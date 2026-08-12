@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>ERROR</funcCode><errorCode>57</errorCode><message>Synthetic XML parsing error</message></result></QueryTaxpayerResponse>

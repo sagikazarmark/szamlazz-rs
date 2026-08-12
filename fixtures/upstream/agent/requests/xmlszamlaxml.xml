@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlszamlaxml xmlns="http://www.szamlazz.hu/xmlszamlaxml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlszamlaxml https://www.szamlazz.hu/szamla/docs/xsds/agentxml/xmlszamlaxml.xsd">
+  <szamlaagentkulcs>Please fill out!</szamlaagentkulcs>
+  <szamlaszam>E-TST-2011-1</szamlaszam>
+  <rendelesSzam></rendelesSzam> <!-- Order number can be used in the query. In this case the last invoice with this order number will be returned 
+  -->
+  <pdf>true</pdf> <!--  Only needed if the pdf must be downloaded
+  -->  
+  <szamlaKulsoAzon></szamlaKulsoAzon> <!-- The invoice can be identified with this key by the third party system (system which uses the Számla Agent): later the invoice can be queried with this key
+  -->
+ </xmlszamlaxml>

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="http://www.szamlazz.hu/szamlavalasz" xmlns:tns="http://www.szamlazz.hu/szamlavalasz" elementFormDefault="qualified">
+
+    <!-- számla alapadatai -->
+    <complexType name="alapTipus">
+        <sequence>
+            <element name="id"            type="int"            maxOccurs="1" minOccurs="0"></element>
+            <element name="iktatoszam"    type="string"         maxOccurs="1" minOccurs="0"></element>
+        </sequence>
+    </complexType>
+    
+    <simpleType name="hibakodTipus">
+        <restriction base="string">
+            <!-- 
+                KEY_ERR kulcs hiba, az átküldött kulcs nem található a fogadó rendszerben,
+                a Számlázz.hu ilyenkor a számlát a számla változásáig nem küldi újra.
+             -->
+            <enumeration value="KEY_ERR"></enumeration>
+            <!-- 
+                KEY_DEL kulcs hiba, törölni kell az online feladáshoz szükséges információkat.
+                Ezen esemény hatására a fiókgazda e-mailben fog értesülni a változásról.
+                (Technikai limitációk miatt bizonyos számlák még feladásra kerülhetnek, a törlés tényének regisztrálása után is)
+             -->
+            <enumeration value="KEY_DEL"></enumeration>
+        </restriction>
+    </simpleType>
+
+    <!-- gyökérelem -->
+    <element name="szamlavalasz">
+        <complexType>
+            <sequence>
+                <element name="alap"      type="tns:alapTipus"     maxOccurs="1" minOccurs="0"></element>
+                <element name="hibakod"   type="tns:hibakodTipus"  maxOccurs="1" minOccurs="0"></element>
+            </sequence>
+        </complexType>
+    </element>
+</schema>

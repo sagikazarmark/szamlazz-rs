@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<szamla xmlns="http://www.szamlazz.hu/szamla" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/szamla https://www.szamlazz.hu/szamla/docs/xsds/szamla/szamla.xsd">
+    <szallito>                                                             <!-- REQ         -->
+        <id>12345</id>                                                     <!-- REQ int     -->
+        <nev>Példa Kft.</nev>                                              <!-- REQ string  -->
+        <cim>                                                              <!-- REQ         -->
+            <orszag></orszag>                                              <!--     string  -->
+            <irsz>1234</irsz>                                              <!-- REQ string  -->
+            <telepules>Budapest</telepules>                                <!-- REQ string  -->
+            <cim>Kis utca 2.</cim>                                         <!-- REQ string  --> <!-- rest of the address -->
+        </cim>
+        <postacim>                                                         
+            <orszag></orszag>                                              <!--     string  -->
+            <irsz></irsz>                                                  <!--     string  -->
+            <telepules></telepules>                                        <!--     string  -->
+            <cim></cim>                                                    <!--     string  --> <!-- rest of the address -->
+        </postacim>                                                        
+        <adoszam>12345678-9-99</adoszam>                                   <!-- REQ string  -->
+        <adoszameu></adoszameu>                                            <!--     string  -->
+        <bank>                                                             
+            <nev></nev>                                                    <!--     string  -->
+            <bankszamla>12345678-12345678</bankszamla>                     <!--     string  -->
+        </bank>
+    </szallito>
+    <alap>                                                                 <!-- REQ         -->
+        <id>123456</id>                                                    <!-- REQ int     --> <!-- internal identifier of the invoice in Számlázz.hu -->
+        <szamlaszam>2015-123</szamlaszam>                                  <!-- REQ string  --> <!-- unique number of the invoice -->
+        <gazdEsemAzon>123456</gazdEsemAzon>                                <!-- REQ int     --> <!-- internal economic event identifier of the invoice in Számlázz.hu --> 
+        <forras>34</forras>                                                <!--     int     --> <!-- only included if the invoice was not issued with Számlázz.hu. 26:QUiCK, 28:SMARTBooks, 34:NAV Online invoice -->
+        <iktatoszam></iktatoszam>                                          <!--     string  --> <!-- data received from the accounting system -->
+        <tipus>SZ</tipus>                                                  <!-- REQ string  --> <!-- "SZ" Invoice, "SS" Cancellation invoice, "JS" Credit note, "HS" Corrective invoice, "ES" Advance invoice, "VS" Final invoice, "D" Pro forma invoice, "SL" Delivery note -->
+        <eszamla>1</eszamla>                                               <!-- REQ string  --> <!-- 0: not an invoice, 1: paper invoice, 2: e-invoice, 3: e-invoice -->
+        <hivszamlaszam>2015-1</hivszamlaszam>                              <!--     string  --> <!-- If the invoice is a cancellation or credit note or final invoice, then the parent invoice number -->
+        <hivdijbekszam>D-1</hivdijbekszam>                                 <!--     string  --> <!-- If the invoice was created based on a pro forma invoice, then the pro forma invoice number -->
+        <kelt>2015-12-01</kelt>                                            <!-- REQ date    --> <!-- Invoice date     -->
+        <telj>2015-12-02</telj>                                            <!-- REQ date    --> <!-- Date of fulfillment  -->
+        <fizh>2015-12-03</fizh>                                            <!-- REQ date    --> <!-- Payment deadline    -->
+        <fizmod>bankkártya</fizmod>                                        <!-- REQ string  --> <!-- Method of payment: can be anything for an agent, otherwise fixed values on the interface -->
+        <fizmodunified>bankkártya</fizmodunified>                          <!-- REQ string  --> <!-- Method of payment: if the payment method is not available on the manual invoice, then it will be "other" -->
+        <keszpenz>true</keszpenz>                                          <!-- REQ boolean --> <!-- true if the invoice is cash-based -->
+        <rendelesszam></rendelesszam>                                      <!--     string  -->
+        <nyelv>hu</nyelv>                                                  <!-- REQ string  --> <!-- hu/en/de/sk/it/fr/hr/ro -->
+        <devizanem>EUR</devizanem>                                         <!--     string  --> <!-- empty, Ft, HUF, EUR, CHF, USD, ... -->
+        <devizabank></devizabank>                                          <!--     string  -->
+        <devizaarf>210</devizaarf>                                         <!--     double  -->
+        <megjegyzes></megjegyzes>                                          <!--     string  -->
+        <penzforg>true</penzforg>                                          <!-- REQ boolean --> <!-- true if the invoice is cash-flow-based -->
+        <kata>true</kata>                                                  <!-- REQ boolean --> <!-- true if the invoice is under KATA -->
+        <katafokonyv>false</katafokonyv>                                   <!-- REQ boolean --> <!-- According to the invoice issuer's opinion, should this invoice be treated as under KATA for accounting -->
+        <email>[email protected]</email>                                    <!--     string  --> <!-- email address related to the invoice (the last address the invoice was sent to) -->
+        <teszt>false</teszt>                                               <!-- REQ boolean --> <!-- Is the invoice in a test or live account -->
+    </alap>         
+    <vevo>                                                                 <!-- REQ         -->
+        <id>1234567</id>                                                   <!-- REQ int     -->
+        <nev></nev>                                                        <!-- REQ string  -->
+        <azonosito></azonosito>                                            <!--     string  --> <!-- Customer identifier  -->
+        <cim>                                                              
+            <orszag></orszag>                                              <!-- REQ string  -->
+            <irsz></irsz>                                                  <!-- REQ string  -->
+            <telepules></telepules>                                        <!-- REQ string  -->
+            <cim></cim>                                                    <!-- REQ string  --> <!-- rest of the address -->
+        </cim>                                                             
+        <postacim>                                                         
+            <nev></nev>                                                    <!--     string  -->
+            <orszag></orszag>                                              <!--     string  -->
+            <irsz></irsz>                                                  <!--     string  -->
+            <telepules></telepules>                                        <!--     string  -->
+            <cim></cim>                                                    <!--     string  --> <!-- rest of the address -->
+        </postacim>
+        <email>[email protected]</email>                                    <!--     string  --> <!-- customer's email address -->         
+        <adoszam></adoszam>                                                
+        <adoszameu></adoszameu>                                            
+        <lokacio>1</lokacio>                                               <!-- REQ int     --> <!-- 1: domestic (Hungarian), 2: within EU, 3: outside of EU (3rd country), -1: unknown -->
+        <privatePersonIndicator>false</privatePersonIndicator>             <!--     boolean --> <!-- customer is a private individual -->
+        <fokonyv>  
+            <vevo>12345A</vevo>                                            <!--     string  --> <!-- customer ledger number -->
+            <vevoazon>12345A</vevoazon>                                    <!--     string  --> <!-- customer ledger identifier -->
+            <datum>2015-12-05</datum>                                      <!--     date    --> <!-- accounting date -->
+            <folyamatostelj>false</folyamatostelj>                         <!--     boolean --> <!-- is the invoice continuous fulfillment -->
+        </fokonyv>
+    </vevo>
+    <tetelek>                                                              <!-- REQ         -->
+        <tetel>                                                            <!-- REQ         -->
+            <nev>Alma</nev>                                                <!-- REQ string  -->
+            <azonosito></azonosito>                                        <!--     string  -->
+            <mennyiseg>2</mennyiseg>                                       <!-- REQ double  -->
+            <mennyisegiegyseg>kg</mennyisegiegyseg>                        <!-- REQ string  -->
+            <nettoegysegar>100.1</nettoegysegar>                           <!-- REQ double  -->
+            <afatipus>ÁKK</afatipus>                                       <!--     string  --> <!-- ÁKK: outside VAT scope, K.AFA: margin scheme VAT, F.AFA: reverse charge VAT, MAA: exempt from VAT, EUKT: outside EU, EUT: within EU, EUK: outside EU, EU: within EU, AAM: exempt from taxation by person, TAM: exempt from taxation by item, TAHK: outside subject matter scope of VAT -->
+            <afakulcs>0</afakulcs>                                         <!-- REQ double  -->
+            <netto>200</netto>                                             <!-- REQ double  -->
+            <arresafaalap>0</arresafaalap>                                 <!-- REQ double  -->
+            <afa>54</afa>                                                  <!-- REQ double  -->
+            <brutto>254</brutto>                                           <!-- REQ double  -->
+            <megjegyzes>zöld</megjegyzes>                                  <!--     string  -->
+            <sztetordering>1</sztetordering>                               <!-- REQ double  -->  <!-- item order on the invoice -->
+            <fokonyv>                                                                      
+                <arbevetel>12345A</arbevetel>                              <!--     string  --> <!-- revenue ledger number -->
+                <afa>12345A</afa>                                          <!--     string  --> <!-- VAT ledger number -->
+                <gazdasagiesemeny>12345A</gazdasagiesemeny>                <!--     string  --> <!-- economic event ledger number -->
+                <gazdasagiesemenyafa>12345A</gazdasagiesemenyafa>          <!--     string  --> <!-- VAT economic event ledger number -->
+                <elszdattol>2018-01-01</elszdattol>                        <!--     date    --> <!-- start of the item settlement period -->
+                <elszdatig>2018-01-31</elszdatig>                          <!--     date    --> <!-- end of the item settlement period -->
+            </fokonyv>                                                                     
+        </tetel>                                                                           
+    </tetelek>                                                                             
+    <osszegek>                                                                             
+        <afakulcsossz>                                                     <!-- REQ double  -->
+            <afatipus>ÁKK</afatipus>                                       <!--     string  --> <!-- ÁKK: outside VAT scope, K.AFA: margin scheme VAT, F.AFA: reverse charge VAT, MAA: exempt from VAT, EUK: outside EU, EU: within EU, AAM: exempt from taxation by person, TAM: exempt from taxation by item -->
+            <afakulcs>0</afakulcs>                                         <!-- REQ double  -->
+            <netto>200</netto>                                             <!-- REQ double  -->
+            <afa>54</afa>                                                  <!-- REQ double  -->
+            <brutto>254</brutto>                                           <!-- REQ double  -->
+        </afakulcsossz>                                                                    
+        <totalossz>                                                        <!-- REQ         -->
+            <netto>200</netto>                                             <!-- REQ double  -->
+            <afa>54</afa>                                                  <!-- REQ double  -->
+            <brutto>254</brutto>                                           <!-- REQ double  -->
+        </totalossz>                                                                       
+    </osszegek>                                                                            
+    <kifizetesek>                                                                          
+        <kifizetes>                                                                        
+            <datum>2015-02-28</datum>                                      <!--     date    -->
+            <jogcim>átutalás</jogcim>                                      <!--     string  -->
+            <osszeg>300</osszeg>                                           <!--     double  -->
+            <megjegyzes></megjegyzes>                                      <!--     string  -->
+            <bankszamlaszam></bankszamlaszam>                              <!--     string  --> <!-- The payment was actually made from this bank account, or the bank account number on the invoice (if the sender's bank account number is unknown) -->
+            <banktranzid>1234</banktranzid>                                <!--     int     -->
+            <devizaarf>275</devizaarf>                                     <!--     double  -->
+        </kifizetes>    
+    </kifizetesek>
+    <pdf></pdf>
+</szamla>

@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><xmlnyugtasend xmlns="http://www.szamlazz.hu/xmlnyugtasend"><beallitasok><szamlaagentkulcs>key</szamlaagentkulcs></beallitasok><fejlec><nyugtaszam>NYGT-2026-1</nyugtaszam></fejlec><emailKuldes><email>vevo@example.com</email><emailTargy>Nyugta</emailTargy><emailSzoveg>Mellékelten küldjük a nyugtát.</emailSzoveg></emailKuldes></xmlnyugtasend>

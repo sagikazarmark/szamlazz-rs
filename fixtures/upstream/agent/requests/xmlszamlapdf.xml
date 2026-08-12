@@ -1,0 +1,6 @@
+<xmlszamlapdf xmlns="http://www.szamlazz.hu/xmlszamlapdf" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlszamlapdf https://www.szamlazz.hu/szamla/docs/xsds/agentpdf/xmlszamlapdf.xsd">
+  <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+  <szamlaszam>E-TST-2011-1</szamlaszam><!-- invoice number -->
+  <valaszVerzio>2</valaszVerzio><!-- response type (see details below) -->
+  <szamlaKulsoAzon></szamlaKulsoAzon><!--     string  --><!-- The invoice can be identified with this key by the third party system (system which uses the Számla Agent): later the invoice can be queried with this key -->
+</xmlszamlapdf>

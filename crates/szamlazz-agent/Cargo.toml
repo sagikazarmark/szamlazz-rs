@@ -1,0 +1,40 @@
+[package]
+name = "szamlazz-agent"
+version.workspace = true
+description = "Sans-IO client for the szamlazz.hu Számla Agent"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude = ["tests/upstream"]
+
+[features]
+default = []
+## Ready-made async client built on reqwest (native and browser wasm).
+client-reqwest = ["dep:reqwest"]
+
+[dependencies]
+base64 = { workspace = true }
+jiff = { workspace = true }
+percent-encoding = "2.3.2"
+quick-xml = { workspace = true }
+# reqwest 0.13.2 introduced the current `rustls` platform-verifier feature.
+reqwest = { version = "0.13.2", default-features = false, optional = true, features = ["cookies", "rustls"] }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = "0.6.5"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

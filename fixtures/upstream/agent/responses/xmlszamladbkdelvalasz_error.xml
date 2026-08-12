@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlszamladbkdelvalasz http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdelvalasz.xsd ">
+  <sikeres>false</sikeres>
+  <hibakod>335</hibakod>
+  <hibauzenet><![CDATA[nincs ilyen díjbekérő a rendszerben, már törlésre került vagy nem is létezett]]></hibauzenet>
+</xmlszamladbkdelvalasz>

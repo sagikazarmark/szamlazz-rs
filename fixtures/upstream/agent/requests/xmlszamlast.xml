@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlszamlast xmlns="http://www.szamlazz.hu/xmlszamlast" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlszamlast https://www.szamlazz.hu/szamla/docs/xsds/agentst/xmlszamlast.xsd">
+    <beallitasok>
+        <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+        <eszamla>false</eszamla>
+        <!-- e-invoice (true/false) -->
+        <szamlaLetoltes>true</szamlaLetoltes>
+        <!-- download PDF -->
+        <szamlaLetoltesPld>1</szamlaLetoltesPld>
+        <!-- download PDF copy or original -->
+        <szamlaKulsoAzon></szamlaKulsoAzon><!--     string  --> <!-- The invoice can be identified with this key by the third party system (system which uses the Számla Agent): later the invoice can be queried with this key -->
+    </beallitasok>
+    <fejlec>
+        <!-- header -->
+        <szamlaszam>E-TST-2011-1</szamlaszam>
+        <!-- invoice number -->
+        <keltDatum>2010-09-12</keltDatum>
+        <!-- date of issue -->
+        <tipus>SS</tipus>
+        <!-- type -->
+    </fejlec>
+    <elado>
+        <!-- seller -->
+        <emailReplyto>[email protected]</emailReplyto>
+        <emailTargy>Email subject</emailTargy>
+        <!-- e-mail subject -->
+        <emailSzoveg>Lorem ipsum</emailSzoveg>
+        <!-- e-mail content -->
+    </elado>
+    <vevo>
+        <!-- buyer -->
+        <email>[email protected]</email>
+    </vevo>
+</xmlszamlast>

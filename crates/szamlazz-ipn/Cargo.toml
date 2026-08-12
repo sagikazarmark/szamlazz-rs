@@ -1,0 +1,40 @@
+[package]
+name = "szamlazz-ipn"
+version.workspace = true
+description = "Receiver types for szamlazz.hu IPN (instant payment notification)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+## axum extractor for PaymentNotification.
+axum = ["dep:axum", "dep:http"]
+## serde implementations on the notification types.
+serde = ["dep:serde"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+form_urlencoded = "1.2.2"
+http = { workspace = true, optional = true }
+jiff = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["tokio", "http1"] }
+http-body-util = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

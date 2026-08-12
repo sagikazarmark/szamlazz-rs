@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmltaxpayer xmlns="http://www.szamlazz.hu/xmltaxpayer" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmltaxpayer http://www.szamlazz.hu/docs/xsds/agent/xmltaxpayer.xsd">
+    <beallitasok>
+        <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+    </beallitasok>
+    <torzsszam>12345678</torzsszam>
+</xmltaxpayer>  

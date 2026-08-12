@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlnyugtavalasz xmlns="http://www.szamlazz.hu/xmlnyugtavalasz">
+  <sikeres>true</sikeres><nyugta>
+    <alap><id>123456</id><nyugtaszam>NYGT-TST-2026-123</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><stornozottNyugtaszam>NYGT-TST-2026-100</stornozottNyugtaszam><kelt>2026-01-01</kelt><fizmod>cash</fizmod><penznem>EUR</penznem><devizaarf>210</devizaarf><teszt>false</teszt></alap>
+    <tetelek>
+      <tetel><azonosito>ITEM-1</azonosito><megnevezes>Synthetic item A</megnevezes><mennyiseg>2.0</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><nettoEgysegar>10000</nettoEgysegar><afakulcs>27</afakulcs><netto>20000.0</netto><afa>5400.0</afa><brutto>25400.0</brutto><fokonyv><arbevetel>911</arbevetel><afa>467</afa></fokonyv></tetel>
+      <tetel><megnevezes>Synthetic item B</megnevezes><mennyiseg>2.0</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><nettoEgysegar>10000</nettoEgysegar><afakulcs>27</afakulcs><nettoErtek>20000.0</nettoErtek><afaErtek>5400.0</afaErtek><bruttoErtek>25400.0</bruttoErtek></tetel>
+    </tetelek>
+    <kifizetesek><kifizetes><fizetoeszkoz>voucher</fizetoeszkoz><osszeg>1000.0</osszeg><leiras>Synthetic voucher</leiras></kifizetes><kifizetes><fizetoeszkoz>debit card</fizetoeszkoz><osszeg>3000.0</osszeg></kifizetes></kifizetesek>
+    <osszegek><afakulcsossz><afatipus>ÁKK</afatipus><afakulcs>0</afakulcs><netto>200</netto><afa>54</afa><brutto>254</brutto></afakulcsossz><totalossz><netto>200</netto><afa>54</afa><brutto>254</brutto></totalossz></osszegek>
+  </nyugta>
+</xmlnyugtavalasz>

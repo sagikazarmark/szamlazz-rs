@@ -1,0 +1,32 @@
+[package]
+name = "szamlazz-cli"
+version.workspace = true
+description = "Command-line client and local IPN and Adatkapcsolat receiver for szamlazz.hu"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "szamlazz"
+path = "src/main.rs"
+
+[dependencies]
+szamlazz-adatkapcsolat = { workspace = true, features = ["axum"] }
+szamlazz-agent = { workspace = true, features = ["client-reqwest"] }
+szamlazz-ipn = { workspace = true, features = ["axum", "serde"] }
+
+anyhow = "1.0.103"
+axum = { workspace = true, features = ["tokio", "http1"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
+jiff = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "signal", "net"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlnyugtast xmlns="http://www.szamlazz.hu/xmlnyugtast" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlnyugtast http://www.szamlazz.hu/docs/xsds/nyugtast/xmlnyugtast.xsd">
+  <beallitasok>
+    <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+    <pdfLetoltes>false</pdfLetoltes>                    <!-- download PDF receipt -->
+  </beallitasok> 
+  <fejlec>
+    <nyugtaszam>NYGT-2020-1</nyugtaszam>    <!-- ID of the receipt, which should be cancelled -->
+    <!--  in case of custom PDF template, the identifier of the used template-->
+    <!--
+    <pdfSablon></pdfSablon>
+     -->
+  </fejlec>
+</xmlnyugtast>

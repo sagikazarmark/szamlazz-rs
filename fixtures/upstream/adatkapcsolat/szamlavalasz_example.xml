@@ -1,0 +1,9 @@
+<szamlavalasz xmlns="http://www.szamlazz.hu/szamlavalasz"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xsi:schemaLocation="http://www.szamlazz.hu/szamlavalasz">
+    <alap>
+        <id>1001</id>   <!-- must match the <id> from the received invoice XML (<szamla><alap><id>...</id></alap></szamla>) -->
+        <iktatoszam>IKT-20250101</iktatoszam>
+    </alap>
+    <!--<hibakod>KEY_ERR</hibakod>-->
+</szamlavalasz>

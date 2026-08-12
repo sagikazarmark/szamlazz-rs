@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<szamla xmlns="http://www.szamlazz.hu/szamla">
+  <szallito><id>1</id><nev>Synthetic Supplier Kft.</nev><cim><irsz>1111</irsz><telepules>Testvaros</telepules><cim>Minta utca 1.</cim></cim><adoszam>11111111-1-11</adoszam></szallito>
+  <alap><id>123456</id><szamlaszam>2015-123</szamlaszam><gazdEsemAzon>1</gazdEsemAzon><forras>34</forras><tipus>SZ</tipus><eszamla>1</eszamla><kelt>2015-12-01</kelt><telj>2015-12-02</telj><fizh>2015-12-03</fizh><fizmod>bankkártya</fizmod><fizmodunified>bankkártya</fizmodunified><keszpenz>false</keszpenz><rendelesszam></rendelesszam><nyelv>hu</nyelv><devizanem>EUR</devizanem><megjegyzes></megjegyzes><penzforg>false</penzforg><kata>false</kata><katafokonyv>false</katafokonyv><email>invoice@example.invalid</email><teszt>false</teszt></alap>
+  <vevo><id>1234567</id><nev>Synthetic Buyer Kft.</nev><cim><irsz>2222</irsz><telepules>Mintavaros</telepules><cim>Teszt ter 2.</cim></cim><adoszam>22222222-2-22</adoszam><lokacio>1</lokacio><privatePersonIndicator>false</privatePersonIndicator><fokonyv><vevo>12345A</vevo></fokonyv></vevo>
+  <tetelek><tetel><nev>Synthetic item</nev><mennyiseg>2</mennyiseg><mennyisegiegyseg>db</mennyisegiegyseg><nettoegysegar>100</nettoegysegar><afatipus>ÁKK</afatipus><afakulcs>0</afakulcs><netto>200</netto><afa>0</afa><brutto>200</brutto><sztetordering>1</sztetordering><fokonyv><arbevetel>12345A</arbevetel></fokonyv></tetel></tetelek>
+  <osszegek><afakulcsossz><afatipus>ÁKK</afatipus><afakulcs>0</afakulcs><netto>200</netto><afa>0</afa><brutto>200</brutto></afakulcsossz><totalossz><netto>200</netto><afa>0</afa><brutto>200</brutto></totalossz></osszegek>
+  <kifizetesek><kifizetes><datum>2015-12-04</datum><jogcim>transfer</jogcim><osszeg>200</osszeg><devizaarf>275</devizaarf></kifizetes></kifizetesek><pdf></pdf>
+</szamla>

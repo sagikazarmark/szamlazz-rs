@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="http://www.szamlazz.hu/xmlszamlakifiz" xmlns:tns="http://www.szamlazz.hu/xmlszamlakifiz" elementFormDefault="qualified">
+    <complexType name="beallitasokTipus">
+        <sequence>
+            <element name="felhasznalo" type="string" maxOccurs="1" minOccurs="0"></element>
+            <element name="jelszo" type="string" maxOccurs="1" minOccurs="0"></element>
+            <element name="szamlaagentkulcs" type="string" maxOccurs="1" minOccurs="0"></element>
+            <element name="szamlaszam"   type="string"  maxOccurs="1" minOccurs="1"></element>
+            <element name="adoszam"      type="string" maxOccurs="1" minOccurs="0"></element>
+            <element name="additiv"      type="boolean" maxOccurs="1" minOccurs="1"></element>
+            <element name="aggregator"   type="string"  maxOccurs="1" minOccurs="0"></element>
+            <element name="valaszVerzio" type="int" maxOccurs="1" minOccurs="0"></element>
+        </sequence>
+    </complexType>
+    <complexType name="kifizetesTipus">
+        <sequence>
+            <element name="datum"  type="date"   maxOccurs="1" minOccurs="1"></element>
+            <element name="jogcim" type="string" maxOccurs="1" minOccurs="1"></element>
+            <element name="osszeg" type="double" maxOccurs="1" minOccurs="1"></element>
+            <element name="leiras" type="string" maxOccurs="1" minOccurs="0"></element>
+        </sequence>
+    </complexType>
+
+    <element name="xmlszamlakifiz">
+	    <complexType>
+	        <sequence>
+	            <element name="beallitasok" type="tns:beallitasokTipus" maxOccurs="1" minOccurs="1"></element>
+	            <element name="kifizetes"   type="tns:kifizetesTipus"   maxOccurs="5" minOccurs="0"></element>
+	        </sequence>
+	    </complexType>
+    </element>
+</schema>

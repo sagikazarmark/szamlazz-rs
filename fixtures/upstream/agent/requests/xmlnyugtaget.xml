@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlnyugtaget xmlns="http://www.szamlazz.hu/xmlnyugtaget" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlnyugtaget http://www.szamlazz.hu/docs/xsds/nyugtaget/xmlnyugtaget.xsd">
+  <beallitasok>
+    <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+    <pdfLetoltes>false</pdfLetoltes> <!-- REQ boolean --> <!-- if true, the receipt PDF is included in the response -->
+  </beallitasok>
+  <fejlec>
+    <nyugtaszam>NYGT-2020-1</nyugtaszam> <!-- receipt number -->
+    <!-- or, instead of nyugtaszam, you can use the order number: -->
+    <!-- <rendelesSzam>ORDER-123</rendelesSzam> -->
+    <!-- optional: custom PDF template code (A | N | J | L) -->
+    <!-- <pdfSablon></pdfSablon> -->
+  </fejlec>
+</xmlnyugtaget>

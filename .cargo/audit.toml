@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+    # rkyv 0.7 out-of-bounds reads (via rust_decimal's optional `rkyv` feature).
+    # The feature is not enabled anywhere in this workspace, so rkyv is never
+    # compiled; it only appears in Cargo.lock. No rust_decimal release depends
+    # on the fixed rkyv 0.8 yet.
+    "RUSTSEC-2026-0235",
+]

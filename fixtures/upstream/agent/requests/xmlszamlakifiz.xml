@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlszamlakifiz xmlns="http://www.szamlazz.hu/xmlszamlakifiz" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlszamlakifiz https://www.szamlazz.hu/szamla/docs/xsds/agentkifiz/xmlszamlakifiz.xsd">
+  <beallitasok> <!-- settings -->
+    <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+    <szamlaszam>E-TST-2011-1</szamlaszam> <!-- invoice number -->
+    <adoszam>12345678-1-13</adoszam> <!-- If you provide the tax number of the issuer of invoice, then the system will match the incoming invoice with the corresponding incoming receipt. -->
+    <additiv>false</additiv> <!-- if it is true, then the former credit entries will be retained -->
+  </beallitasok>
+  <kifizetes> <!-- payment -->
+    <datum>2012-01-01</datum><!-- date -->
+    <jogcim>készpénz</jogcim><!-- payment type --> 
+    <osszeg>1000</osszeg><!-- amount -->
+  </kifizetes>
+  <kifizetes><!-- an other payment -->
+    <datum>2012-01-15</datum>
+    <jogcim>átutalás</jogcim>
+    <osszeg>2000</osszeg>
+    <leiras>Test description</leiras>   <!-- Description, not required -->
+  </kifizetes>
+</xmlszamlakifiz>

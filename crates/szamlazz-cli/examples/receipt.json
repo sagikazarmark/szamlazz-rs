@@ -1,0 +1,23 @@
+{
+  "call_id": "my-shop-checkout-42",
+  "prefix": "NYGTA",
+  "payment_method": "készpénz",
+  "currency": "HUF",
+  "download_pdf": false,
+  "items": [
+    {
+      "name": "Kitten doormat",
+      "quantity": "2",
+      "unit": "db",
+      "unit_price": "10000",
+      "vat_rate": "27",
+      "net_value": "20000",
+      "vat_value": "5400",
+      "gross_value": "25400",
+      "comment": null
+    }
+  ],
+  "payments": [
+    { "method": "készpénz", "amount": "25400", "description": null }
+  ]
+}

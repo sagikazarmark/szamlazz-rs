@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<szamla xmlns="http://www.szamlazz.hu/szamla" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/szamla szamla.xsd ">
+    <szallito>
+        <id>201</id>
+        <nev>Lorem ipsum dolor sit amet, consectetur cs amet., 512356234</nev>
+        <cim>
+            <orszag>Hungary</orszag>
+            <irsz>1086</irsz>
+            <telepules>Budapest</telepules>
+            <cim>Szerdahelyi utca 4-8</cim>
+        </cim>
+        <adoszam>202 336 0856</adoszam>
+        <adoszameu>DPH:SK2023360856</adoszameu>
+        <bank>                                                             
+            <nev>UniCredit Bank Hungary Zrt.</nev>
+            <bankszamla></bankszamla>                                                     
+        </bank>
+    </szallito>                                                                                                 
+    <alap>
+        <id>529992</id>
+        <szamlaszam>D-LOLO-66</szamlaszam>
+        <tipus>D</tipus>
+        <eszamla>0</eszamla>
+        <kelt>2024-10-09</kelt>
+        <telj>2024-10-09</telj>
+        <fizh>2024-10-09</fizh>
+        <fizmod>credit_card</fizmod>
+        <fizmodunified>other</fizmodunified>
+        <nyelv>hu</nyelv>
+        <devizanem>HUF</devizanem>
+        <devizaarf>0</devizaarf>
+        <megjegyzes></megjegyzes>
+        <penzforg>false</penzforg>
+        <kata>true</kata>
+        <email>[email protected]</email>
+        <teszt>false</teszt>
+    </alap>
+    <vevo>
+        <id>221216</id>
+        <nev>Customer name</nev>
+        <cim>
+            <orszag>Hungary</orszag>
+            <irsz>1324</irsz>
+            <telepules>Debrecen</telepules>
+            <cim>1234</cim>
+        </cim>
+     <email>[email protected]</email>
+        <adoszam></adoszam>
+        <fokonyv>
+            <vevo></vevo>
+            <vevoazon></vevoazon>
+        </fokonyv>
+    </vevo>
+    <tetelek>
+        <tetel>
+            <nev>Apple</nev>
+            <mennyiseg>1</mennyiseg>
+            <mennyisegiegyseg>pieces</mennyisegiegyseg>
+            <nettoegysegar>380</nettoegysegar>
+            <afakulcs>20</afakulcs>
+            <netto>380</netto>
+            <arresafaalap>0</arresafaalap>
+            <afa>76</afa>
+            <brutto>456</brutto>
+            <megjegyzes>Apple comment</megjegyzes>
+            <fokonyv>
+                <arbevetel></arbevetel>
+                <afa></afa>
+                <gazdasagiesemeny></gazdasagiesemeny>
+                <gazdasagiesemenyafa></gazdasagiesemenyafa>
+            </fokonyv>
+        </tetel>
+    </tetelek>
+    <osszegek>
+        <afakulcsossz>
+            <afakulcs>20</afakulcs>
+            <netto>464</netto>
+            <afa>93</afa>
+            <brutto>557</brutto>
+        </afakulcsossz>
+        <totalossz>
+            <netto>464</netto>
+            <afa>93</afa>
+            <brutto>557</brutto>
+        </totalossz>
+    </osszegek>
+    <kifizetesek>
+        <kifizetes>
+            <datum>2020-09-22</datum>
+            <jogcim>transfer</jogcim>
+            <osszeg>15</osszeg>
+            <megjegyzes>comment</megjegyzes>
+            <bankszamlaszam>-</bankszamlaszam>
+        </kifizetes>
+    </kifizetesek>
+    <pdf>The receipt .pdf can be found here in BASE64 encoding</pdf>
+</szamla>

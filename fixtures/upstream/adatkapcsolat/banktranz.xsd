@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="http://www.szamlazz.hu/banktranz" xmlns:tns="http://www.szamlazz.hu/banktranz" elementFormDefault="qualified">
+
+    <simpleType name="iranyTipus">
+        <restriction base="string">
+            <enumeration value="BE"></enumeration>
+            <enumeration value="KI"></enumeration>
+        </restriction>
+    </simpleType>
+
+    <complexType name="partnerTipus">
+        <sequence>
+            <element name="nev"        type="string" maxOccurs="1" minOccurs="0"></element>
+            <element name="bankszamla" type="string" maxOccurs="1" minOccurs="0"></element>
+        </sequence>
+    </complexType>
+
+    <!-- gyökérelem -->
+    <element name="banktranz">
+        <complexType>
+            <sequence>
+                <element name="id"             type="int"                    maxOccurs="1" minOccurs="1"></element>
+                <element name="bankszamla"     type="string"                 maxOccurs="1" minOccurs="1"></element>
+                <element name="erteknap"       type="date"                   maxOccurs="1" minOccurs="1"></element>
+                <element name="irany"          type="tns:iranyTipus"         maxOccurs="1" minOccurs="1"></element>
+                <element name="tipus"          type="string"                 maxOccurs="1" minOccurs="0"></element>
+                <element name="technikai"      type="boolean"                maxOccurs="1" minOccurs="1"></element>
+                <element name="osszeg"         type="double"                 maxOccurs="1" minOccurs="1"></element>
+                <element name="devizanem"      type="string"                 maxOccurs="1" minOccurs="1"></element>
+                <element name="partner"        type="tns:partnerTipus"       maxOccurs="1" minOccurs="0"></element>
+                <element name="kozlemeny"      type="string"                 maxOccurs="1" minOccurs="0"></element>
+            </sequence>
+        </complexType>
+    </element>
+    
+</schema>

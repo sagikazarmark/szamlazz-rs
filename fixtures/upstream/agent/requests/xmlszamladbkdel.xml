@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlszamladbkdel xmlns="http://www.szamlazz.hu/xmlszamladbkdel" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlszamladbkdel http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdel.xsd ">
+  <beallitasok>
+    <felhasznalo>Test123</felhasznalo>
+    <jelszo>Test123</jelszo>
+    <szamlaagentkulcs>Please fill!</szamlaagentkulcs>
+  </beallitasok>
+  <fejlec>
+    <szamlaszam>D-43</szamlaszam>
+  </fejlec>
+</xmlszamladbkdel>

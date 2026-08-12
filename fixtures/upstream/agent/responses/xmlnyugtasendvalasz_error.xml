@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlnyugtasendvalasz xmlns="http://www.szamlazz.hu/xmlnyugtasendvalasz" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlnyugtasendvalasz http://www.szamlazz.hu/docs/xsds/nyugta/xmlnyugtasendvalasz.xsd">
+  <sikeres>false</sikeres>
+  <hibakod>7</hibakod>
+  <hibauzenet>Hiányzó adat: emailtargy elem.</hibauzenet>
+</xmlnyugtasendvalasz>

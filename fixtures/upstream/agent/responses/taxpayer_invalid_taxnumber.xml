@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns:ns2="http://schemas.nav.gov.hu/OSA/2.0/data">
+   <header>
+      <requestId>38046_g2z6726bg67ymdt3p56bg6</requestId>
+      <timestamp>2020-11-04T11:29:40.656Z</timestamp>
+      <requestVersion>2.0</requestVersion>
+   </header>
+   <result>
+      <funcCode>OK</funcCode>
+   </result>
+   <taxpayerValidity>false</taxpayerValidity>
+</QueryTaxpayerResponse>

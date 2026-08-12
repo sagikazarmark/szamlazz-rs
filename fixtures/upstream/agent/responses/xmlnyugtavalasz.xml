@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlnyugtavalasz xmlns="http://www.szamlazz.hu/xmlnyugtavalasz" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.szamlazz.hu/xmlnyugtavalasz https://www.szamlazz.hu/szamla/docs/xsds/nyugtavalasz/xmlnyugtavalasz.xsd">
+  <sikeres>true</sikeres>                                                <!-- REQ boolean -->
+  <hibakod></hibakod>                                                    <!--     string  --> <!-- error code (if any) -->
+  <hibauzenet></hibauzenet>                                              <!--     string  --> <!-- error message (if any) -->
+
+  <nyugtaPdf>...</nyugtaPdf>                                             <!--     string  --> <!--receipt PDF with base64 encoding  -->
+  
+  <nyugta>                                                               <!-- REQ         -->
+    <alap>                                                               <!-- REQ         -->
+      <id>123456</id>                                                    <!-- REQ id      -->
+      <hivasAzonosito></hivasAzonosito>                                  <!--     string  --> <!-- If the call ID were defined during the creation of the receipt-->
+      <nyugtaszam>NYGT-2017-123</nyugtaszam>                             <!-- REQ string  -->
+      <tipus>NY</tipus>                                                  <!-- REQ string  --> <!-- type of the receipt: NY - "receipt", SN - "receipt cancellation" -->
+      <stornozott>false</stornozott>                                     <!-- REQ boolean --> <!-- true if the receipt is cancelled, otherwise false (interesting if the receipt type is NY (receipt)) -->
+      <stornozottNyugtaszam>NYGT-2017-100</stornozottNyugtaszam>         <!--     string  --> <!-- If the receipt is cancelled, then the ID of the cancelled receipt (shows which receipt was cancelled in case of SN ("receipt cancellation") type) -->
+      <kelt>2015-12-01</kelt>                                            <!-- REQ date    --> <!-- date of the receipt -->
+      <fizmod>cash</fizmod>                                          <!-- REQ string  -->
+      <penznem>EUR</penznem>                                             <!-- REQ string  --> <!-- empty, Ft, HUF, EUR, CHF, USD, ... -->
+      <devizabank></devizabank>                                          <!--     string  -->
+      <devizaarf>210</devizaarf>                                         <!--     double  -->
+      <megjegyzes></megjegyzes>                                          <!--     string  -->
+      <fokonyvVevo></fokonyvVevo>                                        <!--     string  --> <!-- accounting information -->
+      <teszt>false</teszt>                                               <!-- REQ boolean --> <!-- The receipt was created by a test company (true) or a real company (false)-->
+      <rendelesSzam></rendelesSzam>                                      <!--     string  --> <!-- order number on receipt -->
+    </alap>
+    
+    <tetelek>
+      <tetel>
+        <azonosito></azonosito>                                          <!--     string  --> <!-- item ID -->
+        <megnevezes>Kitten doormat</megnevezes>                       <!-- REQ string  --> <!-- item name -->
+        <mennyiseg>2.0</mennyiseg>                                       <!-- REQ double  --> <!-- item quantity -->
+        <mennyisegiEgyseg>db</mennyisegiEgyseg>                          <!-- REQ string  --> <!-- unit of quantity -->
+        <nettoEgysegar>10000</nettoEgysegar>                             <!-- REQ double  --> <!-- net unit price -->
+        <netto>20000.0</netto>                                           <!-- REQ double  --> <!-- item net value (net unit price * item quantity) -->
+        <afakulcs>27</afakulcs>                                          <!-- REQ double  --> <!-- VAT rate, values: `TAHK` : Not subject to VAT  , `TAM` : supply exempt from VAT / exempt supply, `AAM` : person exempt from VAT / exempt person, `EUT`  : Within EU (former 'EU'), `EUKT` : Outside EU (former 'EUK'), `MAA` : exempt from tax, `F.AFA` : reverse VAT, `K.AFA` : differential VAT, HO, EUE, EUFADE, EUFAD37, ATK, NAM, EAM, KBAUK, KBAET (translation WIP), `0, 5, 7, 18, 19, 20, 25, 27` : exact VAT rate -->
+        <afa>5400.0</afa>                                                <!-- REQ double  --> <!-- VAT total value -->
+        <brutto>25400.0</brutto>                                         <!-- REQ double  --> <!-- gross total value -->
+        <fokonyv>                                                        <!--             --> <!-- general ledger information -->
+          <arbevetel></arbevetel>                                        <!--     string  --> <!-- sales general ledger ID -->
+          <afa></afa>                                                    <!--     string  --> <!-- VAT general ledger ID -->
+        </fokonyv>
+      </tetel>
+      <tetel>
+        <megnevezes>Puppy doormat</megnevezes>
+        <mennyiseg>2.0</mennyiseg>
+        <mennyisegiEgyseg>db</mennyisegiEgyseg>
+        <nettoEgysegar>10000</nettoEgysegar>
+        <nettoErtek>20000.0</nettoErtek>
+        <afakulcs>27</afakulcs>
+        <afaErtek>5400.0</afaErtek>
+        <bruttoErtek>25400.0</bruttoErtek>
+      </tetel>
+    </tetelek>
+  
+    <kifizetesek>
+      <kifizetes>
+        <fizetoeszkoz>voucher</fizetoeszkoz>
+        <osszeg>1000.0</osszeg>
+        <leiras>OTP SZÉP kártya</leiras>
+      </kifizetes>
+      <kifizetes>
+        <fizetoeszkoz>debit card</fizetoeszkoz>
+        <osszeg>3000.0</osszeg>
+      </kifizetes>
+    </kifizetesek>
+  
+    <osszegek>
+      <afakulcsossz>                                                     <!-- REQ int     -->
+        <afatipus>ÁKK</afatipus>                                         <!--     string  --> <!-- `TAHK` : Not subject to VAT  , `TAM` : supply exempt from VAT / exempt supply, `AAM` : person exempt from VAT / exempt person, `EUT`  : Within EU (former 'EU'), `EUKT` : Outside EU (former 'EUK'), `MAA` : exempt from tax, `F.AFA` : reverse VAT, `K.AFA`, HO, EUE, EUFADE, EUFAD37, ATK, NAM, EAM, KBAUK, KBAET (translation WIP) : differential VAT, `0, 5, 7, 18, 19, 20, 25, 27` : exact VAT rate -->
+        <afakulcs>0</afakulcs>                                           <!-- REQ double  -->
+        <netto>200</netto>                                               <!-- REQ double  -->
+        <afa>54</afa>                                                    <!-- REQ double  -->
+        <brutto>254</brutto>                                             <!-- REQ double  -->
+      </afakulcsossz>
+      <totalossz>                                                        <!-- REQ         -->
+        <netto>200</netto>                                               <!-- REQ double  -->
+        <afa>54</afa>                                                    <!-- REQ double  -->
+        <brutto>254</brutto>                                             <!-- REQ double  -->
+      </totalossz>
+    </osszegek>
+  </nyugta>
+
+</xmlnyugtavalasz>
+
