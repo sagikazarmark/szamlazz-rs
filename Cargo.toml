@@ -18,7 +18,7 @@ szamlazz-agent = { path = "crates/szamlazz-agent", version = "0.1.0" }
 szamlazz-ipn = { path = "crates/szamlazz-ipn", version = "0.1.0" }
 
 axum = { version = "0.8.9", default-features = false }
-base64 = "0.22.1"
+base64 = "0.23.1"
 http = "1.4.2"
 http-body-util = "0.1.3"
 jiff = { version = "0.2.31", default-features = false, features = ["std", "serde"] }
