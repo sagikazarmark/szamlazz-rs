@@ -19,5 +19,6 @@ updates:
         patterns:
           - "*"
     exclude-paths:
+      - .github/workflows/release.yml
       - .github/workflows/dagger.yaml
       - .github/workflows/dagger-*.yaml

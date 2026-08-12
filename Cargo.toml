@@ -46,3 +46,8 @@ sign-tag = true
 shared-version = true
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
