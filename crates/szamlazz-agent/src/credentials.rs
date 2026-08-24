@@ -77,6 +77,12 @@ impl Credentials {
     }
 }
 
+impl From<AgentKey> for Credentials {
+    fn from(key: AgentKey) -> Self {
+        Self::AgentKey(key)
+    }
+}
+
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

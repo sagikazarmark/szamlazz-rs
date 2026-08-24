@@ -243,7 +243,7 @@ fn header_payment_method(response: &RawResponse) -> Option<PaymentMethod> {
     response
         .szlahu("szlahu_fizetesmod")
         .filter(|s| !s.is_empty())
-        .map(|method| PaymentMethod::from_wire(&method))
+        .map(PaymentMethod::from)
 }
 
 #[cfg(test)]

@@ -591,8 +591,8 @@ impl ReceiptItem {
     #[must_use]
     pub fn vat_rate(&self) -> VatRate {
         match self.vat_type.as_deref() {
-            Some(code) => VatRate::from_wire(code),
-            None => VatRate::from_wire(&self.vat_code),
+            Some(code) => VatRate::from(code),
+            None => VatRate::from(self.vat_code.as_str()),
         }
     }
 }
@@ -633,8 +633,8 @@ impl VatRateTotal {
     #[must_use]
     pub fn vat_rate(&self) -> VatRate {
         match self.vat_type.as_deref() {
-            Some(code) => VatRate::from_wire(code),
-            None => VatRate::from_wire(&self.vat_code),
+            Some(code) => VatRate::from(code),
+            None => VatRate::from(self.vat_code.as_str()),
         }
     }
 }
@@ -766,7 +766,7 @@ impl From<NyugtaXml> for Receipt {
             cancelled: alap.stornozott,
             cancelled_receipt_number: alap.stornozott_nyugtaszam.map(ReceiptNumber::new),
             issue_date: alap.kelt,
-            payment_method: PaymentMethod::from_wire(&alap.fizmod),
+            payment_method: PaymentMethod::from(alap.fizmod),
             currency: Currency::new(alap.penznem),
             exchange_bank: alap.devizabank,
             exchange_rate: alap.devizaarf,
