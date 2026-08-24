@@ -165,17 +165,6 @@ pub enum InvoiceAppearance {
 }
 
 impl InvoiceAppearance {
-    /// Creates the semantic value while retaining `code` exactly.
-    #[must_use]
-    pub fn from_code(code: i32) -> Self {
-        match code {
-            0 => Self::NotInvoice,
-            1 => Self::Paper,
-            2 | 3 => Self::Electronic(code),
-            other => Self::Unknown(other),
-        }
-    }
-
     /// Returns the exact integer received from szamlazz.hu.
     #[must_use]
     pub fn code(self) -> i32 {
@@ -193,6 +182,18 @@ impl InvoiceAppearance {
     }
 }
 
+/// Creates the semantic value while retaining `code` exactly.
+impl From<i32> for InvoiceAppearance {
+    fn from(code: i32) -> Self {
+        match code {
+            0 => Self::NotInvoice,
+            1 => Self::Paper,
+            2 | 3 => Self::Electronic(code),
+            other => Self::Unknown(other),
+        }
+    }
+}
+
 impl serde::Serialize for InvoiceAppearance {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.code().to_string())
@@ -201,11 +202,11 @@ impl serde::Serialize for InvoiceAppearance {
 
 impl<'de> serde::Deserialize<'de> for InvoiceAppearance {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let code = <String as serde::Deserialize>::deserialize(deserializer)?
+        let code: i32 = <String as serde::Deserialize>::deserialize(deserializer)?
             .trim()
             .parse()
             .map_err(serde::de::Error::custom)?;
-        Ok(Self::from_code(code))
+        Ok(Self::from(code))
     }
 }
 
@@ -686,7 +687,7 @@ impl DocumentItem {
     /// (`afakulcs`), parsed into a [`VatRate`].
     #[must_use]
     pub fn vat_rate(&self) -> VatRate {
-        VatRate::from_wire(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
+        VatRate::from(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
     }
 }
 
@@ -738,7 +739,7 @@ impl VatTotal {
     /// (`afakulcs`), parsed into a [`VatRate`].
     #[must_use]
     pub fn vat_rate(&self) -> VatRate {
-        VatRate::from_wire(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
+        VatRate::from(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
     }
 }
 
@@ -804,7 +805,7 @@ impl FinancialItem {
     /// The VAT type (`afatipus`) when present, otherwise `afakulcs`.
     #[must_use]
     pub fn vat_rate(&self) -> VatRate {
-        VatRate::from_wire(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
+        VatRate::from(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
     }
 }
 

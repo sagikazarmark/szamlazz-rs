@@ -223,17 +223,6 @@ pub enum InvoiceAppearance {
 }
 
 impl InvoiceAppearance {
-    /// Creates the semantic value while retaining `code` exactly.
-    #[must_use]
-    pub fn from_code(code: i64) -> Self {
-        match code {
-            0 => Self::NotInvoice,
-            1 => Self::Paper,
-            2 | 3 => Self::Electronic(code),
-            other => Self::Unknown(other),
-        }
-    }
-
     /// Returns the exact integer received from szamlazz.hu.
     #[must_use]
     pub fn code(self) -> i64 {
@@ -248,6 +237,18 @@ impl InvoiceAppearance {
     #[must_use]
     pub fn is_e_invoice(self) -> bool {
         matches!(self, Self::Electronic(2 | 3))
+    }
+}
+
+/// Creates the semantic value while retaining `code` exactly.
+impl From<i64> for InvoiceAppearance {
+    fn from(code: i64) -> Self {
+        match code {
+            0 => Self::NotInvoice,
+            1 => Self::Paper,
+            2 | 3 => Self::Electronic(code),
+            other => Self::Unknown(other),
+        }
     }
 }
 
@@ -279,12 +280,6 @@ impl Pdf {
         &self.0
     }
 
-    /// Consumes the wrapper, returning the bytes.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
-    }
-
     /// Writes the PDF to a file.
     ///
     /// # Errors
@@ -305,6 +300,13 @@ impl fmt::Debug for Pdf {
 impl AsRef<[u8]> for Pdf {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// Unwraps the raw PDF bytes.
+impl From<Pdf> for Vec<u8> {
+    fn from(pdf: Pdf) -> Self {
+        pdf.0
     }
 }
 
@@ -1612,7 +1614,7 @@ pub(crate) mod de {
     where
         D: Deserializer<'de>,
     {
-        empty_as_none::<D, i64>(deserializer).map(|value| value.map(InvoiceAppearance::from_code))
+        empty_as_none::<D, i64>(deserializer).map(|value| value.map(InvoiceAppearance::from))
     }
 
     pub fn base64_pdf<'de, D>(deserializer: D) -> Result<Option<Pdf>, D::Error>

@@ -54,7 +54,7 @@ pub async fn run(cli: &crate::Cli, command: &PaymentCommand) -> anyhow::Result<(
         (None, Some(date)) => {
             let method = args.method.clone().expect("clap requires --method");
             let amount = args.amount.expect("clap requires --amount");
-            let mut entry = CreditEntry::new(date, PaymentMethod::from_wire(&method), amount);
+            let mut entry = CreditEntry::new(date, PaymentMethod::from(method), amount);
             entry.description.clone_from(&args.description);
             vec![entry]
         }

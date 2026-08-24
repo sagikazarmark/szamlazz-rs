@@ -1,6 +1,8 @@
 //! Taxpayer query (`xmltaxpayer`): looks up a Hungarian taxpayer in the NAV
 //! Online Invoice system by törzsszám and returns its registered data.
 
+use std::str::FromStr;
+
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
@@ -20,17 +22,40 @@ impl TaxpayerPrefix {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    fn validate(value: &str) -> Result<(), TaxpayerPrefixError> {
+        if value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+            Ok(())
+        } else {
+            Err(TaxpayerPrefixError)
+        }
+    }
 }
 
+impl FromStr for TaxpayerPrefix {
+    type Err = TaxpayerPrefixError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<&str> for TaxpayerPrefix {
+    type Error = TaxpayerPrefixError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+/// Validates without reallocating.
 impl TryFrom<String> for TaxpayerPrefix {
     type Error = TaxpayerPrefixError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit()) {
-            Ok(Self(value))
-        } else {
-            Err(TaxpayerPrefixError)
-        }
+        Self::validate(&value)?;
+        Ok(Self(value))
     }
 }
 
@@ -398,6 +423,21 @@ mod tests {
         assert_eq!(
             QueryTaxpayer::new("1234567A").expect_err("nondigit"),
             TaxpayerPrefixError
+        );
+    }
+
+    #[test]
+    fn taxpayer_prefix_parses_from_str() {
+        let prefix: TaxpayerPrefix = "12345678".parse().expect("valid");
+        assert_eq!(prefix.as_str(), "12345678");
+        assert_eq!(TaxpayerPrefix::try_from("12345678"), Ok(prefix.clone()));
+        assert_eq!(
+            TaxpayerPrefix::try_from(String::from("12345678")),
+            Ok(prefix)
+        );
+        assert_eq!(
+            "1234567".parse::<TaxpayerPrefix>(),
+            Err(TaxpayerPrefixError)
         );
     }
 

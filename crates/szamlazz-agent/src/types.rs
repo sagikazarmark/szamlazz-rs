@@ -1,7 +1,9 @@
 //! Domain value types shared across operations.
 
 use std::borrow::Cow;
+use std::convert::Infallible;
 use std::fmt;
+use std::str::FromStr;
 
 use rust_decimal::Decimal;
 
@@ -90,12 +92,6 @@ impl From<String> for ReceiptNumber {
 pub struct Pdf(Vec<u8>);
 
 impl Pdf {
-    /// Wraps raw PDF bytes.
-    #[must_use]
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
     /// Decodes a base64 payload as received in response XML.
     ///
     /// # Errors
@@ -114,12 +110,6 @@ impl Pdf {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
-    }
-
-    /// Consumes the wrapper, returning the bytes.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
     }
 
     /// Writes the PDF to a file.
@@ -158,6 +148,20 @@ impl<'de> serde::Deserialize<'de> for Pdf {
 impl AsRef<[u8]> for Pdf {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// Wraps raw PDF bytes.
+impl From<Vec<u8>> for Pdf {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+/// Unwraps the raw PDF bytes.
+impl From<Pdf> for Vec<u8> {
+    fn from(pdf: Pdf) -> Self {
+        pdf.0
     }
 }
 
@@ -260,11 +264,12 @@ impl VatRate {
             Self::Other(code) => Cow::Borrowed(code),
         }
     }
+}
 
-    /// Parses a wire token: known codes map to their variant, numbers to
-    /// [`VatRate::Percent`], anything else to [`VatRate::Other`].
-    #[must_use]
-    pub fn from_wire(token: &str) -> Self {
+/// Parses a wire token: known codes map to their variant, numbers to
+/// [`VatRate::Percent`], anything else to [`VatRate::Other`].
+impl From<&str> for VatRate {
+    fn from(token: &str) -> Self {
         match token {
             "AAM" => Self::Aam,
             "TAM" => Self::Tam,
@@ -294,6 +299,27 @@ impl VatRate {
     }
 }
 
+/// Parses a wire token; unknown codes become [`VatRate::Other`] without
+/// reallocating.
+impl From<String> for VatRate {
+    fn from(token: String) -> Self {
+        match Self::from(token.as_str()) {
+            Self::Other(_) => Self::Other(token),
+            rate => rate,
+        }
+    }
+}
+
+/// Parses a wire token; never fails because unknown codes become
+/// [`VatRate::Other`].
+impl FromStr for VatRate {
+    type Err = Infallible;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from(token))
+    }
+}
+
 impl fmt::Display for VatRate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.as_wire())
@@ -311,14 +337,14 @@ impl serde::Serialize for VatRate {
 /// [`VatRate::Other`].
 impl<'de> serde::Deserialize<'de> for VatRate {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self::from_wire(&String::deserialize(deserializer)?))
+        Ok(Self::from(String::deserialize(deserializer)?))
     }
 }
 
 /// A currency code (`pénznem`).
 ///
 /// szamlazz.hu accepts 37 ISO-style codes; `HUF` may also be written `Ft`.
-/// The set is open — use [`Currency::new`] for codes without a constant.
+/// The set is open — any code converts via [`Currency::new`] or `From`.
 #[doc(alias = "pénznem")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Currency(Cow<'static, str>);
@@ -358,6 +384,18 @@ impl Currency {
 impl fmt::Display for Currency {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for Currency {
+    fn from(code: &str) -> Self {
+        Self::new(code)
+    }
+}
+
+impl From<String> for Currency {
+    fn from(code: String) -> Self {
+        Self::new(code)
     }
 }
 
@@ -413,29 +451,6 @@ pub enum Language {
 }
 
 impl Language {
-    /// Parses a wire token (`hu`, `en`, …).
-    #[must_use]
-    pub fn from_wire(token: &str) -> Option<Self> {
-        Some(match token {
-            "hu" => Self::Hungarian,
-            "en" => Self::English,
-            "de" => Self::German,
-            "it" => Self::Italian,
-            "ro" => Self::Romanian,
-            "sk" => Self::Slovak,
-            "hr" => Self::Croatian,
-            "fr" => Self::French,
-            "es" => Self::Spanish,
-            "cz" => Self::Czech,
-            "pl" => Self::Polish,
-            "bg" => Self::Bulgarian,
-            "nl" => Self::Dutch,
-            "ru" => Self::Russian,
-            "si" => Self::Slovenian,
-            _ => return None,
-        })
-    }
-
     /// The exact wire token.
     #[must_use]
     pub fn as_wire(self) -> &'static str {
@@ -459,6 +474,37 @@ impl Language {
     }
 }
 
+/// Parses a wire token (`hu`, `en`, …).
+impl FromStr for Language {
+    type Err = UnknownLanguage;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(match token {
+            "hu" => Self::Hungarian,
+            "en" => Self::English,
+            "de" => Self::German,
+            "it" => Self::Italian,
+            "ro" => Self::Romanian,
+            "sk" => Self::Slovak,
+            "hr" => Self::Croatian,
+            "fr" => Self::French,
+            "es" => Self::Spanish,
+            "cz" => Self::Czech,
+            "pl" => Self::Polish,
+            "bg" => Self::Bulgarian,
+            "nl" => Self::Dutch,
+            "ru" => Self::Russian,
+            "si" => Self::Slovenian,
+            _ => return Err(UnknownLanguage(token.to_owned())),
+        })
+    }
+}
+
+/// A token that is not a known [`Language`] wire code.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown language: {0}")]
+pub struct UnknownLanguage(String);
+
 /// Serializes as the wire token, e.g. `"hu"`.
 impl serde::Serialize for Language {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -469,9 +515,9 @@ impl serde::Serialize for Language {
 /// Deserializes from the wire token; unknown languages are an error.
 impl<'de> serde::Deserialize<'de> for Language {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let token = String::deserialize(deserializer)?;
-        Self::from_wire(&token)
-            .ok_or_else(|| serde::de::Error::custom(format!("unknown language: {token}")))
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -517,10 +563,11 @@ impl PaymentMethod {
             Self::Other(method) => method,
         }
     }
+}
 
-    /// Parses a wire token into a known method, or [`PaymentMethod::Other`].
-    #[must_use]
-    pub fn from_wire(token: &str) -> Self {
+/// Parses a wire token into a known method, or [`PaymentMethod::Other`].
+impl From<&str> for PaymentMethod {
+    fn from(token: &str) -> Self {
         match token {
             "átutalás" => Self::Transfer,
             "készpénz" => Self::Cash,
@@ -531,6 +578,27 @@ impl PaymentMethod {
             "SZÉP kártya" => Self::SzepCard,
             other => Self::Other(other.to_owned()),
         }
+    }
+}
+
+/// Parses a wire token; unknown methods become [`PaymentMethod::Other`]
+/// without reallocating.
+impl From<String> for PaymentMethod {
+    fn from(token: String) -> Self {
+        match Self::from(token.as_str()) {
+            Self::Other(_) => Self::Other(token),
+            method => method,
+        }
+    }
+}
+
+/// Parses a wire token; never fails because unknown methods become
+/// [`PaymentMethod::Other`].
+impl FromStr for PaymentMethod {
+    type Err = Infallible;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from(token))
     }
 }
 
@@ -551,7 +619,7 @@ impl serde::Serialize for PaymentMethod {
 /// [`PaymentMethod::Other`].
 impl<'de> serde::Deserialize<'de> for PaymentMethod {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self::from_wire(&String::deserialize(deserializer)?))
+        Ok(Self::from(String::deserialize(deserializer)?))
     }
 }
 
@@ -584,20 +652,28 @@ impl TaxpayerStatus {
             Self::NoTaxNumber => "-1",
         }
     }
+}
 
-    /// Parses a wire token.
-    #[must_use]
-    pub fn from_wire(token: &str) -> Option<Self> {
-        Some(match token {
+/// Parses a wire token (`7`, `6`, `1`, `0`, `-1`).
+impl FromStr for TaxpayerStatus {
+    type Err = UnknownTaxpayerStatus;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(match token {
             "7" => Self::NonEuBusiness,
             "6" => Self::EuBusiness,
             "1" => Self::HasTaxNumber,
             "0" => Self::Unknown,
             "-1" => Self::NoTaxNumber,
-            _ => return None,
+            _ => return Err(UnknownTaxpayerStatus(token.to_owned())),
         })
     }
 }
+
+/// A token that is not a known [`TaxpayerStatus`] wire code.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown taxpayer status: {0}")]
+pub struct UnknownTaxpayerStatus(String);
 
 /// Serializes as the wire token, e.g. `"7"`.
 impl serde::Serialize for TaxpayerStatus {
@@ -609,9 +685,9 @@ impl serde::Serialize for TaxpayerStatus {
 /// Deserializes from the wire token; unknown statuses are an error.
 impl<'de> serde::Deserialize<'de> for TaxpayerStatus {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let token = String::deserialize(deserializer)?;
-        Self::from_wire(&token)
-            .ok_or_else(|| serde::de::Error::custom(format!("unknown taxpayer status: {token}")))
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -621,21 +697,67 @@ mod tests {
 
     #[test]
     fn vat_rate_round_trips() {
-        assert_eq!(VatRate::from_wire("27"), VatRate::percent(27));
-        assert_eq!(VatRate::from_wire("5.5").as_wire(), "5.5");
-        assert_eq!(VatRate::from_wire("AAM"), VatRate::Aam);
-        assert_eq!(VatRate::from_wire("F.AFA").as_wire(), "F.AFA");
-        assert_eq!(VatRate::from_wire("ÁKK"), VatRate::Akk);
+        assert_eq!(VatRate::from("27"), VatRate::percent(27));
+        assert_eq!(VatRate::from("5.5").as_wire(), "5.5");
+        assert_eq!(VatRate::from("AAM"), VatRate::Aam);
+        assert_eq!(VatRate::from("F.AFA").as_wire(), "F.AFA");
+        assert_eq!(VatRate::from("ÁKK"), VatRate::Akk);
         assert_eq!(
-            VatRate::from_wire("BRAND_NEW"),
+            VatRate::from("BRAND_NEW"),
             VatRate::Other("BRAND_NEW".into())
         );
+        assert_eq!(
+            VatRate::from(String::from("BRAND_NEW")),
+            VatRate::Other("BRAND_NEW".into())
+        );
+        assert_eq!("27".parse::<VatRate>(), Ok(VatRate::percent(27)));
+    }
+
+    #[test]
+    fn payment_method_parses_wire_tokens() {
+        assert_eq!(PaymentMethod::from("átutalás"), PaymentMethod::Transfer);
+        assert_eq!(
+            PaymentMethod::from(String::from("Bitcoin")),
+            PaymentMethod::Other("Bitcoin".into())
+        );
+        assert_eq!("készpénz".parse::<PaymentMethod>(), Ok(PaymentMethod::Cash));
+    }
+
+    #[test]
+    fn language_parses_wire_tokens() {
+        assert_eq!("hu".parse::<Language>(), Ok(Language::Hungarian));
+        assert_eq!(
+            "xx".parse::<Language>(),
+            Err(UnknownLanguage("xx".to_owned()))
+        );
+        assert_eq!(Language::English.as_wire().parse(), Ok(Language::English));
+    }
+
+    #[test]
+    fn taxpayer_status_parses_wire_tokens() {
+        assert_eq!(
+            "-1".parse::<TaxpayerStatus>(),
+            Ok(TaxpayerStatus::NoTaxNumber)
+        );
+        assert_eq!(
+            "42".parse::<TaxpayerStatus>(),
+            Err(UnknownTaxpayerStatus("42".to_owned()))
+        );
+    }
+
+    #[test]
+    fn pdf_converts_to_and_from_bytes() {
+        let pdf = Pdf::from(b"%PDF-1.4".to_vec());
+        assert_eq!(pdf.as_bytes(), b"%PDF-1.4");
+        assert_eq!(Vec::from(pdf), b"%PDF-1.4".to_vec());
     }
 
     #[test]
     fn huf_aliases() {
         assert!(Currency::HUF.is_huf());
         assert!(Currency::new("Ft").is_huf());
+        assert!(Currency::from("Ft").is_huf());
+        assert!(Currency::from(String::from("HUF")).is_huf());
         assert!(!Currency::EUR.is_huf());
     }
 
