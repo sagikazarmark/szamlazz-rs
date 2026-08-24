@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -13,9 +13,9 @@ keywords = ["szamlazz", "invoice", "billing", "hungary"]
 categories = ["api-bindings"]
 
 [workspace.dependencies]
-szamlazz-adatkapcsolat = { path = "crates/szamlazz-adatkapcsolat", version = "0.2.0" }
-szamlazz-agent = { path = "crates/szamlazz-agent", version = "0.2.0" }
-szamlazz-ipn = { path = "crates/szamlazz-ipn", version = "0.2.0" }
+szamlazz-adatkapcsolat = { path = "crates/szamlazz-adatkapcsolat", version = "0.3.0" }
+szamlazz-agent = { path = "crates/szamlazz-agent", version = "0.3.0" }
+szamlazz-ipn = { path = "crates/szamlazz-ipn", version = "0.3.0" }
 
 axum = { version = "0.8.9", default-features = false }
 base64 = "0.23.1"
