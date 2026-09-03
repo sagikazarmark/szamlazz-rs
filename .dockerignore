@@ -1,0 +1,14 @@
+/.devenv*
+/.direnv/
+/.git/
+.env
+.env.local
+.pre-commit-config.yaml
+devenv.local.nix
+devenv.local.yaml
+/target/
+/var/
+/restate-szamlazz.toml
+/restate-szamlazz.json
+/restate-szamlazz.yaml
+/restate-szamlazz.yml

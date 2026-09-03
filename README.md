@@ -8,13 +8,14 @@
 ## Features
 
 - **Complete integration surface.** Use the Számla Agent, receive IPN status snapshots, and accept Adatkapcsolat documents.
-- **Portable library cores.** All three libraries target native Rust and `wasm32-unknown-unknown`, including Cloudflare Workers.
+- **Portable library cores.** The three protocol libraries (`szamlazz-agent`, `szamlazz-ipn`, `szamlazz-adatkapcsolat`) target native Rust and `wasm32-unknown-unknown`, including Cloudflare Workers; the Restate crates are native-only.
 - **Sans-IO Számla Agent.** Build complete wire requests and parse raw responses with any HTTP client, or enable the reqwest client.
 - **Protocol-native models.** Typed operations, documents, Acks, errors, and Hungarian Rustdoc aliases preserve szamlazz.hu semantics.
+- **Durable workers.** Issue, reverse, and reconcile documents exactly once per order through Restate services and a runnable endpoint.
 
 ## Workspace
 
-This virtual workspace contains four packages intended for publication and independent use:
+This virtual workspace contains six packages intended for publication and independent use:
 
 | Package | Purpose |
 |---|---|
@@ -22,8 +23,16 @@ This virtual workspace contains four packages intended for publication and indep
 | [`szamlazz-ipn`](crates/szamlazz-ipn) | IPN receiver types for current payment-status snapshots, with an optional axum extractor. |
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
+| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Order` Virtual Object and `SzamlaAgent` service issuing szamlazz.hu documents with durable, idempotent execution. |
+| [`restate-szamlazz-endpoint`](crates/restate-szamlazz-endpoint) | Standalone `restate-szamlazz` endpoint hosting the services for a Restate server. |
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
+
+## Documentation
+
+- [`docs/design/restate-szamlazz.md`](docs/design/restate-szamlazz.md): design and implementation spec for the Restate worker.
+- [`docs/adr/`](docs/adr): architecture decision records behind it.
+- [`docs/szamlazz-hu-behaviour.md`](docs/szamlazz-hu-behaviour.md): verified Számla Agent behavior the worker relies on, with a go-live checklist.
 
 ## Development
 
