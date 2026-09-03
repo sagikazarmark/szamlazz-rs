@@ -5,4 +5,8 @@ ignore = [
     # compiled; it only appears in Cargo.lock. No rust_decimal release depends
     # on the fixed rkyv 0.8 yet.
     "RUSTSEC-2026-0235",
+    # Marvin timing side channel in `rsa`, pulled in by `jsonwebtoken` via
+    # `restate-sdk`'s request-identity verification. No fixed `rsa` release
+    # exists yet; Restate identity keys are Ed25519, so the RSA path is unused.
+    "RUSTSEC-2023-0071",
 ]
