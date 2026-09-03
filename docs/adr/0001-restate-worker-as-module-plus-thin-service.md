@@ -16,7 +16,7 @@ and `Order` never invokes a handler on its own key. The dependency direction the
 `Order → szamla_agent ← SzamlaAgent`.
 
 The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, ledger,
-the module, both services; `contract`/`config`/`ledger` compile without `restate-sdk`), and
+the module, both services — `restate-sdk` is an unconditional dependency), and
 `restate-szamlazz-endpoint` is the binary `restate-szamlazz` that hosts the services over HTTP and
 ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 

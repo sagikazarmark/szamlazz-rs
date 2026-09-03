@@ -16,7 +16,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-restate-szamlazz = { workspace = true, features = ["schemars", "service"] }
+restate-szamlazz = { workspace = true, features = ["schemars"] }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

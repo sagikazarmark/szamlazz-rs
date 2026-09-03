@@ -11,18 +11,16 @@ keywords = ["szamlazz", "invoice", "restate", "durable", "hungary"]
 categories = ["api-bindings"]
 
 [features]
-default = ["service"]
-## Restate Virtual Object and Service adapters (pulls in `restate-sdk`).
-service = ["dep:restate-sdk"]
+default = []
 ## JSON Schema derivation for the contract types (OpenAPI via Restate discovery).
-schemars = ["dep:schemars", "restate-sdk?/schemars"]
+schemars = ["dep:schemars", "restate-sdk/schemars"]
 
 [dependencies]
 szamlazz-agent = { workspace = true, features = ["client-reqwest"] }
 
 hmac = "0.13.0"
 jiff = { workspace = true }
-restate-sdk = { workspace = true, optional = true }
+restate-sdk = { workspace = true }
 rust_decimal = { workspace = true }
 schemars = { workspace = true, optional = true, features = ["jiff02", "rust_decimal1"] }
 serde = { workspace = true }
@@ -40,6 +38,7 @@ wiremock = { workspace = true }
 [lints]
 workspace = true
 
-# Every feature is additive and part of the public API surface.
+# `schemars` adds typed request/response schemas to the discovery manifest and is part of the
+# public API surface.
 [package.metadata.docs.rs]
 all-features = true

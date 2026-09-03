@@ -9,35 +9,24 @@
 //! Számla Agent model: deployment constants live in [`Config`], line totals are computed, and
 //! domain outcomes are returned as data.
 //!
-//! - [`contract`] — the SDK-independent request/response types.
+//! - [`contract`] — the request/response types.
 //! - [`config`] — the deployment configuration.
 //! - [`identity`] — order keys, external ids and payload fingerprints.
 //! - [`ledger`] — the `Order` state and its pure transitions.
 //! - [`szamla_agent`] — the low-level layer over the Számla Agent client, outcome as data.
-//! - `service` — the Restate adapters (feature `service`, on by default).
+//! - [`service`] — the Restate adapters.
 //!
 //! ## Features
 //!
-//! - `service` (default) — the Restate adapters: the `Order` Virtual Object, the
-//!   `SzamlaAgentService` service and the generated `OrderClient` /
-//!   `SzamlaAgentServiceClient`. Pulls in `restate-sdk`.
 //! - `schemars` — `JsonSchema` derives on every [`contract`] type, so the Restate discovery
-//!   manifest and the `OpenAPI` export carry typed request and response schemas. Forwards to
-//!   `restate-sdk/schemars` when `service` is on.
-//!
-//! [`contract`], [`config`], [`identity`], [`ledger`] and [`szamla_agent`] compile without
-//! `service`. Note that [`szamla_agent`] is always compiled: it is the SDK-free low-level layer
-//! the services are built on, so the `szamlazz-agent` reqwest client (and with it `reqwest` and
-//! `tokio`) is part of every build, including `--no-default-features`.
+//!   manifest and the `OpenAPI` export carry typed request and response schemas.
 //!
 //! # Services
 //!
-//! With the `service` feature, `Order` is a Restate Virtual Object registered as `Order` and
-//! `SzamlaAgentService` a stateless service registered as `SzamlaAgent`. Bind both to an
-//! endpoint:
+//! [`Order`] is a Restate Virtual Object registered as `Order` and [`SzamlaAgentService`] a
+//! stateless service registered as `SzamlaAgent`. Bind both to an endpoint:
 //!
 //! ```no_run
-//! # #[cfg(feature = "service")]
 //! # async fn serve(config: std::sync::Arc<restate_szamlazz::Config>) -> Result<(), Box<dyn std::error::Error>> {
 //! use restate_sdk::prelude::{Endpoint, HttpServer};
 //! use restate_szamlazz::{Order, SzamlaAgentService};
@@ -63,7 +52,6 @@ pub mod config;
 pub mod contract;
 pub mod identity;
 pub mod ledger;
-#[cfg(feature = "service")]
 pub mod service;
 pub mod szamla_agent;
 
@@ -71,6 +59,5 @@ pub use config::Config;
 pub use contract::{CreateRequest, CreateResponse, DocumentKind, RequestId};
 pub use identity::{ExternalId, OrderKey};
 pub use ledger::Ledger;
-#[cfg(feature = "service")]
 pub use service::{Order, OrderClient, SzamlaAgentService, SzamlaAgentServiceClient};
 pub use szamla_agent::SzamlaAgent;

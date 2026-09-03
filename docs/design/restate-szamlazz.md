@@ -21,8 +21,10 @@ invoice lifecycle workflow, multiple szamlazz.hu accounts in one deployment.
 | `restate-szamlazz` | library | yes | Contract types, config, the low-level `szamla_agent` layer, the `Order` Virtual Object and the `SzamlaAgent` service |
 | `restate-szamlazz-endpoint` | binary `restate-szamlazz` | yes (`cargo install`) + container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config |
 
-`restate-szamlazz` features: `default = ["service"]`; `service = ["dep:restate-sdk"]`; `schemars = ["dep:schemars",
-"restate-sdk?/schemars"]`. The `contract`, `config` and `ledger` modules compile without `restate-sdk`.
+`restate-szamlazz` depends on `restate-sdk` unconditionally — it is the Restate worker, not a contract package.
+Its only feature is `schemars` (`["dep:schemars", "restate-sdk/schemars"]`), which adds typed request/response
+schemas to the discovery manifest. Should a caller-side, SDK-free contract package ever be needed (e.g. for a
+wasm32 client of the ingress), it becomes a separate `restate-szamlazz-contract` crate rather than a feature.
 
 Layering (ADR 0001): the low-level layer is a **Rust module**, not a Restate service.
 

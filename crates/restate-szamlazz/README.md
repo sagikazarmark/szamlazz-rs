@@ -46,10 +46,9 @@ Prerequisite: the szamlazz.hu account setting **"Rendelésszám ismétlődés ti
 
 ## Feature Flags
 
-Default features enable the Restate adapters. The SDK-free contract, configuration, identity and ledger modules remain available with default features disabled.
+The crate has no default features; `restate-sdk` is always a dependency.
 
-- `service`: enables `Order`, `SzamlaAgentService`, their generated clients and the `restate-sdk` dependency. Enabled by default.
-- `schemars`: derives JSON Schema for the contract types, so Restate's discovery manifest and OpenAPI export document every handler's input and output. Forwards to `restate-sdk`'s `schemars` feature when `service` is enabled.
+- `schemars`: derives JSON Schema for the contract types, so Restate's discovery manifest and OpenAPI export document every handler's input and output. Forwards to `restate-sdk`'s `schemars` feature.
 
 See the [crate documentation](https://docs.rs/restate-szamlazz/latest/restate_szamlazz/) for API and feature semantics and the [generated feature graph](https://docs.rs/crate/restate-szamlazz/latest/features) for activation details.
 
@@ -65,7 +64,7 @@ See the [crate documentation](https://docs.rs/restate-szamlazz/latest/restate_sz
 - `Config`: the deployment configuration — `[account]` (slug, agent key, endpoint, live/test mode, supplier id pin, fingerprint secret), `[defaults]`, `[seller]`, `[issue]` (attempt budget and back-off). Secrets are `config::Secret`, whose `Debug` output is redacted.
 - `Ledger`: the `Order` state — per-kind `Slot`s, corrective entries, the request-id map, a foreign hint and a bounded history. Every transition is a pure method that leaves the ledger unchanged on a precondition failure.
 - `szamla_agent::SzamlaAgent`: the low-level layer over `szamlazz_agent::Client`. Plain async functions (`issue`, `verify`, `query`, `hint`, `storno`, `delete_proforma`, `set_payments`) that return every expected szamlazz.hu outcome as data. `Order` calls them inside `ctx.run`; the `SzamlaAgent` Restate service is a thin facade over the same instance. No Restate service calls another.
-- `Order` / `SzamlaAgentService` (feature `service`): the Restate Virtual Object registered as `Order` and the stateless service registered as `SzamlaAgent`, with generated `OrderClient` and `SzamlaAgentServiceClient` for typed calls from other handlers.
+- `Order` / `SzamlaAgentService`: the Restate Virtual Object registered as `Order` and the stateless service registered as `SzamlaAgent`, with generated `OrderClient` and `SzamlaAgentServiceClient` for typed calls from other handlers.
 
 ## Identity Model
 
@@ -102,8 +101,8 @@ Inside a handler, the issuing loop retries transport failures and unknown outcom
 
 ## Testing
 
-- `cargo test -p restate-szamlazz --all-features` runs the pure ledger transitions, the discovery and binding tests of the adapters, and the wiremock tests of the low-level layer against synthetic szamlazz.hu responses (`tests/szamla_agent.rs`).
-- `cargo test -p restate-szamlazz --all-features -- --ignored e2e` runs `tests/service.rs`: the `Order` Virtual Object end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu. It skips with a message when the docker daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server.
+- `cargo test -p restate-szamlazz` runs the pure ledger transitions, the discovery and binding tests of the adapters, and the wiremock tests of the low-level layer against synthetic szamlazz.hu responses (`tests/szamla_agent.rs`).
+- `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Order` Virtual Object end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu. It skips with a message when the docker daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server.
 - The go-live checklist in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md) re-establishes the verified szamlazz.hu facts on a target account before the worker is enabled; every step issues real documents there.
 
 ## License

@@ -1,12 +1,10 @@
 //! End-to-end tests of the `Order` Virtual Object against a real Restate
 //! server (docker) with wiremock standing in for szamlazz.hu.
 //!
-//! Ignored by default: `cargo test -p restate-szamlazz --all-features -- --ignored e2e`.
+//! Ignored by default: `cargo test -p restate-szamlazz -- --ignored e2e`.
 //! Skips (with a message) when the docker daemon is not reachable. Set
 //! `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server
 //! instead of starting a container.
-
-#![cfg(feature = "service")]
 
 use std::net::TcpListener;
 use std::process::Command;
