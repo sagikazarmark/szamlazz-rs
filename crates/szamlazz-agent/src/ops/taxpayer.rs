@@ -222,19 +222,19 @@ impl TaxpayerResponse {
                 Event::Start(start) => {
                     if !root_seen {
                         root_seen = true;
-                        debug_assert_eq!(start.local_name().as_ref(), b"QueryTaxpayerResponse");
+                        debug_assert_eq!(start.local_name().as_ref(), "QueryTaxpayerResponse");
                     }
                     content.clear();
-                    if start.local_name().as_ref() == b"taxpayerAddressItem" {
+                    if start.local_name().as_ref() == "taxpayerAddressItem" {
                         in_address = true;
                         parsed.addresses.push(TaxpayerAddress::default());
                     }
                 }
                 Event::Text(text) => {
-                    content.push_str(&text.xml10_content().map_err(quick_xml::DeError::from)?);
+                    content.push_str(&text.xml10_content());
                 }
                 Event::CData(cdata) => {
-                    content.push_str(&cdata.xml10_content().map_err(quick_xml::DeError::from)?);
+                    content.push_str(&cdata.xml10_content());
                 }
                 Event::GeneralRef(reference) => {
                     let resolved = reference
@@ -242,11 +242,7 @@ impl TaxpayerResponse {
                         .map_err(quick_xml::DeError::from)?;
                     match resolved {
                         Some(ch) => content.push(ch),
-                        None => match reference
-                            .decode()
-                            .map_err(quick_xml::DeError::from)?
-                            .as_ref()
-                        {
+                        None => match reference.as_ref() {
                             "amp" => content.push('&'),
                             "lt" => content.push('<'),
                             "gt" => content.push('>'),
@@ -263,7 +259,7 @@ impl TaxpayerResponse {
                     if !value.is_empty() {
                         parsed.set(name.as_ref(), value, in_address)?;
                     }
-                    if name.as_ref() == b"taxpayerAddressItem" {
+                    if name.as_ref() == "taxpayerAddressItem" {
                         in_address = false;
                     }
                     content.clear();
@@ -283,29 +279,29 @@ impl TaxpayerResponse {
     }
 
     /// Records a leaf element's text content, keyed by local name.
-    fn set(&mut self, element: &[u8], value: &str, in_address: bool) -> Result<(), ParseError> {
+    fn set(&mut self, element: &str, value: &str, in_address: bool) -> Result<(), ParseError> {
         if in_address {
             let Some(address) = self.addresses.last_mut() else {
                 return Ok(());
             };
 
             match element {
-                b"taxpayerAddressType" => address.kind = Some(value.to_owned()),
-                b"countryCode" => address.country_code = Some(value.to_owned()),
-                b"region" => address.region = Some(value.to_owned()),
-                b"postalCode" => address.postal_code = Some(value.to_owned()),
-                b"city" => address.city = Some(value.to_owned()),
-                b"streetName" => address.street_name = Some(value.to_owned()),
-                b"publicPlaceCategory" => {
+                "taxpayerAddressType" => address.kind = Some(value.to_owned()),
+                "countryCode" => address.country_code = Some(value.to_owned()),
+                "region" => address.region = Some(value.to_owned()),
+                "postalCode" => address.postal_code = Some(value.to_owned()),
+                "city" => address.city = Some(value.to_owned()),
+                "streetName" => address.street_name = Some(value.to_owned()),
+                "publicPlaceCategory" => {
                     address.public_place_category = Some(value.to_owned());
                 }
-                b"number" => address.number = Some(value.to_owned()),
-                b"building" => address.building = Some(value.to_owned()),
-                b"staircase" => address.staircase = Some(value.to_owned()),
-                b"floor" => address.floor = Some(value.to_owned()),
-                b"door" => address.door = Some(value.to_owned()),
-                b"lotNumber" => address.lot_number = Some(value.to_owned()),
-                b"additionalAddressDetail" => {
+                "number" => address.number = Some(value.to_owned()),
+                "building" => address.building = Some(value.to_owned()),
+                "staircase" => address.staircase = Some(value.to_owned()),
+                "floor" => address.floor = Some(value.to_owned()),
+                "door" => address.door = Some(value.to_owned()),
+                "lotNumber" => address.lot_number = Some(value.to_owned()),
+                "additionalAddressDetail" => {
                     address.additional_address_detail = Some(value.to_owned());
                 }
                 _ => {}
@@ -313,10 +309,10 @@ impl TaxpayerResponse {
             return Ok(());
         }
         match element {
-            b"funcCode" => self.func_code = Some(value.to_owned()),
-            b"errorCode" => self.error_code = Some(value.to_owned()),
-            b"message" => self.message = Some(value.to_owned()),
-            b"taxpayerValidity" => {
+            "funcCode" => self.func_code = Some(value.to_owned()),
+            "errorCode" => self.error_code = Some(value.to_owned()),
+            "message" => self.message = Some(value.to_owned()),
+            "taxpayerValidity" => {
                 self.validity = Some(match value {
                     "true" | "1" => true,
                     "false" | "0" => false,
@@ -328,9 +324,9 @@ impl TaxpayerResponse {
                     }
                 });
             }
-            b"taxpayerName" => self.name = Some(value.to_owned()),
-            b"taxpayerId" => self.taxpayer_id = Some(value.to_owned()),
-            b"vatCode" => self.vat_code = Some(value.to_owned()),
+            "taxpayerName" => self.name = Some(value.to_owned()),
+            "taxpayerId" => self.taxpayer_id = Some(value.to_owned()),
+            "vatCode" => self.vat_code = Some(value.to_owned()),
             _ => {}
         }
         Ok(())

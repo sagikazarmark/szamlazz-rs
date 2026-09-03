@@ -966,11 +966,7 @@ fn response_root(body: &[u8]) -> Result<ResponseRoot, ParseError> {
         match event {
             quick_xml::events::Event::Start(start) | quick_xml::events::Event::Empty(start) => {
                 let local = start.local_name();
-                let local =
-                    std::str::from_utf8(local.as_ref()).map_err(|error| ParseError::Invalid {
-                        field: "response root",
-                        message: error.to_string(),
-                    })?;
+                let local = local.as_ref();
                 let (root, expected_namespace) = match local {
                     "xmlszamlavalasz" => (
                         ResponseRoot::AgentResponse,
@@ -984,7 +980,7 @@ fn response_root(body: &[u8]) -> Result<ResponseRoot, ParseError> {
                     }
                 };
 
-                if namespace != ResolveResult::Bound(Namespace(expected_namespace.as_bytes())) {
+                if namespace != ResolveResult::Bound(Namespace(expected_namespace)) {
                     return Err(ParseError::UnexpectedBody(format!(
                         "wrong namespace for XML query response root {local}"
                     )));
