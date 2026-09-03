@@ -1,6 +1,6 @@
 # szamlazz.hu Integration
 
-Rust crates for integrating with szamlazz.hu, a Hungarian invoicing service: an outbound API client and two inbound receivers for szamlazz.hu-initiated pushes.
+Rust crates for integrating with szamlazz.hu, a Hungarian invoicing service: an outbound API client, two inbound receivers for szamlazz.hu-initiated pushes, and a Restate-backed durable worker that issues documents exactly once per order.
 
 ## Language
 
@@ -44,7 +44,7 @@ Advance invoice and the invoice that settles it. Both are invoice-operation flag
 An invoice that corrects a previously issued one, referencing its number.
 
 **Storno invoice (sztornó)**:
-The reversal of an issued invoice. A distinct Agent operation, not an invoice flag.
+The reversal of an issued invoice. A distinct Agent operation, not an invoice flag. Idempotent on the server: repeating the storno of an already reversed invoice echoes the existing storno number as success, with no error code and no second document. Sent on a proforma or delivery note it is a success-shaped no-op that echoes the requested number unchanged.
 _Avoid_: cancellation, void
 
 **Receipt (nyugta)**:
@@ -73,3 +73,51 @@ A numeric percentage or a NAV-defined special code (AAM, TAM, EUT, KBAET, …) o
 
 **Line item (tétel)**:
 One row of a document: name, quantity, unit, net unit price, VAT rate, and net/VAT/gross values whose arithmetic szamlazz.hu verifies server-side.
+
+### Restate worker concepts
+
+**Order**:
+The Restate Virtual Object that owns every document issued for one order number. Its key is the order number (rendelésszám) trimmed of leading/trailing whitespace, case preserved — exactly what szamlazz.hu matches on. Same-key handlers run one at a time, which is what serializes issuing per order. Crate: `restate-szamlazz`.
+_Avoid_: order object, invoice workflow
+
+**Ledger**:
+The `Order`'s Virtual Object state: per-kind slots, corrective entries, the request-id map, a foreign hint and a bounded history. Holds numbers, ids, totals, an HMAC fingerprint and journaled timestamps — never buyer data. It is the source of truth for what the service issued; szamlazz.hu is consulted to verify it, not to rebuild it.
+_Avoid_: cache (it is authoritative, not derived), database
+
+**Slot**:
+The ledger entry for one document kind of an order (`proforma`, `invoice`, `prepayment`, `final`). Exactly one slot per kind; its status moves through `pending`, `committed`, `rejected`, `blocked`, `reversed`, `reversal_unverified` (a service-side storno exhausted its attempts unconfirmed; the next storno retries), `vacant` (nothing of ours after a foreign detection or an operator `forget`), and for proformas `deleted` or `consumed`. A `pending` slot means "we may have issued something we have not yet confirmed" and is what makes killing a stuck invocation safe.
+
+**Generation (gen)**:
+The counter in a slot that increments only on a verified reversal (invoice kinds), an operator-recorded reversal, an operator `forget`, or deletion/consumption (proforma). Each generation is one document identity; the external id embeds it so a reissued invoice never shares an id with the stornoed one. Never bumps on transport errors, rejections, 71/152 or foreign detections.
+_Avoid_: version, attempt, sequence number
+
+**Request id**:
+The caller-supplied `request_id` on every issuing handler: the retry identity. The same id returns the entry's current state forever; a different id is a new logical request; a known id with a different payload is `conflict{payload_mismatch}`. Ledger-only — never sent to szamlazz.hu.
+_Avoid_: idempotency key (Restate's ingress `Idempotency-Key` is a different, retention-bound mechanism the service does not rely on), correlation id
+
+**External id (szamlaKulsoAzon)**:
+The Agent's optional per-document identifier, used by the worker as the identity handle: deterministic from ledger state (`{slug}:{order}:{kind}:{gen}`), written to state before the first call, queried before every create. Not unique server-side and never echoed in responses, so every document found by it is validated before adoption.
+_Avoid_: idempotency key (szamlazz.hu does not treat it as one), external reference
+
+**Outcome**:
+A domain result returned as data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected`, `conflict{reason}`. Errors (`TerminalError`) are reserved for faults — `outcome_unknown`, `unavailable`, `account_mismatch`, `invalid_input` — and always mean "outcome unknown, re-call with the same request id", never "no document exists".
+_Avoid_: error/failure for a rejection or conflict, status
+
+**Reissue**:
+Issuing a new generation of a document kind after the recorded one was reversed. Explicit (`reissue: true` plus a new request id) when the reversal was external or operator-asserted; flag-free after a service-side storno or a proforma deletion.
+_Avoid_: re-create, retry (a retry targets the same generation)
+
+**Reversal origin**:
+Who reversed a recorded document, as the ledger knows it: `service` (via `Order.storno_invoice`), `external` (detected by verification — UI, support, another integration), `operator` (asserted through the private `record_reversal` handler). Decides whether the next create needs `reissue`.
+
+**Foreign document**:
+A live invoice-kind document found under the order number that the ledger does not own and no external id of ours resolves to. Recorded only as a hint (`foreign_hint`), never adopted; the create returns `conflict{foreign}`.
+_Avoid_: external document (collides with reversal origin `external`), orphan
+
+**Consumed proforma**:
+A proforma that szamlazz.hu removed from its query surface because an invoice or prepayment converted it — explicitly by reference or implicitly by shared order number. Distinct from `deleted`: a consumed slot is terminal for the order; a deleted one may be recreated.
+_Avoid_: converted (the invoice is converted from it; the proforma is consumed), deleted
+
+**Low-level layer (`szamla_agent` module) / `SzamlaAgent` service**:
+Two things share the name. The module `restate_szamlazz::szamla_agent` owns the `szamlazz_agent::Client` and the account config and exposes plain async functions with outcome-as-data; `Order` calls it inside `ctx.run`. The `SzamlaAgent` Restate service is a thin stateless facade over the same module for by-number operations (query, credit entries, storno of unmanaged documents). Neither Restate service calls the other.
+_Avoid_: Invoice service, Issuer, "the agent" without qualification
