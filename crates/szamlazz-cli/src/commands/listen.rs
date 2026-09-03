@@ -5,12 +5,14 @@
 //! tunnel like `cloudflared`) at it to watch real traffic during integration
 //! work.
 
+use std::future::ready;
+
 use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::post;
 use clap::Args;
 use szamlazz_adatkapcsolat::{
-    Ack, BankTransaction, Handler, InvoiceAck, InvoiceDocument, ReceiptBatch,
+    Ack, BankTransaction, Handler, InvoiceAck, InvoiceDocument, MaybeSend, ReceiptBatch,
 };
 use szamlazz_ipn::PaymentNotification;
 
@@ -35,37 +37,49 @@ struct PrintingHandler;
 impl Handler for PrintingHandler {
     type Error = std::convert::Infallible;
 
-    async fn outgoing_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, Self::Error> {
+    fn outgoing_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, Self::Error>> + MaybeSend {
         let id = invoice.info.id;
         println!("── adatkapcsolat: outgoing invoice (id {id}) ──");
         print_json(&invoice);
 
-        Ok(InvoiceAck::accept(id))
+        ready(Ok(InvoiceAck::accept(id)))
     }
 
-    async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, Self::Error> {
+    fn incoming_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, Self::Error>> + MaybeSend {
         let id = invoice.info.id;
         println!("── adatkapcsolat: incoming invoice (id {id}) ──");
         print_json(&invoice);
 
-        Ok(InvoiceAck::accept(id))
+        ready(Ok(InvoiceAck::accept(id)))
     }
 
-    async fn bank_transaction(&self, tx: BankTransaction) -> Result<Ack, Self::Error> {
+    fn bank_transaction(
+        &self,
+        tx: BankTransaction,
+    ) -> impl Future<Output = Result<Ack, Self::Error>> + MaybeSend {
         println!("── adatkapcsolat: bank transaction (id {}) ──", tx.id);
         print_json(&tx);
 
-        Ok(Ack::accept())
+        ready(Ok(Ack::accept()))
     }
 
-    async fn receipts(&self, batch: ReceiptBatch) -> Result<Ack, Self::Error> {
+    fn receipts(
+        &self,
+        batch: ReceiptBatch,
+    ) -> impl Future<Output = Result<Ack, Self::Error>> + MaybeSend {
         println!(
             "── adatkapcsolat: receipt batch ({} receipts) ──",
             batch.receipts.len()
         );
         print_json(&batch);
 
-        Ok(Ack::accept())
+        ready(Ok(Ack::accept()))
     }
 }
 
