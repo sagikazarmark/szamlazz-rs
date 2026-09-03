@@ -5,28 +5,29 @@
 
 #![allow(
     missing_docs,
-    reason = "the macro-generated `OrderClient` / `SzamlaAgentServiceClient` carry no documentation"
+    reason = "the macro-generated `OrderClient` / `AgentClient` carry no documentation"
 )]
 
 use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
-use super::{Order, SzamlaAgentService};
+use super::{Agent, Order};
 use crate::contract::{
     CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest, DeleteProformaResponse,
     DocumentKind, ForgetRequest, GetRequest, OrderSnapshot, QueryRequest, QueryResponse,
     RecordReversalRequest, SetPaymentsRequest, SetPaymentsResponse, StornoRequest, StornoResponse,
 };
 
-/// The `Order` Virtual Object, keyed by the order number (`rendelésszám`).
+/// The `Szamlazz.Order` Virtual Object, keyed by the order number
+/// (`rendelésszám`).
 ///
 /// Issuing handlers take a caller-supplied `request_id` as their retry
 /// identity: the same id returns the entry's current state forever. Every
 /// handler that calls szamlazz.hu kills the invocation after five attempts
 /// (ADR 0004); the `pending` slot written before the first call makes that
 /// safe.
-#[restate_sdk::object(name = "Order")]
+#[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
     #[handler(
@@ -247,11 +248,11 @@ impl Order {
     }
 }
 
-/// The `SzamlaAgent` service: query, credit entries and storno by document
+/// The `Szamlazz.Agent` service: query, credit entries and storno by document
 /// number. Never calls into `Order`; a document that carries an order number
 /// is reported as `managed_by_order` instead.
-#[restate_sdk::service(name = "SzamlaAgent")]
-impl SzamlaAgentService {
+#[restate_sdk::service(name = "Szamlazz.Agent")]
+impl Agent {
     /// Queries a document by number, order number or external id.
     #[handler(invocation_retry_policy(
         initial_interval = "10s",

@@ -1,11 +1,11 @@
-//! The low-level layer: owns the [`szamlazz_agent::Client`] and the account
-//! configuration and exposes the Számla Agent operations as plain async
-//! functions with **outcome as data** — an expected szamlazz.hu outcome
-//! (rejection, duplicate order number, not found, no-op storno) is a value,
-//! never an `Err`.
+//! The bodies of the durable steps: one plain async fn per `ctx.run`, over
+//! the [`szamlazz_agent::Client`], returning every expected szamlazz.hu
+//! outcome **as data** — a rejection, a duplicate order number, a not-found
+//! or a no-op storno is a value, never an `Err`.
 //!
-//! `Order` calls these inside `ctx.run`; the `SzamlaAgent` Restate service is
-//! a thin facade over the same functions. Neither Restate service calls the
+//! [`Steps`] owns the client and the account configuration. `Szamlazz.Order`
+//! calls these inside `ctx.run`; the `Szamlazz.Agent` Restate service is a
+//! thin facade over the same functions. Neither Restate service calls the
 //! other.
 //!
 //! Every query result is validated before it is called ours (design §3):
@@ -40,9 +40,10 @@ pub mod build;
 
 pub use build::{DocumentRefs, InputError, gross_total};
 
-/// The low-level Számla Agent layer of one deployment.
+/// The durable step bodies of one deployment: the Számla Agent client plus
+/// the account configuration.
 #[derive(Debug, Clone)]
-pub struct SzamlaAgent {
+pub struct Steps {
     client: Client,
     config: Arc<Config>,
 }
@@ -57,7 +58,7 @@ pub struct IssueRequest<'a> {
     pub kind: IssuedKind,
     /// The order the document belongs to.
     pub order: &'a OrderKey,
-    /// The create request built by [`SzamlaAgent::build_create`].
+    /// The create request built by [`Steps::build_create`].
     pub create: &'a CreateInvoice,
     /// Query the order number before creating to detect foreign documents and
     /// to adopt a conversion of our proforma.
@@ -235,7 +236,7 @@ pub enum QueryOutcome {
     Transport(String),
 }
 
-/// Why [`SzamlaAgent::query_document`] returned no document.
+/// Why [`Steps::query_document`] returned no document.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum QueryError {
@@ -353,8 +354,8 @@ pub enum SetPaymentsOutcome {
     Transport(String),
 }
 
-impl SzamlaAgent {
-    /// Builds the layer for `config`: agent-key credentials and the configured
+impl Steps {
+    /// Builds the steps for `config`: agent-key credentials and the configured
     /// endpoint override.
     ///
     /// # Errors
@@ -395,7 +396,7 @@ impl SzamlaAgent {
     ///    codes [`IssueOutcome::Rejected`].
     pub async fn issue(&self, request: IssueRequest<'_>) -> IssueOutcome {
         let span = tracing::info_span!(
-            "szamla_agent.issue",
+            "steps.issue",
             external_id = %request.external_id,
             kind = %request.kind,
         );
@@ -493,7 +494,7 @@ impl SzamlaAgent {
     }
 
     /// Queries by any selector and returns the full document (for the public
-    /// `SzamlaAgent.query` handler).
+    /// `Szamlazz.Agent.query` handler).
     ///
     /// # Errors
     ///
@@ -510,7 +511,7 @@ impl SzamlaAgent {
     /// [`szamlazz_agent::ops::invoice::CreatedInvoice::reverses`].
     pub async fn storno(&self, attempt: StornoAttempt<'_>) -> StornoOutcome {
         let span = tracing::info_span!(
-            "szamla_agent.storno",
+            "steps.storno",
             number = %attempt.invoice_number,
             external_id = %attempt.external_id,
         );
@@ -789,7 +790,7 @@ fn account_matches(document: &InvoiceDocument, request: &IssueRequest<'_>) -> bo
         }
 }
 
-/// Step 2 of [`SzamlaAgent::issue`]: what the order-number hint means.
+/// Step 2 of [`Steps::issue`]: what the order-number hint means.
 fn classify_hint(document: &InvoiceDocument, request: &IssueRequest<'_>) -> Option<IssueOutcome> {
     let info = &document.info;
     let tipus = info.document_type.as_str();

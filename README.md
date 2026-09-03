@@ -23,7 +23,7 @@ This virtual workspace contains six packages intended for publication and indepe
 | [`szamlazz-ipn`](crates/szamlazz-ipn) | IPN receiver types for current payment-status snapshots, with an optional axum extractor. |
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
-| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Order` Virtual Object and `SzamlaAgent` service issuing szamlazz.hu documents with durable, idempotent execution. |
+| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents with durable, idempotent execution. |
 | [`restate-szamlazz-endpoint`](crates/restate-szamlazz-endpoint) | Standalone `restate-szamlazz` endpoint hosting the services for a Restate server. |
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).

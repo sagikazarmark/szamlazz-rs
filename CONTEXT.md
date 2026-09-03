@@ -77,7 +77,7 @@ One row of a document: name, quantity, unit, net unit price, VAT rate, and net/V
 ### Restate worker concepts
 
 **Order**:
-The Restate Virtual Object that owns every document issued for one order number. Its key is the order number (rendelésszám) trimmed of leading/trailing whitespace, case preserved — exactly what szamlazz.hu matches on. Same-key handlers run one at a time, which is what serializes issuing per order. Crate: `restate-szamlazz`.
+The Restate Virtual Object that owns every document issued for one order number, registered with Restate as `Szamlazz.Order`. Its key is the order number (rendelésszám) trimmed of leading/trailing whitespace, case preserved — exactly what szamlazz.hu matches on. Same-key handlers run one at a time, which is what serializes issuing per order. Crate: `restate-szamlazz`.
 _Avoid_: order object, invoice workflow
 
 **Ledger**:
@@ -108,7 +108,7 @@ Issuing a new generation of a document kind after the recorded one was reversed.
 _Avoid_: re-create, retry (a retry targets the same generation)
 
 **Reversal origin**:
-Who reversed a recorded document, as the ledger knows it: `service` (via `Order.storno_invoice`), `external` (detected by verification — UI, support, another integration), `operator` (asserted through the private `record_reversal` handler). Decides whether the next create needs `reissue`.
+Who reversed a recorded document, as the ledger knows it: `service` (via `Szamlazz.Order.storno_invoice`), `external` (detected by verification — UI, support, another integration), `operator` (asserted through the private `record_reversal` handler). Decides whether the next create needs `reissue`.
 
 **Foreign document**:
 A live invoice-kind document found under the order number that the ledger does not own and no external id of ours resolves to. Recorded only as a hint (`foreign_hint`), never adopted; the create returns `conflict{foreign}`.
@@ -118,6 +118,6 @@ _Avoid_: external document (collides with reversal origin `external`), orphan
 A proforma that szamlazz.hu removed from its query surface because an invoice or prepayment converted it — explicitly by reference or implicitly by shared order number. Distinct from `deleted`: a consumed slot is terminal for the order; a deleted one may be recreated.
 _Avoid_: converted (the invoice is converted from it; the proforma is consumed), deleted
 
-**Low-level layer (`szamla_agent` module) / `SzamlaAgent` service**:
-Two things share the name. The module `restate_szamlazz::szamla_agent` owns the `szamlazz_agent::Client` and the account config and exposes plain async functions with outcome-as-data; `Order` calls it inside `ctx.run`. The `SzamlaAgent` Restate service is a thin stateless facade over the same module for by-number operations (query, credit entries, storno of unmanaged documents). Neither Restate service calls the other.
-_Avoid_: Invoice service, Issuer, "the agent" without qualification
+**Steps (`steps` module) / `Szamlazz.Agent` service**:
+The module `restate_szamlazz::steps` owns the `szamlazz_agent::Client` and the account config and exposes one plain async fn per durable step (`issue`, `verify`, `query`, `hint`, `storno`, `delete_proforma`, `set_payments`) with outcome-as-data — every expected szamlazz.hu outcome is a value, never an `Err`. `Szamlazz.Order` calls it inside `ctx.run`. The `Szamlazz.Agent` Restate service is a thin stateless facade over the same module for by-number operations (query, credit entries, storno of unmanaged documents). Neither Restate service calls the other.
+_Avoid_: "the agent" without qualification, Invoice service, client (for the steps module — it is not a second client)

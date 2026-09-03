@@ -1,5 +1,5 @@
-//! SDK-independent request and response contract of the `Order` and
-//! `SzamlaAgent` services.
+//! SDK-independent request and response contract of the `Szamlazz.Order` and
+//! `Szamlazz.Agent` services.
 //!
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
 //! returned as values (see [`Outcome`] and [`ConflictReason`]), while the
@@ -285,7 +285,7 @@ impl fmt::Display for IssuedKind {
 /// The code of a `TerminalError` raised by an issuing or storno handler.
 ///
 /// Every one of them means "outcome unknown — call again with the same
-/// [`RequestId`], or read `Order.get`", never "no document exists".
+/// [`RequestId`], or read `Szamlazz.Order.get`", never "no document exists".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]

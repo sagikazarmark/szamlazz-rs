@@ -8,12 +8,12 @@ per-handler setting in Rust SDK 0.12 and the server honors it (verified: `GET /s
 shows the effective `retry_policy`; the `POST /deployments` response shows `null`s and is not
 authoritative).
 
-Every handler that calls szamlazz.hu sets `on_max_attempts = "kill"`. On `Order` the issuing,
+Every handler that calls szamlazz.hu sets `on_max_attempts = "kill"`. On `Szamlazz.Order` the issuing,
 correcting, storno and delete handlers carry `invocation_retry_policy(initial_interval = "2m",
 factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "kill")` with
 `inactivity_timeout = "4m"` and `abort_timeout = "3m"` (the closure may take up to 180 s: external-id
-query, hint, create, 60 s each). `SzamlaAgent.set_payments` and `storno` use `max_attempts = 2,
-kill`; read-only handlers (`Order.get` with `verify`, `SzamlaAgent.query`) may retry more freely
+query, hint, create, 60 s each). `Szamlazz.Agent.set_payments` and `storno` use `max_attempts = 2,
+kill`; read-only handlers (`Szamlazz.Order.get` with `verify`, `Szamlazz.Agent.query`) may retry more freely
 because queries are safe to repeat, but they kill too. The `pending` slot written before
 any issuing call (ADR 0002) is what makes kill safe; kill is what makes the slot reachable.
 
@@ -57,7 +57,7 @@ any issuing call (ADR 0002) is what makes kill safe; kill is what makes the slot
   compensate. The next call on the order pre-sleeps for the remainder of the first back-off and
   reconciles by external id before it considers sending.
 - Caller contract, documented in the crate README: **any error from an issuing or storno handler
-  means "outcome unknown — call again with the same `request_id`, or read `Order.get`"**, never "no
+  means "outcome unknown — call again with the same `request_id`, or read `Szamlazz.Order.get`"**, never "no
   document exists". A call that timed out on the client side may still run once the key frees;
   `get` is the way to learn its outcome. Callers should not long-poll an exclusive handler; `get`
   is the non-blocking status check. Callers should not rely on the ingress `Idempotency-Key`: it
@@ -66,7 +66,7 @@ any issuing call (ADR 0002) is what makes kill safe; kill is what makes the slot
   more than 5 minutes; `idempotency_retention = 7d` keeps failed completions visible; `get` surfaces
   `pending` slots with `attempts`, `external_id` and `last_attempt_at`. Verify the effective policy
   with `GET /services/{name}`. The SDK endpoint speaks HTTP/2 only.
-- Runbook: `Order.get` → re-call the same handler with the same `request_id`. It reconciles by
+- Runbook: `Szamlazz.Order.get` → re-call the same handler with the same `request_id`. It reconciles by
   external id first and resumes issuing while the attempt budget lasts; a new `request_id` takes
   over an exhausted `pending` slot with a fresh budget at the same generation. `record_reversal` and
   `forget` (`ingress_private`) exist for the account-mismatch and persistent-transport cases and are

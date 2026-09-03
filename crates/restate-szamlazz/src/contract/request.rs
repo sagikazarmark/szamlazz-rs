@@ -1,4 +1,5 @@
-//! Handler inputs of the `Order` Virtual Object and the `SzamlaAgent` service.
+//! Handler inputs of the `Szamlazz.Order` Virtual Object and the
+//! `Szamlazz.Agent` service.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -7,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::document::{DocumentInput, PaymentMethod};
 use super::{DocumentKind, RequestId};
 
-/// Input of `Order.create_proforma`, `create_invoice`, `create_prepayment`
-/// and `create_final`.
+/// Input of `Szamlazz.Order.create_proforma`, `create_invoice`,
+/// `create_prepayment` and `create_final`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CreateRequest {
@@ -71,7 +72,7 @@ pub enum ProformaLink {
     Number(String),
 }
 
-/// Input of `Order.correct_invoice`.
+/// Input of `Szamlazz.Order.correct_invoice`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CorrectRequest {
@@ -84,7 +85,7 @@ pub struct CorrectRequest {
     pub document: DocumentInput,
 }
 
-/// Input of `Order.storno_invoice` and `SzamlaAgent.storno`.
+/// Input of `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct StornoRequest {
@@ -105,7 +106,7 @@ impl StornoRequest {
     }
 }
 
-/// Input of `Order.delete_proforma`.
+/// Input of `Szamlazz.Order.delete_proforma`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default)]
@@ -116,7 +117,7 @@ pub struct DeleteProformaRequest {
     pub force: bool,
 }
 
-/// Input of `Order.get`.
+/// Input of `Szamlazz.Order.get`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default)]
@@ -126,7 +127,7 @@ pub struct GetRequest {
     pub verify: bool,
 }
 
-/// Input of the private `Order.record_reversal` handler: an operator asserts
+/// Input of the private `Szamlazz.Order.record_reversal` handler: an operator asserts
 /// what szamlazz.hu shows for a recorded document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -156,7 +157,7 @@ pub enum RecordedReversal {
     Live,
 }
 
-/// Input of the private `Order.forget` handler: drop a slot whose document
+/// Input of the private `Szamlazz.Order.forget` handler: drop a slot whose document
 /// szamlazz.hu no longer knows (`conflict{recorded_document_missing}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -165,7 +166,7 @@ pub struct ForgetRequest {
     pub kind: DocumentKind,
 }
 
-/// Input of `SzamlaAgent.query`.
+/// Input of `Szamlazz.Agent.query`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct QueryRequest {
@@ -191,7 +192,7 @@ pub enum Selector {
     ExternalId(String),
 }
 
-/// Input of `SzamlaAgent.set_payments`.
+/// Input of `Szamlazz.Agent.set_payments`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SetPaymentsRequest {

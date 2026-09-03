@@ -18,7 +18,7 @@ invoice lifecycle workflow, multiple szamlazz.hu accounts in one deployment.
 
 | Crate | Kind | Publishes | Purpose |
 |---|---|---|---|
-| `restate-szamlazz` | library | yes | Contract types, config, the low-level `szamla_agent` layer, the `Order` Virtual Object and the `SzamlaAgent` service |
+| `restate-szamlazz` | library | yes | Contract types, config, the `steps` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
 | `restate-szamlazz-endpoint` | binary `restate-szamlazz` | yes (`cargo install`) + container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config |
 
 `restate-szamlazz` depends on `restate-sdk` unconditionally — it is the Restate worker, not a contract package.
@@ -26,14 +26,14 @@ Its only feature is `schemars` (`["dep:schemars", "restate-sdk/schemars"]`), whi
 schemas to the discovery manifest. Should a caller-side, SDK-free contract package ever be needed (e.g. for a
 wasm32 client of the ingress), it becomes a separate `restate-szamlazz-contract` crate rather than a feature.
 
-Layering (ADR 0001): the low-level layer is a **Rust module**, not a Restate service.
+Layering (ADR 0001): the szamlazz.hu-calling layer is a **Rust module** (`steps`), not a Restate service.
 
 ```
-restate_szamlazz::szamla_agent::SzamlaAgent      owns szamlazz_agent::Client + config; plain async fns;
+restate_szamlazz::steps::Steps                   owns szamlazz_agent::Client + config; one plain async fn per ctx.run;
                                                   outcome-as-data; never returns Err for an expected szamlazz.hu outcome
-        ▲                          ▲
-        │ inside ctx.run           │ inside ctx.run
-Order (Virtual Object, key = order number)      SzamlaAgent (stateless Service: query / set_payments / storno)
+        ▲                                   ▲
+        │ inside ctx.run                    │ inside ctx.run
+Szamlazz.Order (Virtual Object, key = order number)   Szamlazz.Agent (stateless Service: query / set_payments / storno)
 ```
 
 No Restate service calls another. `Order` never calls any handler on its own key (same-key exclusive → exclusive
@@ -92,7 +92,7 @@ clock outside a run.
 
 ## 5. Services and handlers
 
-### `Order` (Virtual Object, `#[restate_sdk::object(name = "Order")]`)
+### `Szamlazz.Order` (Virtual Object, `#[restate_sdk::object(name = "Szamlazz.Order")]`)
 
 | Handler | Kind | Input → Output |
 |---|---|---|
@@ -119,7 +119,7 @@ the 60 s client timeout plus observed server-side stalls (≥ 57 s), so the re-e
 pre-query runs after the first request has resolved server-side. `kill` releases the key; the `pending` slot makes
 re-entry safe and kill is what makes it reachable (a paused invocation holds the key — verified).
 
-### `SzamlaAgent` (stateless Service, `#[restate_sdk::service(name = "SzamlaAgent")]`)
+### `Szamlazz.Agent` (stateless Service, `#[restate_sdk::service(name = "Szamlazz.Agent")]`)
 
 | Handler | Input → Output | Notes |
 |---|---|---|
@@ -175,7 +175,7 @@ Steps are numbered as they should appear in code; every szamlazz.hu call is insi
    ⇒ pre-query; 7 ⇒ `conflict{proforma_missing}`. Slot = `pending{gen, request_id, fp, attempts: 0}`;
    `requests[request_id] = {kind, gen}`; `ctx.set` — **before any issuing call**.
 4. **Attempt loop** while `attempts < issue.max_attempts`: `attempts += 1`, `last_attempt_at = run(now)`, `ctx.set`;
-   `out = ctx.run("issue-{kind}-{gen}-{attempts}", || szamla_agent.issue(IssueRequest{…})).retry_policy(max_attempts(1))`.
+   `out = ctx.run("issue-{kind}-{gen}-{attempts}", || steps.issue(IssueRequest{…})).retry_policy(max_attempts(1))`.
    The module function, in one closure:
    - `QueryInvoiceXml(ExternalId)` ⇒ `Ok(doc)` ⇒ validate ⇒ `Found(doc)` | `Collision(doc)`; 7 ⇒ continue;
      transport ⇒ `Transport` (never create when the check itself failed).
@@ -212,19 +212,19 @@ supplies the negative prepayment line. `correct_invoice` — dedupe on `request_
 `corrective:{cseq}`; no `Dup71` path (correctives are exempt from the order-number check — verified); a new
 `request_id` issues a new corrective by contract.
 
-## 7. Storno protocol (`Order.storno_invoice`) — idempotent re-send with a query-first guard
+## 7. Storno protocol (`Szamlazz.Order.storno_invoice`) — idempotent re-send with a query-first guard
 
 Storno is natively idempotent on the server (a repeat storno echoes the existing SS with `sikeres=true`, no
 error — verified) and an external id on the storno request attaches to the SS (verified).
 
-1. Locate the slot or corrective by number (unknown ⇒ `invalid_input{not_managed}` — use `SzamlaAgent.storno`).
+1. Locate the slot or corrective by number (unknown ⇒ `invalid_input{not_managed}` — use `Szamlazz.Agent.storno`).
    Pre-checks: a corrective references this number ⇒ `rejected{has_corrective}` (server code 221); slot `reversed`
    ⇒ `outcome: reversed` (idempotent); `pending` ⇒ `outcome: conflict{pending}`; `reversal_unverified` ⇒ continue
    at step 3 (retry).
 2. `ctx.run(query by number)`: `sztornozott == Some(true)` ⇒ record `reversed{origin: external}` (storno number via
    the order-number hint if it is an `SS` with `hivszamlaszam == number`), `gen += 1` ⇒ `outcome: reversed`. Otherwise
    capture `payments` for the history event.
-3. Loop ≤ 3 attempts (`first_backoff`, ×2): `ctx.run("storno-{number}-{n}", || szamla_agent.storno(...)).max_attempts(1)`:
+3. Loop ≤ 3 attempts (`first_backoff`, ×2): `ctx.run("storno-{number}-{n}", || steps.storno(...)).max_attempts(1)`:
    (a) query by the storno external id ⇒ `Found` SS with `hivszamlaszam == number` ⇒ `Reversed{ss}`;
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon}` **without `keltDatum`** (352 otherwise on e-invoice
    accounts — verified);
@@ -238,7 +238,7 @@ error — verified) and an external id on the storno request attaches to the SS 
 
 `e_invoice` for the storno: the recorded document's `eszamla` when known, else config.
 
-`Order.delete_proforma`: `pending` ⇒ reconcile-first (pre-sleep + external-id query): `Found` ⇒ commit then
+`Szamlazz.Order.delete_proforma`: `pending` ⇒ reconcile-first (pre-sleep + external-id query): `Found` ⇒ commit then
 delete; 7 ⇒ `{deleted: false, reason: pending}`. `committed` ⇒ pre-query `payments`; paid ∧ `!force` ⇒
 `rejected{proforma_paid}` (the server has no guard — verified); `DeleteProforma{InvoiceNumber}` in a run
 (`max_attempts(1)`): success | 335 ⇒ `deleted`, `gen += 1`; other ⇒ `rejected{code}`. `deleted` ⇒ `{deleted: true}`.
@@ -270,7 +270,7 @@ unchanged. The server silently drops references to deleted or already-consumed p
 absence is informational, not a fault.
 
 Caller contract, documented in the crate README: **any error from an issuing or storno handler means "outcome
-unknown — call again with the same `request_id`, or read `Order.get`"**, never "no document exists". Callers
+unknown — call again with the same `request_id`, or read `Szamlazz.Order.get`"**, never "no document exists". Callers
 should not rely on the ingress `Idempotency-Key` (it would replay a `TerminalError` for its retention period —
 verified); `request_id` is the retry identity.
 
@@ -329,11 +329,11 @@ only (Restate SDK). Container image built by `Dockerfile` at the repo root, push
 ## 11. Testing
 
 - `ledger`: pure transition tests (every branch of §6 step 2 and §7 step 1 without I/O).
-- `szamla_agent`: `wiremock` tests using the upstream response fixtures under `fixtures/upstream/agent/`
+- `steps`: `wiremock` tests using the upstream response fixtures under `fixtures/upstream/agent/`
   (`Found` validation, `Dup71` re-query, storno response validation incl. the D/SL no-op, 335, 7).
 - `service`: discovery test (`Discoverable::discover()` names, handler set, `ingress_private` flags) and an
   `Endpoint::builder().bind(...).build()` smoke test; optional raw-protocol test as in email-rs.
-- Endpoint: figment parse tests; a `wiremock`-backed test wiring config → `SzamlaAgent` module.
+- Endpoint: figment parse tests; a `wiremock`-backed test wiring config → `steps` module.
 - Live: `tests/live.rs`-style ignored tests for the go-live checklist in `szamlazz-hu-behaviour.md`.
 
 ## 12. What v1 gives up (deliberately)
@@ -346,7 +346,7 @@ ledger updates, multiple prepayments per order, PDF, receipts.
 ## 13. Deviations from the review record
 
 - VO key is the bare order number, not `{account}/{order}`: one account per deployment is fixed for v1, and a
-  second account would be a second deployment with its own `Order` service; the slug still namespaces external ids.
+  second account would be a second deployment with its own `Szamlazz.Order` service; the slug still namespaces external ids.
 - Correctives use `corrective:{cseq}` (a per-order counter) instead of `corrective:{request_id}` to keep the
   external id short; `request_id ↔ cseq` lives in the ledger.
 - `recorded_document_missing` fires on the first code 7 (no two-sample rule); it is a pure conflict response that
@@ -380,4 +380,4 @@ Where the implementation interprets or narrows the protocol above:
   generation history is never lost.
 - **`get { verify: true }`** returns `verification: [{ kind, result }]` alongside the snapshot; it never writes state
   (shared handler).
-- **`SzamlaAgent.storno`** for unmanaged documents uses the external id `"{slug}:by-number:{number}:storno"`.
+- **`Szamlazz.Agent.storno`** for unmanaged documents uses the external id `"{slug}:by-number:{number}:storno"`.

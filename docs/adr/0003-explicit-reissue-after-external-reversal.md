@@ -10,7 +10,7 @@ recorded number — verified), the slot becomes `reversed{origin: external}`, `g
 handler returns `outcome: reversed{number, storno_number?}` — data, not an error. A new document is
 issued only when the incoming request carries **`reissue: true` and a new `request_id`**
 (`reissue` with a known id is `invalid_input`). After a **service-side** storno
-(`Order.storno_invoice`) the slot is `reversed{origin: service}` and open flag-free: the ledger knows
+(`Szamlazz.Order.storno_invoice`) the slot is `reversed{origin: service}` and open flag-free: the ledger knows
 the reversal was deliberate. A deleted proforma is likewise open flag-free — it is not a legal
 document. The same rule holds inside the attempt loop: a `Found` document that is reversed returns
 `reversed`; the loop never re-allocates.
@@ -43,7 +43,7 @@ Verified practice facts that bear on the decision:
    the form "identical means bug" is wrong.
 5. Credit entries do not carry over, and the server erases `<kifizetesek>` from the original on
    storno (verified). The service snapshots them into history before a storno; the caller
-   re-registers on the new invoice via `SzamlaAgent.set_payments`.
+   re-registers on the new invoice via `Szamlazz.Agent.set_payments`.
 6. The new invoice carries the true, caller-supplied fulfillment date; the service never defaults
    it on reissue.
 

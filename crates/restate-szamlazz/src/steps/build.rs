@@ -9,7 +9,7 @@ use szamlazz_agent::ops::invoice::{
 };
 use szamlazz_agent::{Currency, InvoiceNumber, Language};
 
-use super::SzamlaAgent;
+use super::Steps;
 use crate::contract::{DocumentInput, IssuedKind};
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
@@ -55,7 +55,7 @@ pub enum InputError {
     },
 }
 
-impl SzamlaAgent {
+impl Steps {
     /// Builds the create request for `document`: configured defaults, per-call
     /// overrides (override wins), line totals computed for the currency, the
     /// buyer name normalised, the order number and external id set, no PDF.
@@ -203,7 +203,7 @@ mod tests {
     use crate::contract::document::tests::sample_document;
     use crate::contract::{DocumentKind, ExchangeRateInput};
 
-    fn agent(defaults: &serde_json::Value) -> SzamlaAgent {
+    fn steps(defaults: &serde_json::Value) -> Steps {
         let config: Config = serde_json::from_value(json!({
             "account": {"slug": "acct", "agent_key": "key", "fp_secret": "fp",
                         "endpoint": "http://127.0.0.1:1/"},
@@ -211,7 +211,7 @@ mod tests {
             "seller": {"bank": "Bank", "bank_account": "1234", "email": {"subject": "Hi"}},
         }))
         .expect("config");
-        SzamlaAgent::new(Arc::new(config)).expect("agent")
+        Steps::new(Arc::new(config)).expect("steps")
     }
 
     fn order() -> OrderKey {
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn projects_defaults_and_identity() {
-        let agent = agent(&json!({
+        let steps = steps(&json!({
             "e_invoice": true,
             "send_email": false,
             "number_prefix": "WEB",
@@ -237,7 +237,7 @@ mod tests {
         document.buyer.name = "  Kova\u{301}cs Bt.  ".to_owned();
         document.issue_date = Some(date(2026, 9, 3));
         document.paid = true;
-        let create = agent
+        let create = steps
             .build_create(
                 IssuedKind::Invoice,
                 &document,
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn overrides_win_over_defaults() {
-        let agent = agent(&json!({
+        let steps = steps(&json!({
             "e_invoice": true,
             "send_email": true,
             "number_prefix": "WEB",
@@ -315,7 +315,7 @@ mod tests {
             bank: "OTP".to_owned(),
             rate: Some(dec!(395.5)),
         });
-        let create = agent
+        let create = steps
             .build_create(
                 IssuedKind::Proforma,
                 &document,
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn non_huf_needs_a_rate_unless_mnb_is_automatic() {
-        let mnb = agent(&json!({"currency": "EUR"}));
+        let mnb = steps(&json!({"currency": "EUR"}));
         let document = sample_document();
         let create = mnb
             .build_create(
@@ -356,7 +356,7 @@ mod tests {
             Some(ExchangeRate::automatic_mnb())
         );
 
-        let otp = agent(&json!({"currency": "EUR", "exchange_rate_bank": "OTP"}));
+        let otp = steps(&json!({"currency": "EUR", "exchange_rate_bank": "OTP"}));
         assert_eq!(
             otp.build_create(
                 IssuedKind::Invoice,
@@ -386,10 +386,10 @@ mod tests {
 
     #[test]
     fn kind_references_and_input_errors() {
-        let agent = agent(&json!({}));
+        let steps = steps(&json!({}));
         let document = sample_document();
         let build =
-            |kind, refs| agent.build_create(kind, &document, &order(), &external_id(), refs);
+            |kind, refs| steps.build_create(kind, &document, &order(), &external_id(), refs);
         assert_eq!(
             build(IssuedKind::Prepayment, DocumentRefs::default())
                 .expect("prepayment")
@@ -442,7 +442,7 @@ mod tests {
         let mut empty = document.clone();
         empty.items.clear();
         assert_eq!(
-            agent.build_create(
+            steps.build_create(
                 IssuedKind::Invoice,
                 &empty,
                 &order(),
@@ -454,7 +454,7 @@ mod tests {
         let mut klingon = document;
         klingon.overrides.language = Some("tlh".to_owned());
         assert_eq!(
-            agent.build_create(
+            steps.build_create(
                 IssuedKind::Invoice,
                 &klingon,
                 &order(),

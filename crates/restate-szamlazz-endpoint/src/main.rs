@@ -1,7 +1,7 @@
 //! Standalone endpoint hosting the szamlazz.hu services for Restate.
 //!
-//! Binds the `Order` Virtual Object and the `SzamlaAgent` service of
-//! [`restate_szamlazz`] to one HTTP/2 endpoint and serves it for a Restate
+//! Binds the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service
+//! of [`restate_szamlazz`] to one HTTP/2 endpoint and serves it for a Restate
 //! server to register.
 
 mod config;
@@ -16,7 +16,7 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::http_server::HttpServer;
 use restate_sdk::service::Discoverable;
-use restate_szamlazz::{Order, SzamlaAgent, SzamlaAgentService};
+use restate_szamlazz::{Agent, Order, Steps};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::EndpointConfig;
@@ -100,16 +100,15 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
         "loaded szamlazz.hu account configuration"
     );
 
-    let agent = Arc::new(
-        SzamlaAgent::new(Arc::clone(&config))
-            .context("failed to construct the Számla Agent client")?,
+    let steps = Arc::new(
+        Steps::new(Arc::clone(&config)).context("failed to construct the Számla Agent client")?,
     );
-    let order = Order::from_parts(Arc::clone(&agent), Arc::clone(&config));
-    let szamla_agent = SzamlaAgentService::from_parts(agent, config);
+    let order = Order::from_parts(Arc::clone(&steps), Arc::clone(&config));
+    let agent = Agent::from_parts(steps, config);
 
     for discovery in [
         <Order as Discoverable>::discover(),
-        <SzamlaAgentService as Discoverable>::discover(),
+        <Agent as Discoverable>::discover(),
     ] {
         tracing::info!(
             service = %*discovery.name,
@@ -119,7 +118,7 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
         );
     }
 
-    let mut endpoint = Endpoint::builder().bind(order).bind(szamla_agent);
+    let mut endpoint = Endpoint::builder().bind(order).bind(agent);
     for identity_key in &identity_keys {
         endpoint = endpoint
             .identity_key(identity_key)
@@ -140,7 +139,7 @@ mod tests {
     use figment::Figment;
     use figment::providers::{Format, Toml};
     use restate_szamlazz::contract::Selector;
-    use restate_szamlazz::szamla_agent::QueryOutcome;
+    use restate_szamlazz::steps::QueryOutcome;
     use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -203,7 +202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_endpoint_reaches_the_low_level_layer() {
+    async fn config_endpoint_reaches_the_steps() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("action-szamla_agent_xml"))
@@ -228,9 +227,9 @@ mod tests {
         )))
         .extract()
         .expect("configuration should parse");
-        let agent = SzamlaAgent::new(Arc::new(config.service)).expect("agent should build");
+        let steps = Steps::new(Arc::new(config.service)).expect("steps should build");
 
-        let outcome = agent
+        let outcome = steps
             .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
             .await;
 

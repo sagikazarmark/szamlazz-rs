@@ -211,7 +211,7 @@ impl Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReversalOrigin {
-    /// Via `Order.storno_invoice`; the slot is open flag-free.
+    /// Via `Szamlazz.Order.storno_invoice`; the slot is open flag-free.
     Service,
     /// Detected by verification (UI, support, another integration); the next
     /// create needs `reissue: true`.

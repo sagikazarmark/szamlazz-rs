@@ -1,6 +1,6 @@
-//! Plumbing shared by the `Order` and `SzamlaAgent` handlers: the fault →
-//! `TerminalError` mapping, ledger state access, journaled runs and the
-//! validation of documents found by a query.
+//! Plumbing shared by the `Szamlazz.Order` and `Szamlazz.Agent` handlers: the
+//! fault → `TerminalError` mapping, ledger state access, journaled runs and
+//! the validation of documents found by a query.
 
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::contract::{IssuedKind, RequestId, TerminalCode};
 use crate::identity::OrderKey;
 use crate::ledger::{Ledger, LedgerError};
-use crate::szamla_agent::{FoundDocument, document_type_of};
+use crate::steps::{FoundDocument, document_type_of};
 
 /// The Virtual Object state key holding the [`Ledger`].
 pub(super) const LEDGER_KEY: &str = "ledger";
@@ -123,7 +123,7 @@ impl From<LedgerError> for Fault {
     }
 }
 
-/// A `TerminalError` with a plain HTTP status and message (the `SzamlaAgent`
+/// A `TerminalError` with a plain HTTP status and message (the `Szamlazz.Agent`
 /// service's not-found and rejection errors).
 pub(super) fn terminal(status: u16, code: &str, message: impl Into<String>) -> HandlerError {
     let body = serde_json::json!({ "code": code, "message": message.into() });
@@ -249,7 +249,7 @@ macro_rules! journal_helpers {
             use crate::contract::Selector;
             use crate::identity::{ExternalId, OrderKey};
             use crate::ledger::Ledger;
-            use crate::szamla_agent::{QueryOutcome, SzamlaAgent};
+            use crate::steps::{QueryOutcome, Steps};
 
             /// Journals the result of `f` under `name`, executing it at most
             /// once per journal entry (`RunRetryPolicy::max_attempts(1)`):
@@ -292,48 +292,48 @@ macro_rules! journal_helpers {
             /// Journaled query of document `number` (a verify).
             pub(in crate::service) async fn verify(
                 ctx: &$ctx<'_>,
-                agent: &Arc<SzamlaAgent>,
+                steps: &Arc<Steps>,
                 name: impl Into<String>,
                 number: &str,
             ) -> Result<QueryOutcome, HandlerError> {
-                let agent = Arc::clone(agent);
+                let steps = Arc::clone(steps);
                 let number = number.to_owned();
-                run_once(ctx, name, move || async move { agent.verify(&number).await }).await
+                run_once(ctx, name, move || async move { steps.verify(&number).await }).await
             }
 
             /// Journaled query by external id.
             pub(in crate::service) async fn query_external_id(
                 ctx: &$ctx<'_>,
-                agent: &Arc<SzamlaAgent>,
+                steps: &Arc<Steps>,
                 name: impl Into<String>,
                 external_id: &ExternalId,
             ) -> Result<QueryOutcome, HandlerError> {
-                let agent = Arc::clone(agent);
+                let steps = Arc::clone(steps);
                 let selector = Selector::ExternalId(external_id.as_str().to_owned());
-                run_once(ctx, name, move || async move { agent.query(&selector).await }).await
+                run_once(ctx, name, move || async move { steps.query(&selector).await }).await
             }
 
             /// Journaled order-number hint.
             pub(in crate::service) async fn hint(
                 ctx: &$ctx<'_>,
-                agent: &Arc<SzamlaAgent>,
+                steps: &Arc<Steps>,
                 name: impl Into<String>,
                 order: &OrderKey,
             ) -> Result<QueryOutcome, HandlerError> {
-                let agent = Arc::clone(agent);
+                let steps = Arc::clone(steps);
                 let order = order.clone();
-                run_once(ctx, name, move || async move { agent.hint(&order).await }).await
+                run_once(ctx, name, move || async move { steps.hint(&order).await }).await
             }
 
             /// Disambiguates a code 7 on proforma `number` via the
             /// order-number hint.
             pub(in crate::service) async fn proforma_fate(
                 ctx: &$ctx<'_>,
-                agent: &Arc<SzamlaAgent>,
+                steps: &Arc<Steps>,
                 order: &OrderKey,
                 number: &str,
             ) -> Result<ProformaFate, HandlerError> {
-                match hint(ctx, agent, format!("hint-proforma-{number}"), order).await? {
+                match hint(ctx, steps, format!("hint-proforma-{number}"), order).await? {
                     QueryOutcome::Found(found)
                         if matches!(found.document_type.as_str(), "SZ" | "ES")
                             && found.referenced_proforma.as_deref() == Some(number) =>

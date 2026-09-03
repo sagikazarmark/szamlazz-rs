@@ -1,19 +1,19 @@
-# The low-level szamlazz.hu layer is a Rust module inside `Order`, plus a thin `SzamlaAgent` service
+# The low-level szamlazz.hu layer is a Rust module inside `Order`, plus a thin `Szamlazz.Agent` service
 
 `restate-szamlazz` exposes the basic Számla Agent operations as Restate services. The layer that owns
 the `szamlazz_agent::Client` and the credentials had to live somewhere: either as a Restate service
 that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
-`restate_szamlazz::szamla_agent::SzamlaAgent` is a plain Rust module: a struct holding the client
+`restate_szamlazz::steps::Steps` is a plain Rust module: a struct holding the client
 and the account config, with async functions `issue`, `storno`, `delete_proforma`, `set_payments`
-and `query`. It has no Restate context, returns every expected szamlazz.hu outcome as data (never
-`Err` for a rejection, a duplicate or a "not found"), and is unit-testable with wiremock. The
-`Order` Virtual Object (key = order number) calls these functions **inside its own `ctx.run`
-closures**. A thin, stateless `SzamlaAgent` Restate service exposes `query`, `set_payments` and
-`storno` for by-number operations over the same module instance. No Restate service calls another,
-and `Order` never invokes a handler on its own key. The dependency direction the owner asked for —
-`Order` depends on the low-level layer, nothing depends on `Order` — is a compile-time fact:
-`Order → szamla_agent ← SzamlaAgent`.
+and `query` — one per durable step. It has no Restate context, returns every expected szamlazz.hu
+outcome as data (never `Err` for a rejection, a duplicate or a "not found"), and is unit-testable
+with wiremock. The `Order` Virtual Object (key = order number) calls these functions **inside its own
+`ctx.run` closures**. A thin, stateless `Szamlazz.Agent` Restate service exposes `query`,
+`set_payments` and `storno` for by-number operations over the same module instance. No Restate
+service calls another, and `Order` never invokes a handler on its own key. The dependency direction
+the owner asked for — `Order` depends on the steps, nothing depends on `Order` — is a compile-time
+fact: `Szamlazz.Order → steps ← Szamlazz.Agent`.
 
 The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, ledger,
 the module, both services — `restate-sdk` is an unconditional dependency), and
@@ -36,7 +36,7 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
   a second Restate caller) do not exist at v1; the first would be a non-goal and the second is
   undesirable.
 - **`Order` does everything and a public `Invoice.storno` delegates upward into
-  `Order.storno_invoice`.** Rejected. An upward edge into a Virtual Object is a deadlock class: an
+  `Szamlazz.Order.storno_invoice`.** Rejected. An upward edge into a Virtual Object is a deadlock class: an
   exclusive handler that `.call()`s an exclusive handler on the same VO key never completes
   (verified — parent `running`, child `pending` forever; killing the parent killed both). It also
   inverts the intended dependency direction. The module design is this option with the seam made a
@@ -44,7 +44,7 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 
 ## Consequences
 
-- Every szamlazz.hu call happens inside an `Order` (or `SzamlaAgent`) `ctx.run`. Issuing, storno
+- Every szamlazz.hu call happens inside an `Order` (or `Szamlazz.Agent`) `ctx.run`. Issuing, storno
   and delete runs use `RunRetryPolicy::max_attempts(1)` with outcome-as-data; pure queries use the
   default exponential run retry with `max_duration 2m`. A run failure surfaces as a terminal error
   (HTTP 500 to a synchronous caller — verified), which is why the module must never return `Err`
@@ -53,7 +53,7 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
   the journal. Worst case per episode in a pathological crash loop is loop attempts + (invocation
   attempts − 1) = 9 closure executions, each query-first (ADR 0002), finite because of `kill`
   (ADR 0004).
-- `SzamlaAgent.storno` on a document that carries `rendelesszam` returns
+- `Szamlazz.Agent.storno` on a document that carries `rendelesszam` returns
   `outcome: managed_by_order{key}` — a convention on the key scheme, never a call into `Order`.
   Documents without an order number (no `Order` exists for them) are reversed directly.
 - `issue` and `delete_proforma` exist only as module functions. When a second Restate caller
@@ -63,6 +63,9 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
   ledger holds numbers, ids, totals, an HMAC fingerprint and journaled timestamps — no PII.
 - Rule, stated so a future `storno_invoice → create_invoice` convenience is not added: no `Order`
   handler ever `.call()`s an exclusive handler on its own key. Under this layering it is structural.
-- The service name is `SzamlaAgent` (the glossary term for the surface it wraps). `Invoice`,
-  `Documents`, `Agent` and `Szamlazz` were rejected as names for a layer that issues `D/SZ/ES/VS/HS`,
-  deletes `D` and registers credit entries.
+- The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`
+  prefix marks both as this worker's in a shared Restate cluster; `Agent` names the surface the thin
+  service wraps (the Számla Agent, the glossary term). The Rust type is `Agent` and the module
+  behind both services is `steps`, so no Rust item shares a name with the `szamlazz-agent` crate.
+  `Invoice`, `Documents` and an unqualified `Szamlazz` were rejected as names for a layer that
+  issues `D/SZ/ES/VS/HS`, deletes `D` and registers credit entries.

@@ -5,7 +5,7 @@
 
 **Restate services issuing and managing szamlazz.hu documents with durable, idempotent execution.**
 
-The `Order` Virtual Object — keyed by the order number — owns every document issued for one order and serialises issuing per key, so that a caller can say "issue the invoice for order X" and get exactly one legal document under retries, process crashes, concurrent callers and reversals. The stateless `SzamlaAgent` service exposes by-number operations (query, credit entries, storno of unmanaged documents) over the same low-level layer. Both are projections of the Számla Agent model: deployment constants live in config, line totals are computed, domain outcomes are returned as data.
+The `Szamlazz.Order` Virtual Object — keyed by the order number — owns every document issued for one order and serialises issuing per key, so that a caller can say "issue the invoice for order X" and get exactly one legal document under retries, process crashes, concurrent callers and reversals. The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of unmanaged documents) over the same steps. Both are projections of the Számla Agent model: deployment constants live in config, line totals are computed, domain outcomes are returned as data.
 
 The design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md), the decisions behind it in [`docs/adr/`](../../docs/adr), and the szamlazz.hu behaviour it relies on in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md). A ready-made binary and container image live in [`restate-szamlazz-endpoint`](../restate-szamlazz-endpoint).
 
@@ -17,11 +17,11 @@ Bind both services to a Restate endpoint of your own:
 use std::sync::Arc;
 
 use restate_sdk::prelude::{Endpoint, HttpServer};
-use restate_szamlazz::{Config, Order, SzamlaAgentService};
+use restate_szamlazz::{Agent, Config, Order};
 
 async fn serve(config: Arc<Config>) -> Result<(), Box<dyn std::error::Error>> {
     let order = Order::new(Arc::clone(&config))?;
-    let agent = SzamlaAgentService::from_parts(Arc::clone(order.agent()), config);
+    let agent = Agent::from_parts(Arc::clone(order.steps()), config);
     let endpoint = Endpoint::builder().bind(order).bind(agent).build();
     HttpServer::new(endpoint)
         .listen_and_serve("0.0.0.0:9080".parse()?)
@@ -63,8 +63,8 @@ See the [crate documentation](https://docs.rs/restate-szamlazz/latest/restate_sz
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document (`{slug}:{order}:{kind}:{gen}`, `{slug}:{order}:corrective:{cseq}`, `{original}:storno`).
 - `Config`: the deployment configuration — `[account]` (slug, agent key, endpoint, live/test mode, supplier id pin, fingerprint secret), `[defaults]`, `[seller]`, `[issue]` (attempt budget and back-off). Secrets are `config::Secret`, whose `Debug` output is redacted.
 - `Ledger`: the `Order` state — per-kind `Slot`s, corrective entries, the request-id map, a foreign hint and a bounded history. Every transition is a pure method that leaves the ledger unchanged on a precondition failure.
-- `szamla_agent::SzamlaAgent`: the low-level layer over `szamlazz_agent::Client`. Plain async functions (`issue`, `verify`, `query`, `hint`, `storno`, `delete_proforma`, `set_payments`) that return every expected szamlazz.hu outcome as data. `Order` calls them inside `ctx.run`; the `SzamlaAgent` Restate service is a thin facade over the same instance. No Restate service calls another.
-- `Order` / `SzamlaAgentService`: the Restate Virtual Object registered as `Order` and the stateless service registered as `SzamlaAgent`, with generated `OrderClient` and `SzamlaAgentServiceClient` for typed calls from other handlers.
+- `steps::Steps`: the bodies of the durable steps over `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`issue`, `verify`, `query`, `hint`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome as data. `Szamlazz.Order` calls them inside `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same instance. No Restate service calls another.
+- `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other handlers.
 
 ## Identity Model
 
@@ -93,16 +93,16 @@ Multiple keys stay valid at once, so rotation is a deployment change: register t
 
 ## Retry Behavior
 
-Every handler that calls szamlazz.hu pins its own retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md)): on `Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`, `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m` and `abort_timeout = 3m`; `SzamlaAgent.set_payments` and `storno` use two attempts. Kill, not pause: a paused invocation holds the order's key and blocks the very handler that would reconcile it. Kill releases the key with the last committed state intact, and the `pending` slot written before the first call is what makes that safe.
+Every handler that calls szamlazz.hu pins its own retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md)): on `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`, `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m` and `abort_timeout = 3m`; `Szamlazz.Agent.set_payments` and `storno` use two attempts. Kill, not pause: a paused invocation holds the order's key and blocks the very handler that would reconcile it. Kill releases the key with the last committed state intact, and the `pending` slot written before the first call is what makes that safe.
 
 Inside a handler, the issuing loop retries transport failures and unknown outcomes up to `issue.max_attempts` with `issue.first_backoff` doubling to `issue.max_backoff`; every attempt is query-first. When the budget is exhausted the slot stays `pending` and the handler fails with `TerminalError{outcome_unknown}`.
 
-**Caller contract:** any error from an issuing or storno handler means "outcome unknown — call again with the same `request_id`, or read `Order.get`", never "no document exists". The next call pre-sleeps for the remainder of the first back-off, reconciles by external id and resumes issuing with a fresh budget. Do not rely on Restate's ingress `Idempotency-Key`: it would replay the stored failure for its retention period without re-executing. `request_id` is the retry identity, and `Order.get` is the non-blocking status check.
+**Caller contract:** any error from an issuing or storno handler means "outcome unknown — call again with the same `request_id`, or read `Szamlazz.Order.get`", never "no document exists". The next call pre-sleeps for the remainder of the first back-off, reconciles by external id and resumes issuing with a fresh budget. Do not rely on Restate's ingress `Idempotency-Key`: it would replay the stored failure for its retention period without re-executing. `request_id` is the retry identity, and `Szamlazz.Order.get` is the non-blocking status check.
 
 ## Testing
 
-- `cargo test -p restate-szamlazz` runs the pure ledger transitions, the discovery and binding tests of the adapters, and the wiremock tests of the low-level layer against synthetic szamlazz.hu responses (`tests/szamla_agent.rs`).
-- `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Order` Virtual Object end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu. It skips with a message when the docker daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server.
+- `cargo test -p restate-szamlazz` runs the pure ledger transitions, the discovery and binding tests of the adapters, and the wiremock tests of the steps module against synthetic szamlazz.hu responses (`tests/steps.rs`).
+- `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu. It skips with a message when the docker daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server.
 - The go-live checklist in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md) re-establishes the verified szamlazz.hu facts on a target account before the worker is enabled; every step issues real documents there.
 
 ## License

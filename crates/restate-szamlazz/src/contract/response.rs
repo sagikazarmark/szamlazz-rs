@@ -1,5 +1,5 @@
-//! Handler outputs of the `Order` Virtual Object and the `SzamlaAgent`
-//! service.
+//! Handler outputs of the `Szamlazz.Order` Virtual Object and the
+//! `Szamlazz.Agent` service.
 //!
 //! Domain outcomes are data, returned with HTTP 200 through the ingress. A
 //! `TerminalError` (see [`TerminalCode`](super::TerminalCode)) is reserved
@@ -284,13 +284,13 @@ pub enum StornoOutcome {
     Rejected,
     /// The request contradicts the ledger; see `conflict_reason`.
     Conflict,
-    /// `SzamlaAgent.storno` only: the document carries an order number, so it
-    /// is managed by the `Order` with key `order_key` — call
-    /// `Order.storno_invoice` there instead.
+    /// `Szamlazz.Agent.storno` only: the document carries an order number, so
+    /// it is managed by the `Order` with key `order_key` — call
+    /// `Szamlazz.Order.storno_invoice` there instead.
     ManagedByOrder,
 }
 
-/// Output of `Order.storno_invoice` and `SzamlaAgent.storno`.
+/// Output of `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -368,7 +368,7 @@ impl StornoResponse {
     }
 }
 
-/// Output of `Order.delete_proforma`.
+/// Output of `Szamlazz.Order.delete_proforma`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -400,7 +400,7 @@ impl DeleteProformaResponse {
     }
 }
 
-/// Output of `SzamlaAgent.set_payments`.
+/// Output of `Szamlazz.Agent.set_payments`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -461,7 +461,7 @@ impl PaymentRecord {
     }
 }
 
-/// Output of `SzamlaAgent.query`: a projection of the queried document.
+/// Output of `Szamlazz.Agent.query`: a projection of the queried document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -545,7 +545,7 @@ impl QueryResponse {
     }
 }
 
-/// Output of `Order.get`, `record_reversal` and `forget`: the serialisable
+/// Output of `Szamlazz.Order.get`, `record_reversal` and `forget`: the serialisable
 /// projection of the order's ledger. Carries numbers, ids and totals — never
 /// buyer data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
-//! The stateless `SzamlaAgent` service handlers: `query`, `set_payments` and
-//! `storno` by document number.
+//! The stateless `Szamlazz.Agent` service handlers: `query`, `set_payments`
+//! and `storno` by document number.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use restate_sdk::prelude::Context;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
-use super::SzamlaAgentService;
+use super::Agent;
 use super::support::service::run_once;
 use super::support::{Fault, outstanding, terminal};
 use crate::contract::{
@@ -16,8 +16,8 @@ use crate::contract::{
     StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::identity::ExternalId;
-use crate::szamla_agent::{
-    QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt, StornoOutcome as AgentStorno,
+use crate::steps::{
+    QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt, StornoOutcome as StepsStorno,
 };
 
 /// The journaled result of the `query` handler's run.
@@ -42,16 +42,16 @@ impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
     }
 }
 
-impl SzamlaAgentService {
+impl Agent {
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
         request: QueryRequest,
     ) -> Result<QueryResponse, HandlerError> {
-        let agent = Arc::clone(&self.agent);
+        let steps = Arc::clone(&self.steps);
         let selector = request.selector;
         let run = run_once(ctx, "query", move || async move {
-            QueryRun::from(agent.query_document(&selector).await)
+            QueryRun::from(steps.query_document(&selector).await)
         })
         .await?;
         match run {
@@ -82,12 +82,12 @@ impl SzamlaAgentService {
             entries,
             additive,
         } = request;
-        let agent = Arc::clone(&self.agent);
+        let steps = Arc::clone(&self.steps);
         let number = invoice_number.clone();
         let outcome = run_once(
             ctx,
             format!("set-payments-{invoice_number}"),
-            move || async move { agent.set_payments(&number, &entries, additive).await },
+            move || async move { steps.set_payments(&number, &entries, additive).await },
         )
         .await?;
         match outcome {
@@ -122,10 +122,10 @@ impl SzamlaAgentService {
         // Query first: a document with an order number is managed by an
         // `Order`; this service never calls into it.
         let found = {
-            let agent = Arc::clone(&self.agent);
+            let steps = Arc::clone(&self.steps);
             let number = number.clone();
             run_once(ctx, format!("verify-{number}"), move || async move {
-                agent.verify(&number).await
+                steps.verify(&number).await
             })
             .await?
         };
@@ -160,12 +160,12 @@ impl SzamlaAgentService {
         ));
 
         let outcome = {
-            let agent = Arc::clone(&self.agent);
+            let steps = Arc::clone(&self.steps);
             let number = number.clone();
             let external_id = external_id.clone();
             let comment = comment.clone();
             run_once(ctx, format!("storno-{number}"), move || async move {
-                agent
+                steps
                     .storno(StornoAttempt {
                         invoice_number: &number,
                         external_id: &external_id,
@@ -177,20 +177,20 @@ impl SzamlaAgentService {
             .await?
         };
         match outcome {
-            AgentStorno::Reversed { storno_number, .. }
-            | AgentStorno::AlreadyReversed { storno_number } => {
+            StepsStorno::Reversed { storno_number, .. }
+            | StepsStorno::AlreadyReversed { storno_number } => {
                 Ok(StornoResponse::new(StornoOutcome::Reversed, number)
                     .with_storno_number(storno_number))
             }
-            AgentStorno::NotStornoable => Ok(StornoResponse::new(StornoOutcome::Rejected, number)
+            StepsStorno::NotStornoable => Ok(StornoResponse::new(StornoOutcome::Rejected, number)
                 .with_code("not_stornoable")
                 .with_message("szamlazz.hu echoed the document unchanged: it cannot be reversed")),
-            AgentStorno::Rejected { code, message } => {
+            StepsStorno::Rejected { code, message } => {
                 Ok(StornoResponse::new(StornoOutcome::Rejected, number)
                     .with_code(code)
                     .with_message(message))
             }
-            AgentStorno::Unknown { message, .. } | AgentStorno::Transport(message) => {
+            StepsStorno::Unknown { message, .. } | StepsStorno::Transport(message) => {
                 Err(Fault::outcome_unknown(format!(
                     "storno outcome unknown: {message}; call storno again"
                 ))

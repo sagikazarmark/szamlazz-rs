@@ -22,8 +22,8 @@ use crate::identity::ExternalId;
 use crate::ledger::{
     CommittedDocument, Ledger, Origin, Reversal, ReversalOrigin, SlotStatus, Target,
 };
-use crate::szamla_agent::{
-    DeleteOutcome, FoundDocument, QueryOutcome, StornoAttempt, StornoOutcome as AgentStorno,
+use crate::steps::{
+    DeleteOutcome, FoundDocument, QueryOutcome, StornoAttempt, StornoOutcome as StepsStorno,
 };
 
 /// Storno re-send attempts per invocation (design §7 step 3).
@@ -58,7 +58,7 @@ impl Order {
 
         // Step 2: verify live; capture the payments for the history event.
         let (payments, e_invoice) =
-            match object::verify(ctx, &self.agent, format!("verify-storno-{number}"), &number)
+            match object::verify(ctx, &self.steps, format!("verify-storno-{number}"), &number)
                 .await?
             {
                 QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
@@ -138,7 +138,7 @@ impl Order {
         let mut backoff = self.config.issue.first_backoff;
         for attempt in 1..=STORNO_ATTEMPTS {
             let outcome = {
-                let agent = Arc::clone(&self.agent);
+                let steps = Arc::clone(&self.steps);
                 let number = number.to_owned();
                 let storno_id = storno_id.clone();
                 let comment = comment.map(str::to_owned);
@@ -146,7 +146,7 @@ impl Order {
                     ctx,
                     format!("storno-{number}-{attempt}"),
                     move || async move {
-                        agent
+                        steps
                             .storno(StornoAttempt {
                                 invoice_number: &number,
                                 external_id: &storno_id,
@@ -160,8 +160,8 @@ impl Order {
             };
             // Step 4.
             let response = match outcome {
-                AgentStorno::Reversed { storno_number, .. }
-                | AgentStorno::AlreadyReversed { storno_number } => {
+                StepsStorno::Reversed { storno_number, .. }
+                | StepsStorno::AlreadyReversed { storno_number } => {
                     ledger
                         .mark_reversed(
                             target,
@@ -174,17 +174,17 @@ impl Order {
                     StornoResponse::new(StornoOutcome::Reversed, number)
                         .with_storno_number(storno_number)
                 }
-                AgentStorno::NotStornoable => StornoResponse::new(StornoOutcome::Rejected, number)
+                StepsStorno::NotStornoable => StornoResponse::new(StornoOutcome::Rejected, number)
                     .with_code("not_stornoable")
                     .with_message(
                         "szamlazz.hu echoed the document unchanged: it cannot be reversed",
                     ),
-                AgentStorno::Rejected { code, message } => {
+                StepsStorno::Rejected { code, message } => {
                     StornoResponse::new(StornoOutcome::Rejected, number)
                         .with_code(code)
                         .with_message(message)
                 }
-                AgentStorno::Unknown { .. } | AgentStorno::Transport(_) => {
+                StepsStorno::Unknown { .. } | StepsStorno::Transport(_) => {
                     if attempt < STORNO_ATTEMPTS {
                         object::sleep(ctx, backoff).await?;
                         backoff = next_backoff(backoff, self.config.issue.max_backoff);
@@ -206,7 +206,7 @@ impl Order {
         number: &str,
     ) -> Result<Option<String>, HandlerError> {
         Ok(
-            match object::hint(ctx, &self.agent, format!("hint-storno-{number}"), order).await? {
+            match object::hint(ctx, &self.steps, format!("hint-storno-{number}"), order).await? {
                 QueryOutcome::Found(found)
                     if found.document_type == "SS"
                         && found.referenced_invoice.as_deref() == Some(number) =>
@@ -259,7 +259,7 @@ impl Order {
         // Committed: pre-query the payments.
         match object::verify(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("verify-proforma-delete-{number}"),
             &number,
         )
@@ -267,7 +267,7 @@ impl Order {
         {
             QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
             QueryOutcome::NotFound => {
-                match object::proforma_fate(ctx, &self.agent, &order, &number).await? {
+                match object::proforma_fate(ctx, &self.steps, &order, &number).await? {
                     ProformaFate::Consumed(consumer) => {
                         learn_supplier(&mut ledger, &consumer)?;
                         ledger.mark_consumed(consumer.number).map_err(Fault::from)?;
@@ -291,12 +291,12 @@ impl Order {
         }
 
         let outcome = {
-            let agent = Arc::clone(&self.agent);
+            let steps = Arc::clone(&self.steps);
             let number = number.clone();
             object::run_once(
                 ctx,
                 format!("delete-proforma-{number}"),
-                move || async move { agent.delete_proforma(&number).await },
+                move || async move { steps.delete_proforma(&number).await },
             )
             .await?
         };
@@ -342,7 +342,7 @@ impl Order {
         }
         let outcome = object::query_external_id(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("reconcile-proforma-{}", slot.generation),
             external_id,
         )
@@ -436,7 +436,7 @@ impl Order {
         number: &str,
     ) -> Result<VerificationResult, HandlerError> {
         Ok(
-            match shared::verify(ctx, &self.agent, format!("verify-{number}"), number).await? {
+            match shared::verify(ctx, &self.steps, format!("verify-{number}"), number).await? {
                 QueryOutcome::Found(FoundDocument {
                     reversed: Some(true),
                     ..
@@ -551,7 +551,7 @@ fn locate_for_storno(
 ) -> Result<Result<Located, StornoResponse>, Fault> {
     let Some(target) = ledger.find_by_number(number) else {
         return Err(Fault::invalid_input(format!(
-            "invoice {number} is not managed by this order (not_managed); use SzamlaAgent.storno"
+            "invoice {number} is not managed by this order (not_managed); use Szamlazz.Agent.storno"
         )));
     };
     if target == Target::Slot(DocumentKind::Proforma) {

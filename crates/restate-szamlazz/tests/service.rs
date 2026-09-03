@@ -1,5 +1,5 @@
-//! End-to-end tests of the `Order` Virtual Object against a real Restate
-//! server (docker) with wiremock standing in for szamlazz.hu.
+//! End-to-end tests of the `Szamlazz.Order` Virtual Object against a real
+//! Restate server (docker) with wiremock standing in for szamlazz.hu.
 //!
 //! Ignored by default: `cargo test -p restate-szamlazz -- --ignored e2e`.
 //! Skips (with a message) when the docker daemon is not reachable. Set
@@ -15,7 +15,7 @@ use jiff::civil::date;
 use restate_sdk::prelude::{Endpoint, HttpServer};
 use restate_szamlazz::config::Config;
 use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
-use restate_szamlazz::{Order, SzamlaAgentService};
+use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, method};
@@ -26,7 +26,7 @@ const IMAGE: &str = "docker.restate.dev/restatedev/restate:1.7.8";
 const INGRESS_PORT: u16 = 18080;
 const ADMIN_PORT: u16 = 19070;
 
-// ----- szamlazz.hu fixtures (mirroring tests/szamla_agent.rs) ---------------
+// ----- szamlazz.hu fixtures (mirroring tests/steps.rs) ----------------------
 
 struct Doc<'a> {
     number: &'a str,
@@ -274,7 +274,7 @@ impl Harness {
             .expect("config"),
         );
         let order = Order::new(Arc::clone(&config)).expect("order");
-        let agent = SzamlaAgentService::from_parts(Arc::clone(order.agent()), config);
+        let agent = Agent::from_parts(Arc::clone(order.steps()), config);
         let listener = TcpListener::bind("0.0.0.0:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         listener.set_nonblocking(true).expect("nonblocking");
@@ -318,7 +318,10 @@ impl Harness {
     async fn call(&self, key: &str, handler: &str, body: &Value) -> (u16, Value) {
         let response = self
             .http
-            .post(format!("{}/Order/{key}/{handler}", self.restate.ingress))
+            .post(format!(
+                "{}/Szamlazz.Order/{key}/{handler}",
+                self.restate.ingress
+            ))
             .json(body)
             .send()
             .await

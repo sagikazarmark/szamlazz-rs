@@ -28,7 +28,7 @@ use crate::ledger::{
     CommittedDocument, HistoryKind, Ledger, Origin, RequestRef, Reversal, ReversalOrigin, Slot,
     SlotStatus, Target,
 };
-use crate::szamla_agent::{
+use crate::steps::{
     DocumentRefs, FoundDocument, IssueOutcome, IssueRequest, QueryOutcome, gross_total,
 };
 
@@ -284,7 +284,7 @@ impl Order {
                 self.presleep(ctx, entry.last_attempt_at).await?;
                 let outcome = query_external_id(
                     ctx,
-                    &self.agent,
+                    &self.steps,
                     format!("reconcile-corrective-{cseq}"),
                     &identity.external_id,
                 )
@@ -359,7 +359,7 @@ impl Order {
     ) -> Result<CreateResponse, HandlerError> {
         let outcome = verify(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("verify-corrective-{}", identity.generation),
             number,
         )
@@ -434,7 +434,7 @@ impl Order {
                 .into());
             }
         }
-        match verify(ctx, &self.agent, format!("verify-base-{number}"), &number).await? {
+        match verify(ctx, &self.steps, format!("verify-base-{number}"), &number).await? {
             QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
             QueryOutcome::NotFound => {
                 return Ok(identity.conflict_about(ConflictReason::RecordedDocumentMissing, number));
@@ -547,7 +547,7 @@ impl Order {
         external_id: &ExternalId,
         refs: DocumentRefs<'_>,
     ) -> Result<CreateInvoice, Fault> {
-        self.agent
+        self.steps
             .build_create(kind, document, order, external_id, refs)
             .map_err(|error| Fault::invalid_input(error.to_string()))
     }
@@ -724,7 +724,7 @@ impl Order {
         self.presleep(ctx, slot.last_attempt_at).await?;
         let outcome = query_external_id(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("reconcile-{}-{}", prepared.kind, slot.generation),
             &identity.external_id,
         )
@@ -801,7 +801,7 @@ impl Order {
         };
         let outcome = verify(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("verify-{}-{}", prepared.kind, slot.generation),
             &number,
         )
@@ -853,7 +853,7 @@ impl Order {
                         identity.conflict_about(ConflictReason::RecordedDocumentMissing, number),
                     ));
                 }
-                match proforma_fate(ctx, &self.agent, &prepared.order, &number).await? {
+                match proforma_fate(ctx, &self.steps, &prepared.order, &number).await? {
                     ProformaFate::Consumed(consumer) => {
                         learn_supplier(ledger, &consumer)?;
                         ledger
@@ -892,7 +892,7 @@ impl Order {
         let target = Target::Slot(prepared.kind);
         let outcome = query_external_id(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("reconcile-blocked-{}-{}", prepared.kind, slot.generation),
             &identity.external_id,
         )
@@ -1093,7 +1093,7 @@ impl Order {
             ProformaLink::Number(number) => {
                 let outcome = verify(
                     ctx,
-                    &self.agent,
+                    &self.steps,
                     format!("verify-proforma-{number}"),
                     number,
                 )
@@ -1129,7 +1129,7 @@ impl Order {
             response.existing_number.clone_from(&slot.number);
             return Ok(Some(response));
         }
-        match hint(ctx, &self.agent, "hint-proforma-none", &prepared.order).await? {
+        match hint(ctx, &self.steps, "hint-proforma-none", &prepared.order).await? {
             QueryOutcome::Found(found) if found.document_type == "D" && found.is_live() => Ok(
                 Some(identity.conflict_about(ConflictReason::ProformaLive, found.number)),
             ),
@@ -1151,7 +1151,7 @@ impl Order {
     ) -> Result<Option<CreateResponse>, HandlerError> {
         let outcome = verify(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("verify-proforma-{number}"),
             &number,
         )
@@ -1169,7 +1169,7 @@ impl Order {
                 identity.conflict_about(ConflictReason::ProformaMissing, number),
             )),
             QueryOutcome::NotFound => {
-                match proforma_fate(ctx, &self.agent, &prepared.order, &number).await? {
+                match proforma_fate(ctx, &self.steps, &prepared.order, &number).await? {
                     ProformaFate::Consumed(consumer) => {
                         learn_supplier(ledger, &consumer)?;
                         ledger
@@ -1214,7 +1214,7 @@ impl Order {
         };
         let outcome = verify(
             ctx,
-            &self.agent,
+            &self.steps,
             format!("verify-prepayment-{number}"),
             &number,
         )
@@ -1313,7 +1313,7 @@ impl Order {
         intent: &Intent,
         first: bool,
     ) -> Result<IssueOutcome, HandlerError> {
-        let agent = Arc::clone(&self.agent);
+        let steps = Arc::clone(&self.steps);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
         let order = order.clone();
@@ -1331,7 +1331,7 @@ impl Order {
                 intent.identity.kind, intent.identity.generation
             ),
             move || async move {
-                agent
+                steps
                     .issue(IssueRequest {
                         external_id: &external_id,
                         kind,

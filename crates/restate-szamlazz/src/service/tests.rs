@@ -9,7 +9,7 @@ use restate_sdk::endpoint::Endpoint;
 use restate_sdk::service::Discoverable;
 use serde_json::json;
 
-use super::{Order, SzamlaAgentService};
+use super::{Agent, Order};
 use crate::config::Config;
 
 fn config() -> Arc<Config> {
@@ -30,7 +30,7 @@ fn config() -> Arc<Config> {
 #[test]
 fn order_discovers_as_a_virtual_object_with_ten_handlers() {
     let discovery = <Order as Discoverable>::discover();
-    assert_eq!(discovery.name.as_str(), "Order");
+    assert_eq!(discovery.name.as_str(), "Szamlazz.Order");
     assert_eq!(discovery.ty, ServiceType::VirtualObject);
 
     let mut names: Vec<_> = discovery
@@ -104,9 +104,9 @@ fn order_discovers_as_a_virtual_object_with_ten_handlers() {
 }
 
 #[test]
-fn szamla_agent_discovers_as_a_service_with_three_handlers() {
-    let discovery = <SzamlaAgentService as Discoverable>::discover();
-    assert_eq!(discovery.name.as_str(), "SzamlaAgent");
+fn agent_discovers_as_a_service_with_three_handlers() {
+    let discovery = <Agent as Discoverable>::discover();
+    assert_eq!(discovery.name.as_str(), "Szamlazz.Agent");
     assert_eq!(discovery.ty, ServiceType::Service);
 
     let mut names: Vec<_> = discovery
@@ -158,8 +158,8 @@ fn szamla_agent_discovers_as_a_service_with_three_handlers() {
 fn services_bind_to_an_endpoint() {
     let config = config();
     let order = Order::new(Arc::clone(&config)).expect("order");
-    let agent = SzamlaAgentService::from_parts(Arc::clone(order.agent()), config);
-    assert!(Arc::ptr_eq(order.agent(), agent.agent()));
+    let agent = Agent::from_parts(Arc::clone(order.steps()), config);
+    assert!(Arc::ptr_eq(order.steps(), agent.steps()));
     let _endpoint = Endpoint::builder().bind(order).bind(agent).build();
 }
 

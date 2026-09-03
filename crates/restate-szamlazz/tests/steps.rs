@@ -1,4 +1,4 @@
-//! Wiremock tests of the low-level `szamla_agent` layer: the issue closure
+//! Wiremock tests of the `steps` module: the issue closure
 //! (design §6 step 4), storno validation (§7), deletion, credit entries and
 //! transport failures, against synthetic szamlazz.hu responses.
 
@@ -9,9 +9,9 @@ use restate_szamlazz::config::Config;
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
-use restate_szamlazz::szamla_agent::{
+use restate_szamlazz::steps::{
     DeleteOutcome, DocumentRefs, IssueOutcome, IssueRequest, QueryError, QueryOutcome,
-    SetPaymentsOutcome, StornoAttempt, StornoOutcome, SzamlaAgent,
+    SetPaymentsOutcome, Steps, StornoAttempt, StornoOutcome,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -23,7 +23,7 @@ const SUPPLIER: u64 = 972_720;
 
 // ----- fixtures --------------------------------------------------------------
 
-fn agent(server: &MockServer) -> SzamlaAgent {
+fn steps(server: &MockServer) -> Steps {
     let config: Config = serde_json::from_value(json!({
         "account": {
             "slug": "acct",
@@ -35,7 +35,7 @@ fn agent(server: &MockServer) -> SzamlaAgent {
         },
     }))
     .expect("config");
-    SzamlaAgent::new(Arc::new(config)).expect("agent")
+    Steps::new(Arc::new(config)).expect("steps")
 }
 
 fn order() -> OrderKey {
@@ -224,14 +224,14 @@ fn credit() -> MockBuilder {
 
 struct Harness {
     server: MockServer,
-    agent: SzamlaAgent,
+    steps: Steps,
 }
 
 impl Harness {
     async fn start() -> Self {
         let server = MockServer::start().await;
-        let agent = agent(&server);
-        Self { server, agent }
+        let steps = steps(&server);
+        Self { server, steps }
     }
 
     async fn issue(
@@ -243,7 +243,7 @@ impl Harness {
         let order = order();
         let external_id = external_id();
         let create = self
-            .agent
+            .steps
             .build_create(
                 IssuedKind::Invoice,
                 &document(),
@@ -255,7 +255,7 @@ impl Harness {
                 },
             )
             .expect("build");
-        self.agent
+        self.steps
             .issue(IssueRequest {
                 external_id: &external_id,
                 kind: IssuedKind::Invoice,
@@ -666,19 +666,19 @@ async fn verify_query_and_hint() {
         .mount(&h.server)
         .await;
 
-    match h.agent.verify("SZ-1").await {
+    match h.steps.verify("SZ-1").await {
         QueryOutcome::Found(found) => {
             assert_eq!(found.number, "SZ-1");
             assert_eq!(found.payments, vec![dec!(500), dec!(770)]);
         }
         other => panic!("expected Found, got {other:?}"),
     }
-    assert_eq!(h.agent.verify("SZ-404").await, QueryOutcome::NotFound);
+    assert_eq!(h.steps.verify("SZ-404").await, QueryOutcome::NotFound);
     assert!(matches!(
-        h.agent.verify("SZ-500").await,
+        h.steps.verify("SZ-500").await,
         QueryOutcome::Transport(_)
     ));
-    match h.agent.hint(&order()).await {
+    match h.steps.hint(&order()).await {
         QueryOutcome::Found(found) => {
             assert_eq!(found.document_type, "SS");
             assert_eq!(found.referenced_invoice.as_deref(), Some("SZ-1"));
@@ -686,14 +686,14 @@ async fn verify_query_and_hint() {
         other => panic!("expected Found, got {other:?}"),
     }
     let document = h
-        .agent
+        .steps
         .query_document(&Selector::InvoiceNumber("SZ-1".to_owned()))
         .await
         .expect("document");
     assert_eq!(document.info.invoice_number.as_str(), "SZ-1");
     assert_eq!(document.payments.len(), 2);
     assert_eq!(
-        h.agent
+        h.steps
             .query_document(&Selector::InvoiceNumber("SZ-404".to_owned()))
             .await,
         Err(QueryError::NotFound)
@@ -701,7 +701,7 @@ async fn verify_query_and_hint() {
     // No mock matches the external id query: wiremock answers 404 with an
     // empty body, which the agent crate reports as a parse failure.
     assert!(matches!(
-        h.agent
+        h.steps
             .query(&Selector::ExternalId("acct:ORD-1:invoice:0".to_owned()))
             .await,
         QueryOutcome::Transport(_)
@@ -735,7 +735,7 @@ async fn storno_reversed_is_validated() {
         .await;
 
     assert_eq!(
-        h.agent.storno(storno_attempt(&storno_id)).await,
+        h.steps.storno(storno_attempt(&storno_id)).await,
         StornoOutcome::Reversed {
             storno_number: "SS-1".to_owned(),
             gross: Some(dec!(-1270)),
@@ -764,7 +764,7 @@ async fn storno_echo_is_not_stornoable() {
         .await;
 
     assert_eq!(
-        h.agent.storno(storno_attempt(&storno_id)).await,
+        h.steps.storno(storno_attempt(&storno_id)).await,
         StornoOutcome::NotStornoable
     );
 }
@@ -783,7 +783,7 @@ async fn storno_rejections_are_typed() {
             .mount(&h.server)
             .await;
         assert_eq!(
-            h.agent.storno(storno_attempt(&storno_id)).await,
+            h.steps.storno(storno_attempt(&storno_id)).await,
             StornoOutcome::Rejected {
                 code: code.to_owned(),
                 message: message.to_owned(),
@@ -813,7 +813,7 @@ async fn storno_pre_query_hit_is_already_reversed() {
         .await;
 
     assert_eq!(
-        h.agent.storno(storno_attempt(&storno_id)).await,
+        h.steps.storno(storno_attempt(&storno_id)).await,
         StornoOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
         }
@@ -839,14 +839,14 @@ async fn storno_unknown_and_transport() {
         .await;
 
     assert_eq!(
-        h.agent.storno(storno_attempt(&storno_id)).await,
+        h.steps.storno(storno_attempt(&storno_id)).await,
         StornoOutcome::Unknown {
             code: Some("55".to_owned()),
             message: "signing".to_owned(),
         }
     );
     assert!(matches!(
-        h.agent.storno(storno_attempt(&storno_id)).await,
+        h.steps.storno(storno_attempt(&storno_id)).await,
         StornoOutcome::Transport(_)
     ));
 }
@@ -884,20 +884,20 @@ async fn delete_proforma_outcomes() {
         .mount(&h.server)
         .await;
 
-    assert_eq!(h.agent.delete_proforma("D-1").await, DeleteOutcome::Deleted);
+    assert_eq!(h.steps.delete_proforma("D-1").await, DeleteOutcome::Deleted);
     assert_eq!(
-        h.agent.delete_proforma("D-2").await,
+        h.steps.delete_proforma("D-2").await,
         DeleteOutcome::AlreadyGone
     );
     assert_eq!(
-        h.agent.delete_proforma("D-3").await,
+        h.steps.delete_proforma("D-3").await,
         DeleteOutcome::Rejected {
             code: "3".to_owned(),
             message: "login".to_owned(),
         }
     );
     assert!(matches!(
-        h.agent.delete_proforma("D-4").await,
+        h.steps.delete_proforma("D-4").await,
         DeleteOutcome::Transport(_)
     ));
 }
@@ -928,7 +928,7 @@ async fn set_payments_outcomes() {
     };
 
     match h
-        .agent
+        .steps
         .set_payments("SZ-1", std::slice::from_ref(&entry), true)
         .await
     {
@@ -946,7 +946,7 @@ async fn set_payments_outcomes() {
     assert!(body.contains("<leiras>card</leiras>"));
 
     assert_eq!(
-        h.agent
+        h.steps
             .set_payments("SZ-2", std::slice::from_ref(&entry), false)
             .await,
         SetPaymentsOutcome::Rejected {
@@ -955,14 +955,14 @@ async fn set_payments_outcomes() {
         }
     );
     assert!(matches!(
-        h.agent
+        h.steps
             .set_payments("SZ-3", std::slice::from_ref(&entry), false)
             .await,
         SetPaymentsOutcome::Transport(_)
     ));
     let six = vec![entry; 6];
     assert!(matches!(
-        h.agent.set_payments("SZ-9", &six, false).await,
+        h.steps.set_payments("SZ-9", &six, false).await,
         SetPaymentsOutcome::Rejected { code, .. } if code == "request"
     ));
     assert_eq!(
