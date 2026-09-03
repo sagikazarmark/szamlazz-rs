@@ -345,6 +345,22 @@ mod tests {
         }
     }
 
+    /// A credit entry on a reversed invoice is rejected with 463 in the body
+    /// only — szamlazz.hu sets no `szlahu_error_code` header on this path.
+    #[test]
+    fn body_only_error_is_typed() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[463]]></hibakod><hibauzenet><![CDATA[Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ.]]></hibauzenet></xmlszamlavalasz>"#;
+        let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
+        let error = sample().parse(&response).expect_err("error");
+        match error {
+            ResponseError::Api(api) => {
+                assert_eq!(api.code, crate::ErrorCode::PaymentOnReversedInvoice);
+                assert!(api.message.starts_with("Sztornózó vagy sztornózott"));
+            }
+            other => panic!("expected api error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_more_than_five_credit_entries() {
         let entries: Vec<_> = (0..6)

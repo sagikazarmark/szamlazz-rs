@@ -390,12 +390,28 @@ pub struct InvoiceInfo {
     )]
     pub test: bool,
     /// Whether the invoice has been reversed (`sztornozott`).
+    ///
+    /// Mirrors the wire, where the element is optional and never spelled
+    /// `false`:
+    ///
+    /// - `None` — the element is absent: the invoice has not been reversed,
+    ///   or the document is itself a storno invoice (the marker never appears
+    ///   on the storno invoice; it references its original through
+    ///   [`referenced_invoice_number`](Self::referenced_invoice_number)).
+    /// - `Some(true)` — `<sztornozott>true</sztornozott>`: this invoice has
+    ///   been reversed by a storno invoice. Reversal also removes its recorded
+    ///   [`payments`](InvoiceDocument::payments) from the response.
+    /// - `Some(false)` — accepted for schema completeness; not observed.
+    ///
+    /// Breaking change in 0.x: this was a `bool` defaulting to `false` when the
+    /// element was absent. Treat `reversed != Some(true)` as "live".
+    #[doc(alias = "sztornózott")]
     #[serde(
         rename(deserialize = "sztornozott"),
         default,
-        deserialize_with = "xml::de::flexible_bool"
+        deserialize_with = "xml::de::optional_flexible_bool"
     )]
-    pub reversed: bool,
+    pub reversed: Option<bool>,
 }
 
 /// Postal address returned for a buyer (`postacim`); every component is
@@ -1165,6 +1181,7 @@ mod tests {
         assert!(!document.info.cash_accounting);
         assert!(document.info.kata);
         assert!(!document.info.test);
+        assert_eq!(document.info.reversed, None);
 
         assert_eq!(document.buyer.name, "Synthetic Buyer");
         assert_eq!(
@@ -1270,7 +1287,7 @@ mod tests {
         assert_eq!(document.info.exchange_bank.as_deref(), Some("MNB"));
         assert_eq!(document.info.vat_type.as_deref(), Some("EUT"));
         assert!(document.info.kata_ledger);
-        assert!(document.info.reversed);
+        assert_eq!(document.info.reversed, Some(true));
         assert_eq!(document.buyer.identifier.as_deref(), Some("BUY-1"));
         assert_eq!(
             document
@@ -1382,6 +1399,82 @@ mod tests {
             serde_json::from_str::<InvoiceAppearance>(&json).expect("deserialize"),
             appearance
         );
+    }
+
+    /// `<sztornozott>` is absent on a live invoice and on the storno invoice
+    /// itself, and appears as `true` on the original once it is reversed.
+    #[test]
+    fn reversed_marker_mirrors_the_wire() {
+        let live = "<szamla xmlns=\"http://www.szamlazz.hu/szamla\">\
+             <szallito><nev>Seller</nev>\
+             <cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim>\
+             </szallito>\
+             <alap><id>924307338</id><szamlaszam>CTEST-2026-40</szamlaszam>\
+             <gazdEsemAzon>924307338</gazdEsemAzon><tipus>SZ</tipus><eszamla>1</eszamla>\
+             <teszt>true</teszt></alap>\
+             <vevo><nev>Buyer</nev></vevo>\
+             <tetelek></tetelek>\
+             <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>\
+             </szamla>";
+        let response = RawResponse::new::<&str, &str>([], live.as_bytes().to_vec());
+        let document = sample().parse(&response).expect("success");
+        assert_eq!(document.info.reversed, None);
+
+        let reversed = live.replace(
+            "<teszt>true</teszt>",
+            "<teszt>true</teszt><sztornozott>true</sztornozott>",
+        );
+        let response = RawResponse::new::<&str, &str>([], reversed.into_bytes());
+        let document = sample().parse(&response).expect("success");
+        assert_eq!(document.info.reversed, Some(true));
+
+        let storno = live
+            .replace(
+                "<szamlaszam>CTEST-2026-40</szamlaszam>",
+                "<szamlaszam>CTEST-2026-42</szamlaszam>",
+            )
+            .replace(
+                "<tipus>SZ</tipus>",
+                "<tipus>SS</tipus><hivszamlaszam>CTEST-2026-40</hivszamlaszam>",
+            );
+        let response = RawResponse::new::<&str, &str>([], storno.into_bytes());
+        let document = sample().parse(&response).expect("success");
+        assert_eq!(document.info.document_type, "SS");
+        assert_eq!(document.info.reversed, None);
+        assert_eq!(
+            document
+                .info
+                .referenced_invoice_number
+                .as_ref()
+                .map(InvoiceNumber::as_str),
+            Some("CTEST-2026-40")
+        );
+
+        for (value, expected) in [("1", Some(true)), ("false", Some(false)), ("", None)] {
+            let body = live.replace(
+                "<teszt>true</teszt>",
+                &format!("<teszt>true</teszt><sztornozott>{value}</sztornozott>"),
+            );
+            let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+            let document = sample().parse(&response).expect("success");
+            assert_eq!(document.info.reversed, expected, "value {value:?}");
+        }
+    }
+
+    /// The XML query reports an unknown number, order number, or external
+    /// identifier as code 7 in the body only — no `szlahu_error_code` header.
+    #[test]
+    fn body_only_missing_data_error_is_typed() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[7]]></hibakod><hibauzenet><![CDATA[Hiányzó adat: számla xml (ismeretlen számlaszám, rendelésszám vagy külső azonosító).]]></hibauzenet></xmlszamlavalasz>"#;
+        let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
+        let error = sample().parse(&response).expect_err("error");
+        match error {
+            ResponseError::Api(api) => {
+                assert_eq!(api.code, crate::ErrorCode::MissingData);
+                assert!(api.message.starts_with("Hiányzó adat"));
+            }
+            other => panic!("expected api error, got {other:?}"),
+        }
     }
 
     #[test]
