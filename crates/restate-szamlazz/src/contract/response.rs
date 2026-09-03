@@ -9,6 +9,7 @@
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use szamlazz_agent::ops::query_xml::{InvoiceDocument, RecordedPayment};
 
 use super::{IssuedKind, RequestId};
 
@@ -461,6 +462,17 @@ impl PaymentRecord {
     }
 }
 
+impl From<&RecordedPayment> for PaymentRecord {
+    fn from(payment: &RecordedPayment) -> Self {
+        let mut record = Self::new(payment.amount);
+        record.date = Some(payment.date);
+        record.title = Some(payment.title.clone());
+        record.comment.clone_from(&payment.comment);
+        record.bank_account.clone_from(&payment.bank_account);
+        record
+    }
+}
+
 /// Output of `Szamlazz.Agent.query`: a projection of the queried document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -542,6 +554,42 @@ impl QueryResponse {
             supplier_id: None,
             test: false,
         }
+    }
+}
+
+/// The projection of a queried document: identity, references, dates,
+/// totals and payments — no buyer data. `outstanding` is `gross − Σ payments`.
+impl From<&InvoiceDocument> for QueryResponse {
+    fn from(document: &InvoiceDocument) -> Self {
+        let info = &document.info;
+        let mut response = Self::new(info.invoice_number.as_str(), info.document_type.clone());
+        response.reversed = info.reversed;
+        response.referenced_invoice_number = info
+            .referenced_invoice_number
+            .as_ref()
+            .map(|number| number.as_str().to_owned());
+        response.referenced_proforma_number = info
+            .referenced_proforma_number
+            .as_ref()
+            .map(|number| number.as_str().to_owned());
+        response.order_number.clone_from(&info.order_number);
+        response.issue_date = info.issue_date;
+        response.fulfillment_date = info.fulfillment_date;
+        response.due_date = info.due_date;
+        response.currency.clone_from(&info.currency);
+        response.net_total = Some(document.totals.total.net);
+        response.vat_total = Some(document.totals.total.vat);
+        response.gross_total = Some(document.totals.total.gross);
+        response.payments = document.payments.iter().map(PaymentRecord::from).collect();
+        let amounts: Vec<_> = document
+            .payments
+            .iter()
+            .map(|payment| payment.amount)
+            .collect();
+        response.outstanding = outstanding(response.gross_total, &amounts);
+        response.supplier_id = document.supplier.id;
+        response.test = info.test;
+        response
     }
 }
 
@@ -833,11 +881,20 @@ impl HistorySnapshot {
     }
 }
 
+/// `gross − Σ payments`, when the gross total is known.
+pub(crate) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
+    gross.map(|gross| gross - payments.iter().copied().sum::<Decimal>())
+}
+
 #[cfg(test)]
 mod tests {
     use jiff::civil::date;
     use rust_decimal::dec;
     use serde_json::json;
+    use szamlazz_agent::InvoiceNumber;
+    use szamlazz_agent::ops::query_pdf::InvoiceSelector;
+    use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
+    use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 
     use super::*;
 
@@ -1018,6 +1075,82 @@ mod tests {
             serde_json::from_value(json!({"invoice_number": "D-1", "document_type": "D"}))
                 .expect("deserialize");
         assert_eq!(minimal, QueryResponse::new("D-1", "D"));
+    }
+
+    /// A queried document, as the `szamla` response XML.
+    fn queried_document(payments: &str) -> InvoiceDocument {
+        let body = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<szamla xmlns="http://www.szamlazz.hu/szamla">
+  <szallito><id>972720</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+  <alap><id>924307338</id><szamlaszam>SZ-1</szamlaszam><tipus>SZ</tipus><eszamla>2</eszamla><hivszamlaszam>ES-1</hivszamlaszam><hivdijbekszam>D-1</hivdijbekszam><kelt>2026-07-04</kelt><telj>2026-07-04</telj><fizh>2026-07-12</fizh><rendelesszam>ORD-1</rendelesszam><devizanem>HUF</devizanem><teszt>true</teszt></alap>
+  <vevo><nev>Buyer</nev><email>buyer@example.com</email></vevo>
+  <tetelek></tetelek>
+  <osszegek><totalossz><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></totalossz></osszegek>
+  {payments}
+</szamla>"#
+        );
+        QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new("SZ-1")))
+            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+            .expect("parse")
+    }
+
+    #[test]
+    fn query_response_projects_a_queried_document() {
+        let document = queried_document(
+            "<kifizetesek>\
+             <kifizetes><datum>2026-07-10</datum><jogcim>átutalás</jogcim><osszeg>10000</osszeg><megjegyzes>first</megjegyzes><bankszamlaszam>1234-5678</bankszamlaszam></kifizetes>\
+             <kifizetes><datum>2026-07-11</datum><jogcim>bankkártya</jogcim><osszeg>5000</osszeg></kifizetes>\
+             </kifizetesek>",
+        );
+        let response = QueryResponse::from(&document);
+
+        let mut expected = QueryResponse::new("SZ-1", "SZ");
+        expected.reversed = None;
+        expected.referenced_invoice_number = Some("ES-1".to_owned());
+        expected.referenced_proforma_number = Some("D-1".to_owned());
+        expected.order_number = Some("ORD-1".to_owned());
+        expected.issue_date = Some(date(2026, 7, 4));
+        expected.fulfillment_date = Some(date(2026, 7, 4));
+        expected.due_date = Some(date(2026, 7, 12));
+        expected.currency = Some("HUF".to_owned());
+        expected.net_total = Some(dec!(20000));
+        expected.vat_total = Some(dec!(5400));
+        expected.gross_total = Some(dec!(25400));
+        let mut first = PaymentRecord::new(dec!(10000));
+        first.date = Some(date(2026, 7, 10));
+        first.title = Some("átutalás".to_owned());
+        first.comment = Some("first".to_owned());
+        first.bank_account = Some("1234-5678".to_owned());
+        let mut second = PaymentRecord::new(dec!(5000));
+        second.date = Some(date(2026, 7, 11));
+        second.title = Some("bankkártya".to_owned());
+        expected.payments = vec![first, second];
+        expected.outstanding = Some(dec!(10400));
+        expected.supplier_id = Some(972_720);
+        expected.test = true;
+        assert_eq!(response, expected);
+        assert_eq!(
+            PaymentRecord::from(&document.payments[0]),
+            expected.payments[0]
+        );
+    }
+
+    #[test]
+    fn query_response_without_payments_owes_the_gross_total() {
+        let response = QueryResponse::from(&queried_document(""));
+        assert!(response.payments.is_empty());
+        assert_eq!(response.outstanding, Some(dec!(25400)));
+    }
+
+    #[test]
+    fn outstanding_needs_a_gross_total() {
+        assert_eq!(outstanding(None, &[dec!(1)]), None);
+        assert_eq!(outstanding(Some(dec!(100)), &[]), Some(dec!(100)));
+        assert_eq!(
+            outstanding(Some(dec!(100)), &[dec!(30), dec!(80)]),
+            Some(dec!(-10))
+        );
     }
 
     #[test]

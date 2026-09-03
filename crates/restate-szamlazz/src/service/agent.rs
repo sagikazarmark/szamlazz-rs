@@ -10,14 +10,15 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::Agent;
 use super::support::service::run_once;
-use super::support::{Fault, outstanding, terminal};
+use super::support::{Fault, terminal};
 use crate::contract::{
-    PaymentRecord, QueryRequest, QueryResponse, SetPaymentsRequest, SetPaymentsResponse,
-    StornoOutcome, StornoRequest, StornoResponse,
+    QueryRequest, QueryResponse, SetPaymentsRequest, SetPaymentsResponse, StornoOutcome,
+    StornoRequest, StornoResponse,
 };
 use crate::identity::ExternalId;
 use crate::steps::{
-    QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt, StornoOutcome as StepsStorno,
+    QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt, StornoDocument,
+    StornoOutcome as StepsStorno,
 };
 
 /// The journaled result of the `query` handler's run.
@@ -33,7 +34,7 @@ enum QueryRun {
 impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
     fn from(result: Result<InvoiceDocument, QueryError>) -> Self {
         match result {
-            Ok(document) => Self::Found(Box::new(project(&document))),
+            Ok(document) => Self::Found(Box::new(QueryResponse::from(&document))),
             Err(QueryError::NotFound) => Self::NotFound,
             Err(QueryError::Api { code, message }) => Self::Api { code, message },
             Err(QueryError::Unavailable(message)) => Self::Unavailable(message),
@@ -177,7 +178,7 @@ impl Agent {
             .await?
         };
         match outcome {
-            StepsStorno::Reversed { storno_number, .. }
+            StepsStorno::Reversed(StornoDocument { storno_number, .. })
             | StepsStorno::AlreadyReversed { storno_number } => {
                 Ok(StornoResponse::new(StornoOutcome::Reversed, number)
                     .with_storno_number(storno_number))
@@ -198,48 +199,4 @@ impl Agent {
             }
         }
     }
-}
-
-/// The [`QueryResponse`] projection of a queried document.
-fn project(document: &InvoiceDocument) -> QueryResponse {
-    let info = &document.info;
-    let mut response = QueryResponse::new(info.invoice_number.as_str(), info.document_type.clone());
-    response.reversed = info.reversed;
-    response.referenced_invoice_number = info
-        .referenced_invoice_number
-        .as_ref()
-        .map(|number| number.as_str().to_owned());
-    response.referenced_proforma_number = info
-        .referenced_proforma_number
-        .as_ref()
-        .map(|number| number.as_str().to_owned());
-    response.order_number.clone_from(&info.order_number);
-    response.issue_date = info.issue_date;
-    response.fulfillment_date = info.fulfillment_date;
-    response.due_date = info.due_date;
-    response.currency.clone_from(&info.currency);
-    response.net_total = Some(document.totals.total.net);
-    response.vat_total = Some(document.totals.total.vat);
-    response.gross_total = Some(document.totals.total.gross);
-    response.payments = document
-        .payments
-        .iter()
-        .map(|payment| {
-            let mut record = PaymentRecord::new(payment.amount);
-            record.date = Some(payment.date);
-            record.title = Some(payment.title.clone());
-            record.comment.clone_from(&payment.comment);
-            record.bank_account.clone_from(&payment.bank_account);
-            record
-        })
-        .collect();
-    let amounts: Vec<_> = document
-        .payments
-        .iter()
-        .map(|payment| payment.amount)
-        .collect();
-    response.outstanding = outstanding(response.gross_total, &amounts);
-    response.supplier_id = document.supplier.id;
-    response.test = info.test;
-    response
 }

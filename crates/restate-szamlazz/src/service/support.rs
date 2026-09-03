@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use restate_sdk::errors::{HandlerError, TerminalError};
-use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -185,11 +184,6 @@ pub(super) fn validate_found(
         return Err(Mismatch::Supplier);
     }
     Ok(())
-}
-
-/// `gross − Σ payments`, when the gross total is known.
-pub(super) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
-    gross.map(|gross| gross - payments.iter().copied().sum::<Decimal>())
 }
 
 /// Records the supplier id a query reported; a different recorded id is an

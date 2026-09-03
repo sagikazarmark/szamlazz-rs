@@ -4,6 +4,7 @@
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use szamlazz_agent::ops::credit_entry::CreditEntry;
 
 use super::document::{DocumentInput, PaymentMethod};
 use super::{DocumentKind, RequestId};
@@ -220,6 +221,14 @@ pub struct PaymentEntry {
     pub description: Option<String>,
 }
 
+impl From<&PaymentEntry> for CreditEntry {
+    fn from(entry: &PaymentEntry) -> Self {
+        let mut credit = Self::new(entry.date, entry.method.clone().into(), entry.amount);
+        credit.description.clone_from(&entry.description);
+        credit
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use jiff::civil::date;
@@ -396,5 +405,29 @@ mod tests {
         .expect("deserialize");
         assert!(!minimal.additive);
         assert_eq!(minimal.entries[0].amount, dec!(100));
+    }
+
+    #[test]
+    fn payment_entry_converts_to_agent() {
+        let entry = PaymentEntry {
+            date: date(2026, 7, 10),
+            method: PaymentMethod::Card,
+            amount: dec!(25400),
+            description: Some("card".to_owned()),
+        };
+        let credit = CreditEntry::from(&entry);
+        assert_eq!(credit.date, date(2026, 7, 10));
+        assert_eq!(credit.method, szamlazz_agent::PaymentMethod::Card);
+        assert_eq!(credit.amount, dec!(25400));
+        assert_eq!(credit.description.as_deref(), Some("card"));
+
+        let bare = PaymentEntry {
+            method: PaymentMethod::Other("Bitcoin".to_owned()),
+            description: None,
+            ..entry
+        };
+        let credit = CreditEntry::from(&bare);
+        assert_eq!(credit.method.as_wire(), "Bitcoin");
+        assert_eq!(credit.description, None);
     }
 }

@@ -16,9 +16,10 @@ use super::support::object::{
     hint, load, now, proforma_fate, query_external_id, run_once, save, sleep, verify,
 };
 use super::support::{
-    Fault, ProformaFate, expected_supplier, learn_supplier, next_backoff, order_key, outstanding,
+    Fault, ProformaFate, expected_supplier, learn_supplier, next_backoff, order_key,
     remaining_backoff, validate_found,
 };
+use crate::contract::response::outstanding;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
     IssuedKind, Outcome, ProformaLink, RequestId, Warning,

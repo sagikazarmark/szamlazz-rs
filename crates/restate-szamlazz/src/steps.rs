@@ -23,13 +23,15 @@ use std::sync::Arc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::client::BuildError;
-use szamlazz_agent::ops::credit_entry::{CreditEntries, CreditEntry, RegisterCreditEntry};
-use szamlazz_agent::ops::invoice::CreateInvoice;
+use szamlazz_agent::ops::credit_entry::{
+    CreditEntries, CreditEntry, CreditEntryResult, RegisterCreditEntry,
+};
+use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, InvoiceCreationResult};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
-use szamlazz_agent::{Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
+use szamlazz_agent::{ApiError, Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
 use tracing::Instrument as _;
 
 use crate::config::Config;
@@ -117,6 +119,28 @@ pub enum IssueOutcome {
     /// The HTTP exchange or the response parse failed; the outcome of any
     /// create is unknown.
     Transport(String),
+}
+
+/// A successful create: [`IssueOutcome::Issued`] with the number, or
+/// [`IssueOutcome::Unknown`] when szamlazz.hu answered success without one.
+impl From<InvoiceCreationResult> for IssueOutcome {
+    fn from(result: InvoiceCreationResult) -> Self {
+        match result.invoice_number {
+            Some(number) => Self::Issued(IssuedDocument {
+                number: number.as_str().to_owned(),
+                net: result.net_total,
+                gross: result.gross_total,
+                outstanding: result.outstanding,
+                customer_account_url: result.customer_account_url,
+                document_id: result.document_id,
+                notification_delivery_failed: result.notification_delivery_failed,
+            }),
+            None => Self::Unknown {
+                code: None,
+                message: "create succeeded without a document number".to_owned(),
+            },
+        }
+    }
 }
 
 /// A document szamlazz.hu issued in response to a create.
@@ -276,16 +300,9 @@ pub struct StornoAttempt<'a> {
 /// The result of one storno attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StornoOutcome {
-    /// The invoice is reversed by `storno_number` (now, or echoed by an
+    /// The invoice is reversed by the storno document (now, or echoed by an
     /// idempotent repeat).
-    Reversed {
-        /// The storno invoice number.
-        storno_number: String,
-        /// The storno invoice's (negative) gross total.
-        gross: Option<Decimal>,
-        /// szamlazz.hu's document id of the storno invoice.
-        document_id: Option<u64>,
-    },
+    Reversed(StornoDocument),
     /// The pre-query found the storno invoice under the storno external id;
     /// nothing was sent.
     AlreadyReversed {
@@ -314,6 +331,30 @@ pub enum StornoOutcome {
     Transport(String),
 }
 
+/// The storno invoice szamlazz.hu issued (or echoed) in response to a storno.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StornoDocument {
+    /// The storno invoice number.
+    pub storno_number: String,
+    /// The storno invoice's (negative) gross total.
+    pub gross: Option<Decimal>,
+    /// szamlazz.hu's document id of the storno invoice.
+    pub document_id: Option<u64>,
+}
+
+/// The ledger-relevant projection of a storno response. The caller has
+/// already checked [`CreatedInvoice::reverses`].
+impl From<CreatedInvoice> for StornoDocument {
+    fn from(created: CreatedInvoice) -> Self {
+        Self {
+            storno_number: created.invoice_number.as_str().to_owned(),
+            gross: created.gross_total,
+            document_id: created.document_id,
+        }
+    }
+}
+
 /// The result of a proforma deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteOutcome {
@@ -331,6 +372,21 @@ pub enum DeleteOutcome {
     },
     /// The HTTP exchange, the response parse or the service failed.
     Transport(String),
+}
+
+/// A szamlazz.hu error on a deletion: 335 is [`DeleteOutcome::AlreadyGone`],
+/// anything else [`DeleteOutcome::Rejected`].
+impl From<ApiError> for DeleteOutcome {
+    fn from(api: ApiError) -> Self {
+        if api.code == ErrorCode::ProformaNotFound {
+            Self::AlreadyGone
+        } else {
+            Self::Rejected {
+                code: api.code.code().to_owned(),
+                message: api.message,
+            }
+        }
+    }
 }
 
 /// The result of registering credit entries.
@@ -352,6 +408,27 @@ pub enum SetPaymentsOutcome {
     },
     /// The HTTP exchange, the response parse or the service failed.
     Transport(String),
+}
+
+/// A successful registration: [`SetPaymentsOutcome::Done`] with the reported
+/// totals.
+impl From<CreditEntryResult> for SetPaymentsOutcome {
+    fn from(result: CreditEntryResult) -> Self {
+        Self::Done {
+            outstanding: result.outstanding,
+            gross: result.gross_total,
+        }
+    }
+}
+
+/// A szamlazz.hu error on a registration is a rejection.
+impl From<ApiError> for SetPaymentsOutcome {
+    fn from(api: ApiError) -> Self {
+        Self::Rejected {
+            code: api.code.code().to_owned(),
+            message: api.message,
+        }
+    }
 }
 
 impl Steps {
@@ -428,24 +505,13 @@ impl Steps {
         }
 
         match self.client.send(request.create).await {
-            Ok(result) => match result.invoice_number {
-                Some(number) => {
-                    tracing::info!(number = %number, "document issued");
-                    IssueOutcome::Issued(IssuedDocument {
-                        number: number.as_str().to_owned(),
-                        net: result.net_total,
-                        gross: result.gross_total,
-                        outstanding: result.outstanding,
-                        customer_account_url: result.customer_account_url,
-                        document_id: result.document_id,
-                        notification_delivery_failed: result.notification_delivery_failed,
-                    })
+            Ok(result) => {
+                let outcome = IssueOutcome::from(result);
+                if let IssueOutcome::Issued(issued) = &outcome {
+                    tracing::info!(number = %issued.number, "document issued");
                 }
-                None => IssueOutcome::Unknown {
-                    code: None,
-                    message: "create succeeded without a document number".to_owned(),
-                },
-            },
+                outcome
+            }
             Err(error) => match classify_failure(error) {
                 Failure::Duplicate { code, message } => {
                     tracing::info!(code = %code, "duplicate order number; re-querying");
@@ -555,11 +621,7 @@ impl Steps {
         match self.client.send(&request).await {
             Ok(created) if created.reverses(&request.invoice_number) => {
                 tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
-                StornoOutcome::Reversed {
-                    storno_number: created.invoice_number.as_str().to_owned(),
-                    gross: created.gross_total,
-                    document_id: created.document_id,
-                }
+                StornoOutcome::Reversed(StornoDocument::from(created))
             }
             Ok(created) => {
                 tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
@@ -585,14 +647,13 @@ impl Steps {
                 tracing::info!(number = %number, "proforma deleted");
                 DeleteOutcome::Deleted
             }
-            Err(ClientError::Api(api)) if api.code == ErrorCode::ProformaNotFound => {
-                tracing::info!(number = %number, "proforma already gone");
-                DeleteOutcome::AlreadyGone
+            Err(ClientError::Api(api)) => {
+                let outcome = DeleteOutcome::from(api);
+                if outcome == DeleteOutcome::AlreadyGone {
+                    tracing::info!(number = %number, "proforma already gone");
+                }
+                outcome
             }
-            Err(ClientError::Api(api)) => DeleteOutcome::Rejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            },
             Err(error) => DeleteOutcome::Transport(error.to_string()),
         }
     }
@@ -605,15 +666,7 @@ impl Steps {
         entries: &[PaymentEntry],
         additive: bool,
     ) -> SetPaymentsOutcome {
-        let credit_entries = entries
-            .iter()
-            .map(|entry| {
-                let mut credit =
-                    CreditEntry::new(entry.date, entry.method.clone().into(), entry.amount);
-                credit.description.clone_from(&entry.description);
-                credit
-            })
-            .collect::<Vec<_>>();
+        let credit_entries = entries.iter().map(CreditEntry::from).collect::<Vec<_>>();
         let credit_entries = match CreditEntries::try_from(credit_entries) {
             Ok(entries) => entries,
             Err(error) => {
@@ -633,15 +686,9 @@ impl Steps {
         match self.client.send(&request).await {
             Ok(result) => {
                 tracing::info!(number = %number, additive, "credit entries registered");
-                SetPaymentsOutcome::Done {
-                    outstanding: result.outstanding,
-                    gross: result.gross_total,
-                }
+                SetPaymentsOutcome::from(result)
             }
-            Err(ClientError::Api(api)) => SetPaymentsOutcome::Rejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            },
+            Err(ClientError::Api(api)) => SetPaymentsOutcome::from(api),
             Err(ClientError::Request(error)) => SetPaymentsOutcome::Rejected {
                 code: "request".to_owned(),
                 message: error.to_string(),
@@ -837,5 +884,142 @@ fn invoice_selector(selector: &Selector) -> InvoiceSelector {
         }
         Selector::OrderNumber(number) => InvoiceSelector::OrderNumber(number.clone()),
         Selector::ExternalId(id) => InvoiceSelector::ExternalId(id.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::civil::date;
+    use rust_decimal::dec;
+    use szamlazz_agent::ops::invoice::{Buyer, InvoiceHeader, InvoiceKind};
+    use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+    use szamlazz_agent::{Currency, Language, PaymentMethod};
+
+    use super::*;
+
+    /// A successful `xmlszamlavalasz` body, as create, storno and credit-entry
+    /// responses share it.
+    fn created(number: &str, net: &str, gross: &str, outstanding: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>{number}</szamlaszam><szamlanetto>{net}</szamlanetto><szamlabrutto>{gross}</szamlabrutto><kintlevoseg>{outstanding}</kintlevoseg><vevoifiokurl>https://example.test/acct</vevoifiokurl></xmlszamlavalasz>"#
+        )
+    }
+
+    fn response(body: &str) -> RawResponse {
+        RawResponse::new([("szlahu_id", "924307747")], body.as_bytes().to_vec())
+    }
+
+    /// The smallest create request whose response parses.
+    fn create_request() -> CreateInvoice {
+        CreateInvoice::new(
+            InvoiceKind::Proforma,
+            InvoiceHeader::new(
+                date(2026, 7, 4),
+                date(2026, 7, 12),
+                PaymentMethod::Transfer,
+                Currency::HUF,
+                Language::Hungarian,
+            ),
+            Buyer::new("A", "1", "B", "C"),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn creation_result_with_a_number_is_issued() {
+        let result = create_request()
+            .parse(&response(&created("SZ-1", "1000", "1270", "270")))
+            .expect("parse");
+        assert_eq!(
+            IssueOutcome::from(result),
+            IssueOutcome::Issued(IssuedDocument {
+                number: "SZ-1".to_owned(),
+                net: Some(dec!(1000)),
+                gross: Some(dec!(1270)),
+                outstanding: Some(dec!(270)),
+                customer_account_url: Some("https://example.test/acct".to_owned()),
+                document_id: Some(924_307_747),
+                notification_delivery_failed: false,
+            })
+        );
+    }
+
+    #[test]
+    fn creation_result_without_a_number_is_unknown() {
+        // Only a PDF preview parses without a number.
+        let mut request = create_request();
+        request.header.preview_pdf = Some(true);
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#;
+        let result = request
+            .parse(&RawResponse::new::<&str, &str>(
+                [],
+                body.as_bytes().to_vec(),
+            ))
+            .expect("parse");
+        assert_eq!(result.invoice_number, None);
+        assert_eq!(
+            IssueOutcome::from(result),
+            IssueOutcome::Unknown {
+                code: None,
+                message: "create succeeded without a document number".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn storno_document_from_created_invoice() {
+        let created = StornoInvoice::new("SZ-1")
+            .parse(&response(&created("SS-1", "-1000", "-1270", "0")))
+            .expect("parse");
+        assert_eq!(
+            StornoDocument::from(created),
+            StornoDocument {
+                storno_number: "SS-1".to_owned(),
+                gross: Some(dec!(-1270)),
+                document_id: Some(924_307_747),
+            }
+        );
+    }
+
+    #[test]
+    fn set_payments_outcome_from_credit_entry_result() {
+        let result = RegisterCreditEntry::new("SZ-1")
+            .parse(&response(&created("SZ-1", "1000", "1270", "270")))
+            .expect("parse");
+        assert_eq!(
+            SetPaymentsOutcome::from(result),
+            SetPaymentsOutcome::Done {
+                outstanding: Some(dec!(270)),
+                gross: Some(dec!(1270)),
+            }
+        );
+    }
+
+    #[test]
+    fn api_errors_map_to_delete_and_set_payments_outcomes() {
+        let gone = ApiError {
+            code: ErrorCode::ProformaNotFound,
+            message: "Nincs ilyen díjbekérő".to_owned(),
+        };
+        assert_eq!(DeleteOutcome::from(gone), DeleteOutcome::AlreadyGone);
+
+        let login = ApiError {
+            code: ErrorCode::InvalidCredentials,
+            message: "login".to_owned(),
+        };
+        assert_eq!(
+            DeleteOutcome::from(login.clone()),
+            DeleteOutcome::Rejected {
+                code: "3".to_owned(),
+                message: "login".to_owned(),
+            }
+        );
+        assert_eq!(
+            SetPaymentsOutcome::from(login),
+            SetPaymentsOutcome::Rejected {
+                code: "3".to_owned(),
+                message: "login".to_owned(),
+            }
+        );
     }
 }

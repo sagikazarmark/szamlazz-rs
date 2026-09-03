@@ -734,14 +734,14 @@ async fn storno_reversed_is_validated() {
         .mount(&h.server)
         .await;
 
-    assert_eq!(
-        h.steps.storno(storno_attempt(&storno_id)).await,
-        StornoOutcome::Reversed {
-            storno_number: "SS-1".to_owned(),
-            gross: Some(dec!(-1270)),
-            document_id: Some(924_307_747),
+    match h.steps.storno(storno_attempt(&storno_id)).await {
+        StornoOutcome::Reversed(storno) => {
+            assert_eq!(storno.storno_number, "SS-1");
+            assert_eq!(storno.gross, Some(dec!(-1270)));
+            assert_eq!(storno.document_id, Some(924_307_747));
         }
-    );
+        other => panic!("expected Reversed, got {other:?}"),
+    }
     let body = &h.bodies().await[1];
     assert!(body.contains("<szamlaszam>SZ-1</szamlaszam>"));
     assert!(body.contains("<szamlaKulsoAzon>acct:ORD-1:invoice:0:storno</szamlaKulsoAzon>"));

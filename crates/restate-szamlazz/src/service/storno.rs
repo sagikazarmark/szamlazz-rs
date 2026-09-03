@@ -23,7 +23,8 @@ use crate::ledger::{
     CommittedDocument, Ledger, Origin, Reversal, ReversalOrigin, SlotStatus, Target,
 };
 use crate::steps::{
-    DeleteOutcome, FoundDocument, QueryOutcome, StornoAttempt, StornoOutcome as StepsStorno,
+    DeleteOutcome, FoundDocument, QueryOutcome, StornoAttempt, StornoDocument,
+    StornoOutcome as StepsStorno,
 };
 
 /// Storno re-send attempts per invocation (design §7 step 3).
@@ -160,7 +161,7 @@ impl Order {
             };
             // Step 4.
             let response = match outcome {
-                StepsStorno::Reversed { storno_number, .. }
+                StepsStorno::Reversed(StornoDocument { storno_number, .. })
                 | StepsStorno::AlreadyReversed { storno_number } => {
                     ledger
                         .mark_reversed(
