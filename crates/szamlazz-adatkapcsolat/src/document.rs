@@ -101,23 +101,18 @@ fn validate_element_namespaces(text: &str, kind: RootKind) -> Result<(), ParseEr
 
         match event {
             Event::Start(element) | Event::Empty(element) => {
-                let expected = Namespace(kind.namespace().as_bytes());
+                let expected = Namespace(kind.namespace());
 
                 if namespace != ResolveResult::Bound(expected) {
                     let actual = match namespace {
-                        ResolveResult::Bound(namespace) => {
-                            String::from_utf8_lossy(namespace.as_ref()).into_owned()
-                        }
+                        ResolveResult::Bound(namespace) => namespace.as_ref().to_owned(),
                         ResolveResult::Unbound => String::new(),
                         ResolveResult::Unknown(prefix) => {
-                            format!(
-                                "unbound prefix {}",
-                                String::from_utf8_lossy(prefix.as_ref())
-                            )
+                            format!("unbound prefix {prefix}")
                         }
                     };
                     return Err(ParseError::WrongNamespace {
-                        root: String::from_utf8_lossy(element.local_name().as_ref()).into_owned(),
+                        root: element.local_name().as_ref().to_owned(),
                         expected: kind.namespace(),
                         actual,
                     });
@@ -165,7 +160,7 @@ pub(crate) fn root_kind(text: &str) -> Result<RootKind, ParseError> {
         match reader.read_event().map_err(quick_xml::DeError::from)? {
             Event::Start(start) | Event::Empty(start) => {
                 let local = start.local_name();
-                let local = std::str::from_utf8(local.as_ref())?;
+                let local = local.as_ref();
                 let kind = match local {
                     "szamla" => RootKind::OutgoingInvoice,
                     "szamlabe" => RootKind::IncomingInvoice,
@@ -174,7 +169,7 @@ pub(crate) fn root_kind(text: &str) -> Result<RootKind, ParseError> {
                     other => return Err(ParseError::UnknownRoot(other.to_owned())),
                 };
                 let qualified_name = start.name();
-                let qualified = std::str::from_utf8(qualified_name.as_ref())?;
+                let qualified = qualified_name.as_ref();
                 let prefix = qualified
                     .strip_suffix(local)
                     .and_then(|prefix| prefix.strip_suffix(':'));
@@ -184,8 +179,8 @@ pub(crate) fn root_kind(text: &str) -> Result<RootKind, ParseError> {
 
                 for attribute in start.attributes().with_checks(false) {
                     let attribute = attribute.map_err(quick_xml::DeError::from)?;
-                    if attribute.key.as_ref() == namespace_attribute.as_bytes() {
-                        namespace = Some(std::str::from_utf8(attribute.value.as_ref())?.to_owned());
+                    if attribute.key.as_ref() == namespace_attribute {
+                        namespace = Some(attribute.value.as_ref().to_owned());
                         break;
                     }
                 }

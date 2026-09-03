@@ -61,15 +61,10 @@ pub(crate) fn response_text<'a>(
         match event {
             Event::Start(start) | Event::Empty(start) => {
                 let local_name = start.local_name();
-                let local = std::str::from_utf8(local_name.as_ref()).map_err(|error| {
-                    ParseError::Invalid {
-                        field: "response root",
-                        message: error.to_string(),
-                    }
-                })?;
+                let local = local_name.as_ref();
 
                 if local != expected_root
-                    || namespace != ResolveResult::Bound(Namespace(expected_namespace.as_bytes()))
+                    || namespace != ResolveResult::Bound(Namespace(expected_namespace))
                 {
                     return Err(ParseError::UnexpectedBody(format!(
                         "expected {expected_root} in namespace {expected_namespace}, got {local}: {text}"
