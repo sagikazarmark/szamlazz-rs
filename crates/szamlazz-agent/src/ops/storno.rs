@@ -281,6 +281,25 @@ mod tests {
         assert!(created.reverses(&request.invoice_number));
     }
 
+    /// The issued storno invoice is journal-safe: it round-trips through JSON.
+    #[test]
+    fn created_invoice_round_trips_through_json() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>CTEST-2026-42</szamlaszam><szamlanetto>-1000</szamlanetto><szamlabrutto>-1270</szamlabrutto><kintlevoseg>-1270</kintlevoseg><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
+        let response = RawResponse::new([("szlahu_id", "924307747")], body.to_vec());
+        let created = StornoInvoice::new("CTEST-2026-40")
+            .parse(&response)
+            .expect("success");
+
+        let json = serde_json::to_value(&created).expect("serialize");
+        assert_eq!(json["invoice_number"], "CTEST-2026-42");
+        assert_eq!(json["gross_total"], "-1270");
+        assert_eq!(json["document_id"], 924_307_747);
+        assert_eq!(json["pdf"], "JVBERi0=");
+
+        let restored: CreatedInvoice = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, created);
+    }
+
     /// Storno of a proforma or delivery note succeeds on the wire but echoes
     /// the requested document unchanged; `reverses` is the only tell.
     #[test]

@@ -1,5 +1,11 @@
 //! Invoice XML query (`xmlszamlaxml`): fetch the full data of a previously
 //! issued invoice, optionally with its PDF.
+//!
+//! The public response types carry Rust field names and plain `serde`
+//! derives, so a fetched [`InvoiceDocument`] round-trips through JSON (for
+//! journaling or caching) independently of the XML schema. The wire mapping —
+//! Hungarian element names, list wrappers, lenient empty-element handling —
+//! lives in the private `*Xml` structs after the [`AgentRequest`] impl.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -41,7 +47,7 @@ impl QueryInvoiceXml {
 
 /// A fetched invoice: the `szamla` response document.
 #[doc(alias = "számla")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoiceDocument {
     /// The issuing party (`szallito`).
@@ -65,88 +71,50 @@ pub struct InvoiceDocument {
 }
 
 /// An address block (`cim`) on a fetched invoice.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Address {
     /// Country (`orszag`).
-    #[serde(
-        rename(deserialize = "orszag"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub country: Option<String>,
     /// ZIP code (`irsz`).
-    #[serde(rename(deserialize = "irsz"))]
     pub zip: String,
     /// City (`telepules`).
-    #[serde(rename(deserialize = "telepules"))]
     pub city: String,
     /// Street address (`cim`).
-    #[serde(rename(deserialize = "cim"))]
     pub address: String,
 }
 
 /// Bank details of the supplier (`bank`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Bank {
     /// Bank name (`nev`).
-    #[serde(
-        rename(deserialize = "nev"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub name: Option<String>,
     /// Bank account number (`bankszamla`).
-    #[serde(
-        rename(deserialize = "bankszamla"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub account: Option<String>,
 }
 
 /// The issuing party (`szallito`) as recorded on the invoice.
 #[doc(alias = "szállító")]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Supplier {
     /// Internal szamlazz.hu identifier (`id`).
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     pub id: Option<u64>,
     /// Name (`nev`).
-    #[serde(rename(deserialize = "nev"))]
     pub name: String,
     /// Billing address (`cim`).
-    #[serde(rename(deserialize = "cim"))]
     pub address: Address,
     /// Postal address (`postacim`).
-    #[serde(rename(deserialize = "postacim"), default)]
     pub postal_address: Option<Address>,
     /// Hungarian tax number (`adoszam`).
     #[doc(alias = "adószám")]
-    #[serde(
-        rename(deserialize = "adoszam"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub tax_number: Option<String>,
     /// VAT-group identifier (`csoportazonosito`).
-    #[serde(
-        rename(deserialize = "csoportazonosito"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub group_id: Option<String>,
     /// EU tax number (`adoszameu`).
-    #[serde(
-        rename(deserialize = "adoszameu"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub eu_tax_number: Option<String>,
     /// Bank details (`bank`).
-    #[serde(rename(deserialize = "bank"), default)]
     pub bank: Option<Bank>,
 }
 
@@ -214,180 +182,70 @@ impl<'de> serde::Deserialize<'de> for InvoiceAppearance {
 #[doc(alias = "alap")]
 // These booleans mirror independent protocol fields, not a single state.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoiceInfo {
     /// Internal szamlazz.hu identifier (`id`).
     pub id: u64,
     /// The invoice number (`szamlaszam`).
-    #[serde(rename(deserialize = "szamlaszam"))]
     pub invoice_number: InvoiceNumber,
     /// Economic-event identifier (`gazdEsemAzon`).
-    #[serde(
-        rename(deserialize = "gazdEsemAzon"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub economic_event_id: Option<u64>,
     /// Source system code (`forras`) for externally issued invoices.
-    #[serde(
-        rename(deserialize = "forras"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub source: Option<u32>,
     /// Registration number (`iktatoszam`).
-    #[serde(
-        rename(deserialize = "iktatoszam"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub registration_number: Option<String>,
     /// Document type code (`tipus`), e.g. `SZ` for an invoice or `D` for a
     /// proforma; kept verbatim as the code set is not documented exhaustively.
-    #[serde(rename(deserialize = "tipus"))]
     pub document_type: String,
     /// Document appearance (`eszamla`): not an invoice, paper, or electronic.
     #[doc(alias = "e-számla")]
-    #[serde(rename(deserialize = "eszamla"))]
     pub e_invoice: InvoiceAppearance,
     /// Referenced invoice number (`hivszamlaszam`).
-    #[serde(
-        rename(deserialize = "hivszamlaszam"),
-        default,
-        deserialize_with = "empty_invoice_number"
-    )]
     pub referenced_invoice_number: Option<InvoiceNumber>,
     /// Referenced proforma number (`hivdijbekszam`).
-    #[serde(
-        rename(deserialize = "hivdijbekszam"),
-        default,
-        deserialize_with = "empty_invoice_number"
-    )]
     pub referenced_proforma_number: Option<InvoiceNumber>,
     /// Issue date (`kelt`).
-    #[serde(
-        rename(deserialize = "kelt"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub issue_date: Option<Date>,
     /// Fulfillment date (`telj`).
     #[doc(alias = "teljesítés dátum")]
-    #[serde(
-        rename(deserialize = "telj"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub fulfillment_date: Option<Date>,
     /// Payment due date (`fizh`).
     #[doc(alias = "fizetési határidő")]
-    #[serde(
-        rename(deserialize = "fizh"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub due_date: Option<Date>,
     /// Payment method as recorded (`fizmod`), free text.
-    #[serde(
-        rename(deserialize = "fizmod"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub payment_method: Option<String>,
     /// Payment method normalized to szamlazz.hu's unified set
     /// (`fizmodunified`).
-    #[serde(
-        rename(deserialize = "fizmodunified"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub unified_payment_method: Option<String>,
     /// Whether the payment method is cash (`keszpenz`).
-    #[serde(
-        rename(deserialize = "keszpenz"),
-        default,
-        deserialize_with = "xml::de::flexible_bool"
-    )]
     pub cash_payment: bool,
     /// Order number (`rendelesszam`).
-    #[serde(
-        rename(deserialize = "rendelesszam"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub order_number: Option<String>,
     /// Document language (`nyelv`).
-    #[serde(
-        rename(deserialize = "nyelv"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub language: Option<String>,
     /// Currency (`devizanem`).
     #[doc(alias = "pénznem")]
-    #[serde(
-        rename(deserialize = "devizanem"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub currency: Option<String>,
     /// Foreign-currency quoting bank (`devizabank`).
-    #[serde(
-        rename(deserialize = "devizabank"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub exchange_bank: Option<String>,
     /// Exchange rate (`devizaarf`).
     #[doc(alias = "árfolyam")]
-    #[serde(
-        rename(deserialize = "devizaarf"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub exchange_rate: Option<Decimal>,
     /// Comment shown on the document (`megjegyzes`).
-    #[serde(
-        rename(deserialize = "megjegyzes"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub comment: Option<String>,
     /// Invoice-level VAT category (`afatipus`).
-    #[serde(
-        rename(deserialize = "afatipus"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub vat_type: Option<String>,
     /// Issued under cash accounting (`penzforg`).
     #[doc(alias = "pénzforgalmi elszámolás")]
-    #[serde(
-        rename(deserialize = "penzforg"),
-        default,
-        deserialize_with = "xml::de::flexible_bool"
-    )]
     pub cash_accounting: bool,
     /// Issued under KATA taxation (`kata`).
-    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
     pub kata: bool,
     /// Whether KATA ledger handling applies (`katafokonyv`).
-    #[serde(
-        rename(deserialize = "katafokonyv"),
-        default,
-        deserialize_with = "xml::de::flexible_bool"
-    )]
     pub kata_ledger: bool,
     /// Buyer email the document was sent to (`email`).
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     pub email: Option<String>,
     /// Issued from a test account (`teszt`).
-    #[serde(
-        rename(deserialize = "teszt"),
-        default,
-        deserialize_with = "xml::de::flexible_bool"
-    )]
     pub test: bool,
     /// Whether the invoice has been reversed (`sztornozott`).
     ///
@@ -406,295 +264,130 @@ pub struct InvoiceInfo {
     /// Breaking change in 0.x: this was a `bool` defaulting to `false` when the
     /// element was absent. Treat `reversed != Some(true)` as "live".
     #[doc(alias = "sztornózott")]
-    #[serde(
-        rename(deserialize = "sztornozott"),
-        default,
-        deserialize_with = "xml::de::optional_flexible_bool"
-    )]
     pub reversed: Option<bool>,
 }
 
 /// Postal address returned for a buyer (`postacim`); every component is
 /// optional in the response schema.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BuyerPostalAddress {
     /// Recipient name (`nev`).
-    #[serde(
-        rename(deserialize = "nev"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub name: Option<String>,
     /// Country (`orszag`).
-    #[serde(
-        rename(deserialize = "orszag"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub country: Option<String>,
     /// ZIP code (`irsz`).
-    #[serde(
-        rename(deserialize = "irsz"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub zip: Option<String>,
     /// City (`telepules`).
-    #[serde(
-        rename(deserialize = "telepules"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub city: Option<String>,
     /// Street address (`cim`).
-    #[serde(
-        rename(deserialize = "cim"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub address: Option<String>,
 }
 
 /// Buyer ledger data returned under `vevo/fokonyv`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BuyerLedgerInfo {
     /// Buyer general-ledger account (`vevo`).
-    #[serde(
-        rename(deserialize = "vevo"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub account: Option<String>,
     /// Buyer identifier (`vevoazon`).
-    #[serde(
-        rename(deserialize = "vevoazon"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub buyer_id: Option<String>,
     /// Accounting date (`datum`).
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     pub date: Option<Date>,
     /// Continuous fulfillment (`folyamatostelj`).
-    #[serde(
-        rename(deserialize = "folyamatostelj"),
-        default,
-        deserialize_with = "xml::de::optional_flexible_bool"
-    )]
     pub continuous_fulfillment: Option<bool>,
     /// Settlement period start (`elszDatTol`).
-    #[serde(
-        rename(deserialize = "elszDatTol"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub settlement_from: Option<Date>,
     /// Settlement period end (`elszDatIg`).
-    #[serde(
-        rename(deserialize = "elszDatIg"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub settlement_to: Option<Date>,
 }
 
 /// The buyer (`vevo`) as recorded on the invoice.
 #[doc(alias = "vevő")]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BuyerInfo {
     /// Internal szamlazz.hu identifier (`id`).
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     pub id: Option<u64>,
     /// Name (`nev`).
-    #[serde(rename(deserialize = "nev"))]
     pub name: String,
     /// Partner identifier (`azonosito`).
-    #[serde(
-        rename(deserialize = "azonosito"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub identifier: Option<String>,
     /// Billing address (`cim`).
-    #[serde(rename(deserialize = "cim"), default)]
     pub address: Option<Address>,
     /// Postal address (`postacim`).
-    #[serde(rename(deserialize = "postacim"), default)]
     pub postal_address: Option<BuyerPostalAddress>,
     /// Email address (`email`).
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     pub email: Option<String>,
     /// Hungarian tax number (`adoszam`).
     #[doc(alias = "adószám")]
-    #[serde(
-        rename(deserialize = "adoszam"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub tax_number: Option<String>,
     /// VAT-group identifier (`csoportazonosito`).
-    #[serde(
-        rename(deserialize = "csoportazonosito"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub group_id: Option<String>,
     /// EU tax number (`adoszameu`).
-    #[serde(
-        rename(deserialize = "adoszameu"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub eu_tax_number: Option<String>,
     /// Buyer-location classification (`lokacio`): `1` domestic, `2` EU, `3`
     /// outside the EU, or `-1` unknown.
-    #[serde(
-        rename(deserialize = "lokacio"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub location: Option<i64>,
     /// NAV private-person indicator (`privatePersonIndicator`).
-    #[serde(
-        rename(deserialize = "privatePersonIndicator"),
-        default,
-        deserialize_with = "xml::de::flexible_bool"
-    )]
     pub private_person: bool,
     /// Buyer ledger metadata (`fokonyv`).
-    #[serde(rename(deserialize = "fokonyv"), default)]
     pub ledger: Option<BuyerLedgerInfo>,
 }
 
 /// One row of the fetched invoice (`tetel`).
 #[doc(alias = "tétel")]
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct DocumentItem {
     /// Item name (`nev`).
-    #[serde(rename(deserialize = "nev"))]
     pub name: String,
     /// Item identifier (`azonosito`).
-    #[serde(
-        rename(deserialize = "azonosito"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub id: Option<String>,
     /// Quantity (`mennyiseg`).
-    #[serde(
-        rename(deserialize = "mennyiseg"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub quantity: Decimal,
     /// Unit of measure (`mennyisegiegyseg`).
-    #[serde(rename(deserialize = "mennyisegiegyseg"))]
     pub unit: String,
     /// Net unit price (`nettoegysegar`).
-    #[serde(
-        rename(deserialize = "nettoegysegar"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub unit_price: Decimal,
     /// VAT category (`afatipus`), when the row uses a special VAT code.
     #[doc(alias = "áfatípus")]
-    #[serde(
-        rename(deserialize = "afatipus"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub vat_type: Option<String>,
     /// Numeric VAT rate wire token (`afakulcs`); see
     /// [`DocumentItem::vat_rate`].
     #[doc(alias = "áfakulcs")]
-    #[serde(rename(deserialize = "afakulcs"))]
     pub vat_rate_code: String,
     /// Net value (`netto`).
-    #[serde(rename(deserialize = "netto"), deserialize_with = "xml::de::from_text")]
     pub net_value: Decimal,
     /// Margin-scheme VAT base (`arresafaalap`).
-    #[serde(
-        rename(deserialize = "arresafaalap"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub margin_vat_base: Option<Decimal>,
     /// VAT value (`afa`).
-    #[serde(rename(deserialize = "afa"), deserialize_with = "xml::de::from_text")]
     pub vat_value: Decimal,
     /// Gross value (`brutto`).
-    #[serde(
-        rename(deserialize = "brutto"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub gross_value: Decimal,
     /// Row comment (`megjegyzes`).
-    #[serde(
-        rename(deserialize = "megjegyzes"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub comment: Option<String>,
     /// Stable item ordering (`sztetordering`).
-    #[serde(
-        rename(deserialize = "sztetordering"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub ordering: Option<u32>,
     /// Item ledger metadata (`fokonyv`).
-    #[serde(rename(deserialize = "fokonyv"), default)]
     pub ledger: Option<DocumentItemLedger>,
 }
 
 /// Item ledger data returned under `tetel/fokonyv`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct DocumentItemLedger {
     /// Revenue account (`arbevetel`).
-    #[serde(
-        rename(deserialize = "arbevetel"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub revenue_account: Option<String>,
     /// VAT account (`afa`).
-    #[serde(
-        rename(deserialize = "afa"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub vat_account: Option<String>,
     /// Economic event (`gazdasagiesemeny`).
-    #[serde(
-        rename(deserialize = "gazdasagiesemeny"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub economic_event: Option<String>,
     /// VAT economic event (`gazdasagiesemenyafa`).
-    #[serde(
-        rename(deserialize = "gazdasagiesemenyafa"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub vat_economic_event: Option<String>,
     /// Settlement period start (`elszdattol`).
-    #[serde(
-        rename(deserialize = "elszdattol"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub settlement_from: Option<Date>,
     /// Settlement period end (`elszdatig`).
-    #[serde(
-        rename(deserialize = "elszdatig"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub settlement_to: Option<Date>,
 }
 
@@ -709,44 +402,30 @@ impl DocumentItem {
 
 /// Invoice totals (`osszegek`).
 #[doc(alias = "összegek")]
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Totals {
     /// Per-VAT-rate subtotals (`afakulcsossz`).
-    #[serde(rename(deserialize = "afakulcsossz"), default)]
     pub by_vat_rate: Vec<VatTotal>,
     /// Grand total (`totalossz`).
-    #[serde(rename(deserialize = "totalossz"))]
     pub total: GrandTotal,
 }
 
 /// Subtotal for one VAT rate (`afakulcsossz`).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct VatTotal {
     /// VAT category (`afatipus`), when this subtotal uses a special VAT code.
     #[doc(alias = "áfatípus")]
-    #[serde(
-        rename(deserialize = "afatipus"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub vat_type: Option<String>,
     /// Numeric VAT rate wire token (`afakulcs`); see [`VatTotal::vat_rate`].
     #[doc(alias = "áfakulcs")]
-    #[serde(rename(deserialize = "afakulcs"))]
     pub vat_rate_code: String,
     /// Net subtotal (`netto`).
-    #[serde(rename(deserialize = "netto"), deserialize_with = "xml::de::from_text")]
     pub net: Decimal,
     /// VAT subtotal (`afa`).
-    #[serde(rename(deserialize = "afa"), deserialize_with = "xml::de::from_text")]
     pub vat: Decimal,
     /// Gross subtotal (`brutto`).
-    #[serde(
-        rename(deserialize = "brutto"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub gross: Decimal,
 }
 
@@ -760,60 +439,28 @@ impl VatTotal {
 }
 
 /// A financial item (`qutet`) returned alongside invoice line items.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct FinancialItem {
     /// Name (`nev`).
-    #[serde(rename(deserialize = "nev"))]
     pub name: String,
     /// VAT category (`afatipus`).
-    #[serde(
-        rename(deserialize = "afatipus"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub vat_type: Option<String>,
     /// Numeric VAT rate (`afakulcs`).
-    #[serde(rename(deserialize = "afakulcs"))]
     pub vat_rate_code: String,
     /// Net amount (`netto`).
-    #[serde(rename(deserialize = "netto"), deserialize_with = "xml::de::from_text")]
     pub net: Decimal,
     /// VAT amount (`afa`).
-    #[serde(rename(deserialize = "afa"), deserialize_with = "xml::de::from_text")]
     pub vat: Decimal,
     /// Gross amount (`brutto`).
-    #[serde(
-        rename(deserialize = "brutto"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub gross: Decimal,
     /// Settlement period start (`elszdattol`).
-    #[serde(
-        rename(deserialize = "elszdattol"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub settlement_from: Option<Date>,
     /// Settlement period end (`elszdatig`).
-    #[serde(
-        rename(deserialize = "elszdatig"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub settlement_to: Option<Date>,
     /// Deductible VAT percentage (`afalevon`).
-    #[serde(
-        rename(deserialize = "afalevon"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub deductible_vat: i32,
     /// Labels (`cimkek`).
-    #[serde(
-        rename(deserialize = "cimkek"),
-        default,
-        deserialize_with = "deserialize_labels"
-    )]
     pub labels: Vec<String>,
 }
 
@@ -825,81 +472,37 @@ impl FinancialItem {
     }
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
-struct Labels {
-    #[serde(rename(deserialize = "cimke"), default)]
-    values: Vec<String>,
-}
-
-fn deserialize_labels<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<String>, D::Error> {
-    <Labels as serde::Deserialize>::deserialize(deserializer).map(|labels| labels.values)
-}
-
 /// The invoice grand total (`totalossz`).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct GrandTotal {
     /// Net total (`netto`).
-    #[serde(rename(deserialize = "netto"), deserialize_with = "xml::de::from_text")]
     pub net: Decimal,
     /// VAT total (`afa`).
-    #[serde(rename(deserialize = "afa"), deserialize_with = "xml::de::from_text")]
     pub vat: Decimal,
     /// Gross total (`brutto`).
-    #[serde(
-        rename(deserialize = "brutto"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub gross: Decimal,
 }
 
 /// A payment recorded against the invoice (`kifizetes`).
 #[doc(alias = "kifizetés")]
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct RecordedPayment {
     /// Payment date (`datum`).
-    #[serde(rename(deserialize = "datum"))]
     pub date: Date,
     /// Payment title (`jogcim`), e.g. `transfer`.
     #[doc(alias = "jogcím")]
-    #[serde(rename(deserialize = "jogcim"))]
     pub title: String,
     /// Amount (`osszeg`).
-    #[serde(
-        rename(deserialize = "osszeg"),
-        deserialize_with = "xml::de::from_text"
-    )]
     pub amount: Decimal,
     /// Comment (`megjegyzes`).
-    #[serde(
-        rename(deserialize = "megjegyzes"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub comment: Option<String>,
     /// Bank account the payment arrived on (`bankszamlaszam`).
-    #[serde(
-        rename(deserialize = "bankszamlaszam"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub bank_account: Option<String>,
     /// Bank transaction identifier (`banktranzid`).
-    #[serde(
-        rename(deserialize = "banktranzid"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub bank_transaction_id: Option<u64>,
     /// Exchange rate used for the payment (`devizaarf`).
-    #[serde(
-        rename(deserialize = "devizaarf"),
-        default,
-        deserialize_with = "xml::de::empty_as_none"
-    )]
     pub exchange_rate: Option<Decimal>,
 }
 
@@ -944,18 +547,23 @@ impl AgentRequest for QueryInvoiceXml {
             field: "response body",
             message: error.to_string(),
         })?;
-        let document: SzamlaDocument = quick_xml::de::from_str(text).map_err(ParseError::from)?;
+        let szamla: SzamlaXml = quick_xml::de::from_str(text).map_err(ParseError::from)?;
 
         Ok(InvoiceDocument {
-            supplier: document.szallito,
-            info: document.alap,
-            buyer: document.vevo,
-            items: document.tetelek.tetel,
-            financial_items: document.qutetek.unwrap_or_default().qutet,
-            labels: document.cimkek.unwrap_or_default().values,
-            totals: document.osszegek,
-            payments: document.kifizetesek.unwrap_or_default().kifizetes,
-            pdf: match document.pdf.filter(|content| !content.trim().is_empty()) {
+            supplier: szamla.szallito.into(),
+            info: szamla.alap.into(),
+            buyer: szamla.vevo.into(),
+            items: szamla.tetelek.tetel.into_iter().map(Into::into).collect(),
+            financial_items: szamla.qutetek.qutet.into_iter().map(Into::into).collect(),
+            labels: szamla.cimkek.cimke,
+            totals: szamla.osszegek.into(),
+            payments: szamla
+                .kifizetesek
+                .kifizetes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            pdf: match szamla.pdf.filter(|content| !content.trim().is_empty()) {
                 Some(encoded) => Some(Pdf::from_base64(&encoded)?),
                 None => None,
             },
@@ -1017,44 +625,541 @@ fn response_root(body: &[u8]) -> Result<ResponseRoot, ParseError> {
     }
 }
 
-/// The `szamla` response document as it appears on the wire: list wrappers
-/// still in place and the PDF still base64.
+// ----- wire structs ----------------------------------------------------------
+//
+// The `szamla` response document as it appears on the wire: Hungarian element
+// names, list wrappers still in place, empty elements standing for absent
+// values, and the PDF still base64. Each converts into its public counterpart.
+
 #[derive(Debug, serde::Deserialize)]
-struct SzamlaDocument {
-    szallito: Supplier,
-    alap: InvoiceInfo,
-    vevo: BuyerInfo,
-    tetelek: Items,
+struct SzamlaXml {
+    szallito: SzallitoXml,
+    alap: AlapXml,
+    vevo: VevoXml,
+    tetelek: TetelekXml,
     #[serde(default)]
-    qutetek: Option<FinancialItems>,
+    qutetek: QutetekXml,
     #[serde(default)]
-    cimkek: Option<Labels>,
-    osszegek: Totals,
+    cimkek: CimkekXml,
+    osszegek: OsszegekXml,
     #[serde(default)]
-    kifizetesek: Option<Payments>,
+    kifizetesek: KifizetesekXml,
     #[serde(default)]
     pdf: Option<String>,
 }
 
-/// Wrapper for the `tetelek`/`tetel` list.
 #[derive(Debug, serde::Deserialize)]
-struct Items {
-    #[serde(default)]
-    tetel: Vec<DocumentItem>,
+struct CimXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    orszag: Option<String>,
+    irsz: String,
+    telepules: String,
+    cim: String,
 }
 
-/// Wrapper for the `qutetek`/`qutet` list.
-#[derive(Debug, Default, serde::Deserialize)]
-struct FinancialItems {
-    #[serde(default)]
-    qutet: Vec<FinancialItem>,
+impl From<CimXml> for Address {
+    fn from(cim: CimXml) -> Self {
+        Self {
+            country: cim.orszag,
+            zip: cim.irsz,
+            city: cim.telepules,
+            address: cim.cim,
+        }
+    }
 }
 
-/// Wrapper for the `kifizetesek`/`kifizetes` list.
-#[derive(Debug, Default, serde::Deserialize)]
-struct Payments {
+#[derive(Debug, serde::Deserialize)]
+struct BankXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    nev: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    bankszamla: Option<String>,
+}
+
+impl From<BankXml> for Bank {
+    fn from(bank: BankXml) -> Self {
+        Self {
+            name: bank.nev,
+            account: bank.bankszamla,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SzallitoXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    id: Option<u64>,
+    nev: String,
+    cim: CimXml,
     #[serde(default)]
-    kifizetes: Vec<RecordedPayment>,
+    postacim: Option<CimXml>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    adoszam: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    csoportazonosito: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    adoszameu: Option<String>,
+    #[serde(default)]
+    bank: Option<BankXml>,
+}
+
+impl From<SzallitoXml> for Supplier {
+    fn from(szallito: SzallitoXml) -> Self {
+        Self {
+            id: szallito.id,
+            name: szallito.nev,
+            address: szallito.cim.into(),
+            postal_address: szallito.postacim.map(Into::into),
+            tax_number: szallito.adoszam,
+            group_id: szallito.csoportazonosito,
+            eu_tax_number: szallito.adoszameu,
+            bank: szallito.bank.map(Into::into),
+        }
+    }
+}
+
+// These booleans mirror independent protocol fields, not a single state.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, serde::Deserialize)]
+struct AlapXml {
+    id: u64,
+    szamlaszam: InvoiceNumber,
+    #[serde(
+        rename(deserialize = "gazdEsemAzon"),
+        default,
+        deserialize_with = "xml::de::empty_as_none"
+    )]
+    gazd_esem_azon: Option<u64>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    forras: Option<u32>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    iktatoszam: Option<String>,
+    tipus: String,
+    eszamla: InvoiceAppearance,
+    #[serde(default, deserialize_with = "empty_invoice_number")]
+    hivszamlaszam: Option<InvoiceNumber>,
+    #[serde(default, deserialize_with = "empty_invoice_number")]
+    hivdijbekszam: Option<InvoiceNumber>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    kelt: Option<Date>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    telj: Option<Date>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    fizh: Option<Date>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    fizmod: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    fizmodunified: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
+    keszpenz: bool,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    rendelesszam: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    nyelv: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    devizanem: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    devizabank: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    devizaarf: Option<Decimal>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    megjegyzes: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    afatipus: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
+    penzforg: bool,
+    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
+    kata: bool,
+    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
+    katafokonyv: bool,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    email: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
+    teszt: bool,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    sztornozott: Option<bool>,
+}
+
+impl From<AlapXml> for InvoiceInfo {
+    fn from(alap: AlapXml) -> Self {
+        Self {
+            id: alap.id,
+            invoice_number: alap.szamlaszam,
+            economic_event_id: alap.gazd_esem_azon,
+            source: alap.forras,
+            registration_number: alap.iktatoszam,
+            document_type: alap.tipus,
+            e_invoice: alap.eszamla,
+            referenced_invoice_number: alap.hivszamlaszam,
+            referenced_proforma_number: alap.hivdijbekszam,
+            issue_date: alap.kelt,
+            fulfillment_date: alap.telj,
+            due_date: alap.fizh,
+            payment_method: alap.fizmod,
+            unified_payment_method: alap.fizmodunified,
+            cash_payment: alap.keszpenz,
+            order_number: alap.rendelesszam,
+            language: alap.nyelv,
+            currency: alap.devizanem,
+            exchange_bank: alap.devizabank,
+            exchange_rate: alap.devizaarf,
+            comment: alap.megjegyzes,
+            vat_type: alap.afatipus,
+            cash_accounting: alap.penzforg,
+            kata: alap.kata,
+            kata_ledger: alap.katafokonyv,
+            email: alap.email,
+            test: alap.teszt,
+            reversed: alap.sztornozott,
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct PostacimXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    nev: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    orszag: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    irsz: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    telepules: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    cim: Option<String>,
+}
+
+impl From<PostacimXml> for BuyerPostalAddress {
+    fn from(postacim: PostacimXml) -> Self {
+        Self {
+            name: postacim.nev,
+            country: postacim.orszag,
+            zip: postacim.irsz,
+            city: postacim.telepules,
+            address: postacim.cim,
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct VevoFokonyvXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    vevo: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    vevoazon: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    datum: Option<Date>,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    folyamatostelj: Option<bool>,
+    #[serde(
+        rename(deserialize = "elszDatTol"),
+        default,
+        deserialize_with = "xml::de::empty_as_none"
+    )]
+    elsz_dat_tol: Option<Date>,
+    #[serde(
+        rename(deserialize = "elszDatIg"),
+        default,
+        deserialize_with = "xml::de::empty_as_none"
+    )]
+    elsz_dat_ig: Option<Date>,
+}
+
+impl From<VevoFokonyvXml> for BuyerLedgerInfo {
+    fn from(fokonyv: VevoFokonyvXml) -> Self {
+        Self {
+            account: fokonyv.vevo,
+            buyer_id: fokonyv.vevoazon,
+            date: fokonyv.datum,
+            continuous_fulfillment: fokonyv.folyamatostelj,
+            settlement_from: fokonyv.elsz_dat_tol,
+            settlement_to: fokonyv.elsz_dat_ig,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VevoXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    id: Option<u64>,
+    nev: String,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    azonosito: Option<String>,
+    #[serde(default)]
+    cim: Option<CimXml>,
+    #[serde(default)]
+    postacim: Option<PostacimXml>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    email: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    adoszam: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    csoportazonosito: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    adoszameu: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    lokacio: Option<i64>,
+    #[serde(
+        rename(deserialize = "privatePersonIndicator"),
+        default,
+        deserialize_with = "xml::de::flexible_bool"
+    )]
+    private_person_indicator: bool,
+    #[serde(default)]
+    fokonyv: Option<VevoFokonyvXml>,
+}
+
+impl From<VevoXml> for BuyerInfo {
+    fn from(vevo: VevoXml) -> Self {
+        Self {
+            id: vevo.id,
+            name: vevo.nev,
+            identifier: vevo.azonosito,
+            address: vevo.cim.map(Into::into),
+            postal_address: vevo.postacim.map(Into::into),
+            email: vevo.email,
+            tax_number: vevo.adoszam,
+            group_id: vevo.csoportazonosito,
+            eu_tax_number: vevo.adoszameu,
+            location: vevo.lokacio,
+            private_person: vevo.private_person_indicator,
+            ledger: vevo.fokonyv.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TetelekXml {
+    #[serde(default)]
+    tetel: Vec<TetelXml>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TetelXml {
+    nev: String,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    azonosito: Option<String>,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    mennyiseg: Decimal,
+    mennyisegiegyseg: String,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    nettoegysegar: Decimal,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    afatipus: Option<String>,
+    afakulcs: String,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    netto: Decimal,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    arresafaalap: Option<Decimal>,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    afa: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    brutto: Decimal,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    megjegyzes: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    sztetordering: Option<u32>,
+    #[serde(default)]
+    fokonyv: Option<TetelFokonyvXml>,
+}
+
+impl From<TetelXml> for DocumentItem {
+    fn from(tetel: TetelXml) -> Self {
+        Self {
+            name: tetel.nev,
+            id: tetel.azonosito,
+            quantity: tetel.mennyiseg,
+            unit: tetel.mennyisegiegyseg,
+            unit_price: tetel.nettoegysegar,
+            vat_type: tetel.afatipus,
+            vat_rate_code: tetel.afakulcs,
+            net_value: tetel.netto,
+            margin_vat_base: tetel.arresafaalap,
+            vat_value: tetel.afa,
+            gross_value: tetel.brutto,
+            comment: tetel.megjegyzes,
+            ordering: tetel.sztetordering,
+            ledger: tetel.fokonyv.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct TetelFokonyvXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    arbevetel: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    afa: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    gazdasagiesemeny: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    gazdasagiesemenyafa: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    elszdattol: Option<Date>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    elszdatig: Option<Date>,
+}
+
+impl From<TetelFokonyvXml> for DocumentItemLedger {
+    fn from(fokonyv: TetelFokonyvXml) -> Self {
+        Self {
+            revenue_account: fokonyv.arbevetel,
+            vat_account: fokonyv.afa,
+            economic_event: fokonyv.gazdasagiesemeny,
+            vat_economic_event: fokonyv.gazdasagiesemenyafa,
+            settlement_from: fokonyv.elszdattol,
+            settlement_to: fokonyv.elszdatig,
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct QutetekXml {
+    #[serde(default)]
+    qutet: Vec<QutetXml>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct QutetXml {
+    nev: String,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    afatipus: Option<String>,
+    afakulcs: String,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    netto: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    afa: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    brutto: Decimal,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    elszdattol: Option<Date>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    elszdatig: Option<Date>,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    afalevon: i32,
+    #[serde(default)]
+    cimkek: CimkekXml,
+}
+
+impl From<QutetXml> for FinancialItem {
+    fn from(qutet: QutetXml) -> Self {
+        Self {
+            name: qutet.nev,
+            vat_type: qutet.afatipus,
+            vat_rate_code: qutet.afakulcs,
+            net: qutet.netto,
+            vat: qutet.afa,
+            gross: qutet.brutto,
+            settlement_from: qutet.elszdattol,
+            settlement_to: qutet.elszdatig,
+            deductible_vat: qutet.afalevon,
+            labels: qutet.cimkek.cimke,
+        }
+    }
+}
+
+/// The `cimkek`/`cimke` label list, on the invoice and on financial items.
+#[derive(Debug, Default, serde::Deserialize)]
+struct CimkekXml {
+    #[serde(default)]
+    cimke: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OsszegekXml {
+    #[serde(default)]
+    afakulcsossz: Vec<AfakulcsosszXml>,
+    totalossz: TotalosszXml,
+}
+
+impl From<OsszegekXml> for Totals {
+    fn from(osszegek: OsszegekXml) -> Self {
+        Self {
+            by_vat_rate: osszegek.afakulcsossz.into_iter().map(Into::into).collect(),
+            total: osszegek.totalossz.into(),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AfakulcsosszXml {
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    afatipus: Option<String>,
+    afakulcs: String,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    netto: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    afa: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    brutto: Decimal,
+}
+
+impl From<AfakulcsosszXml> for VatTotal {
+    fn from(ossz: AfakulcsosszXml) -> Self {
+        Self {
+            vat_type: ossz.afatipus,
+            vat_rate_code: ossz.afakulcs,
+            net: ossz.netto,
+            vat: ossz.afa,
+            gross: ossz.brutto,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TotalosszXml {
+    #[serde(deserialize_with = "xml::de::from_text")]
+    netto: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    afa: Decimal,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    brutto: Decimal,
+}
+
+impl From<TotalosszXml> for GrandTotal {
+    fn from(total: TotalosszXml) -> Self {
+        Self {
+            net: total.netto,
+            vat: total.afa,
+            gross: total.brutto,
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct KifizetesekXml {
+    #[serde(default)]
+    kifizetes: Vec<KifizetesXml>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct KifizetesXml {
+    datum: Date,
+    jogcim: String,
+    #[serde(deserialize_with = "xml::de::from_text")]
+    osszeg: Decimal,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    megjegyzes: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    bankszamlaszam: Option<String>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    banktranzid: Option<u64>,
+    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    devizaarf: Option<Decimal>,
+}
+
+impl From<KifizetesXml> for RecordedPayment {
+    fn from(kifizetes: KifizetesXml) -> Self {
+        Self {
+            date: kifizetes.datum,
+            title: kifizetes.jogcim,
+            amount: kifizetes.osszeg,
+            comment: kifizetes.megjegyzes,
+            bank_account: kifizetes.bankszamlaszam,
+            bank_transaction_id: kifizetes.banktranzid,
+            exchange_rate: kifizetes.devizaarf,
+        }
+    }
 }
 
 fn empty_invoice_number<'de, D>(deserializer: D) -> Result<Option<InvoiceNumber>, D::Error>
@@ -1221,20 +1326,20 @@ mod tests {
         assert!(document.pdf.is_none());
     }
 
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn parses_all_current_invoice_response_sections() {
-        let body = r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
+    /// A `szamla` response exercising every section and field the schema
+    /// currently defines.
+    const ALL_SECTIONS: &str = r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
           <szallito><id>1</id><nev>Seller</nev><cim><irsz>1</irsz><telepules>B</telepules><cim>C</cim></cim>
             <postacim><orszag>HU</orszag><irsz>2</irsz><telepules>P</telepules><cim>Post</cim></postacim>
-            <adoszam>12345678-2-42</adoszam><csoportazonosito>GROUP-S</csoportazonosito><adoszameu>HU123</adoszameu></szallito>
+            <adoszam>12345678-2-42</adoszam><csoportazonosito>GROUP-S</csoportazonosito><adoszameu>HU123</adoszameu>
+            <bank><nev>Test Bank</nev><bankszamla>1234-5678</bankszamla></bank></szallito>
           <alap><id>2</id><szamlaszam>INV-1</szamlaszam><gazdEsemAzon>9</gazdEsemAzon><forras>34</forras>
             <iktatoszam>REG-1</iktatoszam><tipus>E</tipus><eszamla>3</eszamla><hivszamlaszam>INV-0</hivszamlaszam>
             <hivdijbekszam>PRO-1</hivdijbekszam><kelt>2026-07-01</kelt><telj>2026-07-02</telj><fizh>2026-07-10</fizh>
             <fizmod>transfer</fizmod><fizmodunified>átutalás</fizmodunified><keszpenz>false</keszpenz>
             <rendelesszam>ORDER-1</rendelesszam><nyelv>hu</nyelv><devizanem>EUR</devizanem><devizabank>MNB</devizabank>
-            <devizaarf>400</devizaarf><afatipus>EUT</afatipus><penzforg>true</penzforg><kata>false</kata>
-            <katafokonyv>true</katafokonyv><teszt>false</teszt><sztornozott>true</sztornozott></alap>
+            <devizaarf>400</devizaarf><megjegyzes>Note</megjegyzes><afatipus>EUT</afatipus><penzforg>true</penzforg><kata>false</kata>
+            <katafokonyv>true</katafokonyv><email>x@example.com</email><teszt>false</teszt><sztornozott>true</sztornozott></alap>
           <vevo><id>3</id><nev>Buyer</nev><azonosito>BUY-1</azonosito><cim><irsz>3</irsz><telepules>V</telepules><cim>Main</cim></cim>
             <postacim><nev>Receiver</nev><orszag>HU</orszag><irsz>4</irsz><telepules>Q</telepules><cim>Ship</cim></postacim>
             <email>b@example.com</email><adoszam>87654321-1-42</adoszam><csoportazonosito>GROUP-B</csoportazonosito>
@@ -1242,17 +1347,22 @@ mod tests {
             <fokonyv><vevo>311</vevo><vevoazon>B-7</vevoazon><datum>2026-07-03</datum><folyamatostelj>true</folyamatostelj>
               <elszDatTol>2026-07-01</elszDatTol><elszDatIg>2026-07-31</elszDatIg></fokonyv></vevo>
           <tetelek><tetel><nev>Item</nev><azonosito>I-1</azonosito><mennyiseg>1</mennyiseg><mennyisegiegyseg>db</mennyisegiegyseg>
-            <nettoegysegar>100</nettoegysegar><afatipus>AAM</afatipus><afakulcs>0</afakulcs><netto>100</netto><afa>0</afa><brutto>100</brutto>
-            <sztetordering>5</sztetordering><fokonyv><arbevetel>911</arbevetel><afa>467</afa><gazdasagiesemeny>SALE</gazdasagiesemeny>
+            <nettoegysegar>100</nettoegysegar><afatipus>AAM</afatipus><afakulcs>0</afakulcs><netto>100</netto><arresafaalap>5</arresafaalap><afa>0</afa><brutto>100</brutto>
+            <megjegyzes>Row</megjegyzes><sztetordering>5</sztetordering><fokonyv><arbevetel>911</arbevetel><afa>467</afa><gazdasagiesemeny>SALE</gazdasagiesemeny>
               <gazdasagiesemenyafa>VAT</gazdasagiesemenyafa><elszdattol>2026-07-01</elszdattol><elszdatig>2026-07-31</elszdatig></fokonyv></tetel></tetelek>
           <qutetek><qutet><nev>Fee</nev><afatipus>TAM</afatipus><afakulcs>0</afakulcs><netto>10</netto><afa>0</afa><brutto>10</brutto>
             <elszdattol>2026-07-01</elszdattol><elszdatig>2026-07-31</elszdatig><afalevon>50</afalevon><cimkek><cimke>fee</cimke></cimkek></qutet></qutetek>
           <cimkek><cimke>invoice</cimke></cimkek>
           <osszegek><afakulcsossz><afatipus>AAM</afatipus><afakulcs>0</afakulcs><netto>110</netto><afa>0</afa><brutto>110</brutto></afakulcsossz>
             <totalossz><netto>110</netto><afa>0</afa><brutto>110</brutto></totalossz></osszegek>
-          <kifizetesek><kifizetes><datum>2026-07-04</datum><jogcim>transfer</jogcim><osszeg>10</osszeg>
-            <bankszamlaszam>ACC</bankszamlaszam><banktranzid>99</banktranzid><devizaarf>401</devizaarf></kifizetes></kifizetesek></szamla>"#;
-        let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
+          <kifizetesek><kifizetes><datum>2026-07-04</datum><jogcim>transfer</jogcim><osszeg>10</osszeg><megjegyzes>Paid</megjegyzes>
+            <bankszamlaszam>ACC</bankszamlaszam><banktranzid>99</banktranzid><devizaarf>401</devizaarf></kifizetes></kifizetesek>
+          <pdf>JVBERi0=</pdf></szamla>"#;
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn parses_all_current_invoice_response_sections() {
+        let response = RawResponse::new::<&str, &str>([], ALL_SECTIONS.as_bytes().to_vec());
         let document = sample().parse(&response).expect("success");
         assert_eq!(
             document
@@ -1326,6 +1436,27 @@ mod tests {
         let json = serde_json::to_value(&document).expect("serialize");
         assert_eq!(json["financial_items"][0]["labels"][0], "fee");
         assert_eq!(json["labels"][0], "invoice");
+    }
+
+    /// The fetched document is journal-safe: it serialises under its Rust
+    /// field names and deserialises back to the same value.
+    #[test]
+    fn invoice_document_round_trips_through_json() {
+        let response = RawResponse::new::<&str, &str>([], ALL_SECTIONS.as_bytes().to_vec());
+        let document = sample().parse(&response).expect("success");
+        assert!(document.pdf.is_some(), "the fixture carries a PDF");
+
+        let json = serde_json::to_value(&document).expect("serialize");
+        assert_eq!(json["info"]["invoice_number"], "INV-1");
+        assert_eq!(json["info"]["e_invoice"], "3");
+        assert_eq!(json["supplier"]["address"]["city"], "B");
+        assert_eq!(json["items"][0]["vat_rate_code"], "0");
+        assert_eq!(json["totals"]["total"]["gross"], "110");
+        assert_eq!(json["pdf"], "JVBERi0=");
+        assert!(json["info"].get("szamlaszam").is_none(), "no wire names");
+
+        let restored: InvoiceDocument = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, document);
     }
 
     #[test]

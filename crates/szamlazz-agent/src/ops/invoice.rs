@@ -641,7 +641,7 @@ impl CreateInvoice {
 
 /// A successful invoice-creation result, including PDF previews that do not
 /// issue a numbered document.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoiceCreationResult {
     /// The assigned invoice number (`szamlaszam`). Absent for PDF previews,
@@ -672,7 +672,7 @@ pub struct InvoiceCreationResult {
 }
 
 /// A successfully issued numbered invoice, such as a storno invoice.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CreatedInvoice {
     /// The assigned invoice number (`szamlaszam`).
@@ -1563,6 +1563,25 @@ mod tests {
         assert_eq!(created.gross_total, Some(dec!(38100)));
         assert!(created.pdf.is_none());
         assert!(!created.notification_delivery_failed);
+    }
+
+    /// The creation result is journal-safe: it round-trips through JSON with
+    /// the PDF as base64.
+    #[test]
+    fn creation_result_round_trips_through_json() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>E-TST-2026-3</szamlaszam><szamlanetto>30000</szamlanetto><szamlabrutto>38100</szamlabrutto><kintlevoseg>38100</kintlevoseg><vevoifiokurl>https://example.test/acct</vevoifiokurl><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
+        let response = RawResponse::new([("szlahu_id", "924307402")], body.to_vec());
+        let created = sample().parse(&response).expect("success");
+        assert_eq!(created.pdf.as_ref().map(Pdf::as_bytes), Some(&b"%PDF-"[..]));
+        assert_eq!(created.document_id, Some(924_307_402));
+
+        let json = serde_json::to_value(&created).expect("serialize");
+        assert_eq!(json["invoice_number"], "E-TST-2026-3");
+        assert_eq!(json["gross_total"], "38100");
+        assert_eq!(json["pdf"], "JVBERi0=");
+
+        let restored: InvoiceCreationResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, created);
     }
 
     #[test]

@@ -145,7 +145,7 @@ impl RegisterCreditEntry {
 }
 
 /// The invoice's payment state after the credit entries were registered.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CreditEntryResult {
     /// The invoice the payments were registered on (`szamlaszam`).
@@ -299,6 +299,30 @@ mod tests {
         assert_eq!(result.outstanding, None);
         assert_eq!(result.payment_method, None);
         assert_eq!(result.customer_account_url, None);
+    }
+
+    /// The payment state is journal-safe: it round-trips through JSON with the
+    /// payment method as its wire token.
+    #[test]
+    fn credit_entry_result_round_trips_through_json() {
+        let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
+        let response = RawResponse::new(
+            [
+                ("szlahu_kintlevoseg", "8100"),
+                ("szlahu_fizetesmod", "%C3%A1tutal%C3%A1s"),
+            ],
+            body.to_vec(),
+        );
+        let result = sample().parse(&response).expect("success");
+        assert_eq!(result.payment_method, Some(PaymentMethod::Transfer));
+
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(json["invoice_number"], "E-TST-2026-3");
+        assert_eq!(json["outstanding"], "8100");
+        assert_eq!(json["payment_method"], "átutalás");
+
+        let restored: CreditEntryResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, result);
     }
 
     #[test]

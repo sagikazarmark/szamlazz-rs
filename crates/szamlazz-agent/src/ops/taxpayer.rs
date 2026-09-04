@@ -103,7 +103,7 @@ impl QueryTaxpayer {
 
 /// A taxpayer as registered in the NAV Online Invoice system.
 #[doc(alias = "adóalany")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct TaxpayerInfo {
     /// Whether NAV says this is a valid taxpayer (`taxpayerValidity`).
@@ -121,7 +121,7 @@ pub struct TaxpayerInfo {
 }
 
 /// A registered address of a taxpayer (`taxpayerAddressItem`).
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct TaxpayerAddress {
     /// Address type (`taxpayerAddressType`), e.g. `HQ`.
@@ -467,6 +467,23 @@ mod tests {
         assert_eq!(address.floor.as_deref(), Some("3"));
         assert_eq!(address.door.as_deref(), Some("4"));
         assert_eq!(address.lot_number.as_deref(), Some("123/4"));
+    }
+
+    /// The taxpayer data is journal-safe: it round-trips through JSON.
+    #[test]
+    fn taxpayer_info_round_trips_through_json() {
+        let body = include_bytes!("../../tests/synthetic/taxpayer.xml");
+        let response = RawResponse::new::<&str, &str>([], body.to_vec());
+        let info = sample().parse(&response).expect("success");
+
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json["valid"], true);
+        assert_eq!(json["tax_number"], "12345678");
+        assert_eq!(json["addresses"][0]["kind"], "HQ");
+        assert_eq!(json["addresses"][0]["public_place_category"], "UTCA");
+
+        let restored: TaxpayerInfo = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, info);
     }
 
     #[test]
