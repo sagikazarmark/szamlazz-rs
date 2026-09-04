@@ -10,18 +10,25 @@ use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
 use restate_szamlazz::steps::{
-    DeleteOutcome, DocumentRefs, IssueOutcome, IssueRequest, QueryError, QueryOutcome,
-    SetPaymentsOutcome, Steps, StornoAttempt, StornoOutcome,
+    DeleteOutcome, DocumentRefs, InvoiceDocumentExt as _, IssueOutcome, IssueRequest, QueryError,
+    QueryOutcome, SetPaymentsOutcome, Steps, StornoAttempt, StornoOutcome,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
 use serde_json::json;
+use szamlazz_agent::InvoiceNumber;
+use szamlazz_agent::ops::invoice::InvoiceCreationResult;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
 const SUPPLIER: u64 = 972_720;
 
 // ----- fixtures --------------------------------------------------------------
+
+/// The issued number of a create result.
+fn number_of(issued: &InvoiceCreationResult) -> Option<&str> {
+    issued.invoice_number.as_ref().map(InvoiceNumber::as_str)
+}
 
 fn steps(server: &MockServer) -> Steps {
     let config: Config = serde_json::from_value(json!({
@@ -303,17 +310,18 @@ async fn pre_query_hit_is_found_and_nothing_is_created() {
 
     match h.issue(true, &[]).await {
         IssueOutcome::Found(found) => {
-            assert_eq!(found.number, "SZ-1");
-            assert_eq!(found.document_type, "SZ");
-            assert_eq!(found.reversed, None);
+            assert_eq!(found.number(), "SZ-1");
+            assert_eq!(found.info.document_type, "SZ");
+            assert_eq!(found.info.reversed, None);
             assert!(found.is_live());
-            assert_eq!(found.order_number.as_deref(), Some("ORD-1"));
-            assert_eq!(found.gross, Some(dec!(1270)));
-            assert_eq!(found.net, Some(dec!(1000)));
-            assert!(found.test);
-            assert_eq!(found.e_invoice, Some(true));
-            assert_eq!(found.supplier_id, Some(SUPPLIER));
-            assert_eq!(found.document_id, Some(924_307_338));
+            assert_eq!(found.info.order_number.as_deref(), Some("ORD-1"));
+            assert_eq!(found.totals.total.gross, dec!(1270));
+            assert_eq!(found.totals.total.net, dec!(1000));
+            assert!(found.info.test);
+            assert_eq!(found.e_invoice(), Some(true));
+            assert_eq!(found.supplier.id, Some(SUPPLIER));
+            assert_eq!(found.info.id, 924_307_338);
+            assert_eq!(found.buyer.name, "Buyer", "the journaled document is whole");
         }
         other => panic!("expected Found, got {other:?}"),
     }
@@ -337,9 +345,9 @@ async fn pre_query_miss_then_create_is_issued() {
     let outcome = h.issue(false, &[]).await;
     match outcome {
         IssueOutcome::Issued(issued) => {
-            assert_eq!(issued.number, "SZ-2");
-            assert_eq!(issued.net, Some(dec!(1000)));
-            assert_eq!(issued.gross, Some(dec!(1270)));
+            assert_eq!(number_of(&issued), Some("SZ-2"));
+            assert_eq!(issued.net_total, Some(dec!(1000)));
+            assert_eq!(issued.gross_total, Some(dec!(1270)));
             assert_eq!(issued.outstanding, Some(dec!(1270)));
             assert_eq!(issued.document_id, Some(924_307_747));
             assert!(!issued.notification_delivery_failed);
@@ -379,7 +387,7 @@ async fn duplicate_order_number_then_requery_hit_is_reconciled() {
         .await;
 
     match h.issue(false, &[]).await {
-        IssueOutcome::Reconciled(found) => assert_eq!(found.number, "SZ-3"),
+        IssueOutcome::Reconciled(found) => assert_eq!(found.number(), "SZ-3"),
         other => panic!("expected Reconciled, got {other:?}"),
     }
 }
@@ -438,8 +446,8 @@ async fn reversed_pre_query_hit_without_reissue_is_found_reversed() {
 
     match h.issue(true, &[]).await {
         IssueOutcome::FoundReversed(found) => {
-            assert_eq!(found.number, "SZ-1");
-            assert_eq!(found.reversed, Some(true));
+            assert_eq!(found.number(), "SZ-1");
+            assert_eq!(found.info.reversed, Some(true));
             assert!(!found.is_live());
         }
         other => panic!("expected FoundReversed, got {other:?}"),
@@ -480,7 +488,7 @@ async fn reversed_pre_query_hit_with_reissue_proceeds_to_create() {
         .await;
 
     match h.issue_with(true, &[], true).await {
-        IssueOutcome::Issued(issued) => assert_eq!(issued.number, "SZ-2"),
+        IssueOutcome::Issued(issued) => assert_eq!(number_of(&issued), Some("SZ-2")),
         other => panic!("expected Issued, got {other:?}"),
     }
 }
@@ -576,7 +584,7 @@ async fn invalid_documents_under_our_external_id_are_collisions() {
             .mount(&h.server)
             .await;
         match h.issue(true, &[]).await {
-            IssueOutcome::Collision(found) => assert_eq!(found.number, doc.number, "{label}"),
+            IssueOutcome::Collision(found) => assert_eq!(found.number(), doc.number, "{label}"),
             other => panic!("{label}: expected Collision, got {other:?}"),
         }
     }
@@ -602,8 +610,8 @@ async fn live_invoice_under_the_order_is_foreign() {
 
     match h.issue(true, &["SZ-1".to_owned()]).await {
         IssueOutcome::Foreign(found) => {
-            assert_eq!(found.number, "SZ-77");
-            assert_eq!(found.document_type, "SZ");
+            assert_eq!(found.number(), "SZ-77");
+            assert_eq!(found.info.document_type, "SZ");
         }
         other => panic!("expected Foreign, got {other:?}"),
     }
@@ -636,8 +644,15 @@ async fn conversion_of_our_proforma_not_under_our_id_is_foreign() {
 
     match h.issue(true, &["D-1".to_owned()]).await {
         IssueOutcome::Foreign(found) => {
-            assert_eq!(found.number, "SZ-78");
-            assert_eq!(found.referenced_proforma.as_deref(), Some("D-1"));
+            assert_eq!(found.number(), "SZ-78");
+            assert_eq!(
+                found
+                    .info
+                    .referenced_proforma_number
+                    .as_ref()
+                    .map(InvoiceNumber::as_str),
+                Some("D-1")
+            );
         }
         other => panic!("expected Foreign, got {other:?}"),
     }
@@ -677,7 +692,9 @@ async fn hint_ignores_our_reversed_and_non_invoice_documents() {
             .mount(&h.server)
             .await;
         match h.issue(true, &["SZ-1".to_owned()]).await {
-            IssueOutcome::Issued(issued) => assert_eq!(issued.number, "SZ-6", "{label}"),
+            IssueOutcome::Issued(issued) => {
+                assert_eq!(number_of(&issued), Some("SZ-6"), "{label}");
+            }
             other => panic!("{label}: expected Issued, got {other:?}"),
         }
     }
@@ -802,8 +819,8 @@ async fn verify_query_and_hint() {
 
     match h.steps.verify("SZ-1").await {
         QueryOutcome::Found(found) => {
-            assert_eq!(found.number, "SZ-1");
-            assert_eq!(found.payments, vec![dec!(500), dec!(770)]);
+            assert_eq!(found.number(), "SZ-1");
+            assert_eq!(found.payment_amounts(), vec![dec!(500), dec!(770)]);
         }
         other => panic!("expected Found, got {other:?}"),
     }
@@ -814,8 +831,8 @@ async fn verify_query_and_hint() {
     ));
     match h.steps.hint(&order()).await {
         QueryOutcome::Found(found) => {
-            assert_eq!(found.document_type, "SS");
-            assert_eq!(found.referenced_invoice.as_deref(), Some("SZ-1"));
+            assert_eq!(found.info.document_type, "SS");
+            assert!(found.is_storno_of("SZ-1"));
         }
         other => panic!("expected Found, got {other:?}"),
     }
@@ -870,8 +887,8 @@ async fn storno_reversed_is_validated() {
 
     match h.steps.storno(storno_attempt(&storno_id)).await {
         StornoOutcome::Reversed(storno) => {
-            assert_eq!(storno.storno_number, "SS-1");
-            assert_eq!(storno.gross, Some(dec!(-1270)));
+            assert_eq!(storno.invoice_number.as_str(), "SS-1");
+            assert_eq!(storno.gross_total, Some(dec!(-1270)));
             assert_eq!(storno.document_id, Some(924_307_747));
         }
         other => panic!("expected Reversed, got {other:?}"),

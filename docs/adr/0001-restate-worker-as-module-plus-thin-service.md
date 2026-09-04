@@ -61,6 +61,10 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
   the seam either way.
 - The buyer input is journaled once, in `Order`'s own journal (`journal_retention = 3d`). Responses and
   tracing carry numbers, ids and totals — no PII; there is no state (ADR 0005).
+  *Amended (#12):* the runs journal the agent crate's response types as they are, so a queried document
+  (`QueryOutcome::Found`, the `Found`/`Reconciled`/`Collision`/`Foreign` issue outcomes) is journaled
+  with the buyer block szamlazz.hu returned. The journal is still the only place it lands; the
+  handler outputs and tracing are unchanged.
 - Rule, stated so a future `storno_invoice → create_invoice` convenience is not added: no `Order`
   handler ever `.call()`s an exclusive handler on its own key. Under this layering it is structural.
 - The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`

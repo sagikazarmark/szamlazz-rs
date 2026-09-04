@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
+use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::Order;
-use super::support::{Fault, Lookup, account_matches, next_backoff, order_key};
+use super::support::{Fault, Lookup, next_backoff, order_key};
 use super::support::{object, shared};
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
@@ -14,7 +15,7 @@ use crate::contract::{
 };
 use crate::identity::ExternalId;
 use crate::steps::{
-    DeleteOutcome, FoundDocument, QueryOutcome, StornoAttempt, StornoDocument,
+    DeleteOutcome, InvoiceDocumentExt as _, QueryOutcome, StornoAttempt,
     StornoOutcome as StepsStorno, issued_kind_of,
 };
 
@@ -49,29 +50,29 @@ impl Order {
                 }
                 QueryOutcome::Found(found) => found,
             };
-        if found.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
+        if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
             return Ok(StornoResponse::new(StornoOutcome::Conflict, number)
                 .with_conflict_reason(ConflictReason::NotManaged));
         }
         let account = &self.config.account;
-        if !account_matches(&found, account.mode.is_test(), account.supplier_id) {
+        if !found.account_matches(account.mode.is_test(), account.supplier_id) {
             return Err(Fault::account_mismatch(format!(
                 "document {number} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
-                found.test, found.supplier_id
+                found.info.test, found.supplier.id
             ))
             .into());
         }
-        if found.reversed == Some(true) {
+        if found.info.reversed == Some(true) {
             // Idempotent: already reversed by anyone.
             let storno_number = object::storno_number_of(ctx, &self.steps, &order, &number).await?;
             let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
             response.storno_number = storno_number;
             return Ok(response);
         }
-        if !matches!(found.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
+        if !matches!(found.info.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
             return Ok(not_stornoable(number));
         }
-        let e_invoice = found.e_invoice.unwrap_or(self.config.defaults.e_invoice);
+        let e_invoice = found.e_invoice().unwrap_or(self.config.defaults.e_invoice);
 
         // Step 2: the query-first re-send loop.
         let storno_id = ExternalId::for_storno(&self.config.account.slug, &order, &number);
@@ -100,8 +101,11 @@ impl Order {
             };
             // Step 3.
             return Ok(match outcome {
-                StepsStorno::Reversed(StornoDocument { storno_number, .. })
-                | StepsStorno::AlreadyReversed { storno_number } => {
+                StepsStorno::Reversed(storno) => {
+                    StornoResponse::new(StornoOutcome::Reversed, number)
+                        .with_storno_number(storno.invoice_number.as_str())
+                }
+                StepsStorno::AlreadyReversed { storno_number } => {
                     StornoResponse::new(StornoOutcome::Reversed, number)
                         .with_storno_number(storno_number)
                 }
@@ -128,7 +132,7 @@ impl Order {
         ))
         .about(
             &order,
-            issued_kind_of(&found.document_type),
+            issued_kind_of(&found.info.document_type),
             storno_id.as_str(),
         )
         .into())
@@ -166,7 +170,7 @@ impl Order {
             return Ok(DeleteProformaResponse::not_deleted("proforma_paid"));
         }
 
-        let number = found.number;
+        let number = found.number().to_owned();
         let outcome = {
             let steps = Arc::clone(&self.steps);
             let number = number.clone();
@@ -240,7 +244,7 @@ impl Order {
 }
 
 /// The `get` projection of a document of ours.
-fn document_status(found: &FoundDocument) -> DocumentStatus {
+fn document_status(found: &InvoiceDocument) -> DocumentStatus {
     let state = if found.is_live() {
         DocumentState::Live
     } else {
@@ -248,14 +252,17 @@ fn document_status(found: &FoundDocument) -> DocumentStatus {
             storno_number: None,
         }
     };
-    let mut status = DocumentStatus::new(found.number.clone(), state);
-    status.gross = found.gross;
-    status.net = found.net;
-    status.payments.clone_from(&found.payments);
-    status
-        .referenced_proforma
-        .clone_from(&found.referenced_proforma);
-    status.e_invoice = found.e_invoice;
+    let mut status = DocumentStatus::new(found.number(), state);
+    status.gross = Some(found.totals.total.gross);
+    status.net = Some(found.totals.total.net);
+    status.payments = found.payment_amounts();
+    status.referenced_proforma = found
+        .info
+        .referenced_proforma_number
+        .as_ref()
+        .map(|number| number.as_str().to_owned());
+    status.e_invoice = found.e_invoice();
+
     status
 }
 

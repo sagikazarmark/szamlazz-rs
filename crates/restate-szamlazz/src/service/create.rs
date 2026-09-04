@@ -11,10 +11,11 @@ use std::sync::Arc;
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
+use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::Order;
 use super::support::object::{lookup, run_once, sleep, storno_number_of, verify};
-use super::support::{Fault, Lookup, account_matches, next_backoff, order_key};
+use super::support::{Fault, Lookup, next_backoff, order_key};
 use crate::config::AccountSlug;
 use crate::contract::response::outstanding;
 use crate::contract::{
@@ -22,7 +23,9 @@ use crate::contract::{
     IssuedKind, Outcome, ProformaLink, Warning,
 };
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
-use crate::steps::{DocumentRefs, FoundDocument, IssueOutcome, IssueRequest, QueryOutcome};
+use crate::steps::{
+    DocumentRefs, InvoiceDocumentExt as _, IssueOutcome, IssueRequest, QueryOutcome,
+};
 
 /// The identity fields every [`CreateResponse`] carries.
 #[derive(Debug, Clone)]
@@ -58,13 +61,13 @@ impl Identity {
     }
 
     /// A response carrying the found document's number and totals.
-    fn found(&self, outcome: Outcome, found: &FoundDocument) -> CreateResponse {
-        let mut response = self
-            .respond(outcome)
-            .with_invoice_number(found.number.clone());
-        response.net_total = found.net;
-        response.gross_total = found.gross;
-        response.outstanding = outstanding(found.gross, &found.payments);
+    fn found(&self, outcome: Outcome, found: &InvoiceDocument) -> CreateResponse {
+        let gross = Some(found.totals.total.gross);
+        let mut response = self.respond(outcome).with_invoice_number(found.number());
+        response.net_total = Some(found.totals.total.net);
+        response.gross_total = gross;
+        response.outstanding = outstanding(gross, &found.payment_amounts());
+
         response
     }
 
@@ -221,11 +224,11 @@ impl Order {
                 .into());
             }
             QueryOutcome::Found(found) => {
-                if found.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
+                if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
                     return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
                 }
                 self.check_account(&found)?;
-                if found.reversed == Some(true) {
+                if found.info.reversed == Some(true) {
                     return Ok(identity.conflict_about(ConflictReason::BaseReversed, number));
                 }
             }
@@ -316,14 +319,16 @@ impl Order {
 
     /// A document verified by number that carries this order's number must
     /// also belong to the configured account.
-    fn check_account(&self, found: &FoundDocument) -> Result<(), Fault> {
+    fn check_account(&self, found: &InvoiceDocument) -> Result<(), Fault> {
         let account = &self.config.account;
-        if account_matches(found, account.mode.is_test(), account.supplier_id) {
+        if found.account_matches(account.mode.is_test(), account.supplier_id) {
             Ok(())
         } else {
             Err(Fault::account_mismatch(format!(
                 "document {} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
-                found.number, found.test, found.supplier_id
+                found.number(),
+                found.info.test,
+                found.supplier.id
             )))
         }
     }
@@ -356,10 +361,10 @@ impl Order {
         .await?;
         Ok(match found {
             Lookup::Collision(found) => {
-                Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
+                Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
             }
             Lookup::Ours(found) if found.is_live() => {
-                Some(identity.conflict_about(ConflictReason::PrepaidChain, found.number))
+                Some(identity.conflict_about(ConflictReason::PrepaidChain, found.number()))
             }
             Lookup::Absent | Lookup::Ours(_) => None,
         })
@@ -387,14 +392,14 @@ impl Order {
         Ok(match found {
             Lookup::Absent => Some(identity.conflict(ConflictReason::PrepaymentMissing)),
             Lookup::Collision(found) => {
-                Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
+                Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
             }
             Lookup::Ours(found) if !found.is_live() => {
-                Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number))
+                Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number()))
             }
             Lookup::Ours(found) => {
-                refs.our_numbers.push(found.number.clone());
-                refs.prepayment = Some(found.number);
+                refs.our_numbers.push(found.number().to_owned());
+                refs.prepayment = Some(found.number().to_owned());
                 None
             }
         })
@@ -433,7 +438,7 @@ impl Order {
                     Lookup::Collision(found) => {
                         return Ok(Some(identity.conflict_about(
                             ConflictReason::ExternalIdCollision,
-                            found.number,
+                            found.number(),
                         )));
                     }
                     Lookup::Ours(found) if found.is_live() => found,
@@ -443,11 +448,11 @@ impl Order {
                     // The server links by shared order number regardless, so
                     // refusing is the only honest answer.
                     return Ok(Some(
-                        identity.conflict_about(ConflictReason::ProformaLive, live.number),
+                        identity.conflict_about(ConflictReason::ProformaLive, live.number()),
                     ));
                 }
-                refs.our_numbers.push(live.number.clone());
-                refs.proforma = Some(live.number);
+                refs.our_numbers.push(live.number().to_owned());
+                refs.proforma = Some(live.number().to_owned());
                 *linked = true;
                 Ok(None)
             }
@@ -464,15 +469,15 @@ impl Order {
                     QueryOutcome::NotFound => Ok(Some(
                         identity.conflict_about(ConflictReason::ProformaMissing, number.clone()),
                     )),
-                    QueryOutcome::Found(found) if found.document_type != "D" => {
+                    QueryOutcome::Found(found) if found.info.document_type != "D" => {
                         Err(Fault::invalid_input(format!(
                             "{number} is not a proforma (tipus {})",
-                            found.document_type
+                            found.info.document_type
                         ))
                         .into())
                     }
                     QueryOutcome::Found(found) => {
-                        refs.our_numbers.push(found.number);
+                        refs.our_numbers.push(found.number().to_owned());
                         refs.proforma = Some(number.clone());
                         *linked = true;
                         Ok(None)
@@ -574,11 +579,20 @@ impl Order {
         let identity = &intent.identity;
         match outcome {
             IssueOutcome::Issued(issued) => {
+                // The steps report a success without a number as `Unknown`;
+                // a bare result here would be a bug, answered as a fault.
+                let Some(number) = issued.invoice_number else {
+                    return Err(Fault::outcome_unknown(
+                        "issued without a document number; retry with a new Idempotency-Key",
+                    )
+                    .about(order, Some(identity.kind), identity.external_id.as_str())
+                    .into());
+                };
                 let mut response = identity
                     .respond(Outcome::Issued)
-                    .with_invoice_number(issued.number);
-                response.net_total = issued.net;
-                response.gross_total = issued.gross;
+                    .with_invoice_number(number.as_str());
+                response.net_total = issued.net_total;
+                response.gross_total = issued.gross_total;
                 response.outstanding = issued.outstanding;
                 response.customer_account_url = issued.customer_account_url;
                 if issued.notification_delivery_failed {
@@ -587,20 +601,20 @@ impl Order {
                 Ok(response)
             }
             IssueOutcome::Found(found) if intent.reissue => {
-                Ok(identity.conflict_about(ConflictReason::Live, found.number))
+                Ok(identity.conflict_about(ConflictReason::Live, found.number()))
             }
             IssueOutcome::Found(found) => Ok(identity.found(Outcome::AlreadyIssued, &found)),
             IssueOutcome::Reconciled(found) => Ok(identity.found(Outcome::Reconciled, &found)),
             IssueOutcome::FoundReversed(found) => {
                 let storno_number =
-                    storno_number_of(ctx, &self.steps, order, &found.number).await?;
-                Ok(identity.reversed(&found.number, storno_number))
+                    storno_number_of(ctx, &self.steps, order, found.number()).await?;
+                Ok(identity.reversed(found.number(), storno_number))
             }
             IssueOutcome::Collision(found) => {
-                Ok(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
+                Ok(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
             }
             IssueOutcome::Foreign(found) => {
-                Ok(identity.conflict_about(ConflictReason::Foreign, found.number))
+                Ok(identity.conflict_about(ConflictReason::Foreign, found.number()))
             }
             IssueOutcome::Rejected { code, message } => Ok(identity.rejected(code, message)),
             IssueOutcome::DuplicateOrderNumber { code, message } if intent.corrective => {

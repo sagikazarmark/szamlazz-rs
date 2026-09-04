@@ -16,7 +16,12 @@
 //! data.
 //!
 //! The outcome types derive `serde` so that the Restate services can journal
-//! them as the result of a `ctx.run`.
+//! them as the result of a `ctx.run`. They carry the agent crate's response
+//! types as they are — [`InvoiceDocument`], [`InvoiceCreationResult`],
+//! [`CreatedInvoice`] — which round-trip through JSON; a journaled document
+//! therefore includes the buyer block szamlazz.hu returned with it.
+//! [`InvoiceDocumentExt`] adds the checks the services make on a queried
+//! document before trusting or acting on it.
 
 use std::sync::Arc;
 
@@ -77,27 +82,31 @@ pub struct IssueRequest<'a> {
 }
 
 /// The result of one issuing attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Documents are boxed: a queried [`InvoiceDocument`] is large next to the
+/// code-and-message variants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IssueOutcome {
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
-    /// create — indistinguishable and reported either way).
-    Issued(IssuedDocument),
+    /// create — indistinguishable and reported either way). The result
+    /// carries a number: a success without one is [`IssueOutcome::Unknown`].
+    Issued(InvoiceCreationResult),
     /// The pre-query found a live document of ours under the external id.
     /// Nothing was created.
-    Found(FoundDocument),
+    Found(Box<InvoiceDocument>),
     /// The pre-query found a reversed document of ours under the external id
     /// and `reissue` was not set. Nothing was created.
-    FoundReversed(FoundDocument),
+    FoundReversed(Box<InvoiceDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found a live document of ours: an earlier attempt
     /// had landed.
-    Reconciled(FoundDocument),
+    Reconciled(Box<InvoiceDocument>),
     /// The external id resolves to a document that fails validation (another
     /// order, kind, account mode or supplier). Nothing was created.
-    Collision(FoundDocument),
+    Collision(Box<InvoiceDocument>),
     /// A live invoice-kind document that is not ours exists under the order
     /// number. Nothing was created.
-    Foreign(FoundDocument),
+    Foreign(Box<InvoiceDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external id re-query found no live document of ours.
     DuplicateOrderNumber {
@@ -130,149 +139,108 @@ pub enum IssueOutcome {
 /// [`IssueOutcome::Unknown`] when szamlazz.hu answered success without one.
 impl From<InvoiceCreationResult> for IssueOutcome {
     fn from(result: InvoiceCreationResult) -> Self {
-        match result.invoice_number {
-            Some(number) => Self::Issued(IssuedDocument {
-                number: number.as_str().to_owned(),
-                net: result.net_total,
-                gross: result.gross_total,
-                outstanding: result.outstanding,
-                customer_account_url: result.customer_account_url,
-                document_id: result.document_id,
-                notification_delivery_failed: result.notification_delivery_failed,
-            }),
-            None => Self::Unknown {
+        if result.invoice_number.is_some() {
+            Self::Issued(result)
+        } else {
+            Self::Unknown {
                 code: None,
                 message: "create succeeded without a document number".to_owned(),
-            },
+            }
         }
     }
 }
 
-/// A document szamlazz.hu issued in response to a create.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct IssuedDocument {
+/// The checks the services make on a queried document before trusting or
+/// acting on it (design §3).
+pub trait InvoiceDocumentExt {
     /// The document number.
-    pub number: String,
-    /// Net total.
-    pub net: Option<Decimal>,
-    /// Gross total.
-    pub gross: Option<Decimal>,
-    /// Outstanding amount.
-    pub outstanding: Option<Decimal>,
-    /// Buyer-facing account URL.
-    pub customer_account_url: Option<String>,
-    /// szamlazz.hu's document id (`szlahu_id`).
-    pub document_id: Option<u64>,
-    /// The document was issued but its notification could not be delivered
-    /// (code 56 with a number).
-    pub notification_delivery_failed: bool,
-}
+    fn number(&self) -> &str;
 
-/// The projection of a queried document the services act on. Carries no
-/// buyer data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct FoundDocument {
-    /// The document number.
-    pub number: String,
-    /// The `tipus` code: `SZ`, `D`, `ES`, `VS`, `SS`, `HS`, `SL`, ….
-    pub document_type: String,
-    /// `<sztornozott>`; `None` means live (or a storno document).
-    pub reversed: Option<bool>,
-    /// The order number.
-    pub order_number: Option<String>,
-    /// The proforma this document converted (`hivdijbekszam`).
-    pub referenced_proforma: Option<String>,
-    /// The invoice this document references (`hivszamlaszam`): the reversed
-    /// original of a storno, the corrected one of a corrective, the settled
-    /// prepayment of a final invoice.
-    pub referenced_invoice: Option<String>,
-    /// Gross total.
-    pub gross: Option<Decimal>,
-    /// Net total.
-    pub net: Option<Decimal>,
-    /// Issued from a test account.
-    pub test: bool,
-    /// Whether it is an e-invoice; `None` for non-invoices (proformas) and
-    /// unknown `eszamla` codes.
-    pub e_invoice: Option<bool>,
-    /// The issuing account's supplier id (`szallito/id`).
-    pub supplier_id: Option<u64>,
-    /// szamlazz.hu's document id (`alap/id`).
-    pub document_id: Option<u64>,
-    /// Registered credit entry amounts, in the order the server lists them.
-    pub payments: Vec<Decimal>,
-}
-
-impl FoundDocument {
     /// Whether the document is live: `reversed != Some(true)`.
-    #[must_use]
-    pub fn is_live(&self) -> bool {
-        self.reversed != Some(true)
-    }
+    fn is_live(&self) -> bool;
+
+    /// Whether the document is the storno invoice (`SS`) reversing `number`.
+    fn is_storno_of(&self, number: &str) -> bool;
+
+    /// Whether it is an e-invoice; `None` for non-invoices (proformas) and
+    /// unknown `eszamla` codes, where the account default applies.
+    fn e_invoice(&self) -> Option<bool>;
+
+    /// Registered credit entry amounts, in the order szamlazz.hu lists them.
+    fn payment_amounts(&self) -> Vec<Decimal>;
+
+    /// Whether the document belongs to the configured account: it carries the
+    /// account's `teszt` flag and — when both are known — the account's
+    /// supplier id.
+    fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool;
 
     /// Whether the document is ours (design §3): it carries `order`, the
-    /// `tipus` of `kind`, the account's `teszt` flag and — when both are
-    /// known — the account's supplier id.
-    #[must_use]
-    pub fn is_ours(
+    /// `tipus` of `kind` and [belongs to the account](Self::account_matches).
+    fn is_ours(
+        &self,
+        order: &OrderKey,
+        kind: IssuedKind,
+        expect_test: bool,
+        expect_supplier_id: Option<u64>,
+    ) -> bool;
+}
+
+impl InvoiceDocumentExt for InvoiceDocument {
+    fn number(&self) -> &str {
+        self.info.invoice_number.as_str()
+    }
+
+    fn is_live(&self) -> bool {
+        self.info.reversed != Some(true)
+    }
+
+    fn is_storno_of(&self, number: &str) -> bool {
+        self.info.document_type == "SS"
+            && self
+                .info
+                .referenced_invoice_number
+                .as_ref()
+                .is_some_and(|referenced| referenced.as_str() == number)
+    }
+
+    fn e_invoice(&self) -> Option<bool> {
+        match self.info.e_invoice {
+            InvoiceAppearance::Paper => Some(false),
+            InvoiceAppearance::Electronic(_) => Some(true),
+            _ => None,
+        }
+    }
+
+    fn payment_amounts(&self) -> Vec<Decimal> {
+        self.payments.iter().map(|payment| payment.amount).collect()
+    }
+
+    fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool {
+        self.info.test == expect_test
+            && match (expect_supplier_id, self.supplier.id) {
+                (Some(expected), Some(seen)) => expected == seen,
+                _ => true,
+            }
+    }
+
+    fn is_ours(
         &self,
         order: &OrderKey,
         kind: IssuedKind,
         expect_test: bool,
         expect_supplier_id: Option<u64>,
     ) -> bool {
-        self.order_number.as_deref().map(str::trim) == Some(order.as_str())
-            && self.document_type == document_type_of(kind)
-            && self.test == expect_test
-            && match (expect_supplier_id, self.supplier_id) {
-                (Some(expected), Some(seen)) => expected == seen,
-                _ => true,
-            }
-    }
-}
-
-impl From<&InvoiceDocument> for FoundDocument {
-    fn from(document: &InvoiceDocument) -> Self {
-        let info = &document.info;
-        Self {
-            number: info.invoice_number.as_str().to_owned(),
-            document_type: info.document_type.clone(),
-            reversed: info.reversed,
-            order_number: info.order_number.clone(),
-            referenced_proforma: info
-                .referenced_proforma_number
-                .as_ref()
-                .map(|number| number.as_str().to_owned()),
-            referenced_invoice: info
-                .referenced_invoice_number
-                .as_ref()
-                .map(|number| number.as_str().to_owned()),
-            gross: Some(document.totals.total.gross),
-            net: Some(document.totals.total.net),
-            test: info.test,
-            e_invoice: match info.e_invoice {
-                InvoiceAppearance::Paper => Some(false),
-                InvoiceAppearance::Electronic(_) => Some(true),
-                _ => None,
-            },
-            supplier_id: document.supplier.id,
-            document_id: Some(info.id),
-            payments: document
-                .payments
-                .iter()
-                .map(|payment| payment.amount)
-                .collect(),
-        }
+        self.info.order_number.as_deref().map(str::trim) == Some(order.as_str())
+            && self.info.document_type == document_type_of(kind)
+            && self.account_matches(expect_test, expect_supplier_id)
     }
 }
 
 /// The result of a query that only needs to know whether a document exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QueryOutcome {
     /// The document.
-    Found(FoundDocument),
+    Found(Box<InvoiceDocument>),
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
     /// number or external id — or a deleted / consumed proforma.
     NotFound,
@@ -319,11 +287,12 @@ pub struct StornoAttempt<'a> {
 }
 
 /// The result of one storno attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StornoOutcome {
-    /// The invoice is reversed by the storno document (now, or echoed by an
-    /// idempotent repeat).
-    Reversed(StornoDocument),
+    /// The invoice is reversed by the storno invoice szamlazz.hu issued (now,
+    /// or echoed by an idempotent repeat), validated with
+    /// [`CreatedInvoice::reverses`] by [`Steps::storno`].
+    Reversed(CreatedInvoice),
     /// The pre-query found the storno invoice under the storno external id;
     /// nothing was sent.
     AlreadyReversed {
@@ -350,30 +319,6 @@ pub enum StornoOutcome {
     },
     /// The HTTP exchange or the response parse failed.
     Transport(String),
-}
-
-/// The storno invoice szamlazz.hu issued (or echoed) in response to a storno.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct StornoDocument {
-    /// The storno invoice number.
-    pub storno_number: String,
-    /// The storno invoice's (negative) gross total.
-    pub gross: Option<Decimal>,
-    /// szamlazz.hu's document id of the storno invoice.
-    pub document_id: Option<u64>,
-}
-
-/// The journaled projection of a storno response. The caller has
-/// already checked [`CreatedInvoice::reverses`].
-impl From<CreatedInvoice> for StornoDocument {
-    fn from(created: CreatedInvoice) -> Self {
-        Self {
-            storno_number: created.invoice_number.as_str().to_owned(),
-            gross: created.gross_total,
-            document_id: created.document_id,
-        }
-    }
 }
 
 /// The result of a proforma deletion.
@@ -516,19 +461,19 @@ impl Steps {
                     request.expect_supplier_id,
                 ) =>
             {
-                tracing::warn!(number = %found.number, "external id collision");
+                tracing::warn!(number = %found.number(), "external id collision");
                 return IssueOutcome::Collision(found);
             }
             Ok(Some(found)) if found.is_live() => {
-                tracing::info!(number = %found.number, "found live under external id");
+                tracing::info!(number = %found.number(), "found live under external id");
                 return IssueOutcome::Found(found);
             }
             Ok(Some(found)) if request.reissue => {
-                tracing::info!(number = %found.number, "reversed under external id; reissuing");
-                Some(found.number)
+                tracing::info!(number = %found.number(), "reversed under external id; reissuing");
+                Some(found.number().to_owned())
             }
             Ok(Some(found)) => {
-                tracing::info!(number = %found.number, "found reversed under external id");
+                tracing::info!(number = %found.number(), "found reversed under external id");
                 return IssueOutcome::FoundReversed(found);
             }
             Ok(None) => None,
@@ -544,14 +489,13 @@ impl Steps {
                 .await
             {
                 Ok(document) => {
-                    let found = FoundDocument::from(&document);
-                    if is_foreign(&found, request.our_numbers, seen.as_deref()) {
+                    if is_foreign(&document, request.our_numbers, seen.as_deref()) {
                         tracing::warn!(
-                            number = %found.number,
-                            tipus = %found.document_type,
+                            number = %document.number(),
+                            tipus = %document.info.document_type,
                             "foreign document under the order"
                         );
-                        return IssueOutcome::Foreign(found);
+                        return IssueOutcome::Foreign(Box::new(document));
                     }
                 }
                 Err(QueryError::NotFound | QueryError::Api { .. }) => {}
@@ -562,11 +506,10 @@ impl Steps {
         // Step 3: create.
         match self.client.send(request.create).await {
             Ok(result) => {
-                let outcome = IssueOutcome::from(result);
-                if let IssueOutcome::Issued(issued) = &outcome {
-                    tracing::info!(number = %issued.number, "document issued");
+                if let Some(number) = &result.invoice_number {
+                    tracing::info!(number = %number, "document issued");
                 }
-                outcome
+                IssueOutcome::from(result)
             }
             Err(error) => match classify_failure(error) {
                 Failure::Duplicate { code, message } => {
@@ -583,7 +526,7 @@ impl Steps {
                             IssueOutcome::Collision(found)
                         }
                         Ok(Some(found)) if found.is_live() => {
-                            tracing::info!(number = %found.number, "reconciled after duplicate");
+                            tracing::info!(number = %found.number(), "reconciled after duplicate");
                             IssueOutcome::Reconciled(found)
                         }
                         // Only a reversed document of ours holds the id: the
@@ -662,16 +605,8 @@ impl Steps {
             ))
             .await
         {
-            Ok(document)
-                if document.info.document_type == "SS"
-                    && document
-                        .info
-                        .referenced_invoice_number
-                        .as_ref()
-                        .map(InvoiceNumber::as_str)
-                        == Some(attempt.invoice_number) =>
-            {
-                let storno_number = document.info.invoice_number.as_str().to_owned();
+            Ok(document) if document.is_storno_of(attempt.invoice_number) => {
+                let storno_number = document.number().to_owned();
                 tracing::info!(storno_number = %storno_number, "storno already issued");
                 return StornoOutcome::AlreadyReversed { storno_number };
             }
@@ -692,7 +627,7 @@ impl Steps {
         match self.client.send(&request).await {
             Ok(created) if created.reverses(&request.invoice_number) => {
                 tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
-                StornoOutcome::Reversed(StornoDocument::from(created))
+                StornoOutcome::Reversed(created)
             }
             Ok(created) => {
                 tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
@@ -774,14 +709,14 @@ impl Steps {
     async fn query_by_external_id(
         &self,
         request: &IssueRequest<'_>,
-    ) -> Result<Option<FoundDocument>, String> {
+    ) -> Result<Option<Box<InvoiceDocument>>, String> {
         match self
             .query_raw(InvoiceSelector::ExternalId(
                 request.external_id.as_str().to_owned(),
             ))
             .await
         {
-            Ok(document) => Ok(Some(FoundDocument::from(&document))),
+            Ok(document) => Ok(Some(Box::new(document))),
             Err(QueryError::NotFound) => Ok(None),
             Err(error) => Err(error.to_string()),
         }
@@ -898,16 +833,16 @@ fn classify_failure(error: ClientError) -> Failure {
 /// Step 2 of [`Steps::issue`]: whether the order-number hint is a live
 /// invoice-kind document that is neither known to be ours nor the document
 /// the pre-query saw under our external id.
-fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
-    is_invoice_family(&found.document_type)
+fn is_foreign(found: &InvoiceDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
+    is_invoice_family(&found.info.document_type)
         && found.is_live()
-        && Some(found.number.as_str()) != seen
-        && !our_numbers.iter().any(|known| known == &found.number)
+        && Some(found.number()) != seen
+        && !our_numbers.iter().any(|known| known == found.number())
 }
 
 fn outcome(result: Result<InvoiceDocument, QueryError>) -> QueryOutcome {
     match result {
-        Ok(document) => QueryOutcome::Found(FoundDocument::from(&document)),
+        Ok(document) => QueryOutcome::Found(Box::new(document)),
         Err(QueryError::NotFound) => QueryOutcome::NotFound,
         Err(error) => QueryOutcome::Transport(error.to_string()),
     }
@@ -966,18 +901,25 @@ mod tests {
         let result = create_request()
             .parse(&response(&created("SZ-1", "1000", "1270", "270")))
             .expect("parse");
+        let outcome = IssueOutcome::from(result.clone());
+        assert_eq!(outcome, IssueOutcome::Issued(result));
+
+        let IssueOutcome::Issued(issued) = outcome else {
+            unreachable!()
+        };
         assert_eq!(
-            IssueOutcome::from(result),
-            IssueOutcome::Issued(IssuedDocument {
-                number: "SZ-1".to_owned(),
-                net: Some(dec!(1000)),
-                gross: Some(dec!(1270)),
-                outstanding: Some(dec!(270)),
-                customer_account_url: Some("https://example.test/acct".to_owned()),
-                document_id: Some(924_307_747),
-                notification_delivery_failed: false,
-            })
+            issued.invoice_number.as_ref().map(InvoiceNumber::as_str),
+            Some("SZ-1")
         );
+        assert_eq!(issued.net_total, Some(dec!(1000)));
+        assert_eq!(issued.gross_total, Some(dec!(1270)));
+        assert_eq!(issued.outstanding, Some(dec!(270)));
+        assert_eq!(
+            issued.customer_account_url.as_deref(),
+            Some("https://example.test/acct")
+        );
+        assert_eq!(issued.document_id, Some(924_307_747));
+        assert!(!issued.notification_delivery_failed);
     }
 
     #[test]
@@ -1002,19 +944,54 @@ mod tests {
         );
     }
 
-    #[test]
-    fn storno_document_from_created_invoice() {
-        let created = StornoInvoice::new("SZ-1")
-            .parse(&response(&created("SS-1", "-1000", "-1270", "0")))
-            .expect("parse");
-        assert_eq!(
-            StornoDocument::from(created),
-            StornoDocument {
-                storno_number: "SS-1".to_owned(),
-                gross: Some(dec!(-1270)),
-                document_id: Some(924_307_747),
-            }
+    /// A queried document, as the `szamla` response XML: a test-account
+    /// document of `ORD-1` with two payments; proformas carry `eszamla` 0.
+    fn queried(number: &str, tipus: &str, extra: &str) -> InvoiceDocument {
+        let eszamla = if tipus == "D" { 0 } else { 2 };
+        let body = format!(
+            r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
+              <szallito><id>972720</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+              <alap><id>1</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla><rendelesszam>ORD-1</rendelesszam><teszt>true</teszt>{extra}</alap>
+              <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>
+              <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
+              <kifizetesek><kifizetes><datum>2026-07-04</datum><jogcim>transfer</jogcim><osszeg>500</osszeg></kifizetes>
+              <kifizetes><datum>2026-07-05</datum><jogcim>transfer</jogcim><osszeg>770</osszeg></kifizetes></kifizetesek>
+              </szamla>"#
         );
+        QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(number)))
+            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+            .expect("parse")
+    }
+
+    #[test]
+    fn document_ext_reads_the_checks_off_a_queried_document() {
+        let order = OrderKey::parse("ORD-1").expect("order");
+        let live = queried("SZ-1", "SZ", "");
+        assert_eq!(live.number(), "SZ-1");
+        assert!(live.is_live());
+        assert_eq!(live.e_invoice(), Some(true));
+        assert_eq!(live.payment_amounts(), [dec!(500), dec!(770)]);
+        assert!(live.account_matches(true, Some(972_720)));
+        assert!(live.account_matches(true, None));
+        assert!(!live.account_matches(false, Some(972_720)));
+        assert!(!live.account_matches(true, Some(1)));
+        assert!(live.is_ours(&order, IssuedKind::Invoice, true, Some(972_720)));
+        assert!(!live.is_ours(&order, IssuedKind::Proforma, true, Some(972_720)));
+        assert!(!live.is_ours(&order, IssuedKind::Invoice, false, None));
+        assert!(!live.is_storno_of("SZ-0"));
+
+        let reversed = queried("SZ-1", "SZ", "<sztornozott>true</sztornozott>");
+        assert!(!reversed.is_live());
+        assert!(reversed.is_ours(&order, IssuedKind::Invoice, true, None));
+
+        let storno = queried("SS-1", "SS", "<hivszamlaszam>SZ-1</hivszamlaszam>");
+        assert!(storno.is_live(), "the storno invoice carries no marker");
+        assert!(storno.is_storno_of("SZ-1"));
+        assert!(!storno.is_storno_of("SZ-2"));
+
+        let proforma = queried("D-1", "D", "");
+        assert_eq!(proforma.e_invoice(), None, "eszamla 0 is not an invoice");
+        assert!(proforma.is_ours(&order, IssuedKind::Proforma, true, None));
     }
 
     #[test]

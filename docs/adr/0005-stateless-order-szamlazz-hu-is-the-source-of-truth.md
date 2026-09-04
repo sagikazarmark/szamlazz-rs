@@ -56,7 +56,7 @@ and through the storno's `hivszamlaszam`. Nothing needs a suffix.
 
 **Every `Found` document is validated before it is trusted**: `rendelesszam == order ∧ tipus ∈ kind-set ∧
 teszt == account.mode ∧ (account.supplier_id unset ∨ szallito/id == supplier_id)`; anything else is
-`conflict{external_id_collision}` (`FoundDocument::is_ours`). External ids are not unique server-side (verified),
+`conflict{external_id_collision}` (`InvoiceDocumentExt::is_ours`). External ids are not unique server-side (verified),
 so this is the only protection against adopting a stranger's document.
 
 **Retry identity is Restate's ingress `Idempotency-Key`**, supplied by the caller. The service does not know

@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
+use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use crate::contract::{IssuedKind, TerminalCode};
 use crate::identity::OrderKey;
-use crate::steps::{FoundDocument, QueryOutcome};
+use crate::steps::{InvoiceDocumentExt as _, QueryOutcome};
 
 /// A fault raised as a `TerminalError` (design §7): never a domain outcome.
 ///
@@ -117,15 +118,15 @@ pub(super) fn next_backoff(current: Duration, max: Duration) -> Duration {
 /// holder may hide a document of ours), `delete_proforma` answers
 /// `not_deleted{external_id_collision}`, and only `get` — a read that must not
 /// fail — reports the slot as absent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum Lookup {
     /// szamlazz.hu holds nothing under the id (code 7).
     Absent,
     /// A document that passed validation: ours, live or reversed.
-    Ours(FoundDocument),
+    Ours(Box<InvoiceDocument>),
     /// A document that fails validation: another order, kind, account mode or
     /// supplier. Never trusted.
-    Collision(FoundDocument),
+    Collision(Box<InvoiceDocument>),
 }
 
 impl Lookup {
@@ -144,26 +145,12 @@ impl Lookup {
                 if found.is_ours(order, kind, expect_test, expect_supplier_id) {
                     Ok(Self::Ours(found))
                 } else {
-                    tracing::warn!(number = %found.number, kind = %kind, "external id collision");
+                    tracing::warn!(number = %found.number(), kind = %kind, "external id collision");
                     Ok(Self::Collision(found))
                 }
             }
         }
     }
-}
-
-/// Whether a document verified by number belongs to the configured account:
-/// the account's `teszt` flag and, when both are known, the supplier id.
-pub(super) fn account_matches(
-    found: &FoundDocument,
-    expect_test: bool,
-    expect_supplier_id: Option<u64>,
-) -> bool {
-    found.test == expect_test
-        && match (expect_supplier_id, found.supplier_id) {
-            (Some(expected), Some(seen)) => expected == seen,
-            _ => true,
-        }
 }
 
 /// The context-bound helpers, stamped out per Restate context type.
@@ -195,7 +182,7 @@ macro_rules! journal_helpers {
             use super::Lookup;
             use crate::contract::{IssuedKind, Selector};
             use crate::identity::{ExternalId, OrderKey};
-            use crate::steps::{QueryOutcome, Steps};
+            use crate::steps::{InvoiceDocumentExt as _, QueryOutcome, Steps};
 
             /// Journals the result of `f` under `name`, executing it at most
             /// once per journal entry (`RunRetryPolicy::max_attempts(1)`):
@@ -307,11 +294,8 @@ macro_rules! journal_helpers {
             ) -> Result<Option<String>, HandlerError> {
                 Ok(
                     match hint(ctx, steps, format!("hint-storno-{number}"), order).await? {
-                        QueryOutcome::Found(found)
-                            if found.document_type == "SS"
-                                && found.referenced_invoice.as_deref() == Some(number) =>
-                        {
-                            Some(found.number)
+                        QueryOutcome::Found(found) if found.is_storno_of(number) => {
+                            Some(found.number().to_owned())
                         }
                         _ => None,
                     },

@@ -17,7 +17,7 @@ use crate::contract::{
 };
 use crate::identity::ExternalId;
 use crate::steps::{
-    QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt, StornoDocument,
+    InvoiceDocumentExt as _, QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt,
     StornoOutcome as StepsStorno,
 };
 
@@ -142,6 +142,7 @@ impl Agent {
             QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
         };
         if let Some(order) = found
+            .info
             .order_number
             .as_deref()
             .map(str::trim)
@@ -151,10 +152,10 @@ impl Agent {
                 StornoResponse::new(StornoOutcome::ManagedByOrder, number).with_order_key(order)
             );
         }
-        if found.reversed == Some(true) {
+        if found.info.reversed == Some(true) {
             return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
         }
-        let e_invoice = found.e_invoice.unwrap_or(self.config.defaults.e_invoice);
+        let e_invoice = found.e_invoice().unwrap_or(self.config.defaults.e_invoice);
         let external_id = ExternalId::for_unmanaged_storno(&self.config.account.slug, &number);
 
         let outcome = {
@@ -175,8 +176,11 @@ impl Agent {
             .await?
         };
         match outcome {
-            StepsStorno::Reversed(StornoDocument { storno_number, .. })
-            | StepsStorno::AlreadyReversed { storno_number } => {
+            StepsStorno::Reversed(storno) => {
+                Ok(StornoResponse::new(StornoOutcome::Reversed, number)
+                    .with_storno_number(storno.invoice_number.as_str()))
+            }
+            StepsStorno::AlreadyReversed { storno_number } => {
                 Ok(StornoResponse::new(StornoOutcome::Reversed, number)
                     .with_storno_number(storno_number))
             }

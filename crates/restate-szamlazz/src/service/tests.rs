@@ -210,27 +210,55 @@ fn faults_serialise_their_code_and_status() {
 
 #[test]
 fn lookup_classifies_query_outcomes() {
+    use szamlazz_agent::InvoiceNumber;
+    use szamlazz_agent::ops::query_pdf::InvoiceSelector;
+    use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
+    use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+
     use super::support::Lookup;
     use crate::contract::IssuedKind;
     use crate::identity::OrderKey;
-    use crate::steps::{FoundDocument, QueryOutcome};
+    use crate::steps::QueryOutcome;
 
+    /// A live `SZ-1` of `ORD-1` from a test account, with the given `alap`
+    /// elements overridden.
+    fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
+        let mut alap = vec![
+            ("szamlaszam", "SZ-1"),
+            ("tipus", "SZ"),
+            ("eszamla", "2"),
+            ("rendelesszam", "ORD-1"),
+            ("teszt", "true"),
+        ];
+        for &(tag, value) in alap_overrides {
+            match alap.iter_mut().find(|(name, _)| *name == tag) {
+                Some(slot) => slot.1 = value,
+                None => alap.push((tag, value)),
+            }
+        }
+        let alap = alap.iter().fold(String::new(), |mut xml, (tag, value)| {
+            use std::fmt::Write as _;
+            write!(xml, "<{tag}>{value}</{tag}>").expect("writing to a String cannot fail");
+            xml
+        });
+        let body = format!(
+            r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
+              <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+              <alap><id>1</id>{alap}</alap>
+              <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>
+              <osszegek><totalossz><netto>0</netto><afa>0</afa><brutto>0</brutto></totalossz></osszegek>
+              </szamla>"#
+        );
+
+        Box::new(
+            QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new("SZ-1")))
+                .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+                .expect("parse"),
+        )
+    }
+
+    const SUPPLIER: u64 = 972_720;
     let order = OrderKey::parse("ORD-1").expect("order");
-    let found = FoundDocument {
-        number: "SZ-1".to_owned(),
-        document_type: "SZ".to_owned(),
-        reversed: None,
-        order_number: Some(" ORD-1 ".to_owned()),
-        referenced_proforma: None,
-        referenced_invoice: None,
-        gross: None,
-        net: None,
-        test: true,
-        e_invoice: Some(true),
-        supplier_id: Some(972_720),
-        document_id: Some(1),
-        payments: Vec::new(),
-    };
     let classify = |outcome: QueryOutcome, supplier: Option<u64>| {
         Lookup::classify(outcome, &order, IssuedKind::Invoice, true, supplier)
     };
@@ -239,47 +267,21 @@ fn lookup_classifies_query_outcomes() {
         classify(QueryOutcome::NotFound, None).expect("classified"),
         Lookup::Absent
     );
-    let ours = classify(QueryOutcome::Found(found.clone()), Some(972_720)).expect("classified");
-    assert_eq!(ours, Lookup::Ours(found.clone()));
+    let ours = found(SUPPLIER, &[]);
+    let lookup = classify(QueryOutcome::Found(ours.clone()), Some(SUPPLIER)).expect("classified");
+    assert_eq!(lookup, Lookup::Ours(ours));
 
-    let reversed = FoundDocument {
-        reversed: Some(true),
-        ..found.clone()
-    };
-    let ours = classify(QueryOutcome::Found(reversed.clone()), None).expect("classified");
-    assert_eq!(ours, Lookup::Ours(reversed));
+    let reversed = found(SUPPLIER, &[("sztornozott", "true")]);
+    let lookup = classify(QueryOutcome::Found(reversed.clone()), None).expect("classified");
+    assert_eq!(lookup, Lookup::Ours(reversed));
 
     for (label, other) in [
-        (
-            "order",
-            FoundDocument {
-                order_number: Some("ORD-2".to_owned()),
-                ..found.clone()
-            },
-        ),
-        (
-            "kind",
-            FoundDocument {
-                document_type: "D".to_owned(),
-                ..found.clone()
-            },
-        ),
-        (
-            "test",
-            FoundDocument {
-                test: false,
-                ..found.clone()
-            },
-        ),
-        (
-            "supplier",
-            FoundDocument {
-                supplier_id: Some(1),
-                ..found.clone()
-            },
-        ),
+        ("order", found(SUPPLIER, &[("rendelesszam", "ORD-2")])),
+        ("kind", found(SUPPLIER, &[("tipus", "D")])),
+        ("test", found(SUPPLIER, &[("teszt", "false")])),
+        ("supplier", found(1, &[])),
     ] {
-        let lookup = classify(QueryOutcome::Found(other.clone()), Some(972_720)).expect(label);
+        let lookup = classify(QueryOutcome::Found(other.clone()), Some(SUPPLIER)).expect(label);
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
     }
     assert!(classify(QueryOutcome::Transport("down".to_owned()), None).is_err());
