@@ -1,5 +1,13 @@
 # `Order` is keyed by the order number and identifies documents by a deterministic external id
 
+Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Still holds: the key rule (trimmed, case preserved, validated), the deterministic external id, the query-first
+create inside a single `ctx.run` with `max_attempts(1)`, the `Found`-validation rule, the 2 m
+`initial_interval`, and the toggle precondition. Superseded: the `{gen}` suffix (the newest holder under
+`{slug}:{order}:{kind}` is the answer; no counter), the `cseq` corrective counter (→ caller-supplied
+`correction_id`), `request_id` as retry identity (→ Restate's ingress `Idempotency-Key`), and "written to state
+before the first call" (no state; the external id is derived from the key).
+
 Issuing through the Számla Agent is at-least-once at every layer: the HTTP client can time out
 after the server has issued, and a `ctx.run` closure that crashes before its result is journaled is
 executed again. The design has to guarantee one legal document per order and kind anyway, and it has

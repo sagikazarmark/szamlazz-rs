@@ -15,18 +15,18 @@ use restate_sdk::serde::Json;
 use super::{Agent, Order};
 use crate::contract::{
     CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest, DeleteProformaResponse,
-    DocumentKind, ForgetRequest, GetRequest, OrderSnapshot, QueryRequest, QueryResponse,
-    RecordReversalRequest, SetPaymentsRequest, SetPaymentsResponse, StornoRequest, StornoResponse,
+    DocumentKind, OrderStatus, QueryRequest, QueryResponse, SetPaymentsRequest,
+    SetPaymentsResponse, StornoRequest, StornoResponse,
 };
 
 /// The `Szamlazz.Order` Virtual Object, keyed by the order number
 /// (`rendelésszám`).
 ///
-/// Issuing handlers take a caller-supplied `request_id` as their retry
-/// identity: the same id returns the entry's current state forever. Every
-/// handler that calls szamlazz.hu kills the invocation after five attempts
-/// (ADR 0004); the `pending` slot written before the first call makes that
-/// safe.
+/// Keeps no state: every handler answers from szamlazz.hu through the order's
+/// deterministic external ids. The retry identity of a request is Restate's
+/// ingress `Idempotency-Key`. Every handler that calls szamlazz.hu kills the
+/// invocation after five attempts (ADR 0004); the external-id pre-query inside
+/// every attempt is what makes that safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -41,20 +41,20 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn create_proforma(
         &self,
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_slot(&ctx, DocumentKind::Proforma, request.into_inner()))
+        Box::pin(self.issue_kind(&ctx, DocumentKind::Proforma, request.into_inner()))
             .await
             .map(Json)
     }
 
-    /// Issues the invoice (`számla`) of the order, optionally converting its
-    /// proforma.
+    /// Issues the invoice (`számla`) of the order, converting its live
+    /// proforma unless told otherwise (`options.proforma`).
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -66,20 +66,28 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn create_invoice(
         &self,
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_slot(&ctx, DocumentKind::Invoice, request.into_inner()))
+        Box::pin(self.issue_kind(&ctx, DocumentKind::Invoice, request.into_inner()))
             .await
             .map(Json)
     }
 
     /// Issues the prepayment invoice (`előlegszámla`) of the order; one per
     /// order.
+    ///
+    /// Takes no `options.proforma` (anything but `auto` is `invalid_input`)
+    /// and runs no proforma lookup: the Agent cannot carry
+    /// `dijbekeroSzamlaszam` on a prepayment invoice, and szamlazz.hu
+    /// converts the order's live proforma by shared order number regardless
+    /// (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
+    /// auto-linking, deletion"). `get` reports the proforma as `consumed`
+    /// once the link landed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -91,19 +99,19 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn create_prepayment(
         &self,
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_slot(&ctx, DocumentKind::Prepayment, request.into_inner()))
+        Box::pin(self.issue_kind(&ctx, DocumentKind::Prepayment, request.into_inner()))
             .await
             .map(Json)
     }
 
-    /// Issues the final invoice (`végszámla`) settling the order's committed
+    /// Issues the final invoice (`végszámla`) settling the order's live
     /// prepayment invoice.
     #[handler(
         invocation_retry_policy(
@@ -116,20 +124,20 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn create_final(
         &self,
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_slot(&ctx, DocumentKind::Final, request.into_inner()))
+        Box::pin(self.issue_kind(&ctx, DocumentKind::Final, request.into_inner()))
             .await
             .map(Json)
     }
 
-    /// Issues a corrective invoice (`helyesbítő számla`) for an invoice managed
-    /// by this order. A new request id issues a new corrective.
+    /// Issues a corrective invoice (`helyesbítő számla`) for an invoice of
+    /// this order. A new `correction_id` issues a new corrective.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -141,7 +149,7 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn correct_invoice(
         &self,
@@ -153,7 +161,7 @@ impl Order {
             .map(Json)
     }
 
-    /// Reverses (`sztornó`) an invoice managed by this order; idempotent.
+    /// Reverses (`sztornó`) an invoice of this order; idempotent.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -165,7 +173,7 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn storno_invoice(
         &self,
@@ -189,7 +197,7 @@ impl Order {
         inactivity_timeout = "4m",
         abort_timeout = "3m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn delete_proforma(
         &self,
@@ -201,50 +209,12 @@ impl Order {
             .map(Json)
     }
 
-    /// The order's ledger as recorded, or — with `verify` — after checking
-    /// every committed document against szamlazz.hu. Read-only: never writes
-    /// state, so it runs concurrently with the exclusive handlers.
-    #[handler(
-        invocation_retry_policy(
-            initial_interval = "2m",
-            factor = 2.0,
-            max_interval = "10m",
-            max_attempts = 5,
-            on_max_attempts = "kill"
-        ),
-        inactivity_timeout = "4m",
-        abort_timeout = "3m",
-        journal_retention = "3d",
-        idempotency_retention = "7d"
-    )]
-    async fn get(
-        &self,
-        ctx: SharedObjectContext<'_>,
-        request: Json<GetRequest>,
-    ) -> HandlerResult<Json<OrderSnapshot>> {
-        self.snapshot(&ctx, request.into_inner()).await.map(Json)
-    }
-
-    /// Operator assertion about a recorded document (private: not reachable
-    /// from the ingress).
-    #[handler(ingress_private = true)]
-    async fn record_reversal(
-        &self,
-        ctx: ObjectContext<'_>,
-        request: Json<RecordReversalRequest>,
-    ) -> HandlerResult<Json<OrderSnapshot>> {
-        self.record(&ctx, request.into_inner()).await.map(Json)
-    }
-
-    /// Operator drop of a slot whose document szamlazz.hu no longer knows
-    /// (private: not reachable from the ingress).
-    #[handler(ingress_private = true)]
-    async fn forget(
-        &self,
-        ctx: ObjectContext<'_>,
-        request: Json<ForgetRequest>,
-    ) -> HandlerResult<Json<OrderSnapshot>> {
-        self.forget_slot(&ctx, request.into_inner()).await.map(Json)
+    /// What szamlazz.hu holds under the order's external ids right now: four
+    /// queries, no state. Read-only, so it runs concurrently with the
+    /// exclusive handlers.
+    #[handler(invocation_retry_policy(max_attempts = 3, on_max_attempts = "kill"))]
+    async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
+        self.status(&ctx).await.map(Json)
     }
 }
 
@@ -277,7 +247,7 @@ impl Agent {
         inactivity_timeout = "2m",
         abort_timeout = "2m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn set_payments(
         &self,
@@ -295,7 +265,7 @@ impl Agent {
         inactivity_timeout = "2m",
         abort_timeout = "2m",
         journal_retention = "3d",
-        idempotency_retention = "7d"
+        idempotency_retention = "30d"
     )]
     async fn storno(
         &self,

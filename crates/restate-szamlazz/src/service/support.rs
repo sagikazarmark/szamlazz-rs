@@ -1,26 +1,20 @@
 //! Plumbing shared by the `Szamlazz.Order` and `Szamlazz.Agent` handlers: the
-//! fault → `TerminalError` mapping, ledger state access, journaled runs and
-//! the validation of documents found by a query.
+//! fault → `TerminalError` mapping, journaled runs and the validation of
+//! documents found under our external ids.
 
 use std::time::Duration;
 
-use jiff::Timestamp;
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 
-use crate::config::Config;
-use crate::contract::{IssuedKind, RequestId, TerminalCode};
+use crate::contract::{IssuedKind, TerminalCode};
 use crate::identity::OrderKey;
-use crate::ledger::{Ledger, LedgerError};
-use crate::steps::{FoundDocument, document_type_of};
+use crate::steps::{FoundDocument, QueryOutcome};
 
-/// The Virtual Object state key holding the [`Ledger`].
-pub(super) const LEDGER_KEY: &str = "ledger";
-
-/// A fault raised as a `TerminalError` (design §8): never a domain outcome.
+/// A fault raised as a `TerminalError` (design §7): never a domain outcome.
 ///
 /// Serialised as the error message so that the ingress body carries the
-/// [`TerminalCode`] token and the identity of the request it is about.
+/// [`TerminalCode`] token and the identity of the document it is about.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct Fault {
     code: TerminalCode,
@@ -29,12 +23,8 @@ pub(super) struct Fault {
     order: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<IssuedKind>,
-    #[serde(rename = "gen", skip_serializing_if = "Option::is_none")]
-    generation: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     external_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    request_id: Option<RequestId>,
 }
 
 impl Fault {
@@ -44,9 +34,7 @@ impl Fault {
             message: message.into(),
             order: None,
             kind: None,
-            generation: None,
             external_id: None,
-            request_id: None,
         }
     }
 
@@ -70,16 +58,12 @@ impl Fault {
     pub(super) fn about(
         mut self,
         order: &OrderKey,
-        kind: IssuedKind,
-        generation: u32,
+        kind: Option<IssuedKind>,
         external_id: impl Into<String>,
-        request_id: Option<&RequestId>,
     ) -> Self {
         self.order = Some(order.as_str().to_owned());
-        self.kind = Some(kind);
-        self.generation = Some(generation);
+        self.kind = kind;
         self.external_id = Some(external_id.into());
-        self.request_id = request_id.cloned();
         self
     }
 
@@ -108,20 +92,6 @@ impl From<Fault> for HandlerError {
     }
 }
 
-/// A ledger precondition failure surfacing from a handler is a programming
-/// error in the dispatch logic (the handler checked the status first), except
-/// for the operator handlers, which map it to `invalid_input` explicitly.
-impl From<LedgerError> for Fault {
-    fn from(error: LedgerError) -> Self {
-        match error {
-            LedgerError::SupplierMismatch { recorded, seen } => Self::account_mismatch(format!(
-                "document belongs to supplier {seen}, the ledger records supplier {recorded}"
-            )),
-            other => Self::invalid_input(other.to_string()),
-        }
-    }
-}
-
 /// A `TerminalError` with a plain HTTP status and message (the `Szamlazz.Agent`
 /// service's not-found and rejection errors).
 pub(super) fn terminal(status: u16, code: &str, message: impl Into<String>) -> HandlerError {
@@ -135,80 +105,65 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
 }
 
-/// The remainder of `backoff` since `last`, or zero.
-pub(super) fn remaining_backoff(backoff: Duration, last: Timestamp, now: Timestamp) -> Duration {
-    let elapsed = Duration::try_from(now.duration_since(last)).unwrap_or(Duration::ZERO);
-    backoff.saturating_sub(elapsed)
-}
-
 /// The next backoff of a doubling schedule capped at `max`.
 pub(super) fn next_backoff(current: Duration, max: Duration) -> Duration {
     current.saturating_mul(2).min(max)
 }
 
-/// Why a document found under our external id is not ours.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Mismatch {
-    /// `rendelesszam` differs from the order key.
-    Order,
-    /// `tipus` is not the kind's document type.
-    Kind,
-    /// `teszt` differs from the account mode.
-    Test,
-    /// `szallito/id` differs from the expected supplier id.
-    Supplier,
-}
-
-/// Validates a document found by a query against the identity it should have
-/// (design §3): same order, the kind's `tipus`, the account's `teszt` and,
-/// when both are known, the supplier id.
-pub(super) fn validate_found(
-    found: &FoundDocument,
-    order: &OrderKey,
-    kind: IssuedKind,
-    config: &Config,
-    supplier_id: Option<u64>,
-) -> Result<(), Mismatch> {
-    if found.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
-        return Err(Mismatch::Order);
-    }
-    if found.document_type != document_type_of(kind) {
-        return Err(Mismatch::Kind);
-    }
-    if found.test != config.account.mode.is_test() {
-        return Err(Mismatch::Test);
-    }
-    if let (Some(expected), Some(seen)) = (supplier_id, found.supplier_id)
-        && expected != seen
-    {
-        return Err(Mismatch::Supplier);
-    }
-    Ok(())
-}
-
-/// Records the supplier id a query reported; a different recorded id is an
-/// `account_mismatch` fault.
-pub(super) fn learn_supplier(ledger: &mut Ledger, found: &FoundDocument) -> Result<(), Fault> {
-    match found.supplier_id {
-        Some(id) => ledger.learn_supplier_id(id).map_err(Fault::from),
-        None => Ok(()),
-    }
-}
-
-/// The supplier id to expect on a found document: the configured pin or the
-/// one the ledger learned.
-pub(super) fn expected_supplier(config: &Config, ledger: &Ledger) -> Option<u64> {
-    config.account.supplier_id.or(ledger.supplier_id())
-}
-
-/// What the order-number hint says about a proforma szamlazz.hu no longer
-/// returns by number (design §6 step 2, proforma kind).
+/// What a query by one of our external ids found (design §3).
+///
+/// Every caller matches all three variants: an issuing handler refuses a
+/// [`Lookup::Collision`] as `conflict{external_id_collision}` (the newest
+/// holder may hide a document of ours), `delete_proforma` answers
+/// `not_deleted{external_id_collision}`, and only `get` — a read that must not
+/// fail — reports the slot as absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ProformaFate {
-    /// An `SZ` or `ES` referencing the proforma exists: it was consumed.
-    Consumed(Box<FoundDocument>),
-    /// Nothing references it: it was deleted.
-    Deleted,
+pub(super) enum Lookup {
+    /// szamlazz.hu holds nothing under the id (code 7).
+    Absent,
+    /// A document that passed validation: ours, live or reversed.
+    Ours(FoundDocument),
+    /// A document that fails validation: another order, kind, account mode or
+    /// supplier. Never trusted.
+    Collision(FoundDocument),
+}
+
+impl Lookup {
+    /// Classifies a query outcome; a failed check is `unavailable`.
+    pub(super) fn classify(
+        outcome: QueryOutcome,
+        order: &OrderKey,
+        kind: IssuedKind,
+        expect_test: bool,
+        expect_supplier_id: Option<u64>,
+    ) -> Result<Self, Fault> {
+        match outcome {
+            QueryOutcome::NotFound => Ok(Self::Absent),
+            QueryOutcome::Transport(message) => Err(Fault::unavailable(message)),
+            QueryOutcome::Found(found) => {
+                if found.is_ours(order, kind, expect_test, expect_supplier_id) {
+                    Ok(Self::Ours(found))
+                } else {
+                    tracing::warn!(number = %found.number, kind = %kind, "external id collision");
+                    Ok(Self::Collision(found))
+                }
+            }
+        }
+    }
+}
+
+/// Whether a document verified by number belongs to the configured account:
+/// the account's `teszt` flag and, when both are known, the supplier id.
+pub(super) fn account_matches(
+    found: &FoundDocument,
+    expect_test: bool,
+    expect_supplier_id: Option<u64>,
+) -> bool {
+    found.test == expect_test
+        && match (expect_supplier_id, found.supplier_id) {
+            (Some(expected), Some(seen)) => expected == seen,
+            _ => true,
+        }
 }
 
 /// The context-bound helpers, stamped out per Restate context type.
@@ -217,7 +172,7 @@ pub(super) enum ProformaFate {
 /// generic `async fn` over them trips rust-lang/rust#100013 (`Send` is not
 /// general enough) inside the macro-generated dispatcher.
 macro_rules! journal_helpers {
-    ($module:ident, $ctx:ident, $($state:tt)*) => {
+    ($module:ident, $ctx:ident) => {
         #[allow(
             dead_code,
             unused_imports,
@@ -228,10 +183,8 @@ macro_rules! journal_helpers {
             use std::sync::Arc;
             use std::time::Duration;
 
-            use jiff::Timestamp;
             use restate_sdk::context::{
-                ContextReadState as _, ContextSideEffects as _, ContextTimers as _,
-                ContextWriteState as _, RunFuture as _, RunRetryPolicy,
+                ContextSideEffects as _, ContextTimers as _, RunFuture as _, RunRetryPolicy,
             };
             use restate_sdk::errors::HandlerError;
             use restate_sdk::prelude::$ctx;
@@ -239,10 +192,9 @@ macro_rules! journal_helpers {
             use serde::Serialize;
             use serde::de::DeserializeOwned;
 
-            use super::{Fault, LEDGER_KEY, ProformaFate};
-            use crate::contract::Selector;
+            use super::Lookup;
+            use crate::contract::{IssuedKind, Selector};
             use crate::identity::{ExternalId, OrderKey};
-            use crate::ledger::Ledger;
             use crate::steps::{QueryOutcome, Steps};
 
             /// Journals the result of `f` under `name`, executing it at most
@@ -267,11 +219,6 @@ macro_rules! journal_helpers {
                 Ok(value)
             }
 
-            /// The journaled current time: deterministic on replay.
-            pub(in crate::service) async fn now(ctx: &$ctx<'_>) -> Result<Timestamp, HandlerError> {
-                run_once(ctx, "now", || async { Timestamp::now() }).await
-            }
-
             /// Durable sleep; a zero duration is skipped.
             pub(in crate::service) async fn sleep(
                 ctx: &$ctx<'_>,
@@ -292,7 +239,12 @@ macro_rules! journal_helpers {
             ) -> Result<QueryOutcome, HandlerError> {
                 let steps = Arc::clone(steps);
                 let number = number.to_owned();
-                run_once(ctx, name, move || async move { steps.verify(&number).await }).await
+                run_once(
+                    ctx,
+                    name,
+                    move || async move { steps.verify(&number).await },
+                )
+                .await
             }
 
             /// Journaled query by external id.
@@ -304,7 +256,33 @@ macro_rules! journal_helpers {
             ) -> Result<QueryOutcome, HandlerError> {
                 let steps = Arc::clone(steps);
                 let selector = Selector::ExternalId(external_id.as_str().to_owned());
-                run_once(ctx, name, move || async move { steps.query(&selector).await }).await
+                run_once(
+                    ctx,
+                    name,
+                    move || async move { steps.query(&selector).await },
+                )
+                .await
+            }
+
+            /// Journaled query by one of our external ids, validated against
+            /// the identity the document should have (design §3).
+            pub(in crate::service) async fn lookup(
+                ctx: &$ctx<'_>,
+                steps: &Arc<Steps>,
+                name: impl Into<String>,
+                external_id: &ExternalId,
+                order: &OrderKey,
+                kind: IssuedKind,
+            ) -> Result<Lookup, HandlerError> {
+                let outcome = query_external_id(ctx, steps, name, external_id).await?;
+                let account = &steps.config().account;
+                Ok(Lookup::classify(
+                    outcome,
+                    order,
+                    kind,
+                    account.mode.is_test(),
+                    account.supplier_id,
+                )?)
             }
 
             /// Journaled order-number hint.
@@ -319,51 +297,30 @@ macro_rules! journal_helpers {
                 run_once(ctx, name, move || async move { steps.hint(&order).await }).await
             }
 
-            /// Disambiguates a code 7 on proforma `number` via the
-            /// order-number hint.
-            pub(in crate::service) async fn proforma_fate(
+            /// The storno number of a reversed document, when the order-number
+            /// hint is the `SS` referencing it.
+            pub(in crate::service) async fn storno_number_of(
                 ctx: &$ctx<'_>,
                 steps: &Arc<Steps>,
                 order: &OrderKey,
                 number: &str,
-            ) -> Result<ProformaFate, HandlerError> {
-                match hint(ctx, steps, format!("hint-proforma-{number}"), order).await? {
-                    QueryOutcome::Found(found)
-                        if matches!(found.document_type.as_str(), "SZ" | "ES")
-                            && found.referenced_proforma.as_deref() == Some(number) =>
-                    {
-                        Ok(ProformaFate::Consumed(Box::new(found)))
-                    }
-                    QueryOutcome::Found(_) | QueryOutcome::NotFound => Ok(ProformaFate::Deleted),
-                    QueryOutcome::Transport(message) => Err(Fault::unavailable(message).into()),
-                }
+            ) -> Result<Option<String>, HandlerError> {
+                Ok(
+                    match hint(ctx, steps, format!("hint-storno-{number}"), order).await? {
+                        QueryOutcome::Found(found)
+                            if found.document_type == "SS"
+                                && found.referenced_invoice.as_deref() == Some(number) =>
+                        {
+                            Some(found.number)
+                        }
+                        _ => None,
+                    },
+                )
             }
-
-            journal_helpers!(@state $ctx $($state)*);
         }
     };
-    (@state $ctx:ident read) => {
-        /// Loads the ledger, or an empty one when the object has no state
-        /// yet.
-        pub(in crate::service) async fn load(ctx: &$ctx<'_>) -> Result<Ledger, HandlerError> {
-            Ok(ctx
-                .get::<Json<Ledger>>(LEDGER_KEY)
-                .await?
-                .map_or_else(Ledger::new, Json::into_inner))
-        }
-    };
-    (@state $ctx:ident read_write) => {
-        journal_helpers!(@state $ctx read);
-
-        /// Writes the ledger. Called immediately after every mutation that
-        /// must survive a crash.
-        pub(in crate::service) fn save(ctx: &$ctx<'_>, ledger: &Ledger) {
-            ctx.set(LEDGER_KEY, Json(ledger.clone()));
-        }
-    };
-    (@state $ctx:ident none) => {};
 }
 
-journal_helpers!(object, ObjectContext, read_write);
-journal_helpers!(shared, SharedObjectContext, read);
-journal_helpers!(service, Context, none);
+journal_helpers!(object, ObjectContext);
+journal_helpers!(shared, SharedObjectContext);
+journal_helpers!(service, Context);

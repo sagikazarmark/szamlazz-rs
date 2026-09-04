@@ -5,7 +5,8 @@
 //! [account]
 //! slug = "acct"
 //! agent_key = "..."
-//! fp_secret = "..."
+//! mode = "live"
+//! supplier_id = 972720
 //!
 //! [defaults]
 //! language = "hu"
@@ -50,15 +51,12 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns the first violated invariant: an empty agent key or fingerprint
-    /// secret, `issue.max_attempts == 0`, or `issue.first_backoff` greater
-    /// than `issue.max_backoff`.
+    /// Returns the first violated invariant: an empty agent key,
+    /// `issue.max_attempts == 0`, or `issue.first_backoff` greater than
+    /// `issue.max_backoff`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.account.agent_key.expose().trim().is_empty() {
             return Err(ConfigError::EmptyAgentKey);
-        }
-        if self.account.fp_secret.expose().is_empty() {
-            return Err(ConfigError::EmptyFingerprintSecret);
         }
         if self.issue.max_attempts == 0 {
             return Err(ConfigError::ZeroMaxAttempts);
@@ -80,9 +78,6 @@ pub enum ConfigError {
     /// `account.agent_key` is empty or blank.
     #[error("account.agent_key must not be empty")]
     EmptyAgentKey,
-    /// `account.fp_secret` is empty.
-    #[error("account.fp_secret must not be empty")]
-    EmptyFingerprintSecret,
     /// `issue.max_attempts` is zero.
     #[error("issue.max_attempts must be at least 1")]
     ZeroMaxAttempts,
@@ -99,7 +94,7 @@ pub enum ConfigError {
 /// The szamlazz.hu account.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountConfig {
-    /// Short name that namespaces external ids (`{slug}:{order}:{kind}:{gen}`).
+    /// Short name that namespaces external ids (`{slug}:{order}:{kind}`).
     pub slug: AccountSlug,
     /// The Agent key (`számlaagentkulcs`).
     pub agent_key: Secret,
@@ -107,16 +102,13 @@ pub struct AccountConfig {
     #[serde(default)]
     pub endpoint: Option<String>,
     /// Whether the account is a live or a test account; validated against
-    /// `teszt` on every adopted document.
+    /// `teszt` on every document found under our external ids.
     #[serde(default)]
     pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`). Optional pin; otherwise
-    /// learned from the first query and stored in the ledger.
+    /// The account's supplier id (`szállító/id`). Optional pin; when set it is
+    /// validated against every document found under our external ids.
     #[serde(default)]
     pub supplier_id: Option<u64>,
-    /// Key of the payload fingerprint HMAC. Rotating it invalidates stored
-    /// fingerprints, so every repeat request reports `payload_mismatch`.
-    pub fp_secret: Secret,
 }
 
 /// Whether the account is live or a test account.
@@ -375,16 +367,15 @@ impl SellerEmailConfig {
 pub struct IssueConfig {
     /// Attempts per invocation before `outcome_unknown`. Default `5`.
     pub max_attempts: u32,
-    /// Sleep after the first failed attempt (and the pre-sleep before
-    /// reconciling a `pending` slot). Default `2m`.
+    /// Sleep after the first failed attempt. Default `2m`.
     #[serde(with = "duration_str")]
     pub first_backoff: Duration,
     /// Cap of the doubling backoff. Default `10m`.
     #[serde(with = "duration_str")]
     pub max_backoff: Duration,
     /// Query the order number before the first attempt to detect foreign
-    /// documents. Default `true`. The hint is taken regardless when
-    /// `options.proforma == ledger`.
+    /// documents. Default `true`. The hint is taken regardless when a proforma
+    /// is linked.
     pub detect_foreign: bool,
 }
 
@@ -495,7 +486,6 @@ mod tests {
                 "endpoint": "http://127.0.0.1:1234/szamla/",
                 "mode": "test",
                 "supplier_id": 972_720,
-                "fp_secret": "fp",
             },
             "defaults": {
                 "e_invoice": true,
@@ -533,7 +523,6 @@ mod tests {
         assert_eq!(config.account.mode, AccountMode::Test);
         assert!(config.account.mode.is_test());
         assert_eq!(config.account.supplier_id, Some(972_720));
-        assert_eq!(config.account.fp_secret.expose(), "fp");
         assert!(config.defaults.e_invoice);
         assert_eq!(config.defaults.language, "en");
         assert_eq!(config.defaults.currency, "EUR");
@@ -558,7 +547,7 @@ mod tests {
     #[test]
     fn minimal_config_uses_spec_defaults() {
         let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct", "agent_key": "key", "fp_secret": "fp"},
+            "account": {"slug": "acct", "agent_key": "key"},
         }))
         .expect("parse");
 
@@ -592,7 +581,7 @@ mod tests {
             "ácct",
         ] {
             let result = serde_json::from_value::<Config>(json!({
-                "account": {"slug": slug, "agent_key": "key", "fp_secret": "fp"},
+                "account": {"slug": slug, "agent_key": "key"},
             }));
             assert!(result.is_err(), "{slug:?} should be rejected");
         }
@@ -611,35 +600,31 @@ mod tests {
 
     #[test]
     fn validate_reports_invariants() {
-        fn config(issue: &serde_json::Value, agent_key: &str, fp_secret: &str) -> Config {
+        fn config(issue: &serde_json::Value, agent_key: &str) -> Config {
             serde_json::from_value(json!({
-                "account": {"slug": "acct", "agent_key": agent_key, "fp_secret": fp_secret},
+                "account": {"slug": "acct", "agent_key": agent_key},
                 "issue": issue,
             }))
             .expect("parse")
         }
 
         assert_eq!(
-            config(&json!({}), " ", "fp").validate(),
+            config(&json!({}), " ").validate(),
             Err(ConfigError::EmptyAgentKey)
         );
         assert_eq!(
-            config(&json!({}), "key", "").validate(),
-            Err(ConfigError::EmptyFingerprintSecret)
-        );
-        assert_eq!(
-            config(&json!({"max_attempts": 0}), "key", "fp").validate(),
+            config(&json!({"max_attempts": 0}), "key").validate(),
             Err(ConfigError::ZeroMaxAttempts)
         );
         assert_eq!(
-            config(&json!({"first_backoff": "11m"}), "key", "fp").validate(),
+            config(&json!({"first_backoff": "11m"}), "key").validate(),
             Err(ConfigError::BackoffOrder {
                 first: Duration::from_mins(11),
                 max: Duration::from_secs(600),
             })
         );
         assert_eq!(
-            config(&json!({"first_backoff": "10m"}), "key", "fp").validate(),
+            config(&json!({"first_backoff": "10m"}), "key").validate(),
             Ok(())
         );
     }
@@ -705,7 +690,7 @@ mod tests {
     #[test]
     fn secret_debug_is_redacted() {
         let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct", "agent_key": "hunter2", "fp_secret": "fp-hunter2"},
+            "account": {"slug": "acct", "agent_key": "hunter2"},
         }))
         .expect("parse");
         let debug = format!("{config:?}");

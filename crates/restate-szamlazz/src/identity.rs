@@ -1,23 +1,18 @@
-//! Identity of orders and documents: the `Order` key, the deterministic
-//! external id (`szamlaKulsoAzon`) and the payload fingerprint.
+//! Identity of orders and documents: the `Order` key and the deterministic
+//! external id (`szamlaKulsoAzon`).
 //!
-//! See §3 of the design document (ADR 0002): the order key is the trimmed
-//! order number, the external id is derived from ledger state before the
-//! first szamlazz.hu call, and the fingerprint detects caller payload drift
-//! on a repeated request id.
+//! See §3 of the design document (ADR 0002, ADR 0005): the order key is the
+//! trimmed order number, and the external id is derived from the key alone so
+//! that *any* invocation can find what an earlier one issued.
 
 use std::fmt;
 use std::str::FromStr;
 
-use hmac::{Hmac, KeyInit as _, Mac as _};
-use jiff::civil::Date;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use unicode_normalization::UnicodeNormalization as _;
 
 use crate::config::AccountSlug;
-use crate::contract::DocumentKind;
+use crate::contract::{CorrectionId, DocumentKind};
 
 /// The key of an `Order` Virtual Object: the order number (`rendelésszám`)
 /// trimmed of leading and trailing whitespace, case preserved — exactly what
@@ -132,41 +127,48 @@ pub enum InvalidOrderKey {
 
 /// The external id (`szamlaKulsoAzon`) of a document the service issues.
 ///
-/// Deterministic from ledger state: `{slug}:{order}:{kind}:{gen}` for slot
-/// kinds, `{slug}:{order}:corrective:{cseq}` for correctives, and the
-/// original's id suffixed with `:storno` for a storno invoice. Not unique
-/// server-side, so every document found by it is validated before adoption.
+/// Deterministic from the order key alone: `{slug}:{order}:{kind}` for the
+/// four document kinds, `{slug}:{order}:corrective:{correction_id}` for
+/// correctives, `{slug}:{order}:storno:{original_number}` for a storno
+/// invoice and `{slug}:by-number:{number}:storno` for the storno of a
+/// document no `Order` manages. Not unique server-side — a query returns the
+/// newest holder — so every document found by it is validated before it is
+/// trusted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExternalId(String);
 
 impl ExternalId {
-    /// Wraps an id read back from the ledger.
+    /// Wraps an id.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    /// The id of generation `generation` of the `kind` slot of `order`.
+    /// The id of the `kind` document of `order`: `{slug}:{order}:{kind}`.
     #[must_use]
-    pub fn for_slot(
-        slug: &AccountSlug,
-        order: &OrderKey,
-        kind: DocumentKind,
-        generation: u32,
-    ) -> Self {
-        Self(format!("{slug}:{order}:{}:{generation}", kind.as_str()))
+    pub fn for_kind(slug: &AccountSlug, order: &OrderKey, kind: DocumentKind) -> Self {
+        Self(format!("{slug}:{order}:{}", kind.as_str()))
     }
 
-    /// The id of the corrective with sequence number `cseq` of `order`.
+    /// The id of the corrective `id` of `order`:
+    /// `{slug}:{order}:corrective:{id}`.
     #[must_use]
-    pub fn for_corrective(slug: &AccountSlug, order: &OrderKey, cseq: u32) -> Self {
-        Self(format!("{slug}:{order}:corrective:{cseq}"))
+    pub fn for_corrective(slug: &AccountSlug, order: &OrderKey, id: &CorrectionId) -> Self {
+        Self(format!("{slug}:{order}:corrective:{id}"))
     }
 
-    /// The id sent on the storno of the document this id identifies.
+    /// The id sent on the storno of `original_number`, a document of `order`:
+    /// `{slug}:{order}:storno:{original_number}`.
     #[must_use]
-    pub fn storno_of(&self) -> Self {
-        Self(format!("{}:storno", self.0))
+    pub fn for_storno(slug: &AccountSlug, order: &OrderKey, original_number: &str) -> Self {
+        Self(format!("{slug}:{order}:storno:{original_number}"))
+    }
+
+    /// The id sent on the storno of `number`, a document no `Order` manages:
+    /// `{slug}:by-number:{number}:storno`.
+    #[must_use]
+    pub fn for_unmanaged_storno(slug: &AccountSlug, number: &str) -> Self {
+        Self(format!("{slug}:by-number:{number}:storno"))
     }
 
     /// The id as a string slice.
@@ -198,91 +200,15 @@ impl From<ExternalId> for String {
 /// attempt: trimmed and in Unicode NFC.
 ///
 /// szamlazz.hu's replay check compares the buyer name byte-exact, so the
-/// service normalises once at validation and journals the result.
+/// service normalises once at validation and serialises the result
+/// identically on every attempt.
 #[must_use]
 pub fn normalize_buyer_name(name: &str) -> String {
     name.trim().nfc().collect()
 }
 
-/// The fingerprint of an issuing request's payload: HMAC-SHA256 over the
-/// normalised buyer name, the computed gross total and the caller-supplied
-/// dates, hex-encoded.
-///
-/// Used solely to detect caller payload drift on a repeated request id
-/// (`conflict{payload_mismatch}`); it is not a model of the server's replay
-/// check. The ledger stores it instead of buyer data.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Fingerprint(String);
-
-impl Fingerprint {
-    /// Computes the fingerprint.
-    ///
-    /// The canonical input is `name\n{gross}\n{issue|-}\n{due|-}\n{fulfil|-}`
-    /// with `gross` normalised (no trailing zeros, so `100` and `100.00`
-    /// agree) and each date as `YYYY-MM-DD` or `-` when absent.
-    #[must_use]
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "HMAC accepts keys of any length; the Result is always Ok"
-    )]
-    pub fn compute(
-        secret: &[u8],
-        normalized_name: &str,
-        gross: Decimal,
-        issue: Option<Date>,
-        due: Option<Date>,
-        fulfil: Option<Date>,
-    ) -> Self {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts keys of any length");
-        mac.update(normalized_name.as_bytes());
-        mac.update(b"\n");
-        mac.update(gross.normalize().to_string().as_bytes());
-        for date in [issue, due, fulfil] {
-            mac.update(b"\n");
-            match date {
-                Some(date) => mac.update(date.to_string().as_bytes()),
-                None => mac.update(b"-"),
-            }
-        }
-        Self(hex(&mac.finalize().into_bytes()))
-    }
-
-    /// The fingerprint as a hex string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for Fingerprint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Fingerprint {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use jiff::civil::date;
-    use rust_decimal::dec;
-
     use super::*;
 
     fn slug() -> AccountSlug {
@@ -341,42 +267,40 @@ mod tests {
     fn external_id_formats() {
         let order = OrderKey::parse("ORD-1").expect("valid");
         assert_eq!(
-            ExternalId::for_slot(&slug(), &order, DocumentKind::Proforma, 0).as_str(),
-            "acct:ORD-1:proforma:0"
+            ExternalId::for_kind(&slug(), &order, DocumentKind::Proforma).as_str(),
+            "acct:ORD-1:proforma"
         );
         assert_eq!(
-            ExternalId::for_slot(&slug(), &order, DocumentKind::Invoice, 2).to_string(),
-            "acct:ORD-1:invoice:2"
+            ExternalId::for_kind(&slug(), &order, DocumentKind::Invoice).to_string(),
+            "acct:ORD-1:invoice"
         );
         assert_eq!(
-            ExternalId::for_slot(&slug(), &order, DocumentKind::Prepayment, 1).as_ref(),
-            "acct:ORD-1:prepayment:1"
+            ExternalId::for_kind(&slug(), &order, DocumentKind::Prepayment).as_ref(),
+            "acct:ORD-1:prepayment"
         );
         assert_eq!(
-            String::from(ExternalId::for_slot(
-                &slug(),
-                &order,
-                DocumentKind::Final,
-                0
-            )),
-            "acct:ORD-1:final:0"
+            String::from(ExternalId::for_kind(&slug(), &order, DocumentKind::Final)),
+            "acct:ORD-1:final"
+        );
+        let correction: CorrectionId = "c-3".parse().expect("valid correction id");
+        assert_eq!(
+            ExternalId::for_corrective(&slug(), &order, &correction).as_str(),
+            "acct:ORD-1:corrective:c-3"
         );
         assert_eq!(
-            ExternalId::for_corrective(&slug(), &order, 3).as_str(),
-            "acct:ORD-1:corrective:3"
+            ExternalId::for_storno(&slug(), &order, "SZ-1").as_str(),
+            "acct:ORD-1:storno:SZ-1"
         );
         assert_eq!(
-            ExternalId::for_slot(&slug(), &order, DocumentKind::Invoice, 0)
-                .storno_of()
-                .as_str(),
-            "acct:ORD-1:invoice:0:storno"
+            ExternalId::for_unmanaged_storno(&slug(), "SZ-9").as_str(),
+            "acct:by-number:SZ-9:storno"
         );
         assert_eq!(
-            ExternalId::new("acct:ORD-1:invoice:0"),
-            ExternalId::for_slot(&slug(), &order, DocumentKind::Invoice, 0)
+            ExternalId::new("acct:ORD-1:invoice"),
+            ExternalId::for_kind(&slug(), &order, DocumentKind::Invoice)
         );
-        let json = serde_json::to_string(&ExternalId::new("x:y:invoice:0")).expect("serialize");
-        assert_eq!(json, "\"x:y:invoice:0\"");
+        let json = serde_json::to_string(&ExternalId::new("x:y:invoice")).expect("serialize");
+        assert_eq!(json, "\"x:y:invoice\"");
     }
 
     #[test]
@@ -389,94 +313,5 @@ mod tests {
         assert_eq!(normalize_buyer_name("Pro\u{301}ba"), "Pr\u{f3}ba");
         assert_ne!(normalize_buyer_name("kft."), normalize_buyer_name("Kft."));
         assert_eq!(normalize_buyer_name("  a  b  "), "a  b");
-    }
-
-    #[test]
-    fn fingerprint_is_stable_and_sensitive() {
-        let secret = b"fp-secret";
-        let base = Fingerprint::compute(
-            secret,
-            "Próba Kft.",
-            dec!(25400),
-            None,
-            Some(date(2026, 7, 12)),
-            Some(date(2026, 7, 4)),
-        );
-        let again = Fingerprint::compute(
-            secret,
-            "Próba Kft.",
-            dec!(25400.00),
-            None,
-            Some(date(2026, 7, 12)),
-            Some(date(2026, 7, 4)),
-        );
-        assert_eq!(base, again, "scale of the gross total must not matter");
-        assert_eq!(base.as_str().len(), 64);
-        assert!(base.as_str().bytes().all(|b| b.is_ascii_hexdigit()));
-
-        let different = [
-            Fingerprint::compute(
-                b"other-secret",
-                "Próba Kft.",
-                dec!(25400),
-                None,
-                Some(date(2026, 7, 12)),
-                Some(date(2026, 7, 4)),
-            ),
-            Fingerprint::compute(
-                secret,
-                "Próba Bt.",
-                dec!(25400),
-                None,
-                Some(date(2026, 7, 12)),
-                Some(date(2026, 7, 4)),
-            ),
-            Fingerprint::compute(
-                secret,
-                "Próba Kft.",
-                dec!(25401),
-                None,
-                Some(date(2026, 7, 12)),
-                Some(date(2026, 7, 4)),
-            ),
-            Fingerprint::compute(
-                secret,
-                "Próba Kft.",
-                dec!(25400),
-                Some(date(2026, 7, 4)),
-                Some(date(2026, 7, 12)),
-                Some(date(2026, 7, 4)),
-            ),
-            Fingerprint::compute(
-                secret,
-                "Próba Kft.",
-                dec!(25400),
-                None,
-                Some(date(2026, 7, 4)),
-                Some(date(2026, 7, 12)),
-            ),
-            Fingerprint::compute(secret, "Próba Kft.", dec!(25400), None, None, None),
-        ];
-        for other in &different {
-            assert_ne!(&base, other);
-        }
-    }
-
-    #[test]
-    fn fingerprint_matches_reference_vector() {
-        // HMAC-SHA256("k", "A\n1\n-\n-\n-") computed independently.
-        let fp = Fingerprint::compute(b"k", "A", dec!(1), None, None, None);
-        let mut mac = Hmac::<Sha256>::new_from_slice(b"k").expect("any key length");
-        mac.update(b"A\n1\n-\n-\n-");
-        assert_eq!(fp.as_str(), hex(&mac.finalize().into_bytes()));
-        assert_eq!(
-            serde_json::to_string(&fp).expect("serialize"),
-            format!("\"{fp}\"")
-        );
-    }
-
-    #[test]
-    fn hex_encodes_lowercase() {
-        assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     }
 }

@@ -1,15 +1,15 @@
 //! The Restate services: the `Szamlazz.Order` Virtual Object and the stateless
-//! `Szamlazz.Agent` service (design §5–§8).
+//! `Szamlazz.Agent` service (design §4–§7).
 //!
 //! Both are thin adapters: every szamlazz.hu call runs inside `ctx.run` through
-//! the [`Steps`] module, every ledger
-//! transition is a pure [`Ledger`](crate::ledger::Ledger) method followed by a `ctx.set`, and domain
-//! outcomes are returned as data. `TerminalError`s carry a
+//! the [`Steps`] module and domain outcomes are returned as data. Neither
+//! keeps state — szamlazz.hu is the source of truth, reached through the
+//! order's deterministic external ids. `TerminalError`s carry a
 //! [`TerminalCode`](crate::contract::TerminalCode) and always mean "outcome
-//! unknown — call again with the same request id".
+//! unknown — retry with a new `Idempotency-Key`".
 //!
-//! - [`Order`] — keyed by the order number; owns every document issued for it;
-//!   registered as `Szamlazz.Order`.
+//! - [`Order`] — keyed by the order number; its per-key lock serialises
+//!   issuing per order; registered as `Szamlazz.Order`.
 //! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`)
 //!   registered as `Szamlazz.Agent`.
 
@@ -28,11 +28,11 @@ mod support;
 
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
 
-/// The `Order` Virtual Object: one instance per order number, owning every
-/// document issued for that order. Registered as `Szamlazz.Order`.
+/// The `Order` Virtual Object: one instance per order number. Registered as
+/// `Szamlazz.Order`.
 ///
 /// Same-key handlers run one at a time, which serialises issuing per order.
-/// The state is a single [`Ledger`](crate::ledger::Ledger) under the key `"ledger"`.
+/// The object holds no state.
 #[derive(Debug, Clone)]
 pub struct Order {
     steps: Arc<Steps>,

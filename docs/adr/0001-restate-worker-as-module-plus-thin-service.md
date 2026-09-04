@@ -15,8 +15,8 @@ service calls another, and `Order` never invokes a handler on its own key. The d
 the owner asked for — `Order` depends on the steps, nothing depends on `Order` — is a compile-time
 fact: `Szamlazz.Order → steps ← Szamlazz.Agent`.
 
-The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, ledger,
-the module, both services — `restate-sdk` is an unconditional dependency), and
+The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, the identity
+types, the module, both services — no state, ADR 0005; `restate-sdk` is an unconditional dependency), and
 `restate-szamlazz-endpoint` is the binary `restate-szamlazz` that hosts the services over HTTP and
 ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 
@@ -30,10 +30,10 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
   invocation attempts × child attempts (350 sends under defaults); a *paused* child holds the
   parent's key indefinitely; the buyer PII is journaled three times (Order input, Order's `Call`
   entry, child input); two timeout pairs must stay consistent; and `issue`/`delete_proforma` need
-  `ingress_private` anyway because raw issuing must not bypass the ledger — at which point a private
-  handler differs from a module function only by a second journal and a retry policy. The usual
-  reasons for a separate service (independent scaling, per-handler OpenAPI for the raw operations,
-  a second Restate caller) do not exist at v1; the first would be a non-goal and the second is
+  `ingress_private` anyway because raw issuing must not bypass `Order`'s lock and pre-query — at which
+  point a private handler differs from a module function only by a second journal and a retry policy.
+  The usual reasons for a separate service (independent scaling, per-handler OpenAPI for the raw
+  operations, a second Restate caller) do not exist at v1; the first would be a non-goal and the second is
   undesirable.
 - **`Order` does everything and a public `Invoice.storno` delegates upward into
   `Szamlazz.Order.storno_invoice`.** Rejected. An upward edge into a Virtual Object is a deadlock class: an
@@ -59,8 +59,8 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 - `issue` and `delete_proforma` exist only as module functions. When a second Restate caller
   appears, the upgrade path is an `ingress_private` handler over the module; the module boundary is
   the seam either way.
-- The buyer input is journaled once, in `Order`'s own journal (`journal_retention = 3d`). The
-  ledger holds numbers, ids, totals, an HMAC fingerprint and journaled timestamps — no PII.
+- The buyer input is journaled once, in `Order`'s own journal (`journal_retention = 3d`). Responses and
+  tracing carry numbers, ids and totals — no PII; there is no state (ADR 0005).
 - Rule, stated so a future `storno_invoice → create_invoice` convenience is not added: no `Order`
   handler ever `.call()`s an exclusive handler on its own key. Under this layering it is structural.
 - The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`

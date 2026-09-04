@@ -10,8 +10,7 @@
 //! - [`document`] — the per-call document input (buyer, line items, payment
 //!   method, overrides) and its conversion to `szamlazz_agent` types.
 //! - [`request`] — handler inputs.
-//! - [`response`] — handler outputs, including the [`OrderSnapshot`]
-//!   projection of the ledger.
+//! - [`response`] — handler outputs, including the [`OrderStatus`] live view.
 
 use std::fmt;
 use std::str::FromStr;
@@ -27,29 +26,27 @@ pub use document::{
     PostalAddressInput, TaxpayerStatus,
 };
 pub use request::{
-    CorrectRequest, CreateOptions, CreateRequest, DeleteProformaRequest, ForgetRequest, GetRequest,
-    PaymentEntry, ProformaLink, QueryRequest, RecordReversalRequest, RecordedReversal, Selector,
-    SetPaymentsRequest, StornoRequest,
+    CorrectRequest, CreateOptions, CreateRequest, DeleteProformaRequest, PaymentEntry,
+    ProformaLink, QueryRequest, Selector, SetPaymentsRequest, StornoRequest,
 };
 pub use response::{
-    ConflictReason, CorrectiveSnapshot, CreateResponse, DeleteProformaResponse,
-    DocumentVerification, ForeignHint, Freshness, HistorySnapshot, OrderSnapshot, Outcome,
-    PaymentRecord, QueryResponse, SetPaymentsResponse, SlotSnapshot, SlotsSnapshot, StornoOutcome,
-    StornoResponse, VerificationResult, Warning,
+    ConflictReason, CreateResponse, DeleteProformaResponse, DocumentState, DocumentStatus,
+    OrderStatus, Outcome, PaymentRecord, QueryResponse, SetPaymentsResponse, StornoOutcome,
+    StornoResponse, Warning,
 };
 
-/// The caller-supplied retry identity of an issuing request.
+/// The caller-supplied identity of one corrective invoice.
 ///
-/// The same id returns the entry's current state forever; a different id is a
-/// new logical request; a known id with a different payload is
-/// `conflict{payload_mismatch}`. It lives in the ledger only and is never sent
-/// to szamlazz.hu.
+/// Several correctives per invoice are legitimate, so the caller names each
+/// one; the id is embedded in the corrective's external id
+/// (`{slug}:{order}:corrective:{id}`) and a new id issues a new corrective by
+/// contract. The same id finds the corrective it issued.
 ///
 /// Valid ids match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RequestId(String);
+pub struct CorrectionId(String);
 
-impl RequestId {
+impl CorrectionId {
     /// The maximum length in bytes (the id is ASCII, so also in characters).
     pub const MAX_LEN: usize = 64;
 
@@ -59,28 +56,28 @@ impl RequestId {
         &self.0
     }
 
-    fn validate(value: &str) -> Result<(), InvalidRequestId> {
+    fn validate(value: &str) -> Result<(), InvalidCorrectionId> {
         let mut chars = value.chars();
         let Some(first) = chars.next() else {
-            return Err(InvalidRequestId::Empty);
+            return Err(InvalidCorrectionId::Empty);
         };
         if value.len() > Self::MAX_LEN {
-            return Err(InvalidRequestId::TooLong(value.len()));
+            return Err(InvalidCorrectionId::TooLong(value.len()));
         }
         if !first.is_ascii_alphanumeric() {
-            return Err(InvalidRequestId::InvalidStart(first));
+            return Err(InvalidCorrectionId::InvalidStart(first));
         }
         if let Some(invalid) =
             chars.find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
         {
-            return Err(InvalidRequestId::InvalidChar(invalid));
+            return Err(InvalidCorrectionId::InvalidChar(invalid));
         }
         Ok(())
     }
 }
 
-impl FromStr for RequestId {
-    type Err = InvalidRequestId;
+impl FromStr for CorrectionId {
+    type Err = InvalidCorrectionId;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::validate(value)?;
@@ -88,8 +85,8 @@ impl FromStr for RequestId {
     }
 }
 
-impl TryFrom<String> for RequestId {
-    type Error = InvalidRequestId;
+impl TryFrom<String> for CorrectionId {
+    type Error = InvalidCorrectionId;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::validate(&value)?;
@@ -97,88 +94,88 @@ impl TryFrom<String> for RequestId {
     }
 }
 
-impl TryFrom<&str> for RequestId {
-    type Error = InvalidRequestId;
+impl TryFrom<&str> for CorrectionId {
+    type Error = InvalidCorrectionId;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         value.parse()
     }
 }
 
-impl fmt::Display for RequestId {
+impl fmt::Display for CorrectionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl AsRef<str> for RequestId {
+impl AsRef<str> for CorrectionId {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl From<RequestId> for String {
-    fn from(id: RequestId) -> Self {
+impl From<CorrectionId> for String {
+    fn from(id: CorrectionId) -> Self {
         id.0
     }
 }
 
 /// Serializes as the plain string.
-impl Serialize for RequestId {
+impl Serialize for CorrectionId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
     }
 }
 
 /// Deserializes from a string, rejecting ids that do not match the pattern.
-impl<'de> Deserialize<'de> for RequestId {
+impl<'de> Deserialize<'de> for CorrectionId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(feature = "schemars")]
-impl schemars::JsonSchema for RequestId {
+impl schemars::JsonSchema for CorrectionId {
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        "RequestId".into()
+        "CorrectionId".into()
     }
 
     fn schema_id() -> std::borrow::Cow<'static, str> {
-        concat!(module_path!(), "::RequestId").into()
+        concat!(module_path!(), "::CorrectionId").into()
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Caller-supplied retry identity of an issuing request.",
+            "description": "Caller-supplied identity of one corrective invoice.",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
         })
     }
 }
 
-/// A string that is not a valid [`RequestId`].
+/// A string that is not a valid [`CorrectionId`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum InvalidRequestId {
+pub enum InvalidCorrectionId {
     /// The id is empty.
-    #[error("request id must not be empty")]
+    #[error("correction id must not be empty")]
     Empty,
-    /// The id exceeds [`RequestId::MAX_LEN`] bytes.
-    #[error("request id is {0} bytes long, at most {max} are allowed", max = RequestId::MAX_LEN)]
+    /// The id exceeds [`CorrectionId::MAX_LEN`] bytes.
+    #[error("correction id is {0} bytes long, at most {max} are allowed", max = CorrectionId::MAX_LEN)]
     TooLong(usize),
     /// The first character is not an ASCII letter or digit.
-    #[error("request id must start with an ASCII letter or digit, found {0:?}")]
+    #[error("correction id must start with an ASCII letter or digit, found {0:?}")]
     InvalidStart(char),
     /// A later character is outside `[A-Za-z0-9._-]`.
-    #[error("request id may only contain ASCII letters, digits, '.', '_' and '-', found {0:?}")]
+    #[error("correction id may only contain ASCII letters, digits, '.', '_' and '-', found {0:?}")]
     InvalidChar(char),
 }
 
-/// A document kind that owns a ledger slot: exactly one slot per kind and
-/// order.
+/// A document kind of which an order carries at most one live document, each
+/// with its own handler and external id.
 ///
-/// Correctives are not slots (an order may carry any number of them); see
-/// [`IssuedKind`] for the kind of an issued document.
+/// Correctives are not kinds in this sense (an order may carry any number of
+/// them); see [`IssuedKind`] for the kind of an issued document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -194,7 +191,7 @@ pub enum DocumentKind {
 }
 
 impl DocumentKind {
-    /// Every slot kind, in ledger order.
+    /// Every kind, in the order `Szamlazz.Order.get` reports them.
     pub const ALL: [Self; 4] = [Self::Proforma, Self::Invoice, Self::Prepayment, Self::Final];
 
     /// The snake-case token used on the wire and inside external ids.
@@ -221,7 +218,7 @@ impl fmt::Display for DocumentKind {
     }
 }
 
-/// The kind of a document the service issued: the four slot kinds plus
+/// The kind of a document the service issued: the four [`DocumentKind`]s plus
 /// correctives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -252,9 +249,9 @@ impl IssuedKind {
         }
     }
 
-    /// The slot kind, or `None` for a corrective.
+    /// The document kind, or `None` for a corrective.
     #[must_use]
-    pub const fn slot_kind(self) -> Option<DocumentKind> {
+    pub const fn document_kind(self) -> Option<DocumentKind> {
         match self {
             Self::Proforma => Some(DocumentKind::Proforma),
             Self::Invoice => Some(DocumentKind::Invoice),
@@ -284,24 +281,25 @@ impl fmt::Display for IssuedKind {
 
 /// The code of a `TerminalError` raised by an issuing or storno handler.
 ///
-/// Every one of them means "outcome unknown — call again with the same
-/// [`RequestId`], or read `Szamlazz.Order.get`", never "no document exists".
+/// Every one of them means "outcome unknown — retry with a new
+/// `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no document
+/// exists".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TerminalCode {
     /// The attempt budget is exhausted while a document may or may not have
-    /// been issued; the slot stays `pending`.
+    /// been issued; the next call's external-id query finds whatever landed.
     OutcomeUnknown,
     /// szamlazz.hu could not be reached for a check that must succeed before
     /// anything is issued.
     Unavailable,
     /// A document found under our identity belongs to a different szamlazz.hu
-    /// account (`szallito/id` differs from the recorded supplier id).
+    /// account.
     AccountMismatch,
-    /// The request is malformed or contradicts the ledger (for example
-    /// `reissue: true` with a known request id).
+    /// The request is malformed or names a document szamlazz.hu does not
+    /// know.
     InvalidInput,
 }
 
@@ -329,57 +327,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_id_accepts_valid_ids() {
+    fn correction_id_accepts_valid_ids() {
         for id in [
             "a",
             "0",
-            "r-2",
-            "order.42_retry-1",
+            "c-2",
+            "order.42_fix-1",
             "A",
-            &"x".repeat(RequestId::MAX_LEN),
+            &"x".repeat(CorrectionId::MAX_LEN),
         ] {
-            let parsed: RequestId = id.parse().expect(id);
+            let parsed: CorrectionId = id.parse().expect(id);
             assert_eq!(parsed.as_str(), id);
             assert_eq!(parsed.to_string(), id);
         }
     }
 
     #[test]
-    fn request_id_rejects_invalid_ids() {
-        let too_long = "x".repeat(RequestId::MAX_LEN + 1);
+    fn correction_id_rejects_invalid_ids() {
+        let too_long = "x".repeat(CorrectionId::MAX_LEN + 1);
         let cases = [
-            ("", InvalidRequestId::Empty),
-            ("-a", InvalidRequestId::InvalidStart('-')),
-            (".a", InvalidRequestId::InvalidStart('.')),
-            ("a b", InvalidRequestId::InvalidChar(' ')),
-            ("a/b", InvalidRequestId::InvalidChar('/')),
-            ("á", InvalidRequestId::InvalidStart('á')),
-            ("aá", InvalidRequestId::InvalidChar('á')),
-            (too_long.as_str(), InvalidRequestId::TooLong(65)),
+            ("", InvalidCorrectionId::Empty),
+            ("-a", InvalidCorrectionId::InvalidStart('-')),
+            (".a", InvalidCorrectionId::InvalidStart('.')),
+            ("a b", InvalidCorrectionId::InvalidChar(' ')),
+            ("a/b", InvalidCorrectionId::InvalidChar('/')),
+            ("á", InvalidCorrectionId::InvalidStart('á')),
+            ("aá", InvalidCorrectionId::InvalidChar('á')),
+            (too_long.as_str(), InvalidCorrectionId::TooLong(65)),
         ];
         for (input, expected) in cases {
             assert_eq!(
-                input.parse::<RequestId>(),
+                input.parse::<CorrectionId>(),
                 Err(expected.clone()),
                 "{input:?}"
             );
-            assert_eq!(RequestId::try_from(input.to_owned()), Err(expected));
+            assert_eq!(CorrectionId::try_from(input.to_owned()), Err(expected));
         }
     }
 
     #[test]
-    fn request_id_serde_validates() {
-        let id: RequestId = serde_json::from_str("\"r-1\"").expect("valid");
-        assert_eq!(id.as_str(), "r-1");
-        assert_eq!(serde_json::to_string(&id).expect("serialize"), "\"r-1\"");
-        assert!(serde_json::from_str::<RequestId>("\"-r\"").is_err());
-        assert!(serde_json::from_str::<RequestId>("\"\"").is_err());
+    fn correction_id_serde_validates() {
+        let id: CorrectionId = serde_json::from_str("\"c-1\"").expect("valid");
+        assert_eq!(id.as_str(), "c-1");
+        assert_eq!(serde_json::to_string(&id).expect("serialize"), "\"c-1\"");
+        assert!(serde_json::from_str::<CorrectionId>("\"-c\"").is_err());
+        assert!(serde_json::from_str::<CorrectionId>("\"\"").is_err());
     }
 
     #[test]
-    fn request_id_orders_as_string() {
-        let a: RequestId = "a".parse().expect("valid");
-        let b: RequestId = "b".parse().expect("valid");
+    fn correction_id_orders_as_string() {
+        let a: CorrectionId = "a".parse().expect("valid");
+        let b: CorrectionId = "b".parse().expect("valid");
         assert!(a < b);
         let mut map = std::collections::BTreeMap::new();
         map.insert(b.clone(), 2);
@@ -403,10 +401,10 @@ mod tests {
         );
         assert!(serde_json::from_str::<DocumentKind>("\"corrective\"").is_err());
         for kind in DocumentKind::ALL {
-            assert_eq!(IssuedKind::from(kind).slot_kind(), Some(kind));
+            assert_eq!(IssuedKind::from(kind).document_kind(), Some(kind));
             assert_eq!(IssuedKind::from(kind).as_str(), kind.as_str());
         }
-        assert_eq!(IssuedKind::Corrective.slot_kind(), None);
+        assert_eq!(IssuedKind::Corrective.document_kind(), None);
     }
 
     #[test]
@@ -428,8 +426,8 @@ mod tests {
 
     #[cfg(feature = "schemars")]
     #[test]
-    fn request_id_schema_carries_the_pattern() {
-        let schema = schemars::schema_for!(RequestId);
+    fn correction_id_schema_carries_the_pattern() {
+        let schema = schemars::schema_for!(CorrectionId);
         let json = serde_json::to_value(&schema).expect("serialize");
         assert_eq!(json["pattern"], "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
     }
@@ -440,17 +438,18 @@ mod tests {
         let schema = schemars::schema_for!(CreateRequest);
         let json = serde_json::to_value(&schema).expect("serialize");
         assert_eq!(json["title"], "CreateRequest");
-        assert!(json["properties"]["request_id"].is_object());
-        assert!(json["$defs"]["RequestId"].is_object());
+        assert!(json["properties"]["document"].is_object());
+        assert!(json["properties"]["options"].is_object());
         assert!(json["$defs"]["DocumentInput"].is_object());
+
+        let correct = serde_json::to_value(schemars::schema_for!(CorrectRequest)).expect("json");
+        assert!(correct["properties"]["correction_id"].is_object());
+        assert!(correct["$defs"]["CorrectionId"].is_object());
 
         for schema in [
             schemars::schema_for!(CorrectRequest),
             schemars::schema_for!(StornoRequest),
             schemars::schema_for!(DeleteProformaRequest),
-            schemars::schema_for!(GetRequest),
-            schemars::schema_for!(RecordReversalRequest),
-            schemars::schema_for!(ForgetRequest),
             schemars::schema_for!(QueryRequest),
             schemars::schema_for!(SetPaymentsRequest),
             schemars::schema_for!(CreateResponse),
@@ -458,14 +457,13 @@ mod tests {
             schemars::schema_for!(DeleteProformaResponse),
             schemars::schema_for!(SetPaymentsResponse),
             schemars::schema_for!(QueryResponse),
-            schemars::schema_for!(OrderSnapshot),
+            schemars::schema_for!(OrderStatus),
         ] {
             serde_json::to_string(&schema).expect("schema serializes");
         }
 
-        let snapshot =
-            serde_json::to_value(schemars::schema_for!(OrderSnapshot)).expect("serialize");
-        assert!(snapshot["$defs"]["SlotsSnapshot"]["properties"]["final"].is_object());
-        assert!(snapshot["$defs"]["SlotSnapshot"]["properties"]["gen"].is_object());
+        let status = serde_json::to_value(schemars::schema_for!(OrderStatus)).expect("serialize");
+        assert!(status["properties"]["final"].is_object());
+        assert!(status["$defs"]["DocumentStatus"].is_object());
     }
 }

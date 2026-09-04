@@ -16,7 +16,9 @@ use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 /// The documents a create refers to, by number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DocumentRefs<'a> {
-    /// The proforma an invoice or prepayment converts (`dijbekeroSzamlaszam`).
+    /// The proforma an invoice converts (`dijbekeroSzamlaszam`); only
+    /// [`IssuedKind::Invoice`] can carry it — the Agent's prepayment invoice
+    /// has no such field and szamlazz.hu links by shared order number instead.
     pub proforma: Option<&'a str>,
     /// The prepayment a final invoice settles (`elolegSzamlaszam`); required
     /// for [`IssuedKind::Final`].
@@ -205,7 +207,7 @@ mod tests {
 
     fn steps(defaults: &serde_json::Value) -> Steps {
         let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct", "agent_key": "key", "fp_secret": "fp",
+            "account": {"slug": "acct", "agent_key": "key",
                         "endpoint": "http://127.0.0.1:1/"},
             "defaults": defaults,
             "seller": {"bank": "Bank", "bank_account": "1234", "email": {"subject": "Hi"}},

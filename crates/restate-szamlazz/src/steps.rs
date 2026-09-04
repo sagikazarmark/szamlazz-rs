@@ -50,7 +50,7 @@ pub struct Steps {
     config: Arc<Config>,
 }
 
-/// One issuing attempt (design §6 step 4): pre-query by external id, optional
+/// One issuing attempt (design §5 step 3): pre-query by external id, optional
 /// order-number hint, create, and the duplicate-order-number re-query.
 #[derive(Debug, Clone)]
 pub struct IssueRequest<'a> {
@@ -62,16 +62,15 @@ pub struct IssueRequest<'a> {
     pub order: &'a OrderKey,
     /// The create request built by [`Steps::build_create`].
     pub create: &'a CreateInvoice,
-    /// Query the order number before creating to detect foreign documents and
-    /// to adopt a conversion of our proforma.
+    /// Proceed past a reversed document under the external id instead of
+    /// answering [`IssueOutcome::FoundReversed`].
+    pub reissue: bool,
+    /// Query the order number before creating to detect foreign documents.
     pub check_hint: bool,
-    /// Every number the ledger knows as ours; hint results among them are
-    /// ignored.
+    /// Numbers of documents known to be ours (seen in the exclusivity and
+    /// proforma checks); hint results among them are ignored.
     pub our_numbers: &'a [String],
-    /// The proforma number recorded in the ledger, when one is live; a hint
-    /// document of the issued kind that references it is adopted.
-    pub our_proforma: Option<&'a str>,
-    /// The supplier id to expect on a found document, when known.
+    /// The supplier id to expect on a found document, when pinned.
     pub expect_supplier_id: Option<u64>,
     /// The `teszt` flag to expect on a found document.
     pub expect_test: bool,
@@ -81,20 +80,26 @@ pub struct IssueRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueOutcome {
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
-    /// create — indistinguishable and committed either way).
+    /// create — indistinguishable and reported either way).
     Issued(IssuedDocument),
-    /// A document of ours was found before or instead of creating: under the
-    /// external id, or (with `adopted`) under the order number referencing
-    /// our proforma. The caller checks `reversed` before committing.
+    /// The pre-query found a live document of ours under the external id.
+    /// Nothing was created.
     Found(FoundDocument),
+    /// The pre-query found a reversed document of ours under the external id
+    /// and `reissue` was not set. Nothing was created.
+    FoundReversed(FoundDocument),
+    /// szamlazz.hu refused the order number as a duplicate (71/152) and the
+    /// external-id re-query found a live document of ours: an earlier attempt
+    /// had landed.
+    Reconciled(FoundDocument),
     /// The external id resolves to a document that fails validation (another
     /// order, kind, account mode or supplier). Nothing was created.
     Collision(FoundDocument),
-    /// A live invoice-kind document the ledger does not own exists under the
-    /// order number. Nothing was created.
+    /// A live invoice-kind document that is not ours exists under the order
+    /// number. Nothing was created.
     Foreign(FoundDocument),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
-    /// external id re-query found nothing.
+    /// external id re-query found no live document of ours.
     DuplicateOrderNumber {
         /// The szamlazz.hu code (`71` or `152`).
         code: String,
@@ -164,8 +169,8 @@ pub struct IssuedDocument {
     pub notification_delivery_failed: bool,
 }
 
-/// The ledger-relevant projection of a queried document. Carries no buyer
-/// data.
+/// The projection of a queried document the services act on. Carries no
+/// buyer data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FoundDocument {
@@ -198,9 +203,6 @@ pub struct FoundDocument {
     pub document_id: Option<u64>,
     /// Registered credit entry amounts, in the order the server lists them.
     pub payments: Vec<Decimal>,
-    /// The document was found under the order number referencing our proforma
-    /// rather than under our external id.
-    pub adopted: bool,
 }
 
 impl FoundDocument {
@@ -208,6 +210,26 @@ impl FoundDocument {
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.reversed != Some(true)
+    }
+
+    /// Whether the document is ours (design §3): it carries `order`, the
+    /// `tipus` of `kind`, the account's `teszt` flag and — when both are
+    /// known — the account's supplier id.
+    #[must_use]
+    pub fn is_ours(
+        &self,
+        order: &OrderKey,
+        kind: IssuedKind,
+        expect_test: bool,
+        expect_supplier_id: Option<u64>,
+    ) -> bool {
+        self.order_number.as_deref().map(str::trim) == Some(order.as_str())
+            && self.document_type == document_type_of(kind)
+            && self.test == expect_test
+            && match (expect_supplier_id, self.supplier_id) {
+                (Some(expected), Some(seen)) => expected == seen,
+                _ => true,
+            }
     }
 }
 
@@ -242,7 +264,6 @@ impl From<&InvoiceDocument> for FoundDocument {
                 .iter()
                 .map(|payment| payment.amount)
                 .collect(),
-            adopted: false,
         }
     }
 }
@@ -283,13 +304,13 @@ pub enum QueryError {
     Transport(String),
 }
 
-/// One storno attempt (design §7 step 3).
+/// One storno attempt (design §6 step 2).
 #[derive(Debug, Clone, Copy)]
 pub struct StornoAttempt<'a> {
     /// The invoice to reverse.
     pub invoice_number: &'a str,
     /// The external id attached to the storno invoice and pre-queried first
-    /// (`{original external id}:storno`).
+    /// (`{slug}:{order}:storno:{number}` or `{slug}:by-number:{number}:storno`).
     pub external_id: &'a ExternalId,
     /// Comment placed on the storno invoice.
     pub comment: Option<&'a str>,
@@ -343,7 +364,7 @@ pub struct StornoDocument {
     pub document_id: Option<u64>,
 }
 
-/// The ledger-relevant projection of a storno response. The caller has
+/// The journaled projection of a storno response. The caller has
 /// already checked [`CreatedInvoice::reverses`].
 impl From<CreatedInvoice> for StornoDocument {
     fn from(created: CreatedInvoice) -> Self {
@@ -456,37 +477,65 @@ impl Steps {
         &self.config
     }
 
-    /// One issuing attempt, query-first (design §6 step 4).
+    /// One issuing attempt, query-first (design §5 step 3).
     ///
-    /// 1. Query by external id: a validated hit is [`IssueOutcome::Found`], an
-    ///    invalid one [`IssueOutcome::Collision`]; code 7 continues; any other
-    ///    failure is [`IssueOutcome::Transport`] — never create when the check
-    ///    itself failed.
-    /// 2. With `check_hint`, query by order number: a live `SZ | ES | VS` not
-    ///    among `our_numbers` is [`IssueOutcome::Foreign`], unless it is of
-    ///    the issued kind and references `our_proforma` — then
-    ///    [`IssueOutcome::Found`] with `adopted`. Anything else continues.
+    /// 1. Query by external id: a validated live hit is
+    ///    [`IssueOutcome::Found`]; a validated reversed hit is
+    ///    [`IssueOutcome::FoundReversed`] unless `reissue`, in which case the
+    ///    attempt continues; an invalid hit is [`IssueOutcome::Collision`];
+    ///    code 7 continues; any other failure is [`IssueOutcome::Transport`]
+    ///    — never create when the check itself failed.
+    /// 2. With `check_hint`, query by order number: a live `SZ | ES | VS`
+    ///    that is neither among `our_numbers` nor the document seen in
+    ///    step 1 is [`IssueOutcome::Foreign`]. Anything else continues.
     /// 3. Create: success with a number is [`IssueOutcome::Issued`]; 71/152
-    ///    re-queries the external id ([`IssueOutcome::Found`] /
-    ///    [`IssueOutcome::Collision`] / [`IssueOutcome::DuplicateOrderNumber`]);
-    ///    1, 55, 56 and `szlahu_down` are [`IssueOutcome::Unknown`]; other
-    ///    codes [`IssueOutcome::Rejected`].
+    ///    re-queries the external id — a live document of ours is
+    ///    [`IssueOutcome::Reconciled`], a reversed one or code 7 is
+    ///    [`IssueOutcome::DuplicateOrderNumber`] (the duplicate is foreign),
+    ///    an invalid one [`IssueOutcome::Collision`]; 1, 55, 56 and
+    ///    `szlahu_down` are [`IssueOutcome::Unknown`]; other codes
+    ///    [`IssueOutcome::Rejected`].
     pub async fn issue(&self, request: IssueRequest<'_>) -> IssueOutcome {
         let span = tracing::info_span!(
             "steps.issue",
             external_id = %request.external_id,
             kind = %request.kind,
+            reissue = request.reissue,
         );
         self.issue_inner(&request).instrument(span).await
     }
 
     async fn issue_inner(&self, request: &IssueRequest<'_>) -> IssueOutcome {
-        match self.query_by_external_id(request).await {
-            Ok(Some(outcome)) => return outcome,
-            Ok(None) => {}
+        // Step 1: the external-id pre-query.
+        let seen = match self.query_by_external_id(request).await {
+            Ok(Some(found))
+                if !found.is_ours(
+                    request.order,
+                    request.kind,
+                    request.expect_test,
+                    request.expect_supplier_id,
+                ) =>
+            {
+                tracing::warn!(number = %found.number, "external id collision");
+                return IssueOutcome::Collision(found);
+            }
+            Ok(Some(found)) if found.is_live() => {
+                tracing::info!(number = %found.number, "found live under external id");
+                return IssueOutcome::Found(found);
+            }
+            Ok(Some(found)) if request.reissue => {
+                tracing::info!(number = %found.number, "reversed under external id; reissuing");
+                Some(found.number)
+            }
+            Ok(Some(found)) => {
+                tracing::info!(number = %found.number, "found reversed under external id");
+                return IssueOutcome::FoundReversed(found);
+            }
+            Ok(None) => None,
             Err(message) => return IssueOutcome::Transport(message),
-        }
+        };
 
+        // Step 2: the order-number hint.
         if request.check_hint {
             match self
                 .query_raw(InvoiceSelector::OrderNumber(
@@ -495,8 +544,14 @@ impl Steps {
                 .await
             {
                 Ok(document) => {
-                    if let Some(outcome) = classify_hint(&document, request) {
-                        return outcome;
+                    let found = FoundDocument::from(&document);
+                    if is_foreign(&found, request.our_numbers, seen.as_deref()) {
+                        tracing::warn!(
+                            number = %found.number,
+                            tipus = %found.document_type,
+                            "foreign document under the order"
+                        );
+                        return IssueOutcome::Foreign(found);
                     }
                 }
                 Err(QueryError::NotFound | QueryError::Api { .. }) => {}
@@ -504,6 +559,7 @@ impl Steps {
             }
         }
 
+        // Step 3: create.
         match self.client.send(request.create).await {
             Ok(result) => {
                 let outcome = IssueOutcome::from(result);
@@ -516,8 +572,23 @@ impl Steps {
                 Failure::Duplicate { code, message } => {
                     tracing::info!(code = %code, "duplicate order number; re-querying");
                     match self.query_by_external_id(request).await {
-                        Ok(Some(outcome)) => outcome,
-                        Ok(None) => IssueOutcome::DuplicateOrderNumber { code, message },
+                        Ok(Some(found))
+                            if !found.is_ours(
+                                request.order,
+                                request.kind,
+                                request.expect_test,
+                                request.expect_supplier_id,
+                            ) =>
+                        {
+                            IssueOutcome::Collision(found)
+                        }
+                        Ok(Some(found)) if found.is_live() => {
+                            tracing::info!(number = %found.number, "reconciled after duplicate");
+                            IssueOutcome::Reconciled(found)
+                        }
+                        // Only a reversed document of ours holds the id: the
+                        // live duplicate is not ours.
+                        Ok(Some(_) | None) => IssueOutcome::DuplicateOrderNumber { code, message },
                         Err(message) => IssueOutcome::Transport(message),
                     }
                 }
@@ -569,7 +640,7 @@ impl Steps {
         self.query_raw(invoice_selector(selector)).await
     }
 
-    /// One storno attempt, query-first (design §7 step 3): the storno external
+    /// One storno attempt, query-first (design §6 step 2): the storno external
     /// id is queried and an `SS` referencing the invoice is
     /// [`StornoOutcome::AlreadyReversed`]; otherwise `xmlszamlast` is sent
     /// with the external id, comment and e-invoice flag and **no issue date**
@@ -698,28 +769,19 @@ impl Steps {
     }
 
     /// Step 1 (and the 71/152 re-query) of [`Self::issue`]: `Ok(Some)` on a
-    /// hit (validated or not), `Ok(None)` on code 7, `Err` when the check
-    /// itself failed.
+    /// hit (validated by the caller), `Ok(None)` on code 7, `Err` when the
+    /// check itself failed.
     async fn query_by_external_id(
         &self,
         request: &IssueRequest<'_>,
-    ) -> Result<Option<IssueOutcome>, String> {
+    ) -> Result<Option<FoundDocument>, String> {
         match self
             .query_raw(InvoiceSelector::ExternalId(
                 request.external_id.as_str().to_owned(),
             ))
             .await
         {
-            Ok(document) => {
-                let found = FoundDocument::from(&document);
-                if is_ours(&document, request) {
-                    tracing::info!(number = %found.number, "found under external id");
-                    Ok(Some(IssueOutcome::Found(found)))
-                } else {
-                    tracing::warn!(number = %found.number, "external id collision");
-                    Ok(Some(IssueOutcome::Collision(found)))
-                }
-            }
+            Ok(document) => Ok(Some(FoundDocument::from(&document))),
             Err(QueryError::NotFound) => Ok(None),
             Err(error) => Err(error.to_string()),
         }
@@ -753,15 +815,28 @@ pub const fn document_type_of(kind: IssuedKind) -> &'static str {
     }
 }
 
-/// Whether `tipus` is the document type a `kind` slot holds (`D`, `SZ`,
-/// `ES`, `VS`).
+/// The kind whose documents carry `tipus`, or `None` for stornos, delivery
+/// notes and unknown codes.
+#[must_use]
+pub fn issued_kind_of(tipus: &str) -> Option<IssuedKind> {
+    match tipus {
+        "D" => Some(IssuedKind::Proforma),
+        "SZ" => Some(IssuedKind::Invoice),
+        "ES" => Some(IssuedKind::Prepayment),
+        "VS" => Some(IssuedKind::Final),
+        "HS" => Some(IssuedKind::Corrective),
+        _ => None,
+    }
+}
+
+/// Whether `tipus` is the document type of `kind` (`D`, `SZ`, `ES`, `VS`).
 #[must_use]
 pub fn is_live_kind(kind: DocumentKind, tipus: &str) -> bool {
     tipus == document_type_of(kind.into())
 }
 
-/// Whether `tipus` is a legal invoice of the kinds the ledger slots hold:
-/// `SZ`, `ES` or `VS`. Stornos, correctives, proformas and delivery notes are
+/// Whether `tipus` is a legal invoice of the kinds an order carries: `SZ`,
+/// `ES` or `VS`. Stornos, correctives, proformas and delivery notes are
 /// not.
 #[must_use]
 pub fn is_invoice_family(tipus: &str) -> bool {
@@ -820,53 +895,14 @@ fn classify_failure(error: ClientError) -> Failure {
     }
 }
 
-/// Whether a document found under our external id is ours: same order, the
-/// issued kind's `tipus`, the account's `teszt` and (when both are known) the
-/// account's supplier id.
-fn is_ours(document: &InvoiceDocument, request: &IssueRequest<'_>) -> bool {
-    document.info.order_number.as_deref().map(str::trim) == Some(request.order.as_str())
-        && document.info.document_type == document_type_of(request.kind)
-        && account_matches(document, request)
-}
-
-fn account_matches(document: &InvoiceDocument, request: &IssueRequest<'_>) -> bool {
-    document.info.test == request.expect_test
-        && match (request.expect_supplier_id, document.supplier.id) {
-            (Some(expected), Some(seen)) => expected == seen,
-            _ => true,
-        }
-}
-
-/// Step 2 of [`Steps::issue`]: what the order-number hint means.
-fn classify_hint(document: &InvoiceDocument, request: &IssueRequest<'_>) -> Option<IssueOutcome> {
-    let info = &document.info;
-    let tipus = info.document_type.as_str();
-    let number = info.invoice_number.as_str();
-    if !is_invoice_family(tipus)
-        || info.reversed == Some(true)
-        || request.our_numbers.iter().any(|known| known == number)
-    {
-        return None;
-    }
-    let converts_our_proforma = request.our_proforma.is_some()
-        && info
-            .referenced_proforma_number
-            .as_ref()
-            .map(InvoiceNumber::as_str)
-            == request.our_proforma;
-    let mut found = FoundDocument::from(document);
-    if matches!(tipus, "SZ" | "ES")
-        && tipus == document_type_of(request.kind)
-        && converts_our_proforma
-        && account_matches(document, request)
-    {
-        tracing::info!(number = %number, "adopting the conversion of our proforma");
-        found.adopted = true;
-        Some(IssueOutcome::Found(found))
-    } else {
-        tracing::warn!(number = %number, tipus = %tipus, "foreign document under the order");
-        Some(IssueOutcome::Foreign(found))
-    }
+/// Step 2 of [`Steps::issue`]: whether the order-number hint is a live
+/// invoice-kind document that is neither known to be ours nor the document
+/// the pre-query saw under our external id.
+fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
+    is_invoice_family(&found.document_type)
+        && found.is_live()
+        && Some(found.number.as_str()) != seen
+        && !our_numbers.iter().any(|known| known == &found.number)
 }
 
 fn outcome(result: Result<InvoiceDocument, QueryError>) -> QueryOutcome {

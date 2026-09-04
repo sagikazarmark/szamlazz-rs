@@ -155,10 +155,7 @@ impl Agent {
             return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
         }
         let e_invoice = found.e_invoice.unwrap_or(self.config.defaults.e_invoice);
-        let external_id = ExternalId::new(format!(
-            "{}:by-number:{number}:storno",
-            self.config.account.slug
-        ));
+        let external_id = ExternalId::for_unmanaged_storno(&self.config.account.slug, &number);
 
         let outcome = {
             let steps = Arc::clone(&self.steps);

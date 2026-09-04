@@ -6,16 +6,17 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::credit_entry::CreditEntry;
 
+use super::CorrectionId;
 use super::document::{DocumentInput, PaymentMethod};
-use super::{DocumentKind, RequestId};
 
 /// Input of `Szamlazz.Order.create_proforma`, `create_invoice`,
 /// `create_prepayment` and `create_final`.
+///
+/// The retry identity of a request is Restate's ingress `Idempotency-Key`;
+/// the request carries none of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CreateRequest {
-    /// The retry identity of this logical request.
-    pub request_id: RequestId,
     /// The document to issue.
     pub document: DocumentInput,
     /// Kind-specific options; all default.
@@ -26,9 +27,8 @@ pub struct CreateRequest {
 impl CreateRequest {
     /// A create request with default [`CreateOptions`].
     #[must_use]
-    pub fn new(request_id: RequestId, document: DocumentInput) -> Self {
+    pub fn new(document: DocumentInput) -> Self {
         Self {
-            request_id,
             document,
             options: CreateOptions::default(),
         }
@@ -40,36 +40,36 @@ impl CreateRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct CreateOptions {
-    /// Issue a new generation after the recorded document was reversed
-    /// externally or by an operator. Requires a new request id; without it a
-    /// reversed slot answers `outcome: reversed`. Unnecessary after a
-    /// service-side storno or a proforma deletion.
+    /// Issue a new document after the existing one was reversed — by this
+    /// service, the UI or anyone. Without it a reversed document answers
+    /// `outcome: reversed`; with it a live document answers
+    /// `conflict{live}`, so the flag can never cause a duplicate.
     pub reissue: bool,
-    /// Which proforma the invoice or prepayment converts (`create_invoice` and
-    /// `create_prepayment` only).
+    /// Which proforma the invoice converts (`create_invoice` only; the other
+    /// kinds refuse anything but `auto` as `invalid_input`). A prepayment
+    /// invoice cannot carry the reference — szamlazz.hu converts the order's
+    /// live proforma by shared order number on its own.
     pub proforma: ProformaLink,
 }
 
 /// How a create request refers to a proforma.
 ///
-/// Serialises as `"ledger"`, `"none"` or `{"number": "D-…"}`.
+/// Serialises as `"auto"`, `"none"` or `{"number": "D-…"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ProformaLink {
-    /// Reference the proforma recorded in the order's ledger: a `committed`
-    /// one is pre-queried and referenced (`conflict{proforma_missing}` when
-    /// szamlazz.hu no longer has it), a `consumed` one is
-    /// `conflict{proforma_consumed}`, a `pending` one `conflict{pending}`.
-    /// With no proforma recorded the request behaves like
-    /// [`ProformaLink::None`].
+    /// Reference the order's live proforma when szamlazz.hu has one under our
+    /// external id; otherwise reference none.
     #[default]
-    Ledger,
+    Auto,
     /// Reference no proforma. Refused with `conflict{proforma_live}` while a
-    /// live proforma exists under the order number, because szamlazz.hu links
-    /// by shared order number regardless.
+    /// live proforma of ours exists, because szamlazz.hu links by shared order
+    /// number regardless.
     None,
-    /// Reference a proforma by number, whether or not the ledger knows it.
+    /// Reference a proforma by number. `conflict{proforma_missing}` when
+    /// szamlazz.hu does not know it, `invalid_input` when it is not a
+    /// proforma.
     Number(String),
 }
 
@@ -77,11 +77,11 @@ pub enum ProformaLink {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CorrectRequest {
-    /// The invoice being corrected; must be managed by this order.
+    /// The invoice being corrected; must carry this order's number.
     pub invoice_number: String,
-    /// The retry identity of this logical request. A new id issues a new
-    /// corrective by contract.
-    pub request_id: RequestId,
+    /// The identity of this corrective. A new id issues a new corrective by
+    /// contract; the same id finds the one it issued.
+    pub correction_id: CorrectionId,
     /// The corrective document.
     pub document: DocumentInput,
 }
@@ -116,55 +116,6 @@ pub struct DeleteProformaRequest {
     /// no guard of its own; without `force` a paid proforma is
     /// `rejected{proforma_paid}`.
     pub force: bool,
-}
-
-/// Input of `Szamlazz.Order.get`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(default)]
-pub struct GetRequest {
-    /// Verify every committed document against szamlazz.hu before answering
-    /// (`freshness: live`) instead of returning the ledger as recorded.
-    pub verify: bool,
-}
-
-/// Input of the private `Szamlazz.Order.record_reversal` handler: an operator asserts
-/// what szamlazz.hu shows for a recorded document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct RecordReversalRequest {
-    /// The recorded invoice the assertion is about.
-    pub invoice_number: String,
-    /// What the operator asserts.
-    pub result: RecordedReversal,
-}
-
-/// An operator's assertion about a recorded document.
-///
-/// Serialises as `{"reversed": {"storno_number": "SS-…"}}` or `"live"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum RecordedReversal {
-    /// The document was reversed outside the service; the slot becomes
-    /// `reversed{origin: operator}` and the generation advances.
-    Reversed {
-        /// The storno invoice number, when known.
-        #[serde(default)]
-        storno_number: Option<String>,
-    },
-    /// The document is live; a `reversal_unverified` slot returns to
-    /// `committed`.
-    Live,
-}
-
-/// Input of the private `Szamlazz.Order.forget` handler: drop a slot whose document
-/// szamlazz.hu no longer knows (`conflict{recorded_document_missing}`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct ForgetRequest {
-    /// The slot to forget.
-    pub kind: DocumentKind,
 }
 
 /// Input of `Szamlazz.Agent.query`.
@@ -238,8 +189,8 @@ mod tests {
     use super::*;
     use crate::contract::document::tests::sample_document;
 
-    fn request_id() -> RequestId {
-        "r-1".parse().expect("valid request id")
+    fn correction_id() -> CorrectionId {
+        "c-1".parse().expect("valid correction id")
     }
 
     fn round_trip<T>(value: &T) -> serde_json::Value
@@ -254,30 +205,30 @@ mod tests {
 
     #[test]
     fn create_request_round_trips() {
-        let mut request = CreateRequest::new(request_id(), sample_document());
+        let mut request = CreateRequest::new(sample_document());
         request.options.reissue = true;
         request.options.proforma = ProformaLink::Number("D-1".to_owned());
         let json = round_trip(&request);
-        assert_eq!(json["request_id"], "r-1");
+        assert_eq!(json.get("request_id"), None);
+        assert_eq!(json["options"]["reissue"], true);
         assert_eq!(json["options"]["proforma"], json!({"number": "D-1"}));
     }
 
     #[test]
     fn create_request_defaults_options() {
         let request: CreateRequest = serde_json::from_value(json!({
-            "request_id": "r-1",
             "document": serde_json::to_value(sample_document()).expect("serialize"),
         }))
         .expect("deserialize");
         assert_eq!(request.options, CreateOptions::default());
-        assert_eq!(request.options.proforma, ProformaLink::Ledger);
+        assert_eq!(request.options.proforma, ProformaLink::Auto);
         assert!(!request.options.reissue);
     }
 
     #[test]
     fn proforma_link_wire_shapes() {
         let cases = [
-            (ProformaLink::Ledger, json!("ledger")),
+            (ProformaLink::Auto, json!("auto")),
             (ProformaLink::None, json!("none")),
             (
                 ProformaLink::Number("D-1".to_owned()),
@@ -297,10 +248,11 @@ mod tests {
     fn correct_and_storno_requests_round_trip() {
         let correct = CorrectRequest {
             invoice_number: "SZ-1".to_owned(),
-            request_id: request_id(),
+            correction_id: correction_id(),
             document: sample_document(),
         };
-        round_trip(&correct);
+        let json = round_trip(&correct);
+        assert_eq!(json["correction_id"], "c-1");
         let mut storno = StornoRequest::new("SZ-1");
         storno.comment = Some("wrong buyer".to_owned());
         round_trip(&storno);
@@ -310,54 +262,12 @@ mod tests {
     }
 
     #[test]
-    fn flag_requests_default_to_false() {
+    fn delete_request_defaults_to_false() {
         assert_eq!(
             serde_json::from_value::<DeleteProformaRequest>(json!({})).expect("deserialize"),
             DeleteProformaRequest { force: false }
         );
-        assert_eq!(
-            serde_json::from_value::<GetRequest>(json!({"verify": true})).expect("deserialize"),
-            GetRequest { verify: true }
-        );
         round_trip(&DeleteProformaRequest { force: true });
-        round_trip(&GetRequest::default());
-    }
-
-    #[test]
-    fn record_reversal_request_round_trips() {
-        let reversed = RecordReversalRequest {
-            invoice_number: "SZ-1".to_owned(),
-            result: RecordedReversal::Reversed {
-                storno_number: Some("SS-1".to_owned()),
-            },
-        };
-        let json = round_trip(&reversed);
-        assert_eq!(
-            json["result"],
-            json!({"reversed": {"storno_number": "SS-1"}})
-        );
-        let live = RecordReversalRequest {
-            invoice_number: "SZ-1".to_owned(),
-            result: RecordedReversal::Live,
-        };
-        let json = round_trip(&live);
-        assert_eq!(json["result"], json!("live"));
-        let bare: RecordedReversal =
-            serde_json::from_value(json!({"reversed": {}})).expect("deserialize");
-        assert_eq!(
-            bare,
-            RecordedReversal::Reversed {
-                storno_number: None
-            }
-        );
-    }
-
-    #[test]
-    fn forget_request_round_trips() {
-        let json = round_trip(&ForgetRequest {
-            kind: DocumentKind::Proforma,
-        });
-        assert_eq!(json, json!({"kind": "proforma"}));
     }
 
     #[test]
@@ -372,8 +282,8 @@ mod tests {
                 json!({"order_number": "ORD-1"}),
             ),
             (
-                Selector::ExternalId("acct:ORD-1:invoice:0".to_owned()),
-                json!({"external_id": "acct:ORD-1:invoice:0"}),
+                Selector::ExternalId("acct:ORD-1:invoice".to_owned()),
+                json!({"external_id": "acct:ORD-1:invoice"}),
             ),
         ];
         for (selector, expected) in cases {

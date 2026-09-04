@@ -83,8 +83,7 @@ async fn main() -> Result<()> {
 }
 
 /// Wires the configuration into the two services and binds them to one
-/// endpoint. Logs what was bound; never the agent key or the fingerprint
-/// secret.
+/// endpoint. Logs what was bound; never the agent key.
 fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     let EndpointConfig {
         service: config,
@@ -153,7 +152,6 @@ mod tests {
             [account]
             slug = "acct"
             agent_key = "agent-key"
-            fp_secret = "fp-secret"
             mode = "test"
             endpoint = "http://127.0.0.1:1/"
             "#
@@ -219,7 +217,6 @@ mod tests {
             [account]
             slug = "acct"
             agent_key = "agent-key"
-            fp_secret = "fp-secret"
             mode = "test"
             endpoint = "{}/"
             "#,

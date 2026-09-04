@@ -77,45 +77,35 @@ One row of a document: name, quantity, unit, net unit price, VAT rate, and net/V
 ### Restate worker concepts
 
 **Order**:
-The Restate Virtual Object that owns every document issued for one order number, registered with Restate as `Szamlazz.Order`. Its key is the order number (rendelésszám) trimmed of leading/trailing whitespace, case preserved — exactly what szamlazz.hu matches on. Same-key handlers run one at a time, which is what serializes issuing per order. Crate: `restate-szamlazz`.
-_Avoid_: order object, invoice workflow
-
-**Ledger**:
-The `Order`'s Virtual Object state: per-kind slots, corrective entries, the request-id map, a foreign hint and a bounded history. Holds numbers, ids, totals, an HMAC fingerprint and journaled timestamps — never buyer data. It is the source of truth for what the service issued; szamlazz.hu is consulted to verify it, not to rebuild it.
-_Avoid_: cache (it is authoritative, not derived), database
-
-**Slot**:
-The ledger entry for one document kind of an order (`proforma`, `invoice`, `prepayment`, `final`). Exactly one slot per kind; its status moves through `pending`, `committed`, `rejected`, `blocked`, `reversed`, `reversal_unverified` (a service-side storno exhausted its attempts unconfirmed; the next storno retries), `vacant` (nothing of ours after a foreign detection or an operator `forget`), and for proformas `deleted` or `consumed`. A `pending` slot means "we may have issued something we have not yet confirmed" and is what makes killing a stuck invocation safe.
-
-**Generation (gen)**:
-The counter in a slot that increments only on a verified reversal (invoice kinds), an operator-recorded reversal, an operator `forget`, or deletion/consumption (proforma). Each generation is one document identity; the external id embeds it so a reissued invoice never shares an id with the stornoed one. Never bumps on transport errors, rejections, 71/152 or foreign detections.
-_Avoid_: version, attempt, sequence number
-
-**Request id**:
-The caller-supplied `request_id` on every issuing handler: the retry identity. The same id returns the entry's current state forever; a different id is a new logical request; a known id with a different payload is `conflict{payload_mismatch}`. Ledger-only — never sent to szamlazz.hu.
-_Avoid_: idempotency key (Restate's ingress `Idempotency-Key` is a different, retention-bound mechanism the service does not rely on), correlation id
+The Restate Virtual Object through which every document of one order number is issued, registered with Restate as `Szamlazz.Order`. Its key is the order number (rendelésszám) trimmed of leading/trailing whitespace, case preserved — exactly what szamlazz.hu matches on. It keeps no state: the object exists for its per-key lock (same-key handlers run one at a time, which serializes issuing per order), and every handler answers from szamlazz.hu through the order's external ids. Crate: `restate-szamlazz`.
+_Avoid_: order object, invoice workflow, ledger (there is none — szamlazz.hu is the source of truth)
 
 **External id (szamlaKulsoAzon)**:
-The Agent's optional per-document identifier, used by the worker as the identity handle: deterministic from ledger state (`{slug}:{order}:{kind}:{gen}`), written to state before the first call, queried before every create. Not unique server-side and never echoed in responses, so every document found by it is validated before adoption.
-_Avoid_: idempotency key (szamlazz.hu does not treat it as one), external reference
+The Agent's optional per-document identifier, used by the worker as the identity handle. Deterministic from the key alone — `{slug}:{order}:{kind}` for the four kinds, `{slug}:{order}:corrective:{correction_id}`, `{slug}:{order}:storno:{number}` — so any invocation can find what an earlier one issued. Not unique server-side and never echoed in responses: a query returns the newest holder, and every document found by it is validated (order number, `tipus`, `teszt`, supplier pin) before it is trusted.
+_Avoid_: idempotency key (szamlazz.hu does not treat it as one), generation (no counter — the newest holder is the answer), external reference
+
+**Idempotency-Key**:
+Restate's ingress retry identity, sent by the caller as a header per logical request; Restate dedupes retries and attaches concurrent duplicates to the in-flight invocation. Recommended, never relied on for safety. Rotate it after a terminal error: Restate replays a failed invocation's stored completion for the retention period (verified), so the same key would repeat the failure instead of reconciling.
+_Avoid_: request id (v1's body field; gone), correlation id
 
 **Outcome**:
-A domain result returned as data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected`, `conflict{reason}`. Errors (`TerminalError`) are reserved for faults — `outcome_unknown`, `unavailable`, `account_mismatch`, `invalid_input` — and always mean "outcome unknown, re-call with the same request id", never "no document exists".
+A domain result returned as data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected`, `conflict{reason}`. Errors (`TerminalError`) are reserved for faults — `outcome_unknown`, `unavailable`, `account_mismatch`, `invalid_input` — and always mean "outcome unknown, retry with a new `Idempotency-Key` or read `get`", never "no document exists".
 _Avoid_: error/failure for a rejection or conflict, status
 
 **Reissue**:
-Issuing a new generation of a document kind after the recorded one was reversed. Explicit (`reissue: true` plus a new request id) when the reversal was external or operator-asserted; flag-free after a service-side storno or a proforma deletion.
-_Avoid_: re-create, retry (a retry targets the same generation)
+Issuing a new document of a kind after the one under its external id was reversed — by the service, the UI or anyone. Always explicit: `reissue: true` (with a new `Idempotency-Key`); without it the create returns `outcome: reversed`. Explicit because the service has no record of who reversed and cannot tell a stale retry of the original create from a deliberate new request; the flag on a live document is `conflict{live}`, so it can never cause a duplicate. The new document becomes the newest holder of the same external id.
+_Avoid_: re-create, retry (a retry targets the same document)
 
-**Reversal origin**:
-Who reversed a recorded document, as the ledger knows it: `service` (via `Szamlazz.Order.storno_invoice`), `external` (detected by verification — UI, support, another integration), `operator` (asserted through the private `record_reversal` handler). Decides whether the next create needs `reissue`.
+**Reversal (as observed)**:
+A document is reversed when szamlazz.hu reports `<sztornozott>true</sztornozott>` on it; the storno document carries `hivszamlaszam` = original and is the order-number hint only until something newer is issued under the order. The service does not track who reversed a document or when.
+_Avoid_: reversal origin (v1 concept; gone), cancellation
 
 **Foreign document**:
-A live invoice-kind document found under the order number that the ledger does not own and no external id of ours resolves to. Recorded only as a hint (`foreign_hint`), never adopted; the create returns `conflict{foreign}`.
-_Avoid_: external document (collides with reversal origin `external`), orphan
+A live invoice-kind document (`SZ`, `ES`, `VS`) found under the order number by the order-number hint that is neither known to be ours nor the document seen under our external id. Detected live on the first attempt; never adopted, nothing recorded; the create returns `conflict{foreign}`.
+_Avoid_: external document, orphan
 
 **Consumed proforma**:
-A proforma that szamlazz.hu removed from its query surface because an invoice or prepayment converted it — explicitly by reference or implicitly by shared order number. Distinct from `deleted`: a consumed slot is terminal for the order; a deleted one may be recreated.
+A proforma that szamlazz.hu removed from its query surface because an invoice or prepayment converted it — explicitly by reference or implicitly by shared order number. Derived live in `get`: the proforma is absent under its external id while the invoice or prepayment carries `hivdijbekszam`, reported as `{state: consumed, by}`. Distinct from a deleted proforma, which is simply absent and may be recreated.
 _Avoid_: converted (the invoice is converted from it; the proforma is consumed), deleted
 
 **Steps (`steps` module) / `Szamlazz.Agent` service**:

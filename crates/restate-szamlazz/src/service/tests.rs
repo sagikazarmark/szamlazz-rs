@@ -1,6 +1,6 @@
 //! Discovery and binding tests of the Restate adapters (design §11): the
-//! service names, the handler set with its shared / private flags and the
-//! per-handler retry policy, plus an `Endpoint` build.
+//! service names, the handler set with its shared flags and the per-handler
+//! retry policy, plus an `Endpoint` build.
 
 use std::sync::Arc;
 
@@ -18,7 +18,6 @@ fn config() -> Arc<Config> {
             "account": {
                 "slug": "acct",
                 "agent_key": "key",
-                "fp_secret": "fp",
                 "endpoint": "http://127.0.0.1:1/",
                 "mode": "test",
             },
@@ -28,7 +27,7 @@ fn config() -> Arc<Config> {
 }
 
 #[test]
-fn order_discovers_as_a_virtual_object_with_ten_handlers() {
+fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
     let discovery = <Order as Discoverable>::discover();
     assert_eq!(discovery.name.as_str(), "Szamlazz.Order");
     assert_eq!(discovery.ty, ServiceType::VirtualObject);
@@ -48,58 +47,66 @@ fn order_discovers_as_a_virtual_object_with_ten_handlers() {
             "create_prepayment",
             "create_proforma",
             "delete_proforma",
-            "forget",
             "get",
-            "record_reversal",
             "storno_invoice",
         ]
     );
 
     for handler in &discovery.handlers {
         let name = handler.name.as_str();
-        // Exclusive is the Virtual Object default and left implicit (`None`);
-        // only shared handlers are flagged.
-        let expected_ty = (name == "get").then_some(HandlerType::Shared);
-        assert_eq!(handler.ty, expected_ty, "{name}");
-        let private = matches!(name, "record_reversal" | "forget");
-        assert_eq!(handler.ingress_private, private.then_some(true), "{name}");
-        if private {
-            assert_eq!(handler.retry_policy_max_attempts, None, "{name}");
-        } else {
-            // ADR 0004: every handler that calls szamlazz.hu kills after 5
-            // attempts with a 2m → 10m back-off and bounded timeouts.
-            assert_eq!(
-                handler.retry_policy_initial_interval,
-                Some(120_000),
-                "{name}"
-            );
-            assert_eq!(handler.retry_policy_max_interval, Some(600_000), "{name}");
-            assert_eq!(
-                handler.retry_policy_exponentiation_factor,
-                Some(2.0),
-                "{name}"
-            );
-            assert_eq!(handler.retry_policy_max_attempts, Some(5), "{name}");
-            assert_eq!(
-                handler.retry_policy_on_max_attempts,
-                Some(RetryPolicyOnMaxAttempts::Kill),
-                "{name}"
-            );
-            assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
-            assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
-            assert_eq!(
-                handler.journal_retention,
-                Some(3 * 24 * 3_600_000),
-                "{name}"
-            );
-            assert_eq!(
-                handler.idempotency_retention,
-                Some(7 * 24 * 3_600_000),
-                "{name}"
-            );
-        }
-        assert!(handler.input.is_some(), "{name} takes an input");
+        assert_eq!(handler.ingress_private, None, "{name} is public");
         assert!(handler.output.is_some(), "{name} returns an output");
+        assert_eq!(
+            handler.retry_policy_on_max_attempts,
+            Some(RetryPolicyOnMaxAttempts::Kill),
+            "{name}"
+        );
+        if name == "get" {
+            // Read-only: shared, an empty input, the default back-off with
+            // three attempts, no retention.
+            assert_eq!(handler.ty, Some(HandlerType::Shared));
+            let input = handler.input.as_ref().expect("an empty input payload");
+            assert!(
+                input.content_type.is_none() && input.json_schema.is_none(),
+                "get takes no input"
+            );
+            assert_eq!(handler.retry_policy_max_attempts, Some(3));
+            assert_eq!(handler.retry_policy_initial_interval, None);
+            assert_eq!(handler.inactivity_timeout, None);
+            assert_eq!(handler.abort_timeout, None);
+            assert_eq!(handler.journal_retention, None);
+            assert_eq!(handler.idempotency_retention, None);
+            continue;
+        }
+        // Exclusive is the Virtual Object default and left implicit (`None`).
+        assert_eq!(handler.ty, None, "{name}");
+        assert!(handler.input.is_some(), "{name} takes an input");
+        // ADR 0004: every handler that calls szamlazz.hu kills after 5
+        // attempts with a 2m → 10m back-off and bounded timeouts.
+        assert_eq!(
+            handler.retry_policy_initial_interval,
+            Some(120_000),
+            "{name}"
+        );
+        assert_eq!(handler.retry_policy_max_interval, Some(600_000), "{name}");
+        assert_eq!(
+            handler.retry_policy_exponentiation_factor,
+            Some(2.0),
+            "{name}"
+        );
+        assert_eq!(handler.retry_policy_max_attempts, Some(5), "{name}");
+        assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
+        assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
+        assert_eq!(
+            handler.journal_retention,
+            Some(3 * 24 * 3_600_000),
+            "{name}"
+        );
+        assert_eq!(
+            handler.idempotency_retention,
+            Some(30 * 24 * 3_600_000),
+            "{name}"
+        );
     }
 }
 
@@ -147,7 +154,7 @@ fn agent_discovers_as_a_service_with_three_handlers() {
             );
             assert_eq!(
                 handler.idempotency_retention,
-                Some(7 * 24 * 3_600_000),
+                Some(30 * 24 * 3_600_000),
                 "{name}"
             );
         }
@@ -172,13 +179,10 @@ fn faults_serialise_their_code_and_status() {
     use crate::identity::OrderKey;
 
     let order = OrderKey::parse("ORD-1").expect("order");
-    let request_id = "r-1".parse().expect("request id");
     let fault = Fault::outcome_unknown("exhausted").about(
         &order,
-        IssuedKind::Invoice,
-        0,
-        "acct:ORD-1:invoice:0",
-        Some(&request_id),
+        Some(IssuedKind::Invoice),
+        "acct:ORD-1:invoice",
     );
     let error = TerminalError::from(fault);
     assert_eq!(error.code(), 500);
@@ -186,9 +190,9 @@ fn faults_serialise_their_code_and_status() {
     assert_eq!(body["code"], TerminalCode::OutcomeUnknown.as_str());
     assert_eq!(body["order"], "ORD-1");
     assert_eq!(body["kind"], "invoice");
-    assert_eq!(body["gen"], 0);
-    assert_eq!(body["external_id"], "acct:ORD-1:invoice:0");
-    assert_eq!(body["request_id"], "r-1");
+    assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+    assert_eq!(body.get("gen"), None);
+    assert_eq!(body.get("request_id"), None);
 
     let cases = [
         (Fault::invalid_input("x"), 400, "invalid_input"),
@@ -202,4 +206,81 @@ fn faults_serialise_their_code_and_status() {
         assert_eq!(body["code"], code);
         assert_eq!(body.get("order"), None);
     }
+}
+
+#[test]
+fn lookup_classifies_query_outcomes() {
+    use super::support::Lookup;
+    use crate::contract::IssuedKind;
+    use crate::identity::OrderKey;
+    use crate::steps::{FoundDocument, QueryOutcome};
+
+    let order = OrderKey::parse("ORD-1").expect("order");
+    let found = FoundDocument {
+        number: "SZ-1".to_owned(),
+        document_type: "SZ".to_owned(),
+        reversed: None,
+        order_number: Some(" ORD-1 ".to_owned()),
+        referenced_proforma: None,
+        referenced_invoice: None,
+        gross: None,
+        net: None,
+        test: true,
+        e_invoice: Some(true),
+        supplier_id: Some(972_720),
+        document_id: Some(1),
+        payments: Vec::new(),
+    };
+    let classify = |outcome: QueryOutcome, supplier: Option<u64>| {
+        Lookup::classify(outcome, &order, IssuedKind::Invoice, true, supplier)
+    };
+
+    assert_eq!(
+        classify(QueryOutcome::NotFound, None).expect("classified"),
+        Lookup::Absent
+    );
+    let ours = classify(QueryOutcome::Found(found.clone()), Some(972_720)).expect("classified");
+    assert_eq!(ours, Lookup::Ours(found.clone()));
+
+    let reversed = FoundDocument {
+        reversed: Some(true),
+        ..found.clone()
+    };
+    let ours = classify(QueryOutcome::Found(reversed.clone()), None).expect("classified");
+    assert_eq!(ours, Lookup::Ours(reversed));
+
+    for (label, other) in [
+        (
+            "order",
+            FoundDocument {
+                order_number: Some("ORD-2".to_owned()),
+                ..found.clone()
+            },
+        ),
+        (
+            "kind",
+            FoundDocument {
+                document_type: "D".to_owned(),
+                ..found.clone()
+            },
+        ),
+        (
+            "test",
+            FoundDocument {
+                test: false,
+                ..found.clone()
+            },
+        ),
+        (
+            "supplier",
+            FoundDocument {
+                supplier_id: Some(1),
+                ..found.clone()
+            },
+        ),
+    ] {
+        let lookup = classify(QueryOutcome::Found(other.clone()), Some(972_720)).expect(label);
+        assert_eq!(lookup, Lookup::Collision(other), "{label}");
+    }
+    assert!(classify(QueryOutcome::Transport("down".to_owned()), None).is_err());
 }

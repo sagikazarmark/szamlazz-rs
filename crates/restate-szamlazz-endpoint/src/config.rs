@@ -68,7 +68,6 @@ mod tests {
         endpoint = "https://www.szamlazz.hu/szamla/"
         mode = "live"
         supplier_id = 972720
-        fp_secret = "fp-secret"
 
         [defaults]
         e_invoice = false
@@ -103,7 +102,6 @@ mod tests {
         [account]
         slug = "acct"
         agent_key = "agent-key"
-        fp_secret = "fp-secret"
         "#
     }
 
@@ -122,7 +120,6 @@ mod tests {
         );
         assert_eq!(service.account.mode, AccountMode::Live);
         assert_eq!(service.account.supplier_id, Some(972_720));
-        assert_eq!(service.account.fp_secret.expose(), "fp-secret");
         assert!(!service.defaults.e_invoice);
         assert_eq!(service.defaults.language, "hu");
         assert_eq!(service.defaults.currency, "HUF");
@@ -167,7 +164,6 @@ mod tests {
             assert_eq!(config.service.account.mode, AccountMode::Test);
             // Untouched values survive the merge.
             assert_eq!(config.service.account.slug.as_str(), "acct");
-            assert_eq!(config.service.account.fp_secret.expose(), "fp-secret");
             Ok(())
         });
     }
@@ -231,7 +227,6 @@ mod tests {
             [account]
             slug = "acct"
             agent_key = " "
-            fp_secret = "fp-secret"
             "#,
         ))
         .extract()
@@ -243,7 +238,6 @@ mod tests {
             [account]
             slug = "acct"
             agent_key = "agent-key"
-            fp_secret = "fp-secret"
 
             [issue]
             first_backoff = "11m"

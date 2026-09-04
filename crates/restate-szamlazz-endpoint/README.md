@@ -5,7 +5,7 @@
 
 **Standalone endpoint hosting the szamlazz.hu services for [Restate](https://restate.dev/).**
 
-The `restate-szamlazz` binary serves the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service of [`restate-szamlazz`](../restate-szamlazz) over HTTP/2 for a Restate server to register. It issues, reverses and reconciles szamlazz.hu documents exactly once per order; the design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md).
+The `restate-szamlazz` binary serves the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service of [`restate-szamlazz`](../restate-szamlazz) over HTTP/2 for a Restate server to register. It issues and reverses szamlazz.hu documents exactly once per order, keeping no state of its own — szamlazz.hu is the source of truth, reached through deterministic external ids; the design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md).
 
 ## Install
 
@@ -20,13 +20,12 @@ docker run --rm -p 9080:9080 \
   -v "$PWD/restate-szamlazz.toml:/etc/restate-szamlazz.toml:ro" \
   -e CONFIG_FILE=/etc/restate-szamlazz.toml \
   -e RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY \
-  -e RESTATE_SZAMLAZZ_ACCOUNT__FP_SECRET \
   ghcr.io/sagikazarmark/restate-szamlazz:latest
 ```
 
 ## Prerequisite
 
-The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON**. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number as its second guard against duplicates; without the toggle a retry that lands after the first request can issue a second legal document. The verified behaviour and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
+The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON**. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id pre-query inside every attempt is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
 
 One deployment serves one szamlazz.hu account. A second account is a second deployment with its own `Szamlazz.Order` service.
 
@@ -41,9 +40,8 @@ identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]
 slug = "acct"                 # 1–16 chars [a-z0-9-]; namespaces external ids
 agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
-mode = "live"                 # live | test — validated against <teszt> on every adopted document
-supplier_id = 972720          # optional pin; otherwise learned from the first query and stored in the ledger
-fp_secret = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__FP_SECRET; rotation invalidates stored fingerprints
+mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
+supplier_id = 972720          # optional pin; when set, validated against szallito/id on every document found under our external ids
 
 [defaults]
 e_invoice = false
@@ -70,18 +68,17 @@ body = "..."
 max_attempts = 5
 first_backoff = "2m"
 max_backoff = "10m"
-detect_foreign = true         # the hint is mandatory when options.proforma == ledger regardless
+detect_foreign = true         # the hint is mandatory when a proforma is linked, regardless
 ```
 
-`account.agent_key` (the Számla Agent key) and `account.fp_secret` (the HMAC key of the payload fingerprint) are secrets. Keep them out of the file and supply them through the environment instead:
+`account.agent_key` (the Számla Agent key) is a secret. Keep it out of the file and supply it through the environment instead:
 
 ```sh
 RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY="..." \
-RESTATE_SZAMLAZZ_ACCOUNT__FP_SECRET="..." \
 restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_DEFAULTS__CURRENCY=EUR`). Only `[account]` is required; `slug`, `agent_key` and `fp_secret` have no defaults. The configuration is validated at start-up and the process exits with the first violated invariant. Neither secret is ever logged.
+Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_DEFAULTS__CURRENCY=EUR`). Only `[account]` is required; `slug` and `agent_key` have no defaults. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged.
 
 ## Running
 
@@ -103,20 +100,18 @@ For local development the repository root has a `compose.yaml` with a Restate se
 
 Every handler takes and returns JSON; the discovery manifest carries JSON Schemas for all of them, so Restate's OpenAPI export documents the full contract. Domain outcomes are data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or `conflict` with a `conflict_reason`.
 
-`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). Every issuing handler takes a `request_id`: the retry identity. The same id returns the entry's current state forever; a different id is a new logical request; a known id with a different payload is `conflict{payload_mismatch}`.
+`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{slug}:{order}:{kind}`), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, three on `Szamlazz.Agent`:
 
 | Handler | Description |
 |---|---|
 | `Szamlazz.Order.create_proforma` | Issues the proforma (`díjbekérő`) of the order. |
-| `Szamlazz.Order.create_invoice` | Issues the invoice (`számla`), optionally converting the order's proforma (`options.proforma`). |
-| `Szamlazz.Order.create_prepayment` | Issues the prepayment invoice (`előlegszámla`); one per order. |
-| `Szamlazz.Order.create_final` | Issues the final invoice (`végszámla`) settling the committed prepayment. |
-| `Szamlazz.Order.correct_invoice` | Issues a corrective invoice (`helyesbítő számla`) for an invoice managed by this order; a new `request_id` issues a new corrective. |
-| `Szamlazz.Order.storno_invoice` | Reverses (`sztornó`) an invoice managed by this order; idempotent. |
+| `Szamlazz.Order.create_invoice` | Issues the invoice (`számla`), converting the order's live proforma unless told otherwise (`options.proforma`: `auto`, `none` or `{"number": …}`); `options.reissue` issues a new one after a reversal. Refused with `conflict{prepaid_chain}` while a live prepayment invoice exists. |
+| `Szamlazz.Order.create_prepayment` | Issues the prepayment invoice (`előlegszámla`); one per order, exclusive with the plain invoice. Takes no `options.proforma`: szamlazz.hu converts the order's live proforma by shared order number on its own. |
+| `Szamlazz.Order.create_final` | Issues the final invoice (`végszámla`) settling the order's live prepayment invoice; the server does not net the prepayment into the totals. |
+| `Szamlazz.Order.correct_invoice` | Issues a corrective invoice (`helyesbítő számla`) for an invoice of this order; a new `correction_id` issues a new corrective. |
+| `Szamlazz.Order.storno_invoice` | Reverses (`sztornó`) an invoice of this order; idempotent. |
 | `Szamlazz.Order.delete_proforma` | Deletes the order's proforma; refuses a paid one unless `force`. |
-| `Szamlazz.Order.get` | The order's ledger as recorded, or with `verify` after checking every committed document against szamlazz.hu. Read-only, never blocks behind issuing. |
-| `Szamlazz.Order.record_reversal` | Operator assertion that a recorded document is reversed or live (private: not reachable from the ingress). |
-| `Szamlazz.Order.forget` | Operator drop of a slot whose document szamlazz.hu no longer knows (private). |
+| `Szamlazz.Order.get` | What szamlazz.hu holds under the order's external ids right now (proforma, invoice, prepayment, final), each `live`, `reversed` or — a proforma — `consumed`. No input. Read-only, never blocks behind issuing. |
 | `Szamlazz.Agent.query` | Queries a document by invoice number, order number or external id. |
 | `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. |
 | `Szamlazz.Agent.storno` | Reverses an invoice that no `Szamlazz.Order` manages; a document carrying an order number is answered with `managed_by_order` instead. |
@@ -126,8 +121,8 @@ A create request through the ingress:
 ```sh
 curl localhost:8080/Szamlazz.Order/ORD-1001/create_invoice \
   -H 'content-type: application/json' \
+  -H 'idempotency-key: 8b2f6c4e-0001' \
   -d '{
-    "request_id": "8b2f6c4e-0001",
     "document": {
       "buyer": { "name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23." },
       "items": [{ "name": "Consulting", "quantity": "1", "unit": "db", "unit_price": "1000", "vat_rate": "27" }],
@@ -138,7 +133,13 @@ curl localhost:8080/Szamlazz.Order/ORD-1001/create_invoice \
   }'
 ```
 
-**Caller contract:** any error from an issuing or storno handler means "outcome unknown — re-call with the same `request_id` or read `Szamlazz.Order.get`", never "no document exists". Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery; the `pending` slot written before the first call is what the next call reconciles against. Do not rely on Restate's ingress `Idempotency-Key`: it would replay the failure for its retention period. `request_id` is the retry identity. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md).
+**Caller contract:**
+
+1. Send an `Idempotency-Key` per logical request; Restate dedupes retries and attaches concurrent duplicates to the in-flight invocation.
+2. **Any error** from an issuing or storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`" (the stored completion of a failed invocation is replayed under the same key for the retention period — verified); the handler reconciles by external id, so the retry is safe. Never interpret an error as "no document exists".
+3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the flag can never cause a duplicate.
+
+Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery; the external-id pre-query inside every attempt is what the next call reconciles against. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
 
 ## Request Identity
 

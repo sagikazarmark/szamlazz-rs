@@ -1,5 +1,13 @@
 # A repeat create after an external reversal returns `reversed` and reissues only on explicit request
 
+Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Still holds — and is now the rule after **every** reversal, not only external ones: a create that finds its
+document reversed (`sztornozott`) returns `outcome: reversed` and issues only with an explicit `reissue: true`;
+`reissue: true` on a live document is `conflict{live}`. Superseded: `request_id` as retry identity (→ Restate's
+ingress `Idempotency-Key`), the flag-free path after a service-side storno (the service keeps no record of who
+reversed, so the runner-up "flag always required" is what stands), the fingerprint and
+`conflict{payload_mismatch}`, `reversal origin`, and the operator `record_reversal` handler.
+
 `create_invoice` (and its proforma, prepayment, final and corrective siblings) may find that the
 document the ledger recorded for this order and kind has since been reversed by someone other than
 the service — a storno from the szamlazz.hu UI, by support, or asserted by an operator. The question

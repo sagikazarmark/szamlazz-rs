@@ -1,5 +1,12 @@
 # Exhausted retries kill the invocation instead of pausing it
 
+Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the retry policy and timeout
+values, the verified Restate facts, and the operational alerts. Superseded: the `pending` slot as what makes
+kill safe (there is no state; the external-id pre-query inside every attempt is), the runbook and caller
+contract phrased in terms of `request_id` (→ retry with a **new** `Idempotency-Key`, since a stored failure is
+replayed under the same key), the operator handlers, and `idempotency_retention = 7d` (the code sets `30d`).
+
 Restate's server-wide default retry policy is `initial-interval 500ms`, factor 2, `max-interval 1m`,
 `max-attempts 70`, `on-max-attempts pause` — about an hour of back-off followed by an indefinite
 pause awaiting a human (the reference page; the guides disagree with each other on the initial
