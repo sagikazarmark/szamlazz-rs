@@ -346,6 +346,33 @@ pub enum QueryOutcome {
     Transport(String),
 }
 
+/// What the account probe of `Szamlazz.Agent.check_account` learned from one
+/// query of the sentinel external id ([`ExternalId::for_probe`]).
+///
+/// Credential acceptance is the only fact it establishes: szamlazz.hu answers
+/// the credential codes before it looks at the request, so any other answer
+/// — code 7 above all, since nothing the service issues carries the sentinel
+/// id — means the key works. The supplier id appears only in found-document
+/// bodies, so a not-found probe cannot cross-check it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ProbeOutcome {
+    /// szamlazz.hu accepted the credentials and answered the query (with code
+    /// 7, a document, or any other non-credential code).
+    Accepted,
+    /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
+    /// [`is_credentials_rejected`].
+    CredentialsRejected {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
+    /// The exchange itself failed (transport, parse or `szlahu_down`) and
+    /// szamlazz.hu's verdict on the credentials is not known.
+    Transport(String),
+}
+
 /// Why [`Gateway::query_document`] returned no document.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -926,6 +953,42 @@ impl Gateway {
     /// See [`QueryError`].
     pub async fn query_document(&self, selector: &Selector) -> Result<InvoiceDocument, QueryError> {
         self.query_raw(invoice_selector(selector)).await
+    }
+
+    /// The account probe of `Szamlazz.Agent.check_account`: one query of the
+    /// sentinel `external_id` ([`ExternalId::for_probe`]), whose expected
+    /// answer is code 7. Every szamlazz.hu answer but a credential code is
+    /// [`ProbeOutcome::Accepted`] — the credential codes come before anything
+    /// else, so any other code means the key was accepted; a document under
+    /// the sentinel id, which nothing the service issues carries, is logged
+    /// and accepted as well. Only a failed exchange (transport, parse,
+    /// `szlahu_down`) settles nothing. Issues nothing.
+    pub async fn probe(&self, external_id: &ExternalId) -> ProbeOutcome {
+        let span = tracing::info_span!("gateway.probe", external_id = %external_id);
+        match self
+            .query_raw(InvoiceSelector::ExternalId(external_id.as_str().to_owned()))
+            .instrument(span)
+            .await
+        {
+            Ok(found) => {
+                tracing::warn!(
+                    external_id = %external_id,
+                    number = %found.number(),
+                    "a document carries the probe's sentinel external id; it was not issued by this service"
+                );
+                ProbeOutcome::Accepted
+            }
+            Err(QueryError::NotFound) => ProbeOutcome::Accepted,
+            Err(QueryError::Api { code, .. }) => {
+                tracing::debug!(code, "the probe was answered with a non-credential code");
+                ProbeOutcome::Accepted
+            }
+            Err(QueryError::CredentialsRejected { code, message }) => {
+                ProbeOutcome::CredentialsRejected { code, message }
+            }
+            Err(error @ QueryError::Unavailable(_)) => ProbeOutcome::Transport(error.to_string()),
+            Err(QueryError::Transport(message)) => ProbeOutcome::Transport(message),
+        }
     }
 
     /// The storno lookup step (design §6 step 2), read-only: the storno

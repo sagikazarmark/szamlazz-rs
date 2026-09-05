@@ -94,8 +94,7 @@ namespace — and nothing of it (gateway, client, credentials) outlives the exec
 
 1. **Pin** — `ctx.run("namespace", || namespace)`, a pure durable step: an in-place redeploy with a changed namespace
    cannot make a running invocation issue under a new id.
-2. *(The ingress-path guard of #27 slots in here.)*
-3. **Resolve** — `ctx.run("account", || resolver.resolve(ctx.scope()))` under the **resolve policy** (§9), an
+2. **Resolve** — `ctx.run("account", || resolver.resolve(ctx.scope()))` under the **resolve policy** (§9), an
    explicit run retry policy bounded by duration. The closure returns the resolver's answer as data — the `Account`,
    `unscoped`, `unknown{scope}` — and its unavailability as a retryable error (whose text never echoes the
    resolver's own message), so unscoped/unknown are journaled and never retried while an outage re-executes the
@@ -103,7 +102,7 @@ namespace — and nothing of it (gateway, client, credentials) outlives the exec
    exhaustion or cancellation of the run → `TerminalError{unavailable}`. One `account` entry per invocation: the
    invocation finishes on the account it started on, and the Restate UI shows the journaled `Account` (id, mode,
    supplier id, endpoint, defaults, seller, credential reference — never the key) for the retention period.
-4. **Fetch** — `store.fetch(account.credential_ref)` **outside the journal**, on every handler execution
+3. **Fetch** — `store.fetch(account.credential_ref)` **outside the journal**, on every handler execution
    including replays, with a short in-process retry (three attempts, 200 ms apart), then
    `TerminalError{unavailable}`. `gone` is terminal at once. Terminal by decision: a retryable error would route a
    prolonged store outage into the handler's kill-on-five and an unstructured 500, whereas the terminal fault is
@@ -111,8 +110,17 @@ namespace — and nothing of it (gateway, client, credentials) outlives the exec
    landed surfaces as `unavailable` although the document exists; `get` or a retry with a new `Idempotency-Key`
    reconciles (`already_issued`). The `Credentials` type has no serde implementation — the compiler rejects any
    attempt to journal it.
-5. **Open** — `Gateway::open(account, credentials)` over a fresh Számla Agent client (the default `reqwest::Client`
+4. **Open** — `Gateway::open(account, credentials)` over a fresh Számla Agent client (the default `reqwest::Client`
    keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
+
+The scope reaches the worker only under protocol v7. Restate's ingress (1.7.8, `ingress-http/src/handler/service_handler.rs`)
+refuses a scoped path while `vqueues` or `scoped_virtual_objects` is off but does **not** gate it on `protocol_v7`:
+with the other two on and v7 off, the scoped call is accepted, the SDK sees `scope = None`, and a single-account
+deployment would issue on its one account. The worker has no second signal of "was this call scoped?" that it is
+willing to depend on — the ingress's `x-restate-ingress-path` header would be one, but it is undocumented and
+caller-overridable, so a guard on it was considered and dropped (#27) — and the defence is operational:
+`Szamlazz.Agent.check_account` under each scope after every deploy, whose `scope` field is what the SDK saw; `null`
+under a scoped call is that misconfiguration, caught before any order is issued.
 
 Handler-level behaviour is observable only under Restate (the SDK has no mock context), so the prologue's decisions
 are pure functions with unit tests (`service::prologue`) and the durable behaviour is asserted end to end (§11).
@@ -121,6 +129,7 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 
 | Handler | Input → Output | Notes |
 |---|---|---|
+| `check_account` | `()` → `CheckAccountResponse { scope, account: { id, mode, supplier_id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue as every handler, then one step (`probe`) — a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries (two segments; every issued id has three or more) — expecting code 7; `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**: reporting it is the probe's purpose); a failed exchange is `TerminalError{unavailable}`. `scope` is what the SDK saw — `null` under a scoped call means the server did not forward the scope (protocol v7 off). Credential acceptance is the only szamlazz.hu-verified fact it returns — the account fields echo the *configured* account, since the supplier id appears only in found-document bodies. Issues nothing. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works. `max_attempts = 3, kill`; `journal_retention = "1d"` (explicit, so the leak assertion can scan it) |
 | `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected`; `journal_retention = "1d"` |
 | `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
 | `storno` | `StornoRequest` → `StornoResponse` | verify first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the storno step under the issue policy; exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
@@ -300,7 +309,8 @@ TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatc
 by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
 prologue's `account` step before anything is issued; the same request never succeeds, so it is a 400 and the caller
 fixes the scope rather than retrying. `unavailable` also covers the prologue's own faults: the resolve policy
-exhausted, the credential store gone or unavailable through the in-process retry.
+exhausted, the credential store gone or unavailable through the in-process retry — and the probe of
+`check_account` when its exchange settled nothing.
 
 `credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
 or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request —
@@ -417,12 +427,14 @@ supplier id — never the key.
   (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
   landed, the 71/152 matrix incl. `existing_number` and the contradiction, the corrective's 71/152 → `Rejected`),
   storno validation incl. the D/SL no-op, 335, 7, and the credential codes 3/135/136/164 as `CredentialsRejected` on
-  every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query);
+  every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query,
+  probe); the probe as exactly one query of the sentinel id and nothing else, with a wrong key as data;
   the gateway validates found documents against the account it was opened for.
-- `service`: discovery test (names, handler set, attributes), an endpoint build smoke test, `prepare` refusing
+- `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
+  `journal_retention`, no input — and attributes), an endpoint build smoke test, `prepare` refusing
   `options.proforma` on every kind but `create_invoice`, the issue policy's field-for-field mapping onto
-  `RunRetryPolicy`, the fault → status mapping, and a sentinel test that the agent key reaches neither the
-  `credentials_rejected` warning nor the fault body.
+  `RunRetryPolicy`, the fault → status mapping, the probe outcome → `credentials` mapping, and a sentinel test that
+  the agent key reaches neither the `credentials_rejected` warning nor the fault body.
 - End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
@@ -445,7 +457,10 @@ supplier id — never the key.
   `account` run's retries visible on `sys_invocation` (`last_failure_related_command_name = account`, the failure
   text never echoing the resolver's message) within the resolve policy's delays, and still one `account` entry; a
   store that fails every fetch → 503 `unavailable` after three fetches, zero szamlazz.hu requests, and the same
-  order issuing once the store is back.
+  order issuing once the store is back. `check_account` unscoped → the configured account with `scope: null` and
+  `credentials: ok` after exactly one szamlazz.hu request (the sentinel query carrying the account's key) and
+  `namespace`, `account`, `probe` journaled; szamlazz.hu's code 3 on the probe → `credentials: rejected` as a 200;
+  scoped on the single-account deployment → 400 `unknown_account`, zero requests.
   Then, on the same server, the **flag day** and the **multi-account phase** (two accounts behind a test-local
   mutable resolver and store seeded from the static resolver's `[accounts.<scope>]` shape: `acme` is the phase-1
   account — same key, same supplier id — and `beta` a second one): while private the ingress answers 400 with no
@@ -454,7 +469,9 @@ supplier id — never the key.
   `namespace` and `account` journaled and zero szamlazz.hu requests, and an unknown scope likewise; the same order
   key under `acme` and `beta` concurrently → two `issued` with each account's own key on the create wire exactly
   once; the **same** `Idempotency-Key` under the two scopes → two invocation ids and two documents, and the key
-  replayed under either scope returning that scope's own completion without a call;
+  replayed under either scope returning that scope's own completion without a call; `check_account` under `acme`
+  and under `beta` → each its own account with `scope` as the SDK saw it, `credentials: ok`, and each account's
+  key on its probe query exactly once; unscoped → 400 `unknown_account`;
   `create_invoice` → purge → `storno_invoice` → `reversed` → purge → `create_invoice {reissue}` → `issued` on an order
   Restate holds nothing of, then the scoped `get` seeing the new holder; `acme`'s seller bank account changed between
   two executions of a create step (the first loses its reply) → both executions carry the journaled bank account
@@ -466,8 +483,8 @@ supplier id — never the key.
   The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH
-  /invocations/{id}/purge`). `get` and `Szamlazz.Agent.query` set `journal_retention = 1d` so their journals are
-  inspectable.
+  /invocations/{id}/purge`). `get`, `Szamlazz.Agent.query` and `Szamlazz.Agent.check_account` set
+  `journal_retention = 1d` so their journals are inspectable.
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)

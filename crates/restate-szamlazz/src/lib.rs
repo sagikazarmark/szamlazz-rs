@@ -6,7 +6,8 @@
 //! retries, crashes, concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the
 //! source of truth, reached through deterministic external ids (`{namespace}:{order}:{kind}`), so
 //! any invocation can find what an earlier one issued. The stateless `Szamlazz.Agent` service
-//! exposes by-number operations (query, credit entries, storno of unmanaged documents) over the
+//! exposes by-number operations (query, credit entries, storno of unmanaged documents) and the
+//! read-only `check_account` probe over the
 //! same gateway. Both are projections of the Számla Agent model: account constants live on the
 //! resolved [`Account`], deployment constants in [`WorkerConfig`], line totals are computed, and
 //! domain outcomes are returned as data.

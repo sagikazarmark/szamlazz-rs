@@ -119,7 +119,7 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
 }
 
 #[test]
-fn agent_discovers_as_a_service_with_three_handlers() {
+fn agent_discovers_as_a_service_with_four_handlers() {
     let discovery = <Agent as Discoverable>::discover();
     assert_eq!(discovery.name.as_str(), "Szamlazz.Agent");
     assert_eq!(discovery.ty, ServiceType::Service);
@@ -130,7 +130,7 @@ fn agent_discovers_as_a_service_with_three_handlers() {
         .map(|handler| handler.name.as_str())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["query", "set_payments", "storno"]);
+    assert_eq!(names, ["check_account", "query", "set_payments", "storno"]);
 
     for handler in &discovery.handlers {
         let name = handler.name.as_str();
@@ -140,18 +140,37 @@ fn agent_discovers_as_a_service_with_three_handlers() {
             Some(RetryPolicyOnMaxAttempts::Kill),
             "{name}"
         );
-        if name == "query" {
+        if name == "query" || name == "check_account" {
             // Read-only: a short 10s → 1m back-off, three attempts, no
             // idempotency retention (nothing to replay); an explicit journal
-            // retention so the journal is inspectable.
-            assert_eq!(handler.retry_policy_initial_interval, Some(10_000));
-            assert_eq!(handler.retry_policy_max_interval, Some(60_000));
-            assert_eq!(handler.retry_policy_exponentiation_factor, Some(2.0));
-            assert_eq!(handler.retry_policy_max_attempts, Some(3));
-            assert_eq!(handler.inactivity_timeout, None);
-            assert_eq!(handler.abort_timeout, None);
-            assert_eq!(handler.journal_retention, Some(24 * 3_600_000));
-            assert_eq!(handler.idempotency_retention, None);
+            // retention so the journal is inspectable — and, for the probe,
+            // so the leak assertion can scan it.
+            assert_eq!(
+                handler.retry_policy_initial_interval,
+                Some(10_000),
+                "{name}"
+            );
+            assert_eq!(handler.retry_policy_max_interval, Some(60_000), "{name}");
+            assert_eq!(
+                handler.retry_policy_exponentiation_factor,
+                Some(2.0),
+                "{name}"
+            );
+            assert_eq!(handler.retry_policy_max_attempts, Some(3), "{name}");
+            assert_eq!(handler.inactivity_timeout, None, "{name}");
+            assert_eq!(handler.abort_timeout, None, "{name}");
+            assert_eq!(handler.journal_retention, Some(24 * 3_600_000), "{name}");
+            assert_eq!(handler.idempotency_retention, None, "{name}");
+            if name == "check_account" {
+                let input = handler.input.as_ref().expect("an empty input payload");
+                assert!(
+                    input.content_type.is_none() && input.json_schema.is_none(),
+                    "check_account takes no input"
+                );
+            } else {
+                assert!(handler.input.is_some(), "{name} takes an input");
+            }
+            assert!(handler.output.is_some(), "{name} returns an output");
         } else {
             assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
             assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");

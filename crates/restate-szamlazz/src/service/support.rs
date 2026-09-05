@@ -274,16 +274,15 @@ macro_rules! journal_helpers {
             /// 1. **Pin** the namespace in a pure durable step (`namespace`):
             ///    a redeploy with a changed namespace cannot make a running
             ///    invocation issue under a new id.
-            /// 2. *(The ingress-path guard of #27 slots in here.)*
-            /// 3. **Resolve** the request's scope to its account in a durable
+            /// 2. **Resolve** the request's scope to its account in a durable
             ///    step named `account` under the resolve policy: unscoped and
             ///    unknown are journaled as data and become the terminal
             ///    `unknown_account`; an unavailable resolver is retryable and
             ///    journals nothing; exhaustion is `unavailable`.
-            /// 4. **Fetch** the account's credentials outside the journal —
+            /// 3. **Fetch** the account's credentials outside the journal —
             ///    on every execution, including replays — with a short
             ///    in-process retry, then terminal `unavailable`.
-            /// 5. **Open** the gateway for this execution over a fresh client.
+            /// 4. **Open** the gateway for this execution over a fresh client.
             pub(in crate::service) async fn prologue(
                 ctx: &$ctx<'_>,
                 accounts: &Accounts,
@@ -299,7 +298,7 @@ macro_rules! journal_helpers {
                     ..config.clone()
                 };
 
-                // 3. Resolve.
+                // 2. Resolve.
                 let scope = ctx.scope().map(str::to_owned);
                 let resolution = {
                     let accounts = accounts.clone();
@@ -316,10 +315,10 @@ macro_rules! journal_helpers {
                 };
                 let account = decisions::account_of(resolution)?;
 
-                // 4. Fetch, outside the journal.
+                // 3. Fetch, outside the journal.
                 let credentials = decisions::fetch_credentials(accounts, &account).await?;
 
-                // 5. Open.
+                // 4. Open.
                 let gateway = decisions::open(account, credentials)?;
                 Ok(Execution { gateway, config })
             }

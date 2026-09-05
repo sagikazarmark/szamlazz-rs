@@ -5,8 +5,6 @@
 //! is asserted end to end) — and the one step that runs outside the journal,
 //! the credential fetch. The durable steps themselves are stamped per context
 //! type in `support::{object, shared, service}::prologue`.
-//!
-//! The ingress-path guard slots in before resolution.
 
 use std::sync::Arc;
 use std::time::Duration;

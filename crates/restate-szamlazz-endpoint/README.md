@@ -118,6 +118,25 @@ supplier_id = 972721
 
 **The scope is routing, not authorization.** Anyone who can reach the ingress under a scope issues on that account. Put the ingress behind a gateway that sets the scope from the authenticated identity, never forwards a caller-supplied scope path, and strips `x-restate-*` request headers. Kafka ingress arrives unscoped and is unsupported in this mode.
 
+### Deploy checklist
+
+After every deploy or configuration change, call `Szamlazz.Agent.check_account` **under each configured scope** (unscoped on a single-account deployment). It runs the prologue like every handler, sends one read-only query of a sentinel external id that nothing the service issues carries, and answers with what the SDK saw, the *configured* account, the namespace and whether szamlazz.hu accepted the credentials. It issues nothing.
+
+```sh
+curl -X POST localhost:8080/restate/scope/acme/call/Szamlazz.Agent/check_account
+# {"scope":"acme","account":{"id":"acme","mode":"live","supplier_id":972720},"namespace":"acct","credentials":{"state":"ok"}}
+```
+
+| Answer | Meaning |
+|---|---|
+| `200` with `scope` equal to the scope you called under, the expected `account.id`, and `credentials: {"state": "ok"}` | The scope reaches the worker, resolves to the intended account, and its agent key works. |
+| `200` with `credentials: {"state": "rejected", "code", "message"}` | Resolution is right; szamlazz.hu refused the key (3 invalid credentials, 135 browser session active, 136 login blocked, 164 multiple accounts). Fix `agent_key` or the account's state on szamlazz.hu. Data, not a fault. |
+| `200` with `"scope": null` under a **scoped** call | **Stop.** The server accepted the scoped path but did not forward the scope: `protocol_v7` is off (the ingress gates a scoped path on `vqueues` and `scoped_virtual_objects` only). On a single-account deployment every scoped request would issue on the one account. Enable `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7` and probe again before opening the services. |
+| `400 unknown_account` | The scope names no account (or the request is unscoped on a multi-account deployment). Fix the configuration or the address. |
+| `503 unavailable` | szamlazz.hu, the resolver or the credential store could not be reached; call again. |
+
+Credential acceptance is the only szamlazz.hu-verified fact in the answer: the supplier id appears only in found-document bodies, so a not-found probe cannot cross-check `supplier_id` — it echoes the configuration. A wrong `mode` or `supplier_id` surfaces on the first document found under the account (`account_mismatch`, `conflict{external_id_collision}`), not here. The probe is the only defence against the `protocol_v7`-off case: the worker has no per-request signal of "was this call scoped?" that it is willing to depend on (the ingress's `x-restate-ingress-path` header is undocumented and caller-overridable), so run the probe under every scope before you open the services, and after every server upgrade.
+
 ### Single → multi flag day
 
 Going from `[account]` to `[accounts.<scope>]` is a configuration change plus a caller change, with **no data migration**: the namespace stays, so the first scoped create for an already-invoiced order finds its document under the unchanged external id. What must not happen is one szamlazz.hu account being reachable under two identities at once (unscoped *and* under its scope), which would split an order's lock across two Virtual Objects — so drain first, switch, then resume. Scripted against the admin API (`:9070`) and the `restate` CLI:
@@ -140,6 +159,11 @@ restate deployments register http://host:9081
 # 5. Make the services public again.
 curl -X PATCH localhost:9070/services/Szamlazz.Order -H 'content-type: application/json' -d '{"public": true}'
 curl -X PATCH localhost:9070/services/Szamlazz.Agent -H 'content-type: application/json' -d '{"public": true}'
+
+# 6. Probe every scope (the deploy checklist above): each answers its account with credentials ok.
+for scope in acme beta_events; do
+  curl -X POST "localhost:8080/restate/scope/$scope/call/Szamlazz.Agent/check_account"
+done
 ```
 
 The same drain–switch–resume procedure applies to any change of the scope → account mapping. The mapping is append-only: moving traffic to another szamlazz.hu account means a new scope, never re-pointing an existing one. The end-to-end suite performs this flag day on a live Restate server (`tests/service.rs`, phase 2).
@@ -164,7 +188,7 @@ For local development the repository root has a `compose.yaml` with a Restate se
 
 Every handler takes and returns JSON; the discovery manifest carries JSON Schemas for all of them, so Restate's OpenAPI export documents the full contract. Domain outcomes are data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or `conflict` with a `conflict_reason`.
 
-`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{namespace}:{order}:{kind}`, the namespace being the top-level `namespace` key), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, three on `Szamlazz.Agent`:
+`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{namespace}:{order}:{kind}`, the namespace being the top-level `namespace` key), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, four on `Szamlazz.Agent`:
 
 | Handler | Description |
 |---|---|
@@ -176,6 +200,7 @@ Every handler takes and returns JSON; the discovery manifest carries JSON Schema
 | `Szamlazz.Order.storno_invoice` | Reverses (`sztornó`) an invoice of this order; idempotent. |
 | `Szamlazz.Order.delete_proforma` | Deletes the order's proforma; refuses a paid one unless `force`. |
 | `Szamlazz.Order.get` | What szamlazz.hu holds under the order's external ids right now (proforma, invoice, prepayment, final), each `live`, `reversed` or — a proforma — `consumed`. No input. Read-only, never blocks behind issuing. |
+| `Szamlazz.Agent.check_account` | The read-only probe of the [deploy checklist](#deploy-checklist): the scope the SDK saw, the configured account (`id`, `mode`, `supplier_id`), the namespace and whether szamlazz.hu accepted the credentials (`ok` / `rejected`). No input. One sentinel query; issues nothing. |
 | `Szamlazz.Agent.query` | Queries a document by invoice number, order number or external id. |
 | `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. |
 | `Szamlazz.Agent.storno` | Reverses an invoice that no `Szamlazz.Order` manages; a document carrying an order number is answered with `managed_by_order` instead. |

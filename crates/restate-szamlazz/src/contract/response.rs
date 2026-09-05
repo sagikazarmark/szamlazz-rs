@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, RecordedPayment};
 
 use super::IssuedKind;
+use crate::account::Account;
+use crate::config::AccountMode;
 
 /// The domain outcome of a create or correct request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -702,6 +704,98 @@ pub enum DocumentState {
     },
 }
 
+/// Output of `Szamlazz.Agent.check_account`: what the deploy pipeline needs
+/// to prove, per scope, that the scope reaches the worker, resolves to the
+/// intended account and its credentials work — without issuing anything.
+///
+/// Credential acceptance is the only szamlazz.hu-verified fact here; the
+/// account fields echo the *configured* account (the supplier id appears only
+/// in found-document bodies, so a not-found probe cannot cross-check it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct CheckAccountResponse {
+    /// The scope the SDK saw; `null` for an unscoped request.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// The configured account the request resolved to.
+    pub account: CheckedAccount,
+    /// The deployment's namespace (the external-id prefix), as pinned.
+    pub namespace: String,
+    /// Whether szamlazz.hu accepted the account's credentials.
+    pub credentials: CredentialsCheck,
+}
+
+impl CheckAccountResponse {
+    /// A response for `account` under `scope` in `namespace`.
+    pub fn new(
+        scope: Option<String>,
+        account: CheckedAccount,
+        namespace: impl Into<String>,
+        credentials: CredentialsCheck,
+    ) -> Self {
+        Self {
+            scope,
+            account,
+            namespace: namespace.into(),
+            credentials,
+        }
+    }
+}
+
+/// The configured identity of the account `check_account` resolved to: the
+/// pins the worker validates found documents against, never the agent key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct CheckedAccount {
+    /// The account's id as the resolver knows it.
+    pub id: String,
+    /// `live` or `test`.
+    pub mode: AccountMode,
+    /// The configured supplier id pin, when set.
+    #[serde(default)]
+    pub supplier_id: Option<u64>,
+}
+
+impl CheckedAccount {
+    /// The identity `id` in `mode`, pinned to `supplier_id` when set.
+    pub fn new(id: impl Into<String>, mode: AccountMode, supplier_id: Option<u64>) -> Self {
+        Self {
+            id: id.into(),
+            mode,
+            supplier_id,
+        }
+    }
+}
+
+impl From<&Account> for CheckedAccount {
+    fn from(account: &Account) -> Self {
+        Self::new(account.id.to_string(), account.mode, account.supplier_id)
+    }
+}
+
+/// Whether szamlazz.hu accepted the account's credentials on the probe query.
+///
+/// Tagged by `state`: `ok`, or `rejected` with the szamlazz.hu code (3, 135,
+/// 136 or 164) and message. Data, not a fault: the probe's purpose is to
+/// report it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CredentialsCheck {
+    /// szamlazz.hu answered the query: the agent key works.
+    Ok,
+    /// szamlazz.hu refused the agent key.
+    Rejected {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
+}
+
 /// `gross − Σ payments`, when the gross total is known.
 pub(crate) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
     gross.map(|gross| gross - payments.iter().copied().sum::<Decimal>())
@@ -1003,6 +1097,48 @@ mod tests {
             DocumentState::Reversed {
                 storno_number: None
             }
+        );
+    }
+
+    /// `{scope, account: {id, mode, supplier_id}, namespace, credentials}`,
+    /// the credentials tagged by `state`: `ok`, or `rejected` with szamlazz.hu's
+    /// code and message.
+    #[test]
+    fn check_account_response_round_trips() {
+        let mut account = Account::new("acme", "acme");
+        account.mode = AccountMode::Test;
+        account.supplier_id = Some(972_720);
+        let mut response = CheckAccountResponse::new(
+            Some("acme-events".to_owned()),
+            CheckedAccount::from(&account),
+            "acct",
+            CredentialsCheck::Ok,
+        );
+        let json = round_trip(&response);
+        assert_eq!(
+            json,
+            json!({
+                "scope": "acme-events",
+                "account": { "id": "acme", "mode": "test", "supplier_id": 972_720 },
+                "namespace": "acct",
+                "credentials": { "state": "ok" },
+            })
+        );
+
+        response.scope = None;
+        response.account.supplier_id = None;
+        response.account.mode = AccountMode::Live;
+        response.credentials = CredentialsCheck::Rejected {
+            code: "3".to_owned(),
+            message: "Sikertelen bejelentkezés.".to_owned(),
+        };
+        let json = round_trip(&response);
+        assert_eq!(json["scope"], serde_json::Value::Null);
+        assert_eq!(json["account"]["mode"], "live");
+        assert_eq!(json["account"]["supplier_id"], serde_json::Value::Null);
+        assert_eq!(
+            json["credentials"],
+            json!({ "state": "rejected", "code": "3", "message": "Sikertelen bejelentkezés." })
         );
     }
 }

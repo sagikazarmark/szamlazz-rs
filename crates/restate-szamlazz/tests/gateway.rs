@@ -11,7 +11,7 @@ use restate_szamlazz::contract::{
 };
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
-    InvoiceDocumentExt as _, LookupOutcome, LookupRequest, QueryError, QueryOutcome,
+    InvoiceDocumentExt as _, LookupOutcome, LookupRequest, ProbeOutcome, QueryError, QueryOutcome,
     SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
@@ -1307,6 +1307,117 @@ async fn credential_codes_on_a_query_are_credentials_rejected() {
             "query_document {code}"
         );
     }
+}
+
+// ----- probe (`Szamlazz.Agent.check_account`) ---------------------------------
+
+/// The sentinel id the probe queries: `{namespace}:check-account`.
+fn probe_id() -> ExternalId {
+    ExternalId::for_probe(&"acct".parse().expect("namespace"))
+}
+
+/// The probe is one external-id query of the sentinel id and nothing else;
+/// szamlazz.hu's code 7 is the expected answer and means the credentials
+/// were accepted.
+#[tokio::test]
+async fn probe_sends_one_query_of_the_sentinel_id_and_accepts_not_found() {
+    let h = Harness::start().await;
+    external_id_query(probe_id().as_str())
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(h.gateway.probe(&probe_id()).await, ProbeOutcome::Accepted);
+
+    let sent = h.bodies().await;
+    assert_eq!(sent.len(), 1, "exactly one request: {sent:?}");
+    assert!(
+        sent[0].contains("name=\"action-szamla_agent_xml\""),
+        "a query"
+    );
+    assert!(
+        sent[0].contains("<szamlaKulsoAzon>acct:check-account</szamlaKulsoAzon>"),
+        "of the sentinel id: {}",
+        sent[0]
+    );
+    assert!(sent[0].contains("<szamlaagentkulcs>key</szamlaagentkulcs>"));
+}
+
+/// A document under the sentinel id (someone issued one by hand) still
+/// proves the credentials; the probe issues nothing and reports `Accepted`.
+#[tokio::test]
+async fn probe_accepts_a_document_under_the_sentinel_id() {
+    let h = Harness::start().await;
+    external_id_query(probe_id().as_str())
+        .respond_with(Doc::new("SZ-9", "SZ").response())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(h.gateway.probe(&probe_id()).await, ProbeOutcome::Accepted);
+    assert_eq!(h.bodies().await.len(), 1);
+}
+
+/// A wrong key is data — `CredentialsRejected` with szamlazz.hu's code — not
+/// an error, for every credential code; still exactly one request.
+#[tokio::test]
+async fn probe_reports_a_wrong_key_as_credentials_rejected() {
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        external_id_query(probe_id().as_str())
+            .respond_with(body_error(code, "Sikertelen bejelentkezés."))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        assert_eq!(
+            h.gateway.probe(&probe_id()).await,
+            ProbeOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            },
+            "{code}"
+        );
+        assert_eq!(h.bodies().await.len(), 1, "{code}");
+    }
+}
+
+/// A non-credential szamlazz.hu code on the probe still proves the key:
+/// szamlazz.hu answers the credential codes before anything else.
+#[tokio::test]
+async fn probe_accepts_any_other_szamlazz_code() {
+    let h = Harness::start().await;
+    external_id_query(probe_id().as_str())
+        .respond_with(api_error("57", "Rendszerhiba"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(h.gateway.probe(&probe_id()).await, ProbeOutcome::Accepted);
+    assert_eq!(h.bodies().await.len(), 1);
+}
+
+/// A failed exchange — a transport failure, `szlahu_down` — settles nothing
+/// about the credentials.
+#[tokio::test]
+async fn probe_reports_a_failed_exchange_as_transport() {
+    let h = Harness::start().await;
+    external_id_query(probe_id().as_str())
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.gateway.probe(&probe_id()).await,
+        ProbeOutcome::Transport(_)
+    ));
+
+    let h = Harness::start().await;
+    external_id_query(probe_id().as_str())
+        .respond_with(ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"))
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.gateway.probe(&probe_id()).await,
+        ProbeOutcome::Transport(_)
+    ));
 }
 
 // ----- storno ----------------------------------------------------------------

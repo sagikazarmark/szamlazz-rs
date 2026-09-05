@@ -30,9 +30,9 @@ pub use request::{
     ProformaLink, QueryRequest, Selector, SetPaymentsRequest, StornoRequest,
 };
 pub use response::{
-    ConflictReason, CreateResponse, DeleteProformaResponse, DocumentState, DocumentStatus,
-    OrderStatus, Outcome, PaymentRecord, QueryResponse, SetPaymentsResponse, StornoOutcome,
-    StornoResponse, Warning,
+    CheckAccountResponse, CheckedAccount, ConflictReason, CreateResponse, CredentialsCheck,
+    DeleteProformaResponse, DocumentState, DocumentStatus, OrderStatus, Outcome, PaymentRecord,
+    QueryResponse, SetPaymentsResponse, StornoOutcome, StornoResponse, Warning,
 };
 
 /// The caller-supplied identity of one corrective invoice.

@@ -10,7 +10,7 @@ can say "issue the invoice for order X" and get exactly one legal document under
 concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the source of truth, reached through
 deterministic external ids (`{namespace}:{order}:{kind}`) so that any invocation can find what an earlier one
 issued. The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of
-unmanaged documents) over the same gateway module. Both are projections of the Számla Agent model: deployment
+unmanaged documents) and the read-only `check_account` probe over the same gateway module. Both are projections of the Számla Agent model: deployment
 constants live in config, line totals are computed, domain outcomes are returned as data.
 
 The design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md), the decisions
@@ -83,7 +83,12 @@ What it relies on:
   account it started on; the journaled `Account` (visible in the Restate UI for the retention period) carries
   everything but the agent key. Unscoped and unknown scopes are `unknown_account` (400) before anything is
   issued. The **scope** is the only channel for the account — never a header, a body field or the key — and it is
-  routing, not authorization: the ingress sits behind a gateway that sets it from the authenticated identity.
+  routing, not authorization: the ingress sits behind a gateway that sets it from the authenticated identity and
+  never forwards a caller-supplied scope path. The scope reaches the worker only under **protocol v7**, and
+  Restate's ingress does not refuse a scoped path when v7 is off — the SDK would see no scope and a single-account
+  deployment would issue on its one account. `Szamlazz.Agent.check_account` under each scope after every deploy is
+  the defence: it answers the `scope` the SDK saw (`null` under a scoped call is that misconfiguration), the
+  configured account, and whether szamlazz.hu accepted its key.
 - **One szamlazz.hu account under exactly one scope, no fan-in; the mapping append-only.** Unscoped counts as a
   scope value. Two scopes reaching one account would split an order's per-key lock across two Virtual Objects.
   The static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape
@@ -126,10 +131,15 @@ activation details.
   `conflict` with a reason — `prepaid_chain`, `live`, `foreign`, `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
   `base_reversed`, `not_managed`.
-- `contract::TerminalCode`: the five fault codes a `TerminalError` carries — `outcome_unknown` (500),
-  `unavailable` (503), `account_mismatch` (409), `invalid_input` (400) and `credentials_rejected` (503: szamlazz.hu
-  answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the attempt that raised it issued
-  nothing).
+- `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
+  `unavailable` (503; also the prologue's own faults: the resolve policy exhausted, the credential store gone or
+  unavailable), `account_mismatch` (409), `invalid_input` (400), `credentials_rejected`
+  (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the attempt that
+  raised it issued nothing) and `unknown_account` (400: the request names no account of this deployment).
+- `contract::CheckAccountResponse` (`CheckedAccount`, `CredentialsCheck`): the output of
+  `Szamlazz.Agent.check_account` — `scope`, `account: {id, mode, supplier_id}`, `namespace` and
+  `credentials: {state: ok} | {state: rejected, code, message}`; credential acceptance is its only szamlazz.hu-verified
+  fact, the rest echoes the configured account.
 - `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
   `managed_by_order`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
   `QueryResponse`, `SetPaymentsRequest` / `SetPaymentsResponse`: the remaining handler contracts.
@@ -142,7 +152,8 @@ activation details.
 - `OrderKey`: the `Order` key — the order number trimmed of leading and trailing whitespace, case preserved,
   validated (1–64 bytes, no control characters, no internal whitespace runs).
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document — `for_kind`, `for_corrective`,
-  `for_storno`, `for_unmanaged_storno`.
+  `for_storno`, `for_unmanaged_storno` — and `for_probe`, the two-segment `{namespace}:check-account` sentinel
+  that nothing the service issues carries.
 - `WorkerConfig`: the deployment-level configuration the services hold — `namespace` (the `config::Namespace`, the
   external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`, permanent), `[issue]` (the issue policy:
   `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`) and `[resolve]` (the resolve policy:
@@ -246,7 +257,7 @@ szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2
 `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m`, `abort_timeout = 3m`,
 `journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3` and
 `journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.set_payments` and `storno` use two
-attempts, `query` three with the same one-day journal retention. Kill, not pause: a paused invocation
+attempts, `query` and `check_account` three with the same one-day journal retention. Kill, not pause: a paused invocation
 holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
 external-id query inside the create step is what makes that safe.
 
@@ -272,7 +283,8 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
   `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — the storno lookup and step — `AlreadyReversed`
   on a re-executed step, a lost reply re-queried once, `Unconfirmed` when nothing landed — plus storno validation
-  including the proforma / delivery-note no-op, 335, 7, and the credential codes 3/135/136/164 on every operation).
+  including the proforma / delivery-note no-op, 335, 7, the credential codes 3/135/136/164 on every operation, and
+  the `check_account` probe as exactly one query of the sentinel id with a wrong key as data).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
@@ -280,14 +292,16 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   replay, 152 → reconciled, storno → reversed → stale create → `reissue`, `reissue` on live → `conflict{live}`, an
   external reversal, proforma auto-link and `consumed` in `get`, an exhausted create step answering a structured
   `outcome_unknown` within the run policy's delays with the run's retries visible on `sys_invocation` while it is in
-  flight, a scoped call answered `unknown_account` with zero szamlazz.hu requests, a purged invocation querying
+  flight, a scoped call answered `unknown_account` with zero szamlazz.hu requests, `check_account` unscoped answering
+  the account with `credentials: ok` after one sentinel query (and `rejected` as data on code 3), a purged invocation querying
   szamlazz.hu again, a flaky resolver retried under the resolve policy, a failing credential store as a terminal
   `unavailable`, and a positive control for the journal-leak check (a sentinel in a szamlazz.hu rejection is found in
   the hex-decoded `raw` of the create run's result). Then the documented single → multi **flag day** (private,
   drain, register the multi-account revision, public) and the multi-account phase: the first scoped create for an
   order invoiced unscoped finds it under the unchanged external id; unscoped → `unknown_account`; the same order key
   under two scopes concurrently → two `issued` with each account's key on the create wire exactly once; the same
-  `Idempotency-Key` under two scopes → two invocation ids and two documents, each replaying its own completion; an
+  `Idempotency-Key` under two scopes → two invocation ids and two documents, each replaying its own completion;
+  `check_account` under each scope → its own account with its key on the probe, unscoped → `unknown_account`; an
   order whose invocations were purged stornoed and reissued; an account
   change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
   rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that

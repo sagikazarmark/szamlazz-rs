@@ -211,6 +211,14 @@ fn storno() -> MockBuilder {
     op("action-szamla_agent_st")
 }
 
+/// The sentinel external id `check_account` probes under the run's namespace.
+const PROBE_ID: &str = "acct:check-account";
+
+/// The probe's query carrying `agent_key`: which account's key was checked.
+fn probe_with_key(agent_key: &str) -> MockBuilder {
+    external_id_query(PROBE_ID).and(body_string_contains(agent_key_tag(agent_key)))
+}
+
 fn document(unit_price: Decimal) -> DocumentInput {
     DocumentInput::new(
         BuyerInput::new("Kovács Bt.", "2030", "Érd", "Tárnoki út 23."),
@@ -926,6 +934,16 @@ impl Harness {
         .await
     }
 
+    /// `Szamlazz.Agent.check_account`: no input, no idempotency key; unscoped
+    /// or under `scope`.
+    async fn check_account(&self, scope: Option<&str>) -> Reply {
+        let path = match scope {
+            Some(scope) => format!("/restate/scope/{scope}/call/Szamlazz.Agent/check_account"),
+            None => "/restate/call/Szamlazz.Agent/check_account".to_owned(),
+        };
+        self.invoke(&path, None, None).await
+    }
+
     async fn invoke(&self, path: &str, body: Option<&Value>, idempotency: Option<&str>) -> Reply {
         let mut request = self.http.post(format!("{}{path}", self.restate.ingress));
         if let Some(idempotency) = idempotency {
@@ -1003,6 +1021,17 @@ impl Harness {
             .as_array()
             .unwrap_or_else(|| panic!("rows: {body}"))
             .clone()
+    }
+
+    /// The names of the `ctx.run` commands of an invocation, in journal
+    /// order: which durable steps ran.
+    async fn runs(&self, invocation_id: &str) -> Vec<String> {
+        self.journal(invocation_id)
+            .await
+            .into_iter()
+            .filter(JournalEntry::is_run)
+            .filter_map(|entry| entry.name)
+            .collect()
     }
 
     /// The journal of an invocation, in index order.
@@ -1223,6 +1252,7 @@ async fn e2e_order_protocol() {
     prepayment_takes_no_proforma_option(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
+    check_account_names_the_account_and_reports_the_credentials(&h).await;
     purged_invocation_queries_szamlazz_again(&h).await;
     flaky_resolver_is_retried_by_the_resolve_policy(&h).await;
     failing_credential_store_is_a_terminal_unavailable(&h).await;
@@ -1231,6 +1261,7 @@ async fn e2e_order_protocol() {
     flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
     same_order_key_under_two_scopes_issues_on_both_accounts(&h).await;
     same_idempotency_key_under_two_scopes_is_two_invocations(&h).await;
+    check_account_under_each_scope_names_its_account(&h).await;
     purged_order_is_stornoed_and_reissued(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
@@ -1915,14 +1946,10 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     assert_eq!(reply.fault().code, "unknown_account", "{}", reply.body);
-    let runs: Vec<_> = h
-        .journal(reply.invocation_id())
-        .await
-        .into_iter()
-        .filter(JournalEntry::is_run)
-        .filter_map(|entry| entry.name)
-        .collect();
-    assert_eq!(runs, ["namespace", "account"], "{runs:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account"]
+    );
     assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
 
     // Positive control: the sentinel travels through szamlazz.hu's rejection
@@ -1977,6 +2004,76 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     );
     eprintln!(
         "(xii) scoped call on a single-account deployment → unknown_account; leak positive control: pass"
+    );
+}
+
+/// (xii-b) `check_account` on the single-account deployment: unscoped, the
+/// probe answers the configured account with `scope: null` and
+/// `credentials: ok` after exactly one szamlazz.hu request — the query of the
+/// sentinel id, carrying the account's key — with `probe` as its one step
+/// after the prologue's; a wrong key is `credentials: rejected` as data, not
+/// a fault. `scope` is what the SDK saw: under a scoped call it is the
+/// deploy-time signal that the server forwards the scope (protocol v7).
+async fn check_account_names_the_account_and_reports_the_credentials(h: &Harness) {
+    h.reset().await;
+    probe_with_key(AGENT_KEY)
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h.check_account(None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.body,
+        json!({
+            "scope": null,
+            "account": { "id": "acct", "mode": "test", "supplier_id": SUPPLIER },
+            "namespace": "acct",
+            "credentials": { "state": "ok" },
+        })
+    );
+    assert_eq!(h.requests_seen().await, 1, "one query, nothing else");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "probe"]
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.handler, "check_account");
+    assert_eq!(invocation.scope, None);
+
+    // A wrong key: szamlazz.hu's code 3 on the probe is reported, not raised.
+    h.reset().await;
+    probe_with_key(AGENT_KEY)
+        .respond_with(api_error("3", "Sikertelen bejelentkezés."))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h.check_account(None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["account"]["id"], "acct");
+    assert_eq!(
+        reply.body["credentials"],
+        json!({ "state": "rejected", "code": "3", "message": "Sikertelen bejelentkezés." })
+    );
+    assert_eq!(h.requests_seen().await, 1, "one query, nothing else");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+
+    // A scoped probe on the single-account deployment: no account to probe,
+    // nothing sent — the scope is refused by the `account` step (xii), and
+    // the probe reports it the same way.
+    h.reset().await;
+    let reply = h.check_account(Some("acme-events")).await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(reply.fault().code, "unknown_account", "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account"]
+    );
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+    eprintln!(
+        "(xii-b) check_account unscoped → the account, credentials ok | rejected as data; scoped → unknown_account: pass"
     );
 }
 
@@ -2137,14 +2234,10 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
     );
     assert_eq!(h.requests_seen().await, 0, "zero szamlazz.hu requests");
 
-    let runs: Vec<_> = h
-        .journal(reply.invocation_id())
-        .await
-        .into_iter()
-        .filter(JournalEntry::is_run)
-        .filter_map(|entry| entry.name)
-        .collect();
-    assert_eq!(runs, ["namespace", "account"], "{runs:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account"]
+    );
     let invocation = h.invocation(reply.invocation_id()).await;
     assert!(
         invocation
@@ -2265,14 +2358,10 @@ async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness
         fault.message.contains("/restate/scope/"),
         "the fault tells the caller how to address an account: {fault:?}"
     );
-    let runs: Vec<_> = h
-        .journal(reply.invocation_id())
-        .await
-        .into_iter()
-        .filter(JournalEntry::is_run)
-        .filter_map(|entry| entry.name)
-        .collect();
-    assert_eq!(runs, ["namespace", "account"], "{runs:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account"]
+    );
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope, None, "{invocation:?}");
     assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
@@ -2433,6 +2522,72 @@ async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: &Harness) {
     assert_eq!(h.requests_seen().await, before, "replays, not calls");
     eprintln!(
         "(xvii-b) same Idempotency-Key under two scopes → two invocation ids, two documents; each replays its own: pass"
+    );
+}
+
+/// (xvii-c) `check_account` under each scope of the multi-account deployment
+/// names that scope's account with `credentials: ok` and `scope` as the SDK
+/// saw it, and the probe on the wire carries that account's key and nothing
+/// else — the deploy-pipeline proof that a scope reaches the worker, resolves
+/// to the intended account and its key works. Unscoped it is
+/// `unknown_account` with `namespace` and `account` journaled and no
+/// szamlazz.hu request.
+async fn check_account_under_each_scope_names_its_account(h: &Harness) {
+    h.reset().await;
+    probe_with_key(AGENT_KEY)
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    probe_with_key(KEY_B)
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    for (scope, id, supplier) in [("acme", "acme", SUPPLIER), ("beta", "beta", SUPPLIER_B)] {
+        let reply = h.check_account(Some(scope)).await;
+        assert_eq!(reply.status, 200, "{scope}: {}", reply.body);
+        assert_eq!(
+            reply.body,
+            json!({
+                "scope": scope,
+                "account": { "id": id, "mode": "test", "supplier_id": supplier },
+                "namespace": "acct",
+                "credentials": { "state": "ok" },
+            }),
+            "{scope}"
+        );
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            ["namespace", "account", "probe"],
+            "{scope}"
+        );
+        let invocation = h.invocation(reply.invocation_id()).await;
+        assert_eq!(invocation.scope.as_deref(), Some(scope), "{invocation:?}");
+        assert_eq!(invocation.handler, "check_account");
+    }
+    assert_eq!(
+        h.requests_seen().await,
+        2,
+        "one probe per account, each with its own key, nothing else"
+    );
+
+    // Unscoped on the multi-account deployment: no account to probe.
+    h.reset().await;
+    let reply = h.check_account(None).await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert!(fault.message.contains("unscoped"), "{fault:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account"]
+    );
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+
+    eprintln!(
+        "(xvii-c) check_account under acme and beta → each its account with its key on the probe, credentials ok; unscoped → unknown_account: pass"
     );
 }
 

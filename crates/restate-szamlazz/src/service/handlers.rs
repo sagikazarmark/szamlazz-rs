@@ -14,9 +14,9 @@ use restate_sdk::serde::Json;
 
 use super::{Agent, Order};
 use crate::contract::{
-    CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest, DeleteProformaResponse,
-    DocumentKind, OrderStatus, QueryRequest, QueryResponse, SetPaymentsRequest,
-    SetPaymentsResponse, StornoRequest, StornoResponse,
+    CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
+    DeleteProformaResponse, DocumentKind, OrderStatus, QueryRequest, QueryResponse,
+    SetPaymentsRequest, SetPaymentsResponse, StornoRequest, StornoResponse,
 };
 
 /// The `Szamlazz.Order` Virtual Object, keyed by the order number
@@ -236,10 +236,33 @@ impl Order {
 }
 
 /// The `Szamlazz.Agent` service: query, credit entries and storno by document
-/// number. Never calls into `Order`; a document that carries an order number
-/// is reported as `managed_by_order` instead.
+/// number, and the `check_account` probe. Never calls into `Order`; a
+/// document that carries an order number is reported as `managed_by_order`
+/// instead.
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
+    /// Proves, for the scope the request arrived under, that it reaches the
+    /// worker, resolves to the intended account and the account's agent key
+    /// works — with one read-only query of a sentinel external id, issuing
+    /// nothing. For onboarding and deploy pipelines; also the deploy-time
+    /// canary for the experimental Restate flags (`scope: null` under a
+    /// scoped call means the server did not forward the scope). No input.
+    /// The journal is retained a day so that the leak assertion can scan it.
+    #[handler(
+        invocation_retry_policy(
+            initial_interval = "10s",
+            factor = 2.0,
+            max_interval = "1m",
+            max_attempts = 3,
+            on_max_attempts = "kill"
+        ),
+        journal_retention = "1d"
+    )]
+    async fn check_account(&self, ctx: Context<'_>) -> HandlerResult<Json<CheckAccountResponse>> {
+        let execution = self.prologue(&ctx).await?;
+        execution.check_account_request(&ctx).await.map(Json)
+    }
+
     /// Queries a document by number, order number or external id. The
     /// journal is retained a day so that it can be inspected; there is
     /// nothing to replay.

@@ -1,5 +1,5 @@
 //! The stateless `Szamlazz.Agent` service handlers: `query`, `set_payments`
-//! and `storno` by document number.
+//! and `storno` by document number, and the `check_account` probe.
 
 use std::sync::Arc;
 
@@ -12,13 +12,34 @@ use super::prologue::Execution;
 use super::support::service::{lookup_storno, run_once, storno_step};
 use super::support::{Fault, StornoIntent, storno_response, terminal};
 use crate::contract::{
-    QueryRequest, QueryResponse, SetPaymentsRequest, SetPaymentsResponse, StornoOutcome,
-    StornoRequest, StornoResponse,
+    CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
+    SetPaymentsRequest, SetPaymentsResponse, StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    InvoiceDocumentExt as _, QueryError, QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome,
+    InvoiceDocumentExt as _, ProbeOutcome, QueryError, QueryOutcome, SetPaymentsOutcome,
+    StornoLookupOutcome,
 };
 use crate::identity::ExternalId;
+
+/// What the probe step settled, as `check_account`'s `credentials` — or the
+/// one answer that settles nothing.
+///
+/// # Errors
+///
+/// The `unavailable` fault of a probe whose exchange failed: szamlazz.hu's
+/// verdict on the credentials is not known, so the handler reports neither
+/// `ok` nor `rejected`.
+pub(super) fn credentials_check(outcome: ProbeOutcome) -> Result<CredentialsCheck, Fault> {
+    match outcome {
+        ProbeOutcome::Accepted => Ok(CredentialsCheck::Ok),
+        ProbeOutcome::CredentialsRejected { code, message } => {
+            Ok(CredentialsCheck::Rejected { code, message })
+        }
+        ProbeOutcome::Transport(message) => Err(Fault::unavailable(format!(
+            "the account probe's exchange with szamlazz.hu failed ({message}): the credentials were neither accepted nor rejected; call check_account again"
+        ))),
+    }
+}
 
 /// The journaled result of the `query` handler's run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +68,35 @@ impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
 }
 
 impl Execution {
+    /// The `check_account` probe: the prologue has resolved whatever scope
+    /// the SDK saw to an account (or refused the request as
+    /// `unknown_account`); this runs one durable step (`probe`) — a query of
+    /// the sentinel external id — and reports that scope, the configured
+    /// account, the pinned namespace and szamlazz.hu's verdict on the
+    /// credentials. `scope` is what the SDK saw, not what the caller sent:
+    /// `None` under a scoped call means the server did not forward the
+    /// scope. Issues nothing.
+    pub(super) async fn check_account_request(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<CheckAccountResponse, HandlerError> {
+        let outcome = {
+            let gateway = Arc::clone(&self.gateway);
+            let external_id = ExternalId::for_probe(&self.config.namespace);
+            run_once(ctx, "probe", move || async move {
+                gateway.probe(&external_id).await
+            })
+            .await?
+        };
+        let credentials = credentials_check(outcome)?;
+        Ok(CheckAccountResponse::new(
+            ctx.scope().map(str::to_owned),
+            CheckedAccount::from(self.gateway.account()),
+            self.config.namespace.as_str(),
+            credentials,
+        ))
+    }
+
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
@@ -216,5 +266,47 @@ impl Execution {
         storno_response(outcome, number).map_err(|(code, message)| {
             Fault::credentials_rejected(&self.config.namespace, code, message).into()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use restate_sdk::errors::TerminalError;
+
+    use super::*;
+
+    /// A wrong key is `credentials: rejected` — data — not a fault; only an
+    /// exchange that settled nothing is one.
+    #[test]
+    fn the_probe_outcome_is_data_unless_nothing_was_settled() {
+        assert_eq!(
+            credentials_check(ProbeOutcome::Accepted).expect("data"),
+            CredentialsCheck::Ok
+        );
+        assert_eq!(
+            credentials_check(ProbeOutcome::CredentialsRejected {
+                code: "3".to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            })
+            .expect("data"),
+            CredentialsCheck::Rejected {
+                code: "3".to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            }
+        );
+        let error = TerminalError::from(
+            credentials_check(ProbeOutcome::Transport("connection reset".to_owned()))
+                .expect_err("fault"),
+        );
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "unavailable");
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message")
+                .contains("check_account again"),
+            "{body}"
+        );
     }
 }

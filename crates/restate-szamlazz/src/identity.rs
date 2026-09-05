@@ -125,15 +125,17 @@ pub enum InvalidOrderKey {
     WhitespaceRun,
 }
 
-/// The external id (`szamlaKulsoAzon`) of a document the service issues.
+/// The external id (`szamlaKulsoAzon`) the service sends or queries.
 ///
 /// Deterministic from the order key alone under the deployment's
 /// [`Namespace`]: `{namespace}:{order}:{kind}` for the four document kinds,
 /// `{namespace}:{order}:corrective:{correction_id}` for correctives,
-/// `{namespace}:{order}:storno:{original_number}` for a storno invoice and
+/// `{namespace}:{order}:storno:{original_number}` for a storno invoice,
 /// `{namespace}:by-number:{number}:storno` for the storno of a document no
-/// `Order` manages. Not unique server-side — a query returns the newest
-/// holder — so every document found by it is validated before it is trusted.
+/// `Order` manages, and the two-segment `{namespace}:check-account` sentinel
+/// that `check_account` probes and nothing the service issues carries. Not
+/// unique server-side — a query returns the newest holder — so every document
+/// found by it is validated before it is trusted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExternalId(String);
@@ -169,6 +171,16 @@ impl ExternalId {
     #[must_use]
     pub fn for_unmanaged_storno(namespace: &Namespace, number: &str) -> Self {
         Self(format!("{namespace}:by-number:{number}:storno"))
+    }
+
+    /// The sentinel id `Szamlazz.Agent.check_account` queries:
+    /// `{namespace}:check-account`. Two segments, where every id the service
+    /// issues has at least three — nothing the service issues carries it, so
+    /// the expected answer is "not found" and the query proves only that the
+    /// credentials were accepted.
+    #[must_use]
+    pub fn for_probe(namespace: &Namespace) -> Self {
+        Self(format!("{namespace}:check-account"))
     }
 
     /// The id as a string slice.
@@ -305,6 +317,28 @@ mod tests {
         );
         let json = serde_json::to_string(&ExternalId::new("x:y:invoice")).expect("serialize");
         assert_eq!(json, "\"x:y:invoice\"");
+    }
+
+    /// The probe id has two segments; every id the service issues has at
+    /// least three (`{namespace}:{order}:{kind}`), so nothing the service
+    /// issues carries it.
+    #[test]
+    fn the_probe_id_cannot_be_an_issued_documents_id() {
+        let probe = ExternalId::for_probe(&namespace());
+        assert_eq!(probe.as_str(), "acct:check-account");
+        assert_eq!(probe.as_str().split(':').count(), 2);
+        let order = OrderKey::parse("check-account").expect("valid");
+        assert!(
+            ExternalId::for_kind(&namespace(), &order, DocumentKind::Invoice)
+                .as_str()
+                .split(':')
+                .count()
+                >= 3
+        );
+        assert_ne!(
+            probe,
+            ExternalId::for_kind(&namespace(), &order, DocumentKind::Invoice)
+        );
     }
 
     #[test]
