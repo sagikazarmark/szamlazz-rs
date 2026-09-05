@@ -1,25 +1,27 @@
 # restate-szamlazz — design and implementation spec (v2, stateless)
 
 Status: accepted for implementation. Supersedes v1 (the ledger design; see ADR 0005 for why). Decisions are recorded
-as ADRs 0001–0005, the verified szamlazz.hu behaviour it relies on in [`szamlazz-hu-behaviour.md`](../szamlazz-hu-behaviour.md).
+as ADRs 0001–0006, the verified szamlazz.hu behaviour it relies on in [`szamlazz-hu-behaviour.md`](../szamlazz-hu-behaviour.md).
+Since #20 one deployment serves any number of szamlazz.hu accounts, selected per request by the Restate scope
+([ADR 0006](../adr/0006-account-selection-via-restate-scopes.md)).
 
 ## 1. Goal
 
 Expose the basic szamlazz.hu Számla Agent operations as Restate services with durable execution, so that a caller
-can say "issue the invoice for order X" and get exactly one legal document under retries, process crashes,
-concurrent callers and reversals — with a JSON API that is a *projection* of the Agent model: deployment constants
-moved to config, line totals computed, one handler per document kind, no PDF.
+can say "issue the invoice for order X on account A" and get exactly one legal document under retries, process
+crashes, concurrent callers and reversals — with a JSON API that is a *projection* of the Agent model: account
+constants moved to the resolved account, deployment constants to config, line totals computed, one handler per
+document kind, no PDF.
 
 Non-goals: PDF download, receipts, taxpayer query, IPN / Adatkapcsolat ingestion, the proforma → payment → invoice
-lifecycle workflow. Several szamlazz.hu accounts in one deployment, selected per request by the Restate scope, are in
-scope since #20 (§9, §11).
+lifecycle workflow, Kafka ingress (untested in multi-account mode — §4).
 
 ## 2. Crates
 
 | Crate | Kind | Purpose |
 |---|---|---|
-| `restate-szamlazz` | library | Contract types, config, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
-| `restate-szamlazz-endpoint` | binary `restate-szamlazz`, container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config |
+| `restate-szamlazz` | library | Contract types, deployment config, the account model with the resolver and credential-store traits and the static resolver, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
+| `restate-szamlazz-endpoint` | binary `restate-szamlazz`, container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config in the single-account (`[account]`) or multi-account (`[accounts.<scope>]`) shape |
 
 `restate-sdk` is an unconditional dependency; the only feature is `schemars`.
 
@@ -36,14 +38,16 @@ prologue (§4) resolves its account and opens a gateway for its own execution. N
 ## 3. Principle: szamlazz.hu is the source of truth (ADR 0005)
 
 `Szamlazz.Order` keeps **no state**. The Virtual Object exists for its per-key lock: at most one handler runs for an
-order at a time. Everything else is answered by querying szamlazz.hu through deterministic external ids:
+order at a time. Everything else is answered by querying szamlazz.hu — the account the invocation resolved to (§4)
+— through deterministic external ids:
 
 - **VO key** = the order number, trimmed of leading/trailing whitespace, case preserved (the server trims and is
   case-sensitive — verified). Validation: 1–64 bytes after trim, no control characters, no whitespace runs →
-  `invalid_input`.
+  `invalid_input`. The key carries no account marker: Restate namespaces it per **scope** (ADR 0006), so the same
+  order number under two scopes is two `Szamlazz.Order` instances with two locks.
 - **External id** (`szamlaKulsoAzon`), deterministic from the key under the deployment's **namespace** (chosen by the
-  operator, opaque to szamlazz.hu, permanent; 1–16 bytes of `[a-z0-9-]`, `:` excluded as the separator), so *any*
-  invocation can find what an earlier one issued:
+  operator, opaque to szamlazz.hu, permanent; 1–16 bytes of `[a-z0-9-]`, `:` excluded as the separator; one per
+  deployment, shared by every account), so *any* invocation can find what an earlier one issued:
   - slot kinds: `"{namespace}:{order}:{kind}"`, `kind ∈ proforma | invoice | prepayment | final`
   - correctives: `"{namespace}:{order}:corrective:{correction_id}"` (caller-supplied id; several correctives per invoice
     are legitimate)
@@ -52,9 +56,11 @@ order at a time. Everything else is answered by querying szamlazz.hu through det
     question we ask — "what is the newest document of this kind we issued for this order?" — and it is why a reissue
     after a storno needs no generation counter: the new document becomes the newest holder, the old one stays
     reachable through the storno's `hivszamlaszam`.
-  - Every `Found` document is validated before it is trusted: `rendelesszam == order ∧ tipus ∈ kind-set ∧ teszt ==
-    account.mode ∧ (account.supplier_id unset ∨ szallito/id == supplier_id)`; anything else →
-    `conflict{external_id_collision}`.
+  - Every `Found` document is validated before it is trusted, against the pins of the invocation's resolved
+    `Account`: `rendelesszam == order ∧ tipus ∈ kind-set ∧ teszt == account.mode ∧ (account.supplier_id unset ∨
+    szallito/id == account.supplier_id)`; anything else → `conflict{external_id_collision}`. `mode` defaults to
+    `live` and is always checked; `supplier_id` is optional in the single-account shape and required in the
+    multi-account shape (§9).
 - **Retry identity** is Restate's ingress `Idempotency-Key` (caller-side, recommended; see §8). The service does not
   know whether one was used, so it never relies on it for safety.
 - **Buyer name is serialised byte-identically on every attempt**: normalised once (trim + NFC) at validation. The
@@ -120,7 +126,10 @@ deployment would issue on its one account. The worker has no second signal of "w
 willing to depend on — the ingress's `x-restate-ingress-path` header would be one, but it is undocumented and
 caller-overridable, so a guard on it was considered and dropped (#27) — and the defence is operational:
 `Szamlazz.Agent.check_account` under each scope after every deploy, whose `scope` field is what the SDK saw; `null`
-under a scoped call is that misconfiguration, caught before any order is issued.
+under a scoped call is that misconfiguration, caught before any order is issued. Kafka ingress is untested and
+unsupported in multi-account mode: the server's `kafka_scope` flag can scope a record from an `x-restate-scope`
+record header, so "arrives unscoped" is not the reason — no scenario exercises it, and the record's scope would be
+set outside the gateway of the safety contract (ADR 0006).
 
 Handler-level behaviour is observable only under Restate (the SDK has no mock context), so the prologue's decisions
 are pure functions with unit tests (`service::prologue`) and the durable behaviour is asserted end to end (§11).
@@ -136,9 +145,10 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
-Steps 0–2 and the lookup are `ctx.run`s with `RunRetryPolicy::max_attempts(1)` whose expected outcomes are data. The
-create step is the one `ctx.run` under a retry policy — the **issue policy** (§9) — because it is the one step whose
-outcome can be *unknown*. The storno step (§6) is the other write step and runs under the same policy.
+The numbered steps 0–2 and the lookup are `ctx.run`s with `RunRetryPolicy::max_attempts(1)` whose expected outcomes
+are data. The create step is the one `ctx.run` under a retry policy — the **issue policy** (§9) — because it is the
+one step whose outcome can be *unknown*. The storno step (§6) is the other write step and runs under the same policy.
+Every step runs on the account the prologue resolved (§4), through the gateway opened for this execution.
 
 0. **Validate (pure).** Order key from `ctx.key()`. Validate buyer, items (≥ 1), dates. Normalise `buyer.name`.
    Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
@@ -233,10 +243,12 @@ corrective by contract.
 
 Storno is natively idempotent on the server (a repeat echoes the existing storno — verified) and an external id on
 the storno request attaches to the storno document (verified). It has the shape of issuing (§5): a read-only lookup
-step and one write step under the issue policy, query-first on every execution.
+step and one write step under the issue policy, query-first on every execution — on the account the prologue
+resolved for this invocation; a storno request under the wrong scope finds nothing under the number (what szamlazz.hu
+answers when one account names another's invoice number is unverified — behaviour notes) or fails the account pins.
 
 1. **Verify.** `ctx.run(verify number)`: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
-   `Szamlazz.Agent.storno`); `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; `sztornozott ==
+   `Szamlazz.Agent.storno`); `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}`; `sztornozott ==
    Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno number via the hint when the newest document
    is the matching `SS`); `tipus ∉ {SZ, ES, VS, HS}` → `rejected{not_stornoable}`.
 2. **Lookup** — one read-only durable step, `ctx.run("lookup-storno-{number}", || gateway.lookup_storno(external_id,
@@ -287,7 +299,10 @@ absent — a read must not fail; the issuing handlers are the ones that refuse i
 ## 7. Outcome contract
 
 Domain outcomes are **data** (HTTP 200 through the ingress, typed in the OpenAPI export). `TerminalError` is reserved
-for faults.
+for faults: the six codes of `TerminalCode` below, which every handler may raise, plus the by-number 404 `not_found`
+and 422 pass-through of `Szamlazz.Agent.query` / `set_payments` / `storno` (§4). No response names the account: `external_id` (with its namespace) is the only deployment
+marker a response carries, and `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under
+the scope the call was made under.
 
 ```
 CreateResponse { outcome, conflict_reason?, kind, external_id,
@@ -324,13 +339,20 @@ occurrence is logged at `warn` with the namespace and the code (never the key).
 ## 8. Caller contract (documented in the crate READMEs)
 
 1. Send an `Idempotency-Key` per logical request; Restate dedupes retries and attaches concurrent duplicates to the
-   in-flight invocation.
+   in-flight invocation. Deduplication is per scope: the same key under two scopes is two invocations.
 2. **Any error** from an issuing or storno handler means "outcome unknown — retry with a **new** key" (the stored
    completion of a failed invocation is replayed for the retention period — verified); the handler reconciles by
    external id, so the retry is safe. Never interpret an error as "no document exists".
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true`
    (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the
    flag can never cause a duplicate.
+4. On a multi-account deployment, **set the scope on every call** (`/restate/scope/{scope}/call/…`) — it is a path
+   segment of the request, not a session — and record the order key *and the scope as used* per order; nothing else is needed to storno,
+   correct, reissue or inspect the order later. `order_key` in a storno response is meaningful only under the same
+   scope. Never send a tenant or event identifier as the scope: one szamlazz.hu account ⇔ one scope (ADR 0006).
+5. A 5xx whose `x-restate-error-source` is `invocation` is this worker's fault (`outcome_unknown`, `unavailable`,
+   `credentials_rejected`): page, do not auto-retry into it; then rule 2. Auto-retry a 5xx only when the source is
+   `ingress` or absent.
 
 ## 9. Configuration (deployment-constant; never in payloads)
 
@@ -380,7 +402,7 @@ the single-account shape. Load-time validation enforces the checkable half of th
 szamlazz.hu account under exactly one scope, no fan-in: `supplier_id` required on every account (the only
 server-side account identity), unique supplier ids, unique `(endpoint, agent_key)` pairs, unique ids (the credential
 reference). Scope keys are `[a-z0-9_]`, 1–36 bytes: a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`,
-non-empty, ≤ 36 bytes — a dashed UUID is exactly 36) chosen so that environment overrides can address them
+non-empty, at most 36 characters — ASCII, so bytes; a dashed UUID is exactly 36) chosen so that environment overrides can address them
 (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the documented constraint
 on the account identifiers a caller uses as scopes with the static resolver. The namespace is one per deployment and
 shared by every account.
@@ -408,7 +430,7 @@ szamlazz.hu account from being reachable unscoped and under its scope at the sam
 applies to any change of the scope → account mapping, which is append-only. Scripted in the endpoint README and
 performed by the e2e suite (§11).
 
-There is no `detect_foreign`: the order-number hint runs on every lookup except for correctives.
+The order-number hint runs on every lookup except for correctives; it is not configurable.
 
 Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `due_date`, `payment_method`, `paid`,
 `comment?`, `issue_date?`, overrides.
@@ -416,9 +438,12 @@ Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `
 ## 10. Endpoint
 
 `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting
-(`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY`); `identity_keys`; tracing;
-container image on `v*` tags. The start-up log names the namespace and the resolved account's id, mode, endpoint and
-supplier id — never the key.
+(`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY`;
+`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY` in the multi-account shape); `identity_keys`; tracing;
+container image on `v*` tags. The start-up log names the namespace, whether the deployment is scoped, and per
+account its scope (or `<unscoped>`), id, mode, endpoint and supplier id — never the key. The endpoint README carries
+the caller guidance with the Pretix integration as the worked example (ADR 0006), the deploy checklist around
+`check_account`, and the flag-day and drain–switch–resume scripts.
 
 ## 11. Testing
 
@@ -484,7 +509,7 @@ supplier id — never the key.
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH
   /invocations/{id}/purge`). `get`, `Szamlazz.Agent.query` and `Szamlazz.Agent.check_account` set
-  `journal_retention = 1d` so their journals are inspectable.
+  `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)

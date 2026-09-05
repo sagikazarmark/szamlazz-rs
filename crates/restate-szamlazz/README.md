@@ -43,10 +43,13 @@ async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<d
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (the endpoint binary uses figment). `WorkerConfig` is the deployment-level part — the `namespace` of the external
 ids, the `[issue]` and `[resolve]` policies; call `validate()` after parsing. `StaticConfig` is the static
-resolver's `[account]`, and `StaticResolver::try_from` validates it and implements both the account resolver and
-the credential store; `Accounts::from` bundles the two. A deployment with its own resolver and store builds
-`Accounts::new` over them instead. Neither service holds a gateway or a client: every handler resolves its account
-and opens a `Gateway` for its own execution.
+resolver's configuration in one of two mutually exclusive shapes — a single `[account]`, served unscoped, or a table
+of `[accounts.<scope>]`, each served under its scope only (`/restate/scope/{scope}/call/…`) — and
+`StaticResolver::try_from` validates it and implements both the account resolver and the credential store;
+`Accounts::from` bundles the two. A deployment with its own resolver and store builds `Accounts::new` over them
+instead. Neither service holds a gateway or a client: every handler resolves its account and opens a `Gateway` for
+its own execution. Going from `[account]` to `[accounts.<scope>]` is a flag day with no data migration, scripted in
+the [endpoint README](../restate-szamlazz-endpoint/README.md#single--multi-flag-day).
 
 ## Scope Contract
 
@@ -82,26 +85,43 @@ What it relies on:
   its `Account` in a durable step named `account` under the resolve policy, so an invocation finishes on the
   account it started on; the journaled `Account` (visible in the Restate UI for the retention period) carries
   everything but the agent key. Unscoped and unknown scopes are `unknown_account` (400) before anything is
-  issued. The **scope** is the only channel for the account — never a header, a body field or the key — and it is
-  routing, not authorization: the ingress sits behind a gateway that sets it from the authenticated identity and
-  never forwards a caller-supplied scope path. The scope reaches the worker only under **protocol v7**, and
-  Restate's ingress does not refuse a scoped path when v7 is off — the SDK would see no scope and a single-account
-  deployment would issue on its one account. `Szamlazz.Agent.check_account` under each scope after every deploy is
-  the defence: it answers the `scope` the SDK saw (`null` under a scoped call is that misconfiguration), the
-  configured account, and whether szamlazz.hu accepted its key.
-- **One szamlazz.hu account under exactly one scope, no fan-in; the mapping append-only.** Unscoped counts as a
-  scope value. Two scopes reaching one account would split an order's per-key lock across two Virtual Objects.
-  The static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape
-  is served by scope only and is checked at load time (a `supplier_id` on every account, unique supplier ids,
-  unique `(endpoint, agent_key)` pairs, unique ids); a resolver of your own must guarantee it itself.
+  issued. The **scope** is the only channel for the account — never a header, a body field or the key. The scope
+  reaches the worker only under **protocol v7**, and Restate's ingress does not refuse a scoped path when v7 is
+  off — the SDK would see no scope and a single-account deployment would issue on its one account.
+  `Szamlazz.Agent.check_account` under each scope after every deploy is the defence: it answers the `scope` the
+  SDK saw (`null` under a scoped call is that misconfiguration), the configured account, and whether szamlazz.hu
+  accepted its key. Multi-account mode depends on three experimental Restate flags (`vqueues`, `protocol_v7`,
+  `scoped_virtual_objects`), verified on server 1.7.8 with SDK 0.12.0 — see
+  [ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md) for what the server source says about
+  them and for the flagless contingency. Kafka ingress is untested and unsupported in multi-account mode.
 - **Credentials are fetched on every handler execution, outside the journal**, and held only for that
   execution — a rotation is picked up on the next execution of every in-flight invocation, and no agent key is
-  ever written into Restate (the `Credentials` type has no serde implementation). A failed fetch is a
-  **terminal** `unavailable` after a short in-process retry, by decision: a retryable error would route a
-  prolonged store outage into the handler's kill-on-five and an unstructured 500, whereas the terminal fault is
-  structured and immediate. The cost: a store outage during a **replay** of an invocation whose create already
-  landed surfaces as `unavailable` even though the document exists — `get` or a retry with a new
-  `Idempotency-Key` reconciles it (`already_issued`).
+  ever written into Restate (the `Credentials` type has no serde implementation; the e2e suite scans every
+  journal entry for the run's keys). A failed fetch is a **terminal** `unavailable` after a short in-process
+  retry, by decision: a retryable error would route a prolonged store outage into the handler's kill-on-five and
+  an unstructured 500, whereas the terminal fault is structured and immediate. The cost: a store outage during a
+  **replay** of an invocation whose create already landed surfaces as `unavailable` even though the document
+  exists — `get` or a retry with a new `Idempotency-Key` reconciles it (`already_issued`).
+- **The safety contract** ([ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md)) — the
+  static resolver enforces what can be checked at load time; a resolver of your own, and the operator, guarantee
+  the rest:
+  1. One szamlazz.hu account is reachable under exactly one scope value; unscoped counts as a value; no fan-in
+     (two scopes reaching one account would split an order's per-key lock across two Virtual Objects). The
+     static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape is
+     served by scope only and is checked at load time (a `supplier_id` on every account, unique supplier ids,
+     unique `(endpoint, agent_key)` pairs, unique ids).
+  2. The scope → account mapping is append-only: moving traffic to another account means a new scope, never
+     re-pointing an existing one. Appending a scope cannot create fan-in; any change that could put one account
+     under two identities at once (the single → multi flag day above all) is a drain–switch–resume.
+  3. The namespace is permanent for the deployment.
+  4. Order keys are unique within an account for its lifetime, across all writers.
+  5. The caller records the order key and the scope as used; nothing else is needed to operate on the order
+     later.
+  6. The scope is routing, not authorization: the ingress sits behind a gateway that sets the scope from the
+     authenticated identity, never forwards a caller-supplied scope path, and strips `x-restate-*` request
+     headers (the ingress lets a caller's copy of one of its own headers win).
+  7. Ownership of a document is decided by the external-id query alone; the order-number query can name a
+     document but never prove ownership.
 
 What it does not do: PDF download, receipts, taxpayer query, IPN and Adatkapcsolat ingestion, the proforma →
 payment → invoice lifecycle workflow, multiple prepayments per order, tracking *who* reversed a document, and
@@ -134,7 +154,7 @@ activation details.
 - `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
   `unavailable` (503; also the prologue's own faults: the resolve policy exhausted, the credential store gone or
   unavailable), `account_mismatch` (409), `invalid_input` (400), `credentials_rejected`
-  (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the attempt that
+  (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the execution that
   raised it issued nothing) and `unknown_account` (400: the request names no account of this deployment).
 - `contract::CheckAccountResponse` (`CheckedAccount`, `CredentialsCheck`): the output of
   `Szamlazz.Agent.check_account` — `scope`, `account: {id, mode, supplier_id}`, `namespace` and
@@ -244,13 +264,37 @@ worker; callers authenticate to Restate ingress separately.
    `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document is
    `conflict{live}`, so the flag can never cause a duplicate.
 4. A `credentials_rejected` fault (503) means szamlazz.hu refused the worker's agent key (codes 3, 135, 136, 164)
-   on some step: the deployment is misconfigured, not the request. The attempt that raised it issued nothing, but an
-   earlier attempt may have landed with a lost reply, so rule 2 applies — once the key is fixed, retry with a new
-   key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
+   on some step: the deployment is misconfigured, not the request. The execution that raised it issued nothing, but
+   an earlier execution may have landed with a lost reply, so rule 2 applies — once the key is fixed, retry with a
+   new key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
    appears in neither the log nor the fault.
 5. An `unknown_account` fault (400) means the request named no account of this deployment — unscoped where
    accounts are scoped, or a scope no account is reachable by. Nothing was issued and the same request never
    succeeds: fix the scope, do not retry.
+6. On a multi-account deployment, set the scope on **every** call — it is a path segment of the request, not a
+   session — and record the order key *and the scope as used* per order. `Idempotency-Key`s are deduplicated per scope. `order_key` in a
+   storno response is meaningful only under the same scope; `external_id` is the only namespace marker in any
+   response, and no response names the account.
+
+Faults are `TerminalError`s with a JSON body `{ "code", "message", "order"?, "kind"?, "external_id"? }`; the
+ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. These are the six codes of
+`contract::TerminalCode`, which every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` also
+answer a by-number miss as 404 `not_found` and pass a szamlazz.hu error through as 422 with its own code:
+
+| Code | HTTP | Meaning | What to do |
+|---|---|---|---|
+| `invalid_input` | 400 | The request is malformed or names a document szamlazz.hu does not know. | Fix the request. |
+| `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
+| `account_mismatch` | 409 | A document carrying this order's number belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's). | Check the account's `mode` / `supplier_id`; do not retry blindly. |
+| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued. | Rule 2. |
+| `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent — or the account resolver or credential store could not answer. | Rule 2, later. |
+| `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
+
+A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
+down. Restate's HTTP invocation docs say to treat `invocation` errors as non-retryable and to auto-retry a 5xx only
+when its source is `ingress` (or absent); do that here: page on an `invocation` 503 instead of retrying into it —
+`credentials_rejected` in particular repeats identically until the deployment is fixed — and only then retry with
+a new `Idempotency-Key` or read `get`.
 
 Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md)): every handler that calls
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,

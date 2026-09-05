@@ -279,18 +279,21 @@ impl fmt::Display for IssuedKind {
     }
 }
 
-/// The code of a `TerminalError` raised by an issuing or storno handler.
+/// The code of a `TerminalError` any handler of either service may raise.
 ///
 /// Every one of them means "outcome unknown — retry with a new
 /// `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no document
-/// exists".
+/// exists". The by-number `Szamlazz.Agent` handlers additionally answer a
+/// miss as 404 `not_found` and pass a szamlazz.hu error through as 422 with
+/// its own code; those are not `TerminalCode`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TerminalCode {
-    /// The attempt budget is exhausted while a document may or may not have
-    /// been issued; the next call's external-id query finds whatever landed.
+    /// The create or storno step ran out of the issue policy while a document
+    /// may or may not have been issued; the next call's external-id query
+    /// finds whatever landed.
     OutcomeUnknown,
     /// szamlazz.hu could not be reached for a check that must succeed before
     /// anything is issued.
@@ -303,8 +306,8 @@ pub enum TerminalCode {
     InvalidInput,
     /// szamlazz.hu rejected the account's agent credentials (codes 3, 135,
     /// 136, 164): the worker's configuration is wrong, not the request. The
-    /// attempt that observed the code issued nothing — szamlazz.hu answers
-    /// these codes before acting on a request — but an earlier attempt may
+    /// execution that observed the code issued nothing — szamlazz.hu answers
+    /// these codes before acting on a request — but an earlier execution may
     /// have landed with a lost reply, which is why this is a fault and not a
     /// `rejected` outcome. Fix the key, then retry with a new
     /// `Idempotency-Key`. HTTP 503.

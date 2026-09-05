@@ -251,8 +251,8 @@ fn docker_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// The experimental server flags multi-account mode depends on (design, ADR
-/// pending in #28): vqueues, protocol v7 (below it the SDK sees no scope) and
+/// The experimental server flags multi-account mode depends on (design §4,
+/// ADR 0006): vqueues, protocol v7 (below it the SDK sees no scope) and
 /// scoped Virtual Objects. Set on the container and expected of a server
 /// reused through the environment.
 const SERVER_FLAGS: [&str; 3] = [

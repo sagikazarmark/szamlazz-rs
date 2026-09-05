@@ -117,7 +117,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Header presence is **per operation**: create (152, 73), storno (14, 221, 352) and delete-proforma (335) set `szlahu_error_code` + `szlahu_error`; query (7) and credit (463) are **body-only**. | A6, B3/B5/B7, C6, D1, D8 | The crate must always parse `<hibakod>`; never detect errors from headers alone. |
 | Code 7's text — "Hiányzó adat: számla xml (ismeretlen számlaszám, rendelésszám vagy külső azonosító)." — covers unknown number, order number *or* external id, and also a consumed proforma. | D1-query-*, C2-5 | 7 is "not on the query surface", not "never existed". |
 | Codes 14, 73, 221, 352, 463 were not named in the crate at probe time (parsed as `Unknown`). | error.rs review | Type them; none is retryable. |
-| The `szlahu_id` header is the **document id** (= `alap/id` = `gazdEsemAzon`), different for every document. The supplier id is `szallito/id` (972720 on this account, identical on 10/10 queries) and appears **only in query bodies** — create responses have no `<szallito>`. | C3, D9 | `[account] supplier_id` is an optional config pin checked against `szallito/id` on every document found under our external ids; any text calling `szlahu_id` the supplier id is wrong. |
+| The `szlahu_id` header is the **document id** (= `alap/id` = `gazdEsemAzon`), different for every document. The supplier id is `szallito/id` (972720 on this account, identical on 10/10 queries) and appears **only in query bodies** — create responses have no `<szallito>`. | C3, D9 | The account's `supplier_id` pin (optional in the single-account shape, required in the multi-account shape — it is the only server-side account identity) is checked against `szallito/id` on every document found under our external ids; a not-found probe (`check_account`) cannot cross-check it; any text calling `szlahu_id` the supplier id is wrong. |
 | Success headers on create/storno/credit: `szlahu_szamlaszam`, `szlahu_id`, `szlahu_kintlevoseg`, `szlahu_vevoifiokurl`, …; delete success sets none. | A1, D1, D3 | — |
 
 ## Latency
@@ -133,7 +133,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Caveat | Why it matters |
 |---|---|
 | Everything above is one TEST account, one day, roughly 75 document-creating calls in four sessions. | Nothing here is a documented guarantee. |
-| Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | `[account] mode` is validated against `<teszt>` on every document found under our external ids; the live account has a different supplier id and `teszt=false`. |
+| Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | The account's `mode` (default `live`) is validated against `<teszt>` on every document found under our external ids; the live account has a different supplier id and `teszt=false`. In multi-account mode each account carries its own `mode` and `supplier_id`. |
 | E-invoicing is enabled (`<eszamla>1</eszamla>` on all but `D`/`SL`). | 352 (kelt must be today) on storno may be an e-invoice rule; behavior on paper-invoice accounts is unknown. |
 | The test account did not produce 56 for bad addresses. | Either test accounts do not send mail or 56 is raised only on synchronous hand-off failures. |
 | Other probes were issuing concurrently, so `CTEST-2026-*` numbers are not contiguous. | Irrelevant to the facts; noted so the raw logs are not misread. |
@@ -172,17 +172,28 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   issued, the fault still says "outcome unknown" and the next call's external-id query finds it.
 - **Everything on a live account** (`teszt=false`, possibly non-e-invoice): e-mail sending, 56, 352,
   `szallito/id`. Go-live precondition — see below.
+- **By-number operations under the wrong scope** (multi-account mode, ADR 0006): what szamlazz.hu answers
+  when account A's agent key queries, credits or stornos an invoice *number* that belongs to account B —
+  7 (not on this account's query surface) is expected, but a shared number space or a different code is
+  possible; only one account was probed. Moderate: `Szamlazz.Order.storno_invoice` verifies first and
+  refuses a document whose `teszt` / `szallito/id` are not the resolved account's (`account_mismatch`);
+  `Szamlazz.Agent.query`, `set_payments` and `storno` check no account pin — by-number operations act on
+  whatever szamlazz.hu returns to that account's key (a found document does carry `teszt` and `szallito/id`;
+  the check is simply not made there). The
+  worker relies on szamlazz.hu answering 7 across accounts; the caller records the scope as used per order
+  (safety contract rule 5) precisely so that the case is never exercised.
 
 ## Go-live checklist
 
-Re-run these on the target szamlazz.hu account before enabling the worker. Every step issues real,
+Re-run these on the target szamlazz.hu account before enabling the worker — on **every** account a multi-account
+deployment serves. Every step issues real,
 numbered documents there; agree the test order numbers and their subsequent storno with whoever keeps
 the books first. Confirm the toggle "Disable order number repetition" is ON in the account settings
 before starting.
 
 | Step | Probe | Expect | Feeds |
 |---|---|---|---|
-| 1 | A1 — create with an external id, query by it at +0/+2/+10/+60 s | Hit every time; `<teszt>false</teszt>`; note `szallito/id` | `[account] supplier_id`, `mode = live`, lag ≈ 0 |
+| 1 | A1 — create with an external id, query by it at +0/+2/+10/+60 s | Hit every time; `<teszt>false</teszt>`; note `szallito/id` | The account's `supplier_id` and `mode = live` (per account in multi-account mode), lag ≈ 0 |
 | 2 | A4-base — byte-identical resend of a create | Same number, byte-identical response | Toggle ON confirmed; replay guard works |
 | 3 | A4c — resend with the buyer name changed only in case/trailing space | 152 naming the trimmed order number | Fingerprint is byte-exact on the buyer name; 152 header shape |
 | 4 | A5 — create → storno → byte-identical resend | A **new** invoice; order number reusable | Replay ends at storno (ADR 0003 hazard is real here too) |

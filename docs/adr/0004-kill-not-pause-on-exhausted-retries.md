@@ -102,7 +102,8 @@ inside the closure, `Err(Unconfirmed)` only for an unknown answer, exhaustion ma
 `Szamlazz.Agent.storno` alike. No durable attempt counter or `ctx.sleep` remains: the issue policy is
 the retry envelope of every szamlazz.hu write, and the resolve policy (#25) that of the `account` step.
 The one in-process retry left is the prologue's credential fetch — three fetches 200 ms apart, outside
-the journal, then a terminal `unavailable` — which is deliberately not a Restate retry (design §4).
+the journal, then a terminal `unavailable` — which is deliberately not a Restate retry (design §4;
+[ADR 0006](0006-account-selection-via-restate-scopes.md) records why terminal was chosen over retryable).
 
 ## Consequences
 

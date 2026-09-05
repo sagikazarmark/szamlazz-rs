@@ -1,5 +1,9 @@
 # `Szamlazz.Order` keeps no state: szamlazz.hu is the source of truth, reached through deterministic external ids
 
+Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) — the account whose
+szamlazz.hu is the source of truth is the one the invocation's scope resolved to, and the validation pins are
+read from that journaled `Account` (below).
+
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,
 `reversal_unverified`, `vacant`, `deleted`, `consumed`), a generation counter per slot embedded in the external
@@ -57,7 +61,11 @@ and through the storno's `hivszamlaszam`. Nothing needs a suffix.
 **Every `Found` document is validated before it is trusted**: `rendelesszam == order ∧ tipus ∈ kind-set ∧
 teszt == account.mode ∧ (account.supplier_id unset ∨ szallito/id == supplier_id)`; anything else is
 `conflict{external_id_collision}` (`InvoiceDocumentExt::is_ours`). External ids are not unique server-side (verified),
-so this is the only protection against adopting a stranger's document.
+so this is the only protection against adopting a stranger's document. *Amended (ADR 0006):* `account` is the
+invocation's journaled `Account`, resolved from the scope — the pins are per account, not per deployment; `mode`
+defaults to `live` and is always checked, and `supplier_id` (the only server-side account identity a found document
+exposes) is optional in the single-account shape and required in the multi-account shape, where it also enforces
+"one szamlazz.hu account under exactly one scope" at load time.
 
 **Retry identity is Restate's ingress `Idempotency-Key`**, supplied by the caller. The service does not know
 whether one was used and never relies on it for safety: the external-id query inside the create step — the first
@@ -96,7 +104,7 @@ line of the closure on every execution — is the guard, the key is deduplicatio
   szamlazz.hu no longer knows is simply absent — live accounts cannot delete invoices); the `payments_before`
   capture on storno (query before stornoing — the server erases `<kifizetesek>` on the original); the ledger
   snapshot (`get` is four live queries and can return `unavailable`); the operator handlers `record_reversal` /
-  `forget` (nothing to repair); the account fingerprint learned into state (pin `supplier_id` in config); schema
+  `forget` (nothing to repair); the account fingerprint learned into state (pin `supplier_id` on the `Account`); schema
   versioning and state migrations.
 - **Gained**: nothing to migrate, repair or drift; `get` is never stale; a UI storno, a support storno and a
   service storno are one case (`sztornozott`); a kill has nothing to compensate; a reset Restate cluster loses

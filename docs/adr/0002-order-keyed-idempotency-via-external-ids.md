@@ -1,13 +1,15 @@
 # `Order` is keyed by the order number and identifies documents by a deterministic external id
 
-Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
+amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) (the account namespace, below).
 Still holds: the key rule (trimmed, case preserved, validated), the deterministic external id, the query-first
 create inside a single `ctx.run` — now the create *step* under the issue policy's run retry policy (ADR 0004,
 amended by #22) rather than one `max_attempts(1)` run per attempt — the `Found`-validation rule, the 2 m
 `initial_interval`, and the toggle precondition. Superseded: the `{gen}` suffix (the newest holder under
-`{slug}:{order}:{kind}` is the answer; no counter), the `cseq` corrective counter (→ caller-supplied
-`correction_id`), `request_id` as retry identity (→ Restate's ingress `Idempotency-Key`), and "written to state
-before the first call" (no state; the external id is derived from the key).
+`{namespace}:{order}:{kind}` is the answer; no counter), the `cseq` corrective counter (→ caller-supplied
+`correction_id`), `request_id` as retry identity (→ Restate's ingress `Idempotency-Key`), "written to state
+before the first call" (no state; the external id is derived from the key), and "one szamlazz.hu account per
+deployment" (→ the Restate scope selects the account, ADR 0006; the slug is the deployment's namespace).
 
 Issuing through the Számla Agent is at-least-once at every layer: the HTTP client can time out
 after the server has issued, and a `ctx.run` closure that crashes before its result is journaled is
@@ -20,8 +22,10 @@ replay match and the duplicate check, while case is significant (two invoices co
 `PRB-C-Case` and `prb-c-case`), and the query path matches exactly (a padded order number is
 creatable but not queryable) — all verified. The key is validated (1–64 bytes after trim, no control
 characters, no internal whitespace runs → `invalid_input`); nothing is case-folded or NFC-normalized
-because the server does neither. One szamlazz.hu account per deployment means the key carries no
-account namespace; the account slug lives in the external id.
+because the server does neither. The key carries no account namespace *because the Restate scope does*
+(ADR 0006; first written as "one szamlazz.hu account per deployment"): Restate namespaces the Virtual
+Object key and the `Idempotency-Key` per scope, so the same order number under two scopes is two `Order`
+instances; the deployment's namespace lives in the external id and is shared by every account.
 
 A document's identity is a deterministic `szamlaKulsoAzon` (external id) derived from ledger state:
 `{slug}:{order}:{kind}:{gen}` for the slot kinds (`proforma | invoice | prepayment | final`),
@@ -115,9 +119,11 @@ repetition" is ON**; it is the second guard, not the first.
 - Same-key exclusivity serializes every create for one order, so each generation has exactly one
   creating call — the property that makes cold-ledger recovery by `{kind}:{gen}` work.
 - `supplier_id` is `szallito/id` from the first query response (the `szlahu_id` header is the
-  document id); `[account] mode` is validated against `<teszt>` on every adopted document.
-- External ids of ~110 characters with `: . _ -` are accepted and queryable (verified), so the slug
-  (1–16 chars `[a-z0-9-]`) plus order, kind and gen fit without hashing.
+  document id); the account's `mode` is validated against `<teszt>` on every adopted document. *Amended
+  (ADR 0006):* both pins are read from the invocation's journaled `Account`; `supplier_id` is required in
+  the multi-account shape.
+- External ids of ~110 characters with `: . _ -` are accepted and queryable (verified), so the namespace
+  (1–16 chars `[a-z0-9-]`; then called the slug) plus order, kind and gen fit without hashing.
 - Two order numbers differing only in case are two VO keys and two server documents. Internal
   whitespace and control characters are rejected rather than collapsed, because the server's
   handling of them is untested.

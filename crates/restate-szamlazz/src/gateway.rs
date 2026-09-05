@@ -258,7 +258,7 @@ pub trait InvoiceDocumentExt {
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.
     fn payment_amounts(&self) -> Vec<Decimal>;
 
-    /// Whether the document belongs to the configured account: it carries the
+    /// Whether the document belongs to the resolved account: it carries the
     /// account's `teszt` flag and — when both are known — the account's
     /// supplier id.
     fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool;

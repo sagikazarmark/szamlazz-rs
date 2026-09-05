@@ -31,7 +31,7 @@ One deployment serves one szamlazz.hu account unscoped (`[account]`) **or** any 
 
 ## Configuration
 
-The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload: the deployment-level settings at the top (`namespace`, `[issue]`, `[resolve]`) and the szamlazz.hu account under `[account]`.
+The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload: the deployment-level settings at the top (`namespace`, `[issue]`, `[resolve]`) and the szamlazz.hu account under `[account]` — or, in [multi-account mode](#multi-account-mode), the accounts under `[accounts.<scope>]`.
 
 ```toml
 identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]
@@ -86,7 +86,7 @@ RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY="..." \
 restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). `namespace` and `[account]` with `id` and `agent_key` are required; everything else has a default. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged; the start-up log names the namespace and the account's `id`, `mode`, `endpoint` and `supplier_id`.
+Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). `namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, and — per account — its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`.
 
 The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is not supported and fails to load with an error naming the moved keys.
 
@@ -114,9 +114,13 @@ supplier_id = 972721
 
 `[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: a missing `supplier_id` (the only server-side account identity the worker can validate a found document against), two accounts sharing a `supplier_id`, two sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
 
-**Scope format.** The static resolver's scope keys are `[a-z0-9_]`, 1–36 bytes — a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`, non-empty, at most 36 bytes; a dashed UUID is exactly 36), chosen so that environment overrides can address them (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the constraint on the account identifiers your application uses as scopes with this binary; a deployment with its own `AccountResolver` may use Restate's full format.
+**Scope format.** The static resolver's scope keys are `[a-z0-9_]`, 1–36 bytes — a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`, non-empty, at most 36 characters — ASCII, so bytes; a dashed UUID is exactly 36), chosen so that environment overrides can address them (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the constraint on the account identifiers your application uses as scopes with this binary; a deployment with its own `AccountResolver` may use Restate's full format.
 
-**The scope is routing, not authorization.** Anyone who can reach the ingress under a scope issues on that account. Put the ingress behind a gateway that sets the scope from the authenticated identity, never forwards a caller-supplied scope path, and strips `x-restate-*` request headers. Kafka ingress arrives unscoped and is unsupported in this mode.
+**The scope is routing, not authorization.** Anyone who can reach the ingress under a scope issues on that account. Put the ingress behind a gateway that sets the scope from the authenticated identity, never forwards a caller-supplied scope path, and strips `x-restate-*` request headers (the ingress lets a caller's copy of one of its own headers win). Limit keys therefore travel as the `limit-key` query parameter, or are set by the gateway. The seven rules the worker relies on — one account under exactly one scope, an append-only mapping, a permanent namespace, order keys unique within an account, the caller recording key and scope as used, routing-not-authorization, ownership by external id alone — are in the [library README](../restate-szamlazz/README.md#scope-contract) and [ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md).
+
+**Experimental Restate flags.** Scoped calls need `vqueues`, `protocol_v7` and `scoped_virtual_objects` on the server (`RESTATE_EXPERIMENTAL_ENABLE_*`; `compose.yaml` sets the three). They are experimental at Restate 1.7.8 — the server source calls `vqueues` "in heavy development" and scoped Virtual Objects "not officially supported in v1.7", while the docs present flow control as opt-in whose "configuration and APIs may change" — and the facts here were verified on server 1.7.8 with SDK 0.12.0; re-run the [deploy checklist](#deploy-checklist) after every server upgrade. ADR 0006 records the quotes, the Restate Cloud confirmation and the flagless contingency.
+
+**Kafka ingress** is untested and unsupported in this mode. The server has a `kafka_scope` flag that scopes a record from an `x-restate-scope` record header, so "arrives unscoped" is not the reason — no scenario exercises it, and the record's scope would be set by the producer, outside the gateway above. Verify it yourself before wiring a subscription.
 
 ### Deploy checklist
 
@@ -166,7 +170,7 @@ for scope in acme beta_events; do
 done
 ```
 
-The same drain–switch–resume procedure applies to any change of the scope → account mapping. The mapping is append-only: moving traffic to another szamlazz.hu account means a new scope, never re-pointing an existing one. The end-to-end suite performs this flag day on a live Restate server (`tests/service.rs`, phase 2).
+The mapping is append-only: moving traffic to another szamlazz.hu account means a new scope, never re-pointing an existing one (re-pointing is forbidden, not merely undrained). The same drain–switch–resume applies to any change that could put one szamlazz.hu account under two identities at once; appending an account cannot, so adding one is steps 3 and 6 alone — register the revision, probe the new scope. The end-to-end suite performs this flag day on a live Restate server (`tests/service.rs`, phase 2).
 
 ## Running
 
@@ -242,6 +246,33 @@ curl localhost:8080/restate/call/Szamlazz.Order/ORD-1001/create_invoice \
 A 503 whose `x-restate-error-source` is `invocation` is **this worker's** answer — `unavailable` or `credentials_rejected` — not the Restate ingress being down. Restate's [HTTP invocation docs](https://docs.restate.dev/invoke/http#retrying-requests) say to treat `invocation` errors as non-retryable and to auto-retry a `5xx` only when its source is `ingress` (or absent); do that here as well: page on an `invocation` 503 instead of retrying into it — `credentials_rejected` in particular repeats identically until the deployment is fixed — and only then retry with a new `Idempotency-Key`.
 
 Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery. Issuing itself is a read-only lookup step and a create step whose every execution — Restate re-executes it under the `[issue]` policy while szamlazz.hu's answer is unknown — queries the external id before it sends; that query is what the next call reconciles against, and an exhausted create step is a structured `outcome_unknown` naming the order, kind and external id. Storno has the same two steps under the same policy. A killed invocation also reaches the caller as HTTP 500 with `x-restate-error-source: invocation`, carrying the last retryable error's message. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+
+## Caller guidance: a Pretix integration
+
+The worked example behind multi-account mode ([ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md)): an application that issues szamlazz.hu documents for [Pretix](https://pretix.eu/) ticket orders, serving many organizers, each with its own szamlazz.hu account, where an event may override the organizer's account. The same rules apply to any caller; Pretix supplies the concrete identifiers.
+
+**The account is a first-class entity in your application.** Model it as its own record — an id, the szamlazz.hu account it stands for, its state — with an organizer-level default and an optional per-event override. Resolve *event → account* in your application **before** every call, and store the account id **per invoice, as used**: the account an order was invoiced on is a fact about that invoice, not about the event's current setting, and it is what you need to storno, correct, reissue or inspect the order months later. Together with the order key it is all you need (the worker keeps nothing).
+
+**Scope = your account id.** It must fit Restate's scope format — `[a-zA-Z0-9_.-]`, non-empty, at most 36 characters (a dashed UUID is exactly 36) — and, with this binary's static resolver, the stricter `[a-z0-9_]`. Never send the organizer, the event or any tenant identifier as the scope: one szamlazz.hu account ⇔ one scope, and an event that overrides its organizer's account is invoiced under *that* account's scope. Two organizers sharing one szamlazz.hu account share one scope.
+
+**Order key = Pretix event slug + order code**, for example `democon-2026-ABC12`. Pretix order codes are unique per event, not per organizer, so the event slug makes the key unique within the account across every event the account serves — and it stays unique if the event later moves to another account, because the key's uniqueness is required *within* an account only. Keep it within the worker's key rule (1–64 bytes after trimming, no whitespace runs, no control characters); it is also what szamlazz.hu shows as `rendelésszám`.
+
+**`Idempotency-Key` = the webhook notification id.** Pretix retries a webhook until it is acknowledged; Restate deduplicates those retries per scope, so the same notification under two accounts is two invocations — which is right, since it addresses two szamlazz.hu accounts. After a terminal fault (any 5xx with `x-restate-error-source: invocation`), a retry needs a **new** key: Restate replays the stored failure under the old one for the retention period.
+
+**Per-event throttling via limit keys, never via scopes.** To keep one event's burst from starving the others on the same account, send the call under the scope with a limit key — `?limit-key={event-slug}` (each level `[a-zA-Z0-9_.-]`, at most 36 characters; the gateway strips `x-restate-*` headers, so use the query parameter or let the gateway set it). A limit key shapes concurrency only; it is not part of the identity, so it never changes which `Szamlazz.Order` instance a call reaches.
+
+| Pretix flow | Call under the account's scope | Notes |
+|---|---|---|
+| Order placed, bank transfer pending | `Szamlazz.Order/{key}/create_proforma` | The proforma is the payment request. |
+| Bank transfer received (proforma exists) | `Szamlazz.Order/{key}/create_invoice` | `options.proforma: auto` (default) converts the live proforma; szamlazz.hu links by shared order number anyway. |
+| Card payment (paid at once) | `Szamlazz.Order/{key}/create_invoice` | No proforma; `auto` finds none. |
+| Order canceled before payment | `Szamlazz.Order/{key}/delete_proforma` | `{deleted: true, reason: absent}` when it was never created or already consumed. |
+| Full refund | `Szamlazz.Order/{key}/storno_invoice {invoice_number}` | `reversed`; idempotent. Credit entries are wiped by the storno — re-register on a new invoice if needed. |
+| Partial refund / order changed | `Szamlazz.Order/{key}/correct_invoice {invoice_number, correction_id, document}` | `correction_id` = the Pretix change or notification id; a new id issues a new corrective. |
+| Wrong buyer data — redo | `storno_invoice`, then `create_invoice {options: {reissue: true}}` with a new key | Buyer data cannot be fixed by a corrective (szamlazz.hu); a create without `reissue` after the storno returns `reversed`. |
+| Reconcile / after any fault | `Szamlazz.Order/{key}/get` | The live view of the order's four documents; never blocks behind issuing. |
+
+Reading responses: `outcome` is data (HTTP 200) — branch on `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` and `conflict{conflict_reason}`, not on status codes. `external_id` (`{namespace}:{key}:{kind}`) is the only namespace marker in any response; no response names the account, and `order_key` in a storno response (`managed_by_order`) is meaningful only under the scope you called under. A 503 with `x-restate-error-source: invocation` is the worker's `unavailable` or `credentials_rejected`: page, do not auto-retry into it; once fixed, retry with a new `Idempotency-Key` or read `get`. Adding an organizer's account is a resolver change — a row for a database-backed resolver; an `[accounts.<scope>]` entry and a new revision for the static one, following the [mapping-change procedure](#single--multi-flag-day) — followed by `check_account` under the new scope.
 
 ## Request Identity
 
