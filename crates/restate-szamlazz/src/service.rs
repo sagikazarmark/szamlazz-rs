@@ -20,10 +20,8 @@
 
 use std::sync::Arc;
 
-use szamlazz_agent::client::BuildError;
-
 use crate::config::{Config, WorkerConfig};
-use crate::gateway::Gateway;
+use crate::gateway::{Gateway, OpenError};
 
 mod agent;
 mod create;
@@ -49,8 +47,9 @@ impl Order {
     ///
     /// # Errors
     ///
-    /// Returns an error when the HTTP client cannot be constructed.
-    pub fn new(config: &Config) -> Result<Self, BuildError> {
+    /// Returns an error when the endpoint is not an http(s) URL or the HTTP
+    /// client cannot be constructed.
+    pub fn new(config: &Config) -> Result<Self, OpenError> {
         let gateway = Arc::new(Gateway::new(config)?);
         Ok(Self::from_parts(gateway, WorkerConfig::from(config)))
     }
@@ -87,8 +86,9 @@ impl Agent {
     ///
     /// # Errors
     ///
-    /// Returns an error when the HTTP client cannot be constructed.
-    pub fn new(config: &Config) -> Result<Self, BuildError> {
+    /// Returns an error when the endpoint is not an http(s) URL or the HTTP
+    /// client cannot be constructed.
+    pub fn new(config: &Config) -> Result<Self, OpenError> {
         let gateway = Arc::new(Gateway::new(config)?);
         Ok(Self::from_parts(gateway, WorkerConfig::from(config)))
     }

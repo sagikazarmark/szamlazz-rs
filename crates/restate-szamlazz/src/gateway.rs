@@ -43,7 +43,8 @@ use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::{ApiError, Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
 use tracing::Instrument as _;
 
-use crate::config::{AccountMode, Config, Defaults, SellerConfig};
+use crate::account::{Account, InvalidEndpoint};
+use crate::config::Config;
 use crate::contract::{DocumentKind, IssuedKind, PaymentEntry, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
@@ -53,39 +54,27 @@ pub use build::{DocumentRefs, InputError, gross_total};
 
 /// The module that speaks to szamlazz.hu for one account: the Számla Agent
 /// client plus the [`Account`] it is opened for.
+///
+/// Opened with [`Gateway::open`] for one handler execution from a resolved
+/// account and freshly fetched credentials; [`Gateway::new`] is the legacy
+/// path from a [`Config`].
 #[derive(Debug, Clone)]
 pub struct Gateway {
     client: Client,
     account: Account,
 }
 
-/// One szamlazz.hu account as the services know it — never the agent key.
-///
-/// Everything account-shaped the service layer reads: the ownership-validation
-/// pins (`mode`, `supplier_id`), the document defaults and the seller block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Account {
-    /// Whether the account is live or a test account; validated against
-    /// `teszt` on every document found under our external ids.
-    pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`). Optional pin; when set it is
-    /// validated against every document found under our external ids.
-    pub supplier_id: Option<u64>,
-    /// Document defaults that per-call overrides may change.
-    pub defaults: Defaults,
-    /// The seller block; account data is used where absent.
-    pub seller: SellerConfig,
-}
-
-impl From<&Config> for Account {
-    fn from(config: &Config) -> Self {
-        Self {
-            mode: config.account.mode,
-            supplier_id: config.account.supplier_id,
-            defaults: config.defaults.clone(),
-            seller: config.seller.clone(),
-        }
-    }
+/// [`Gateway::new`] failure: the [`Config`] names an endpoint that is not an
+/// http(s) URL, or the HTTP client cannot be constructed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OpenError {
+    /// `account.endpoint` is not an http(s) URL.
+    #[error("account.endpoint: {0}")]
+    Endpoint(#[from] InvalidEndpoint),
+    /// The Számla Agent client could not be built.
+    #[error(transparent)]
+    Client(#[from] BuildError),
 }
 
 /// The lookup step (design §5 step 3): what identifies the document whose
@@ -581,22 +570,37 @@ impl From<ApiError> for SetPaymentsOutcome {
 }
 
 impl Gateway {
-    /// Opens the gateway for the account in `config`: agent-key credentials
-    /// and the configured endpoint override.
+    /// Opens the gateway for one handler execution: `account` as resolved
+    /// and `credentials` as just fetched, over a **fresh** Számla Agent
+    /// client.
+    ///
+    /// A fresh client every time is a boundary, not a performance choice: the
+    /// default `reqwest::Client` keeps szamlazz.hu's `JSESSIONID` cookie, so
+    /// a client shared between accounts would carry one account's session
+    /// into another account's request.
     ///
     /// # Errors
     ///
     /// Returns an error when the HTTP client cannot be constructed.
-    pub fn new(config: &Config) -> Result<Self, BuildError> {
-        let mut builder = Client::builder()
-            .credentials(Credentials::agent_key(config.account.agent_key.expose()));
-        if let Some(endpoint) = &config.account.endpoint {
-            builder = builder.endpoint(endpoint.clone());
-        }
-        Ok(Self {
-            client: builder.build()?,
-            account: Account::from(config),
-        })
+    pub fn open(account: Account, credentials: Credentials) -> Result<Self, BuildError> {
+        let client = Client::builder()
+            .credentials(credentials)
+            .endpoint(account.endpoint.as_str())
+            .build()?;
+        Ok(Self { client, account })
+    }
+
+    /// Opens the gateway for the account in `config`: the legacy path, with
+    /// agent-key credentials and the configured endpoint override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the endpoint is not an http(s) URL or the HTTP
+    /// client cannot be constructed.
+    pub fn new(config: &Config) -> Result<Self, OpenError> {
+        let account = Account::try_from(config)?;
+        let credentials = Credentials::agent_key(config.account.agent_key.expose());
+        Ok(Self::open(account, credentials)?)
     }
 
     /// The account the gateway speaks for: the only way the services read

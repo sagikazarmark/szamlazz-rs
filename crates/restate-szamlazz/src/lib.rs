@@ -12,6 +12,8 @@
 //!
 //! - [`contract`] — the request/response types.
 //! - [`config`] — the deployment configuration.
+//! - [`account`] — the account model, the account resolver and credential store traits, and
+//!   the static resolver over deployment configuration.
 //! - [`identity`] — order keys and external ids.
 //! - [`gateway`] — the module that speaks to szamlazz.hu for one account, outcome as data.
 //! - [`service`] — the Restate adapters.
@@ -49,12 +51,14 @@
 //!
 //! See `docs/design/restate-szamlazz.md` in the repository for the design.
 
+pub mod account;
 pub mod config;
 pub mod contract;
 pub mod gateway;
 pub mod identity;
 pub mod service;
 
+pub use account::{Account, AccountResolver, Accounts, CredentialStore};
 pub use config::{Config, WorkerConfig};
 pub use contract::{CorrectionId, CreateRequest, CreateResponse, DocumentKind};
 pub use gateway::Gateway;

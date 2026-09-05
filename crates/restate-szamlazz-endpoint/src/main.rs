@@ -99,8 +99,7 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
         "loaded szamlazz.hu account configuration"
     );
 
-    let gateway =
-        Arc::new(Gateway::new(&config).context("failed to construct the Számla Agent client")?);
+    let gateway = Arc::new(Gateway::new(&config).context("failed to open the gateway")?);
     let worker = WorkerConfig::from(&config);
     let order = Order::from_parts(Arc::clone(&gateway), worker.clone());
     let agent = Agent::from_parts(gateway, worker);

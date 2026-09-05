@@ -4,7 +4,8 @@
 //! szamlazz.hu responses.
 
 use jiff::civil::date;
-use restate_szamlazz::config::Config;
+use restate_szamlazz::account::{Account, Endpoint};
+use restate_szamlazz::config::{AccountMode, Config};
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
@@ -16,8 +17,8 @@ use restate_szamlazz::gateway::{
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
 use serde_json::json;
-use szamlazz_agent::InvoiceNumber;
 use szamlazz_agent::ops::invoice::InvoiceCreationResult;
+use szamlazz_agent::{Credentials, InvoiceNumber};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
@@ -1687,4 +1688,150 @@ async fn set_payments_outcomes() {
         3,
         "six entries never reach the wire"
     );
+}
+
+// ----- Gateway::open ---------------------------------------------------------
+
+/// An [`Account`] in `mode`, pinned to `SUPPLIER`, on `server`, and the
+/// gateway opened for it with `key`.
+fn open(server: &MockServer, id: &str, key: &str, mode: AccountMode) -> Gateway {
+    let mut account = Account::new(id, id);
+    account.mode = mode;
+    account.supplier_id = Some(SUPPLIER);
+    account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+    Gateway::open(account, Credentials::agent_key(key)).expect("gateway")
+}
+
+fn agent_key_on_the_wire(body: &str) -> Option<&str> {
+    let start = body.find("<szamlaagentkulcs>")? + "<szamlaagentkulcs>".len();
+    let end = body[start..].find("</szamlaagentkulcs>")? + start;
+    Some(&body[start..end])
+}
+
+#[tokio::test]
+async fn a_gateway_opened_from_an_account_sends_that_accounts_key() {
+    let server = MockServer::start().await;
+    external_id_query("acme:ORD-1:invoice")
+        .respond_with(not_found())
+        .mount(&server)
+        .await;
+    let gateway = open(&server, "acme", "key-acme", AccountMode::Test);
+
+    let outcome = gateway
+        .query(&Selector::ExternalId("acme:ORD-1:invoice".to_owned()))
+        .await;
+    assert!(matches!(outcome, QueryOutcome::NotFound), "{outcome:?}");
+
+    let sent = server.received_requests().await.expect("requests");
+    assert_eq!(sent.len(), 1);
+    let body = String::from_utf8_lossy(&sent[0].body);
+    assert_eq!(agent_key_on_the_wire(&body), Some("key-acme"));
+    assert_eq!(gateway.account().id.as_str(), "acme");
+}
+
+/// Two accounts on one szamlazz.hu: each gateway's requests carry its own
+/// key, and a session cookie szamlazz.hu sets for the first never travels
+/// with the second — a fresh client per gateway. The first gateway's second
+/// request *does* carry the cookie, proving the cookie store is live and the
+/// test would catch a shared client.
+#[tokio::test]
+async fn two_gateways_opened_from_two_accounts_share_no_key_and_no_session() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(not_found().insert_header("set-cookie", "JSESSIONID=session-of-acme; Path=/"))
+        .mount(&server)
+        .await;
+    let acme = open(&server, "acme", "key-acme", AccountMode::Test);
+    let beta = open(&server, "beta", "key-beta", AccountMode::Test);
+
+    let selector = Selector::OrderNumber("ORD-1".to_owned());
+    assert!(matches!(
+        acme.query(&selector).await,
+        QueryOutcome::NotFound
+    ));
+    assert!(matches!(
+        beta.query(&selector).await,
+        QueryOutcome::NotFound
+    ));
+    assert!(matches!(
+        acme.query(&selector).await,
+        QueryOutcome::NotFound
+    ));
+
+    let sent = server.received_requests().await.expect("requests");
+    assert_eq!(sent.len(), 3);
+    let cookie = |i: usize| {
+        sent[i]
+            .headers
+            .get("cookie")
+            .map(|value| value.to_str().expect("ascii").to_owned())
+    };
+    let key = |i: usize| {
+        agent_key_on_the_wire(&String::from_utf8_lossy(&sent[i].body)).map(str::to_owned)
+    };
+
+    assert_eq!(key(0).as_deref(), Some("key-acme"));
+    assert_eq!(cookie(0), None, "acme's first request: no session yet");
+    assert_eq!(key(1).as_deref(), Some("key-beta"));
+    assert_eq!(cookie(1), None, "beta never saw acme's Set-Cookie");
+    assert_eq!(key(2).as_deref(), Some("key-acme"));
+    assert_eq!(
+        cookie(2).as_deref(),
+        Some("JSESSIONID=session-of-acme"),
+        "acme's own client keeps its own session"
+    );
+}
+
+/// The account's mode is always validated: a document under our external id
+/// that says `teszt=false` is not ours on a test account (and vice versa),
+/// so the lookup step reports a collision instead of adopting it.
+#[tokio::test]
+async fn opened_gateway_validates_the_accounts_mode_against_teszt() {
+    for (mode, teszt, label) in [
+        (AccountMode::Test, false, "test account, live document"),
+        (AccountMode::Live, true, "live account, test document"),
+    ] {
+        let server = MockServer::start().await;
+        let external_id = ExternalId::new("acme:ORD-1:invoice");
+        external_id_query("acme:ORD-1:invoice")
+            .respond_with(
+                Doc {
+                    test: teszt,
+                    ..Doc::new("SZ-9", "SZ")
+                }
+                .response(),
+            )
+            .mount(&server)
+            .await;
+        order_query()
+            .respond_with(not_found())
+            .expect(0)
+            .mount(&server)
+            .await;
+        let gateway = open(&server, "acme", "key-acme", mode);
+
+        let outcome = gateway
+            .lookup(LookupRequest {
+                external_id: &external_id,
+                kind: IssuedKind::Invoice,
+                order: &order(),
+                our_numbers: &[],
+            })
+            .await;
+        match outcome {
+            LookupOutcome::Collision(found) => {
+                assert_eq!(found.number(), "SZ-9", "{label}");
+                assert!(
+                    !found.is_ours(
+                        &order(),
+                        IssuedKind::Invoice,
+                        mode.is_test(),
+                        Some(SUPPLIER)
+                    ),
+                    "{label}"
+                );
+            }
+            other => panic!("{label}: expected Collision, got {other:?}"),
+        }
+    }
 }

@@ -27,6 +27,12 @@
 //! (credentials, mode, supplier pin, defaults, seller) and the services keep a
 //! [`WorkerConfig`] (namespace, issue policy). `account.slug` is the
 //! [`Namespace`]; the key keeps its old name for now.
+//!
+//! This is the legacy path. The account model the services will resolve per
+//! invocation lives in [`crate::account`]: an [`Account`](crate::account::Account)
+//! is built from a `Config` with `TryFrom`, and the static resolver's own
+//! configuration ([`StaticConfig`](crate::account::StaticConfig)) carries the
+//! account fields without the namespace.
 
 use std::fmt;
 use std::str::FromStr;
@@ -268,8 +274,10 @@ pub enum InvalidNamespace {
 }
 
 /// A secret string whose `Debug` output is redacted.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
+///
+/// Deserializes from a string or an integer: agent keys may be all digits,
+/// and an unquoted one is a number to TOML and YAML.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
 
 impl Secret {
@@ -288,6 +296,38 @@ impl Secret {
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Secret(***)")
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct StringOrInteger;
+
+        impl serde::de::Visitor<'_> for StringOrInteger {
+            type Value = Secret;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string or an integer")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Secret::from(value))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(Secret::from(value))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(Secret::from(value.to_string()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(Secret::from(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(StringOrInteger)
     }
 }
 
