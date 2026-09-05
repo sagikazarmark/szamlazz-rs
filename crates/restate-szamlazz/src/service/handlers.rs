@@ -213,8 +213,12 @@ impl Order {
 
     /// What szamlazz.hu holds under the order's external ids right now: four
     /// queries, no state. Read-only, so it runs concurrently with the
-    /// exclusive handlers.
-    #[handler(invocation_retry_policy(max_attempts = 3, on_max_attempts = "kill"))]
+    /// exclusive handlers. The journal is retained a day so that it can be
+    /// inspected; there is nothing to replay.
+    #[handler(
+        invocation_retry_policy(max_attempts = 3, on_max_attempts = "kill"),
+        journal_retention = "1d"
+    )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
         self.status(&ctx).await.map(Json)
     }
@@ -225,14 +229,19 @@ impl Order {
 /// is reported as `managed_by_order` instead.
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
-    /// Queries a document by number, order number or external id.
-    #[handler(invocation_retry_policy(
-        initial_interval = "10s",
-        factor = 2.0,
-        max_interval = "1m",
-        max_attempts = 3,
-        on_max_attempts = "kill"
-    ))]
+    /// Queries a document by number, order number or external id. The
+    /// journal is retained a day so that it can be inspected; there is
+    /// nothing to replay.
+    #[handler(
+        invocation_retry_policy(
+            initial_interval = "10s",
+            factor = 2.0,
+            max_interval = "1m",
+            max_attempts = 3,
+            on_max_attempts = "kill"
+        ),
+        journal_retention = "1d"
+    )]
     async fn query(
         &self,
         ctx: Context<'_>,

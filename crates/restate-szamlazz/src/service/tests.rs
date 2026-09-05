@@ -67,7 +67,8 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
         );
         if name == "get" {
             // Read-only: shared, an empty input, the default back-off with
-            // three attempts, no retention.
+            // three attempts, no idempotency retention; an explicit journal
+            // retention so the journal is inspectable.
             assert_eq!(handler.ty, Some(HandlerType::Shared));
             let input = handler.input.as_ref().expect("an empty input payload");
             assert!(
@@ -78,7 +79,7 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
             assert_eq!(handler.retry_policy_initial_interval, None);
             assert_eq!(handler.inactivity_timeout, None);
             assert_eq!(handler.abort_timeout, None);
-            assert_eq!(handler.journal_retention, None);
+            assert_eq!(handler.journal_retention, Some(24 * 3_600_000));
             assert_eq!(handler.idempotency_retention, None);
             continue;
         }
@@ -138,14 +139,15 @@ fn agent_discovers_as_a_service_with_three_handlers() {
         );
         if name == "query" {
             // Read-only: a short 10s → 1m back-off, three attempts, no
-            // retention (nothing to replay).
+            // idempotency retention (nothing to replay); an explicit journal
+            // retention so the journal is inspectable.
             assert_eq!(handler.retry_policy_initial_interval, Some(10_000));
             assert_eq!(handler.retry_policy_max_interval, Some(60_000));
             assert_eq!(handler.retry_policy_exponentiation_factor, Some(2.0));
             assert_eq!(handler.retry_policy_max_attempts, Some(3));
             assert_eq!(handler.inactivity_timeout, None);
             assert_eq!(handler.abort_timeout, None);
-            assert_eq!(handler.journal_retention, None);
+            assert_eq!(handler.journal_retention, Some(24 * 3_600_000));
             assert_eq!(handler.idempotency_retention, None);
         } else {
             assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");

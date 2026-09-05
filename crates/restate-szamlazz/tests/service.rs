@@ -1,10 +1,18 @@
-//! End-to-end tests of the `Szamlazz.Order` Virtual Object against a real
-//! Restate server (docker) with wiremock standing in for szamlazz.hu.
+//! End-to-end tests of the `Szamlazz.Order` Virtual Object and the
+//! `Szamlazz.Agent` service against a real Restate server (docker) with
+//! wiremock standing in for szamlazz.hu.
 //!
 //! Ignored by default: `cargo test -p restate-szamlazz --test service -- --ignored`.
 //! Skips (with a message) when the docker daemon is not reachable. Set
 //! `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server
-//! instead of starting a container.
+//! instead of starting a container; it must run with the three experimental
+//! flags ([`SERVER_FLAGS`]) — `compose.yaml` sets them.
+//!
+//! The harness calls through the `/restate/call/…` and
+//! `/restate/scope/{scope}/call/…` ingress paths, reports the invocation id
+//! (`x-restate-id`) and parses fault bodies, and reads `sys_journal` /
+//! `sys_invocation` through the SQL introspection API — `raw` hex-decoded to
+//! bytes, since run results are stored as bytes.
 
 use std::net::TcpListener;
 use std::process::Command;
@@ -19,6 +27,7 @@ use restate_szamlazz::contract::{
 };
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
@@ -176,6 +185,16 @@ fn docker_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+/// The experimental server flags multi-account mode depends on (design, ADR
+/// pending in #28): vqueues, protocol v7 (below it the SDK sees no scope) and
+/// scoped Virtual Objects. Set on the container and expected of a server
+/// reused through the environment.
+const SERVER_FLAGS: [&str; 3] = [
+    "RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true",
+    "RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true",
+    "RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true",
+];
+
 /// A Restate server: an existing one (from the environment) or a container
 /// removed on drop.
 struct Restate {
@@ -196,20 +215,25 @@ impl Restate {
                 container: None,
             };
         }
+        let mut args = vec![
+            "run".to_owned(),
+            "--rm".to_owned(),
+            "-d".to_owned(),
+            // Docker Desktop resolves `host.docker.internal` on its own;
+            // a Linux daemon needs the alias to reach the endpoint.
+            "--add-host=host.docker.internal:host-gateway".to_owned(),
+            "-p".to_owned(),
+            format!("{INGRESS_PORT}:8080"),
+            "-p".to_owned(),
+            format!("{ADMIN_PORT}:9070"),
+        ];
+        for flag in SERVER_FLAGS {
+            args.push("-e".to_owned());
+            args.push(flag.to_owned());
+        }
+        args.push(IMAGE.to_owned());
         let output = Command::new("docker")
-            .args([
-                "run",
-                "--rm",
-                "-d",
-                // Docker Desktop resolves `host.docker.internal` on its own;
-                // a Linux daemon needs the alias to reach the endpoint.
-                "--add-host=host.docker.internal:host-gateway",
-                "-p",
-                &format!("{INGRESS_PORT}:8080"),
-                "-p",
-                &format!("{ADMIN_PORT}:9070"),
-                IMAGE,
-            ])
+            .args(&args)
             .output()
             .expect("docker run");
         assert!(
@@ -234,6 +258,116 @@ impl Drop for Restate {
                 .output();
         }
     }
+}
+
+/// An ingress reply: the status, the parsed body and the invocation id the
+/// ingress reports in `x-restate-id`.
+#[derive(Debug)]
+struct Reply {
+    status: u16,
+    body: Value,
+    invocation_id: Option<String>,
+}
+
+impl Reply {
+    fn invocation_id(&self) -> &str {
+        self.invocation_id
+            .as_deref()
+            .unwrap_or_else(|| panic!("no x-restate-id on the reply: {}", self.body))
+    }
+
+    /// The structured fault inside the ingress error envelope: the handler's
+    /// `TerminalError` message is the fault JSON.
+    fn fault(&self) -> Fault {
+        let message = self.body["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an error envelope with a message: {}", self.body));
+        serde_json::from_str(message)
+            .unwrap_or_else(|error| panic!("a structured fault ({error}): {message}"))
+    }
+}
+
+/// The fault body of a `TerminalError` (design §7).
+#[derive(Debug, Deserialize)]
+struct Fault {
+    code: String,
+    message: String,
+    #[serde(default)]
+    order: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    external_id: Option<String>,
+}
+
+/// A `sys_journal` row with `raw` decoded from hex to bytes: run results are
+/// stored as bytes and render as integer arrays in `entry_json`, so a text
+/// match on `entry_json` is vacuous.
+///
+/// Under protocol v7 (journal v2) a run is two rows: `Command: Run`, which
+/// carries the name, and the `Notification: Run` that follows it, which
+/// carries the result bytes (verified against 1.7.8). A leak check must scan
+/// every row, not the named ones.
+#[derive(Debug)]
+struct JournalEntry {
+    index: u64,
+    entry_type: String,
+    name: Option<String>,
+    raw: Vec<u8>,
+}
+
+impl JournalEntry {
+    /// Whether the entry is a `ctx.run` command (named).
+    fn is_run(&self) -> bool {
+        self.entry_type == "Command: Run"
+    }
+
+    /// Whether the entry's bytes contain `needle`.
+    fn raw_contains(&self, needle: &str) -> bool {
+        self.raw
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+}
+
+/// The result of the run named `name`: the `Notification: Run` row that
+/// follows its command.
+fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a JournalEntry> {
+    let command = journal
+        .iter()
+        .position(|entry| entry.is_run() && entry.name.as_deref() == Some(name))?;
+    journal[command + 1..]
+        .iter()
+        .find(|entry| entry.entry_type == "Notification: Run")
+}
+
+/// What [`Harness::watch`] saw of an invocation's attempts while it ran.
+#[derive(Debug, Default)]
+struct Retries {
+    max_retry_count: u64,
+    failures: Vec<String>,
+    failing_commands: Vec<String>,
+}
+
+/// A `sys_invocation` row of a completed invocation. `retry_count` and the
+/// last failure are attempt state, gone once the invocation completed — see
+/// [`Harness::watch`] for them.
+#[derive(Debug)]
+struct Invocation {
+    status: String,
+    completion_failure: Option<String>,
+    scope: Option<String>,
+    handler: String,
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 struct Harness {
@@ -264,6 +398,24 @@ impl Harness {
                 "Restate admin API did not come up"
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // The server must run with the three experimental flags; a reused
+        // server (from the environment) is checked the same way.
+        let version: Value = http
+            .get(format!("{}/version", restate.admin))
+            .send()
+            .await
+            .expect("version")
+            .json()
+            .await
+            .expect("version json");
+        for feature in ["vqueues", "protocol_v7", "scoped_virtual_objects"] {
+            assert_eq!(
+                version["features"][feature],
+                Value::Bool(true),
+                "the Restate server must run with {feature} enabled: {version}"
+            );
         }
 
         // Serve the endpoint on a free port and register it.
@@ -328,50 +480,231 @@ impl Harness {
         }
     }
 
-    /// Calls `handler` on `key` with an `Idempotency-Key`.
-    async fn call(
+    /// Calls `Szamlazz.Order.{handler}` on `key` with an `Idempotency-Key`,
+    /// unscoped.
+    async fn call(&self, key: &str, handler: &str, body: &Value, idempotency: &str) -> Reply {
+        self.invoke(
+            &format!("/restate/call/Szamlazz.Order/{key}/{handler}"),
+            Some(body),
+            Some(idempotency),
+        )
+        .await
+    }
+
+    /// Calls `Szamlazz.Order.{handler}` on `key` under `scope`
+    /// (`/restate/scope/{scope}/call/…`).
+    async fn call_scoped(
         &self,
+        scope: &str,
         key: &str,
         handler: &str,
         body: &Value,
         idempotency: &str,
-    ) -> (u16, Value) {
-        let response = self
-            .http
-            .post(format!(
-                "{}/Szamlazz.Order/{key}/{handler}",
-                self.restate.ingress
-            ))
-            .header("idempotency-key", idempotency)
-            .json(body)
-            .send()
-            .await
-            .expect("ingress call");
+    ) -> Reply {
+        self.invoke(
+            &format!("/restate/scope/{scope}/call/Szamlazz.Order/{key}/{handler}"),
+            Some(body),
+            Some(idempotency),
+        )
+        .await
+    }
+
+    /// Calls `Szamlazz.Agent.{handler}` under `scope`.
+    async fn call_agent_scoped(&self, scope: &str, handler: &str, body: &Value) -> Reply {
+        self.invoke(
+            &format!("/restate/scope/{scope}/call/Szamlazz.Agent/{handler}"),
+            Some(body),
+            None,
+        )
+        .await
+    }
+
+    async fn invoke(&self, path: &str, body: Option<&Value>, idempotency: Option<&str>) -> Reply {
+        let mut request = self.http.post(format!("{}{path}", self.restate.ingress));
+        if let Some(idempotency) = idempotency {
+            request = request.header("idempotency-key", idempotency);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await.expect("ingress call");
         let status = response.status().as_u16();
+        let invocation_id = response
+            .headers()
+            .get("x-restate-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let text = response.text().await.expect("body");
-        let value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        (status, value)
+        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        Reply {
+            status,
+            body,
+            invocation_id,
+        }
     }
 
     async fn ok(&self, key: &str, handler: &str, body: &Value, idempotency: &str) -> Value {
-        let (status, value) = self.call(key, handler, body, idempotency).await;
-        assert_eq!(status, 200, "{handler} on {key}: {value}");
-        value
+        let reply = self.call(key, handler, body, idempotency).await;
+        assert_eq!(reply.status, 200, "{handler} on {key}: {}", reply.body);
+        reply.body
     }
 
     /// `Szamlazz.Order.get`: no input, no idempotency key.
     async fn get(&self, key: &str) -> Value {
+        let reply = self
+            .invoke(
+                &format!("/restate/call/Szamlazz.Order/{key}/get"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, 200, "get on {key}: {}", reply.body);
+        reply.body
+    }
+
+    /// Runs a SQL query against the introspection API (`POST :9070/query`).
+    async fn sql(&self, query: &str) -> Vec<Value> {
         let response = self
             .http
-            .post(format!("{}/Szamlazz.Order/{key}/get", self.restate.ingress))
+            .post(format!("{}/query", self.restate.admin))
+            .header("accept", "application/json")
+            .json(&json!({ "query": query }))
             .send()
             .await
-            .expect("ingress call");
+            .expect("sql query");
         let status = response.status().as_u16();
-        let text = response.text().await.expect("body");
-        let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        assert_eq!(status, 200, "get on {key}: {value}");
-        value
+        let body: Value = response.json().await.expect("sql json");
+        assert_eq!(status, 200, "sql failed: {body}");
+        body["rows"]
+            .as_array()
+            .unwrap_or_else(|| panic!("rows: {body}"))
+            .clone()
+    }
+
+    /// The journal of an invocation, in index order.
+    async fn journal(&self, invocation_id: &str) -> Vec<JournalEntry> {
+        let rows = self
+            .sql(&format!(
+                "SELECT index, entry_type, name, raw FROM sys_journal WHERE id = '{invocation_id}' ORDER BY index"
+            ))
+            .await;
+        rows.iter()
+            .map(|row| JournalEntry {
+                index: row["index"].as_u64().expect("index"),
+                entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
+                name: row["name"].as_str().map(str::to_owned),
+                raw: row["raw"]
+                    .as_str()
+                    .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// The `sys_invocation` row of an invocation.
+    async fn invocation(&self, invocation_id: &str) -> Invocation {
+        let rows = self
+            .sql(&format!(
+                "SELECT status, completion_failure, scope, target_handler_name FROM sys_invocation WHERE id = '{invocation_id}'"
+            ))
+            .await;
+        let row = rows
+            .first()
+            .unwrap_or_else(|| panic!("no sys_invocation row for {invocation_id}"));
+        Invocation {
+            status: row["status"].as_str().unwrap_or_default().to_owned(),
+            completion_failure: row["completion_failure"].as_str().map(str::to_owned),
+            scope: row["scope"].as_str().map(str::to_owned),
+            handler: row["target_handler_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    }
+
+    /// Watches the invocations on Virtual Object `key` for four seconds and
+    /// records what `sys_invocation` reports **while they are in flight**:
+    /// `retry_count`, `last_failure` and `last_failure_related_command_name`
+    /// are attempt state, cleared once the invocation completes — a completed
+    /// row shows neither the count nor the failing command (verified against
+    /// 1.7.8). Start it before the call, await it after.
+    fn watch(&self, key: &str) -> tokio::task::JoinHandle<Retries> {
+        let admin = self.restate.admin.clone();
+        let http = self.http.clone();
+        let key = key.to_owned();
+        tokio::spawn(async move {
+            let mut retries = Retries::default();
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let body: Value = http
+                    .post(format!("{admin}/query"))
+                    .header("accept", "application/json")
+                    .json(&json!({
+                        "query": format!(
+                            "SELECT retry_count, last_failure, last_failure_related_command_name FROM sys_invocation WHERE target_service_key = '{key}'"
+                        )
+                    }))
+                    .send()
+                    .await
+                    .expect("sql query")
+                    .json()
+                    .await
+                    .expect("sql json");
+                for row in body["rows"].as_array().into_iter().flatten() {
+                    if let Some(count) = row["retry_count"].as_u64() {
+                        retries.max_retry_count = retries.max_retry_count.max(count);
+                    }
+                    if let Some(failure) = row["last_failure"].as_str()
+                        && !retries.failures.iter().any(|seen| seen == failure)
+                    {
+                        retries.failures.push(failure.to_owned());
+                    }
+                    if let Some(command) = row["last_failure_related_command_name"].as_str()
+                        && !retries.failing_commands.iter().any(|seen| seen == command)
+                    {
+                        retries.failing_commands.push(command.to_owned());
+                    }
+                }
+            }
+            retries
+        })
+    }
+
+    /// Purges a completed invocation (`PATCH /invocations/{id}/purge`), so a
+    /// later call runs against an order Restate has no memory of.
+    async fn purge(&self, invocation_id: &str) {
+        let response = self
+            .http
+            .patch(format!(
+                "{}/invocations/{invocation_id}/purge",
+                self.restate.admin
+            ))
+            .send()
+            .await
+            .expect("purge");
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        assert!(
+            (200..300).contains(&status),
+            "purge of {invocation_id} failed ({status}): {body}"
+        );
+        // The purge is asynchronous; wait for the row to go.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let rows = self
+                .sql(&format!(
+                    "SELECT id FROM sys_invocation WHERE id = '{invocation_id}'"
+                ))
+                .await;
+            if rows.is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invocation {invocation_id} still present after purge"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     async fn reset(&self) {
@@ -415,6 +748,8 @@ async fn e2e_order_protocol() {
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
+    harness_scoped_call_and_leak_positive_control(&h).await;
+    purged_invocation_queries_szamlazz_again(&h).await;
 }
 
 /// (i) create ⇒ `issued`; a second call with a **new** key ⇒
@@ -881,7 +1216,7 @@ async fn secondary_lookup_collision_refuses_to_create(h: &Harness) {
 async fn prepayment_takes_no_proforma_option(h: &Harness) {
     h.reset().await;
     let before = h.requests_seen().await;
-    let (status, body) = h
+    let reply = h
         .call(
             "E2E-10",
             "create_prepayment",
@@ -889,11 +1224,8 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
             "e2e-10-k1",
         )
         .await;
-    assert_eq!(status, 400, "{body}");
-    assert!(
-        body.to_string().contains("invalid_input"),
-        "carries the fault code: {body}"
-    );
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(reply.fault().code, "invalid_input", "{}", reply.body);
     assert_eq!(h.requests_seen().await, before, "refused before any call");
 
     h.absent("E2E-10", &["invoice", "prepayment"]).await;
@@ -950,7 +1282,8 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
         .await;
 
     let started = Instant::now();
-    let (status, body) = h
+    let watch = h.watch("E2E-11");
+    let reply = h
         .call(
             "E2E-11",
             "create_invoice",
@@ -959,7 +1292,8 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
         )
         .await;
     let elapsed = started.elapsed();
-    assert_eq!(status, 500, "{body}");
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 500, "{}", reply.body);
     assert!(
         elapsed < Duration::from_secs(60),
         "the run policy's delay was honoured, not the handler's: {elapsed:?}"
@@ -967,20 +1301,206 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
 
     // The ingress wraps the handler's terminal error; the fault is the JSON
     // in its message.
-    let message = body["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("an error envelope with a message: {body}"));
-    let fault: Value = serde_json::from_str(message)
-        .unwrap_or_else(|error| panic!("a structured fault ({error}): {message}"));
-    assert_eq!(fault["code"], "outcome_unknown", "{fault}");
-    assert_eq!(fault["order"], "E2E-11");
-    assert_eq!(fault["kind"], "invoice");
-    assert_eq!(fault["external_id"], "acct:E2E-11:invoice");
+    let fault = reply.fault();
+    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-11"));
+    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-11:invoice"));
     assert!(
-        fault["message"]
-            .as_str()
-            .is_some_and(|text| text.contains("retry with a new Idempotency-Key")),
-        "{fault}"
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
     );
-    eprintln!("(xi) exhausted create step → structured outcome_unknown: pass");
+
+    // The run's re-execution is visible while the invocation is in flight:
+    // `retry_count` reaches 1 with the create step named as the failing
+    // command — and the completed invocation carries the structured fault.
+    assert_eq!(retries.max_retry_count, 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["create-invoice"],
+        "the run, not the handler, is what retried: {retries:?}"
+    );
+    assert!(
+        retries
+            .failures
+            .iter()
+            .all(|failure| failure.contains("transport failure")),
+        "the last failure is the Unconfirmed message: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("outcome_unknown")),
+        "{invocation:?}"
+    );
+    let journal = h.journal(reply.invocation_id()).await;
+    let runs: Vec<_> = journal
+        .iter()
+        .filter(|entry| entry.is_run())
+        .filter_map(|entry| entry.name.as_deref())
+        .collect();
+    assert!(
+        runs.contains(&"lookup-invoice") && runs.contains(&"create-invoice"),
+        "the two steps are journaled by name: {runs:?}"
+    );
+    eprintln!("(xi) exhausted create step → structured outcome_unknown; run retries visible: pass");
+}
+
+/// (xii) the harness capabilities of #29 that the multi-account tickets
+/// assert through: a scoped `Szamlazz.Agent.query` reaches the handler and
+/// answers 200 (the scope needs no Virtual Object routing); the leak check
+/// has a positive control — a sentinel string in a wiremock rejection is
+/// found in the hex-decoded `raw` of the create run's journal entry.
+async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
+    const SENTINEL: &str = "SENTINEL-8f3a2c-LEAK-CONTROL";
+    h.reset().await;
+    number_query("SZ-12")
+        .respond_with(Doc::new("SZ-12", "SZ", "E2E-12").response())
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped(
+            "tenant-a",
+            "query",
+            &json!({ "selector": { "invoice_number": "SZ-12" } }),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-12");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(
+        invocation.scope.as_deref(),
+        Some("tenant-a"),
+        "{invocation:?}"
+    );
+    assert_eq!(invocation.handler, "query");
+
+    // A scoped call to the Virtual Object routes through the scoped path
+    // too; the scope is on the invocation. (Until #25 the worker ignores it
+    // and issues on its one account; #26 makes an unknown scope a fault.)
+    h.absent("E2E-12", &["prepayment", "proforma"]).await;
+    order_query("E2E-12")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-12:invoice")
+        .respond_with(Doc::new("SZ-12", "SZ", "E2E-12").response())
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_scoped(
+            "tenant-a",
+            "E2E-12",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-12-scoped",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(
+        invocation.scope.as_deref(),
+        Some("tenant-a"),
+        "{invocation:?}"
+    );
+
+    // Positive control: the sentinel travels through szamlazz.hu's rejection
+    // message into the create run's journaled result.
+    h.reset().await;
+    h.absent("E2E-12", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-12")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(api_error("259", SENTINEL))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-12",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-12-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "rejected", "{}", reply.body);
+    assert_eq!(reply.body["message"], SENTINEL);
+
+    let journal = h.journal(reply.invocation_id()).await;
+    let create_result = run_result(&journal, "create-invoice")
+        .unwrap_or_else(|| panic!("the create-invoice run's result entry: {journal:?}"));
+    assert!(
+        create_result.raw_contains(SENTINEL),
+        "the sentinel is found in the hex-decoded raw of entry {}: {:?}",
+        create_result.index,
+        String::from_utf8_lossy(&create_result.raw)
+    );
+    let lookup_result = run_result(&journal, "lookup-invoice").expect("the lookup's result");
+    assert!(
+        !lookup_result.raw_contains(SENTINEL),
+        "the sentinel is not in an entry it did not pass through"
+    );
+    let leaked: Vec<u64> = journal
+        .iter()
+        .filter(|entry| entry.raw_contains(SENTINEL))
+        .map(|entry| entry.index)
+        .collect();
+    assert_eq!(
+        leaked,
+        [create_result.index, journal.last().expect("output").index],
+        "the sentinel is in exactly the create result and the output"
+    );
+    eprintln!("(xii) scoped Szamlazz.Agent.query → 200; leak positive control: pass");
+}
+
+/// (xiii) an order Restate has no memory of: the `get` invocation is purged
+/// and a second `get` queries szamlazz.hu again (nothing is served from a
+/// retained journal or a Virtual Object state).
+async fn purged_invocation_queries_szamlazz_again(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-13", &["proforma", "invoice", "prepayment", "final"])
+        .await;
+    let reply = h
+        .invoke("/restate/call/Szamlazz.Order/E2E-13/get", None, None)
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let first = h.requests_seen().await;
+    assert_eq!(first, 4, "four external-id queries");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(
+        h.journal(reply.invocation_id())
+            .await
+            .iter()
+            .filter(|entry| entry.is_run())
+            .count(),
+        4,
+        "get's journal is retained and inspectable"
+    );
+
+    h.purge(reply.invocation_id()).await;
+    assert!(
+        h.journal(reply.invocation_id()).await.is_empty(),
+        "the journal is gone with the invocation"
+    );
+
+    let reply = h
+        .invoke("/restate/call/Szamlazz.Order/E2E-13/get", None, None)
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        h.requests_seen().await,
+        first + 4,
+        "szamlazz.hu is queried again"
+    );
+    eprintln!("(xiii) purged invocation → szamlazz.hu queried again: pass");
 }

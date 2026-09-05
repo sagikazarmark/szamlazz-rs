@@ -81,13 +81,13 @@ invocation_retry_policy(initial_interval = "2m", factor = 2.0, max_interval = "1
 inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   idempotency_retention = "30d"
 ```
 
-`get`: default retry policy, `max_attempts = 3`, `kill`.
+`get`: default retry policy, `max_attempts = 3`, `kill`, `journal_retention = "1d"` (inspectable, nothing to replay).
 
 ### `Szamlazz.Agent` (stateless Service, `#[restate_sdk::service(name = "Szamlazz.Agent")]`)
 
 | Handler | Input → Output | Notes |
 |---|---|---|
-| `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected` |
+| `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected`; `journal_retention = "1d"` |
 | `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
 | `storno` | `StornoRequest` → `StornoResponse` | verify first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the storno step under the issue policy; exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
 
@@ -325,13 +325,26 @@ Unchanged from v1: `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAM
   `options.proforma` on every kind but `create_invoice`, the issue policy's field-for-field mapping onto
   `RunRetryPolicy`, the fault → status mapping, and a sentinel test that the agent key reaches neither the
   `credentials_rejected` warning nor the fault body.
-- End to end (docker-gated): Restate 1.7.8 + wiremock as szamlazz.hu — issued → already_issued (new key) and
-  Idempotency-Key replay (same key, create mock `expect(1)`); 152 → reconciled; storno → reversed; stale create →
-  reversed; `reissue` → issued as newest holder; `reissue` on live → `conflict{live}`; `sztornozott` → reversed;
-  proforma auto-link and `consumed` in `get`; `get` shape; a collision on the secondary (`…:prepayment`) lookup →
-  `conflict{external_id_collision}` with the create mock `expect(0)` and the slot absent in `get`; `create_prepayment`
-  refusing `options.proforma` and issuing without a proforma lookup; an exhausted create step (every reply lost, a
-  short test policy) → a structured `outcome_unknown` 500 within the run policy's delays, not the handler's.
+- End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
+  `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
+  szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
+  152 → reconciled; storno → reversed; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
+  live → `conflict{live}`; `sztornozott` → reversed; proforma auto-link and `consumed` in `get`; `get` shape; a
+  collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
+  `expect(0)` and the slot absent in `get`; `create_prepayment` refusing `options.proforma` and issuing without a
+  proforma lookup; an exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
+  500 within the run policy's delays, not the handler's, with `sys_invocation.retry_count = 1` and
+  `last_failure_related_command_name = create-invoice` observed **while in flight** (attempt state is cleared on
+  completion); a scoped `Szamlazz.Agent.query` and a scoped `Szamlazz.Order` call reaching the handlers with the
+  scope on `sys_invocation`; a purged `get` invocation querying szamlazz.hu again; and the leak check's positive
+  control — a sentinel in a szamlazz.hu rejection found in the hex-decoded `raw` of the create run's
+  `Notification: Run` row (under journal v2 the `Command: Run` row carries only the name; the result is in the
+  notification that follows), and nowhere else but the output.
+  The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, returns the
+  `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
+  render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH
+  /invocations/{id}/purge`). `get` and `Szamlazz.Agent.query` set `journal_retention = 1d` so their journals are
+  inspectable.
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)

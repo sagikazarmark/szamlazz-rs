@@ -204,8 +204,9 @@ worker; callers authenticate to Restate ingress separately.
 Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md)): every handler that calls
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
 `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m`, `abort_timeout = 3m`,
-`journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3`.
-`Szamlazz.Agent.set_payments` and `storno` use two attempts, `query` three. Kill, not pause: a paused invocation
+`journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3` and
+`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.set_payments` and `storno` use two
+attempts, `query` three with the same one-day journal retention. Kill, not pause: a paused invocation
 holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
 external-id query inside the create step is what makes that safe.
 
@@ -233,12 +234,18 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   on a re-executed step, a lost reply re-queried once, `Unconfirmed` when nothing landed — plus storno validation
   including the proforma / delivery-note no-op, 335, 7, and the credential codes 3/135/136/164 on every operation).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
-  end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu — issued →
-  already_issued, `Idempotency-Key` replay, 152 → reconciled, storno → reversed → stale create → `reissue`,
-  `reissue` on live → `conflict{live}`, an external reversal, proforma auto-link and `consumed` in `get`, and an
-  exhausted create step answering a structured `outcome_unknown` within the run policy's delays. It
-  skips with a message when the docker daemon is not reachable; set `RESTATE_ADMIN_URL` /
-  `RESTATE_INGRESS_URL` to reuse a running server.
+  and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
+  `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
+  for szamlazz.hu — issued → already_issued, `Idempotency-Key` replay, 152 → reconciled, storno → reversed → stale
+  create → `reissue`, `reissue` on live → `conflict{live}`, an external reversal, proforma auto-link and `consumed`
+  in `get`, an exhausted create step answering a structured `outcome_unknown` within the run policy's delays with
+  the run's retries visible on `sys_invocation` while it is in flight, a scoped call reaching the handlers, a purged
+  invocation querying szamlazz.hu again, and a positive control for the journal-leak check (a sentinel in a
+  szamlazz.hu rejection is found in the hex-decoded `raw` of the create run's result). The harness calls through
+  `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses fault bodies and reads
+  `sys_journal` / `sys_invocation` through the SQL introspection API. It skips with a message when the docker
+  daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server (which must
+  run with the three flags).
 - The go-live checklist in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md)
   re-establishes the verified szamlazz.hu facts on a target account before the worker is enabled; every step
   issues real documents there.
