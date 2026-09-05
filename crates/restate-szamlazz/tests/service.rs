@@ -16,12 +16,18 @@
 
 use std::net::TcpListener;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use jiff::civil::date;
 use restate_sdk::prelude::{Endpoint, HttpServer};
-use restate_szamlazz::config::Config;
+use restate_szamlazz::account::{
+    Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
+    ResolveError, StaticResolver,
+};
+use restate_szamlazz::config::{Config, ResolveConfig, WorkerConfig};
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, DocumentState, LineItemInput, OrderStatus, PaymentMethod,
 };
@@ -29,10 +35,14 @@ use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use szamlazz_agent::Credentials;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
 const SUPPLIER: u64 = 972_720;
+/// The agent key of the test account: a sentinel that must never appear in a
+/// journal entry.
+const AGENT_KEY: &str = "e2e-agent-key-sentinel-7d1f4b";
 const IMAGE: &str = "docker.restate.dev/restatedev/restate:1.7.8";
 const INGRESS_PORT: u16 = 18080;
 const ADMIN_PORT: u16 = 19070;
@@ -370,10 +380,139 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The static resolver behind a script: the resolver fails the next N
+/// resolutions with `unavailable`, and the store can be taken down. What
+/// #25's e2e drives — a resolver that fails then succeeds, a store that
+/// always fails — on the one deployment the harness registers.
+#[derive(Debug)]
+struct Scripted {
+    inner: StaticResolver,
+    /// Resolutions left to fail with `unavailable`.
+    resolver_failures: AtomicU32,
+    /// How many times the resolver was asked.
+    resolutions: AtomicU32,
+    /// Whether every fetch fails with `unavailable`.
+    store_down: AtomicBool,
+    /// How many times the store was asked.
+    fetches: AtomicU32,
+}
+
+impl Scripted {
+    fn new(inner: StaticResolver) -> Self {
+        Self {
+            inner,
+            resolver_failures: AtomicU32::new(0),
+            resolutions: AtomicU32::new(0),
+            store_down: AtomicBool::new(false),
+            fetches: AtomicU32::new(0),
+        }
+    }
+
+    fn fail_next_resolutions(&self, count: u32) {
+        self.resolver_failures.store(count, Ordering::SeqCst);
+    }
+
+    fn set_store_down(&self, down: bool) {
+        self.store_down.store(down, Ordering::SeqCst);
+    }
+
+    fn resolutions(&self) -> u32 {
+        self.resolutions.load(Ordering::SeqCst)
+    }
+
+    fn fetches(&self) -> u32 {
+        self.fetches.load(Ordering::SeqCst)
+    }
+}
+
+impl AccountResolver for Scripted {
+    fn resolve<'a>(
+        &'a self,
+        scope: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Account, ResolveError>> {
+        Box::pin(async move {
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            let outstanding = self.resolver_failures.load(Ordering::SeqCst);
+            if outstanding > 0 {
+                self.resolver_failures
+                    .store(outstanding - 1, Ordering::SeqCst);
+                return Err(ResolveError::unavailable(std::io::Error::other(
+                    "scripted resolver outage",
+                )));
+            }
+            self.inner.resolve(scope).await
+        })
+    }
+}
+
+impl CredentialStore for Scripted {
+    fn fetch<'a>(
+        &'a self,
+        credential_ref: &'a CredentialRef,
+    ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
+        Box::pin(async move {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            if self.store_down.load(Ordering::SeqCst) {
+                return Err(FetchError::unavailable(std::io::Error::other(
+                    "scripted store outage",
+                )));
+            }
+            self.inner.fetch(credential_ref).await
+        })
+    }
+}
+
+/// The two services for the test account at `endpoint`, over the scripted
+/// resolver and store, with short policies so that retries and exhaustion are
+/// observable within the test.
+fn services(endpoint: &str) -> (Arc<Scripted>, Order, Agent) {
+    let config: Config = serde_json::from_value(json!({
+        "account": {
+            "slug": "acct",
+            "agent_key": AGENT_KEY,
+            "endpoint": endpoint,
+            "mode": "test",
+            "supplier_id": SUPPLIER,
+        },
+        // A short issue policy: two executions of the create step, one
+        // second apart, so exhaustion is observable within the test.
+        "issue": {
+            "max_attempts": 2,
+            "initial_delay": "1s",
+            "factor": 2.0,
+            "max_delay": "2s",
+            "max_duration": "1m",
+        },
+    }))
+    .expect("config");
+    // The static resolver of `config` behind the script, and a short resolve
+    // policy so a scripted outage is retried within the test.
+    let scripted = Arc::new(Scripted::new(
+        StaticResolver::try_from(&config).expect("resolver"),
+    ));
+    let accounts = Accounts::new(
+        Arc::clone(&scripted) as Arc<dyn AccountResolver>,
+        Arc::clone(&scripted) as Arc<dyn CredentialStore>,
+    );
+    let worker = WorkerConfig {
+        resolve: ResolveConfig {
+            initial_delay: Duration::from_secs(1),
+            factor: 1.0,
+            max_delay: Duration::from_secs(1),
+            max_duration: Duration::from_secs(30),
+        },
+        ..WorkerConfig::from(&config)
+    };
+    let order = Order::from_parts(accounts.clone(), worker.clone());
+    let agent = Agent::from_parts(accounts, worker);
+    (scripted, order, agent)
+}
+
 struct Harness {
     restate: Restate,
     mock: MockServer,
     http: reqwest::Client,
+    accounts: Arc<Scripted>,
 }
 
 impl Harness {
@@ -419,27 +558,7 @@ impl Harness {
         }
 
         // Serve the endpoint on a free port and register it.
-        let config: Config = serde_json::from_value(json!({
-            "account": {
-                "slug": "acct",
-                "agent_key": "key",
-                "endpoint": mock.uri(),
-                "mode": "test",
-                "supplier_id": SUPPLIER,
-            },
-            // A short issue policy: two executions of the create step, one
-            // second apart, so exhaustion is observable within the test.
-            "issue": {
-                "max_attempts": 2,
-                "initial_delay": "1s",
-                "factor": 2.0,
-                "max_delay": "2s",
-                "max_duration": "1m",
-            },
-        }))
-        .expect("config");
-        let order = Order::new(&config).expect("order");
-        let agent = Agent::from_parts(Arc::clone(order.gateway()), order.config().clone());
+        let (scripted, order, agent) = services(&mock.uri());
         let listener = TcpListener::bind("0.0.0.0:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         listener.set_nonblocking(true).expect("nonblocking");
@@ -477,6 +596,7 @@ impl Harness {
             restate,
             mock,
             http,
+            accounts: scripted,
         }
     }
 
@@ -750,6 +870,8 @@ async fn e2e_order_protocol() {
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
     purged_invocation_queries_szamlazz_again(&h).await;
+    flaky_resolver_is_retried_by_the_resolve_policy(&h).await;
+    failing_credential_store_is_a_terminal_unavailable(&h).await;
 }
 
 /// (i) create ⇒ `issued`; a second call with a **new** key ⇒
@@ -778,14 +900,16 @@ async fn issued_then_already_issued(h: &Harness) {
         .mount(&h.mock)
         .await;
 
-    let first = h
-        .ok(
+    let reply = h
+        .call(
             "E2E-1",
             "create_invoice",
             &create_body(dec!(1000), false),
             "e2e-1-k1",
         )
         .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let first = &reply.body;
     assert_eq!(first["outcome"], "issued", "{first}");
     assert_eq!(first["invoice_number"], "SZ-1");
     assert_eq!(first["kind"], "invoice");
@@ -793,6 +917,36 @@ async fn issued_then_already_issued(h: &Harness) {
     assert_eq!(first["gross_total"], "1270");
     assert_eq!(first.get("gen"), None);
     assert_eq!(first.get("request_id"), None);
+
+    // The prologue: the namespace pin and exactly one `account` entry, both
+    // before the operation's first step; the journaled account carries its
+    // id and never the agent key.
+    let journal = h.journal(reply.invocation_id()).await;
+    let runs: Vec<_> = journal
+        .iter()
+        .filter(|entry| entry.is_run())
+        .filter_map(|entry| entry.name.as_deref())
+        .collect();
+    assert_eq!(
+        &runs[..3],
+        ["namespace", "account", "exclusivity-prepayment"],
+        "{runs:?}"
+    );
+    assert_eq!(
+        runs.iter().filter(|name| **name == "account").count(),
+        1,
+        "one account entry per invocation: {runs:?}"
+    );
+    let account = run_result(&journal, "account").expect("the account result");
+    assert!(
+        account.raw_contains("\"id\":\"acct\""),
+        "{:?}",
+        String::from_utf8_lossy(&account.raw)
+    );
+    assert!(
+        !journal.iter().any(|entry| entry.raw_contains(AGENT_KEY)),
+        "the agent key is in no journal entry"
+    );
 
     let again = h
         .ok(
@@ -1312,9 +1466,10 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
     );
 
     // The run's re-execution is visible while the invocation is in flight:
-    // `retry_count` reaches 1 with the create step named as the failing
-    // command — and the completed invocation carries the structured fault.
-    assert_eq!(retries.max_retry_count, 1, "{retries:?}");
+    // `retry_count` counts it (at least 1; the server's exact accounting is
+    // its own) with the create step named as the failing command — and the
+    // completed invocation carries the structured fault.
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
         retries.failing_commands,
         ["create-invoice"],
@@ -1351,8 +1506,10 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
 }
 
 /// (xii) the harness capabilities of #29 that the multi-account tickets
-/// assert through: a scoped `Szamlazz.Agent.query` reaches the handler and
-/// answers 200 (the scope needs no Virtual Object routing); the leak check
+/// assert through: a scoped call reaches the handler (the scope needs no
+/// Virtual Object routing for `Szamlazz.Agent`, and is on the invocation
+/// either way) — on this single-account deployment the prologue answers it
+/// with `unknown_account` and nothing reaches szamlazz.hu; the leak check
 /// has a positive control — a sentinel string in a wiremock rejection is
 /// found in the hex-decoded `raw` of the create run's journal entry.
 async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
@@ -1360,6 +1517,7 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     h.reset().await;
     number_query("SZ-12")
         .respond_with(Doc::new("SZ-12", "SZ", "E2E-12").response())
+        .expect(0)
         .mount(&h.mock)
         .await;
     let reply = h
@@ -1369,8 +1527,10 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
             &json!({ "selector": { "invoice_number": "SZ-12" } }),
         )
         .await;
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["invoice_number"], "SZ-12");
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert!(fault.message.contains("tenant-a"), "{fault:?}");
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(
         invocation.scope.as_deref(),
@@ -1379,18 +1539,8 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     );
     assert_eq!(invocation.handler, "query");
 
-    // A scoped call to the Virtual Object routes through the scoped path
-    // too; the scope is on the invocation. (Until #25 the worker ignores it
-    // and issues on its one account; #26 makes an unknown scope a fault.)
-    h.absent("E2E-12", &["prepayment", "proforma"]).await;
-    order_query("E2E-12")
-        .respond_with(not_found())
-        .mount(&h.mock)
-        .await;
-    external_id_query("acct:E2E-12:invoice")
-        .respond_with(Doc::new("SZ-12", "SZ", "E2E-12").response())
-        .mount(&h.mock)
-        .await;
+    // The same through the Virtual Object: the journal has the `account`
+    // entry — the resolution is data — and nothing after it.
     let reply = h
         .call_scoped(
             "tenant-a",
@@ -1400,14 +1550,17 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
             "e2e-12-scoped",
         )
         .await;
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
-    let invocation = h.invocation(reply.invocation_id()).await;
-    assert_eq!(
-        invocation.scope.as_deref(),
-        Some("tenant-a"),
-        "{invocation:?}"
-    );
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(reply.fault().code, "unknown_account", "{}", reply.body);
+    let runs: Vec<_> = h
+        .journal(reply.invocation_id())
+        .await
+        .into_iter()
+        .filter(JournalEntry::is_run)
+        .filter_map(|entry| entry.name)
+        .collect();
+    assert_eq!(runs, ["namespace", "account"], "{runs:?}");
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
 
     // Positive control: the sentinel travels through szamlazz.hu's rejection
     // message into the create run's journaled result.
@@ -1459,7 +1612,9 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
         [create_result.index, journal.last().expect("output").index],
         "the sentinel is in exactly the create result and the output"
     );
-    eprintln!("(xii) scoped Szamlazz.Agent.query → 200; leak positive control: pass");
+    eprintln!(
+        "(xii) scoped call on a single-account deployment → unknown_account; leak positive control: pass"
+    );
 }
 
 /// (xiii) an order Restate has no memory of: the `get` invocation is purged
@@ -1483,8 +1638,8 @@ async fn purged_invocation_queries_szamlazz_again(h: &Harness) {
             .iter()
             .filter(|entry| entry.is_run())
             .count(),
-        4,
-        "get's journal is retained and inspectable"
+        6,
+        "get's journal is retained and inspectable: the prologue's two steps and four queries"
     );
 
     h.purge(reply.invocation_id()).await;
@@ -1503,4 +1658,162 @@ async fn purged_invocation_queries_szamlazz_again(h: &Harness) {
         "szamlazz.hu is queried again"
     );
     eprintln!("(xiii) purged invocation → szamlazz.hu queried again: pass");
+}
+
+/// (xiv) the resolver fails twice, then answers: the `account` step is
+/// re-executed under the resolve policy (one second apart under the test
+/// policy, not the handler's two-minute `initial_interval`), the invocation
+/// completes with the outcome, `sys_invocation.retry_count` shows the run's
+/// retries with `account` as the failing command, and the journal holds one
+/// `account` entry.
+async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-14", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-14")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-14", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let resolutions_before = h.accounts.resolutions();
+    h.accounts.fail_next_resolutions(2);
+    let started = Instant::now();
+    let watch = h.watch("E2E-14");
+    let reply = h
+        .call(
+            "E2E-14",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-14-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "the resolve policy's delay was honoured, not the handler's: {elapsed:?}"
+    );
+    assert_eq!(
+        h.accounts.resolutions() - resolutions_before,
+        3,
+        "two failures, then the answer"
+    );
+    // Two run failures: the server counts at least both (its exact
+    // accounting — 3 was observed — is its own).
+    assert!(retries.max_retry_count >= 2, "{retries:?}");
+    assert_eq!(retries.failing_commands, ["account"], "{retries:?}");
+    assert!(
+        retries.failures.iter().all(|failure| failure
+            .contains("the account resolver is unavailable")
+            && !failure.contains("scripted")),
+        "the resolver's own message is never echoed: {retries:?}"
+    );
+
+    let journal = h.journal(reply.invocation_id()).await;
+    let runs: Vec<_> = journal
+        .iter()
+        .filter(|entry| entry.is_run())
+        .filter_map(|entry| entry.name.as_deref())
+        .collect();
+    assert_eq!(
+        runs.iter().filter(|name| **name == "account").count(),
+        1,
+        "the failed executions journaled nothing: {runs:?}"
+    );
+    assert!(runs.contains(&"create-invoice"), "{runs:?}");
+    eprintln!("(xiv) flaky resolver → retried under the resolve policy, one account entry: pass");
+}
+
+/// (xv) the credential store fails on every fetch: the handler ends with a
+/// terminal `unavailable` (503) after the in-process retry, without a single
+/// szamlazz.hu request; the `account` step is journaled (the resolution
+/// succeeded), nothing after it.
+async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-15", &["prepayment", "proforma", "invoice"])
+        .await;
+    create()
+        .respond_with(created("SZ-15", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+
+    let fetches_before = h.accounts.fetches();
+    h.accounts.set_store_down(true);
+    let started = Instant::now();
+    let reply = h
+        .call(
+            "E2E-15",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-15-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    h.accounts.set_store_down(false);
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert!(fault.message.contains("credentials"), "{fault:?}");
+    assert!(!fault.message.contains("scripted"), "{fault:?}");
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "terminal, not routed into the handler's retries: {elapsed:?}"
+    );
+    assert_eq!(
+        h.accounts.fetches() - fetches_before,
+        3,
+        "the short in-process retry: three fetches"
+    );
+    assert_eq!(h.requests_seen().await, 0, "zero szamlazz.hu requests");
+
+    let runs: Vec<_> = h
+        .journal(reply.invocation_id())
+        .await
+        .into_iter()
+        .filter(JournalEntry::is_run)
+        .filter_map(|entry| entry.name)
+        .collect();
+    assert_eq!(runs, ["namespace", "account"], "{runs:?}");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("unavailable")),
+        "{invocation:?}"
+    );
+
+    // The store is back: the same order issues on the next call.
+    h.reset().await;
+    h.absent("E2E-15", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-15")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-15", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let issued = h
+        .ok(
+            "E2E-15",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-15-k2",
+        )
+        .await;
+    assert_eq!(issued["outcome"], "issued", "{issued}");
+    eprintln!(
+        "(xv) failing credential store → terminal unavailable, zero szamlazz.hu requests: pass"
+    );
 }

@@ -2,30 +2,35 @@
 //! `Szamlazz.Agent` service (design §4–§7).
 //!
 //! Both are thin adapters: every szamlazz.hu call runs inside `ctx.run` through
-//! the [`Gateway`] and domain outcomes are returned as data. Neither keeps
-//! state — szamlazz.hu is the source of truth, reached through the order's
-//! deterministic external ids. `TerminalError`s carry a
+//! the [`Gateway`](crate::gateway::Gateway) and domain outcomes are returned as
+//! data. Neither keeps state — szamlazz.hu is the source of truth, reached
+//! through the order's deterministic external ids. `TerminalError`s carry a
 //! [`TerminalCode`](crate::contract::TerminalCode) and always mean "outcome
 //! unknown — retry with a new `Idempotency-Key`".
 //!
-//! Each service holds exactly two things: the gateway, through which it reads
-//! everything about the account ([`Gateway::account`]), and a
-//! [`WorkerConfig`] with the deployment-level settings — the namespace of the
-//! external ids and the issue policy — that are not account-shaped.
+//! Each service holds exactly two things: the [`Accounts`] bundle — the
+//! account resolver and the credential store — and a [`WorkerConfig`] with the
+//! deployment-level settings (the namespace of the external ids, the issue
+//! and resolve policies). Every handler runs the same prologue after parsing
+//! its key: **pin** the namespace in a pure durable step, **resolve** the
+//! request's scope to its account in a durable step named `account` under the
+//! resolve policy, **fetch** the account's credentials outside the journal on
+//! every execution, **open** the gateway for this execution over a fresh
+//! client. The handler body then runs on that execution (`prologue::Execution`);
+//! nothing of it — gateway, client, credentials — outlives the execution.
 //!
 //! - [`Order`] — keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.
 //! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`)
 //!   registered as `Szamlazz.Agent`.
 
-use std::sync::Arc;
-
+use crate::account::{Accounts, InvalidEndpoint};
 use crate::config::{Config, WorkerConfig};
-use crate::gateway::{Gateway, OpenError};
 
 mod agent;
 mod create;
 mod handlers;
+mod prologue;
 mod storno;
 mod support;
 
@@ -38,32 +43,35 @@ pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressCli
 /// The object holds no state.
 #[derive(Debug, Clone)]
 pub struct Order {
-    gateway: Arc<Gateway>,
+    accounts: Accounts,
     config: WorkerConfig,
 }
 
 impl Order {
-    /// Builds the object for `config`, opening the gateway.
+    /// Builds the object for the single account of `config` through the
+    /// static resolver: the legacy path (goes with `Config` in #31).
     ///
     /// # Errors
     ///
-    /// Returns an error when the endpoint is not an http(s) URL or the HTTP
-    /// client cannot be constructed.
-    pub fn new(config: &Config) -> Result<Self, OpenError> {
-        let gateway = Arc::new(Gateway::new(config)?);
-        Ok(Self::from_parts(gateway, WorkerConfig::from(config)))
+    /// Returns an error when the endpoint is not an http(s) URL.
+    pub fn new(config: &Config) -> Result<Self, InvalidEndpoint> {
+        Ok(Self::from_parts(
+            Accounts::try_from(config)?,
+            WorkerConfig::from(config),
+        ))
     }
 
-    /// Builds the object over an existing gateway.
+    /// Builds the object over the account resolver and credential store in
+    /// `accounts` and the deployment-level `config`.
     #[must_use]
-    pub fn from_parts(gateway: Arc<Gateway>, config: WorkerConfig) -> Self {
-        Self { gateway, config }
+    pub fn from_parts(accounts: Accounts, config: WorkerConfig) -> Self {
+        Self { accounts, config }
     }
 
-    /// The gateway to szamlazz.hu.
+    /// The account resolver and credential store.
     #[must_use]
-    pub fn gateway(&self) -> &Arc<Gateway> {
-        &self.gateway
+    pub fn accounts(&self) -> &Accounts {
+        &self.accounts
     }
 
     /// The deployment-level settings.
@@ -74,35 +82,38 @@ impl Order {
 }
 
 /// The stateless `Szamlazz.Agent` service: by-number operations over the
-/// same gateway as [`Order`].
+/// same accounts as [`Order`].
 #[derive(Debug, Clone)]
 pub struct Agent {
-    gateway: Arc<Gateway>,
+    accounts: Accounts,
     config: WorkerConfig,
 }
 
 impl Agent {
-    /// Builds the service for `config`, opening the gateway.
+    /// Builds the service for the single account of `config` through the
+    /// static resolver: the legacy path (goes with `Config` in #31).
     ///
     /// # Errors
     ///
-    /// Returns an error when the endpoint is not an http(s) URL or the HTTP
-    /// client cannot be constructed.
-    pub fn new(config: &Config) -> Result<Self, OpenError> {
-        let gateway = Arc::new(Gateway::new(config)?);
-        Ok(Self::from_parts(gateway, WorkerConfig::from(config)))
+    /// Returns an error when the endpoint is not an http(s) URL.
+    pub fn new(config: &Config) -> Result<Self, InvalidEndpoint> {
+        Ok(Self::from_parts(
+            Accounts::try_from(config)?,
+            WorkerConfig::from(config),
+        ))
     }
 
-    /// Builds the service over an existing gateway.
+    /// Builds the service over the account resolver and credential store in
+    /// `accounts` and the deployment-level `config`.
     #[must_use]
-    pub fn from_parts(gateway: Arc<Gateway>, config: WorkerConfig) -> Self {
-        Self { gateway, config }
+    pub fn from_parts(accounts: Accounts, config: WorkerConfig) -> Self {
+        Self { accounts, config }
     }
 
-    /// The gateway to szamlazz.hu.
+    /// The account resolver and credential store.
     #[must_use]
-    pub fn gateway(&self) -> &Arc<Gateway> {
-        &self.gateway
+    pub fn accounts(&self) -> &Accounts {
+        &self.accounts
     }
 
     /// The deployment-level settings.

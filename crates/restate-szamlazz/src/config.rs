@@ -96,14 +96,17 @@ impl Config {
 /// account-shaped and therefore does not route through the gateway.
 ///
 /// The namespace prefixes every external id the deployment issues; the issue
-/// policy is the run retry policy of the create and storno steps. Built from a
-/// [`Config`].
+/// policy is the run retry policy of the create and storno steps; the resolve
+/// policy is the run retry policy of the `account` step. Built from a
+/// [`Config`] for now (the adapter goes with #31).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerConfig {
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
     pub namespace: Namespace,
     /// The issue policy: the run retry policy of the create and storno steps.
     pub issue: IssueConfig,
+    /// The resolve policy: the run retry policy of the `account` step.
+    pub resolve: ResolveConfig,
 }
 
 impl From<&Config> for WorkerConfig {
@@ -111,6 +114,7 @@ impl From<&Config> for WorkerConfig {
         Self {
             namespace: config.account.slug.clone(),
             issue: config.issue.clone(),
+            resolve: ResolveConfig::default(),
         }
     }
 }
@@ -502,6 +506,56 @@ impl IssueConfig {
     }
 }
 
+/// The resolve policy: the run retry policy of the `account` step of every
+/// handler (design §4), which asks the account resolver for the request's
+/// account. An unavailable resolver is retried under it — `initial_delay`
+/// growing by `factor` to `max_delay`, bounded by `max_duration` and nothing
+/// else — and its exhaustion is the `unavailable` fault. Unscoped and unknown
+/// are answers, journaled as data, never retried. Shapes no journal entry.
+///
+/// Set explicitly for the same reason as the issue policy: the SDK's default
+/// run policy sends no retry delay and the server would spend the handler's
+/// `invocation_retry_policy` instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResolveConfig {
+    /// Delay before the first re-execution. Default `1s`.
+    #[serde(with = "duration_str")]
+    pub initial_delay: Duration,
+    /// Multiplier of the delay after each re-execution. Default `2.0`.
+    pub factor: f32,
+    /// Cap of the delay. Default `10s`.
+    #[serde(with = "duration_str")]
+    pub max_delay: Duration,
+    /// Hard bound on the time spent re-executing the step. Default `1m`.
+    #[serde(with = "duration_str")]
+    pub max_duration: Duration,
+}
+
+impl Default for ResolveConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_secs(1),
+            factor: 2.0,
+            max_delay: Duration::from_secs(10),
+            max_duration: Duration::from_mins(1),
+        }
+    }
+}
+
+impl ResolveConfig {
+    /// The policy as the SDK's run retry policy: delays and the duration bound
+    /// from this configuration, no attempt cap (the duration is the bound).
+    #[must_use]
+    pub fn run_retry_policy(&self) -> RunRetryPolicy {
+        RunRetryPolicy::new()
+            .initial_delay(self.initial_delay)
+            .exponentiation_factor(self.factor)
+            .max_delay(self.max_delay)
+            .max_duration(self.max_duration)
+    }
+}
+
 /// Parses a duration written as `"90s"`, `"2m"`, `"1h"` or a plain number of
 /// seconds.
 ///
@@ -724,10 +778,11 @@ mod tests {
         }
     }
 
-    /// The services hold only the deployment-level settings: the namespace
-    /// and the issue policy, taken from the parsed configuration.
+    /// The services hold only the deployment-level settings: the namespace,
+    /// the issue policy and the resolve policy, taken from the parsed
+    /// configuration (the resolve policy has no key yet and is the default).
     #[test]
-    fn worker_config_is_the_namespace_and_the_issue_policy() {
+    fn worker_config_is_the_namespace_and_the_policies() {
         let config: Config = serde_json::from_value(json!({
             "account": {"slug": "acct-1", "agent_key": "key", "mode": "test"},
             "issue": {"max_attempts": 3, "initial_delay": "90s", "max_delay": "1h"},
@@ -749,8 +804,26 @@ mod tests {
             WorkerConfig {
                 namespace: "acct-1".parse().expect("namespace"),
                 issue: config.issue.clone(),
+                resolve: ResolveConfig::default(),
             }
         );
+    }
+
+    /// The resolve policy is the run retry policy of the `account` step:
+    /// delays and the duration bound, no attempt cap.
+    #[test]
+    fn resolve_policy_maps_to_the_run_retry_policy_bounded_by_duration() {
+        assert_eq!(
+            format!("{:?}", ResolveConfig::default().run_retry_policy()),
+            "RunRetryPolicy { initial_delay: 1s, factor: 2.0, max_delay: Some(10s), \
+             max_attempts: None, max_duration: Some(60s) }"
+        );
+        let parsed: ResolveConfig =
+            serde_json::from_value(json!({"initial_delay": "2s", "max_duration": "30s"}))
+                .expect("parse");
+        assert_eq!(parsed.initial_delay, Duration::from_secs(2));
+        assert_eq!(parsed.max_duration, Duration::from_secs(30));
+        assert_eq!(parsed.max_delay, Duration::from_secs(10), "default kept");
     }
 
     /// The issue policy is the run retry policy of the create and storno

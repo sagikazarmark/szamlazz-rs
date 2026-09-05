@@ -8,7 +8,7 @@ use restate_sdk::prelude::Context;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
-use super::Agent;
+use super::prologue::Execution;
 use super::support::service::{lookup_storno, run_once, run_retrying};
 use super::support::{Fault, terminal};
 use crate::contract::{
@@ -47,7 +47,7 @@ impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
     }
 }
 
-impl Agent {
+impl Execution {
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
@@ -195,7 +195,7 @@ impl Agent {
         // The storno step, under the issue policy: query-first on every
         // execution; its exhaustion is `outcome_unknown`.
         let outcome = self
-            .storno_step(ctx, &number, &external_id, comment, e_invoice)
+            .unmanaged_storno_step(ctx, &number, &external_id, comment, e_invoice)
             .await?;
         match outcome {
             GatewayStorno::Reversed(storno) => {
@@ -224,10 +224,11 @@ impl Agent {
         }
     }
 
-    /// The storno step under the issue policy's run retry policy (design §6
-    /// step 3). Any `Err` from the run — exhaustion or cancellation — is
-    /// `outcome_unknown`: the next call's lookup finds whatever landed.
-    async fn storno_step(
+    /// The storno step of `Szamlazz.Agent.storno` under the issue policy's
+    /// run retry policy (design §6 step 3). Any `Err` from the run —
+    /// exhaustion or cancellation — is `outcome_unknown`: the next call's
+    /// lookup finds whatever landed.
+    async fn unmanaged_storno_step(
         &self,
         ctx: &Context<'_>,
         number: &str,

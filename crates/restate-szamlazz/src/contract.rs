@@ -309,6 +309,11 @@ pub enum TerminalCode {
     /// `rejected` outcome. Fix the key, then retry with a new
     /// `Idempotency-Key`. HTTP 503.
     CredentialsRejected,
+    /// The request names no account of this deployment: it arrived unscoped
+    /// where accounts are reachable by scope only, or under a scope no account
+    /// is reachable by. Raised before anything is issued; the same request
+    /// never succeeds, so the caller must fix the scope, not retry. HTTP 400.
+    UnknownAccount,
 }
 
 impl TerminalCode {
@@ -321,6 +326,7 @@ impl TerminalCode {
             Self::AccountMismatch => "account_mismatch",
             Self::InvalidInput => "invalid_input",
             Self::CredentialsRejected => "credentials_rejected",
+            Self::UnknownAccount => "unknown_account",
         }
     }
 }

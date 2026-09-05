@@ -7,7 +7,7 @@ use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
-use super::Order;
+use super::prologue::Execution;
 use super::support::{Fault, Lookup, order_key};
 use super::support::{object, shared};
 use crate::contract::{
@@ -32,7 +32,7 @@ struct StornoIntent {
     e_invoice: bool,
 }
 
-impl Order {
+impl Execution {
     // ----- storno_invoice (§6) ---------------------------------------------
 
     pub(super) async fn storno(

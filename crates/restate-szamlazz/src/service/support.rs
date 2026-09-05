@@ -54,6 +54,12 @@ impl Fault {
         Self::new(TerminalCode::AccountMismatch, message)
     }
 
+    /// The request names no account of this deployment (unscoped where
+    /// accounts are scoped, or an unknown scope).
+    pub(super) fn unknown_account(message: impl Into<String>) -> Self {
+        Self::new(TerminalCode::UnknownAccount, message)
+    }
+
     /// szamlazz.hu rejected the account's agent credentials with `code`
     /// (3, 135, 136 or 164). Logs the warning that pages the operator — tagged
     /// with the namespace and the code, never the key — and builds the fault.
@@ -95,7 +101,8 @@ impl Fault {
     /// The HTTP status the ingress reports for the fault.
     const fn status(&self) -> u16 {
         match self.code {
-            TerminalCode::InvalidInput => 400,
+            // The caller's request: the same request never succeeds.
+            TerminalCode::InvalidInput | TerminalCode::UnknownAccount => 400,
             TerminalCode::AccountMismatch => 409,
             TerminalCode::OutcomeUnknown => 500,
             // The worker's misconfiguration, not the caller's request: the
@@ -205,12 +212,70 @@ macro_rules! journal_helpers {
             use serde::de::DeserializeOwned;
 
             use super::{Fault, Lookup};
-            use crate::config::Namespace;
+            use crate::account::Accounts;
+            use crate::config::{Namespace, WorkerConfig};
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{
                 Gateway, InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome,
             };
             use crate::identity::{ExternalId, OrderKey};
+            use crate::service::prologue::{self, Execution, Resolution};
+
+            /// The prologue of every handler (design §4): pin → resolve →
+            /// fetch → open.
+            ///
+            /// 1. **Pin** the namespace in a pure durable step (`namespace`):
+            ///    a redeploy with a changed namespace cannot make a running
+            ///    invocation issue under a new id.
+            /// 2. *(The ingress-path guard of #27 slots in here.)*
+            /// 3. **Resolve** the request's scope to its account in a durable
+            ///    step named `account` under the resolve policy: unscoped and
+            ///    unknown are journaled as data and become the terminal
+            ///    `unknown_account`; an unavailable resolver is retryable and
+            ///    journals nothing; exhaustion is `unavailable`.
+            /// 4. **Fetch** the account's credentials outside the journal —
+            ///    on every execution, including replays — with a short
+            ///    in-process retry, then terminal `unavailable`.
+            /// 5. **Open** the gateway for this execution over a fresh client.
+            pub(in crate::service) async fn prologue(
+                ctx: &$ctx<'_>,
+                accounts: &Accounts,
+                config: &WorkerConfig,
+            ) -> Result<Execution, HandlerError> {
+                // 1. Pin.
+                let pinned = {
+                    let namespace = config.namespace.clone();
+                    run_once(ctx, "namespace", move || async move { namespace }).await?
+                };
+                let config = WorkerConfig {
+                    namespace: pinned,
+                    ..config.clone()
+                };
+
+                // 3. Resolve.
+                let scope = ctx.scope().map(str::to_owned);
+                let resolution = {
+                    let accounts = accounts.clone();
+                    run_retrying(
+                        ctx,
+                        "account",
+                        config.resolve.run_retry_policy(),
+                        move || async move {
+                            prologue::resolution(accounts.resolve(scope.as_deref()).await)
+                        },
+                    )
+                    .await
+                    .map_err(|error| prologue::resolve_exhausted(&error))?
+                };
+                let account = prologue::account_of(resolution)?;
+
+                // 4. Fetch, outside the journal.
+                let credentials = prologue::fetch_credentials(accounts, &account).await?;
+
+                // 5. Open.
+                let gateway = prologue::open(account, credentials)?;
+                Ok(Execution { gateway, config })
+            }
 
             /// Journals the result of `f` under `name`, executing it at most
             /// once per journal entry (`RunRetryPolicy::max_attempts(1)`):

@@ -4,15 +4,15 @@
 //! mapping the handlers share, including the sentinel that the agent key
 //! reaches neither the `credentials_rejected` warning nor the fault body.
 
-use std::sync::Arc;
-
 use restate_sdk::discovery::{HandlerType, RetryPolicyOnMaxAttempts, ServiceType};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::service::Discoverable;
 use serde_json::json;
 
 use super::{Agent, Order};
+use crate::account::ResolveError;
 use crate::config::{Config, Namespace, WorkerConfig};
+use crate::gateway::Gateway;
 
 fn config() -> Config {
     serde_json::from_value(json!({
@@ -167,17 +167,28 @@ fn agent_discovers_as_a_service_with_three_handlers() {
     }
 }
 
-/// Both services hold the same gateway and the same deployment-level
-/// settings, and nothing else.
-#[test]
-fn services_bind_to_an_endpoint() {
+/// Both services hold the same accounts and the same deployment-level
+/// settings, and nothing else — no gateway, no client.
+#[tokio::test]
+async fn services_bind_to_an_endpoint() {
     let config = config();
     let order = Order::new(&config).expect("order");
-    let agent = Agent::from_parts(Arc::clone(order.gateway()), order.config().clone());
-    assert!(Arc::ptr_eq(order.gateway(), agent.gateway()));
+    let agent = Agent::from_parts(order.accounts().clone(), order.config().clone());
     assert_eq!(order.config(), agent.config());
     assert_eq!(*order.config(), WorkerConfig::from(&config));
     assert_eq!(order.config().namespace.as_str(), "acct");
+    // The adapter: the single account, unscoped, with the inline key.
+    let account = order.accounts().resolve(None).await.expect("account");
+    assert_eq!(account.id.as_str(), "acct");
+    assert!(account.mode.is_test());
+    assert!(order.accounts().fetch(&account).await.is_ok());
+    assert!(
+        matches!(
+            agent.accounts().resolve(Some("tenant")).await,
+            Err(ResolveError::Unknown { scope }) if scope == "tenant"
+        ),
+        "a single-account deployment knows no scope"
+    );
     let _endpoint = Endpoint::builder().bind(order).bind(agent).build();
 }
 
@@ -214,6 +225,7 @@ fn faults_serialise_their_code_and_status() {
             503,
             "credentials_rejected",
         ),
+        (Fault::unknown_account("x"), 400, "unknown_account"),
     ];
     for (fault, status, code) in cases {
         let error = TerminalError::from(fault);
@@ -324,8 +336,26 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
         .finish();
     let guard = tracing::subscriber::set_default(subscriber);
 
-    // What the handlers do: the gateway observes the code, the fault is built.
-    let outcome = order.gateway().verify("SZ-1").await;
+    // Pin the warning's callsite to this thread's subscriber. tracing caches
+    // a callsite's interest on its first hit — and only once a subscriber has
+    // raised the global max level, so it cannot be pre-registered — and a
+    // first hit from a parallel test thread, which has no subscriber, would
+    // cache it as disabled. Hitting it here registers it; the rebuild
+    // re-evaluates it against this thread's subscriber in case a parallel
+    // thread was first. The warm-up event is told apart by its namespace.
+    drop(Fault::credentials_rejected(
+        &"warmup".parse().expect("namespace"),
+        "0",
+        "warm-up",
+    ));
+    tracing::callsite::rebuild_interest_cache();
+
+    // What the prologue does: resolve, fetch, open — then the gateway
+    // observes the code and the fault is built.
+    let account = order.accounts().resolve(None).await.expect("account");
+    let credentials = order.accounts().fetch(&account).await.expect("credentials");
+    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let outcome = gateway.verify("SZ-1").await;
     let QueryOutcome::CredentialsRejected { code, message } = outcome.clone() else {
         panic!("expected CredentialsRejected, got {outcome:?}");
     };

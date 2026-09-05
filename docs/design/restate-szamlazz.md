@@ -83,6 +83,37 @@ inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   id
 
 `get`: default retry policy, `max_attempts = 3`, `kill`, `journal_retention = "1d"` (inspectable, nothing to replay).
 
+### The prologue (every handler of both services)
+
+After parsing its key, every handler runs the same four steps before its operation; the handler body then runs on
+the resulting *execution* — the gateway opened for this execution plus the deployment settings with the pinned
+namespace — and nothing of it (gateway, client, credentials) outlives the execution. No Virtual Object state.
+
+1. **Pin** — `ctx.run("namespace", || namespace)`, a pure durable step: an in-place redeploy with a changed namespace
+   cannot make a running invocation issue under a new id.
+2. *(The ingress-path guard of #27 slots in here.)*
+3. **Resolve** — `ctx.run("account", || resolver.resolve(ctx.scope()))` under the **resolve policy** (§9), an
+   explicit run retry policy bounded by duration. The closure returns the resolver's answer as data — the `Account`,
+   `unscoped`, `unknown{scope}` — and its unavailability as a retryable error (whose text never echoes the
+   resolver's own message), so unscoped/unknown are journaled and never retried while an outage re-executes the
+   step and journals nothing. Outside the closure: `unscoped | unknown` → `TerminalError{unknown_account, 400}`;
+   exhaustion or cancellation of the run → `TerminalError{unavailable}`. One `account` entry per invocation: the
+   invocation finishes on the account it started on, and the Restate UI shows the journaled `Account` (id, mode,
+   supplier id, endpoint, defaults, seller, credential reference — never the key) for the retention period.
+4. **Fetch** — `store.fetch(account.credential_ref)` **outside the journal**, on every handler execution
+   including replays, with a short in-process retry (three attempts, 200 ms apart), then
+   `TerminalError{unavailable}`. `gone` is terminal at once. Terminal by decision: a retryable error would route a
+   prolonged store outage into the handler's kill-on-five and an unstructured 500, whereas the terminal fault is
+   structured and immediate. Documented cost: an outage during a replay of an invocation whose create already
+   landed surfaces as `unavailable` although the document exists; `get` or a retry with a new `Idempotency-Key`
+   reconciles (`already_issued`). The `Credentials` type has no serde implementation — the compiler rejects any
+   attempt to journal it.
+5. **Open** — `Gateway::open(account, credentials)` over a fresh Számla Agent client (the default `reqwest::Client`
+   keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
+
+Handler-level behaviour is observable only under Restate (the SDK has no mock context), so the prologue's decisions
+are pure functions with unit tests (`service::prologue`) and the durable behaviour is asserted end to end (§11).
+
 ### `Szamlazz.Agent` (stateless Service, `#[restate_sdk::service(name = "Szamlazz.Agent")]`)
 
 | Handler | Input → Output | Notes |
@@ -259,8 +290,14 @@ StornoResponse { outcome ∈ reversed | rejected | conflict | managed_by_order, 
 DeleteProformaResponse { deleted, reason? }
 OrderStatus — see §6
 TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatch (409) | invalid_input (400)
-                   | credentials_rejected (503)
+                   | credentials_rejected (503) | unknown_account (400)
 ```
+
+`unknown_account`: the request names no account of this deployment — it arrived unscoped where accounts are reachable
+by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
+prologue's `account` step before anything is issued; the same request never succeeds, so it is a 400 and the caller
+fixes the scope rather than retrying. `unavailable` also covers the prologue's own faults: the resolve policy
+exhausted, the credential store gone or unavailable through the in-process retry.
 
 `credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
 or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request —
@@ -302,6 +339,11 @@ max_delay = "10m"
 max_duration = "1h"           # the hard bound (the attempt count is not durable across replays — ADR 0004)
 ```
 
+The **resolve policy** — the run retry policy of the prologue's `account` step — is the other deployment-level
+setting on `WorkerConfig` (`ResolveConfig`: `initial_delay = "1s"`, `factor = 2.0`, `max_delay = "10s"`,
+`max_duration = "1m"`, no attempt cap — the duration is the bound). It has no configuration key yet; the endpoint
+uses the defaults until #31 lays out the new shape. Set explicitly for the same reason as the issue policy.
+
 There is no `detect_foreign`: the order-number hint runs on every lookup except for correctives.
 
 Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `due_date`, `payment_method`, `paid`,
@@ -339,7 +381,15 @@ Unchanged from v1: `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAM
   scope on `sys_invocation`; a purged `get` invocation querying szamlazz.hu again; and the leak check's positive
   control — a sentinel in a szamlazz.hu rejection found in the hex-decoded `raw` of the create run's
   `Notification: Run` row (under journal v2 the `Command: Run` row carries only the name; the result is in the
-  notification that follows), and nowhere else but the output.
+  notification that follows), and nowhere else but the output. The prologue (on the same harness, through a
+  test-local scripted resolver and store wrapping the static one): every invocation's journal opens with
+  `namespace` and exactly one `account` run, and the journaled account carries its id and never the agent key; a
+  scoped call on the single-account deployment → 400 `unknown_account` with `namespace`, `account` and nothing
+  else journaled and zero szamlazz.hu requests; a resolver that fails twice then answers → the outcome, with the
+  `account` run's retries visible on `sys_invocation` (`last_failure_related_command_name = account`, the failure
+  text never echoing the resolver's message) within the resolve policy's delays, and still one `account` entry; a
+  store that fails every fetch → 503 `unavailable` after three fetches, zero szamlazz.hu requests, and the same
+  order issuing once the store is back.
   The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH

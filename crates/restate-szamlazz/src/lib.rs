@@ -26,8 +26,9 @@
 //! # Services
 //!
 //! [`Order`] is a Restate Virtual Object registered as `Szamlazz.Order` and [`Agent`] a
-//! stateless service registered as `Szamlazz.Agent`. Both hold the [`Gateway`] and a
-//! [`WorkerConfig`]; bind both to an endpoint:
+//! stateless service registered as `Szamlazz.Agent`. Both hold the [`Accounts`] bundle (the
+//! account resolver and the credential store) and a [`WorkerConfig`]; every handler resolves
+//! its account and opens a [`Gateway`] for its own execution. Bind both to an endpoint:
 //!
 //! ```no_run
 //! # async fn serve(config: restate_szamlazz::Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +36,7 @@
 //! use restate_szamlazz::{Agent, Order};
 //!
 //! let order = Order::new(&config)?;
-//! let agent = Agent::from_parts(std::sync::Arc::clone(order.gateway()), order.config().clone());
+//! let agent = Agent::from_parts(order.accounts().clone(), order.config().clone());
 //! let endpoint = Endpoint::builder().bind(order).bind(agent).build();
 //! HttpServer::new(endpoint)
 //!     .listen_and_serve("0.0.0.0:9080".parse()?)

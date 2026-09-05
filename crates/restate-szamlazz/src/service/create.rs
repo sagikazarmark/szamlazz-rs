@@ -17,7 +17,7 @@ use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
-use super::Order;
+use super::prologue::Execution;
 use super::support::object::{lookup, run_once, run_retrying, verify};
 use super::support::{Fault, Lookup, order_key};
 use crate::config::Namespace;
@@ -112,7 +112,7 @@ struct Intent {
     our_numbers: Vec<String>,
 }
 
-impl Order {
+impl Execution {
     // ----- entry points ----------------------------------------------------
 
     /// `create_proforma` / `create_invoice` / `create_prepayment` /
@@ -678,11 +678,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, WorkerConfig};
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
+    use crate::gateway::Gateway;
 
-    fn order() -> Order {
+    /// An execution as the prologue would build it for the test account.
+    fn order() -> Execution {
         let config: Config = serde_json::from_value(json!({
             "account": {
                 "slug": "acct",
@@ -692,7 +694,10 @@ mod tests {
             },
         }))
         .expect("config");
-        Order::new(&config).expect("order")
+        Execution {
+            gateway: Arc::new(Gateway::new(&config).expect("gateway")),
+            config: WorkerConfig::from(&config),
+        }
     }
 
     fn request(proforma: ProformaLink) -> CreateRequest {

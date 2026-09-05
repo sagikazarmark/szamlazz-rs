@@ -12,6 +12,7 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
+use super::support::{object, service, shared};
 use super::{Agent, Order};
 use crate::contract::{
     CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest, DeleteProformaResponse,
@@ -24,11 +25,14 @@ use crate::contract::{
 ///
 /// Keeps no state: every handler answers from szamlazz.hu through the order's
 /// deterministic external ids. The retry identity of a request is Restate's
-/// ingress `Idempotency-Key`. Issuing is two durable steps — a read-only
-/// lookup and a query-first create under the issue policy's run retry policy
-/// (design §5) — and every handler that calls szamlazz.hu kills the invocation
-/// after five attempts (ADR 0004); the external-id query inside the create
-/// step is what makes both safe.
+/// ingress `Idempotency-Key`. Every handler first runs the prologue — pin the
+/// namespace, resolve the request's scope to its account (journaled once per
+/// invocation), fetch the credentials for this execution, open the gateway —
+/// and then its operation. Issuing is two durable steps — a read-only lookup
+/// and a query-first create under the issue policy's run retry policy (design
+/// §5) — and every handler that calls szamlazz.hu kills the invocation after
+/// five attempts (ADR 0004); the external-id query inside the create step is
+/// what makes both safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -50,7 +54,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_kind(&ctx, DocumentKind::Proforma, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Proforma, request.into_inner()))
             .await
             .map(Json)
     }
@@ -75,7 +80,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_kind(&ctx, DocumentKind::Invoice, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Invoice, request.into_inner()))
             .await
             .map(Json)
     }
@@ -108,7 +114,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_kind(&ctx, DocumentKind::Prepayment, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Prepayment, request.into_inner()))
             .await
             .map(Json)
     }
@@ -133,7 +140,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.issue_kind(&ctx, DocumentKind::Final, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Final, request.into_inner()))
             .await
             .map(Json)
     }
@@ -158,7 +166,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        Box::pin(self.correct(&ctx, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.correct(&ctx, request.into_inner()))
             .await
             .map(Json)
     }
@@ -182,7 +191,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        Box::pin(self.storno(&ctx, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.storno(&ctx, request.into_inner()))
             .await
             .map(Json)
     }
@@ -206,7 +216,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
-        Box::pin(self.delete(&ctx, request.into_inner()))
+        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        Box::pin(execution.delete(&ctx, request.into_inner()))
             .await
             .map(Json)
     }
@@ -220,7 +231,8 @@ impl Order {
         journal_retention = "1d"
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
-        self.status(&ctx).await.map(Json)
+        let execution = shared::prologue(&ctx, &self.accounts, &self.config).await?;
+        execution.status(&ctx).await.map(Json)
     }
 }
 
@@ -247,7 +259,9 @@ impl Agent {
         ctx: Context<'_>,
         request: Json<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
-        self.query_request(&ctx, request.into_inner())
+        let execution = service::prologue(&ctx, &self.accounts, &self.config).await?;
+        execution
+            .query_request(&ctx, request.into_inner())
             .await
             .map(Json)
     }
@@ -265,7 +279,9 @@ impl Agent {
         ctx: Context<'_>,
         request: Json<SetPaymentsRequest>,
     ) -> HandlerResult<Json<SetPaymentsResponse>> {
-        self.set_payments_request(&ctx, request.into_inner())
+        let execution = service::prologue(&ctx, &self.accounts, &self.config).await?;
+        execution
+            .set_payments_request(&ctx, request.into_inner())
             .await
             .map(Json)
     }
@@ -283,7 +299,9 @@ impl Agent {
         ctx: Context<'_>,
         request: Json<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        self.storno_request(&ctx, request.into_inner())
+        let execution = service::prologue(&ctx, &self.accounts, &self.config).await?;
+        execution
+            .storno_request(&ctx, request.into_inner())
             .await
             .map(Json)
     }

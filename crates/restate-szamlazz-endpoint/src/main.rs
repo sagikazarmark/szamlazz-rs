@@ -7,7 +7,6 @@
 mod config;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
@@ -16,7 +15,7 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::http_server::HttpServer;
 use restate_sdk::service::Discoverable;
-use restate_szamlazz::{Agent, Gateway, Order, WorkerConfig};
+use restate_szamlazz::{Accounts, Agent, Order, WorkerConfig};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::EndpointConfig;
@@ -99,10 +98,10 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
         "loaded szamlazz.hu account configuration"
     );
 
-    let gateway = Arc::new(Gateway::new(&config).context("failed to open the gateway")?);
+    let accounts = Accounts::try_from(&config).context("failed to load the account")?;
     let worker = WorkerConfig::from(&config);
-    let order = Order::from_parts(Arc::clone(&gateway), worker.clone());
-    let agent = Agent::from_parts(gateway, worker);
+    let order = Order::from_parts(accounts.clone(), worker.clone());
+    let agent = Agent::from_parts(accounts, worker);
 
     for discovery in [
         <Order as Discoverable>::discover(),
@@ -136,6 +135,7 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
 mod tests {
     use figment::Figment;
     use figment::providers::{Format, Toml};
+    use restate_szamlazz::Gateway;
     use restate_szamlazz::contract::Selector;
     use restate_szamlazz::gateway::QueryOutcome;
     use wiremock::matchers::{body_string_contains, method};
@@ -223,7 +223,11 @@ mod tests {
         )))
         .extract()
         .expect("configuration should parse");
-        let gateway = Gateway::new(&config.service).expect("gateway should build");
+        // What every handler's prologue does: resolve, fetch, open.
+        let accounts = Accounts::try_from(&config.service).expect("accounts should build");
+        let account = accounts.resolve(None).await.expect("the unscoped account");
+        let credentials = accounts.fetch(&account).await.expect("its credentials");
+        let gateway = Gateway::open(account, credentials).expect("gateway should build");
 
         let outcome = gateway
             .query(&Selector::InvoiceNumber("SZ-1".to_owned()))

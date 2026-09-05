@@ -431,6 +431,16 @@ impl From<StaticResolver> for Accounts {
     }
 }
 
+/// The adapter from the library [`Config`]: its single account through the
+/// static resolver. Goes with `Config` in #31.
+impl TryFrom<&Config> for Accounts {
+    type Error = InvalidEndpoint;
+
+    fn try_from(config: &Config) -> Result<Self, Self::Error> {
+        StaticResolver::try_from(config).map(Self::from)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

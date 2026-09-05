@@ -30,7 +30,7 @@ use restate_szamlazz::{Agent, Config, Order};
 
 async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let order = Order::new(&config)?;
-    let agent = Agent::from_parts(Arc::clone(order.gateway()), order.config().clone());
+    let agent = Agent::from_parts(order.accounts().clone(), order.config().clone());
     let endpoint = Endpoint::builder().bind(order).bind(agent).build();
     HttpServer::new(endpoint)
         .listen_and_serve("0.0.0.0:9080".parse()?)
@@ -40,8 +40,10 @@ async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Config` only implements `Deserialize`; the host chooses the file format and environment merging (the endpoint
-binary uses figment). Call `Config::validate()` after parsing. `Order::new` opens the `Gateway` for the account
-and keeps the deployment-level `WorkerConfig` (namespace, issue policy); `Agent` shares both.
+binary uses figment). Call `Config::validate()` after parsing. `Order::new` wraps the single account of `Config` in
+the static resolver as the `Accounts` bundle (account resolver + credential store) and keeps the deployment-level
+`WorkerConfig` (namespace, issue and resolve policies); `Agent` shares both. Neither holds a gateway or a client:
+every handler resolves its account and opens a `Gateway` for its own execution.
 
 ## Scope Contract
 
@@ -71,8 +73,21 @@ What it relies on:
   invocation can ask "is there already one?" without state.
 - **Validation of every found document** — order number, `tipus`, `teszt`, and the `supplier_id` pin when
   configured — because external ids are not unique server-side and a query returns the newest holder.
-- One szamlazz.hu account per deployment; the deployment's namespace prefixes the external ids and is
-  permanent — changing it would hide every document issued so far.
+- The deployment's **namespace** prefixes the external ids and is permanent — changing it would hide every
+  document issued so far. It is pinned per invocation, so a redeploy cannot move a running invocation.
+- **The account is resolved once per invocation and journaled.** Every handler resolves the request's scope to
+  its `Account` in a durable step named `account` under the resolve policy, so an invocation finishes on the
+  account it started on; the journaled `Account` (visible in the Restate UI for the retention period) carries
+  everything but the agent key. Unscoped and unknown scopes are `unknown_account` (400) before anything is
+  issued; the single-account `Config` path serves its account unscoped and knows no scope.
+- **Credentials are fetched on every handler execution, outside the journal**, and held only for that
+  execution — a rotation is picked up on the next execution of every in-flight invocation, and no agent key is
+  ever written into Restate (the `Credentials` type has no serde implementation). A failed fetch is a
+  **terminal** `unavailable` after a short in-process retry, by decision: a retryable error would route a
+  prolonged store outage into the handler's kill-on-five and an unstructured 500, whereas the terminal fault is
+  structured and immediate. The cost: a store outage during a **replay** of an invocation whose create already
+  landed surfaces as `unavailable` even though the document exists — `get` or a retry with a new
+  `Idempotency-Key` reconciles it (`already_issued`).
 
 What it does not do: PDF download, receipts, taxpayer query, IPN and Adatkapcsolat ingestion, the proforma →
 payment → invoice lifecycle workflow, multiple prepayments per order, tracking *who* reversed a document, and
@@ -123,8 +138,13 @@ activation details.
   `supplier_id`), `[defaults]`, `[seller]`, `[issue]` (the issue policy: `max_attempts`, `initial_delay`, `factor`,
   `max_delay`, `max_duration`). Secrets are `config::Secret`, whose `Debug` output is redacted. `account.slug` is
   the `config::Namespace` — the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`. `WorkerConfig`
-  (`namespace`, `issue`) is the deployment-level part the services hold; `IssueConfig::run_retry_policy` is the
-  `RunRetryPolicy` of the create and storno steps.
+  (`namespace`, `issue`, `resolve`) is the deployment-level part the services hold; `IssueConfig::run_retry_policy`
+  is the `RunRetryPolicy` of the create and storno steps, `ResolveConfig::run_retry_policy` that of the `account`
+  step (`1s` → `10s`, bounded by `1m`; no configuration key until #31).
+- `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`: one szamlazz.hu account
+  as the worker knows it (never its key), the bundle of the two pluggable traits both services hold, and the
+  configuration-backed implementation of both — `Accounts::try_from(&Config)` is the adapter from the library
+  `Config`.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
   `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome
@@ -134,7 +154,8 @@ activation details.
   `Szamlazz.Agent` Restate service is a thin facade over the same instance. No Restate service calls another.
 - `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
   registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
-  handlers.
+  handlers. Both are built `from_parts(Accounts, WorkerConfig)`; every handler runs the prologue — pin the
+  namespace, resolve the account (`account` step), fetch the credentials, open the gateway — before its operation.
 
 ## Identity Model
 
@@ -200,6 +221,9 @@ worker; callers authenticate to Restate ingress separately.
    earlier attempt may have landed with a lost reply, so rule 2 applies — once the key is fixed, retry with a new
    key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
    appears in neither the log nor the fault.
+5. An `unknown_account` fault (400) means the request named no account of this deployment — unscoped where
+   accounts are scoped, or a scope no account is reachable by. Nothing was issued and the same request never
+   succeeds: fix the scope, do not retry.
 
 Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md)): every handler that calls
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
