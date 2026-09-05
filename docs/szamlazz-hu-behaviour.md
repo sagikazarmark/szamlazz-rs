@@ -163,6 +163,13 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   hint) and the customer-facing narrative; not a safety issue.
 - Internal whitespace and NFC handling of order numbers (only edge whitespace and case tested). Low:
   rejected rather than guessed.
+- **Credential codes 3, 135, 136, 164** (invalid credentials, browser session active, login blocked,
+  multiple accounts): none was observed on the probe account. The worker relies on szamlazz.hu's
+  documentation that they are answered **before any write** — so the attempt that sees one has sent
+  nothing — and surfaces each as `TerminalError{credentials_rejected}` on every operation. Their
+  header form (header + body, or body-only) is likewise assumed from the documentation; the crate
+  parses `<hibakod>` either way. Moderate: were a credential code ever returned *after* a document was
+  issued, the fault still says "outcome unknown" and the next call's external-id query finds it.
 - **Everything on a live account** (`teszt=false`, possibly non-e-invoice): e-mail sending, 56, 352,
   `szallito/id`. Go-live precondition — see below.
 

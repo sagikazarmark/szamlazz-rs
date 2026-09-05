@@ -93,7 +93,7 @@ Restate's ingress retry identity, sent by the caller as a header per logical req
 _Avoid_: request id (v1's body field; gone), correlation id
 
 **Outcome**:
-A domain result returned as data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected`, `conflict{reason}`. Errors (`TerminalError`) are reserved for faults — `outcome_unknown`, `unavailable`, `account_mismatch`, `invalid_input` — and always mean "outcome unknown, retry with a new `Idempotency-Key` or read `get`", never "no document exists".
+A domain result returned as data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected`, `conflict{reason}`. Errors (`TerminalError`) are reserved for faults — `outcome_unknown`, `unavailable`, `account_mismatch`, `invalid_input`, `credentials_rejected` — and always mean "outcome unknown, retry with a new `Idempotency-Key` or read `get`", never "no document exists". `credentials_rejected` (HTTP 503) is szamlazz.hu answering 3/135/136/164 to any step: the worker's agent key is wrong, not the request; the attempt that raised it issued nothing (szamlazz.hu answers these codes before acting), but an earlier one may have landed, so it is a fault, never `rejected`.
 _Avoid_: error/failure for a rejection or conflict, status
 
 **Reissue**:

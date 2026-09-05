@@ -211,6 +211,13 @@ impl Order {
         // The base must be a live invoice carrying this order's number.
         match verify(ctx, &self.gateway, format!("verify-base-{number}"), &number).await? {
             QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+            QueryOutcome::CredentialsRejected { code, message } => {
+                return Err(
+                    Fault::credentials_rejected(&self.config.namespace, code, message)
+                        .about(&order, Some(identity.kind), identity.external_id.as_str())
+                        .into(),
+                );
+            }
             QueryOutcome::NotFound => {
                 return Err(Fault::invalid_input(format!(
                     "invoice {number} is not known to szamlazz.hu (not_found)"
@@ -345,6 +352,7 @@ impl Order {
         let found = lookup(
             ctx,
             &self.gateway,
+            &self.config.namespace,
             format!("exclusivity-{other}"),
             &other_id,
             &prepared.order,
@@ -375,6 +383,7 @@ impl Order {
         let found = lookup(
             ctx,
             &self.gateway,
+            &self.config.namespace,
             "prepayment-for-final",
             &prepayment_id,
             &prepared.order,
@@ -419,6 +428,7 @@ impl Order {
                 let found = lookup(
                     ctx,
                     &self.gateway,
+                    &self.config.namespace,
                     "proforma-link",
                     &proforma_id,
                     &prepared.order,
@@ -456,6 +466,15 @@ impl Order {
                 .await?
                 {
                     QueryOutcome::Transport(message) => Err(Fault::unavailable(message).into()),
+                    QueryOutcome::CredentialsRejected { code, message } => Err(
+                        Fault::credentials_rejected(&self.config.namespace, code, message)
+                            .about(
+                                &prepared.order,
+                                Some(identity.kind),
+                                identity.external_id.as_str(),
+                            )
+                            .into(),
+                    ),
                     QueryOutcome::NotFound => Ok(Some(
                         identity.conflict_about(ConflictReason::ProformaMissing, number.clone()),
                     )),
@@ -492,6 +511,13 @@ impl Order {
         // Step 3: lookup.
         let reversed = match self.lookup_step(ctx, order, &intent).await? {
             LookupOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+            LookupOutcome::CredentialsRejected { code, message } => {
+                return Err(
+                    Fault::credentials_rejected(&self.config.namespace, code, message)
+                        .about(order, Some(identity.kind), identity.external_id.as_str())
+                        .into(),
+                );
+            }
             LookupOutcome::Live(found) if intent.reissue => {
                 return Ok(identity.conflict_about(ConflictReason::Live, found.number()));
             }
@@ -563,6 +589,13 @@ impl Order {
                 response
             }
             CreateOutcome::Rejected { code, message } => identity.rejected(code, message),
+            CreateOutcome::CredentialsRejected { code, message } => {
+                return Err(
+                    Fault::credentials_rejected(&self.config.namespace, code, message)
+                        .about(order, Some(identity.kind), identity.external_id.as_str())
+                        .into(),
+                );
+            }
         })
     }
 

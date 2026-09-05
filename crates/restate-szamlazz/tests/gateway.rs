@@ -1,6 +1,7 @@
 //! Wiremock tests of the `gateway` module: the lookup and create steps
-//! (design §5 steps 3–4), storno validation (§6), deletion, credit entries and
-//! transport failures, against synthetic szamlazz.hu responses.
+//! (design §5 steps 3–4), storno validation (§6), deletion, credit entries,
+//! credential rejections and transport failures, against synthetic
+//! szamlazz.hu responses.
 
 use jiff::civil::date;
 use restate_szamlazz::config::Config;
@@ -21,6 +22,11 @@ use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
 const SUPPLIER: u64 = 972_720;
+
+/// The szamlazz.hu codes that mean "the agent credentials are wrong": 3
+/// invalid credentials, 135 browser session active, 136 login blocked, 164
+/// multiple accounts. Every operation answers them as `CredentialsRejected`.
+const CREDENTIAL_CODES: [&str; 4] = ["3", "135", "136", "164"];
 
 // ----- fixtures --------------------------------------------------------------
 
@@ -533,7 +539,7 @@ async fn lookup_hint_ignores_our_documents_non_invoices_and_its_own_failure() {
         ("storno", storno.response()),
         ("proforma", proforma.response()),
         ("hint miss", not_found()),
-        ("hint error", body_error("3", "login")),
+        ("hint error", body_error("57", "malformed")),
     ];
     for (label, hint) in cases {
         let h = Harness::start().await;
@@ -1080,6 +1086,122 @@ async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_que
     }
 }
 
+// ----- credentials: lookup and create -----------------------------------------
+
+#[tokio::test]
+async fn credential_codes_on_the_lookup_external_id_query_are_credentials_rejected() {
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(body_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        order_query()
+            .respond_with(Doc::new("SZ-77", "SZ").response())
+            .expect(0)
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.lookup(&[]).await,
+            LookupOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "{code}"
+        );
+        assert_eq!(
+            h.bodies().await.len(),
+            1,
+            "{code}: no hint after the rejection"
+        );
+    }
+}
+
+#[tokio::test]
+async fn credential_codes_on_the_lookup_hint_are_credentials_rejected() {
+    // Unlike a miss or another API error, a credential rejection on the hint
+    // is conclusive: the lookup does not report `Absent` and nothing proceeds
+    // to the create step.
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(not_found())
+            .mount(&h.server)
+            .await;
+        order_query()
+            .respond_with(body_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.lookup(&[]).await,
+            LookupOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "{code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn credential_codes_on_the_create_leading_query_never_send() {
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(body_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(created("SZ-X", "1000", "1270"))
+            .expect(0)
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.create(None).await,
+            Ok(CreateOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            }),
+            "{code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn credential_codes_on_the_create_send_are_settled_without_a_re_query() {
+    // Settled data, not `Unconfirmed`: re-executing the step with the same
+    // key would only repeat the answer, so the run retry policy must not be
+    // spent on it.
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(not_found())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(api_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.create(None).await,
+            Ok(CreateOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            }),
+            "{code}"
+        );
+    }
+}
+
 // ----- queries ---------------------------------------------------------------
 
 #[tokio::test]
@@ -1154,6 +1276,43 @@ async fn verify_query_and_hint() {
             .await,
         QueryOutcome::Transport(_)
     ));
+}
+
+// ----- credentials -------------------------------------------------------------
+
+#[tokio::test]
+async fn credential_codes_on_a_query_are_credentials_rejected() {
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        op("action-szamla_agent_xml")
+            .respond_with(body_error(code, "login"))
+            .mount(&h.server)
+            .await;
+
+        let expected = QueryOutcome::CredentialsRejected {
+            code: code.to_owned(),
+            message: "login".to_owned(),
+        };
+        assert_eq!(h.gateway.verify("SZ-1").await, expected, "verify {code}");
+        assert_eq!(h.gateway.hint(&order()).await, expected, "hint {code}");
+        assert_eq!(
+            h.gateway
+                .query(&Selector::ExternalId("acct:ORD-1:invoice".to_owned()))
+                .await,
+            expected,
+            "query {code}"
+        );
+        assert_eq!(
+            h.gateway
+                .query_document(&Selector::InvoiceNumber("SZ-1".to_owned()))
+                .await,
+            Err(QueryError::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            }),
+            "query_document {code}"
+        );
+    }
 }
 
 // ----- storno ----------------------------------------------------------------
@@ -1269,6 +1428,53 @@ async fn storno_pre_query_hit_is_already_reversed() {
 }
 
 #[tokio::test]
+async fn credential_codes_on_the_storno_are_credentials_rejected() {
+    // Both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno` run
+    // this step; the pre-query and the send each report the rejection.
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        let storno_id = storno_id();
+        external_id_query(storno_id.as_str())
+            .respond_with(body_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(created("SS-1", "-1000", "-1270"))
+            .expect(0)
+            .mount(&h.server)
+            .await;
+        assert_eq!(
+            h.gateway.storno(storno_attempt(&storno_id)).await,
+            StornoOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "pre-query {code}"
+        );
+
+        let h = Harness::start().await;
+        external_id_query(storno_id.as_str())
+            .respond_with(not_found())
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(api_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        assert_eq!(
+            h.gateway.storno(storno_attempt(&storno_id)).await,
+            StornoOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "send {code}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn storno_unknown_and_transport() {
     let h = Harness::start().await;
     let storno_id = storno_id();
@@ -1331,6 +1537,11 @@ async fn delete_proforma_outcomes() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&h.server)
         .await;
+    delete()
+        .and(body_string_contains("<szamlaszam>D-5</szamlaszam>"))
+        .respond_with(api_error("57", "malformed"))
+        .mount(&h.server)
+        .await;
 
     assert_eq!(
         h.gateway.delete_proforma("D-1").await,
@@ -1342,7 +1553,7 @@ async fn delete_proforma_outcomes() {
     );
     assert_eq!(
         h.gateway.delete_proforma("D-3").await,
-        DeleteOutcome::Rejected {
+        DeleteOutcome::CredentialsRejected {
             code: "3".to_owned(),
             message: "login".to_owned(),
         }
@@ -1351,6 +1562,61 @@ async fn delete_proforma_outcomes() {
         h.gateway.delete_proforma("D-4").await,
         DeleteOutcome::Transport(_)
     ));
+    assert_eq!(
+        h.gateway.delete_proforma("D-5").await,
+        DeleteOutcome::Rejected {
+            code: "57".to_owned(),
+            message: "malformed".to_owned(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn credential_codes_on_the_delete_are_credentials_rejected() {
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        delete()
+            .respond_with(api_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        assert_eq!(
+            h.gateway.delete_proforma("D-1").await,
+            DeleteOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "{code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn credential_codes_on_set_payments_are_credentials_rejected() {
+    let entry = PaymentEntry {
+        date: date(2026, 9, 3),
+        method: PaymentMethod::Card,
+        amount: dec!(1000),
+        description: None,
+    };
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        credit()
+            .respond_with(body_error(code, "login"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        assert_eq!(
+            h.gateway
+                .set_payments("SZ-1", std::slice::from_ref(&entry), false)
+                .await,
+            SetPaymentsOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "{code}"
+        );
+    }
 }
 
 #[tokio::test]

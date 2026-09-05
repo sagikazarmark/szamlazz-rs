@@ -301,6 +301,14 @@ pub enum TerminalCode {
     /// The request is malformed or names a document szamlazz.hu does not
     /// know.
     InvalidInput,
+    /// szamlazz.hu rejected the account's agent credentials (codes 3, 135,
+    /// 136, 164): the worker's configuration is wrong, not the request. The
+    /// attempt that observed the code issued nothing — szamlazz.hu answers
+    /// these codes before acting on a request — but an earlier attempt may
+    /// have landed with a lost reply, which is why this is a fault and not a
+    /// `rejected` outcome. Fix the key, then retry with a new
+    /// `Idempotency-Key`. HTTP 503.
+    CredentialsRejected,
 }
 
 impl TerminalCode {
@@ -312,6 +320,7 @@ impl TerminalCode {
             Self::Unavailable => "unavailable",
             Self::AccountMismatch => "account_mismatch",
             Self::InvalidInput => "invalid_input",
+            Self::CredentialsRejected => "credentials_rejected",
         }
     }
 }
@@ -409,11 +418,16 @@ mod tests {
 
     #[test]
     fn terminal_code_tokens() {
+        assert_eq!(
+            TerminalCode::CredentialsRejected.as_str(),
+            "credentials_rejected"
+        );
         for code in [
             TerminalCode::OutcomeUnknown,
             TerminalCode::Unavailable,
             TerminalCode::AccountMismatch,
             TerminalCode::InvalidInput,
+            TerminalCode::CredentialsRejected,
         ] {
             let json = serde_json::to_string(&code).expect("serialize");
             assert_eq!(json, format!("\"{}\"", code.as_str()));

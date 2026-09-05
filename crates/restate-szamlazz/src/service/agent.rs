@@ -26,6 +26,7 @@ use crate::identity::ExternalId;
 enum QueryRun {
     Found(Box<QueryResponse>),
     NotFound,
+    CredentialsRejected { code: String, message: String },
     Api { code: String, message: String },
     Unavailable(String),
     Transport(String),
@@ -36,6 +37,9 @@ impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
         match result {
             Ok(document) => Self::Found(Box::new(QueryResponse::from(&document))),
             Err(QueryError::NotFound) => Self::NotFound,
+            Err(QueryError::CredentialsRejected { code, message }) => {
+                Self::CredentialsRejected { code, message }
+            }
             Err(QueryError::Api { code, message }) => Self::Api { code, message },
             Err(QueryError::Unavailable(message)) => Self::Unavailable(message),
             Err(QueryError::Transport(message)) => Self::Transport(message),
@@ -62,6 +66,9 @@ impl Agent {
                 "not_found",
                 "szamlazz.hu does not know the document (code 7)",
             )),
+            QueryRun::CredentialsRejected { code, message } => {
+                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
+            }
             QueryRun::Api { code, message } => Err(terminal(
                 422,
                 &code,
@@ -103,6 +110,9 @@ impl Agent {
                 &code,
                 format!("szamlazz.hu refused the credit entries ({code}): {message}"),
             )),
+            SetPaymentsOutcome::CredentialsRejected { code, message } => {
+                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
+            }
             SetPaymentsOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
                 "credit entry registration outcome unknown: {message}; call set_payments again"
             ))
@@ -140,6 +150,11 @@ impl Agent {
                 ));
             }
             QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+            QueryOutcome::CredentialsRejected { code, message } => {
+                return Err(
+                    Fault::credentials_rejected(&self.config.namespace, code, message).into(),
+                );
+            }
         };
         if let Some(order) = found
             .info
@@ -197,6 +212,9 @@ impl Agent {
                 Ok(StornoResponse::new(StornoOutcome::Rejected, number)
                     .with_code(code)
                     .with_message(message))
+            }
+            GatewayStorno::CredentialsRejected { code, message } => {
+                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
             }
             GatewayStorno::Unknown { message, .. } | GatewayStorno::Transport(message) => {
                 Err(Fault::outcome_unknown(format!(

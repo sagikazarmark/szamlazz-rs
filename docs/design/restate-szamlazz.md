@@ -87,9 +87,9 @@ inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   id
 
 | Handler | Input → Output | Notes |
 |---|---|---|
-| `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found` |
-| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)` |
-| `storno` | `StornoRequest` → `StornoResponse` | query first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else storno with ext id `"{namespace}:by-number:{number}:storno"` |
+| `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected` |
+| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
+| `storno` | `StornoRequest` → `StornoResponse` | query first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else storno with ext id `"{namespace}:by-number:{number}:storno"`; 3/135/136/164 → `credentials_rejected` |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
@@ -118,18 +118,19 @@ outcome can be *unknown*.
    supplier pin); the request carries only what identifies the document. In one closure:
    - `QueryInvoiceXml(ExternalId)` → `Ok(doc)`: validate → `Collision(doc)` on mismatch; live → `Live(doc)` (no
      hint: nothing will be created); reversed (`sztornozott == Some(true)`) → remember it and continue. 7 → continue.
-     Transport → `Transport`.
+     3/135/136/164 → `CredentialsRejected{code, message}`. Transport → `Transport`.
    - The order-number hint, on every lookup **except for correctives**: `QueryInvoiceXml(OrderNumber)` → a live
      `SZ|ES|VS` whose number ∉ `our_numbers` and ≠ the document seen under our ext id → `Foreign(doc)` — also when
-     our own document under the id is reversed, since no create may proceed past it; a miss (7) or an API error
-     says nothing about foreign documents and continues; the hint's transport failure → `Transport` (nothing may be
-     concluded).
+     our own document under the id is reversed, since no create may proceed past it; a miss (7) or another API error
+     says nothing about foreign documents and continues; 3/135/136/164 → `CredentialsRejected` (conclusive: nothing
+     proceeds); the hint's transport failure → `Transport` (nothing may be concluded).
    - Otherwise `Absent`, or `Reversed{doc, storno_number?}` with the storno number when the hint is the `SS` whose
      `hivszamlaszam` is the reversed document (absent otherwise, and for correctives).
    It settles every case that needs no create: `Live` → `reissue ? conflict{live, number} : already_issued{number,
    totals}`; `Reversed` → `reissue ? proceed, remembering the number : outcome: reversed{number, storno_number?}`;
    `Collision` → `conflict{external_id_collision, number}`; `Foreign` → `conflict{foreign, existing_number}`;
-   `Transport` → `TerminalError{unavailable}`; `Absent` → proceed.
+   `Transport` → `TerminalError{unavailable}`; `CredentialsRejected` → `TerminalError{credentials_rejected}` (§7);
+   `Absent` → proceed.
 4. **Create** — one durable step under the issue policy, `ctx.run("create-{kind}", || gateway.create(CreateStepRequest{
    external_id, kind, order, create, reversed }))` with `RunRetryPolicy::new().initial_delay(2m)
    .exponentiation_factor(2.0).max_delay(10m).max_attempts(5).max_duration(1h)` (§9). **Every execution is
@@ -139,8 +140,11 @@ outcome can be *unknown*.
    closure never returns a `TerminalError` itself.
    - Leading query `QueryInvoiceXml(ExternalId)` → a validated live document that is not `reversed` → `Found(doc)`
      (an earlier execution created it; **nothing is sent**); invalid → `Collision(doc)`; 7 or the reversed document →
-     send; transport → `Err(Transport)` (never create when the check itself failed).
-   - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`.
+     send; 3/135/136/164 → `Ok(CredentialsRejected{code, message})` (settled, nothing sent); transport →
+     `Err(Transport)` (never create when the check itself failed).
+   - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
+     → `CredentialsRejected{code, message}` — settled data, **not** `Unconfirmed`: re-executing with the same key would
+     only repeat the answer, so the run policy is not spent on it.
    - Transport failure or an open code (1, 55, 56 without a number, `szlahu_down`): re-query the external id once,
      immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; collision → `Collision`; nothing →
      `Err(Transport | Open)`. The run policy then re-executes the whole handler after the delay: the journal
@@ -159,7 +163,9 @@ outcome can be *unknown*.
    → `outcome: issued{number, totals}` (the caller asked for this document and has it — ADR 0003); `Reconciled(doc)`
    → `reconciled{number, totals}`; `Collision(doc)` → `conflict{external_id_collision, number}`;
    `DuplicateOrderNumber` → `conflict{duplicate_order_number, code, message, existing_number?}`; `Rejected` →
-   `rejected{code, message}`.
+   `rejected{code, message}`; `CredentialsRejected{code}` → `TerminalError{credentials_rejected, 503, json{order, kind,
+   external_id}}` and a warning tagged with the namespace and the code (§7) — the execution that observed the code
+   issued nothing, an earlier one may have landed with a lost reply, which is why this is a fault and never `rejected`.
 6. **Crash path.** A crash mid-closure leaves no journal entry; Restate re-dispatches after the handler's
    `initial_interval` (2 m > 60 s client timeout + observed stalls) with the journal; completed runs replay; the open
    `create-…` closure re-executes and begins with the external-id query, so a landed create is `Found`, not
@@ -194,18 +200,19 @@ the storno request attaches to the storno document (verified).
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon}` **without `keltDatum`** (352 otherwise — verified);
    (c) validate: `invoice_number ≠ requested ∧ gross < 0` → `Reversed`; echo of the requested number →
    `NotStornoable`; API errors → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
-   `221` = has a corrective — typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); `Transport |
-   Unknown` → backoff, loop.
+   `221` = has a corrective — typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 on
+   (a) or (b) → `CredentialsRejected{code, message}`; `Transport | Unknown` → backoff, loop.
 3. `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `Rejected` → `outcome: rejected{code}`;
-   exhausted → `TerminalError{outcome_unknown}` (the next call is safe: step 1 and 2(a) find the storno if it landed).
+   `CredentialsRejected` → `TerminalError{credentials_rejected}` (that attempt issued nothing); exhausted →
+   `TerminalError{outcome_unknown}` (the next call is safe: step 1 and 2(a) find the storno if it landed).
 
 `e_invoice` for the storno: the verified document's `eszamla` when known, else config.
 
 `delete_proforma({force})`: `ctx.run(query "…:proforma")`: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
 live `D` with payments ∧ `!force` → `rejected{proforma_paid}` (the server has no guard — verified);
-`ctx.run(DeleteProforma{InvoiceNumber})` (`max_attempts(1)`): success | 335 → `{deleted: true}`; other →
-`rejected{code}`; `Transport` → `TerminalError{outcome_unknown}`.
+`ctx.run(DeleteProforma{InvoiceNumber})` (`max_attempts(1)`): success | 335 → `{deleted: true}`; 3/135/136/164 →
+`TerminalError{credentials_rejected}`; other → `rejected{code}`; `Transport` → `TerminalError{outcome_unknown}`.
 
 `get`: four `ctx.run` queries (`…:proforma|invoice|prepayment|final`) → `OrderStatus { proforma?, invoice?,
 prepayment?, final?: DocumentStatus }` where `DocumentStatus { number, state: live | reversed | consumed{by},
@@ -214,7 +221,7 @@ would need the order-number hint, which only shows the newest document); the cre
 when the hint yields it. A proforma that is absent while the invoice references it (`hivdijbekszam`) is reported as
 `proforma: { state: consumed, by: invoice_number }`. A document under an id that fails validation leaves its slot
 absent — a read must not fail; the issuing handlers are the ones that refuse it as `conflict{external_id_collision}`.
-`Transport` on any query → `TerminalError{unavailable}`.
+`Transport` on any query → `TerminalError{unavailable}`; 3/135/136/164 on any query → `TerminalError{credentials_rejected}`.
 
 ## 7. Outcome contract
 
@@ -233,8 +240,18 @@ StornoResponse { outcome ∈ reversed | rejected | conflict | managed_by_order, 
                  invoice_number, storno_number?, order_key?, code?, message? }
 DeleteProformaResponse { deleted, reason? }
 OrderStatus — see §6
-TerminalError codes: outcome_unknown | unavailable | account_mismatch | invalid_input
+TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatch (409) | invalid_input (400)
+                   | credentials_rejected (503)
 ```
+
+`credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
+or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request —
+the same request succeeds once the key is fixed — so it is 503, not a 4xx ("do not retry") or 401/403 ("you are
+unauthenticated"). The execution that observed the code issued nothing — szamlazz.hu answers these codes before acting
+on a request, and on the 71/152 re-query path the create was already refused as a duplicate; an earlier execution may
+have landed with a lost reply, which is why it is a fault under the "every error means outcome unknown" rule and never
+`rejected`. Every
+occurrence is logged at `warn` with the namespace and the code (never the key).
 
 ## 8. Caller contract (documented in the crate READMEs)
 
@@ -284,11 +301,13 @@ Unchanged from v1: `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAM
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
   (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
   landed, the 71/152 matrix incl. `existing_number` and the contradiction, the corrective's 71/152 → `Rejected`),
-  storno validation incl. the D/SL no-op, 335, 7; the gateway validates found documents against the account it was
-  opened for.
+  storno validation incl. the D/SL no-op, 335, 7, and the credential codes 3/135/136/164 as `CredentialsRejected` on
+  every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query);
+  the gateway validates found documents against the account it was opened for.
 - `service`: discovery test (names, handler set, attributes), an endpoint build smoke test, `prepare` refusing
-  `options.proforma` on every kind but `create_invoice`, and the issue policy's field-for-field mapping onto
-  `RunRetryPolicy`.
+  `options.proforma` on every kind but `create_invoice`, the issue policy's field-for-field mapping onto
+  `RunRetryPolicy`, the fault → status mapping, and a sentinel test that the agent key reaches neither the
+  `credentials_rejected` warning nor the fault body.
 - End to end (docker-gated): Restate 1.7.8 + wiremock as szamlazz.hu — issued → already_issued (new key) and
   Idempotency-Key replay (same key, create mock `expect(1)`); 152 → reconciled; storno → reversed; stale create →
   reversed; `reissue` → issued as newest holder; `reissue` on live → `conflict{live}`; `sztornozott` → reversed;

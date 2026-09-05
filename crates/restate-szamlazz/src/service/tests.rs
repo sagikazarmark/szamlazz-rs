@@ -1,6 +1,8 @@
 //! Discovery and binding tests of the Restate adapters (design §11): the
 //! service names, the handler set with its shared flags and the per-handler
-//! retry policy, plus an `Endpoint` build.
+//! retry policy, plus an `Endpoint` build — and the fault → `TerminalError`
+//! mapping the handlers share, including the sentinel that the agent key
+//! reaches neither the `credentials_rejected` warning nor the fault body.
 
 use std::sync::Arc;
 
@@ -10,7 +12,7 @@ use restate_sdk::service::Discoverable;
 use serde_json::json;
 
 use super::{Agent, Order};
-use crate::config::{Config, WorkerConfig};
+use crate::config::{Config, Namespace, WorkerConfig};
 
 fn config() -> Config {
     serde_json::from_value(json!({
@@ -22,6 +24,10 @@ fn config() -> Config {
         },
     }))
     .expect("config")
+}
+
+fn namespace() -> Namespace {
+    "acct".parse().expect("namespace")
 }
 
 #[test]
@@ -201,6 +207,11 @@ fn faults_serialise_their_code_and_status() {
         (Fault::invalid_input("x"), 400, "invalid_input"),
         (Fault::account_mismatch("x"), 409, "account_mismatch"),
         (Fault::unavailable("x"), 503, "unavailable"),
+        (
+            Fault::credentials_rejected(&namespace(), "3", "x"),
+            503,
+            "credentials_rejected",
+        ),
     ];
     for (fault, status, code) in cases {
         let error = TerminalError::from(fault);
@@ -209,6 +220,137 @@ fn faults_serialise_their_code_and_status() {
         assert_eq!(body["code"], code);
         assert_eq!(body.get("order"), None);
     }
+}
+
+/// The fault a credential rejection raises names the szamlazz.hu code, tells
+/// the caller nothing was issued, and carries the document identity when one
+/// is attached.
+#[test]
+fn credentials_rejected_fault_names_the_code_and_the_document() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::Fault;
+    use crate::contract::IssuedKind;
+    use crate::identity::OrderKey;
+
+    let order = OrderKey::parse("ORD-1").expect("order");
+    let fault = Fault::credentials_rejected(&namespace(), "136", "Bejelentkezés letiltva").about(
+        &order,
+        Some(IssuedKind::Invoice),
+        "acct:ORD-1:invoice",
+    );
+    let error = TerminalError::from(fault);
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "credentials_rejected");
+    assert_eq!(body["order"], "ORD-1");
+    assert_eq!(body["kind"], "invoice");
+    assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("136"), "{message}");
+    assert!(message.contains("Bejelentkezés letiltva"), "{message}");
+    assert!(message.contains("issued nothing"), "{message}");
+}
+
+/// The agent key never reaches the operator's warning or the caller's fault
+/// body: both are built from what szamlazz.hu answered, tagged with the
+/// namespace and the code only. Every event the crate emits during the
+/// exchange and the fault construction is captured at `TRACE`, and the key is
+/// demonstrably on the wire when the rejection is observed.
+#[tokio::test]
+async fn credentials_rejected_never_leaks_the_agent_key() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use restate_sdk::errors::TerminalError;
+    use tracing_subscriber::fmt::MakeWriter;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::support::Fault;
+    use crate::gateway::QueryOutcome;
+
+    /// A `MakeWriter` collecting formatted events into a shared buffer.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Capture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    const KEY: &str = "sentinel-agent-key-9f3a7c";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>3</hibakod><hibauzenet>Sikertelen bejelentkezés.</hibauzenet></xmlszamlavalasz>"#,
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config: Config = serde_json::from_value(json!({
+        "account": {
+            "slug": "acct",
+            "agent_key": KEY,
+            "endpoint": server.uri(),
+            "mode": "test",
+        },
+    }))
+    .expect("config");
+    let order = Order::new(&config).expect("order");
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    // What the handlers do: the gateway observes the code, the fault is built.
+    let outcome = order.gateway().verify("SZ-1").await;
+    let QueryOutcome::CredentialsRejected { code, message } = outcome.clone() else {
+        panic!("expected CredentialsRejected, got {outcome:?}");
+    };
+    assert_eq!(code, "3");
+    let error = TerminalError::from(Fault::credentials_rejected(
+        &order.config().namespace,
+        code,
+        message,
+    ));
+    drop(guard);
+
+    let sent = server.received_requests().await.expect("requests");
+    assert!(
+        String::from_utf8_lossy(&sent[0].body).contains(KEY),
+        "the sentinel key must have been on the wire for the test to mean anything"
+    );
+    assert!(!format!("{outcome:?}").contains(KEY), "{outcome:?}");
+
+    let logs = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("utf-8");
+    assert!(logs.contains("WARN"), "{logs}");
+    assert!(logs.contains("namespace=acct"), "{logs}");
+    assert!(logs.contains("code=3"), "{logs}");
+    assert!(!logs.contains(KEY), "{logs}");
+    assert_eq!(error.code(), 503);
+    assert!(!error.message().contains(KEY), "{}", error.message());
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "credentials_rejected");
 }
 
 #[test]
@@ -262,8 +404,16 @@ fn lookup_classifies_query_outcomes() {
 
     const SUPPLIER: u64 = 972_720;
     let order = OrderKey::parse("ORD-1").expect("order");
+    let namespace = namespace();
     let classify = |outcome: QueryOutcome, supplier: Option<u64>| {
-        Lookup::classify(outcome, &order, IssuedKind::Invoice, true, supplier)
+        Lookup::classify(
+            outcome,
+            &namespace,
+            &order,
+            IssuedKind::Invoice,
+            true,
+            supplier,
+        )
     };
 
     assert_eq!(
@@ -288,4 +438,18 @@ fn lookup_classifies_query_outcomes() {
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
     }
     assert!(classify(QueryOutcome::Transport("down".to_owned()), None).is_err());
+
+    // Rejected credentials are a fault of their own, not `unavailable`.
+    let fault = classify(
+        QueryOutcome::CredentialsRejected {
+            code: "3".to_owned(),
+            message: "login".to_owned(),
+        },
+        None,
+    )
+    .expect_err("a fault");
+    let error = restate_sdk::errors::TerminalError::from(fault);
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "credentials_rejected");
 }

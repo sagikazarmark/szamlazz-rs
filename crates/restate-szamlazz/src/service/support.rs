@@ -8,6 +8,7 @@ use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
+use crate::config::Namespace;
 use crate::contract::{IssuedKind, TerminalCode};
 use crate::gateway::{InvoiceDocumentExt as _, QueryOutcome};
 use crate::identity::OrderKey;
@@ -55,6 +56,31 @@ impl Fault {
         Self::new(TerminalCode::AccountMismatch, message)
     }
 
+    /// szamlazz.hu rejected the account's agent credentials with `code`
+    /// (3, 135, 136 or 164). Logs the warning that pages the operator — tagged
+    /// with the namespace and the code, never the key — and builds the fault.
+    /// The attempt that observed the code issued nothing: szamlazz.hu answers
+    /// these codes before acting on a request.
+    pub(super) fn credentials_rejected(
+        namespace: &Namespace,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let code = code.into();
+        let message = message.into();
+        tracing::warn!(
+            namespace = %namespace,
+            code = %code,
+            "szamlazz.hu rejected the agent credentials; fix the account's agent key"
+        );
+        Self::new(
+            TerminalCode::CredentialsRejected,
+            format!(
+                "szamlazz.hu rejected the agent credentials (code {code}: {message}); this attempt issued nothing — fix the account's agent key, then retry with a new Idempotency-Key or read get"
+            ),
+        )
+    }
+
     /// Attaches the identity of the document the fault is about.
     pub(super) fn about(
         mut self,
@@ -74,7 +100,10 @@ impl Fault {
             TerminalCode::InvalidInput => 400,
             TerminalCode::AccountMismatch => 409,
             TerminalCode::OutcomeUnknown => 500,
-            TerminalCode::Unavailable => 503,
+            // The worker's misconfiguration, not the caller's request: the
+            // same request succeeds once the key is fixed, so neither a 4xx
+            // ("do not retry") nor 401/403 ("you are unauthenticated") fits.
+            TerminalCode::Unavailable | TerminalCode::CredentialsRejected => 503,
         }
     }
 }
@@ -130,9 +159,11 @@ pub(super) enum Lookup {
 }
 
 impl Lookup {
-    /// Classifies a query outcome; a failed check is `unavailable`.
+    /// Classifies a query outcome; a failed check is `unavailable`, rejected
+    /// credentials are `credentials_rejected`.
     pub(super) fn classify(
         outcome: QueryOutcome,
+        namespace: &Namespace,
         order: &OrderKey,
         kind: IssuedKind,
         expect_test: bool,
@@ -141,6 +172,9 @@ impl Lookup {
         match outcome {
             QueryOutcome::NotFound => Ok(Self::Absent),
             QueryOutcome::Transport(message) => Err(Fault::unavailable(message)),
+            QueryOutcome::CredentialsRejected { code, message } => {
+                Err(Fault::credentials_rejected(namespace, code, message))
+            }
             QueryOutcome::Found(found) => {
                 if found.is_ours(order, kind, expect_test, expect_supplier_id) {
                     Ok(Self::Ours(found))
@@ -180,7 +214,8 @@ macro_rules! journal_helpers {
             use serde::Serialize;
             use serde::de::DeserializeOwned;
 
-            use super::Lookup;
+            use super::{Fault, Lookup};
+            use crate::config::Namespace;
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{Gateway, InvoiceDocumentExt as _, QueryOutcome};
             use crate::identity::{ExternalId, OrderKey};
@@ -285,10 +320,11 @@ macro_rules! journal_helpers {
 
             /// Journaled query by one of our external ids, validated against
             /// the identity the document should have (design §3) and the
-            /// gateway's account.
+            /// gateway's account. A fault carries that identity.
             pub(in crate::service) async fn lookup(
                 ctx: &$ctx<'_>,
                 gateway: &Arc<Gateway>,
+                namespace: &Namespace,
                 name: impl Into<String>,
                 external_id: &ExternalId,
                 order: &OrderKey,
@@ -298,11 +334,13 @@ macro_rules! journal_helpers {
                 let account = gateway.account();
                 Ok(Lookup::classify(
                     outcome,
+                    namespace,
                     order,
                     kind,
                     account.mode.is_test(),
                     account.supplier_id,
-                )?)
+                )
+                .map_err(|fault| fault.about(order, Some(kind), external_id.as_str()))?)
             }
 
             /// Journaled order-number hint.
@@ -318,10 +356,12 @@ macro_rules! journal_helpers {
             }
 
             /// The storno number of a reversed document, when the order-number
-            /// hint is the `SS` referencing it.
+            /// hint is the `SS` referencing it. Best effort: a failed hint is
+            /// `None` — except rejected credentials, which are a fault.
             pub(in crate::service) async fn storno_number_of(
                 ctx: &$ctx<'_>,
                 gateway: &Arc<Gateway>,
+                namespace: &Namespace,
                 order: &OrderKey,
                 number: &str,
             ) -> Result<Option<String>, HandlerError> {
@@ -329,6 +369,11 @@ macro_rules! journal_helpers {
                     match hint(ctx, gateway, format!("hint-storno-{number}"), order).await? {
                         QueryOutcome::Found(found) if found.is_storno_of(number) => {
                             Some(found.number().to_owned())
+                        }
+                        QueryOutcome::CredentialsRejected { code, message } => {
+                            return Err(
+                                Fault::credentials_rejected(namespace, code, message).into()
+                            );
                         }
                         _ => None,
                     },

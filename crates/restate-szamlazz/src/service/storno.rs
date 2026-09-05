@@ -1,5 +1,6 @@
 //! The storno protocol (design §6), proforma deletion and the `get` live view.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
@@ -17,7 +18,7 @@ use crate::gateway::{
     DeleteOutcome, InvoiceDocumentExt as _, QueryOutcome, StornoAttempt,
     StornoOutcome as GatewayStorno, issued_kind_of,
 };
-use crate::identity::ExternalId;
+use crate::identity::{ExternalId, OrderKey};
 
 /// Storno re-send attempts per invocation (design §6 step 2).
 const STORNO_ATTEMPTS: u32 = 3;
@@ -36,45 +37,22 @@ impl Order {
             comment,
         } = request;
         let gateway = &self.gateway;
+        let namespace = &self.config.namespace;
+        let storno_id = ExternalId::for_storno(namespace, &order, &number);
 
         // Step 1: verify the document.
-        let found =
-            match object::verify(ctx, gateway, format!("verify-storno-{number}"), &number).await? {
-                QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
-                QueryOutcome::NotFound => {
-                    return Err(Fault::invalid_input(format!(
-                        "invoice {number} is not known to szamlazz.hu (not_found)"
-                    ))
-                    .into());
-                }
-                QueryOutcome::Found(found) => found,
-            };
-        if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
-            return Ok(StornoResponse::new(StornoOutcome::Conflict, number)
-                .with_conflict_reason(ConflictReason::NotManaged));
-        }
-        let account = gateway.account();
-        if !found.account_matches(account.mode.is_test(), account.supplier_id) {
-            return Err(Fault::account_mismatch(format!(
-                "document {number} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
-                found.info.test, found.supplier.id
-            ))
-            .into());
-        }
-        if found.info.reversed == Some(true) {
-            // Idempotent: already reversed by anyone.
-            let storno_number = object::storno_number_of(ctx, gateway, &order, &number).await?;
-            let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
-            response.storno_number = storno_number;
-            return Ok(response);
-        }
-        if !matches!(found.info.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
-            return Ok(not_stornoable(number));
-        }
-        let e_invoice = found.e_invoice().unwrap_or(account.defaults.e_invoice);
+        let found = match self
+            .verify_for_storno(ctx, &order, &number, &storno_id)
+            .await?
+        {
+            ControlFlow::Continue(found) => found,
+            ControlFlow::Break(response) => return Ok(response),
+        };
+        let e_invoice = found
+            .e_invoice()
+            .unwrap_or(gateway.account().defaults.e_invoice);
 
         // Step 2: the query-first re-send loop.
-        let storno_id = ExternalId::for_storno(&self.config.namespace, &order, &number);
         let mut backoff = self.config.issue.initial_delay;
         for attempt in 1..=STORNO_ATTEMPTS {
             let outcome = {
@@ -114,6 +92,15 @@ impl Order {
                         .with_code(code)
                         .with_message(message)
                 }
+                GatewayStorno::CredentialsRejected { code, message } => {
+                    return Err(Fault::credentials_rejected(namespace, code, message)
+                        .about(
+                            &order,
+                            issued_kind_of(&found.info.document_type),
+                            storno_id.as_str(),
+                        )
+                        .into());
+                }
                 GatewayStorno::Unknown { .. } | GatewayStorno::Transport(_) => {
                     if attempt < STORNO_ATTEMPTS {
                         object::sleep(ctx, backoff).await?;
@@ -137,6 +124,64 @@ impl Order {
         .into())
     }
 
+    /// Step 1 of the storno protocol: the document must be known, carry this
+    /// order's number, belong to the gateway's account and be a live invoice
+    /// kind. `Break(response)` is the answer for anything that stops the
+    /// storno before it is sent (not managed, already reversed, not
+    /// stornoable) — a domain outcome, not a fault.
+    async fn verify_for_storno(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        number: &str,
+        storno_id: &ExternalId,
+    ) -> Result<ControlFlow<StornoResponse, Box<InvoiceDocument>>, HandlerError> {
+        let gateway = &self.gateway;
+        let namespace = &self.config.namespace;
+        let found =
+            match object::verify(ctx, gateway, format!("verify-storno-{number}"), number).await? {
+                QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+                QueryOutcome::CredentialsRejected { code, message } => {
+                    return Err(Fault::credentials_rejected(namespace, code, message)
+                        .about(order, None, storno_id.as_str())
+                        .into());
+                }
+                QueryOutcome::NotFound => {
+                    return Err(Fault::invalid_input(format!(
+                        "invoice {number} is not known to szamlazz.hu (not_found)"
+                    ))
+                    .into());
+                }
+                QueryOutcome::Found(found) => found,
+            };
+        if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
+            return Ok(ControlFlow::Break(
+                StornoResponse::new(StornoOutcome::Conflict, number)
+                    .with_conflict_reason(ConflictReason::NotManaged),
+            ));
+        }
+        let account = gateway.account();
+        if !found.account_matches(account.mode.is_test(), account.supplier_id) {
+            return Err(Fault::account_mismatch(format!(
+                "document {number} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
+                found.info.test, found.supplier.id
+            ))
+            .into());
+        }
+        if found.info.reversed == Some(true) {
+            // Idempotent: already reversed by anyone.
+            let storno_number =
+                object::storno_number_of(ctx, gateway, namespace, order, number).await?;
+            let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
+            response.storno_number = storno_number;
+            return Ok(ControlFlow::Break(response));
+        }
+        if !matches!(found.info.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
+            return Ok(ControlFlow::Break(not_stornoable(number.to_owned())));
+        }
+        Ok(ControlFlow::Continue(found))
+    }
+
     // ----- delete_proforma (§6 tail) ---------------------------------------
 
     pub(super) async fn delete(
@@ -150,6 +195,7 @@ impl Order {
         let found = match object::lookup(
             ctx,
             &self.gateway,
+            &self.config.namespace,
             "proforma-for-delete",
             &proforma_id,
             &order,
@@ -185,6 +231,11 @@ impl Order {
                 Ok(DeleteProformaResponse::deleted())
             }
             DeleteOutcome::Rejected { code, .. } => Ok(DeleteProformaResponse::not_deleted(code)),
+            DeleteOutcome::CredentialsRejected { code, message } => Err(
+                Fault::credentials_rejected(&self.config.namespace, code, message)
+                    .about(&order, Some(IssuedKind::Proforma), proforma_id.as_str())
+                    .into(),
+            ),
             DeleteOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
                 "proforma deletion outcome unknown: {message}; retry with a new Idempotency-Key"
             ))
@@ -211,6 +262,7 @@ impl Order {
             let found = shared::lookup(
                 ctx,
                 &self.gateway,
+                &self.config.namespace,
                 format!("get-{kind}"),
                 &external_id,
                 &order,

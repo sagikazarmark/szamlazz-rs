@@ -102,8 +102,10 @@ activation details.
   `conflict` with a reason — `prepaid_chain`, `live`, `foreign`, `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
   `base_reversed`, `not_managed`.
-- `contract::TerminalCode`: the four fault codes a `TerminalError` carries — `outcome_unknown`, `unavailable`,
-  `account_mismatch`, `invalid_input`.
+- `contract::TerminalCode`: the five fault codes a `TerminalError` carries — `outcome_unknown` (500),
+  `unavailable` (503), `account_mismatch` (409), `invalid_input` (400) and `credentials_rejected` (503: szamlazz.hu
+  answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the attempt that raised it issued
+  nothing).
 - `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
   `managed_by_order`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
   `QueryResponse`, `SetPaymentsRequest` / `SetPaymentsResponse`: the remaining handler contracts.
@@ -193,6 +195,11 @@ worker; callers authenticate to Restate ingress separately.
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send
    `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document is
    `conflict{live}`, so the flag can never cause a duplicate.
+4. A `credentials_rejected` fault (503) means szamlazz.hu refused the worker's agent key (codes 3, 135, 136, 164)
+   on some step: the deployment is misconfigured, not the request. The attempt that raised it issued nothing, but an
+   earlier attempt may have landed with a lost reply, so rule 2 applies — once the key is fixed, retry with a new
+   key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
+   appears in neither the log nor the fault.
 
 Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md)): every handler that calls
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
@@ -221,7 +228,7 @@ answer their re-query cannot resolve is `rejected`.
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
   exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
   `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — plus storno validation including the
-  proforma / delivery-note no-op, 335, 7).
+  proforma / delivery-note no-op, 335, 7, and the credential codes 3/135/136/164 on every operation).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu — issued →
   already_issued, `Idempotency-Key` replay, 152 → reconciled, storno → reversed → stale create → `reissue`,
