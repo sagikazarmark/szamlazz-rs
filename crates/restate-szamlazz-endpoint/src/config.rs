@@ -92,9 +92,10 @@ mod tests {
 
         [issue]
         max_attempts = 5
-        first_backoff = "2m"
-        max_backoff = "10m"
-        detect_foreign = true
+        initial_delay = "2m"
+        factor = 2.0
+        max_delay = "10m"
+        max_duration = "1h"
     "#;
 
     fn minimal() -> &'static str {
@@ -143,9 +144,10 @@ mod tests {
         );
         assert_eq!(service.seller.email.body.as_deref(), Some("Thank you"));
         assert_eq!(service.issue.max_attempts, 5);
-        assert_eq!(service.issue.first_backoff, Duration::from_secs(120));
-        assert_eq!(service.issue.max_backoff, Duration::from_secs(600));
-        assert!(service.issue.detect_foreign);
+        assert_eq!(service.issue.initial_delay, Duration::from_secs(120));
+        assert_eq!(service.issue.factor.to_bits(), 2.0f32.to_bits());
+        assert_eq!(service.issue.max_delay, Duration::from_secs(600));
+        assert_eq!(service.issue.max_duration, Duration::from_secs(3600));
         assert!(config.identity_keys.is_empty());
         service.validate().expect("the spec example is valid");
     }
@@ -240,15 +242,15 @@ mod tests {
             agent_key = "agent-key"
 
             [issue]
-            first_backoff = "11m"
+            initial_delay = "11m"
             "#,
         ))
         .extract()
         .expect("configuration should parse");
         assert_eq!(
             config.service.validate(),
-            Err(ConfigError::BackoffOrder {
-                first: Duration::from_mins(11),
+            Err(ConfigError::DelayOrder {
+                initial: Duration::from_mins(11),
                 max: Duration::from_mins(10),
             })
         );

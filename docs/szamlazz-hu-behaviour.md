@@ -19,9 +19,9 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| With the toggle ON, a second document of the same kind under an order number with different content is rejected with 152 "Már létező rendelésszám: {order}. …". The message names the order number only, never the existing invoice number; HTTP 200; headers `szlahu_error_code`/`szlahu_error` set, no `szlahu_szamlaszam`/`szlahu_id`. | A4c-2, A4d-alt, A5-price2000, A6; C1-7 | 71/152 → re-query by external id: a live document of ours → `reconciled`; the existing number is otherwise learned only via the order-number hint; the first two unresolved 71/152s are treated as `Unknown` (sleep, re-query), the third returns `conflict{duplicate_order_number}` — never `rejected`, never a new document. |
+| With the toggle ON, a second document of the same kind under an order number with different content is rejected with 152 "Már létező rendelésszám: {order}. …". The message names the order number only, never the existing invoice number; HTTP 200; headers `szlahu_error_code`/`szlahu_error` set, no `szlahu_szamlaszam`/`szlahu_id`. | A4c-2, A4d-alt, A5-price2000, A6; C1-7 | 71/152 → re-query by external id: a live document of ours → `reconciled`; not ours → `conflict{external_id_collision}`; reversed and ours, or absent → the duplicate is not ours and the order-number query names it → `conflict{duplicate_order_number}` with `existing_number` when the newest document under the order is a live document of our kind, without it otherwise; nothing under the order at all is a contradiction the create step retries. Never `rejected` (except for correctives), never a new document. |
 | The check is **per document kind**: `SZ`, `D`, `ES`, `VS`, `SL`, `HS` each accepted the same order number in sequence; a second `SL` (different price) → 152. `SZ`-vs-`SZ` → 152. | C1-1…C1-7, D4-create-sz | Cross-kind exclusivity (plain invoice vs prepayment chain) is the service's own check (`conflict{prepaid_chain}`); 71/152 is intra-kind only. |
-| Correctives are exempt: an `HS` was accepted under an order already carried by its base and by five other kinds. `HS`-vs-`HS` not tested. | B7-create-corrective, C1-6 | No 71/152 path in `correct_invoice`; a new `correction_id` issues a new `HS` by contract; the external-id pre-query is the only guard. |
+| Correctives are exempt: an `HS` was accepted under an order already carried by its base and by five other kinds. `HS`-vs-`HS` not tested. | B7-create-corrective, C1-6 | `correct_invoice` takes no order-number hint (the live base under the order is expected) and a 71/152 its re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new `HS` by contract; the external-id query is the only guard. |
 | Create **trims** leading/trailing whitespace from the order number: `" PRB-C-Case "` and `"PRB-C-Case "` replayed the existing invoice; with a different price → 152 naming the *trimmed* value. | C4-3, C4-4, C4-5 | VO key and every `rendelesszam` are derived from the trimmed bytes. |
 | Case is **preserved and significant**: `prb-c-case` created a second invoice next to `PRB-C-Case`; each queryable under its own spelling. | C4-2, queries | No case-fold; two spellings are two orders. |
 | Query by order number is **exact**: padded values → 7; case-sensitive. | C4 queries | A padded order number would be creatable-but-unqueryable → trim is mandatory; internal whitespace/control characters are rejected (untested server-side). |
@@ -38,7 +38,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Fingerprint **includes**: the (trimmed) order number as gate, the amount (unit price 1001 → 152), the buyer name **byte-exact** (`"próba vevő kft. "` — case and trailing space — → 152). | A4d-alt, A4c-2 | Normalize the buyer name once at validation (trim + NFC) and serialize it identically on every attempt, so the replay is a stable second guard. |
 | Fingerprint **excludes**: `szamlaKulsoAzon` (other external id → replay), `keltDatum` (+1 day and −1 day → replay), `megjegyzes` (comment → replay). | A4a-2, A4b-2, A4b-3, A4e-2 | Pinning `issue_date` is not a guard; the service sends it only when the caller supplies it. A replayed document's `kelt` may differ from the request. |
 | Untested: due date, fulfillment date, item name/quantity/VAT, buyer address, currency, payment method; the documented "2 days" window. | — | Not relied on; only affects how permissive the replay is. |
-| Replay lasts only **while the matching document is live**: after `SZ`-72 → `SS`-73, the byte-identical resend issued `SZ`-74 (new id, real-issue latency); a different-price request then got 152 because 74 holds the order number. | A5 | Replay protection ends at storno. After a reversal the external-id pre-query is the only guard; a `Found` reversed document returns `outcome: reversed` and the loop never creates without `reissue: true` (ADR 0003). |
+| Replay lasts only **while the matching document is live**: after `SZ`-72 → `SS`-73, the byte-identical resend issued `SZ`-74 (new id, real-issue latency); a different-price request then got 152 because 74 holds the order number. | A5 | Replay protection ends at storno. After a reversal the external-id query is the only guard; the lookup step answers `outcome: reversed` for a reversed document and the create step is never reached without `reissue: true` (ADR 0003). |
 | Re-converting a consumed proforma under the same order (different external id) → byte-identical replay of the existing `SZ`. | C2-6 | Same replay behavior via the proforma path; the replay stored no external id. |
 
 ## External ids (`szamlaKulsoAzon`)
@@ -58,7 +58,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| `<sztornozott>` is **absent** (not `false`) before a storno; afterwards the original's `<alap>` gains exactly `<sztornozott>true</sztornozott>` (after `<teszt>`). The `SS` never carries it. Also visible when the original is fetched by its external id. | B1 diff, A5-q-72/73, B6-query-orig-extid | The external-id pre-query detects a UI storno without any state or operator: `sztornozott == Some(true)` → `outcome: reversed`. The agent crate exposes `Option<bool>`; `None` ⇒ live. |
+| `<sztornozott>` is **absent** (not `false`) before a storno; afterwards the original's `<alap>` gains exactly `<sztornozott>true</sztornozott>` (after `<teszt>`). The `SS` never carries it. Also visible when the original is fetched by its external id. | B1 diff, A5-q-72/73, B6-query-orig-extid | The lookup step detects a UI storno without any state or operator: `sztornozott == Some(true)` → `outcome: reversed`. The agent crate exposes `Option<bool>`; `None` ⇒ live. |
 | The `SS` inherits `<rendelesszam>` and carries `<hivszamlaszam>` = original. `<gazdEsemAzon>` of an `SS`/`HS` equals the original's `<id>`; a converted `SZ` inherits the `D`'s id. | B1, A5-q-73, B7-query-corrective, D4-query-sz | The `storno_number` on `outcome: reversed` comes from the hint when the newest document under the order is the matching `SS`, else it is absent. `gazdEsemAzon == original.id` is an optional consistency check. |
 | A storno negates the **quantity** (−1), not the unit price; `SS` totals are negative (`szamlabrutto=-1270`, `kintlevoseg=-1270`). | B1 | Storno response validation: `gross_total < 0`. |
 | A storno **wipes `<kifizetesek>`** from the original (body shrank; `payments=[]`); the `SS`'s `kintlevoseg` is the full negative gross, prior credits not netted. The query XML has no `kintlevoseg` element at all. | B8 | The service does not snapshot payments; a caller that needs them queries before stornoing (`Szamlazz.Agent.query`) and re-registers on the new invoice via `set_payments`. Outstanding is observable only via response headers. |
@@ -81,9 +81,9 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | After conversion the `D` is **gone**: 7 by number and by external id; delete → 335. | C2-5, D4-delete-converted, D4-query-proforma-* | `get` reports `proforma: {state: consumed, by}` when the proforma is absent under its id while the invoice or prepayment carries `hivdijbekszam`; `delete_proforma` answers `{deleted: true, reason: absent}`. |
 | **Auto-linking by order number**: an `ES` issued *without* `dijbekeroSzamlaszam` under the `D`'s order shows `<hivdijbekszam>D-…</hivdijbekszam>` and the `D` became unqueryable. | C1-3, C2 | `proforma: none` is unenforceable: with a live `D` of ours under `{slug}:{order}:proforma` the create returns `conflict{proforma_live}`; the caller deletes the proforma or lets `auto` link it. Consumption by an `ES` as well as an `SZ` is derived in `get`. |
 | A **second conversion** from a consumed `D`: same order → replay of the existing `SZ`; different order → a plain `SZ` with the reference **silently dropped** (no `hivdijbekszam`, own `gazdEsemAzon`). | C2-6, D4-create-sz2 | `dijbekeroSzamlaszam` is best-effort and the create response cannot reveal a dropped link. `proforma: {number}` verifies the `D` first; `get` shows the link that actually landed via `referenced_proforma`. |
-| An `SZ` referencing an explicitly **deleted** `D` → success, reference silently ignored (5455 ms). | D5 | 7 on the pre-query ⇒ `conflict{proforma_missing}`. |
+| An `SZ` referencing an explicitly **deleted** `D` → success, reference silently ignored (5455 ms). | D5 | 7 on the proforma verify ⇒ `conflict{proforma_missing}`. |
 | Delete: success is `<xmlszamladbkdelvalasz><sikeres>true</sikeres>` with **no** `szlahu_*` headers. A second delete → 335 "Nincs ilyen díjbekérő (vagy törölték, vagy nem is létezett)." with headers; a never-existed number → the same 335. Delete by order number works. | D1, D2 | `335 ⇒ deleted` is safe because the number was just found under our external id. |
-| A credit entry on a `D` is accepted (`kintlevoseg 0`, `<kifizetesek>` readable); a **fully paid `D` deletes without any guard**, taking its payment history with it. | D3 | The paid guard is service-side (`force`); `kifizetesek` is read in the pre-query. |
+| A credit entry on a `D` is accepted (`kintlevoseg 0`, `<kifizetesek>` readable); a **fully paid `D` deletes without any guard**, taking its payment history with it. | D3 | The paid guard is service-side (`force`); `kifizetesek` is read in the proforma lookup. |
 | `<vevo>` in a query is **live partner master data** (overwritten by a later create with the same buyer name), not an at-issue snapshot; `<alap><email>` is per-document. | D6-query-bademail1 | Never compare `<vevo>` to the request; the service compares no payload — a different payload for a live document is `already_issued`. |
 
 ## Prepayment and final invoices
@@ -92,7 +92,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 |---|---|---|
 | A `VS` issued **without** `elolegSzamlaszam` under the `ES`'s order is linked anyway: `<hivszamlaszam>` = the `ES`. | C6-2, C6-3 | Pass `elolegSzamlaszam` explicitly regardless; the server links by order number. |
 | The server does **not** net the prepayment into the final: `VS` gross 1270, `kintlevoseg` 1270. | C6-2 | The caller supplies the negative prepayment line. |
-| A second `VS` against a settled `ES` → 73 "A hivatkozott előlegszámla nem beazonosítható. …" — with the correct number, under the same or a new order; 73 fires before any 152; headers set. | C6-4, C6-5 | The 1:1 rule is enforced via 73 → `rejected{73}`; the external-id pre-query on `{slug}:{order}:final` answers `already_issued` first when the final is ours; type 73. |
+| A second `VS` against a settled `ES` → 73 "A hivatkozott előlegszámla nem beazonosítható. …" — with the correct number, under the same or a new order; 73 fires before any 152; headers set. | C6-4, C6-5 | The 1:1 rule is enforced via 73 → `rejected{73}`; the lookup step on `{slug}:{order}:final` answers `already_issued` first when the final is ours; type 73. |
 | References are one-directional: the settled `ES`, converted `D` and corrected `SZ` show nothing. | C3, C6-6, C5-q-78 | The relationship is read from the referencing side only: `get` derives `consumed` from the invoice's `hivdijbekszam`, the storno number from the `SS`'s `hivszamlaszam`. |
 
 ## Corrective invoices
@@ -124,9 +124,9 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| Queries 0.66–1.0 s (10-sample median 858 ms; first of a session 4.8 s); creates 1.8–5.5 s; replays and errors 0.7–0.95 s (one replay 1.8 s); storno that creates 2.3–2.8 s, echo 0.7–1.1 s; credits 0.7–1.3 s; delete 0.7–1.0 s. | D9-lat-1…10; A, B, C, D logs | The 180 s closure budget (three 60 s calls) stands; `inactivity_timeout 4m`, `abort_timeout 3m`. |
-| One create **stalled ≥ 57 s** with no response and issued nothing (checked by order-number query); every other call returned within 0.7–5.5 s. Not re-sent. | A4d-2, A4d-q | The re-check after a crash must wait longer than client timeout (60 s) plus stall: `initial_interval = 2m`, never below ~90 s. |
-| Code 56 could not be triggered: a malformed (`nem-email-cim`) and an undeliverable buyer e-mail with `sendEmail=true` both returned plain success, `notification_delivery_failed=false`; the malformed address was stored on the document. | D6 | 56-without-number is treated as `Unknown` → external-id re-query, which is safe either way. |
+| Queries 0.66–1.0 s (10-sample median 858 ms; first of a session 4.8 s); creates 1.8–5.5 s; replays and errors 0.7–0.95 s (one replay 1.8 s); storno that creates 2.3–2.8 s, echo 0.7–1.1 s; credits 0.7–1.3 s; delete 0.7–1.0 s. | D9-lat-1…10; A, B, C, D logs | The 180 s budget of the create closure (three 60 s calls: leading query, create, re-query) stands; `inactivity_timeout 4m`, `abort_timeout 3m`. |
+| One create **stalled ≥ 57 s** with no response and issued nothing (checked by order-number query); every other call returned within 0.7–5.5 s. Not re-sent. | A4d-2, A4d-q | The re-check must wait longer than client timeout (60 s) plus stall: the handlers' `initial_interval` (a crash) and the issue policy's `initial_delay` (a lost reply, re-executing the create step) are both `2m`, never below ~90 s. |
+| Code 56 could not be triggered: a malformed (`nem-email-cim`) and an undeliverable buyer e-mail with `sendEmail=true` both returned plain success, `notification_delivery_failed=false`; the malformed address was stored on the document. | D6 | 56-without-number leaves the create step's outcome open → an immediate external-id re-query, then `Unconfirmed` (the run policy re-executes the step) when nothing is there — safe either way. |
 
 ## Test-account caveats
 
@@ -144,7 +144,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   `Unknown` → re-query.
 - `HS`-vs-`HS` under the toggle; whether the replay applies to `HS`, `D`, `ES`, `VS` at all (only
   `SZ`-vs-`SZ`, `SL`-vs-`SL` and `SZ`-from-`D` were exercised). Moderate for correctives; the
-  external-id pre-query is the working guard.
+  external-id query inside the create step is the working guard.
 - Due date, fulfillment date, item fields, address, currency in the replay fingerprint; the "2 days"
   window. Low: the replay is no longer the primary guard.
 - 352 on **create**, and on non-e-invoice accounts. Low–moderate: the service does not pin
@@ -156,8 +156,8 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   `storno_invoice` accepts `ES`/`VS`/`HS`, and `create_final` with `reissue: true` after a reversed
   `VS` sends a new one; the `SZ`-beside-`ES` case is refused by the service (`conflict{prepaid_chain}`)
   before sending.
-- A second `D` after a consumed `D` (152 expected). Low: with `detect_foreign` on (the default) the
-  order-number hint sees the converting invoice or prepayment first → `conflict{foreign}`.
+- A second `D` after a consumed `D` (152 expected). Low: the order-number hint in the lookup step sees
+  the converting invoice or prepayment first → `conflict{foreign}`.
 - Whether a UI-converted `SZ` carries `rendelesszam`/`hivdijbekszam`; which e-mails a UI or Agent
   storno sends. Moderate for foreign detection (an `SZ` without `rendelesszam` is invisible to the
   hint) and the customer-facing narrative; not a safety issue.
@@ -179,7 +179,7 @@ before starting.
 | 2 | A4-base — byte-identical resend of a create | Same number, byte-identical response | Toggle ON confirmed; replay guard works |
 | 3 | A4c — resend with the buyer name changed only in case/trailing space | 152 naming the trimmed order number | Fingerprint is byte-exact on the buyer name; 152 header shape |
 | 4 | A5 — create → storno → byte-identical resend | A **new** invoice; order number reusable | Replay ends at storno (ADR 0003 hazard is real here too) |
-| 5 | B1 — query the original by number before and after the storno | `<sztornozott>true</sztornozott>` appears on the original, never on the `SS` | Reversal detection on the external-id pre-query (`outcome: reversed`) |
+| 5 | B1 — query the original by number before and after the storno | `<sztornozott>true</sztornozott>` appears on the original, never on the `SS` | Reversal detection in the lookup step (`outcome: reversed`) |
 | 6 | B4 — repeat the storno | Echo of the existing `SS`, no error, no second `SS` | Storno re-send is safe |
 | 7 | B6 — storno with an external id, query by it | Returns the `SS` (`hivszamlaszam` = original) | Storno query-first guard |
 | 8 | C4 — create with `" ORDER "`, `"ORDER "`, `"order"`; query by each | Padded → replay; lowercase → new document; padded query → 7 | Key normalization (trim, preserve case) |

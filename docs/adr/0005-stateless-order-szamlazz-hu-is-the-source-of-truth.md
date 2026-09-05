@@ -60,8 +60,8 @@ teszt == account.mode ∧ (account.supplier_id unset ∨ szallito/id == supplier
 so this is the only protection against adopting a stranger's document.
 
 **Retry identity is Restate's ingress `Idempotency-Key`**, supplied by the caller. The service does not know
-whether one was used and never relies on it for safety: the external-id pre-query inside every attempt is the
-guard, the key is deduplication.
+whether one was used and never relies on it for safety: the external-id query inside the create step — the first
+line of the closure on every execution — is the guard, the key is deduplication.
 
 **`reissue: true` is required after *any* reversal.** A create that finds its document reversed returns
 `outcome: reversed`; with `reissue: true` it proceeds, and on a live document it is `conflict{live}`. There is no
@@ -107,12 +107,14 @@ guard, the key is deduplication.
   external id and is safe; never read an error as "no document exists"; (3) after any reversal a create returns
   `reversed`; send `reissue: true` with a new key when a new invoice is wanted.
 - **Still required**: the toggle ON (the server-side guard against a second live document of the same kind);
-  the byte-stable buyer name (the replay guard); `initial_interval = 2m` on the handlers (the crash re-check
-  must wait out a client timeout plus an observed ≥ 57 s server stall); the cross-kind exclusivity check
-  (`conflict{prepaid_chain}`) and the proforma-link check (`conflict{proforma_live}`), which the server does not
-  perform.
-- **Foreign documents** are detected live through the order-number hint on the first attempt (a live `SZ | ES |
-  VS` that is neither ours nor the document seen under our id → `conflict{foreign}`); nothing is recorded.
+  the byte-stable buyer name (the replay guard); the 2-minute gap before a re-check — the handlers'
+  `initial_interval` for a crash, the issue policy's `initial_delay` for a lost reply — which must wait out a
+  client timeout plus an observed ≥ 57 s server stall before the create step's leading query runs again; the
+  cross-kind exclusivity check (`conflict{prepaid_chain}`) and the proforma-link check (`conflict{proforma_live}`),
+  which the server does not perform.
+- **Foreign documents** are detected live through the order-number hint in the lookup step, on every kind but
+  correctives (a live `SZ | ES | VS` that is neither ours nor the document seen under our id →
+  `conflict{foreign}`); nothing is recorded.
 - **Consumed proformas** are derived live in `get`: proforma absent under its id while the invoice or prepayment
   carries `hivdijbekszam` → `{state: consumed, by}`.
 - `CorrectionId` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) replaces the corrective counter and the

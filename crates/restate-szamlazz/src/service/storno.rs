@@ -75,7 +75,7 @@ impl Order {
 
         // Step 2: the query-first re-send loop.
         let storno_id = ExternalId::for_storno(&self.config.namespace, &order, &number);
-        let mut backoff = self.config.issue.first_backoff;
+        let mut backoff = self.config.issue.initial_delay;
         for attempt in 1..=STORNO_ATTEMPTS {
             let outcome = {
                 let gateway = Arc::clone(gateway);
@@ -117,7 +117,7 @@ impl Order {
                 GatewayStorno::Unknown { .. } | GatewayStorno::Transport(_) => {
                     if attempt < STORNO_ATTEMPTS {
                         object::sleep(ctx, backoff).await?;
-                        backoff = next_backoff(backoff, self.config.issue.max_backoff);
+                        backoff = next_backoff(backoff, self.config.issue.max_delay);
                     }
                     continue;
                 }

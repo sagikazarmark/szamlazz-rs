@@ -2,6 +2,9 @@
 //! async fn per `ctx.run`, over the [`szamlazz_agent::Client`], returning
 //! every expected szamlazz.hu outcome **as data** — a rejection, a duplicate
 //! order number, a not-found or a no-op storno is a value, never an `Err`.
+//! The one exception is deliberate: the create step returns
+//! [`Unconfirmed`] when szamlazz.hu's answer is *not* known, so that the
+//! type says what the run retry policy may re-execute.
 //!
 //! [`Gateway`] owns the client and the [`Account`] it speaks for; it is not a
 //! second client — the Számla Agent `Client` is the transport it wraps.
@@ -85,13 +88,69 @@ impl From<&Config> for Account {
     }
 }
 
-/// One issuing attempt (design §5 step 3): pre-query by external id, optional
-/// order-number hint, create, and the duplicate-order-number re-query.
+/// The lookup step (design §5 step 3): what identifies the document whose
+/// external id is queried and, for every kind but correctives, the order
+/// whose hint is taken.
 ///
 /// A found document is validated against the gateway's own [`Account`]; the
 /// request carries only what identifies the document.
 #[derive(Debug, Clone)]
-pub struct IssueRequest<'a> {
+pub struct LookupRequest<'a> {
+    /// The external id the document carries and is looked up by.
+    pub external_id: &'a ExternalId,
+    /// The kind being issued; a found document must have the matching `tipus`.
+    /// Correctives take no order-number hint.
+    pub kind: IssuedKind,
+    /// The order the document belongs to.
+    pub order: &'a OrderKey,
+    /// Numbers of documents known to be ours (seen in the exclusivity and
+    /// proforma checks); hint results among them are ignored.
+    pub our_numbers: &'a [String],
+}
+
+/// What the lookup step found. Every case that needs no create is settled
+/// here; [`LookupOutcome::Absent`] and [`LookupOutcome::Reversed`] proceed to
+/// the create step.
+///
+/// Documents are boxed: a queried [`InvoiceDocument`] is large next to the
+/// unit variants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum LookupOutcome {
+    /// Nothing under the external id (code 7), and the hint saw nothing
+    /// foreign.
+    Absent,
+    /// A live document of ours under the external id. The hint is not taken:
+    /// nothing will be created.
+    Live(Box<InvoiceDocument>),
+    /// A reversed document of ours under the external id, and the hint saw
+    /// nothing foreign.
+    Reversed {
+        /// The reversed document.
+        document: Box<InvoiceDocument>,
+        /// Its storno's number, when the newest document under the order is
+        /// the `SS` referencing it; absent otherwise and for correctives.
+        storno_number: Option<String>,
+    },
+    /// The external id resolves to a document that fails validation (another
+    /// order, kind, account mode or supplier).
+    Collision(Box<InvoiceDocument>),
+    /// A live invoice-kind document that is not ours exists under the order
+    /// number. Reported even when our own document under the id is reversed:
+    /// no create — reissue or not — may proceed past it.
+    Foreign(Box<InvoiceDocument>),
+    /// A query failed (transport, parse, unavailability or another
+    /// szamlazz.hu error); nothing may be concluded.
+    Transport(String),
+}
+
+/// The create step (design §5 step 4): query the external id, then send the
+/// create unless a live document of ours is already there.
+///
+/// Carries what identifies the document and the create to send. A found
+/// document is validated against the gateway's own [`Account`].
+#[derive(Debug, Clone)]
+pub struct CreateStepRequest<'a> {
     /// The external id the document carries and is looked up by.
     pub external_id: &'a ExternalId,
     /// The kind being issued; a found document must have the matching `tipus`.
@@ -100,49 +159,50 @@ pub struct IssueRequest<'a> {
     pub order: &'a OrderKey,
     /// The create request built by [`Gateway::build_create`].
     pub create: &'a CreateInvoice,
-    /// Proceed past a reversed document under the external id instead of
-    /// answering [`IssueOutcome::FoundReversed`].
-    pub reissue: bool,
-    /// Query the order number before creating to detect foreign documents.
-    pub check_hint: bool,
-    /// Numbers of documents known to be ours (seen in the exclusivity and
-    /// proforma checks); hint results among them are ignored.
-    pub our_numbers: &'a [String],
+    /// The number of the reversed document the lookup step saw under the
+    /// external id (a reissue). A live document under the id that is not this
+    /// one was issued by an earlier execution of the step.
+    pub reversed: Option<&'a str>,
 }
 
-/// The result of one issuing attempt.
+/// The settled result of the create step: szamlazz.hu's answer is known.
+/// What is *not* settled is an [`Unconfirmed`] error, which the run retry
+/// policy re-executes.
 ///
 /// Documents are boxed: a queried [`InvoiceDocument`] is large next to the
 /// code-and-message variants.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum IssueOutcome {
+#[non_exhaustive]
+pub enum CreateOutcome {
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
     /// create — indistinguishable and reported either way). The result
-    /// carries a number: a success without one is [`IssueOutcome::Unknown`].
+    /// carries a number.
     Issued(InvoiceCreationResult),
-    /// The pre-query found a live document of ours under the external id.
-    /// Nothing was created.
+    /// A live document of ours is under the external id — found by the
+    /// leading query (an earlier execution of this step created it) or by the
+    /// re-query after a lost reply. Nothing was sent, or what was sent landed.
     Found(Box<InvoiceDocument>),
-    /// The pre-query found a reversed document of ours under the external id
-    /// and `reissue` was not set. Nothing was created.
-    FoundReversed(Box<InvoiceDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
-    /// external-id re-query found a live document of ours: an earlier attempt
+    /// external-id re-query found a live document of ours: an earlier send
     /// had landed.
     Reconciled(Box<InvoiceDocument>),
     /// The external id resolves to a document that fails validation (another
     /// order, kind, account mode or supplier). Nothing was created.
     Collision(Box<InvoiceDocument>),
-    /// A live invoice-kind document that is not ours exists under the order
-    /// number. Nothing was created.
-    Foreign(Box<InvoiceDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
-    /// external id re-query found no live document of ours.
+    /// external-id re-query found no live document of ours: the duplicate is
+    /// not ours. Never reported for correctives, which are exempt from the
+    /// order-number check — their unresolved 71/152 is
+    /// [`CreateOutcome::Rejected`].
     DuplicateOrderNumber {
         /// The szamlazz.hu code (`71` or `152`).
         code: String,
         /// The szamlazz.hu message.
         message: String,
+        /// The newest document under the order, when it is a live document of
+        /// the kind being issued; absent when a document of another kind (or a
+        /// reversed one) is newest, and when the naming query itself failed.
+        existing_number: Option<String>,
     },
     /// szamlazz.hu refused the document; nothing was created.
     Rejected {
@@ -151,32 +211,38 @@ pub enum IssueOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
-    /// The attempt may or may not have issued a document (codes 1, 55, 56
-    /// without a number, or `szlahu_down`); re-query before retrying.
-    Unknown {
+}
+
+/// The create step ended without a settled outcome: the run retry policy
+/// re-executes the step, whose leading query then finds whatever landed.
+///
+/// Every variant follows an immediate external-id re-query that found no live
+/// document of ours (read-your-writes lag is ≈ 0, so "nothing" is not lag).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Unconfirmed {
+    /// The HTTP exchange or the response parse failed — on the leading query
+    /// (nothing was sent), on the create, or on the re-query itself.
+    #[error("transport failure: {0}")]
+    Transport(String),
+    /// szamlazz.hu reported an open code, one that leaves the outcome open:
+    /// 1, 55, 56 without a number, or `szlahu_down`.
+    #[error("open code {}: {message}", code.as_deref().unwrap_or("szlahu_down"))]
+    Open {
         /// The szamlazz.hu code, when one was reported.
         code: Option<String>,
         /// What was reported.
         message: String,
     },
-    /// The HTTP exchange or the response parse failed; the outcome of any
-    /// create is unknown.
-    Transport(String),
-}
-
-/// A successful create: [`IssueOutcome::Issued`] with the number, or
-/// [`IssueOutcome::Unknown`] when szamlazz.hu answered success without one.
-impl From<InvoiceCreationResult> for IssueOutcome {
-    fn from(result: InvoiceCreationResult) -> Self {
-        if result.invoice_number.is_some() {
-            Self::Issued(result)
-        } else {
-            Self::Unknown {
-                code: None,
-                message: "create succeeded without a document number".to_owned(),
-            }
-        }
-    }
+    /// szamlazz.hu refused the order number as a duplicate (71/152), yet the
+    /// order-number query knows nothing under the order.
+    #[error("duplicate order number {code} reported but nothing is under the order: {message}")]
+    Contradiction {
+        /// The szamlazz.hu code (`71` or `152`).
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
 }
 
 /// The checks the services make on a queried document before trusting or
@@ -463,118 +529,274 @@ impl Gateway {
         )
     }
 
-    /// One issuing attempt, query-first (design §5 step 3).
+    /// The lookup step (design §5 step 3), read-only.
     ///
     /// 1. Query by external id: a validated live hit is
-    ///    [`IssueOutcome::Found`]; a validated reversed hit is
-    ///    [`IssueOutcome::FoundReversed`] unless `reissue`, in which case the
-    ///    attempt continues; an invalid hit is [`IssueOutcome::Collision`];
-    ///    code 7 continues; any other failure is [`IssueOutcome::Transport`]
-    ///    — never create when the check itself failed.
-    /// 2. With `check_hint`, query by order number: a live `SZ | ES | VS`
-    ///    that is neither among `our_numbers` nor the document seen in
-    ///    step 1 is [`IssueOutcome::Foreign`]. Anything else continues.
-    /// 3. Create: success with a number is [`IssueOutcome::Issued`]; 71/152
-    ///    re-queries the external id — a live document of ours is
-    ///    [`IssueOutcome::Reconciled`], a reversed one or code 7 is
-    ///    [`IssueOutcome::DuplicateOrderNumber`] (the duplicate is foreign),
-    ///    an invalid one [`IssueOutcome::Collision`]; 1, 55, 56 and
-    ///    `szlahu_down` are [`IssueOutcome::Unknown`]; other codes
-    ///    [`IssueOutcome::Rejected`].
-    pub async fn issue(&self, request: IssueRequest<'_>) -> IssueOutcome {
+    ///    [`LookupOutcome::Live`] (the hint is not taken); an invalid hit is
+    ///    [`LookupOutcome::Collision`]; code 7 and a validated reversed hit
+    ///    continue; any other failure is [`LookupOutcome::Transport`].
+    /// 2. The order-number hint, for every kind but correctives: a live
+    ///    `SZ | ES | VS` that is neither among `our_numbers` nor the document
+    ///    seen in step 1 is [`LookupOutcome::Foreign`]. The hint's own failure
+    ///    is not conclusive and continues.
+    /// 3. Otherwise [`LookupOutcome::Absent`], or [`LookupOutcome::Reversed`]
+    ///    with the storno number when the hint is the `SS` reversing it.
+    pub async fn lookup(&self, request: LookupRequest<'_>) -> LookupOutcome {
         let span = tracing::info_span!(
-            "gateway.issue",
+            "gateway.lookup",
             external_id = %request.external_id,
             kind = %request.kind,
-            reissue = request.reissue,
         );
-        self.issue_inner(&request).instrument(span).await
+        self.lookup_inner(&request).instrument(span).await
     }
 
-    async fn issue_inner(&self, request: &IssueRequest<'_>) -> IssueOutcome {
-        // Step 1: the external-id pre-query.
-        let seen = match self.query_by_external_id(request).await {
-            Ok(Some(found)) if !self.is_ours(&found, request.order, request.kind) => {
-                tracing::warn!(number = %found.number(), "external id collision");
-                return IssueOutcome::Collision(found);
-            }
-            Ok(Some(found)) if found.is_live() => {
-                tracing::info!(number = %found.number(), "found live under external id");
-                return IssueOutcome::Found(found);
-            }
-            Ok(Some(found)) if request.reissue => {
-                tracing::info!(number = %found.number(), "reversed under external id; reissuing");
-                Some(found.number().to_owned())
-            }
-            Ok(Some(found)) => {
-                tracing::info!(number = %found.number(), "found reversed under external id");
-                return IssueOutcome::FoundReversed(found);
-            }
-            Ok(None) => None,
-            Err(message) => return IssueOutcome::Transport(message),
+    async fn lookup_inner(&self, request: &LookupRequest<'_>) -> LookupOutcome {
+        // Step 1: the external id.
+        let reversed = match self
+            .seen(request.external_id, request.order, request.kind)
+            .await
+        {
+            Ok(Seen::Absent) => None,
+            Ok(Seen::Collision(found)) => return LookupOutcome::Collision(found),
+            Ok(Seen::Live(found)) => return LookupOutcome::Live(found),
+            Ok(Seen::Reversed(found)) => Some(found),
+            Err(message) => return LookupOutcome::Transport(message),
         };
 
-        // Step 2: the order-number hint.
-        if request.check_hint {
-            match self
-                .query_raw(InvoiceSelector::OrderNumber(
-                    request.order.as_str().to_owned(),
-                ))
-                .await
-            {
-                Ok(document) => {
-                    if is_foreign(&document, request.our_numbers, seen.as_deref()) {
+        // Step 2: the order-number hint; correctives are exempt.
+        let mut storno_number = None;
+        if request.kind != IssuedKind::Corrective {
+            match self.hint_raw(request.order).await {
+                Ok(hint) => {
+                    let seen = reversed.as_deref().map(InvoiceDocumentExt::number);
+                    if is_foreign(&hint, request.our_numbers, seen) {
                         tracing::warn!(
-                            number = %document.number(),
-                            tipus = %document.info.document_type,
+                            number = %hint.number(),
+                            tipus = %hint.info.document_type,
                             "foreign document under the order"
                         );
-                        return IssueOutcome::Foreign(Box::new(document));
+                        return LookupOutcome::Foreign(Box::new(hint));
+                    }
+                    if let Some(reversed) = &reversed
+                        && hint.is_storno_of(reversed.number())
+                    {
+                        storno_number = Some(hint.number().to_owned());
                     }
                 }
+                // A miss or an API error says nothing about foreign documents.
                 Err(QueryError::NotFound | QueryError::Api { .. }) => {}
-                Err(error) => return IssueOutcome::Transport(error.to_string()),
+                Err(error) => return LookupOutcome::Transport(error.to_string()),
             }
         }
 
-        // Step 3: create.
+        match reversed {
+            Some(document) => LookupOutcome::Reversed {
+                document,
+                storno_number,
+            },
+            None => LookupOutcome::Absent,
+        }
+    }
+
+    /// The create step (design §5 step 4), query-first on every execution.
+    ///
+    /// 1. Query by external id: a validated live hit that is not
+    ///    `request.reversed` is [`CreateOutcome::Found`] — an earlier
+    ///    execution created it; an invalid hit is [`CreateOutcome::Collision`];
+    ///    code 7 and a reversed hit continue; a failed query is
+    ///    [`Unconfirmed::Transport`] — never create when the check itself
+    ///    failed.
+    /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
+    ///    a refusal [`CreateOutcome::Rejected`]. A lost reply or an open code
+    ///    is re-queried once, immediately: what landed settles the step,
+    ///    nothing is [`Unconfirmed`]. 71/152 is re-queried the same way and
+    ///    then named through the order-number query.
+    ///
+    /// # Errors
+    ///
+    /// [`Unconfirmed`] when the outcome is not settled; the caller's run retry
+    /// policy re-executes the step.
+    pub async fn create(
+        &self,
+        request: CreateStepRequest<'_>,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        let span = tracing::info_span!(
+            "gateway.create",
+            external_id = %request.external_id,
+            kind = %request.kind,
+            reversed = request.reversed,
+        );
+        self.create_inner(&request).instrument(span).await
+    }
+
+    async fn create_inner(
+        &self,
+        request: &CreateStepRequest<'_>,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        // Step 1: the leading query.
+        if let Some(settled) = self.settled_by_query(request).await? {
+            return Ok(settled);
+        }
+
+        // Step 2: create.
         match self.client.send(request.create).await {
             Ok(result) => {
-                if let Some(number) = &result.invoice_number {
-                    tracing::info!(number = %number, "document issued");
-                }
-                IssueOutcome::from(result)
+                let Some(number) = &result.invoice_number else {
+                    let open = Unconfirmed::Open {
+                        code: None,
+                        message: "create succeeded without a document number".to_owned(),
+                    };
+                    return self.settle_or(request, open).await;
+                };
+                tracing::info!(number = %number, "document issued");
+                Ok(CreateOutcome::Issued(result))
             }
             Err(error) => match classify_failure(error) {
-                Failure::Duplicate { code, message } => {
-                    tracing::info!(code = %code, "duplicate order number; re-querying");
-                    match self.query_by_external_id(request).await {
-                        Ok(Some(found)) if !self.is_ours(&found, request.order, request.kind) => {
-                            IssueOutcome::Collision(found)
-                        }
-                        Ok(Some(found)) if found.is_live() => {
-                            tracing::info!(number = %found.number(), "reconciled after duplicate");
-                            IssueOutcome::Reconciled(found)
-                        }
-                        // Only a reversed document of ours holds the id: the
-                        // live duplicate is not ours.
-                        Ok(Some(_) | None) => IssueOutcome::DuplicateOrderNumber { code, message },
-                        Err(message) => IssueOutcome::Transport(message),
-                    }
-                }
                 Failure::Rejected { code, message } => {
                     tracing::info!(code = %code, "document rejected");
-                    IssueOutcome::Rejected { code, message }
+                    Ok(CreateOutcome::Rejected { code, message })
                 }
                 Failure::Unknown { code, message } => {
-                    tracing::warn!(code = ?code, "outcome unknown");
-                    IssueOutcome::Unknown { code, message }
+                    tracing::warn!(code = ?code, "open code; re-querying");
+                    self.settle_or(request, Unconfirmed::Open { code, message })
+                        .await
                 }
                 Failure::Transport(message) => {
-                    tracing::warn!("transport failure");
-                    IssueOutcome::Transport(message)
+                    tracing::warn!("transport failure; re-querying");
+                    self.settle_or(request, Unconfirmed::Transport(message))
+                        .await
+                }
+                Failure::Duplicate { code, message } => {
+                    tracing::info!(code = %code, "duplicate order number; re-querying");
+                    self.after_duplicate(request, code, message).await
                 }
             },
+        }
+    }
+
+    /// The immediate re-query after a create whose reply was lost or open:
+    /// what landed settles the step; nothing is `unconfirmed`.
+    async fn settle_or(
+        &self,
+        request: &CreateStepRequest<'_>,
+        unconfirmed: Unconfirmed,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        match self.settled_by_query(request).await? {
+            Some(settled) => Ok(settled),
+            None => Err(unconfirmed),
+        }
+    }
+
+    /// The re-query after 71/152: a live document of ours under the id is
+    /// [`CreateOutcome::Reconciled`]; a collision is reported as such;
+    /// otherwise the duplicate is not ours — the order-number query names it
+    /// when the newest document under the order is a live document of the
+    /// kind being issued, and its miss is a contradiction.
+    ///
+    /// Correctives are exempt from the order-number check, so their
+    /// unresolved 71/152 is an ordinary [`CreateOutcome::Rejected`], without
+    /// an order-number query.
+    async fn after_duplicate(
+        &self,
+        request: &CreateStepRequest<'_>,
+        code: String,
+        message: String,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        match self.settled_by_query(request).await? {
+            Some(CreateOutcome::Found(found)) => {
+                tracing::info!(number = %found.number(), "reconciled after duplicate");
+                return Ok(CreateOutcome::Reconciled(found));
+            }
+            Some(settled) => return Ok(settled),
+            None => {}
+        }
+
+        if request.kind == IssuedKind::Corrective {
+            tracing::info!(code = %code, "duplicate order number on a corrective: rejected");
+            return Ok(CreateOutcome::Rejected { code, message });
+        }
+
+        let existing_number = match self.hint_raw(request.order).await {
+            Ok(newest)
+                if newest.is_live()
+                    && newest.info.document_type == document_type_of(request.kind) =>
+            {
+                Some(newest.number().to_owned())
+            }
+            Ok(_) => None,
+            Err(QueryError::NotFound) => {
+                tracing::warn!(code = %code, "duplicate order number but nothing under the order");
+                return Err(Unconfirmed::Contradiction { code, message });
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "could not name the duplicate");
+                None
+            }
+        };
+        Ok(CreateOutcome::DuplicateOrderNumber {
+            code,
+            message,
+            existing_number,
+        })
+    }
+
+    /// The external-id query of the create step: `Some` when it settles the
+    /// step — a live document of ours that is not `request.reversed`
+    /// ([`CreateOutcome::Found`]) or an invalid holder
+    /// ([`CreateOutcome::Collision`]) — `None` when nothing live of ours is
+    /// there.
+    ///
+    /// # Errors
+    ///
+    /// [`Unconfirmed::Transport`] when the query itself failed.
+    async fn settled_by_query(
+        &self,
+        request: &CreateStepRequest<'_>,
+    ) -> Result<Option<CreateOutcome>, Unconfirmed> {
+        match self
+            .seen(request.external_id, request.order, request.kind)
+            .await
+        {
+            Ok(Seen::Collision(found)) => Ok(Some(CreateOutcome::Collision(found))),
+            Ok(Seen::Live(found)) if Some(found.number()) != request.reversed => {
+                Ok(Some(CreateOutcome::Found(found)))
+            }
+            // Nothing (code 7), a reversed document, or the document the
+            // lookup saw reversed and the server still reports live.
+            Ok(Seen::Live(_) | Seen::Reversed(_) | Seen::Absent) => Ok(None),
+            Err(message) => Err(Unconfirmed::Transport(message)),
+        }
+    }
+
+    /// The external-id query of both steps, validated against this gateway's
+    /// account (design §3).
+    ///
+    /// # Errors
+    ///
+    /// The message of a failed query (transport, parse, unavailability or
+    /// another szamlazz.hu error); code 7 is [`Seen::Absent`].
+    async fn seen(
+        &self,
+        external_id: &ExternalId,
+        order: &OrderKey,
+        kind: IssuedKind,
+    ) -> Result<Seen, String> {
+        let selector = InvoiceSelector::ExternalId(external_id.as_str().to_owned());
+        match self.query_raw(selector).await {
+            Ok(found) if !self.is_ours(&found, order, kind) => {
+                tracing::warn!(number = %found.number(), "external id collision");
+                Ok(Seen::Collision(Box::new(found)))
+            }
+            Ok(found) if found.is_live() => {
+                tracing::info!(number = %found.number(), "found live under external id");
+                Ok(Seen::Live(Box::new(found)))
+            }
+            Ok(found) => {
+                tracing::info!(number = %found.number(), "found reversed under external id");
+                Ok(Seen::Reversed(Box::new(found)))
+            }
+            Err(QueryError::NotFound) => Ok(Seen::Absent),
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -594,10 +816,7 @@ impl Gateway {
     /// The order-number hint: the most recently issued document of any kind
     /// carrying the order number.
     pub async fn hint(&self, order: &OrderKey) -> QueryOutcome {
-        outcome(
-            self.query_raw(InvoiceSelector::OrderNumber(order.as_str().to_owned()))
-                .await,
-        )
+        outcome(self.hint_raw(order).await)
     }
 
     /// Queries by any selector and returns the full document (for the public
@@ -730,23 +949,10 @@ impl Gateway {
         }
     }
 
-    /// Step 1 (and the 71/152 re-query) of [`Self::issue`]: `Ok(Some)` on a
-    /// hit (validated by the caller), `Ok(None)` on code 7, `Err` when the
-    /// check itself failed.
-    async fn query_by_external_id(
-        &self,
-        request: &IssueRequest<'_>,
-    ) -> Result<Option<Box<InvoiceDocument>>, String> {
-        match self
-            .query_raw(InvoiceSelector::ExternalId(
-                request.external_id.as_str().to_owned(),
-            ))
+    /// The order-number hint as a raw query result.
+    async fn hint_raw(&self, order: &OrderKey) -> Result<InvoiceDocument, QueryError> {
+        self.query_raw(InvoiceSelector::OrderNumber(order.as_str().to_owned()))
             .await
-        {
-            Ok(document) => Ok(Some(Box::new(document))),
-            Err(QueryError::NotFound) => Ok(None),
-            Err(error) => Err(error.to_string()),
-        }
     }
 
     async fn query_raw(&self, selector: InvoiceSelector) -> Result<InvoiceDocument, QueryError> {
@@ -805,6 +1011,19 @@ pub fn is_invoice_family(tipus: &str) -> bool {
     matches!(tipus, "SZ" | "ES" | "VS")
 }
 
+/// What the external-id query of the lookup and create steps saw, validated
+/// (design §3).
+enum Seen {
+    /// Code 7.
+    Absent,
+    /// A live document of ours.
+    Live(Box<InvoiceDocument>),
+    /// A reversed document of ours.
+    Reversed(Box<InvoiceDocument>),
+    /// A document that fails validation. Never trusted.
+    Collision(Box<InvoiceDocument>),
+}
+
 /// A failed create-like call, classified for the outcome enums.
 enum Failure {
     Rejected {
@@ -857,9 +1076,9 @@ fn classify_failure(error: ClientError) -> Failure {
     }
 }
 
-/// Step 2 of [`Gateway::issue`]: whether the order-number hint is a live
+/// Step 2 of [`Gateway::lookup`]: whether the order-number hint is a live
 /// invoice-kind document that is neither known to be ours nor the document
-/// the pre-query saw under our external id.
+/// seen under our external id.
 fn is_foreign(found: &InvoiceDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
     is_invoice_family(&found.info.document_type)
         && found.is_live()
@@ -887,11 +1106,8 @@ fn invoice_selector(selector: &Selector) -> InvoiceSelector {
 
 #[cfg(test)]
 mod tests {
-    use jiff::civil::date;
     use rust_decimal::dec;
-    use szamlazz_agent::ops::invoice::{Buyer, InvoiceHeader, InvoiceKind};
     use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
-    use szamlazz_agent::{Currency, Language, PaymentMethod};
 
     use super::*;
 
@@ -905,70 +1121,6 @@ mod tests {
 
     fn response(body: &str) -> RawResponse {
         RawResponse::new([("szlahu_id", "924307747")], body.as_bytes().to_vec())
-    }
-
-    /// The smallest create request whose response parses.
-    fn create_request() -> CreateInvoice {
-        CreateInvoice::new(
-            InvoiceKind::Proforma,
-            InvoiceHeader::new(
-                date(2026, 7, 4),
-                date(2026, 7, 12),
-                PaymentMethod::Transfer,
-                Currency::HUF,
-                Language::Hungarian,
-            ),
-            Buyer::new("A", "1", "B", "C"),
-            Vec::new(),
-        )
-    }
-
-    #[test]
-    fn creation_result_with_a_number_is_issued() {
-        let result = create_request()
-            .parse(&response(&created("SZ-1", "1000", "1270", "270")))
-            .expect("parse");
-        let outcome = IssueOutcome::from(result.clone());
-        assert_eq!(outcome, IssueOutcome::Issued(result));
-
-        let IssueOutcome::Issued(issued) = outcome else {
-            unreachable!()
-        };
-        assert_eq!(
-            issued.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("SZ-1")
-        );
-        assert_eq!(issued.net_total, Some(dec!(1000)));
-        assert_eq!(issued.gross_total, Some(dec!(1270)));
-        assert_eq!(issued.outstanding, Some(dec!(270)));
-        assert_eq!(
-            issued.customer_account_url.as_deref(),
-            Some("https://example.test/acct")
-        );
-        assert_eq!(issued.document_id, Some(924_307_747));
-        assert!(!issued.notification_delivery_failed);
-    }
-
-    #[test]
-    fn creation_result_without_a_number_is_unknown() {
-        // Only a PDF preview parses without a number.
-        let mut request = create_request();
-        request.header.preview_pdf = Some(true);
-        let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#;
-        let result = request
-            .parse(&RawResponse::new::<&str, &str>(
-                [],
-                body.as_bytes().to_vec(),
-            ))
-            .expect("parse");
-        assert_eq!(result.invoice_number, None);
-        assert_eq!(
-            IssueOutcome::from(result),
-            IssueOutcome::Unknown {
-                code: None,
-                message: "create succeeded without a document number".to_owned(),
-            }
-        );
     }
 
     /// A queried document, as the `szamla` response XML: a test-account

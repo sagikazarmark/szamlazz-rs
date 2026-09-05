@@ -272,7 +272,15 @@ impl Harness {
                 "mode": "test",
                 "supplier_id": SUPPLIER,
             },
-            "issue": { "max_attempts": 2, "first_backoff": "1s", "max_backoff": "2s" },
+            // A short issue policy: two executions of the create step, one
+            // second apart, so exhaustion is observable within the test.
+            "issue": {
+                "max_attempts": 2,
+                "initial_delay": "1s",
+                "factor": 2.0,
+                "max_delay": "2s",
+                "max_duration": "1m",
+            },
         }))
         .expect("config");
         let order = Order::new(&config).expect("order");
@@ -403,10 +411,11 @@ async fn e2e_order_protocol() {
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
+    exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
 }
 
 /// (i) create ⇒ `issued`; a second call with a **new** key ⇒
-/// `already_issued` from the external-id pre-query.
+/// `already_issued` from the lookup step.
 async fn issued_then_already_issued(h: &Harness) {
     h.reset().await;
     h.absent("E2E-1", &["prepayment", "proforma"]).await;
@@ -414,9 +423,11 @@ async fn issued_then_already_issued(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
+    // The lookup step and the create step's own leading query both miss;
+    // the second call's lookup finds the document.
     external_id_query("acct:E2E-1:invoice")
         .respond_with(not_found())
-        .up_to_n_times(1)
+        .up_to_n_times(2)
         .mount(&h.mock)
         .await;
     external_id_query("acct:E2E-1:invoice")
@@ -492,9 +503,11 @@ async fn duplicate_order_number_reconciles(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
+    // Lookup and the create step's leading query miss; the re-query after
+    // the 152 finds the document.
     external_id_query("acct:E2E-3:invoice")
         .respond_with(not_found())
-        .up_to_n_times(1)
+        .up_to_n_times(2)
         .mount(&h.mock)
         .await;
     external_id_query("acct:E2E-3:invoice")
@@ -577,7 +590,7 @@ async fn storno_then_stale_create_then_reissue(h: &Harness) {
     assert_eq!(reversed["storno_number"], "SS-1");
     assert_eq!(reversed["invoice_number"], "SZ-1");
 
-    // The stale create: the pre-query finds the reversed document.
+    // The stale create: the lookup finds the reversed document.
     mount_reversed_sz1(h).await;
     create()
         .respond_with(created("SZ-X", "1000", "1270"))
@@ -596,8 +609,9 @@ async fn storno_then_stale_create_then_reissue(h: &Harness) {
     assert_eq!(stale["invoice_number"], "SZ-1");
     assert_eq!(stale["storno_number"], "SS-1");
 
-    // Reissue: the pre-query passes the reversed document, the hint sees the
-    // storno, the create issues the next document under the same id.
+    // Reissue: the lookup passes the reversed document and its hint sees the
+    // storno; the create step's leading query sees the same reversed
+    // document and issues the next one under the same id.
     mount_reversed_sz1(h).await;
     create()
         .respond_with(created("SZ-2", "1000", "1270"))
@@ -645,8 +659,8 @@ async fn reissue_on_live_is_a_conflict(h: &Harness) {
     eprintln!("(v) reissue on a live document → conflict{{live}}: pass");
 }
 
-/// (vi) the external-id pre-query returns `<sztornozott>true</sztornozott>`
-/// (a UI storno) ⇒ `reversed`, storno number unknown.
+/// (vi) the lookup returns `<sztornozott>true</sztornozott>` (a UI storno)
+/// ⇒ `reversed`, storno number unknown.
 async fn external_reversal_detected(h: &Harness) {
     h.reset().await;
     h.absent("E2E-6", &["prepayment", "proforma", "invoice"])
@@ -702,7 +716,7 @@ async fn external_reversal_detected(h: &Harness) {
     assert_eq!(detected["outcome"], "reversed", "{detected}");
     assert_eq!(detected["invoice_number"], "SZ-6");
     assert_eq!(detected["storno_number"], Value::Null);
-    eprintln!("(vi) sztornozott on the pre-query → reversed: pass");
+    eprintln!("(vi) sztornozott on the lookup → reversed: pass");
 }
 
 /// (vii) a proforma, then an invoice with the default `proforma: auto` ⇒ the
@@ -908,4 +922,62 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
     assert_eq!(issued["invoice_number"], "ES-10");
     assert_eq!(issued["external_id"], "acct:E2E-10:prepayment");
     eprintln!("(x) create_prepayment: proforma option refused, no proforma lookup: pass");
+}
+
+/// (xi) every execution of the create step loses its reply and the re-query
+/// finds nothing ⇒ the run retry policy re-executes the step (one second
+/// later under the test policy — not the handler's two-minute
+/// `initial_interval`), and its exhaustion is a structured `outcome_unknown`
+/// fault naming the order, kind and external id. The
+/// `sys_invocation.retry_count` assertion — run retries must not consume the
+/// handler's `invocation_retry_policy` budget — waits for the SQL helper
+/// of #29.
+async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-11", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-11")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(2)
+        .mount(&h.mock)
+        .await;
+
+    let started = Instant::now();
+    let (status, body) = h
+        .call(
+            "E2E-11",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-11-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, 500, "{body}");
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "the run policy's delay was honoured, not the handler's: {elapsed:?}"
+    );
+
+    // The ingress wraps the handler's terminal error; the fault is the JSON
+    // in its message.
+    let message = body["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an error envelope with a message: {body}"));
+    let fault: Value = serde_json::from_str(message)
+        .unwrap_or_else(|error| panic!("a structured fault ({error}): {message}"));
+    assert_eq!(fault["code"], "outcome_unknown", "{fault}");
+    assert_eq!(fault["order"], "E2E-11");
+    assert_eq!(fault["kind"], "invoice");
+    assert_eq!(fault["external_id"], "acct:E2E-11:invoice");
+    assert!(
+        fault["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("retry with a new Idempotency-Key")),
+        "{fault}"
+    );
+    eprintln!("(xi) exhausted create step → structured outcome_unknown: pass");
 }

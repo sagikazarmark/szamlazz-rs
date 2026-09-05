@@ -93,7 +93,9 @@ inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   id
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
-Every szamlazz.hu call is inside a `ctx.run` with `RunRetryPolicy::max_attempts(1)`; expected outcomes are data.
+Steps 0–2 and the lookup are `ctx.run`s with `RunRetryPolicy::max_attempts(1)` whose expected outcomes are data. The
+create step is the one `ctx.run` under a retry policy — the **issue policy** (§9) — because it is the one step whose
+outcome can be *unknown*.
 
 0. **Validate (pure).** Order key from `ctx.key()`. Validate buyer, items (≥ 1), dates. Normalise `buyer.name`.
    Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
@@ -111,37 +113,58 @@ Every szamlazz.hu call is inside a `ctx.run` with `RunRetryPolicy::max_attempts(
    Under `auto` and `none`, a document under `…:proforma` that fails validation → `conflict{external_id_collision,
    number}` (as in step 1).
    Collect the numbers seen in steps 1–2 as `our_numbers` (for foreign detection).
-3. **Attempt loop** while `attempts < issue.max_attempts`:
-   `out = ctx.run("issue-{kind}-{attempt}", || gateway.issue(IssueRequest{ external_id, kind, order, create, reissue,
-   check_hint: attempt == 1 && (detect_foreign || proforma linked), our_numbers }))`. The gateway validates every found
-   document against its own account (`teszt`, supplier pin); the request carries only what identifies the document.
-   The step, in one closure:
-   - `QueryInvoiceXml(ExternalId)` → `Ok(doc)`: validate → `Collision(doc)` on mismatch; live → `Found(doc)`;
-     reversed (`sztornozott == Some(true)`) → `reissue ? continue : FoundReversed(doc)`. 7 → continue. Transport →
-     `Transport` (never create when the check itself failed).
-   - Hint, if `check_hint`: `QueryInvoiceXml(OrderNumber)` → live `SZ|ES|VS` whose number ∉ `our_numbers` and ≠ any
-     document already seen under our ext id → `Foreign(doc)`; otherwise continue.
-   - `CreateInvoice` → `Issued(r)` | `Rejected{code, message}` | `Unknown{code?, message}` (56 without number, 1, 55,
-     `szlahu_down`) | 71/152 → re-query ext id → `Found(doc)` (live) or `DuplicateOrderNumber{message}` | `Transport`.
-   Branch on data:
-   - `Found(doc)` → `outcome: already_issued{number, totals}` if the query preceded a create attempt in this
-     invocation… — precisely: `Found` from the *pre-query* → `reissue ? conflict{live} : already_issued`; `Found`
-     from the *71/152 re-query* → `reconciled`. (The step tags which.)
-   - `FoundReversed(doc)` → `outcome: reversed{number, storno_number?}` (storno number from the hint if the newest
-     document under the order is an `SS` with `hivszamlaszam == number`, else absent).
-   - `Issued(r)` → `outcome: issued` (+ `warnings: [notification_delivery_failed]`).
-   - `Collision(doc)` → `conflict{external_id_collision, number}`.
-   - `Foreign(doc)` → `conflict{foreign, existing_number}`.
-   - `Rejected{code}` → `outcome: rejected{code, message}`.
-   - `DuplicateOrderNumber` → `attempt ≤ 2` → treat as `Unknown` (sleep, loop; the re-executed closure re-queries),
-     else `conflict{duplicate_order_number}`.
-   - `Transport | Unknown` → attempts remain → `ctx.sleep(backoff)` (`first_backoff`, ×2, ≤ `max_backoff`) → loop.
-4. **Exhausted.** `TerminalError{outcome_unknown, json{order, kind, external_id}}`. Nothing to record: the next
-   invocation's pre-query finds whatever landed.
-5. **Crash path.** Restate re-dispatches after `initial_interval` (2 m > 60 s client timeout + observed stalls) with
-   the journal; completed runs replay; the open `issue-…` closure re-executes and begins with the ext-id query, so a
-   landed create is `Found`, not re-issued. Second guard: with the toggle ON, a byte-identical resend while the first
-   document is live is answered with the same number.
+3. **Lookup** — one read-only durable step, `ctx.run("lookup-{kind}", || gateway.lookup(LookupRequest{ external_id,
+   kind, order, our_numbers }))`. The gateway validates every found document against its own account (`teszt`,
+   supplier pin); the request carries only what identifies the document. In one closure:
+   - `QueryInvoiceXml(ExternalId)` → `Ok(doc)`: validate → `Collision(doc)` on mismatch; live → `Live(doc)` (no
+     hint: nothing will be created); reversed (`sztornozott == Some(true)`) → remember it and continue. 7 → continue.
+     Transport → `Transport`.
+   - The order-number hint, on every lookup **except for correctives**: `QueryInvoiceXml(OrderNumber)` → a live
+     `SZ|ES|VS` whose number ∉ `our_numbers` and ≠ the document seen under our ext id → `Foreign(doc)` — also when
+     our own document under the id is reversed, since no create may proceed past it; a miss (7) or an API error
+     says nothing about foreign documents and continues; the hint's transport failure → `Transport` (nothing may be
+     concluded).
+   - Otherwise `Absent`, or `Reversed{doc, storno_number?}` with the storno number when the hint is the `SS` whose
+     `hivszamlaszam` is the reversed document (absent otherwise, and for correctives).
+   It settles every case that needs no create: `Live` → `reissue ? conflict{live, number} : already_issued{number,
+   totals}`; `Reversed` → `reissue ? proceed, remembering the number : outcome: reversed{number, storno_number?}`;
+   `Collision` → `conflict{external_id_collision, number}`; `Foreign` → `conflict{foreign, existing_number}`;
+   `Transport` → `TerminalError{unavailable}`; `Absent` → proceed.
+4. **Create** — one durable step under the issue policy, `ctx.run("create-{kind}", || gateway.create(CreateStepRequest{
+   external_id, kind, order, create, reversed }))` with `RunRetryPolicy::new().initial_delay(2m)
+   .exponentiation_factor(2.0).max_delay(10m).max_attempts(5).max_duration(1h)` (§9). **Every execution is
+   query-first, inside the closure** — a separate journaled pre-query would replay its stale "nothing" on the retry
+   and re-send. The gateway returns settled-vs-unconfirmed: every szamlazz.hu answer is `Ok(CreateOutcome)`, and
+   `Err(Unconfirmed)` (a plain `std::error::Error`, retryable to the SDK) is the one thing the policy re-executes. The
+   closure never returns a `TerminalError` itself.
+   - Leading query `QueryInvoiceXml(ExternalId)` → a validated live document that is not `reversed` → `Found(doc)`
+     (an earlier execution created it; **nothing is sent**); invalid → `Collision(doc)`; 7 or the reversed document →
+     send; transport → `Err(Transport)` (never create when the check itself failed).
+   - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`.
+   - Transport failure or an open code (1, 55, 56 without a number, `szlahu_down`): re-query the external id once,
+     immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; collision → `Collision`; nothing →
+     `Err(Transport | Open)`. The run policy then re-executes the whole handler after the delay: the journal
+     replays to the create step and the leading query runs again — the re-check ADR 0002 sizes the 2-minute gap for.
+   - 71/152: re-query the external id → live and ours → `Reconciled(doc)`; not ours → `Collision(doc)`; reversed and
+     ours, or absent → the duplicate is not ours. For correctives that is `Rejected{code, message}` (exempt from the
+     order-number check — verified; no order-number query). Otherwise `QueryInvoiceXml(OrderNumber)` names it:
+     the newest document under the order is a live document of our kind → `DuplicateOrderNumber{code, message,
+     existing_number}`, another kind or reversed → without `existing_number`, a failed naming query → without it;
+     7 (nothing under the order, yet 71/152) → `Err(Contradiction)`, retryable.
+   Any `Err` from the run — exhaustion (`TerminalError` 500 carrying the last `Unconfirmed`) or cancellation (409)
+   — is mapped by the handler to `TerminalError{outcome_unknown, json{order, kind, external_id}}`; a cancel
+   mid-create therefore reports `outcome_unknown`. Nothing is recorded: the next invocation's lookup finds whatever
+   landed.
+5. **Branch on data.** `Issued(r)` → `outcome: issued` (+ `warnings: [notification_delivery_failed]`); `Found(doc)`
+   → `outcome: issued{number, totals}` (the caller asked for this document and has it — ADR 0003); `Reconciled(doc)`
+   → `reconciled{number, totals}`; `Collision(doc)` → `conflict{external_id_collision, number}`;
+   `DuplicateOrderNumber` → `conflict{duplicate_order_number, code, message, existing_number?}`; `Rejected` →
+   `rejected{code, message}`.
+6. **Crash path.** A crash mid-closure leaves no journal entry; Restate re-dispatches after the handler's
+   `initial_interval` (2 m > 60 s client timeout + observed stalls) with the journal; completed runs replay; the open
+   `create-…` closure re-executes and begins with the external-id query, so a landed create is `Found`, not
+   re-issued. Second guard: with the toggle ON, a byte-identical resend while the first document is live is answered
+   with the same number.
 
 Kind specifics: `create_proforma` — kind `D`; no exclusivity step; `proforma` option not applicable. `create_prepayment`
 — exclusivity against `…:invoice`; `proforma` option not applicable (anything but `auto` → `invalid_input`) and **no
@@ -152,9 +175,10 @@ derives `consumed` from the `ES`. `create_final` — `ctx.run(query "…:prepaym
 `conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server
 enforces one final per prepayment (73 → `rejected`); the server does not net the prepayment into the final's totals.
 `correct_invoice` — `ctx.run(verify invoice_number)`: 7 → `invalid_input`, reversed → `conflict{base_reversed}`,
-`rendelesszam ≠ key` → `conflict{not_managed}`; ext id `…:corrective:{correction_id}`; same loop without the 71/152
-path (correctives are exempt from the order-number check — verified); a new `correction_id` issues a new corrective
-by contract.
+`rendelesszam ≠ key` → `conflict{not_managed}`; ext id `…:corrective:{correction_id}`; the same lookup and create
+steps with the corrective exemption (verified): no order-number hint — the live base invoice under the order is
+expected — and a 71/152 the re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new
+corrective by contract.
 
 ## 6. Storno protocol (`Szamlazz.Order.storno_invoice`)
 
@@ -164,7 +188,7 @@ the storno request attaches to the storno document (verified).
 1. `ctx.run(verify number)`: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
    `Szamlazz.Agent.storno`); `sztornozott == Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno
    number via the hint when the newest document is the matching `SS`); `tipus ∉ {SZ, ES, VS, HS}` → `rejected{not_stornoable}`.
-2. Loop ≤ 3 attempts (`first_backoff`, ×2): `ctx.run("storno-{number}-{n}", || gateway.storno(StornoAttempt{ number,
+2. Loop ≤ 3 attempts (`issue.initial_delay`, ×2, ≤ `issue.max_delay`): `ctx.run("storno-{number}-{n}", || gateway.storno(StornoAttempt{ number,
    external_id: "{namespace}:{order}:storno:{number}", comment, e_invoice }))`:
    (a) query by the storno ext id → `SS` with `hivszamlaszam == number` → `AlreadyReversed{storno_number}`;
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon}` **without `keltDatum`** (352 otherwise — verified);
@@ -235,12 +259,16 @@ supplier_id = 972720          # optional; when set, validated against szallito/i
 
 [defaults]   # as v1: e_invoice, language, currency, exchange_rate_bank, template?, send_email?, number_prefix?, extra_logo?, aggregator?, guardian?
 [seller]     # as v1
-[issue]
-max_attempts = 5
-first_backoff = "2m"
-max_backoff = "10m"
-detect_foreign = true         # the hint is mandatory when a proforma is linked, regardless
+[issue]      # the issue policy: the create step's run retry policy (§5 step 4); shapes no journal entry
+max_attempts = 5              # executions of the create step, including the first
+initial_delay = "2m"          # before the first re-execution; > client timeout + the longest observed server stall
+factor = 2.0
+max_delay = "10m"
+max_duration = "1h"           # the hard bound (the attempt count is not durable across replays — ADR 0004)
 ```
+
+Until #30 the storno loop reads `initial_delay` / `max_delay` for its own doubling backoff. There is no
+`detect_foreign`: the order-number hint runs on every lookup except for correctives.
 
 Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `due_date`, `payment_method`, `paid`,
 `comment?`, `issue_date?`, overrides.
@@ -252,17 +280,22 @@ Unchanged from v1: `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAM
 
 ## 11. Testing
 
-- `gateway`: wiremock tests using upstream-shaped responses (`Found`/`FoundReversed` with and without `reissue`,
-  `Dup71` re-query, storno validation incl. the D/SL no-op, 335, 7, `Collision`, `Foreign`); the gateway validates
-  found documents against the account it was opened for.
-- `service`: discovery test (names, handler set, attributes), an endpoint build smoke test, and `prepare` refusing
-  `options.proforma` on every kind but `create_invoice`.
+- `gateway`: wiremock tests using upstream-shaped responses — the lookup matrix (`Absent`, `Live`, `Reversed` with
+  the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
+  (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
+  landed, the 71/152 matrix incl. `existing_number` and the contradiction, the corrective's 71/152 → `Rejected`),
+  storno validation incl. the D/SL no-op, 335, 7; the gateway validates found documents against the account it was
+  opened for.
+- `service`: discovery test (names, handler set, attributes), an endpoint build smoke test, `prepare` refusing
+  `options.proforma` on every kind but `create_invoice`, and the issue policy's field-for-field mapping onto
+  `RunRetryPolicy`.
 - End to end (docker-gated): Restate 1.7.8 + wiremock as szamlazz.hu — issued → already_issued (new key) and
   Idempotency-Key replay (same key, create mock `expect(1)`); 152 → reconciled; storno → reversed; stale create →
   reversed; `reissue` → issued as newest holder; `reissue` on live → `conflict{live}`; `sztornozott` → reversed;
   proforma auto-link and `consumed` in `get`; `get` shape; a collision on the secondary (`…:prepayment`) lookup →
   `conflict{external_id_collision}` with the create mock `expect(0)` and the slot absent in `get`; `create_prepayment`
-  refusing `options.proforma` and issuing without a proforma lookup.
+  refusing `options.proforma` and issuing without a proforma lookup; an exhausted create step (every reply lost, a
+  short test policy) → a structured `outcome_unknown` 500 within the run policy's delays, not the handler's.
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)

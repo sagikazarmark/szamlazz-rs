@@ -1,5 +1,5 @@
-//! Wiremock tests of the `gateway` module: the issue closure
-//! (design §5 step 3), storno validation (§6), deletion, credit entries and
+//! Wiremock tests of the `gateway` module: the lookup and create steps
+//! (design §5 steps 3–4), storno validation (§6), deletion, credit entries and
 //! transport failures, against synthetic szamlazz.hu responses.
 
 use jiff::civil::date;
@@ -8,8 +8,9 @@ use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
 use restate_szamlazz::gateway::{
-    DeleteOutcome, DocumentRefs, Gateway, InvoiceDocumentExt as _, IssueOutcome, IssueRequest,
-    QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt, StornoOutcome,
+    CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
+    InvoiceDocumentExt as _, LookupOutcome, LookupRequest, QueryError, QueryOutcome,
+    SetPaymentsOutcome, StornoAttempt, StornoOutcome, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -22,11 +23,6 @@ use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 const SUPPLIER: u64 = 972_720;
 
 // ----- fixtures --------------------------------------------------------------
-
-/// The issued number of a create result.
-fn number_of(issued: &InvoiceCreationResult) -> Option<&str> {
-    issued.invoice_number.as_ref().map(InvoiceNumber::as_str)
-}
 
 /// A gateway for a test account pinned to `SUPPLIER`; every found document is
 /// validated against those two pins.
@@ -97,6 +93,14 @@ impl<'a> Doc<'a> {
             test: true,
             supplier_id: SUPPLIER,
             payments: &[],
+        }
+    }
+
+    /// A document of ours that carries `<sztornozott>true</sztornozott>`.
+    const fn reversed(number: &'a str, tipus: &'a str) -> Self {
+        Self {
+            reversed: true,
+            ..Self::new(number, tipus)
         }
     }
 
@@ -244,37 +248,61 @@ impl Harness {
         Self { server, gateway }
     }
 
-    async fn issue(&self, check_hint: bool, our_numbers: &[String]) -> IssueOutcome {
-        self.issue_with(check_hint, our_numbers, false).await
+    /// The lookup step for an invoice of `ORD-1`.
+    async fn lookup(&self, our_numbers: &[String]) -> LookupOutcome {
+        self.lookup_kind(IssuedKind::Invoice, &external_id(), our_numbers)
+            .await
     }
 
-    async fn issue_with(
+    async fn lookup_kind(
         &self,
-        check_hint: bool,
+        kind: IssuedKind,
+        external_id: &ExternalId,
         our_numbers: &[String],
-        reissue: bool,
-    ) -> IssueOutcome {
+    ) -> LookupOutcome {
+        self.gateway
+            .lookup(LookupRequest {
+                external_id,
+                kind,
+                order: &order(),
+                our_numbers,
+            })
+            .await
+    }
+
+    /// The create step for an invoice of `ORD-1`; `reversed` is the number
+    /// the lookup step saw reversed under the id.
+    async fn create(&self, reversed: Option<&str>) -> Result<CreateOutcome, Unconfirmed> {
+        self.create_kind(IssuedKind::Invoice, &external_id(), reversed)
+            .await
+    }
+
+    async fn create_kind(
+        &self,
+        kind: IssuedKind,
+        external_id: &ExternalId,
+        reversed: Option<&str>,
+    ) -> Result<CreateOutcome, Unconfirmed> {
         let order = order();
-        let external_id = external_id();
+        let refs = if kind == IssuedKind::Corrective {
+            DocumentRefs {
+                corrected: Some("SZ-1"),
+                ..DocumentRefs::default()
+            }
+        } else {
+            DocumentRefs::default()
+        };
         let create = self
             .gateway
-            .build_create(
-                IssuedKind::Invoice,
-                &document(),
-                &order,
-                &external_id,
-                DocumentRefs::default(),
-            )
+            .build_create(kind, &document(), &order, external_id, refs)
             .expect("build");
         self.gateway
-            .issue(IssueRequest {
-                external_id: &external_id,
-                kind: IssuedKind::Invoice,
+            .create(CreateStepRequest {
+                external_id,
+                kind,
                 order: &order,
                 create: &create,
-                reissue,
-                check_hint,
-                our_numbers,
+                reversed,
             })
             .await
     }
@@ -290,268 +318,58 @@ impl Harness {
     }
 }
 
-// ----- issue -----------------------------------------------------------------
+// ----- lookup ----------------------------------------------------------------
 
 #[tokio::test]
-async fn pre_query_hit_is_found_and_nothing_is_created() {
+async fn lookup_with_nothing_under_the_id_or_the_order_is_absent() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    order_query()
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(h.lookup(&[]).await, LookupOutcome::Absent);
+    assert_eq!(h.bodies().await.len(), 2, "the external id, then the hint");
+}
+
+#[tokio::test]
+async fn lookup_finds_our_live_document_and_takes_no_hint() {
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
         .respond_with(Doc::new("SZ-1", "SZ").response())
         .expect(1)
         .mount(&h.server)
         .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
+    order_query()
+        .respond_with(Doc::new("SZ-77", "SZ").response())
         .expect(0)
         .mount(&h.server)
         .await;
 
-    match h.issue(true, &[]).await {
-        IssueOutcome::Found(found) => {
+    match h.lookup(&[]).await {
+        LookupOutcome::Live(found) => {
             assert_eq!(found.number(), "SZ-1");
             assert_eq!(found.info.document_type, "SZ");
-            assert_eq!(found.info.reversed, None);
             assert!(found.is_live());
             assert_eq!(found.info.order_number.as_deref(), Some("ORD-1"));
             assert_eq!(found.totals.total.gross, dec!(1270));
             assert_eq!(found.totals.total.net, dec!(1000));
-            assert!(found.info.test);
-            assert_eq!(found.e_invoice(), Some(true));
             assert_eq!(found.supplier.id, Some(SUPPLIER));
-            assert_eq!(found.info.id, 924_307_338);
             assert_eq!(found.buyer.name, "Buyer", "the journaled document is whole");
         }
-        other => panic!("expected Found, got {other:?}"),
+        other => panic!("expected Live, got {other:?}"),
     }
-    assert_eq!(h.bodies().await.len(), 1, "no hint query after a hit");
+    assert_eq!(h.bodies().await.len(), 1, "settled without the hint");
 }
 
 #[tokio::test]
-async fn pre_query_miss_then_create_is_issued() {
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(not_found())
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-2", "1000", "1270"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    let outcome = h.issue(false, &[]).await;
-    match outcome {
-        IssueOutcome::Issued(issued) => {
-            assert_eq!(number_of(&issued), Some("SZ-2"));
-            assert_eq!(issued.net_total, Some(dec!(1000)));
-            assert_eq!(issued.gross_total, Some(dec!(1270)));
-            assert_eq!(issued.outstanding, Some(dec!(1270)));
-            assert_eq!(issued.document_id, Some(924_307_747));
-            assert!(!issued.notification_delivery_failed);
-        }
-        other => panic!("expected Issued, got {other:?}"),
-    }
-    let bodies = h.bodies().await;
-    assert_eq!(bodies.len(), 2, "no hint query when check_hint is false");
-    let create_body = &bodies[1];
-    assert!(create_body.contains("<szamlaKulsoAzon>acct:ORD-1:invoice</szamlaKulsoAzon>"));
-    assert!(create_body.contains("<rendelesSzam>ORD-1</rendelesSzam>"));
-    assert!(create_body.contains("<szamlaLetoltes>false</szamlaLetoltes>"));
-    assert!(create_body.contains("<nev>Kovács Bt.</nev>"));
-}
-
-#[tokio::test]
-async fn duplicate_order_number_then_requery_hit_is_reconciled() {
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(not_found())
-        .up_to_n_times(1)
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(Doc::new("SZ-3", "SZ").response())
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(api_error(
-            "152",
-            "M%C3%A1r+l%C3%A9tez%C5%91+rendel%C3%A9ssz%C3%A1m",
-        ))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    match h.issue(false, &[]).await {
-        IssueOutcome::Reconciled(found) => assert_eq!(found.number(), "SZ-3"),
-        other => panic!("expected Reconciled, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn duplicate_order_number_then_requery_reversed_is_duplicate() {
-    // With `reissue`, the pre-query passes a reversed document; a 152 whose
-    // re-query still sees only that reversed document means the live
-    // duplicate is not ours.
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(
-            Doc {
-                reversed: true,
-                ..Doc::new("SZ-1", "SZ")
-            }
-            .response(),
-        )
-        .expect(2)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(api_error("152", "duplicate"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    assert_eq!(
-        h.issue_with(false, &[], true).await,
-        IssueOutcome::DuplicateOrderNumber {
-            code: "152".to_owned(),
-            message: "duplicate".to_owned(),
-        }
-    );
-}
-
-#[tokio::test]
-async fn reversed_pre_query_hit_without_reissue_is_found_reversed() {
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(
-            Doc {
-                reversed: true,
-                ..Doc::new("SZ-1", "SZ")
-            }
-            .response(),
-        )
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-
-    match h.issue(true, &[]).await {
-        IssueOutcome::FoundReversed(found) => {
-            assert_eq!(found.number(), "SZ-1");
-            assert_eq!(found.info.reversed, Some(true));
-            assert!(!found.is_live());
-        }
-        other => panic!("expected FoundReversed, got {other:?}"),
-    }
-    assert_eq!(h.bodies().await.len(), 1, "no hint, no create");
-}
-
-#[tokio::test]
-async fn reversed_pre_query_hit_with_reissue_proceeds_to_create() {
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(
-            Doc {
-                reversed: true,
-                ..Doc::new("SZ-1", "SZ")
-            }
-            .response(),
-        )
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    // The hint sees the storno of the reversed document: not foreign.
-    order_query()
-        .respond_with(
-            Doc {
-                referenced_invoice: Some("SZ-1"),
-                ..Doc::new("SS-1", "SS")
-            }
-            .response(),
-        )
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-2", "1000", "1270"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    match h.issue_with(true, &[], true).await {
-        IssueOutcome::Issued(issued) => assert_eq!(number_of(&issued), Some("SZ-2")),
-        other => panic!("expected Issued, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn hint_ignores_the_document_seen_under_our_external_id() {
-    // A reversed document of ours under the id, then the same document as
-    // the newest under the order: it is never foreign, even if the hint's
-    // copy looked live.
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(
-            Doc {
-                reversed: true,
-                ..Doc::new("SZ-1", "SZ")
-            }
-            .response(),
-        )
-        .mount(&h.server)
-        .await;
-    order_query()
-        .respond_with(Doc::new("SZ-1", "SZ").response())
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-2", "1000", "1270"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    assert!(matches!(
-        h.issue_with(true, &[], true).await,
-        IssueOutcome::Issued(_)
-    ));
-}
-
-#[tokio::test]
-async fn duplicate_order_number_then_requery_miss_is_duplicate() {
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(not_found())
-        .expect(2)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(api_error(
-            "152",
-            "M%C3%A1r+l%C3%A9tez%C5%91+rendel%C3%A9ssz%C3%A1m",
-        ))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    assert_eq!(
-        h.issue(false, &[]).await,
-        IssueOutcome::DuplicateOrderNumber {
-            code: "152".to_owned(),
-            message: "Már létező rendelésszám".to_owned(),
-        }
-    );
-}
-
-#[tokio::test]
-async fn invalid_documents_under_our_external_id_are_collisions() {
+async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
     let other_order = Doc {
         order: Some("ORD-2"),
         ..Doc::new("SZ-9", "SZ")
@@ -576,59 +394,372 @@ async fn invalid_documents_under_our_external_id_are_collisions() {
             .respond_with(doc.response())
             .mount(&h.server)
             .await;
-        create()
-            .respond_with(created("SZ-X", "1000", "1270"))
+        order_query()
+            .respond_with(not_found())
             .expect(0)
             .mount(&h.server)
             .await;
-        match h.issue(true, &[]).await {
-            IssueOutcome::Collision(found) => assert_eq!(found.number(), doc.number, "{label}"),
+        match h.lookup(&[]).await {
+            LookupOutcome::Collision(found) => assert_eq!(found.number(), doc.number, "{label}"),
             other => panic!("{label}: expected Collision, got {other:?}"),
         }
     }
 }
 
 #[tokio::test]
-async fn live_invoice_under_the_order_is_foreign() {
+async fn lookup_of_our_reversed_document_names_its_storno_from_the_hint() {
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
-        .respond_with(not_found())
-        .mount(&h.server)
-        .await;
-    order_query()
-        .respond_with(Doc::new("SZ-77", "SZ").response())
+        .respond_with(Doc::reversed("SZ-1", "SZ").response())
         .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-
-    match h.issue(true, &["SZ-1".to_owned()]).await {
-        IssueOutcome::Foreign(found) => {
-            assert_eq!(found.number(), "SZ-77");
-            assert_eq!(found.info.document_type, "SZ");
-        }
-        other => panic!("expected Foreign, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn conversion_of_our_proforma_not_under_our_id_is_foreign() {
-    // A live invoice referencing our proforma but not reachable under our
-    // external id was not issued by this service: nothing is adopted.
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(not_found())
         .mount(&h.server)
         .await;
     order_query()
         .respond_with(
             Doc {
-                referenced_proforma: Some("D-1"),
-                ..Doc::new("SZ-78", "SZ")
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new("SS-1", "SS")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.lookup(&[]).await {
+        LookupOutcome::Reversed {
+            document,
+            storno_number,
+        } => {
+            assert_eq!(document.number(), "SZ-1");
+            assert!(!document.is_live());
+            assert_eq!(storno_number.as_deref(), Some("SS-1"));
+        }
+        other => panic!("expected Reversed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn lookup_of_our_reversed_document_has_no_storno_number_when_the_hint_is_not_its_storno() {
+    // The newest document under the order is the reversed document itself
+    // (nothing newer exists) or the storno of another document: no storno
+    // number is known, and neither is foreign.
+    let same = Doc::reversed("SZ-1", "SZ");
+    let other_storno = Doc {
+        referenced_invoice: Some("SZ-0"),
+        ..Doc::new("SS-0", "SS")
+    };
+    for (label, hint) in [("same", same), ("other storno", other_storno)] {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(Doc::reversed("SZ-1", "SZ").response())
+            .mount(&h.server)
+            .await;
+        order_query()
+            .respond_with(hint.response())
+            .mount(&h.server)
+            .await;
+
+        match h.lookup(&[]).await {
+            LookupOutcome::Reversed {
+                document,
+                storno_number,
+            } => {
+                assert_eq!(document.number(), "SZ-1", "{label}");
+                assert_eq!(storno_number, None, "{label}");
+            }
+            other => panic!("{label}: expected Reversed, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn lookup_reports_a_live_invoice_under_the_order_that_is_not_ours_as_foreign() {
+    // Plain foreign; a conversion of our proforma not reachable under our id
+    // (not issued by this service, so nothing is adopted); and a foreign
+    // document beside our own reversed one, where no create — reissue or
+    // not — may proceed.
+    let plain = (not_found(), Doc::new("SZ-77", "SZ"), "SZ-77");
+    let conversion = (
+        not_found(),
+        Doc {
+            referenced_proforma: Some("D-1"),
+            ..Doc::new("SZ-78", "SZ")
+        },
+        "SZ-78",
+    );
+    let beside_reversed = (
+        Doc::reversed("SZ-1", "SZ").response(),
+        Doc::new("ES-79", "ES"),
+        "ES-79",
+    );
+    for (label, (under_id, hint, expected)) in [
+        ("plain", plain),
+        ("conversion", conversion),
+        ("beside reversed", beside_reversed),
+    ] {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(under_id)
+            .mount(&h.server)
+            .await;
+        order_query()
+            .respond_with(hint.response())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        match h.lookup(&["D-1".to_owned()]).await {
+            LookupOutcome::Foreign(found) => assert_eq!(found.number(), expected, "{label}"),
+            other => panic!("{label}: expected Foreign, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn lookup_hint_ignores_our_documents_non_invoices_and_its_own_failure() {
+    let ours = Doc::new("D-1", "D");
+    let ours_by_number = Doc::new("SZ-1", "SZ");
+    let reversed = Doc::reversed("SZ-5", "SZ");
+    let storno = Doc {
+        referenced_invoice: Some("SZ-5"),
+        ..Doc::new("SS-5", "SS")
+    };
+    let proforma = Doc::new("D-9", "D");
+    let cases = [
+        ("our proforma", ours.response()),
+        ("our number", ours_by_number.response()),
+        ("reversed", reversed.response()),
+        ("storno", storno.response()),
+        ("proforma", proforma.response()),
+        ("hint miss", not_found()),
+        ("hint error", body_error("3", "login")),
+    ];
+    for (label, hint) in cases {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(not_found())
+            .mount(&h.server)
+            .await;
+        order_query()
+            .respond_with(hint)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.lookup(&["D-1".to_owned(), "SZ-1".to_owned()]).await,
+            LookupOutcome::Absent,
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lookup_reports_a_failed_query_as_transport() {
+    // A bare 500 with an empty body parses as `UnexpectedBody` in the agent
+    // crate (a `Parse` error), which this layer reports as `Transport`. The
+    // external id first; then the hint, whose own transport failure is not
+    // conclusive either.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.lookup(&[]).await,
+        LookupOutcome::Transport(message) if message.contains("empty response")
+    ));
+
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .mount(&h.server)
+        .await;
+    order_query()
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+    assert!(matches!(h.lookup(&[]).await, LookupOutcome::Transport(_)));
+}
+
+#[tokio::test]
+async fn lookup_of_a_corrective_takes_no_hint() {
+    // The live base invoice under the order is expected, not foreign.
+    let h = Harness::start().await;
+    let corrective_id = ExternalId::new("acct:ORD-1:corrective:c1");
+    external_id_query(corrective_id.as_str())
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    order_query()
+        .respond_with(Doc::new("SZ-1", "SZ").response())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.lookup_kind(IssuedKind::Corrective, &corrective_id, &[])
+            .await,
+        LookupOutcome::Absent
+    );
+    assert_eq!(h.bodies().await.len(), 1);
+}
+
+#[tokio::test]
+async fn corrective_with_a_live_base_under_the_order_is_issued() {
+    // Lookup, then create: the base invoice is the newest document under the
+    // order throughout and is never queried; the corrective is issued.
+    let h = Harness::start().await;
+    let corrective_id = ExternalId::new("acct:ORD-1:corrective:c1");
+    external_id_query(corrective_id.as_str())
+        .respond_with(not_found())
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    order_query()
+        .respond_with(Doc::new("SZ-1", "SZ").response())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    create()
+        .and(body_string_contains(
+            "<helyesbitoszamla>true</helyesbitoszamla>",
+        ))
+        .and(body_string_contains(
+            "<helyesbitettSzamlaszam>SZ-1</helyesbitettSzamlaszam>",
+        ))
+        .respond_with(created("HS-1", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.lookup_kind(IssuedKind::Corrective, &corrective_id, &[])
+            .await,
+        LookupOutcome::Absent
+    );
+    match h
+        .create_kind(IssuedKind::Corrective, &corrective_id, None)
+        .await
+    {
+        Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("HS-1")),
+        other => panic!("expected Issued, got {other:?}"),
+    }
+}
+
+// ----- create ----------------------------------------------------------------
+
+/// The issued number of a create result.
+fn number_of(issued: &InvoiceCreationResult) -> Option<&str> {
+    issued.invoice_number.as_ref().map(InvoiceNumber::as_str)
+}
+
+#[tokio::test]
+async fn create_with_nothing_under_the_id_sends_the_create_and_is_issued() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-2", "1000", "1270"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Issued(issued)) => {
+            assert_eq!(number_of(&issued), Some("SZ-2"));
+            assert_eq!(issued.net_total, Some(dec!(1000)));
+            assert_eq!(issued.gross_total, Some(dec!(1270)));
+            assert_eq!(issued.outstanding, Some(dec!(1270)));
+            assert_eq!(issued.document_id, Some(924_307_747));
+            assert!(!issued.notification_delivery_failed);
+        }
+        other => panic!("expected Issued, got {other:?}"),
+    }
+    let bodies = h.bodies().await;
+    assert_eq!(bodies.len(), 2, "the leading query, then the create");
+    let create_body = &bodies[1];
+    assert!(create_body.contains("<szamlaKulsoAzon>acct:ORD-1:invoice</szamlaKulsoAzon>"));
+    assert!(create_body.contains("<rendelesSzam>ORD-1</rendelesSzam>"));
+    assert!(create_body.contains("<szamlaLetoltes>false</szamlaLetoltes>"));
+    assert!(create_body.contains("<nev>Kovács Bt.</nev>"));
+}
+
+#[tokio::test]
+async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_nothing() {
+    // The step, driven twice: the first execution's reply is lost (500), its
+    // immediate re-query still sees nothing, so it is unconfirmed; the second
+    // execution's leading query finds the document that landed and sends no
+    // create — also when the lookup step had seen a reversed document
+    // (`reissue: true`) that this live one is not.
+    for (label, reversed) in [("plain", None), ("reissue", Some("SZ-0"))] {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(not_found())
+            .up_to_n_times(2)
+            .mount(&h.server)
+            .await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(Doc::new("SZ-1", "SZ").response())
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        assert!(
+            matches!(h.create(reversed).await, Err(Unconfirmed::Transport(_))),
+            "{label}: first execution"
+        );
+        match h.create(reversed).await {
+            Ok(CreateOutcome::Found(found)) => assert_eq!(found.number(), "SZ-1", "{label}"),
+            other => panic!("{label}: expected Found, got {other:?}"),
+        }
+        assert_eq!(
+            h.bodies().await.len(),
+            4,
+            "{label}: query, create, re-query; query"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_past_the_reversed_document_the_lookup_saw_sends_the_create() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::reversed("SZ-1", "SZ").response())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-2", "1000", "1270"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.create(Some("SZ-1")).await {
+        Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("SZ-2")),
+        other => panic!("expected Issued, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
+    // A collision under the id settles the step; a failed query leaves it
+    // unconfirmed. Neither sends a create.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(
+            Doc {
+                order: Some("ORD-2"),
+                ..Doc::new("SZ-9", "SZ")
             }
             .response(),
         )
@@ -639,129 +770,11 @@ async fn conversion_of_our_proforma_not_under_our_id_is_foreign() {
         .expect(0)
         .mount(&h.server)
         .await;
-
-    match h.issue(true, &["D-1".to_owned()]).await {
-        IssueOutcome::Foreign(found) => {
-            assert_eq!(found.number(), "SZ-78");
-            assert_eq!(
-                found
-                    .info
-                    .referenced_proforma_number
-                    .as_ref()
-                    .map(InvoiceNumber::as_str),
-                Some("D-1")
-            );
-        }
-        other => panic!("expected Foreign, got {other:?}"),
+    match h.create(None).await {
+        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number(), "SZ-9"),
+        other => panic!("expected Collision, got {other:?}"),
     }
-}
 
-#[tokio::test]
-async fn hint_ignores_our_reversed_and_non_invoice_documents() {
-    let ours = Doc::new("SZ-1", "SZ");
-    let reversed = Doc {
-        reversed: true,
-        ..Doc::new("SZ-5", "SZ")
-    };
-    let storno = Doc {
-        referenced_invoice: Some("SZ-5"),
-        ..Doc::new("SS-5", "SS")
-    };
-    let proforma = Doc::new("D-1", "D");
-    for (label, doc) in [
-        ("ours", ours),
-        ("reversed", reversed),
-        ("storno", storno),
-        ("proforma", proforma),
-    ] {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(not_found())
-            .mount(&h.server)
-            .await;
-        order_query()
-            .respond_with(doc.response())
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        create()
-            .respond_with(created("SZ-6", "1000", "1270"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        match h.issue(true, &["SZ-1".to_owned()]).await {
-            IssueOutcome::Issued(issued) => {
-                assert_eq!(number_of(&issued), Some("SZ-6"), "{label}");
-            }
-            other => panic!("{label}: expected Issued, got {other:?}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn hint_miss_or_error_continues_to_create() {
-    for response in [not_found(), body_error("3", "login")] {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(not_found())
-            .mount(&h.server)
-            .await;
-        order_query()
-            .respond_with(response)
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        create()
-            .respond_with(created("SZ-6", "1000", "1270"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        assert!(matches!(h.issue(true, &[]).await, IssueOutcome::Issued(_)));
-    }
-}
-
-#[tokio::test]
-async fn create_rejections_and_unknowns_are_classified() {
-    let cases: [(ResponseTemplate, IssueOutcome); 3] = [
-        (
-            api_error("259", "net"),
-            IssueOutcome::Rejected {
-                code: "259".to_owned(),
-                message: "net".to_owned(),
-            },
-        ),
-        (
-            api_error("1", "maintenance"),
-            IssueOutcome::Unknown {
-                code: Some("1".to_owned()),
-                message: "maintenance".to_owned(),
-            },
-        ),
-        (
-            ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
-            IssueOutcome::Unknown {
-                code: None,
-                message: "maintenance".to_owned(),
-            },
-        ),
-    ];
-    for (response, expected) in cases {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(not_found())
-            .mount(&h.server)
-            .await;
-        create()
-            .respond_with(response)
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        assert_eq!(h.issue(false, &[]).await, expected);
-    }
-}
-
-#[tokio::test]
-async fn failed_pre_query_never_creates() {
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
         .respond_with(ResponseTemplate::new(500))
@@ -772,13 +785,299 @@ async fn failed_pre_query_never_creates() {
         .expect(0)
         .mount(&h.server)
         .await;
-
-    // A bare 500 with an empty body parses as `UnexpectedBody` in the agent
-    // crate (a `Parse` error), which this layer reports as `Transport`.
     assert!(matches!(
-        h.issue(true, &[]).await,
-        IssueOutcome::Transport(message) if message.contains("empty response")
+        h.create(None).await,
+        Err(Unconfirmed::Transport(message)) if message.contains("empty response")
     ));
+}
+
+#[tokio::test]
+async fn create_rejection_is_settled_without_a_re_query() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("259", "net"))
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.create(None).await,
+        Ok(CreateOutcome::Rejected {
+            code: "259".to_owned(),
+            message: "net".to_owned(),
+        })
+    );
+}
+
+/// A success without a number: `xmlszamlavalasz` without `<szamlaszam>`,
+/// which the agent crate refuses to parse for a create.
+fn created_without_a_number() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(
+        r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#,
+        "application/xml",
+    )
+}
+
+#[tokio::test]
+async fn create_with_an_open_outcome_re_queries_once_and_is_unconfirmed_when_nothing_landed() {
+    let cases: [(&str, ResponseTemplate, Unconfirmed); 4] = [
+        (
+            "maintenance",
+            api_error("1", "maintenance"),
+            Unconfirmed::Open {
+                code: Some("1".to_owned()),
+                message: "maintenance".to_owned(),
+            },
+        ),
+        (
+            "signing",
+            api_error("55", "signing"),
+            Unconfirmed::Open {
+                code: Some("55".to_owned()),
+                message: "signing".to_owned(),
+            },
+        ),
+        (
+            "down",
+            ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
+            Unconfirmed::Open {
+                code: None,
+                message: "maintenance".to_owned(),
+            },
+        ),
+        (
+            "no number",
+            created_without_a_number(),
+            Unconfirmed::Transport("missing szamlaszam in response".to_owned()),
+        ),
+    ];
+    for (label, response, expected) in cases {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(not_found())
+            .expect(2)
+            .mount(&h.server)
+            .await;
+        create().respond_with(response).mount(&h.server).await;
+
+        assert_eq!(h.create(None).await, Err(expected), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn create_with_an_open_outcome_is_found_when_the_re_query_sees_the_document() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::new("SZ-4", "SZ").response())
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("55", "signing"))
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Found(found)) => assert_eq!(found.number(), "SZ-4"),
+        other => panic!("expected Found, got {other:?}"),
+    }
+}
+
+// ----- create: the duplicate order number (71/152) --------------------------
+
+const DUPLICATE_MESSAGE: &str = "M%C3%A1r+l%C3%A9tez%C5%91+rendel%C3%A9ssz%C3%A1m";
+
+/// The leading query misses, the create answers 152, and the re-query sees
+/// `under_id`.
+async fn duplicate_harness(under_id: ResponseTemplate) -> Harness {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(under_id)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("152", DUPLICATE_MESSAGE))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    h
+}
+
+#[tokio::test]
+async fn duplicate_order_number_with_our_live_document_under_the_id_is_reconciled() {
+    let h = duplicate_harness(Doc::new("SZ-3", "SZ").response()).await;
+    order_query()
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Reconciled(found)) => assert_eq!(found.number(), "SZ-3"),
+        other => panic!("expected Reconciled, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn duplicate_order_number_with_an_invalid_document_under_the_id_is_a_collision() {
+    let h = duplicate_harness(
+        Doc {
+            order: Some("ORD-2"),
+            ..Doc::new("SZ-9", "SZ")
+        }
+        .response(),
+    )
+    .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number(), "SZ-9"),
+        other => panic!("expected Collision, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn duplicate_order_number_names_the_existing_document_when_our_kind_is_newest() {
+    // Nothing under the id, or only our reversed document (a reissue): the
+    // live duplicate is not ours; the order-number query names it when it is
+    // a live document of the kind being issued.
+    let absent = (not_found(), None);
+    let reversed = (Doc::reversed("SZ-1", "SZ").response(), Some("SZ-1"));
+    for (label, (under_id, reversed)) in [("absent", absent), ("reversed", reversed)] {
+        let h = duplicate_harness(under_id).await;
+        order_query()
+            .respond_with(Doc::new("SZ-77", "SZ").response())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.create(reversed).await,
+            Ok(CreateOutcome::DuplicateOrderNumber {
+                code: "152".to_owned(),
+                message: "Már létező rendelésszám".to_owned(),
+                existing_number: Some("SZ-77".to_owned()),
+            }),
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_order_number_has_no_existing_number_when_another_kind_is_newest() {
+    // The newest document under the order is a proforma, a storno, or a
+    // reversed document of our kind: none of them is the live duplicate.
+    let proforma = Doc::new("D-1", "D");
+    let storno = Doc {
+        referenced_invoice: Some("SZ-0"),
+        ..Doc::new("SS-0", "SS")
+    };
+    let reversed_of_our_kind = Doc::reversed("SZ-0", "SZ");
+    for (label, newest) in [
+        ("proforma", proforma),
+        ("storno", storno),
+        ("reversed", reversed_of_our_kind),
+    ] {
+        let h = duplicate_harness(not_found()).await;
+        order_query()
+            .respond_with(newest.response())
+            .mount(&h.server)
+            .await;
+
+        assert_eq!(
+            h.create(None).await,
+            Ok(CreateOutcome::DuplicateOrderNumber {
+                code: "152".to_owned(),
+                message: "Már létező rendelésszám".to_owned(),
+                existing_number: None,
+            }),
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_order_number_with_nothing_under_the_order_is_unconfirmed() {
+    let h = duplicate_harness(not_found()).await;
+    order_query()
+        .respond_with(not_found())
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.create(None).await,
+        Err(Unconfirmed::Contradiction {
+            code: "152".to_owned(),
+            message: "Már létező rendelésszám".to_owned(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_query() {
+    // Correctives are exempt from the order-number check (verified), so a
+    // 71/152 the re-query cannot resolve is an ordinary rejection, and the
+    // live base invoice under the order is never consulted; a re-query that
+    // finds the corrective is still reconciled.
+    let corrective_id = ExternalId::new("acct:ORD-1:corrective:c1");
+
+    let h = Harness::start().await;
+    external_id_query(corrective_id.as_str())
+        .respond_with(not_found())
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    order_query()
+        .respond_with(Doc::new("SZ-1", "SZ").response())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("71", "duplicate"))
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.create_kind(IssuedKind::Corrective, &corrective_id, None)
+            .await,
+        Ok(CreateOutcome::Rejected {
+            code: "71".to_owned(),
+            message: "duplicate".to_owned(),
+        })
+    );
+
+    let h = Harness::start().await;
+    external_id_query(corrective_id.as_str())
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query(corrective_id.as_str())
+        .respond_with(Doc::new("HS-1", "HS").response())
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("71", "duplicate"))
+        .mount(&h.server)
+        .await;
+    match h
+        .create_kind(IssuedKind::Corrective, &corrective_id, None)
+        .await
+    {
+        Ok(CreateOutcome::Reconciled(found)) => assert_eq!(found.number(), "HS-1"),
+        other => panic!("expected Reconciled, got {other:?}"),
+    }
 }
 
 // ----- queries ---------------------------------------------------------------

@@ -25,7 +25,7 @@ docker run --rm -p 9080:9080 \
 
 ## Prerequisite
 
-The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON**. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id pre-query inside every attempt is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
+The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON**. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id query inside every execution of the create step is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
 
 One deployment serves one szamlazz.hu account. A second account is a second deployment with its own `Szamlazz.Order` service.
 
@@ -64,11 +64,12 @@ reply_to = "..."
 subject = "..."
 body = "..."
 
-[issue]
-max_attempts = 5
-first_backoff = "2m"
-max_backoff = "10m"
-detect_foreign = true         # the hint is mandatory when a proforma is linked, regardless
+[issue]                       # the issue policy: the create step's run retry policy
+max_attempts = 5              # executions of the create step, including the first
+initial_delay = "2m"          # before the first re-execution; longer than a client timeout plus the longest observed server stall
+factor = 2.0
+max_delay = "10m"
+max_duration = "1h"           # the hard bound on re-executing the step
 ```
 
 `account.agent_key` (the Számla Agent key) is a secret. Keep it out of the file and supply it through the environment instead:
@@ -139,7 +140,7 @@ curl localhost:8080/Szamlazz.Order/ORD-1001/create_invoice \
 2. **Any error** from an issuing or storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`" (the stored completion of a failed invocation is replayed under the same key for the retention period — verified); the handler reconciles by external id, so the retry is safe. Never interpret an error as "no document exists".
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the flag can never cause a duplicate.
 
-Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery; the external-id pre-query inside every attempt is what the next call reconciles against. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery. Issuing itself is a read-only lookup step and a create step whose every execution — Restate re-executes it under the `[issue]` policy while szamlazz.hu's answer is unknown — queries the external id before it sends; that query is what the next call reconciles against, and an exhausted create step is a structured `outcome_unknown` naming the order, kind and external id. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
 
 ## Request Identity
 

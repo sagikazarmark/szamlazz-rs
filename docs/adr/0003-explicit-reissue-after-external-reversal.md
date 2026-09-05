@@ -8,6 +8,16 @@ ingress `Idempotency-Key`), the flag-free path after a service-side storno (the 
 reversed, so the runner-up "flag always required" is what stands), the fingerprint and
 `conflict{payload_mismatch}`, `reversal origin`, and the operator `record_reversal` handler.
 
+*Amended (#22): where "live" is observed.* Issuing is two durable steps (design §5): a read-only **lookup**
+and a query-first **create** under a run retry policy. `reissue: true` on a document that is live **at
+lookup** is `conflict{live}` — the caller's flag met a live document and the flag never causes a duplicate.
+A document found live by the create step's *own* leading query that is not the reversed one lookup saw is
+`outcome: issued`, not `conflict{live}`: the lookup had already passed the reversed document, the create
+step ran, its reply was lost, and the re-executed step finds what its earlier execution issued — the very
+document the caller asked for. The two answers differ because the two queries answer different questions:
+lookup asks "may this create proceed?", the create step's query asks "did my earlier execution already
+land?".
+
 `create_invoice` (and its proforma, prepayment, final and corrective siblings) may find that the
 document the ledger recorded for this order and kind has since been reversed by someone other than
 the service — a storno from the szamlazz.hu UI, by support, or asserted by an operator. The question
@@ -20,8 +30,8 @@ issued only when the incoming request carries **`reissue: true` and a new `reque
 (`reissue` with a known id is `invalid_input`). After a **service-side** storno
 (`Szamlazz.Order.storno_invoice`) the slot is `reversed{origin: service}` and open flag-free: the ledger knows
 the reversal was deliberate. A deleted proforma is likewise open flag-free — it is not a legal
-document. The same rule holds inside the attempt loop: a `Found` document that is reversed returns
-`reversed`; the loop never re-allocates.
+document. The same rule holds in the lookup step: a `Reversed` document returns
+`reversed`; the create step is never reached without the flag.
 
 ## Why the default is "tell, don't act"
 

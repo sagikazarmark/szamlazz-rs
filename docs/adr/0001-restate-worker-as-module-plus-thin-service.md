@@ -5,11 +5,13 @@ the `szamlazz_agent::Client` and the credentials had to live somewhere: either a
 that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
 `restate_szamlazz::gateway::Gateway` is a plain Rust module: a struct holding the client
-and the account it speaks for, with async functions `issue`, `storno`, `delete_proforma`, `set_payments`
-and `query` — one per durable step. It has no Restate context, returns every expected szamlazz.hu
-outcome as data (never `Err` for a rejection, a duplicate or a "not found"), and is unit-testable
-with wiremock. The `Order` Virtual Object (key = order number) calls these functions **inside its own
-`ctx.run` closures**. A thin, stateless `Szamlazz.Agent` Restate service exposes `query`,
+and the account it speaks for, with async functions `lookup`, `create`, `storno`, `delete_proforma`,
+`set_payments` and `query` — one per durable step. It has no Restate context, returns every expected
+szamlazz.hu outcome as data (never `Err` for a rejection, a duplicate or a "not found"; the create
+step's `Err(Unconfirmed)` is reserved for an answer that is *not* known and is what the run retry
+policy re-executes), and is unit-testable with wiremock. The `Order` Virtual Object (key = order
+number) calls these functions **inside its own `ctx.run` closures**. A thin, stateless
+`Szamlazz.Agent` Restate service exposes `query`,
 `set_payments` and `storno` for by-number operations over the same module instance. No Restate
 service calls another, and `Order` never invokes a handler on its own key. The dependency direction
 the owner asked for — `Order` depends on the gateway, nothing depends on `Order` — is a compile-time
@@ -46,27 +48,28 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 
 ## Consequences
 
-- Every szamlazz.hu call happens inside an `Order` (or `Szamlazz.Agent`) `ctx.run`. Issuing, storno
-  and delete runs use `RunRetryPolicy::max_attempts(1)` with outcome-as-data; pure queries use the
-  default exponential run retry with `max_duration 2m`. A run failure surfaces as a terminal error
-  (HTTP 500 to a synchronous caller — verified), which is why the module must never return `Err`
-  for an expected outcome.
+- Every szamlazz.hu call happens inside an `Order` (or `Szamlazz.Agent`) `ctx.run`. The lookup,
+  storno and delete runs use `RunRetryPolicy::max_attempts(1)` with outcome-as-data; the create
+  step runs under the issue policy (a run retry policy, ADR 0004) and is the one closure that may
+  return a retryable `Err` — only for an outcome that is not known. A run failure surfaces as a
+  terminal error (HTTP 500 to a synchronous caller — verified), which is why the module must never
+  return `Err` for an expected outcome.
 - A process crash re-executes only the *open* closure; completed runs, sets and sleeps replay from
-  the journal. Worst case per episode in a pathological crash loop is loop attempts + (invocation
-  attempts − 1) = 9 closure executions, each query-first (ADR 0002), finite because of `kill`
-  (ADR 0004).
+  the journal. Worst case per episode in a pathological crash loop is (issue policy executions) +
+  (invocation attempts − 1) = 9 executions of the create closure, each query-first (ADR 0002),
+  finite because of `kill` and of the issue policy's `max_duration` (ADR 0004).
 - `Szamlazz.Agent.storno` on a document that carries `rendelesszam` returns
   `outcome: managed_by_order{key}` — a convention on the key scheme, never a call into `Order`.
   Documents without an order number (no `Order` exists for them) are reversed directly.
-- `issue` and `delete_proforma` exist only as module functions. When a second Restate caller
-  appears, the upgrade path is an `ingress_private` handler over the module; the module boundary is
-  the seam either way.
+- `lookup`, `create` and `delete_proforma` exist only as module functions. When a second Restate
+  caller appears, the upgrade path is an `ingress_private` handler over the module; the module
+  boundary is the seam either way.
 - The buyer input is journaled once, in `Order`'s own journal (`journal_retention = 3d`). Responses and
   tracing carry numbers, ids and totals — no PII; there is no state (ADR 0005).
   *Amended (#12):* the runs journal the agent crate's response types as they are, so a queried document
-  (`QueryOutcome::Found`, the `Found`/`Reconciled`/`Collision`/`Foreign` issue outcomes) is journaled
-  with the buyer block szamlazz.hu returned. The journal is still the only place it lands; the
-  handler outputs and tracing are unchanged.
+  (`QueryOutcome::Found`, the `Live`/`Reversed`/`Collision`/`Foreign` lookup outcomes and the
+  `Found`/`Reconciled`/`Collision` create outcomes) is journaled with the buyer block szamlazz.hu
+  returned. The journal is still the only place it lands; the handler outputs and tracing are unchanged.
 - Rule, stated so a future `storno_invoice → create_invoice` convenience is not added: no `Order`
   handler ever `.call()`s an exclusive handler on its own key. Under this layering it is structural.
 - The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`

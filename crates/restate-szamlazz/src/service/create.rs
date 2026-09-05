@@ -1,10 +1,14 @@
 //! The create protocol (design §5) for the four document kinds and for
 //! correctives, in the order the steps appear in the design.
 //!
-//! Every szamlazz.hu call is a journaled run with `max_attempts(1)`; the
-//! handlers keep no state — the external-id pre-query inside every attempt is
-//! what finds a document an earlier attempt or invocation issued. Domain
-//! outcomes are data and faults are `TerminalError`s.
+//! The handlers keep no state. After validation and the reference checks,
+//! issuing is two durable steps: a read-only **lookup** (`lookup-{kind}`) that
+//! settles every case needing no create, and a **create** (`create-{kind}`)
+//! under the issue policy's run retry policy, query-first on every execution
+//! — the external-id query inside the create closure is what finds a document
+//! an earlier execution issued. Domain outcomes are data and faults are
+//! `TerminalError`s; a create step that ends without a settled outcome is
+//! `outcome_unknown`.
 
 use std::sync::Arc;
 
@@ -14,8 +18,8 @@ use szamlazz_agent::ops::invoice::CreateInvoice;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::Order;
-use super::support::object::{lookup, run_once, sleep, storno_number_of, verify};
-use super::support::{Fault, Lookup, next_backoff, order_key};
+use super::support::object::{lookup, run_once, run_retrying, verify};
+use super::support::{Fault, Lookup, order_key};
 use crate::config::Namespace;
 use crate::contract::response::outstanding;
 use crate::contract::{
@@ -23,7 +27,8 @@ use crate::contract::{
     IssuedKind, Outcome, ProformaLink, Warning,
 };
 use crate::gateway::{
-    DocumentRefs, InvoiceDocumentExt as _, IssueOutcome, IssueRequest, QueryOutcome,
+    CreateOutcome, CreateStepRequest, DocumentRefs, InvoiceDocumentExt as _, LookupOutcome,
+    LookupRequest, QueryOutcome,
 };
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
@@ -98,17 +103,13 @@ struct Refs {
     our_numbers: Vec<String>,
 }
 
-/// One document to issue: what the attempt loop (step 3) needs.
+/// One document to issue: what the lookup and create steps (steps 3–4) need.
 struct Intent {
     identity: Identity,
     create: CreateInvoice,
     reissue: bool,
-    /// Run the order-number hint on the first attempt.
-    check_hint: bool,
+    /// Numbers known to be ours; the hint ignores them.
     our_numbers: Vec<String>,
-    /// Correctives are exempt from the order-number check: a 71/152 that the
-    /// re-query cannot resolve is an ordinary rejection, not a conflict.
-    corrective: bool,
 }
 
 impl Order {
@@ -161,10 +162,9 @@ impl Order {
         // converts the order's live proforma by shared order number anyway
         // (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
         // auto-linking, deletion"), so a prepayment skips the lookup.
-        let mut proforma_linked = false;
         if kind == DocumentKind::Invoice
             && let Some(response) = self
-                .proforma_link(ctx, &prepared, &identity, &mut refs, &mut proforma_linked)
+                .proforma_link(ctx, &prepared, &identity, &mut refs)
                 .await?
         {
             return Ok(response);
@@ -185,11 +185,9 @@ impl Order {
             identity,
             create,
             reissue: prepared.reissue,
-            check_hint: self.config.issue.detect_foreign || proforma_linked,
             our_numbers: refs.our_numbers,
-            corrective: false,
         };
-        self.attempt_loop(ctx, &prepared.order, intent).await
+        self.issue(ctx, &prepared.order, intent).await
     }
 
     /// `correct_invoice`.
@@ -244,11 +242,9 @@ impl Order {
             identity,
             create,
             reissue: false,
-            check_hint: false,
             our_numbers: Vec::new(),
-            corrective: true,
         };
-        self.attempt_loop(ctx, &order, intent).await
+        self.issue(ctx, &order, intent).await
     }
 
     // ----- step 0: validation ----------------------------------------------
@@ -414,7 +410,6 @@ impl Order {
         prepared: &Prepared,
         identity: &Identity,
         refs: &mut Refs,
-        linked: &mut bool,
     ) -> Result<Option<CreateResponse>, HandlerError> {
         let kind = DocumentKind::Proforma;
         match &prepared.proforma {
@@ -449,7 +444,6 @@ impl Order {
                 }
                 refs.our_numbers.push(live.number().to_owned());
                 refs.proforma = Some(live.number().to_owned());
-                *linked = true;
                 Ok(None)
             }
             ProformaLink::Number(number) => {
@@ -475,7 +469,6 @@ impl Order {
                     QueryOutcome::Found(found) => {
                         refs.our_numbers.push(found.number().to_owned());
                         refs.proforma = Some(number.clone());
-                        *linked = true;
                         Ok(None)
                     }
                 }
@@ -483,96 +476,54 @@ impl Order {
         }
     }
 
-    // ----- step 3: the attempt loop ----------------------------------------
+    // ----- steps 3–5: lookup, create, branch on data -----------------------
 
-    async fn attempt_loop(
+    /// Issues `intent`: the lookup step settles every case that needs no
+    /// create; the create step, under the issue policy, sends it; the result
+    /// is branched on as data.
+    async fn issue(
         &self,
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
         intent: Intent,
     ) -> Result<CreateResponse, HandlerError> {
-        let max_attempts = self.config.issue.max_attempts.max(1);
-        let mut backoff = self.config.issue.first_backoff;
-
-        for attempt in 1..=max_attempts {
-            let outcome = self.issue_once(ctx, order, &intent, attempt).await?;
-            match outcome {
-                IssueOutcome::Transport(_) | IssueOutcome::Unknown { .. } => {
-                    if attempt < max_attempts {
-                        sleep(ctx, backoff).await?;
-                        backoff = next_backoff(backoff, self.config.issue.max_backoff);
-                    }
-                }
-                IssueOutcome::DuplicateOrderNumber { .. }
-                    if !intent.corrective && attempt <= 2 && attempt < max_attempts =>
-                {
-                    // Treated as unknown: the re-executed closure re-queries
-                    // the external id after the backoff.
-                    sleep(ctx, backoff).await?;
-                    backoff = next_backoff(backoff, self.config.issue.max_backoff);
-                }
-                settled => return self.settle(ctx, order, &intent, settled).await,
-            }
-        }
-
-        // Step 4: exhausted. Nothing to record: the next invocation's
-        // pre-query finds whatever landed.
-        Err(Fault::outcome_unknown(format!(
-            "{max_attempts} issuing attempts exhausted without a confirmed outcome; retry with a new Idempotency-Key"
-        ))
-        .about(
-            order,
-            Some(intent.identity.kind),
-            intent.identity.external_id.as_str(),
-        )
-        .into())
-    }
-
-    /// One journaled issuing attempt.
-    async fn issue_once(
-        &self,
-        ctx: &ObjectContext<'_>,
-        order: &OrderKey,
-        intent: &Intent,
-        attempt: u32,
-    ) -> Result<IssueOutcome, HandlerError> {
-        let gateway = Arc::clone(&self.gateway);
-        let external_id = intent.identity.external_id.clone();
-        let kind = intent.identity.kind;
-        let order = order.clone();
-        let create = intent.create.clone();
-        let reissue = intent.reissue;
-        let check_hint = attempt == 1 && intent.check_hint;
-        let our_numbers = intent.our_numbers.clone();
-        run_once(ctx, format!("issue-{kind}-{attempt}"), move || async move {
-            gateway
-                .issue(IssueRequest {
-                    external_id: &external_id,
-                    kind,
-                    order: &order,
-                    create: &create,
-                    reissue,
-                    check_hint,
-                    our_numbers: &our_numbers,
-                })
-                .await
-        })
-        .await
-    }
-
-    /// Branches on a settled attempt outcome (step 3, "branch on data").
-    async fn settle(
-        &self,
-        ctx: &ObjectContext<'_>,
-        order: &OrderKey,
-        intent: &Intent,
-        outcome: IssueOutcome,
-    ) -> Result<CreateResponse, HandlerError> {
         let identity = &intent.identity;
-        match outcome {
-            IssueOutcome::Issued(issued) => {
-                // The gateway reports a success without a number as `Unknown`;
-                // a bare result here would be a bug, answered as a fault.
+
+        // Step 3: lookup.
+        let reversed = match self.lookup_step(ctx, order, &intent).await? {
+            LookupOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+            LookupOutcome::Live(found) if intent.reissue => {
+                return Ok(identity.conflict_about(ConflictReason::Live, found.number()));
+            }
+            LookupOutcome::Live(found) => {
+                return Ok(identity.found(Outcome::AlreadyIssued, &found));
+            }
+            LookupOutcome::Reversed {
+                document,
+                storno_number,
+            } if !intent.reissue => {
+                return Ok(identity.reversed(document.number(), storno_number));
+            }
+            LookupOutcome::Reversed { document, .. } => Some(document.number().to_owned()),
+            LookupOutcome::Collision(found) => {
+                return Ok(
+                    identity.conflict_about(ConflictReason::ExternalIdCollision, found.number())
+                );
+            }
+            LookupOutcome::Foreign(found) => {
+                return Ok(identity.conflict_about(ConflictReason::Foreign, found.number()));
+            }
+            LookupOutcome::Absent => None,
+        };
+
+        // Step 4: create.
+        let outcome = self.create_step(ctx, order, &intent, reversed).await?;
+
+        // Step 5: branch on data.
+        Ok(match outcome {
+            CreateOutcome::Issued(issued) => {
+                // The gateway reports `Issued` only with a number; a bare
+                // result here would be a bug, answered as a fault.
                 let Some(number) = issued.invoice_number else {
                     return Err(Fault::outcome_unknown(
                         "issued without a document number; retry with a new Idempotency-Key",
@@ -590,40 +541,101 @@ impl Order {
                 if issued.notification_delivery_failed {
                     response = response.with_warning(Warning::NotificationDeliveryFailed);
                 }
-                Ok(response)
+                response
             }
-            IssueOutcome::Found(found) if intent.reissue => {
-                Ok(identity.conflict_about(ConflictReason::Live, found.number()))
+            // An earlier execution of the step created it (ADR 0003): the
+            // caller asked for this document and has it.
+            CreateOutcome::Found(found) => identity.found(Outcome::Issued, &found),
+            CreateOutcome::Reconciled(found) => identity.found(Outcome::Reconciled, &found),
+            CreateOutcome::Collision(found) => {
+                identity.conflict_about(ConflictReason::ExternalIdCollision, found.number())
             }
-            IssueOutcome::Found(found) => Ok(identity.found(Outcome::AlreadyIssued, &found)),
-            IssueOutcome::Reconciled(found) => Ok(identity.found(Outcome::Reconciled, &found)),
-            IssueOutcome::FoundReversed(found) => {
-                let storno_number =
-                    storno_number_of(ctx, &self.gateway, order, found.number()).await?;
-                Ok(identity.reversed(found.number(), storno_number))
+            CreateOutcome::DuplicateOrderNumber {
+                code,
+                message,
+                existing_number,
+            } => {
+                let mut response = identity
+                    .conflict(ConflictReason::DuplicateOrderNumber)
+                    .with_code(code)
+                    .with_message(message);
+                response.existing_number = existing_number;
+                response
             }
-            IssueOutcome::Collision(found) => {
-                Ok(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
-            }
-            IssueOutcome::Foreign(found) => {
-                Ok(identity.conflict_about(ConflictReason::Foreign, found.number()))
-            }
-            IssueOutcome::Rejected { code, message } => Ok(identity.rejected(code, message)),
-            IssueOutcome::DuplicateOrderNumber { code, message } if intent.corrective => {
-                Ok(identity.rejected(code, message))
-            }
-            IssueOutcome::DuplicateOrderNumber { code, message } => Ok(identity
-                .conflict(ConflictReason::DuplicateOrderNumber)
-                .with_code(code)
-                .with_message(message)),
-            IssueOutcome::Transport(message) | IssueOutcome::Unknown { message, .. } => {
-                Err(Fault::outcome_unknown(format!(
-                    "issuing attempt ended without a confirmed outcome: {message}; retry with a new Idempotency-Key"
-                ))
-                .about(order, Some(identity.kind), identity.external_id.as_str())
-                .into())
-            }
-        }
+            CreateOutcome::Rejected { code, message } => identity.rejected(code, message),
+        })
+    }
+
+    /// Step 3: one read-only durable step — the external id and, for every
+    /// kind but correctives, the order-number hint.
+    async fn lookup_step(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        intent: &Intent,
+    ) -> Result<LookupOutcome, HandlerError> {
+        let gateway = Arc::clone(&self.gateway);
+        let external_id = intent.identity.external_id.clone();
+        let kind = intent.identity.kind;
+        let order = order.clone();
+        let our_numbers = intent.our_numbers.clone();
+        run_once(ctx, format!("lookup-{kind}"), move || async move {
+            gateway
+                .lookup(LookupRequest {
+                    external_id: &external_id,
+                    kind,
+                    order: &order,
+                    our_numbers: &our_numbers,
+                })
+                .await
+        })
+        .await
+    }
+
+    /// Step 4: one durable step under the issue policy's run retry policy,
+    /// query-first on every execution (the query is inside the closure: a
+    /// separate journaled pre-query would replay its stale "nothing" on the
+    /// retry and re-send). Any `Err` from the run — exhaustion (500) or
+    /// cancellation (409) — is `outcome_unknown` about this document: nothing
+    /// is recorded, the next invocation's lookup finds whatever landed.
+    async fn create_step(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        intent: &Intent,
+        reversed: Option<String>,
+    ) -> Result<CreateOutcome, HandlerError> {
+        let gateway = Arc::clone(&self.gateway);
+        let external_id = intent.identity.external_id.clone();
+        let kind = intent.identity.kind;
+        let order_key = order.clone();
+        let create = intent.create.clone();
+        run_retrying(
+            ctx,
+            format!("create-{kind}"),
+            self.config.issue.run_retry_policy(),
+            move || async move {
+                gateway
+                    .create(CreateStepRequest {
+                        external_id: &external_id,
+                        kind,
+                        order: &order_key,
+                        create: &create,
+                        reversed: reversed.as_deref(),
+                    })
+                    .await
+            },
+        )
+        .await
+        .map_err(|error| {
+            Fault::outcome_unknown(format!(
+                "the create step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
+                error.code(),
+                error.message()
+            ))
+            .about(order, Some(kind), intent.identity.external_id.as_str())
+            .into()
+        })
     }
 }
 

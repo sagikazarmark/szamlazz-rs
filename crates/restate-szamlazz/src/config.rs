@@ -14,8 +14,10 @@
 //!
 //! [issue]
 //! max_attempts = 5
-//! first_backoff = "2m"
-//! max_backoff = "10m"
+//! initial_delay = "2m"
+//! factor = 2.0
+//! max_delay = "10m"
+//! max_duration = "1h"
 //! ```
 //!
 //! The types only implement `Deserialize`; the endpoint binary chooses the
@@ -30,6 +32,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+use restate_sdk::context::RunRetryPolicy;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 
@@ -48,7 +51,7 @@ pub struct Config {
     /// The seller block; account data is used where absent.
     #[serde(default)]
     pub seller: SellerConfig,
-    /// Issuing attempt budget and backoff.
+    /// The issue policy: the create step's run retry policy.
     #[serde(default)]
     pub issue: IssueConfig,
 }
@@ -61,8 +64,8 @@ impl Config {
     /// # Errors
     ///
     /// Returns the first violated invariant: an empty agent key,
-    /// `issue.max_attempts == 0`, or `issue.first_backoff` greater than
-    /// `issue.max_backoff`.
+    /// `issue.max_attempts == 0`, `issue.initial_delay` greater than
+    /// `issue.max_delay`, or `issue.factor` below 1.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.account.agent_key.expose().trim().is_empty() {
             return Err(ConfigError::EmptyAgentKey);
@@ -70,11 +73,14 @@ impl Config {
         if self.issue.max_attempts == 0 {
             return Err(ConfigError::ZeroMaxAttempts);
         }
-        if self.issue.first_backoff > self.issue.max_backoff {
-            return Err(ConfigError::BackoffOrder {
-                first: self.issue.first_backoff,
-                max: self.issue.max_backoff,
+        if self.issue.initial_delay > self.issue.max_delay {
+            return Err(ConfigError::DelayOrder {
+                initial: self.issue.initial_delay,
+                max: self.issue.max_delay,
             });
+        }
+        if self.issue.factor.is_nan() || self.issue.factor < 1.0 {
+            return Err(ConfigError::InvalidFactor(self.issue.factor));
         }
         Ok(())
     }
@@ -84,12 +90,12 @@ impl Config {
 /// account-shaped and therefore does not route through the gateway.
 ///
 /// The namespace prefixes every external id the deployment issues; the issue
-/// policy bounds the attempt loop. Built from a [`Config`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// policy is the create step's run retry policy. Built from a [`Config`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkerConfig {
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
     pub namespace: Namespace,
-    /// Issuing attempt budget and backoff.
+    /// The issue policy: the create step's run retry policy.
     pub issue: IssueConfig,
 }
 
@@ -103,7 +109,7 @@ impl From<&Config> for WorkerConfig {
 }
 
 /// A [`Config`] that parsed but violates an invariant.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
     /// `account.agent_key` is empty or blank.
@@ -112,14 +118,17 @@ pub enum ConfigError {
     /// `issue.max_attempts` is zero.
     #[error("issue.max_attempts must be at least 1")]
     ZeroMaxAttempts,
-    /// `issue.first_backoff` exceeds `issue.max_backoff`.
-    #[error("issue.first_backoff ({first:?}) must not exceed issue.max_backoff ({max:?})")]
-    BackoffOrder {
-        /// The configured first backoff.
-        first: Duration,
-        /// The configured maximum backoff.
+    /// `issue.initial_delay` exceeds `issue.max_delay`.
+    #[error("issue.initial_delay ({initial:?}) must not exceed issue.max_delay ({max:?})")]
+    DelayOrder {
+        /// The configured initial delay.
+        initial: Duration,
+        /// The configured maximum delay.
         max: Duration,
     },
+    /// `issue.factor` is below 1 (the delay would shrink) or not a number.
+    #[error("issue.factor ({0}) must be a number of at least 1")]
+    InvalidFactor(f32),
 }
 
 /// The szamlazz.hu account.
@@ -396,35 +405,59 @@ impl SellerEmailConfig {
     }
 }
 
-/// Issuing attempt budget and backoff.
+/// The issue policy: the run retry policy of the create step (design §5
+/// step 4). Restate re-executes the step after `initial_delay`, multiplying
+/// the delay by `factor` up to `max_delay`, until `max_attempts` executions or
+/// `max_duration` — then the step fails and the handler reports
+/// `outcome_unknown`. The policy shapes no journal entry.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a plain number of
 /// seconds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IssueConfig {
-    /// Attempts per invocation before `outcome_unknown`. Default `5`.
+    /// Executions of the create step, including the first. Default `5`.
     pub max_attempts: u32,
-    /// Sleep after the first failed attempt. Default `2m`.
+    /// Delay before the first re-execution. Default `2m`: longer than the
+    /// client timeout plus the longest observed server stall, so a request
+    /// still in flight has resolved by the time the re-check runs.
     #[serde(with = "duration_str")]
-    pub first_backoff: Duration,
-    /// Cap of the doubling backoff. Default `10m`.
+    pub initial_delay: Duration,
+    /// Multiplier of the delay after each re-execution. Default `2.0`.
+    pub factor: f32,
+    /// Cap of the delay. Default `10m`.
     #[serde(with = "duration_str")]
-    pub max_backoff: Duration,
-    /// Query the order number before the first attempt to detect foreign
-    /// documents. Default `true`. The hint is taken regardless when a proforma
-    /// is linked.
-    pub detect_foreign: bool,
+    pub max_delay: Duration,
+    /// Hard bound on the time spent re-executing the step. Default `1h`.
+    #[serde(with = "duration_str")]
+    pub max_duration: Duration,
 }
 
 impl Default for IssueConfig {
     fn default() -> Self {
         Self {
             max_attempts: 5,
-            first_backoff: Duration::from_mins(2),
-            max_backoff: Duration::from_mins(10),
-            detect_foreign: true,
+            initial_delay: Duration::from_mins(2),
+            factor: 2.0,
+            max_delay: Duration::from_mins(10),
+            max_duration: Duration::from_hours(1),
         }
+    }
+}
+
+impl IssueConfig {
+    /// The policy as the SDK's run retry policy, every field set from this
+    /// configuration. Built on [`RunRetryPolicy::new`], whose factor is 1.0
+    /// and which caps nothing — not on `default()`, which caps the delay at
+    /// 2 s and the duration at 50 s.
+    #[must_use]
+    pub fn run_retry_policy(&self) -> RunRetryPolicy {
+        RunRetryPolicy::new()
+            .initial_delay(self.initial_delay)
+            .exponentiation_factor(self.factor)
+            .max_delay(self.max_delay)
+            .max_attempts(self.max_attempts)
+            .max_duration(self.max_duration)
     }
 }
 
@@ -545,9 +578,10 @@ mod tests {
             },
             "issue": {
                 "max_attempts": 3,
-                "first_backoff": "90s",
-                "max_backoff": "1h",
-                "detect_foreign": false,
+                "initial_delay": "90s",
+                "factor": 1.5,
+                "max_delay": "1h",
+                "max_duration": "2h",
             },
         }))
         .expect("parse");
@@ -569,9 +603,10 @@ mod tests {
         assert_eq!(config.seller.bank.as_deref(), Some("Bank"));
         assert_eq!(config.seller.email.subject.as_deref(), Some("S"));
         assert_eq!(config.issue.max_attempts, 3);
-        assert_eq!(config.issue.first_backoff, Duration::from_secs(90));
-        assert_eq!(config.issue.max_backoff, Duration::from_secs(3600));
-        assert!(!config.issue.detect_foreign);
+        assert_eq!(config.issue.initial_delay, Duration::from_secs(90));
+        assert_eq!(config.issue.factor.to_bits(), 1.5f32.to_bits());
+        assert_eq!(config.issue.max_delay, Duration::from_secs(3600));
+        assert_eq!(config.issue.max_duration, Duration::from_secs(7200));
         config.validate().expect("valid");
 
         let seller = config.seller.to_seller();
@@ -602,9 +637,10 @@ mod tests {
         assert_eq!(config.seller.to_seller().email, None);
         assert_eq!(config.issue, IssueConfig::default());
         assert_eq!(config.issue.max_attempts, 5);
-        assert_eq!(config.issue.first_backoff, Duration::from_secs(120));
-        assert_eq!(config.issue.max_backoff, Duration::from_secs(600));
-        assert!(config.issue.detect_foreign);
+        assert_eq!(config.issue.initial_delay, Duration::from_secs(120));
+        assert_eq!(config.issue.factor.to_bits(), 2.0f32.to_bits());
+        assert_eq!(config.issue.max_delay, Duration::from_secs(600));
+        assert_eq!(config.issue.max_duration, Duration::from_secs(3600));
         config.validate().expect("valid");
     }
 
@@ -653,22 +689,50 @@ mod tests {
     fn worker_config_is_the_namespace_and_the_issue_policy() {
         let config: Config = serde_json::from_value(json!({
             "account": {"slug": "acct-1", "agent_key": "key", "mode": "test"},
-            "issue": {"max_attempts": 3, "first_backoff": "90s", "max_backoff": "1h"},
+            "issue": {"max_attempts": 3, "initial_delay": "90s", "max_delay": "1h"},
         }))
         .expect("parse");
 
         let worker = WorkerConfig::from(&config);
         assert_eq!(worker.namespace.as_str(), "acct-1");
         assert_eq!(worker.issue.max_attempts, 3);
-        assert_eq!(worker.issue.first_backoff, Duration::from_secs(90));
-        assert_eq!(worker.issue.max_backoff, Duration::from_secs(3600));
-        assert!(worker.issue.detect_foreign);
+        assert_eq!(worker.issue.initial_delay, Duration::from_secs(90));
+        assert_eq!(worker.issue.max_delay, Duration::from_secs(3600));
+        assert_eq!(
+            worker.issue.factor.to_bits(),
+            2.0f32.to_bits(),
+            "unset fields keep their defaults"
+        );
         assert_eq!(
             worker,
             WorkerConfig {
                 namespace: "acct-1".parse().expect("namespace"),
                 issue: config.issue.clone(),
             }
+        );
+    }
+
+    /// The issue policy is the create step's run retry policy, every field
+    /// set: `RunRetryPolicy::new()` has factor 1.0 and no caps, and
+    /// `default()` caps at 2 s / 50 s — neither is what the policy says.
+    #[test]
+    fn issue_policy_maps_to_the_run_retry_policy_field_for_field() {
+        assert_eq!(
+            format!("{:?}", IssueConfig::default().run_retry_policy()),
+            "RunRetryPolicy { initial_delay: 120s, factor: 2.0, max_delay: Some(600s), \
+             max_attempts: Some(5), max_duration: Some(3600s) }"
+        );
+        let short = IssueConfig {
+            max_attempts: 2,
+            initial_delay: Duration::from_secs(1),
+            factor: 1.5,
+            max_delay: Duration::from_secs(2),
+            max_duration: Duration::from_secs(30),
+        };
+        assert_eq!(
+            format!("{:?}", short.run_retry_policy()),
+            "RunRetryPolicy { initial_delay: 1s, factor: 1.5, max_delay: Some(2s), \
+             max_attempts: Some(2), max_duration: Some(30s) }"
         );
     }
 
@@ -691,16 +755,21 @@ mod tests {
             Err(ConfigError::ZeroMaxAttempts)
         );
         assert_eq!(
-            config(&json!({"first_backoff": "11m"}), "key").validate(),
-            Err(ConfigError::BackoffOrder {
-                first: Duration::from_mins(11),
+            config(&json!({"initial_delay": "11m"}), "key").validate(),
+            Err(ConfigError::DelayOrder {
+                initial: Duration::from_mins(11),
                 max: Duration::from_secs(600),
             })
         );
         assert_eq!(
-            config(&json!({"first_backoff": "10m"}), "key").validate(),
+            config(&json!({"initial_delay": "10m"}), "key").validate(),
             Ok(())
         );
+        assert_eq!(
+            config(&json!({"factor": 0.5}), "key").validate(),
+            Err(ConfigError::InvalidFactor(0.5))
+        );
+        assert_eq!(config(&json!({"factor": 1.0}), "key").validate(), Ok(()));
     }
 
     #[test]
@@ -754,11 +823,12 @@ mod tests {
     #[test]
     fn issue_config_round_trips_durations_as_strings() {
         let json = serde_json::to_value(IssueConfig::default()).expect("serialize");
-        assert_eq!(json["first_backoff"], "2m");
-        assert_eq!(json["max_backoff"], "10m");
+        assert_eq!(json["initial_delay"], "2m");
+        assert_eq!(json["max_delay"], "10m");
+        assert_eq!(json["max_duration"], "1h");
         let back: IssueConfig = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, IssueConfig::default());
-        assert!(serde_json::from_value::<IssueConfig>(json!({"first_backoff": 120})).is_err());
+        assert!(serde_json::from_value::<IssueConfig>(json!({"initial_delay": 120})).is_err());
     }
 
     #[test]

@@ -166,6 +166,7 @@ macro_rules! journal_helpers {
             reason = "each context type uses a different subset of the helpers"
         )]
         pub(in crate::service) mod $module {
+            use std::error::Error as StdError;
             use std::future::Future;
             use std::sync::Arc;
             use std::time::Duration;
@@ -173,7 +174,7 @@ macro_rules! journal_helpers {
             use restate_sdk::context::{
                 ContextSideEffects as _, ContextTimers as _, RunFuture as _, RunRetryPolicy,
             };
-            use restate_sdk::errors::HandlerError;
+            use restate_sdk::errors::{HandlerError, TerminalError};
             use restate_sdk::prelude::$ctx;
             use restate_sdk::serde::Json;
             use serde::Serialize;
@@ -202,6 +203,37 @@ macro_rules! journal_helpers {
                     .run(|| async move { Ok(Json(f().await)) })
                     .name(name)
                     .retry_policy(RunRetryPolicy::new().max_attempts(1))
+                    .await?;
+                Ok(value)
+            }
+
+            /// Journals the result of `f` under `name`, re-executing it under
+            /// `policy` while it fails with `E` — the step's own "not
+            /// settled" error, which the SDK treats as retryable. The whole
+            /// handler replays to this entry after the policy's delay, so the
+            /// closure begins again from its first line.
+            ///
+            /// # Errors
+            ///
+            /// The `TerminalError` the run ends with: exhaustion of the
+            /// policy (500, carrying the last `E`'s message) or cancellation
+            /// (409). The caller decides what it means.
+            pub(in crate::service) async fn run_retrying<'ctx, T, E, F, Fut>(
+                ctx: &$ctx<'ctx>,
+                name: impl Into<String>,
+                policy: RunRetryPolicy,
+                f: F,
+            ) -> Result<T, TerminalError>
+            where
+                F: FnOnce() -> Fut + Send + 'ctx,
+                Fut: Future<Output = Result<T, E>> + Send + 'ctx,
+                T: Serialize + DeserializeOwned + Send + 'static,
+                E: StdError + Send + Sync + 'static,
+            {
+                let Json(value) = ctx
+                    .run(|| async move { Ok(Json(f().await?)) })
+                    .name(name)
+                    .retry_policy(policy)
                     .await?;
                 Ok(value)
             }

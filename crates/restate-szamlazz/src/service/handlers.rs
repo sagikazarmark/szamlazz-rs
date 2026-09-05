@@ -24,9 +24,11 @@ use crate::contract::{
 ///
 /// Keeps no state: every handler answers from szamlazz.hu through the order's
 /// deterministic external ids. The retry identity of a request is Restate's
-/// ingress `Idempotency-Key`. Every handler that calls szamlazz.hu kills the
-/// invocation after five attempts (ADR 0004); the external-id pre-query inside
-/// every attempt is what makes that safe.
+/// ingress `Idempotency-Key`. Issuing is two durable steps — a read-only
+/// lookup and a query-first create under the issue policy's run retry policy
+/// (design §5) — and every handler that calls szamlazz.hu kills the invocation
+/// after five attempts (ADR 0004); the external-id query inside the create
+/// step is what makes both safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.

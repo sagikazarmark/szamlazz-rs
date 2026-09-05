@@ -2,7 +2,8 @@
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
 Still holds: the key rule (trimmed, case preserved, validated), the deterministic external id, the query-first
-create inside a single `ctx.run` with `max_attempts(1)`, the `Found`-validation rule, the 2 m
+create inside a single `ctx.run` — now the create *step* under the issue policy's run retry policy (ADR 0004,
+amended by #22) rather than one `max_attempts(1)` run per attempt — the `Found`-validation rule, the 2 m
 `initial_interval`, and the toggle precondition. Superseded: the `{gen}` suffix (the newest holder under
 `{slug}:{order}:{kind}` is the answer; no counter), the `cseq` corrective counter (→ caller-supplied
 `correction_id`), `request_id` as retry identity (→ Restate's ingress `Idempotency-Key`), and "written to state
@@ -36,15 +37,21 @@ repetition" is ON**; it is the second guard, not the first.
 
 ## The crash window, and what closes it
 
-- `max_attempts(1)` on the run bounds *returned* errors, not executions. A crash mid-closure leaves
-  no journal entry; Restate re-dispatches the invocation as an ordinary retryable failure and the
-  closure runs again — no sooner than the handler's `initial_interval` (verified: 20 s configured,
-  23.8 s observed, new process). The re-executed closure begins with the external-id query, so a
-  request that landed is `Found`, not re-issued.
+- The create step is one `ctx.run` whose closure begins with the external-id query and ends with
+  the send (or the re-query after a lost reply). A crash mid-closure leaves no journal entry;
+  Restate re-dispatches the invocation as an ordinary retryable failure and the closure runs again —
+  no sooner than the handler's `initial_interval` (verified: 20 s configured, 23.8 s observed, new
+  process). A *lost reply* (transport failure, an open code) is not a crash: the closure re-queries
+  once and, finding nothing, returns a retryable error, and the run retry policy — the issue policy,
+  `initial_delay 2m` — re-executes the whole handler after the delay; the journal replays to the
+  create step and the closure begins again with the query. Either way the re-executed closure starts
+  with the external-id query, so a request that landed is `Found`, not re-issued. The query must be
+  *inside* the closure: a separate journaled pre-query would replay its stale "nothing" (ADR 0004).
 - Read-your-writes lag by external id is ≈ 0 (verified: hit 771 ms after the create returned, and
-  at +2, +10, +60 s). The 2-minute gap is therefore not for lag but for a first request that is
-  still in flight server-side: one create stalled ≥ 57 s with no response against a 60 s client
-  timeout. The gap must exceed timeout plus stall; 2 min keeps a margin — never below ~90 s.
+  at +2, +10, +60 s). The 2-minute gap — the handler's `initial_interval` and the issue policy's
+  `initial_delay` alike — is therefore not for lag but for a first request that is still in flight
+  server-side: one create stalled ≥ 57 s with no response against a 60 s client timeout. The gap
+  must exceed timeout plus stall; 2 min keeps a margin — never below ~90 s.
 - External ids are **not unique** server-side (two invoices under different orders with the same id
   were both issued, no warning) and a query by a shared id returns the newest holder (last-writer-
   wins) — verified. Every `Found` document is therefore validated before adoption:

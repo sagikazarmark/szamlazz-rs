@@ -48,9 +48,10 @@ and keeps the deployment-level `WorkerConfig` (namespace, issue policy); `Agent`
 What `Szamlazz.Order` guarantees:
 
 - **Exactly one live document per kind per order** — proforma, invoice, prepayment, final — under caller
-  retries, process crashes and concurrent callers. Same-key handlers run one at a time; every issuing attempt
-  queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it creates, so a
-  request that landed before a crash or timeout is found, not re-issued.
+  retries, process crashes and concurrent callers. Same-key handlers run one at a time; issuing is a read-only
+  **lookup** step that settles every case needing no create, then a **create** step under a run retry policy whose
+  every execution queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it
+  creates, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
 - **Correctives** are issued under a caller-supplied `correction_id`; the same id finds the corrective it
   issued, a new id issues a new one.
 - **Storno** (`storno_invoice`) and **proforma deletion** are idempotent; a document reversed by anyone — the
@@ -117,16 +118,18 @@ activation details.
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document — `for_kind`, `for_corrective`,
   `for_storno`, `for_unmanaged_storno`.
 - `Config`: the deployment configuration — `[account]` (`slug`, `agent_key`, `endpoint`, `mode`,
-  `supplier_id`), `[defaults]`, `[seller]`, `[issue]` (`max_attempts`, `first_backoff`, `max_backoff`,
-  `detect_foreign`). Secrets are `config::Secret`, whose `Debug` output is redacted. `account.slug` is the
-  `config::Namespace` — the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`. `WorkerConfig`
-  (`namespace`, `issue`) is the deployment-level part the services hold.
+  `supplier_id`), `[defaults]`, `[seller]`, `[issue]` (the issue policy: `max_attempts`, `initial_delay`, `factor`,
+  `max_delay`, `max_duration`). Secrets are `config::Secret`, whose `Debug` output is redacted. `account.slug` is
+  the `config::Namespace` — the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`. `WorkerConfig`
+  (`namespace`, `issue`) is the deployment-level part the services hold; `IssueConfig::run_retry_policy` is the
+  create step's `RunRetryPolicy`.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
-  `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`issue`, `verify`, `query`, `hint`, `storno`,
-  `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome as data. It is not a
-  second client: the Számla Agent `Client` is the transport it wraps. Every read of account configuration by the
-  services goes through `Gateway::account()`. `Szamlazz.Order` calls it inside `ctx.run`; the `Szamlazz.Agent`
-  Restate service is a thin facade over the same instance. No Restate service calls another.
+  `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
+  `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome as data; `create`
+  alone returns `Err(Unconfirmed)` for an outcome that is *not* known, which is what its run retry policy
+  re-executes. It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
+  configuration by the services goes through `Gateway::account()`. `Szamlazz.Order` calls it inside `ctx.run`; the
+  `Szamlazz.Agent` Restate service is a thin facade over the same instance. No Restate service calls another.
 - `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
   registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
   handlers.
@@ -148,8 +151,9 @@ Three identities work together ([ADR 0002](../../docs/adr/0002-order-keyed-idemp
   | storno of an order's invoice | `{namespace}:{order}:storno:{original_number}` |
   | storno via `Szamlazz.Agent` (no order) | `{namespace}:by-number:{number}:storno` |
 
-  It is queried before every create inside the same `ctx.run` closure, so a request that landed before a
-  crash or timeout is found, not re-issued. There is **no generation counter**: external ids are not unique
+  It is queried by the lookup step and again by every execution of the create step, inside the create's own
+  `ctx.run` closure, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
+  There is **no generation counter**: external ids are not unique
   server-side and a query returns the newest holder, which is exactly the question asked — "what is the newest
   document of this kind we issued for this order?" A reissued invoice becomes the newest holder of the same id;
   the stornoed original stays reachable by number and through the storno's `hivszamlaszam`. Because the id is
@@ -196,23 +200,33 @@ szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2
 `journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3`.
 `Szamlazz.Agent.set_payments` and `storno` use two attempts, `query` three. Kill, not pause: a paused invocation
 holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
-external-id pre-query inside every attempt is what makes that safe.
+external-id query inside the create step is what makes that safe.
 
-Inside a handler, the issuing loop retries transport failures and unknown outcomes up to `issue.max_attempts`
-with `issue.first_backoff` doubling to `issue.max_backoff`; every attempt is query-first. When the budget is
-exhausted the handler fails with `TerminalError{outcome_unknown}`; the next invocation's pre-query finds
-whatever landed.
+Inside a handler, issuing is two durable steps. The **lookup** (`lookup-{kind}`) is read-only and settles every
+case that needs no create: a live document of ours is `already_issued` (or `conflict{live}` with `reissue`), a
+reversed one is `reversed` (or proceeds with `reissue`), an invalid holder is `conflict{external_id_collision}`, a
+live invoice under the order that is not ours is `conflict{foreign}`. The **create** (`create-{kind}`) runs under
+the issue policy — `[issue]`: `max_attempts` executions, `initial_delay` growing by `factor` to `max_delay`,
+bounded by `max_duration` — and every execution is query-first: it finds what an earlier execution issued and
+sends nothing. A lost reply is re-queried once, immediately; when nothing landed the step is *unconfirmed* and
+Restate re-executes it after the delay. When the policy is exhausted (or the invocation is cancelled mid-create)
+the handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next
+invocation's lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number
+answer their re-query cannot resolve is `rejected`.
 
 ## Testing
 
 - `cargo test -p restate-szamlazz` runs the contract, config and identity unit tests, the discovery and binding
   tests of the adapters, and the wiremock tests of the gateway against synthetic szamlazz.hu responses
-  (`tests/gateway.rs`: `Found` / `FoundReversed` with and without `reissue`, the 71/152 re-query, `Collision`,
-  `Foreign`, storno validation including the proforma / delivery-note no-op, 335, 7).
+  (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
+  exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
+  `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — plus storno validation including the
+  proforma / delivery-note no-op, 335, 7).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu — issued →
   already_issued, `Idempotency-Key` replay, 152 → reconciled, storno → reversed → stale create → `reissue`,
-  `reissue` on live → `conflict{live}`, an external reversal, proforma auto-link and `consumed` in `get`. It
+  `reissue` on live → `conflict{live}`, an external reversal, proforma auto-link and `consumed` in `get`, and an
+  exhausted create step answering a structured `outcome_unknown` within the run policy's delays. It
   skips with a message when the docker daemon is not reachable; set `RESTATE_ADMIN_URL` /
   `RESTATE_INGRESS_URL` to reuse a running server.
 - The go-live checklist in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md)
