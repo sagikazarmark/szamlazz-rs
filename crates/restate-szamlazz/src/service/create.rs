@@ -16,16 +16,16 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 use super::Order;
 use super::support::object::{lookup, run_once, sleep, storno_number_of, verify};
 use super::support::{Fault, Lookup, next_backoff, order_key};
-use crate::config::AccountSlug;
+use crate::config::Namespace;
 use crate::contract::response::outstanding;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
     IssuedKind, Outcome, ProformaLink, Warning,
 };
-use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
-use crate::steps::{
+use crate::gateway::{
     DocumentRefs, InvoiceDocumentExt as _, IssueOutcome, IssueRequest, QueryOutcome,
 };
+use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
 /// The identity fields every [`CreateResponse`] carries.
 #[derive(Debug, Clone)]
@@ -35,10 +35,10 @@ struct Identity {
 }
 
 impl Identity {
-    fn of_kind(slug: &AccountSlug, order: &OrderKey, kind: DocumentKind) -> Self {
+    fn of_kind(namespace: &Namespace, order: &OrderKey, kind: DocumentKind) -> Self {
         Self {
             kind: kind.into(),
-            external_id: ExternalId::for_kind(slug, order, kind),
+            external_id: ExternalId::for_kind(namespace, order, kind),
         }
     }
 
@@ -124,7 +124,7 @@ impl Order {
     ) -> Result<CreateResponse, HandlerError> {
         // Step 0: validate (pure).
         let prepared = self.prepare(ctx.key(), kind, request)?;
-        let identity = Identity::of_kind(&self.config.account.slug, &prepared.order, kind);
+        let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
         let mut refs = Refs::default();
 
         // Step 1: exclusivity.
@@ -207,15 +207,11 @@ impl Order {
         self.validate_document(IssuedKind::Corrective, &document, &order)?;
         let identity = Identity {
             kind: IssuedKind::Corrective,
-            external_id: ExternalId::for_corrective(
-                &self.config.account.slug,
-                &order,
-                &correction_id,
-            ),
+            external_id: ExternalId::for_corrective(&self.config.namespace, &order, &correction_id),
         };
 
         // The base must be a live invoice carrying this order's number.
-        match verify(ctx, &self.steps, format!("verify-base-{number}"), &number).await? {
+        match verify(ctx, &self.gateway, format!("verify-base-{number}"), &number).await? {
             QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
             QueryOutcome::NotFound => {
                 return Err(Fault::invalid_input(format!(
@@ -312,15 +308,15 @@ impl Order {
         external_id: &ExternalId,
         refs: DocumentRefs<'_>,
     ) -> Result<CreateInvoice, Fault> {
-        self.steps
+        self.gateway
             .build_create(kind, document, order, external_id, refs)
             .map_err(|error| Fault::invalid_input(error.to_string()))
     }
 
     /// A document verified by number that carries this order's number must
-    /// also belong to the configured account.
+    /// also belong to the gateway's account.
     fn check_account(&self, found: &InvoiceDocument) -> Result<(), Fault> {
-        let account = &self.config.account;
+        let account = self.gateway.account();
         if found.account_matches(account.mode.is_test(), account.supplier_id) {
             Ok(())
         } else {
@@ -349,10 +345,10 @@ impl Order {
         identity: &Identity,
         other: DocumentKind,
     ) -> Result<Option<CreateResponse>, HandlerError> {
-        let other_id = ExternalId::for_kind(&self.config.account.slug, &prepared.order, other);
+        let other_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, other);
         let found = lookup(
             ctx,
-            &self.steps,
+            &self.gateway,
             format!("exclusivity-{other}"),
             &other_id,
             &prepared.order,
@@ -379,10 +375,10 @@ impl Order {
         refs: &mut Refs,
     ) -> Result<Option<CreateResponse>, HandlerError> {
         let kind = DocumentKind::Prepayment;
-        let prepayment_id = ExternalId::for_kind(&self.config.account.slug, &prepared.order, kind);
+        let prepayment_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, kind);
         let found = lookup(
             ctx,
-            &self.steps,
+            &self.gateway,
             "prepayment-for-final",
             &prepayment_id,
             &prepared.order,
@@ -424,10 +420,10 @@ impl Order {
         match &prepared.proforma {
             ProformaLink::Auto | ProformaLink::None => {
                 let proforma_id =
-                    ExternalId::for_kind(&self.config.account.slug, &prepared.order, kind);
+                    ExternalId::for_kind(&self.config.namespace, &prepared.order, kind);
                 let found = lookup(
                     ctx,
-                    &self.steps,
+                    &self.gateway,
                     "proforma-link",
                     &proforma_id,
                     &prepared.order,
@@ -459,7 +455,7 @@ impl Order {
             ProformaLink::Number(number) => {
                 match verify(
                     ctx,
-                    &self.steps,
+                    &self.gateway,
                     format!("verify-proforma-{number}"),
                     number,
                 )
@@ -540,7 +536,7 @@ impl Order {
         intent: &Intent,
         attempt: u32,
     ) -> Result<IssueOutcome, HandlerError> {
-        let steps = Arc::clone(&self.steps);
+        let gateway = Arc::clone(&self.gateway);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
         let order = order.clone();
@@ -548,10 +544,8 @@ impl Order {
         let reissue = intent.reissue;
         let check_hint = attempt == 1 && intent.check_hint;
         let our_numbers = intent.our_numbers.clone();
-        let expect_supplier_id = self.config.account.supplier_id;
-        let expect_test = self.config.account.mode.is_test();
         run_once(ctx, format!("issue-{kind}-{attempt}"), move || async move {
-            steps
+            gateway
                 .issue(IssueRequest {
                     external_id: &external_id,
                     kind,
@@ -560,8 +554,6 @@ impl Order {
                     reissue,
                     check_hint,
                     our_numbers: &our_numbers,
-                    expect_supplier_id,
-                    expect_test,
                 })
                 .await
         })
@@ -579,7 +571,7 @@ impl Order {
         let identity = &intent.identity;
         match outcome {
             IssueOutcome::Issued(issued) => {
-                // The steps report a success without a number as `Unknown`;
+                // The gateway reports a success without a number as `Unknown`;
                 // a bare result here would be a bug, answered as a fault.
                 let Some(number) = issued.invoice_number else {
                     return Err(Fault::outcome_unknown(
@@ -607,7 +599,7 @@ impl Order {
             IssueOutcome::Reconciled(found) => Ok(identity.found(Outcome::Reconciled, &found)),
             IssueOutcome::FoundReversed(found) => {
                 let storno_number =
-                    storno_number_of(ctx, &self.steps, order, found.number()).await?;
+                    storno_number_of(ctx, &self.gateway, order, found.number()).await?;
                 Ok(identity.reversed(found.number(), storno_number))
             }
             IssueOutcome::Collision(found) => {
@@ -646,18 +638,16 @@ mod tests {
     use crate::contract::document::tests::sample_document;
 
     fn order() -> Order {
-        let config: Arc<Config> = Arc::new(
-            serde_json::from_value(json!({
-                "account": {
-                    "slug": "acct",
-                    "agent_key": "key",
-                    "endpoint": "http://127.0.0.1:1/",
-                    "mode": "test",
-                },
-            }))
-            .expect("config"),
-        );
-        Order::new(config).expect("order")
+        let config: Config = serde_json::from_value(json!({
+            "account": {
+                "slug": "acct",
+                "agent_key": "key",
+                "endpoint": "http://127.0.0.1:1/",
+                "mode": "test",
+            },
+        }))
+        .expect("config");
+        Order::new(&config).expect("order")
     }
 
     fn request(proforma: ProformaLink) -> CreateRequest {

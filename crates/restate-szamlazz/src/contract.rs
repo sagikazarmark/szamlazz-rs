@@ -39,7 +39,7 @@ pub use response::{
 ///
 /// Several correctives per invoice are legitimate, so the caller names each
 /// one; the id is embedded in the corrective's external id
-/// (`{slug}:{order}:corrective:{id}`) and a new id issues a new corrective by
+/// (`{namespace}:{order}:corrective:{id}`) and a new id issues a new corrective by
 /// contract. The same id finds the corrective it issued.
 ///
 /// Valid ids match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.

@@ -10,20 +10,18 @@ use restate_sdk::service::Discoverable;
 use serde_json::json;
 
 use super::{Agent, Order};
-use crate::config::Config;
+use crate::config::{Config, WorkerConfig};
 
-fn config() -> Arc<Config> {
-    Arc::new(
-        serde_json::from_value(json!({
-            "account": {
-                "slug": "acct",
-                "agent_key": "key",
-                "endpoint": "http://127.0.0.1:1/",
-                "mode": "test",
-            },
-        }))
-        .expect("config"),
-    )
+fn config() -> Config {
+    serde_json::from_value(json!({
+        "account": {
+            "slug": "acct",
+            "agent_key": "key",
+            "endpoint": "http://127.0.0.1:1/",
+            "mode": "test",
+        },
+    }))
+    .expect("config")
 }
 
 #[test]
@@ -161,12 +159,17 @@ fn agent_discovers_as_a_service_with_three_handlers() {
     }
 }
 
+/// Both services hold the same gateway and the same deployment-level
+/// settings, and nothing else.
 #[test]
 fn services_bind_to_an_endpoint() {
     let config = config();
-    let order = Order::new(Arc::clone(&config)).expect("order");
-    let agent = Agent::from_parts(Arc::clone(order.steps()), config);
-    assert!(Arc::ptr_eq(order.steps(), agent.steps()));
+    let order = Order::new(&config).expect("order");
+    let agent = Agent::from_parts(Arc::clone(order.gateway()), order.config().clone());
+    assert!(Arc::ptr_eq(order.gateway(), agent.gateway()));
+    assert_eq!(order.config(), agent.config());
+    assert_eq!(*order.config(), WorkerConfig::from(&config));
+    assert_eq!(order.config().namespace.as_str(), "acct");
     let _endpoint = Endpoint::builder().bind(order).bind(agent).build();
 }
 
@@ -217,8 +220,8 @@ fn lookup_classifies_query_outcomes() {
 
     use super::support::Lookup;
     use crate::contract::IssuedKind;
+    use crate::gateway::QueryOutcome;
     use crate::identity::OrderKey;
-    use crate::steps::QueryOutcome;
 
     /// A live `SZ-1` of `ORD-1` from a test account, with the given `alap`
     /// elements overridden.

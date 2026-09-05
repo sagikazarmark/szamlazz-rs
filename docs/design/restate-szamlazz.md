@@ -17,15 +17,18 @@ invoice lifecycle workflow, multiple szamlazz.hu accounts in one deployment.
 
 | Crate | Kind | Purpose |
 |---|---|---|
-| `restate-szamlazz` | library | Contract types, config, the `steps` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
+| `restate-szamlazz` | library | Contract types, config, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
 | `restate-szamlazz-endpoint` | binary `restate-szamlazz`, container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config |
 
 `restate-sdk` is an unconditional dependency; the only feature is `schemars`.
 
-Layering (ADR 0001): `steps` is a Rust module owning the `szamlazz_agent::Client`, exposing one plain async fn per
-durable step with outcome-as-data. `Szamlazz.Order` calls it inside `ctx.run`; `Szamlazz.Agent` is a thin stateless
-facade over it for by-number operations. No Restate service calls another; no `Order` handler calls a handler on its
-own key.
+Layering (ADR 0001): the `gateway` is a Rust module that speaks to szamlazz.hu on behalf of one account — it owns the
+`szamlazz_agent::Client` (the transport it wraps; it is not a second client) and the account, and exposes one plain
+async fn per durable step with outcome-as-data. `Szamlazz.Order` calls it inside `ctx.run`; `Szamlazz.Agent` is a thin
+stateless facade over it for by-number operations. Every read of account configuration by the services — the
+ownership-validation pins, the document defaults, the seller block — goes through `Gateway::account()`; the services
+hold only the gateway and a `WorkerConfig` with the deployment-level settings (the namespace of the external ids, the
+issue policy). No Restate service calls another; no `Order` handler calls a handler on its own key.
 
 ## 3. Principle: szamlazz.hu is the source of truth (ADR 0005)
 
@@ -35,12 +38,13 @@ order at a time. Everything else is answered by querying szamlazz.hu through det
 - **VO key** = the order number, trimmed of leading/trailing whitespace, case preserved (the server trims and is
   case-sensitive — verified). Validation: 1–64 bytes after trim, no control characters, no whitespace runs →
   `invalid_input`.
-- **External id** (`szamlaKulsoAzon`), deterministic from the key, so *any* invocation can find what an earlier one
-  issued:
-  - slot kinds: `"{slug}:{order}:{kind}"`, `kind ∈ proforma | invoice | prepayment | final`
-  - correctives: `"{slug}:{order}:corrective:{correction_id}"` (caller-supplied id; several correctives per invoice
+- **External id** (`szamlaKulsoAzon`), deterministic from the key under the deployment's **namespace** (chosen by the
+  operator, opaque to szamlazz.hu, permanent; 1–16 bytes of `[a-z0-9-]`, `:` excluded as the separator), so *any*
+  invocation can find what an earlier one issued:
+  - slot kinds: `"{namespace}:{order}:{kind}"`, `kind ∈ proforma | invoice | prepayment | final`
+  - correctives: `"{namespace}:{order}:corrective:{correction_id}"` (caller-supplied id; several correctives per invoice
     are legitimate)
-  - storno: `"{slug}:{order}:storno:{original_number}"`
+  - storno: `"{namespace}:{order}:storno:{original_number}"`
   - Ext ids are not unique server-side; a query returns the **newest** holder (verified). That is exactly the
     question we ask — "what is the newest document of this kind we issued for this order?" — and it is why a reissue
     after a storno needs no generation counter: the new document becomes the newest holder, the old one stays
@@ -85,21 +89,22 @@ inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   id
 |---|---|---|
 | `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found` |
 | `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)` |
-| `storno` | `StornoRequest` → `StornoResponse` | query first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else storno with ext id `"{slug}:by-number:{number}:storno"` |
+| `storno` | `StornoRequest` → `StornoResponse` | query first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else storno with ext id `"{namespace}:by-number:{number}:storno"` |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
 Every szamlazz.hu call is inside a `ctx.run` with `RunRetryPolicy::max_attempts(1)`; expected outcomes are data.
 
 0. **Validate (pure).** Order key from `ctx.key()`. Validate buyer, items (≥ 1), dates. Normalise `buyer.name`.
-   Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + config defaults +
-   per-call overrides, `external_id = "{slug}:{order}:invoice"`, `download_pdf = false`.
-1. **Exclusivity.** `ctx.run(query "{slug}:{order}:prepayment")`: live `ES` → `conflict{prepaid_chain, existing_number}`.
+   Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
+   defaults and seller block (read through the gateway) + per-call overrides,
+   `external_id = "{namespace}:{order}:invoice"`, `download_pdf = false`.
+1. **Exclusivity.** `ctx.run(query "{namespace}:{order}:prepayment")`: live `ES` → `conflict{prepaid_chain, existing_number}`.
    (`create_prepayment` mirrors this against `…:invoice`.) `Transport` → `TerminalError{unavailable}`. A document under
    the secondary id that fails validation → `conflict{external_id_collision, number}`: the query returns the newest
    holder, so a foreign document may hide a live document of ours behind it, and refusing is the only safe answer.
 2. **Proforma link** (`options.proforma`; `create_invoice` only — see kind specifics):
-   - `auto` (default): `ctx.run(query "{slug}:{order}:proforma")` → live `D` → pass `dijbekeroSzamlaszam`; 7 → none.
+   - `auto` (default): `ctx.run(query "{namespace}:{order}:proforma")` → live `D` → pass `dijbekeroSzamlaszam`; 7 → none.
    - `none`: same query; live `D` → `conflict{proforma_live, existing_number}` (the server links by shared order
      number regardless — verified — so refusing is the only honest answer).
    - `{number}`: `ctx.run(verify number)`; 7 → `conflict{proforma_missing}`; `tipus ≠ D` → `invalid_input`.
@@ -107,8 +112,9 @@ Every szamlazz.hu call is inside a `ctx.run` with `RunRetryPolicy::max_attempts(
    number}` (as in step 1).
    Collect the numbers seen in steps 1–2 as `our_numbers` (for foreign detection).
 3. **Attempt loop** while `attempts < issue.max_attempts`:
-   `out = ctx.run("issue-{kind}-{attempt}", || steps.issue(IssueRequest{ external_id, kind, order, create, reissue,
-   check_hint: attempt == 1 && (detect_foreign || proforma linked), our_numbers, expect_test, expect_supplier_id }))`.
+   `out = ctx.run("issue-{kind}-{attempt}", || gateway.issue(IssueRequest{ external_id, kind, order, create, reissue,
+   check_hint: attempt == 1 && (detect_foreign || proforma linked), our_numbers }))`. The gateway validates every found
+   document against its own account (`teszt`, supplier pin); the request carries only what identifies the document.
    The step, in one closure:
    - `QueryInvoiceXml(ExternalId)` → `Ok(doc)`: validate → `Collision(doc)` on mismatch; live → `Found(doc)`;
      reversed (`sztornozott == Some(true)`) → `reissue ? continue : FoundReversed(doc)`. 7 → continue. Transport →
@@ -158,8 +164,8 @@ the storno request attaches to the storno document (verified).
 1. `ctx.run(verify number)`: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
    `Szamlazz.Agent.storno`); `sztornozott == Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno
    number via the hint when the newest document is the matching `SS`); `tipus ∉ {SZ, ES, VS, HS}` → `rejected{not_stornoable}`.
-2. Loop ≤ 3 attempts (`first_backoff`, ×2): `ctx.run("storno-{number}-{n}", || steps.storno(StornoAttempt{ number,
-   external_id: "{slug}:{order}:storno:{number}", comment, e_invoice }))`:
+2. Loop ≤ 3 attempts (`first_backoff`, ×2): `ctx.run("storno-{number}-{n}", || gateway.storno(StornoAttempt{ number,
+   external_id: "{namespace}:{order}:storno:{number}", comment, e_invoice }))`:
    (a) query by the storno ext id → `SS` with `hivszamlaszam == number` → `AlreadyReversed{storno_number}`;
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon}` **without `keltDatum`** (352 otherwise — verified);
    (c) validate: `invoice_number ≠ requested ∧ gross < 0` → `Reversed`; echo of the requested number →
@@ -221,7 +227,7 @@ TerminalError codes: outcome_unknown | unavailable | account_mismatch | invalid_
 
 ```toml
 [account]
-slug = "acct"                 # 1–16 chars [a-z0-9-]; namespaces external ids
+slug = "acct"                 # the namespace: 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
 agent_key = "..."             # or env RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
 mode = "live"                 # live | test — validated against <teszt> on every adopted document
@@ -246,8 +252,9 @@ Unchanged from v1: `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAM
 
 ## 11. Testing
 
-- `steps`: wiremock tests using upstream-shaped responses (`Found`/`FoundReversed` with and without `reissue`,
-  `Dup71` re-query, storno validation incl. the D/SL no-op, 335, 7, `Collision`, `Foreign`).
+- `gateway`: wiremock tests using upstream-shaped responses (`Found`/`FoundReversed` with and without `reissue`,
+  `Dup71` re-query, storno validation incl. the D/SL no-op, 335, 7, `Collision`, `Foreign`); the gateway validates
+  found documents against the account it was opened for.
 - `service`: discovery test (names, handler set, attributes), an endpoint build smoke test, and `prepare` refusing
   `options.proforma` on every kind but `create_invoice`.
 - End to end (docker-gated): Restate 1.7.8 + wiremock as szamlazz.hu — issued → already_issued (new key) and

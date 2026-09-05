@@ -1,5 +1,5 @@
-//! The pure projection of a [`DocumentInput`] plus configuration into the
-//! Agent's [`CreateInvoice`] (design §6 step 0).
+//! The pure projection of a [`DocumentInput`] plus the account's defaults and
+//! seller block into the Agent's [`CreateInvoice`] (design §6 step 0).
 
 use std::str::FromStr as _;
 
@@ -9,7 +9,7 @@ use szamlazz_agent::ops::invoice::{
 };
 use szamlazz_agent::{Currency, InvoiceNumber, Language};
 
-use super::Steps;
+use super::Gateway;
 use crate::contract::{DocumentInput, IssuedKind};
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
@@ -57,10 +57,11 @@ pub enum InputError {
     },
 }
 
-impl Steps {
-    /// Builds the create request for `document`: configured defaults, per-call
-    /// overrides (override wins), line totals computed for the currency, the
-    /// buyer name normalised, the order number and external id set, no PDF.
+impl Gateway {
+    /// Builds the create request for `document`: the account's defaults,
+    /// per-call overrides (override wins), line totals computed for the
+    /// currency, the buyer name normalised, the order number and external id
+    /// set, no PDF.
     ///
     /// Pure: no I/O and no clock. `issue_date` is passed through as the caller
     /// pinned it (or left unset so the server dates the document).
@@ -76,7 +77,7 @@ impl Steps {
         external_id: &ExternalId,
         refs: DocumentRefs<'_>,
     ) -> Result<CreateInvoice, InputError> {
-        let defaults = &self.config.defaults;
+        let defaults = &self.account.defaults;
         let overrides = &document.overrides;
 
         if document.items.is_empty() {
@@ -163,7 +164,7 @@ impl Steps {
         create.aggregator.clone_from(&defaults.aggregator);
         create.guardian = defaults.guardian;
         create.external_id = Some(external_id.as_str().to_owned());
-        create.seller = self.config.seller.to_seller();
+        create.seller = self.account.seller.to_seller();
         Ok(create)
     }
 }
@@ -192,8 +193,6 @@ fn template(token: &str) -> InvoiceTemplate {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use jiff::civil::date;
     use rust_decimal::dec;
     use serde_json::json;
@@ -205,7 +204,7 @@ mod tests {
     use crate::contract::document::tests::sample_document;
     use crate::contract::{DocumentKind, ExchangeRateInput};
 
-    fn steps(defaults: &serde_json::Value) -> Steps {
+    fn gateway(defaults: &serde_json::Value) -> Gateway {
         let config: Config = serde_json::from_value(json!({
             "account": {"slug": "acct", "agent_key": "key",
                         "endpoint": "http://127.0.0.1:1/"},
@@ -213,7 +212,7 @@ mod tests {
             "seller": {"bank": "Bank", "bank_account": "1234", "email": {"subject": "Hi"}},
         }))
         .expect("config");
-        Steps::new(Arc::new(config)).expect("steps")
+        Gateway::new(&config).expect("gateway")
     }
 
     fn order() -> OrderKey {
@@ -226,7 +225,7 @@ mod tests {
 
     #[test]
     fn projects_defaults_and_identity() {
-        let steps = steps(&json!({
+        let gateway = gateway(&json!({
             "e_invoice": true,
             "send_email": false,
             "number_prefix": "WEB",
@@ -239,7 +238,7 @@ mod tests {
         document.buyer.name = "  Kova\u{301}cs Bt.  ".to_owned();
         document.issue_date = Some(date(2026, 9, 3));
         document.paid = true;
-        let create = steps
+        let create = gateway
             .build_create(
                 IssuedKind::Invoice,
                 &document,
@@ -299,7 +298,7 @@ mod tests {
 
     #[test]
     fn overrides_win_over_defaults() {
-        let steps = steps(&json!({
+        let gateway = gateway(&json!({
             "e_invoice": true,
             "send_email": true,
             "number_prefix": "WEB",
@@ -317,7 +316,7 @@ mod tests {
             bank: "OTP".to_owned(),
             rate: Some(dec!(395.5)),
         });
-        let create = steps
+        let create = gateway
             .build_create(
                 IssuedKind::Proforma,
                 &document,
@@ -342,7 +341,7 @@ mod tests {
 
     #[test]
     fn non_huf_needs_a_rate_unless_mnb_is_automatic() {
-        let mnb = steps(&json!({"currency": "EUR"}));
+        let mnb = gateway(&json!({"currency": "EUR"}));
         let document = sample_document();
         let create = mnb
             .build_create(
@@ -358,7 +357,7 @@ mod tests {
             Some(ExchangeRate::automatic_mnb())
         );
 
-        let otp = steps(&json!({"currency": "EUR", "exchange_rate_bank": "OTP"}));
+        let otp = gateway(&json!({"currency": "EUR", "exchange_rate_bank": "OTP"}));
         assert_eq!(
             otp.build_create(
                 IssuedKind::Invoice,
@@ -388,10 +387,10 @@ mod tests {
 
     #[test]
     fn kind_references_and_input_errors() {
-        let steps = steps(&json!({}));
+        let gateway = gateway(&json!({}));
         let document = sample_document();
         let build =
-            |kind, refs| steps.build_create(kind, &document, &order(), &external_id(), refs);
+            |kind, refs| gateway.build_create(kind, &document, &order(), &external_id(), refs);
         assert_eq!(
             build(IssuedKind::Prepayment, DocumentRefs::default())
                 .expect("prepayment")
@@ -444,7 +443,7 @@ mod tests {
         let mut empty = document.clone();
         empty.items.clear();
         assert_eq!(
-            steps.build_create(
+            gateway.build_create(
                 IssuedKind::Invoice,
                 &empty,
                 &order(),
@@ -456,7 +455,7 @@ mod tests {
         let mut klingon = document;
         klingon.overrides.language = Some("tlh".to_owned());
         assert_eq!(
-            steps.build_create(
+            gateway.build_create(
                 IssuedKind::Invoice,
                 &klingon,
                 &order(),

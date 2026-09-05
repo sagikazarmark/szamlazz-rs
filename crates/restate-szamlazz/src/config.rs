@@ -20,6 +20,11 @@
 //!
 //! The types only implement `Deserialize`; the endpoint binary chooses the
 //! file format and environment merging.
+//!
+//! A parsed [`Config`] is split at construction: the gateway takes the account
+//! (credentials, mode, supplier pin, defaults, seller) and the services keep a
+//! [`WorkerConfig`] (namespace, issue policy). `account.slug` is the
+//! [`Namespace`]; the key keeps its old name for now.
 
 use std::fmt;
 use std::str::FromStr;
@@ -29,6 +34,10 @@ use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 
 /// The complete deployment configuration.
+///
+/// The Restate services do not hold it: the account-shaped part is read
+/// through [`Gateway::account`](crate::gateway::Gateway::account) and the rest
+/// is a [`WorkerConfig`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// The single szamlazz.hu account this deployment issues for.
@@ -47,7 +56,7 @@ pub struct Config {
 impl Config {
     /// Checks the cross-field invariants that `Deserialize` cannot express.
     ///
-    /// The account slug is validated when parsed and needs no further check.
+    /// The namespace is validated when parsed and needs no further check.
     ///
     /// # Errors
     ///
@@ -68,6 +77,28 @@ impl Config {
             });
         }
         Ok(())
+    }
+}
+
+/// The deployment-level settings the Restate services hold: what is not
+/// account-shaped and therefore does not route through the gateway.
+///
+/// The namespace prefixes every external id the deployment issues; the issue
+/// policy bounds the attempt loop. Built from a [`Config`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerConfig {
+    /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
+    pub namespace: Namespace,
+    /// Issuing attempt budget and backoff.
+    pub issue: IssueConfig,
+}
+
+impl From<&Config> for WorkerConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            namespace: config.account.slug.clone(),
+            issue: config.issue.clone(),
+        }
     }
 }
 
@@ -94,8 +125,9 @@ pub enum ConfigError {
 /// The szamlazz.hu account.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountConfig {
-    /// Short name that namespaces external ids (`{slug}:{order}:{kind}`).
-    pub slug: AccountSlug,
+    /// The deployment's [`Namespace`], the external-id prefix
+    /// (`{namespace}:{order}:{kind}`). The key is `slug` for now.
+    pub slug: Namespace,
     /// The Agent key (`számlaagentkulcs`).
     pub agent_key: Secret,
     /// The Számla Agent endpoint; `None` uses the production URL.
@@ -130,39 +162,45 @@ impl AccountMode {
     }
 }
 
-/// The account slug: 1–16 characters of `[a-z0-9-]`.
+/// The namespace: the external-id prefix of this deployment, 1–16 bytes of
+/// `[a-z0-9-]`.
+///
+/// Chosen by the operator, opaque to szamlazz.hu and permanent: every
+/// external id the deployment issues starts with it, so changing it would
+/// hide every document issued so far. `:` is excluded because it is the
+/// external-id separator.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AccountSlug(String);
+pub struct Namespace(String);
 
-impl AccountSlug {
+impl Namespace {
     /// The maximum length in bytes.
     pub const MAX_LEN: usize = 16;
 
-    /// The slug as a string slice.
+    /// The namespace as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    fn validate(value: &str) -> Result<(), InvalidAccountSlug> {
+    fn validate(value: &str) -> Result<(), InvalidNamespace> {
         if value.is_empty() {
-            return Err(InvalidAccountSlug::Empty);
+            return Err(InvalidNamespace::Empty);
         }
         if value.len() > Self::MAX_LEN {
-            return Err(InvalidAccountSlug::TooLong(value.len()));
+            return Err(InvalidNamespace::TooLong(value.len()));
         }
         if let Some(invalid) = value
             .chars()
             .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
         {
-            return Err(InvalidAccountSlug::InvalidChar(invalid));
+            return Err(InvalidNamespace::InvalidChar(invalid));
         }
         Ok(())
     }
 }
 
-impl FromStr for AccountSlug {
-    type Err = InvalidAccountSlug;
+impl FromStr for Namespace {
+    type Err = InvalidNamespace;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::validate(value)?;
@@ -170,8 +208,8 @@ impl FromStr for AccountSlug {
     }
 }
 
-impl TryFrom<String> for AccountSlug {
-    type Error = InvalidAccountSlug;
+impl TryFrom<String> for Namespace {
+    type Error = InvalidNamespace;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::validate(&value)?;
@@ -179,44 +217,44 @@ impl TryFrom<String> for AccountSlug {
     }
 }
 
-impl fmt::Display for AccountSlug {
+impl fmt::Display for Namespace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl AsRef<str> for AccountSlug {
+impl AsRef<str> for Namespace {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
 /// Serializes as the plain string.
-impl Serialize for AccountSlug {
+impl Serialize for Namespace {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
     }
 }
 
-/// Deserializes from a string, rejecting invalid slugs.
-impl<'de> Deserialize<'de> for AccountSlug {
+/// Deserializes from a string, rejecting invalid namespaces.
+impl<'de> Deserialize<'de> for Namespace {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
-/// A string that is not a valid [`AccountSlug`].
+/// A string that is not a valid [`Namespace`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum InvalidAccountSlug {
-    /// The slug is empty.
-    #[error("account slug must not be empty")]
+pub enum InvalidNamespace {
+    /// The namespace is empty.
+    #[error("namespace must not be empty")]
     Empty,
-    /// The slug exceeds [`AccountSlug::MAX_LEN`] bytes.
-    #[error("account slug is {0} bytes long, at most {max} are allowed", max = AccountSlug::MAX_LEN)]
+    /// The namespace exceeds [`Namespace::MAX_LEN`] bytes.
+    #[error("namespace is {0} bytes long, at most {max} are allowed", max = Namespace::MAX_LEN)]
     TooLong(usize),
     /// A character is outside `[a-z0-9-]`.
-    #[error("account slug may only contain lowercase ASCII letters, digits and '-', found {0:?}")]
+    #[error("namespace may only contain lowercase ASCII letters, digits and '-', found {0:?}")]
     InvalidChar(char),
 }
 
@@ -570,32 +608,68 @@ mod tests {
         config.validate().expect("valid");
     }
 
+    /// The namespace is 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it
+    /// is the external-id separator.
     #[test]
-    fn invalid_slug_is_rejected_at_parse_time() {
-        for slug in [
-            "",
-            "Acct",
-            "acct_1",
-            "acct 1",
-            "a".repeat(17).as_str(),
-            "ácct",
-        ] {
-            let result = serde_json::from_value::<Config>(json!({
-                "account": {"slug": slug, "agent_key": "key"},
-            }));
-            assert!(result.is_err(), "{slug:?} should be rejected");
+    fn namespace_rule_is_enforced_at_parse_time() {
+        for accepted in ["a", "acct", "acct-1", "0", "a".repeat(16).as_str()] {
+            let namespace: Namespace = accepted.parse().expect(accepted);
+            assert_eq!(namespace.as_str(), accepted);
+            assert_eq!(namespace.to_string(), accepted);
+            let config: Config = serde_json::from_value(json!({
+                "account": {"slug": accepted, "agent_key": "key"},
+            }))
+            .expect(accepted);
+            assert_eq!(config.account.slug, namespace);
         }
-        assert_eq!("".parse::<AccountSlug>(), Err(InvalidAccountSlug::Empty));
+
+        let too_long = "a".repeat(17);
+        let rejected = [
+            ("", InvalidNamespace::Empty),
+            ("Acct", InvalidNamespace::InvalidChar('A')),
+            ("acct_1", InvalidNamespace::InvalidChar('_')),
+            ("acct 1", InvalidNamespace::InvalidChar(' ')),
+            ("acct:1", InvalidNamespace::InvalidChar(':')),
+            ("ácct", InvalidNamespace::InvalidChar('á')),
+            (too_long.as_str(), InvalidNamespace::TooLong(17)),
+        ];
+        for (input, expected) in rejected {
+            assert_eq!(
+                input.parse::<Namespace>(),
+                Err(expected.clone()),
+                "{input:?}"
+            );
+            assert_eq!(Namespace::try_from(input.to_owned()), Err(expected));
+            let result = serde_json::from_value::<Config>(json!({
+                "account": {"slug": input, "agent_key": "key"},
+            }));
+            assert!(result.is_err(), "{input:?} should be rejected");
+        }
+    }
+
+    /// The services hold only the deployment-level settings: the namespace
+    /// and the issue policy, taken from the parsed configuration.
+    #[test]
+    fn worker_config_is_the_namespace_and_the_issue_policy() {
+        let config: Config = serde_json::from_value(json!({
+            "account": {"slug": "acct-1", "agent_key": "key", "mode": "test"},
+            "issue": {"max_attempts": 3, "first_backoff": "90s", "max_backoff": "1h"},
+        }))
+        .expect("parse");
+
+        let worker = WorkerConfig::from(&config);
+        assert_eq!(worker.namespace.as_str(), "acct-1");
+        assert_eq!(worker.issue.max_attempts, 3);
+        assert_eq!(worker.issue.first_backoff, Duration::from_secs(90));
+        assert_eq!(worker.issue.max_backoff, Duration::from_secs(3600));
+        assert!(worker.issue.detect_foreign);
         assert_eq!(
-            "Acct".parse::<AccountSlug>(),
-            Err(InvalidAccountSlug::InvalidChar('A'))
+            worker,
+            WorkerConfig {
+                namespace: "acct-1".parse().expect("namespace"),
+                issue: config.issue.clone(),
+            }
         );
-        assert_eq!(
-            "a".repeat(17).parse::<AccountSlug>(),
-            Err(InvalidAccountSlug::TooLong(17))
-        );
-        let slug: AccountSlug = "a".repeat(16).parse().expect("16 chars are allowed");
-        assert_eq!(slug.to_string(), "a".repeat(16));
     }
 
     #[test]

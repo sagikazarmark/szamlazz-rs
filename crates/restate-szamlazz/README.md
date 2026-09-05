@@ -8,9 +8,9 @@
 The `Szamlazz.Order` Virtual Object — keyed by the order number — serializes issuing per key, so that a caller
 can say "issue the invoice for order X" and get exactly one legal document under retries, process crashes,
 concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the source of truth, reached through
-deterministic external ids (`{slug}:{order}:{kind}`) so that any invocation can find what an earlier one
+deterministic external ids (`{namespace}:{order}:{kind}`) so that any invocation can find what an earlier one
 issued. The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of
-unmanaged documents) over the same steps. Both are projections of the Számla Agent model: deployment constants
+unmanaged documents) over the same gateway. Both are projections of the Számla Agent model: deployment constants
 live in config, line totals are computed, domain outcomes are returned as data.
 
 The design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md), the decisions
@@ -28,9 +28,9 @@ use std::sync::Arc;
 use restate_sdk::prelude::{Endpoint, HttpServer};
 use restate_szamlazz::{Agent, Config, Order};
 
-async fn serve(config: Arc<Config>) -> Result<(), Box<dyn std::error::Error>> {
-    let order = Order::new(Arc::clone(&config))?;
-    let agent = Agent::from_parts(Arc::clone(order.steps()), config);
+async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    let order = Order::new(&config)?;
+    let agent = Agent::from_parts(Arc::clone(order.gateway()), order.config().clone());
     let endpoint = Endpoint::builder().bind(order).bind(agent).build();
     HttpServer::new(endpoint)
         .listen_and_serve("0.0.0.0:9080".parse()?)
@@ -40,7 +40,8 @@ async fn serve(config: Arc<Config>) -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Config` only implements `Deserialize`; the host chooses the file format and environment merging (the endpoint
-binary uses figment). Call `Config::validate()` after parsing.
+binary uses figment). Call `Config::validate()` after parsing. `Order::new` opens the `Gateway` for the account
+and keeps the deployment-level `WorkerConfig` (namespace, issue policy); `Agent` shares both.
 
 ## Scope Contract
 
@@ -69,7 +70,8 @@ What it relies on:
   invocation can ask "is there already one?" without state.
 - **Validation of every found document** — order number, `tipus`, `teszt`, and the `supplier_id` pin when
   configured — because external ids are not unique server-side and a query returns the newest holder.
-- One szamlazz.hu account per deployment; the account slug namespaces the external ids.
+- One szamlazz.hu account per deployment; the deployment's namespace prefixes the external ids and is
+  permanent — changing it would hide every document issued so far.
 
 What it does not do: PDF download, receipts, taxpayer query, IPN and Adatkapcsolat ingestion, the proforma →
 payment → invoice lifecycle workflow, multiple prepayments per order, tracking *who* reversed a document, and
@@ -116,11 +118,15 @@ activation details.
   `for_storno`, `for_unmanaged_storno`.
 - `Config`: the deployment configuration — `[account]` (`slug`, `agent_key`, `endpoint`, `mode`,
   `supplier_id`), `[defaults]`, `[seller]`, `[issue]` (`max_attempts`, `first_backoff`, `max_backoff`,
-  `detect_foreign`). Secrets are `config::Secret`, whose `Debug` output is redacted.
-- `steps::Steps`: the bodies of the durable steps over `szamlazz_agent::Client` — one plain async fn per
-  `ctx.run` (`issue`, `verify`, `query`, `hint`, `storno`, `delete_proforma`, `set_payments`), each returning
-  every expected szamlazz.hu outcome as data. `Szamlazz.Order` calls them inside `ctx.run`; the
-  `Szamlazz.Agent` Restate service is a thin facade over the same instance. No Restate service calls another.
+  `detect_foreign`). Secrets are `config::Secret`, whose `Debug` output is redacted. `account.slug` is the
+  `config::Namespace` — the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`. `WorkerConfig`
+  (`namespace`, `issue`) is the deployment-level part the services hold.
+- `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
+  `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`issue`, `verify`, `query`, `hint`, `storno`,
+  `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome as data. It is not a
+  second client: the Számla Agent `Client` is the transport it wraps. Every read of account configuration by the
+  services goes through `Gateway::account()`. `Szamlazz.Order` calls it inside `ctx.run`; the `Szamlazz.Agent`
+  Restate service is a thin facade over the same instance. No Restate service calls another.
 - `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
   registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
   handlers.
@@ -132,14 +138,15 @@ Three identities work together ([ADR 0002](../../docs/adr/0002-order-keyed-idemp
 
 - The **order key** decides which `Order` instance runs; same-key handlers run one at a time, which is what
   serializes issuing per order. The object holds no state.
-- The **external id** identifies a document to szamlazz.hu and is derived from the key alone:
+- The **external id** identifies a document to szamlazz.hu and is derived from the key alone under the
+  deployment's namespace:
 
   | Document | External id |
   |---|---|
-  | proforma, invoice, prepayment, final | `{slug}:{order}:{kind}` |
-  | corrective | `{slug}:{order}:corrective:{correction_id}` |
-  | storno of an order's invoice | `{slug}:{order}:storno:{original_number}` |
-  | storno via `Szamlazz.Agent` (no order) | `{slug}:by-number:{number}:storno` |
+  | proforma, invoice, prepayment, final | `{namespace}:{order}:{kind}` |
+  | corrective | `{namespace}:{order}:corrective:{correction_id}` |
+  | storno of an order's invoice | `{namespace}:{order}:storno:{original_number}` |
+  | storno via `Szamlazz.Agent` (no order) | `{namespace}:by-number:{number}:storno` |
 
   It is queried before every create inside the same `ctx.run` closure, so a request that landed before a
   crash or timeout is found, not re-issued. There is **no generation counter**: external ids are not unique
@@ -199,8 +206,8 @@ whatever landed.
 ## Testing
 
 - `cargo test -p restate-szamlazz` runs the contract, config and identity unit tests, the discovery and binding
-  tests of the adapters, and the wiremock tests of the steps module against synthetic szamlazz.hu responses
-  (`tests/steps.rs`: `Found` / `FoundReversed` with and without `reissue`, the 71/152 re-query, `Collision`,
+  tests of the adapters, and the wiremock tests of the gateway against synthetic szamlazz.hu responses
+  (`tests/gateway.rs`: `Found` / `FoundReversed` with and without `reissue`, the 71/152 re-query, `Collision`,
   `Foreign`, storno validation including the proforma / delivery-note no-op, 335, 7).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu — issued →

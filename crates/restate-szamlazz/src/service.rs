@@ -2,11 +2,16 @@
 //! `Szamlazz.Agent` service (design §4–§7).
 //!
 //! Both are thin adapters: every szamlazz.hu call runs inside `ctx.run` through
-//! the [`Steps`] module and domain outcomes are returned as data. Neither
-//! keeps state — szamlazz.hu is the source of truth, reached through the
-//! order's deterministic external ids. `TerminalError`s carry a
+//! the [`Gateway`] and domain outcomes are returned as data. Neither keeps
+//! state — szamlazz.hu is the source of truth, reached through the order's
+//! deterministic external ids. `TerminalError`s carry a
 //! [`TerminalCode`](crate::contract::TerminalCode) and always mean "outcome
 //! unknown — retry with a new `Idempotency-Key`".
+//!
+//! Each service holds exactly two things: the gateway, through which it reads
+//! everything about the account ([`Gateway::account`]), and a
+//! [`WorkerConfig`] with the deployment-level settings — the namespace of the
+//! external ids and the issue policy — that are not account-shaped.
 //!
 //! - [`Order`] — keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.
@@ -17,8 +22,8 @@ use std::sync::Arc;
 
 use szamlazz_agent::client::BuildError;
 
-use crate::config::Config;
-use crate::steps::Steps;
+use crate::config::{Config, WorkerConfig};
+use crate::gateway::Gateway;
 
 mod agent;
 mod create;
@@ -35,69 +40,75 @@ pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressCli
 /// The object holds no state.
 #[derive(Debug, Clone)]
 pub struct Order {
-    steps: Arc<Steps>,
-    config: Arc<Config>,
+    gateway: Arc<Gateway>,
+    config: WorkerConfig,
 }
 
 impl Order {
-    /// Builds the object for `config`, constructing the steps.
+    /// Builds the object for `config`, opening the gateway.
     ///
     /// # Errors
     ///
     /// Returns an error when the HTTP client cannot be constructed.
-    pub fn new(config: Arc<Config>) -> Result<Self, BuildError> {
-        let steps = Arc::new(Steps::new(Arc::clone(&config))?);
-        Ok(Self::from_parts(steps, config))
+    pub fn new(config: &Config) -> Result<Self, BuildError> {
+        let gateway = Arc::new(Gateway::new(config)?);
+        Ok(Self::from_parts(gateway, WorkerConfig::from(config)))
     }
 
-    /// Builds the object over existing steps.
+    /// Builds the object over an existing gateway.
     #[must_use]
-    pub fn from_parts(steps: Arc<Steps>, config: Arc<Config>) -> Self {
-        Self { steps, config }
+    pub fn from_parts(gateway: Arc<Gateway>, config: WorkerConfig) -> Self {
+        Self { gateway, config }
     }
 
-    /// The durable step bodies.
+    /// The gateway to szamlazz.hu.
     #[must_use]
-    pub fn steps(&self) -> &Arc<Steps> {
-        &self.steps
+    pub fn gateway(&self) -> &Arc<Gateway> {
+        &self.gateway
     }
 
-    /// The deployment configuration.
+    /// The deployment-level settings.
     #[must_use]
-    pub fn config(&self) -> &Arc<Config> {
+    pub fn config(&self) -> &WorkerConfig {
         &self.config
     }
 }
 
 /// The stateless `Szamlazz.Agent` service: by-number operations over the
-/// same steps as [`Order`].
+/// same gateway as [`Order`].
 #[derive(Debug, Clone)]
 pub struct Agent {
-    steps: Arc<Steps>,
-    config: Arc<Config>,
+    gateway: Arc<Gateway>,
+    config: WorkerConfig,
 }
 
 impl Agent {
-    /// Builds the service for `config`, constructing the steps.
+    /// Builds the service for `config`, opening the gateway.
     ///
     /// # Errors
     ///
     /// Returns an error when the HTTP client cannot be constructed.
-    pub fn new(config: Arc<Config>) -> Result<Self, BuildError> {
-        let steps = Arc::new(Steps::new(Arc::clone(&config))?);
-        Ok(Self::from_parts(steps, config))
+    pub fn new(config: &Config) -> Result<Self, BuildError> {
+        let gateway = Arc::new(Gateway::new(config)?);
+        Ok(Self::from_parts(gateway, WorkerConfig::from(config)))
     }
 
-    /// Builds the service over existing steps.
+    /// Builds the service over an existing gateway.
     #[must_use]
-    pub fn from_parts(steps: Arc<Steps>, config: Arc<Config>) -> Self {
-        Self { steps, config }
+    pub fn from_parts(gateway: Arc<Gateway>, config: WorkerConfig) -> Self {
+        Self { gateway, config }
     }
 
-    /// The durable step bodies.
+    /// The gateway to szamlazz.hu.
     #[must_use]
-    pub fn steps(&self) -> &Arc<Steps> {
-        &self.steps
+    pub fn gateway(&self) -> &Arc<Gateway> {
+        &self.gateway
+    }
+
+    /// The deployment-level settings.
+    #[must_use]
+    pub fn config(&self) -> &WorkerConfig {
+        &self.config
     }
 }
 

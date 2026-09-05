@@ -13,11 +13,11 @@ use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
     DocumentStatus, IssuedKind, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
-use crate::identity::ExternalId;
-use crate::steps::{
+use crate::gateway::{
     DeleteOutcome, InvoiceDocumentExt as _, QueryOutcome, StornoAttempt,
-    StornoOutcome as StepsStorno, issued_kind_of,
+    StornoOutcome as GatewayStorno, issued_kind_of,
 };
+use crate::identity::ExternalId;
 
 /// Storno re-send attempts per invocation (design §6 step 2).
 const STORNO_ATTEMPTS: u32 = 3;
@@ -35,12 +35,11 @@ impl Order {
             invoice_number: number,
             comment,
         } = request;
+        let gateway = &self.gateway;
 
         // Step 1: verify the document.
         let found =
-            match object::verify(ctx, &self.steps, format!("verify-storno-{number}"), &number)
-                .await?
-            {
+            match object::verify(ctx, gateway, format!("verify-storno-{number}"), &number).await? {
                 QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
                 QueryOutcome::NotFound => {
                     return Err(Fault::invalid_input(format!(
@@ -54,7 +53,7 @@ impl Order {
             return Ok(StornoResponse::new(StornoOutcome::Conflict, number)
                 .with_conflict_reason(ConflictReason::NotManaged));
         }
-        let account = &self.config.account;
+        let account = gateway.account();
         if !found.account_matches(account.mode.is_test(), account.supplier_id) {
             return Err(Fault::account_mismatch(format!(
                 "document {number} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
@@ -64,7 +63,7 @@ impl Order {
         }
         if found.info.reversed == Some(true) {
             // Idempotent: already reversed by anyone.
-            let storno_number = object::storno_number_of(ctx, &self.steps, &order, &number).await?;
+            let storno_number = object::storno_number_of(ctx, gateway, &order, &number).await?;
             let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
             response.storno_number = storno_number;
             return Ok(response);
@@ -72,14 +71,14 @@ impl Order {
         if !matches!(found.info.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
             return Ok(not_stornoable(number));
         }
-        let e_invoice = found.e_invoice().unwrap_or(self.config.defaults.e_invoice);
+        let e_invoice = found.e_invoice().unwrap_or(account.defaults.e_invoice);
 
         // Step 2: the query-first re-send loop.
-        let storno_id = ExternalId::for_storno(&self.config.account.slug, &order, &number);
+        let storno_id = ExternalId::for_storno(&self.config.namespace, &order, &number);
         let mut backoff = self.config.issue.first_backoff;
         for attempt in 1..=STORNO_ATTEMPTS {
             let outcome = {
-                let steps = Arc::clone(&self.steps);
+                let gateway = Arc::clone(gateway);
                 let number = number.clone();
                 let storno_id = storno_id.clone();
                 let comment = comment.clone();
@@ -87,7 +86,7 @@ impl Order {
                     ctx,
                     format!("storno-{number}-{attempt}"),
                     move || async move {
-                        steps
+                        gateway
                             .storno(StornoAttempt {
                                 invoice_number: &number,
                                 external_id: &storno_id,
@@ -101,21 +100,21 @@ impl Order {
             };
             // Step 3.
             return Ok(match outcome {
-                StepsStorno::Reversed(storno) => {
+                GatewayStorno::Reversed(storno) => {
                     StornoResponse::new(StornoOutcome::Reversed, number)
                         .with_storno_number(storno.invoice_number.as_str())
                 }
-                StepsStorno::AlreadyReversed { storno_number } => {
+                GatewayStorno::AlreadyReversed { storno_number } => {
                     StornoResponse::new(StornoOutcome::Reversed, number)
                         .with_storno_number(storno_number)
                 }
-                StepsStorno::NotStornoable => not_stornoable(number),
-                StepsStorno::Rejected { code, message } => {
+                GatewayStorno::NotStornoable => not_stornoable(number),
+                GatewayStorno::Rejected { code, message } => {
                     StornoResponse::new(StornoOutcome::Rejected, number)
                         .with_code(code)
                         .with_message(message)
                 }
-                StepsStorno::Unknown { .. } | StepsStorno::Transport(_) => {
+                GatewayStorno::Unknown { .. } | GatewayStorno::Transport(_) => {
                     if attempt < STORNO_ATTEMPTS {
                         object::sleep(ctx, backoff).await?;
                         backoff = next_backoff(backoff, self.config.issue.max_backoff);
@@ -147,10 +146,10 @@ impl Order {
     ) -> Result<DeleteProformaResponse, HandlerError> {
         let order = order_key(ctx.key())?;
         let kind = DocumentKind::Proforma;
-        let proforma_id = ExternalId::for_kind(&self.config.account.slug, &order, kind);
+        let proforma_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
         let found = match object::lookup(
             ctx,
-            &self.steps,
+            &self.gateway,
             "proforma-for-delete",
             &proforma_id,
             &order,
@@ -172,12 +171,12 @@ impl Order {
 
         let number = found.number().to_owned();
         let outcome = {
-            let steps = Arc::clone(&self.steps);
+            let gateway = Arc::clone(&self.gateway);
             let number = number.clone();
             object::run_once(
                 ctx,
                 format!("delete-proforma-{number}"),
-                move || async move { steps.delete_proforma(&number).await },
+                move || async move { gateway.delete_proforma(&number).await },
             )
             .await?
         };
@@ -208,10 +207,10 @@ impl Order {
         let order = order_key(ctx.key())?;
         let mut status = OrderStatus::default();
         for kind in DocumentKind::ALL {
-            let external_id = ExternalId::for_kind(&self.config.account.slug, &order, kind);
+            let external_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
             let found = shared::lookup(
                 ctx,
-                &self.steps,
+                &self.gateway,
                 format!("get-{kind}"),
                 &external_id,
                 &order,

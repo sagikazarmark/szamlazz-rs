@@ -11,7 +11,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization as _;
 
-use crate::config::AccountSlug;
+use crate::config::Namespace;
 use crate::contract::{CorrectionId, DocumentKind};
 
 /// The key of an `Order` Virtual Object: the order number (`rendelésszám`)
@@ -127,13 +127,13 @@ pub enum InvalidOrderKey {
 
 /// The external id (`szamlaKulsoAzon`) of a document the service issues.
 ///
-/// Deterministic from the order key alone: `{slug}:{order}:{kind}` for the
-/// four document kinds, `{slug}:{order}:corrective:{correction_id}` for
-/// correctives, `{slug}:{order}:storno:{original_number}` for a storno
-/// invoice and `{slug}:by-number:{number}:storno` for the storno of a
-/// document no `Order` manages. Not unique server-side — a query returns the
-/// newest holder — so every document found by it is validated before it is
-/// trusted.
+/// Deterministic from the order key alone under the deployment's
+/// [`Namespace`]: `{namespace}:{order}:{kind}` for the four document kinds,
+/// `{namespace}:{order}:corrective:{correction_id}` for correctives,
+/// `{namespace}:{order}:storno:{original_number}` for a storno invoice and
+/// `{namespace}:by-number:{number}:storno` for the storno of a document no
+/// `Order` manages. Not unique server-side — a query returns the newest
+/// holder — so every document found by it is validated before it is trusted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExternalId(String);
@@ -144,31 +144,31 @@ impl ExternalId {
         Self(value.into())
     }
 
-    /// The id of the `kind` document of `order`: `{slug}:{order}:{kind}`.
+    /// The id of the `kind` document of `order`: `{namespace}:{order}:{kind}`.
     #[must_use]
-    pub fn for_kind(slug: &AccountSlug, order: &OrderKey, kind: DocumentKind) -> Self {
-        Self(format!("{slug}:{order}:{}", kind.as_str()))
+    pub fn for_kind(namespace: &Namespace, order: &OrderKey, kind: DocumentKind) -> Self {
+        Self(format!("{namespace}:{order}:{}", kind.as_str()))
     }
 
     /// The id of the corrective `id` of `order`:
-    /// `{slug}:{order}:corrective:{id}`.
+    /// `{namespace}:{order}:corrective:{id}`.
     #[must_use]
-    pub fn for_corrective(slug: &AccountSlug, order: &OrderKey, id: &CorrectionId) -> Self {
-        Self(format!("{slug}:{order}:corrective:{id}"))
+    pub fn for_corrective(namespace: &Namespace, order: &OrderKey, id: &CorrectionId) -> Self {
+        Self(format!("{namespace}:{order}:corrective:{id}"))
     }
 
     /// The id sent on the storno of `original_number`, a document of `order`:
-    /// `{slug}:{order}:storno:{original_number}`.
+    /// `{namespace}:{order}:storno:{original_number}`.
     #[must_use]
-    pub fn for_storno(slug: &AccountSlug, order: &OrderKey, original_number: &str) -> Self {
-        Self(format!("{slug}:{order}:storno:{original_number}"))
+    pub fn for_storno(namespace: &Namespace, order: &OrderKey, original_number: &str) -> Self {
+        Self(format!("{namespace}:{order}:storno:{original_number}"))
     }
 
     /// The id sent on the storno of `number`, a document no `Order` manages:
-    /// `{slug}:by-number:{number}:storno`.
+    /// `{namespace}:by-number:{number}:storno`.
     #[must_use]
-    pub fn for_unmanaged_storno(slug: &AccountSlug, number: &str) -> Self {
-        Self(format!("{slug}:by-number:{number}:storno"))
+    pub fn for_unmanaged_storno(namespace: &Namespace, number: &str) -> Self {
+        Self(format!("{namespace}:by-number:{number}:storno"))
     }
 
     /// The id as a string slice.
@@ -211,8 +211,8 @@ pub fn normalize_buyer_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    fn slug() -> AccountSlug {
-        "acct".parse().expect("valid slug")
+    fn namespace() -> Namespace {
+        "acct".parse().expect("valid namespace")
     }
 
     #[test]
@@ -267,37 +267,41 @@ mod tests {
     fn external_id_formats() {
         let order = OrderKey::parse("ORD-1").expect("valid");
         assert_eq!(
-            ExternalId::for_kind(&slug(), &order, DocumentKind::Proforma).as_str(),
+            ExternalId::for_kind(&namespace(), &order, DocumentKind::Proforma).as_str(),
             "acct:ORD-1:proforma"
         );
         assert_eq!(
-            ExternalId::for_kind(&slug(), &order, DocumentKind::Invoice).to_string(),
+            ExternalId::for_kind(&namespace(), &order, DocumentKind::Invoice).to_string(),
             "acct:ORD-1:invoice"
         );
         assert_eq!(
-            ExternalId::for_kind(&slug(), &order, DocumentKind::Prepayment).as_ref(),
+            ExternalId::for_kind(&namespace(), &order, DocumentKind::Prepayment).as_ref(),
             "acct:ORD-1:prepayment"
         );
         assert_eq!(
-            String::from(ExternalId::for_kind(&slug(), &order, DocumentKind::Final)),
+            String::from(ExternalId::for_kind(
+                &namespace(),
+                &order,
+                DocumentKind::Final
+            )),
             "acct:ORD-1:final"
         );
         let correction: CorrectionId = "c-3".parse().expect("valid correction id");
         assert_eq!(
-            ExternalId::for_corrective(&slug(), &order, &correction).as_str(),
+            ExternalId::for_corrective(&namespace(), &order, &correction).as_str(),
             "acct:ORD-1:corrective:c-3"
         );
         assert_eq!(
-            ExternalId::for_storno(&slug(), &order, "SZ-1").as_str(),
+            ExternalId::for_storno(&namespace(), &order, "SZ-1").as_str(),
             "acct:ORD-1:storno:SZ-1"
         );
         assert_eq!(
-            ExternalId::for_unmanaged_storno(&slug(), "SZ-9").as_str(),
+            ExternalId::for_unmanaged_storno(&namespace(), "SZ-9").as_str(),
             "acct:by-number:SZ-9:storno"
         );
         assert_eq!(
             ExternalId::new("acct:ORD-1:invoice"),
-            ExternalId::for_kind(&slug(), &order, DocumentKind::Invoice)
+            ExternalId::for_kind(&namespace(), &order, DocumentKind::Invoice)
         );
         let json = serde_json::to_string(&ExternalId::new("x:y:invoice")).expect("serialize");
         assert_eq!(json, "\"x:y:invoice\"");

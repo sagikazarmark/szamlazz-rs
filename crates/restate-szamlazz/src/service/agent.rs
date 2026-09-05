@@ -15,11 +15,11 @@ use crate::contract::{
     QueryRequest, QueryResponse, SetPaymentsRequest, SetPaymentsResponse, StornoOutcome,
     StornoRequest, StornoResponse,
 };
-use crate::identity::ExternalId;
-use crate::steps::{
+use crate::gateway::{
     InvoiceDocumentExt as _, QueryError, QueryOutcome, SetPaymentsOutcome, StornoAttempt,
-    StornoOutcome as StepsStorno,
+    StornoOutcome as GatewayStorno,
 };
+use crate::identity::ExternalId;
 
 /// The journaled result of the `query` handler's run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +49,10 @@ impl Agent {
         ctx: &Context<'_>,
         request: QueryRequest,
     ) -> Result<QueryResponse, HandlerError> {
-        let steps = Arc::clone(&self.steps);
+        let gateway = Arc::clone(&self.gateway);
         let selector = request.selector;
         let run = run_once(ctx, "query", move || async move {
-            QueryRun::from(steps.query_document(&selector).await)
+            QueryRun::from(gateway.query_document(&selector).await)
         })
         .await?;
         match run {
@@ -83,12 +83,12 @@ impl Agent {
             entries,
             additive,
         } = request;
-        let steps = Arc::clone(&self.steps);
+        let gateway = Arc::clone(&self.gateway);
         let number = invoice_number.clone();
         let outcome = run_once(
             ctx,
             format!("set-payments-{invoice_number}"),
-            move || async move { steps.set_payments(&number, &entries, additive).await },
+            move || async move { gateway.set_payments(&number, &entries, additive).await },
         )
         .await?;
         match outcome {
@@ -123,10 +123,10 @@ impl Agent {
         // Query first: a document with an order number is managed by an
         // `Order`; this service never calls into it.
         let found = {
-            let steps = Arc::clone(&self.steps);
+            let gateway = Arc::clone(&self.gateway);
             let number = number.clone();
             run_once(ctx, format!("verify-{number}"), move || async move {
-                steps.verify(&number).await
+                gateway.verify(&number).await
             })
             .await?
         };
@@ -155,16 +155,18 @@ impl Agent {
         if found.info.reversed == Some(true) {
             return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
         }
-        let e_invoice = found.e_invoice().unwrap_or(self.config.defaults.e_invoice);
-        let external_id = ExternalId::for_unmanaged_storno(&self.config.account.slug, &number);
+        let e_invoice = found
+            .e_invoice()
+            .unwrap_or(self.gateway.account().defaults.e_invoice);
+        let external_id = ExternalId::for_unmanaged_storno(&self.config.namespace, &number);
 
         let outcome = {
-            let steps = Arc::clone(&self.steps);
+            let gateway = Arc::clone(&self.gateway);
             let number = number.clone();
             let external_id = external_id.clone();
             let comment = comment.clone();
             run_once(ctx, format!("storno-{number}"), move || async move {
-                steps
+                gateway
                     .storno(StornoAttempt {
                         invoice_number: &number,
                         external_id: &external_id,
@@ -176,23 +178,27 @@ impl Agent {
             .await?
         };
         match outcome {
-            StepsStorno::Reversed(storno) => {
+            GatewayStorno::Reversed(storno) => {
                 Ok(StornoResponse::new(StornoOutcome::Reversed, number)
                     .with_storno_number(storno.invoice_number.as_str()))
             }
-            StepsStorno::AlreadyReversed { storno_number } => {
+            GatewayStorno::AlreadyReversed { storno_number } => {
                 Ok(StornoResponse::new(StornoOutcome::Reversed, number)
                     .with_storno_number(storno_number))
             }
-            StepsStorno::NotStornoable => Ok(StornoResponse::new(StornoOutcome::Rejected, number)
-                .with_code("not_stornoable")
-                .with_message("szamlazz.hu echoed the document unchanged: it cannot be reversed")),
-            StepsStorno::Rejected { code, message } => {
+            GatewayStorno::NotStornoable => {
+                Ok(StornoResponse::new(StornoOutcome::Rejected, number)
+                    .with_code("not_stornoable")
+                    .with_message(
+                        "szamlazz.hu echoed the document unchanged: it cannot be reversed",
+                    ))
+            }
+            GatewayStorno::Rejected { code, message } => {
                 Ok(StornoResponse::new(StornoOutcome::Rejected, number)
                     .with_code(code)
                     .with_message(message))
             }
-            StepsStorno::Unknown { message, .. } | StepsStorno::Transport(message) => {
+            GatewayStorno::Unknown { message, .. } | GatewayStorno::Transport(message) => {
                 Err(Fault::outcome_unknown(format!(
                     "storno outcome unknown: {message}; call storno again"
                 ))

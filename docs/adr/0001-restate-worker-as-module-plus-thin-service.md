@@ -4,16 +4,18 @@
 the `szamlazz_agent::Client` and the credentials had to live somewhere: either as a Restate service
 that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
-`restate_szamlazz::steps::Steps` is a plain Rust module: a struct holding the client
-and the account config, with async functions `issue`, `storno`, `delete_proforma`, `set_payments`
+`restate_szamlazz::gateway::Gateway` is a plain Rust module: a struct holding the client
+and the account it speaks for, with async functions `issue`, `storno`, `delete_proforma`, `set_payments`
 and `query` — one per durable step. It has no Restate context, returns every expected szamlazz.hu
 outcome as data (never `Err` for a rejection, a duplicate or a "not found"), and is unit-testable
 with wiremock. The `Order` Virtual Object (key = order number) calls these functions **inside its own
 `ctx.run` closures**. A thin, stateless `Szamlazz.Agent` Restate service exposes `query`,
 `set_payments` and `storno` for by-number operations over the same module instance. No Restate
 service calls another, and `Order` never invokes a handler on its own key. The dependency direction
-the owner asked for — `Order` depends on the steps, nothing depends on `Order` — is a compile-time
-fact: `Szamlazz.Order → steps ← Szamlazz.Agent`.
+the owner asked for — `Order` depends on the gateway, nothing depends on `Order` — is a compile-time
+fact: `Szamlazz.Order → gateway ← Szamlazz.Agent`. Everything the services know about the account
+they read through `Gateway::account()`; they hold no other account handle, only the deployment-level
+`WorkerConfig` (namespace, issue policy).
 
 The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, the identity
 types, the module, both services — no state, ADR 0005; `restate-sdk` is an unconditional dependency), and
@@ -70,6 +72,9 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 - The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`
   prefix marks both as this worker's in a shared Restate cluster; `Agent` names the surface the thin
   service wraps (the Számla Agent, the glossary term). The Rust type is `Agent` and the module
-  behind both services is `steps`, so no Rust item shares a name with the `szamlazz-agent` crate.
-  `Invoice`, `Documents` and an unqualified `Szamlazz` were rejected as names for a layer that
-  issues `D/SZ/ES/VS/HS`, deletes `D` and registers credit entries.
+  behind both services is `gateway` — named for what it is: the module that speaks to szamlazz.hu on
+  behalf of one account, not a second client (the Számla Agent `Client` is the transport it wraps) —
+  so no Rust item shares a name with the `szamlazz-agent` crate. It was first called `steps`, after
+  the durable steps whose bodies it holds; renamed because a new reader should not have to wonder
+  what a "step" is. `Invoice`, `Documents` and an unqualified `Szamlazz` were rejected as names for a
+  layer that issues `D/SZ/ES/VS/HS`, deletes `D` and registers credit entries.

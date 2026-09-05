@@ -37,7 +37,7 @@ The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_S
 identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]
 
 [account]
-slug = "acct"                 # 1–16 chars [a-z0-9-]; namespaces external ids
+slug = "acct"                 # the namespace: 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
 agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
 mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
@@ -100,7 +100,7 @@ For local development the repository root has a `compose.yaml` with a Restate se
 
 Every handler takes and returns JSON; the discovery manifest carries JSON Schemas for all of them, so Restate's OpenAPI export documents the full contract. Domain outcomes are data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or `conflict` with a `conflict_reason`.
 
-`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{slug}:{order}:{kind}`), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, three on `Szamlazz.Agent`:
+`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{namespace}:{order}:{kind}`, the namespace being `account.slug`), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, three on `Szamlazz.Agent`:
 
 | Handler | Description |
 |---|---|

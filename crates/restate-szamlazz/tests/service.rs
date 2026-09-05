@@ -28,7 +28,7 @@ const IMAGE: &str = "docker.restate.dev/restatedev/restate:1.7.8";
 const INGRESS_PORT: u16 = 18080;
 const ADMIN_PORT: u16 = 19070;
 
-// ----- szamlazz.hu fixtures (mirroring tests/steps.rs) ----------------------
+// ----- szamlazz.hu fixtures (mirroring tests/gateway.rs) --------------------
 
 struct Doc<'a> {
     number: &'a str,
@@ -264,21 +264,19 @@ impl Harness {
         }
 
         // Serve the endpoint on a free port and register it.
-        let config: Arc<Config> = Arc::new(
-            serde_json::from_value(json!({
-                "account": {
-                    "slug": "acct",
-                    "agent_key": "key",
-                    "endpoint": mock.uri(),
-                    "mode": "test",
-                    "supplier_id": SUPPLIER,
-                },
-                "issue": { "max_attempts": 2, "first_backoff": "1s", "max_backoff": "2s" },
-            }))
-            .expect("config"),
-        );
-        let order = Order::new(Arc::clone(&config)).expect("order");
-        let agent = Agent::from_parts(Arc::clone(order.steps()), config);
+        let config: Config = serde_json::from_value(json!({
+            "account": {
+                "slug": "acct",
+                "agent_key": "key",
+                "endpoint": mock.uri(),
+                "mode": "test",
+                "supplier_id": SUPPLIER,
+            },
+            "issue": { "max_attempts": 2, "first_backoff": "1s", "max_backoff": "2s" },
+        }))
+        .expect("config");
+        let order = Order::new(&config).expect("order");
+        let agent = Agent::from_parts(Arc::clone(order.gateway()), order.config().clone());
         let listener = TcpListener::bind("0.0.0.0:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         listener.set_nonblocking(true).expect("nonblocking");

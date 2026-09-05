@@ -1,12 +1,15 @@
-//! The bodies of the durable steps: one plain async fn per `ctx.run`, over
-//! the [`szamlazz_agent::Client`], returning every expected szamlazz.hu
-//! outcome **as data** — a rejection, a duplicate order number, a not-found
-//! or a no-op storno is a value, never an `Err`.
+//! The module that speaks to szamlazz.hu on behalf of one account: one plain
+//! async fn per `ctx.run`, over the [`szamlazz_agent::Client`], returning
+//! every expected szamlazz.hu outcome **as data** — a rejection, a duplicate
+//! order number, a not-found or a no-op storno is a value, never an `Err`.
 //!
-//! [`Steps`] owns the client and the account configuration. `Szamlazz.Order`
-//! calls these inside `ctx.run`; the `Szamlazz.Agent` Restate service is a
-//! thin facade over the same functions. Neither Restate service calls the
-//! other.
+//! [`Gateway`] owns the client and the [`Account`] it speaks for; it is not a
+//! second client — the Számla Agent `Client` is the transport it wraps.
+//! `Szamlazz.Order` calls these inside `ctx.run`; the `Szamlazz.Agent` Restate
+//! service is a thin facade over the same functions. Neither Restate service
+//! calls the other. Everything the services need to know about the account
+//! (its ownership-validation pins, its document defaults) is read through
+//! [`Gateway::account`].
 //!
 //! Every query result is validated before it is called ours (design §3):
 //! external ids are not unique server-side and the order-number hint returns
@@ -23,8 +26,6 @@
 //! [`InvoiceDocumentExt`] adds the checks the services make on a queried
 //! document before trusting or acting on it.
 
-use std::sync::Arc;
-
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::client::BuildError;
@@ -39,7 +40,7 @@ use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::{ApiError, Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
 use tracing::Instrument as _;
 
-use crate::config::Config;
+use crate::config::{AccountMode, Config, Defaults, SellerConfig};
 use crate::contract::{DocumentKind, IssuedKind, PaymentEntry, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
@@ -47,16 +48,48 @@ pub mod build;
 
 pub use build::{DocumentRefs, InputError, gross_total};
 
-/// The durable step bodies of one deployment: the Számla Agent client plus
-/// the account configuration.
+/// The module that speaks to szamlazz.hu for one account: the Számla Agent
+/// client plus the [`Account`] it is opened for.
 #[derive(Debug, Clone)]
-pub struct Steps {
+pub struct Gateway {
     client: Client,
-    config: Arc<Config>,
+    account: Account,
+}
+
+/// One szamlazz.hu account as the services know it — never the agent key.
+///
+/// Everything account-shaped the service layer reads: the ownership-validation
+/// pins (`mode`, `supplier_id`), the document defaults and the seller block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    /// Whether the account is live or a test account; validated against
+    /// `teszt` on every document found under our external ids.
+    pub mode: AccountMode,
+    /// The account's supplier id (`szállító/id`). Optional pin; when set it is
+    /// validated against every document found under our external ids.
+    pub supplier_id: Option<u64>,
+    /// Document defaults that per-call overrides may change.
+    pub defaults: Defaults,
+    /// The seller block; account data is used where absent.
+    pub seller: SellerConfig,
+}
+
+impl From<&Config> for Account {
+    fn from(config: &Config) -> Self {
+        Self {
+            mode: config.account.mode,
+            supplier_id: config.account.supplier_id,
+            defaults: config.defaults.clone(),
+            seller: config.seller.clone(),
+        }
+    }
 }
 
 /// One issuing attempt (design §5 step 3): pre-query by external id, optional
 /// order-number hint, create, and the duplicate-order-number re-query.
+///
+/// A found document is validated against the gateway's own [`Account`]; the
+/// request carries only what identifies the document.
 #[derive(Debug, Clone)]
 pub struct IssueRequest<'a> {
     /// The external id the document carries and is looked up by.
@@ -65,7 +98,7 @@ pub struct IssueRequest<'a> {
     pub kind: IssuedKind,
     /// The order the document belongs to.
     pub order: &'a OrderKey,
-    /// The create request built by [`Steps::build_create`].
+    /// The create request built by [`Gateway::build_create`].
     pub create: &'a CreateInvoice,
     /// Proceed past a reversed document under the external id instead of
     /// answering [`IssueOutcome::FoundReversed`].
@@ -75,10 +108,6 @@ pub struct IssueRequest<'a> {
     /// Numbers of documents known to be ours (seen in the exclusivity and
     /// proforma checks); hint results among them are ignored.
     pub our_numbers: &'a [String],
-    /// The supplier id to expect on a found document, when pinned.
-    pub expect_supplier_id: Option<u64>,
-    /// The `teszt` flag to expect on a found document.
-    pub expect_test: bool,
 }
 
 /// The result of one issuing attempt.
@@ -249,7 +278,7 @@ pub enum QueryOutcome {
     Transport(String),
 }
 
-/// Why [`Steps::query_document`] returned no document.
+/// Why [`Gateway::query_document`] returned no document.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum QueryError {
@@ -278,7 +307,7 @@ pub struct StornoAttempt<'a> {
     /// The invoice to reverse.
     pub invoice_number: &'a str,
     /// The external id attached to the storno invoice and pre-queried first
-    /// (`{slug}:{order}:storno:{number}` or `{slug}:by-number:{number}:storno`).
+    /// (`{namespace}:{order}:storno:{number}` or `{namespace}:by-number:{number}:storno`).
     pub external_id: &'a ExternalId,
     /// Comment placed on the storno invoice.
     pub comment: Option<&'a str>,
@@ -291,7 +320,7 @@ pub struct StornoAttempt<'a> {
 pub enum StornoOutcome {
     /// The invoice is reversed by the storno invoice szamlazz.hu issued (now,
     /// or echoed by an idempotent repeat), validated with
-    /// [`CreatedInvoice::reverses`] by [`Steps::storno`].
+    /// [`CreatedInvoice::reverses`] by [`Gateway::storno`].
     Reversed(CreatedInvoice),
     /// The pre-query found the storno invoice under the storno external id;
     /// nothing was sent.
@@ -397,14 +426,14 @@ impl From<ApiError> for SetPaymentsOutcome {
     }
 }
 
-impl Steps {
-    /// Builds the steps for `config`: agent-key credentials and the configured
-    /// endpoint override.
+impl Gateway {
+    /// Opens the gateway for the account in `config`: agent-key credentials
+    /// and the configured endpoint override.
     ///
     /// # Errors
     ///
     /// Returns an error when the HTTP client cannot be constructed.
-    pub fn new(config: Arc<Config>) -> Result<Self, BuildError> {
+    pub fn new(config: &Config) -> Result<Self, BuildError> {
         let mut builder = Client::builder()
             .credentials(Credentials::agent_key(config.account.agent_key.expose()));
         if let Some(endpoint) = &config.account.endpoint {
@@ -412,14 +441,26 @@ impl Steps {
         }
         Ok(Self {
             client: builder.build()?,
-            config,
+            account: Account::from(config),
         })
     }
 
-    /// The deployment configuration.
+    /// The account the gateway speaks for: the only way the services read
+    /// account configuration.
     #[must_use]
-    pub fn config(&self) -> &Config {
-        &self.config
+    pub fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// Whether `found` is ours (design §3) for `order` and `kind`, validated
+    /// against this gateway's account.
+    fn is_ours(&self, found: &InvoiceDocument, order: &OrderKey, kind: IssuedKind) -> bool {
+        found.is_ours(
+            order,
+            kind,
+            self.account.mode.is_test(),
+            self.account.supplier_id,
+        )
     }
 
     /// One issuing attempt, query-first (design §5 step 3).
@@ -442,7 +483,7 @@ impl Steps {
     ///    [`IssueOutcome::Rejected`].
     pub async fn issue(&self, request: IssueRequest<'_>) -> IssueOutcome {
         let span = tracing::info_span!(
-            "steps.issue",
+            "gateway.issue",
             external_id = %request.external_id,
             kind = %request.kind,
             reissue = request.reissue,
@@ -453,14 +494,7 @@ impl Steps {
     async fn issue_inner(&self, request: &IssueRequest<'_>) -> IssueOutcome {
         // Step 1: the external-id pre-query.
         let seen = match self.query_by_external_id(request).await {
-            Ok(Some(found))
-                if !found.is_ours(
-                    request.order,
-                    request.kind,
-                    request.expect_test,
-                    request.expect_supplier_id,
-                ) =>
-            {
+            Ok(Some(found)) if !self.is_ours(&found, request.order, request.kind) => {
                 tracing::warn!(number = %found.number(), "external id collision");
                 return IssueOutcome::Collision(found);
             }
@@ -515,14 +549,7 @@ impl Steps {
                 Failure::Duplicate { code, message } => {
                     tracing::info!(code = %code, "duplicate order number; re-querying");
                     match self.query_by_external_id(request).await {
-                        Ok(Some(found))
-                            if !found.is_ours(
-                                request.order,
-                                request.kind,
-                                request.expect_test,
-                                request.expect_supplier_id,
-                            ) =>
-                        {
+                        Ok(Some(found)) if !self.is_ours(&found, request.order, request.kind) => {
                             IssueOutcome::Collision(found)
                         }
                         Ok(Some(found)) if found.is_live() => {
@@ -591,7 +618,7 @@ impl Steps {
     /// [`szamlazz_agent::ops::invoice::CreatedInvoice::reverses`].
     pub async fn storno(&self, attempt: StornoAttempt<'_>) -> StornoOutcome {
         let span = tracing::info_span!(
-            "steps.storno",
+            "gateway.storno",
             number = %attempt.invoice_number,
             external_id = %attempt.external_id,
         );
@@ -620,8 +647,8 @@ impl Steps {
         request.comment = attempt.comment.map(str::to_owned);
         request
             .aggregator
-            .clone_from(&self.config.defaults.aggregator);
-        request.guardian = self.config.defaults.guardian;
+            .clone_from(&self.account.defaults.aggregator);
+        request.guardian = self.account.defaults.guardian;
         request.issue_date = None;
 
         match self.client.send(&request).await {
@@ -687,7 +714,7 @@ impl Steps {
         request.entries = credit_entries;
         request
             .aggregator
-            .clone_from(&self.config.defaults.aggregator);
+            .clone_from(&self.account.defaults.aggregator);
 
         match self.client.send(&request).await {
             Ok(result) => {
@@ -830,7 +857,7 @@ fn classify_failure(error: ClientError) -> Failure {
     }
 }
 
-/// Step 2 of [`Steps::issue`]: whether the order-number hint is a live
+/// Step 2 of [`Gateway::issue`]: whether the order-number hint is a live
 /// invoice-kind document that is neither known to be ours nor the document
 /// the pre-query saw under our external id.
 fn is_foreign(found: &InvoiceDocument, our_numbers: &[String], seen: Option<&str>) -> bool {

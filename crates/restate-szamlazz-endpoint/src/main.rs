@@ -16,7 +16,7 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::http_server::HttpServer;
 use restate_sdk::service::Discoverable;
-use restate_szamlazz::{Agent, Order, Steps};
+use restate_szamlazz::{Agent, Gateway, Order, WorkerConfig};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::EndpointConfig;
@@ -83,27 +83,27 @@ async fn main() -> Result<()> {
 }
 
 /// Wires the configuration into the two services and binds them to one
-/// endpoint. Logs what was bound; never the agent key.
+/// endpoint: the account opens the gateway, the rest is the services'
+/// [`WorkerConfig`]. Logs what was bound; never the agent key.
 fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     let EndpointConfig {
         service: config,
         identity_keys,
     } = config;
-    let config = Arc::new(config);
 
     tracing::info!(
-        account = %config.account.slug,
+        namespace = %config.account.slug,
         mode = ?config.account.mode,
         endpoint = ?config.account.endpoint,
         supplier_id = ?config.account.supplier_id,
         "loaded szamlazz.hu account configuration"
     );
 
-    let steps = Arc::new(
-        Steps::new(Arc::clone(&config)).context("failed to construct the Számla Agent client")?,
-    );
-    let order = Order::from_parts(Arc::clone(&steps), Arc::clone(&config));
-    let agent = Agent::from_parts(steps, config);
+    let gateway =
+        Arc::new(Gateway::new(&config).context("failed to construct the Számla Agent client")?);
+    let worker = WorkerConfig::from(&config);
+    let order = Order::from_parts(Arc::clone(&gateway), worker.clone());
+    let agent = Agent::from_parts(gateway, worker);
 
     for discovery in [
         <Order as Discoverable>::discover(),
@@ -138,7 +138,7 @@ mod tests {
     use figment::Figment;
     use figment::providers::{Format, Toml};
     use restate_szamlazz::contract::Selector;
-    use restate_szamlazz::steps::QueryOutcome;
+    use restate_szamlazz::gateway::QueryOutcome;
     use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_endpoint_reaches_the_steps() {
+    async fn config_endpoint_reaches_the_gateway() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("action-szamla_agent_xml"))
@@ -224,9 +224,9 @@ mod tests {
         )))
         .extract()
         .expect("configuration should parse");
-        let steps = Steps::new(Arc::new(config.service)).expect("steps should build");
+        let gateway = Gateway::new(&config.service).expect("gateway should build");
 
-        let outcome = steps
+        let outcome = gateway
             .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
             .await;
 

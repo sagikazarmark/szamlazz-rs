@@ -9,8 +9,8 @@ use serde::Serialize;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use crate::contract::{IssuedKind, TerminalCode};
+use crate::gateway::{InvoiceDocumentExt as _, QueryOutcome};
 use crate::identity::OrderKey;
-use crate::steps::{InvoiceDocumentExt as _, QueryOutcome};
 
 /// A fault raised as a `TerminalError` (design §7): never a domain outcome.
 ///
@@ -181,8 +181,8 @@ macro_rules! journal_helpers {
 
             use super::Lookup;
             use crate::contract::{IssuedKind, Selector};
+            use crate::gateway::{Gateway, InvoiceDocumentExt as _, QueryOutcome};
             use crate::identity::{ExternalId, OrderKey};
-            use crate::steps::{InvoiceDocumentExt as _, QueryOutcome, Steps};
 
             /// Journals the result of `f` under `name`, executing it at most
             /// once per journal entry (`RunRetryPolicy::max_attempts(1)`):
@@ -220,16 +220,16 @@ macro_rules! journal_helpers {
             /// Journaled query of document `number` (a verify).
             pub(in crate::service) async fn verify(
                 ctx: &$ctx<'_>,
-                steps: &Arc<Steps>,
+                gateway: &Arc<Gateway>,
                 name: impl Into<String>,
                 number: &str,
             ) -> Result<QueryOutcome, HandlerError> {
-                let steps = Arc::clone(steps);
+                let gateway = Arc::clone(gateway);
                 let number = number.to_owned();
                 run_once(
                     ctx,
                     name,
-                    move || async move { steps.verify(&number).await },
+                    move || async move { gateway.verify(&number).await },
                 )
                 .await
             }
@@ -237,32 +237,33 @@ macro_rules! journal_helpers {
             /// Journaled query by external id.
             pub(in crate::service) async fn query_external_id(
                 ctx: &$ctx<'_>,
-                steps: &Arc<Steps>,
+                gateway: &Arc<Gateway>,
                 name: impl Into<String>,
                 external_id: &ExternalId,
             ) -> Result<QueryOutcome, HandlerError> {
-                let steps = Arc::clone(steps);
+                let gateway = Arc::clone(gateway);
                 let selector = Selector::ExternalId(external_id.as_str().to_owned());
                 run_once(
                     ctx,
                     name,
-                    move || async move { steps.query(&selector).await },
+                    move || async move { gateway.query(&selector).await },
                 )
                 .await
             }
 
             /// Journaled query by one of our external ids, validated against
-            /// the identity the document should have (design §3).
+            /// the identity the document should have (design §3) and the
+            /// gateway's account.
             pub(in crate::service) async fn lookup(
                 ctx: &$ctx<'_>,
-                steps: &Arc<Steps>,
+                gateway: &Arc<Gateway>,
                 name: impl Into<String>,
                 external_id: &ExternalId,
                 order: &OrderKey,
                 kind: IssuedKind,
             ) -> Result<Lookup, HandlerError> {
-                let outcome = query_external_id(ctx, steps, name, external_id).await?;
-                let account = &steps.config().account;
+                let outcome = query_external_id(ctx, gateway, name, external_id).await?;
+                let account = gateway.account();
                 Ok(Lookup::classify(
                     outcome,
                     order,
@@ -275,25 +276,25 @@ macro_rules! journal_helpers {
             /// Journaled order-number hint.
             pub(in crate::service) async fn hint(
                 ctx: &$ctx<'_>,
-                steps: &Arc<Steps>,
+                gateway: &Arc<Gateway>,
                 name: impl Into<String>,
                 order: &OrderKey,
             ) -> Result<QueryOutcome, HandlerError> {
-                let steps = Arc::clone(steps);
+                let gateway = Arc::clone(gateway);
                 let order = order.clone();
-                run_once(ctx, name, move || async move { steps.hint(&order).await }).await
+                run_once(ctx, name, move || async move { gateway.hint(&order).await }).await
             }
 
             /// The storno number of a reversed document, when the order-number
             /// hint is the `SS` referencing it.
             pub(in crate::service) async fn storno_number_of(
                 ctx: &$ctx<'_>,
-                steps: &Arc<Steps>,
+                gateway: &Arc<Gateway>,
                 order: &OrderKey,
                 number: &str,
             ) -> Result<Option<String>, HandlerError> {
                 Ok(
-                    match hint(ctx, steps, format!("hint-storno-{number}"), order).await? {
+                    match hint(ctx, gateway, format!("hint-storno-{number}"), order).await? {
                         QueryOutcome::Found(found) if found.is_storno_of(number) => {
                             Some(found.number().to_owned())
                         }

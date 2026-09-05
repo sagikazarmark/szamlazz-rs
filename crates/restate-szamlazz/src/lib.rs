@@ -4,16 +4,16 @@
 //! The `Order` Virtual Object — keyed by the order number — serialises issuing per key so that a
 //! caller can say "issue the invoice for order X" and get exactly one legal document under
 //! retries, crashes, concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the
-//! source of truth, reached through deterministic external ids (`{slug}:{order}:{kind}`), so any
-//! invocation can find what an earlier one issued. The stateless `Szamlazz.Agent` service exposes
-//! by-number operations (query, credit entries, storno of unmanaged documents) over the same
-//! steps. Both are projections of the Számla Agent model: deployment constants live in
+//! source of truth, reached through deterministic external ids (`{namespace}:{order}:{kind}`), so
+//! any invocation can find what an earlier one issued. The stateless `Szamlazz.Agent` service
+//! exposes by-number operations (query, credit entries, storno of unmanaged documents) over the
+//! same gateway. Both are projections of the Számla Agent model: deployment constants live in
 //! [`Config`], line totals are computed, and domain outcomes are returned as data.
 //!
 //! - [`contract`] — the request/response types.
 //! - [`config`] — the deployment configuration.
 //! - [`identity`] — order keys and external ids.
-//! - [`steps`] — the durable step bodies over the Számla Agent client, outcome as data.
+//! - [`gateway`] — the module that speaks to szamlazz.hu for one account, outcome as data.
 //! - [`service`] — the Restate adapters.
 //!
 //! ## Features
@@ -24,15 +24,16 @@
 //! # Services
 //!
 //! [`Order`] is a Restate Virtual Object registered as `Szamlazz.Order` and [`Agent`] a
-//! stateless service registered as `Szamlazz.Agent`. Bind both to an endpoint:
+//! stateless service registered as `Szamlazz.Agent`. Both hold the [`Gateway`] and a
+//! [`WorkerConfig`]; bind both to an endpoint:
 //!
 //! ```no_run
-//! # async fn serve(config: std::sync::Arc<restate_szamlazz::Config>) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn serve(config: restate_szamlazz::Config) -> Result<(), Box<dyn std::error::Error>> {
 //! use restate_sdk::prelude::{Endpoint, HttpServer};
 //! use restate_szamlazz::{Agent, Order};
 //!
-//! let order = Order::new(std::sync::Arc::clone(&config))?;
-//! let agent = Agent::from_parts(std::sync::Arc::clone(order.steps()), config);
+//! let order = Order::new(&config)?;
+//! let agent = Agent::from_parts(std::sync::Arc::clone(order.gateway()), order.config().clone());
 //! let endpoint = Endpoint::builder().bind(order).bind(agent).build();
 //! HttpServer::new(endpoint)
 //!     .listen_and_serve("0.0.0.0:9080".parse()?)
@@ -50,12 +51,12 @@
 
 pub mod config;
 pub mod contract;
+pub mod gateway;
 pub mod identity;
 pub mod service;
-pub mod steps;
 
-pub use config::Config;
+pub use config::{Config, WorkerConfig};
 pub use contract::{CorrectionId, CreateRequest, CreateResponse, DocumentKind};
+pub use gateway::Gateway;
 pub use identity::{ExternalId, OrderKey};
 pub use service::{Agent, AgentClient, Order, OrderClient};
-pub use steps::Steps;
