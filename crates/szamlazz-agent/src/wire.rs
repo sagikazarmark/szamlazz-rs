@@ -180,12 +180,27 @@ impl RawResponse {
 
     /// A `szlahu_*` header value, percent-decoded (szamlazz.hu URL-encodes
     /// them).
+    ///
+    /// Document-issuing operations report the issued number as
+    /// `szlahu_szamlaszam`, the totals as `szlahu_nettovegosszeg` /
+    /// `szlahu_bruttovegosszeg` / `szlahu_kintlevoseg`, and szamlazz.hu's
+    /// internal *document* identifier as `szlahu_id` — the same value the XML
+    /// query returns as `alap/id` (a storno or corrective invoice carries its
+    /// original's identifier as `gazdEsemAzon`). `szlahu_id` is not an
+    /// account or supplier identifier; that is `szallito/id` in query bodies.
     pub fn szlahu(&self, name: &str) -> Option<String> {
         self.header(name).map(percent_decode)
     }
 
     /// The error szamlazz.hu reported via `szlahu_error_code` /
     /// `szlahu_error` headers, if any.
+    ///
+    /// Not every operation sets these headers. Invoice creation (e.g. 152,
+    /// 73), storno (14, 221, 352), and proforma deletion (335) report errors
+    /// in the headers *and* the body; the XML query (7) and credit-entry
+    /// registration (463) report in the body only. `None` here therefore does
+    /// not mean success — every parser in this crate also reads the body's
+    /// `<hibakod>` / `<hibauzenet>`.
     #[must_use]
     pub fn header_error(&self) -> Option<ApiError> {
         let code = self.header("szlahu_error_code")?;

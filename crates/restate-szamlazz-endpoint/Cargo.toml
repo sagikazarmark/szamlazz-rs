@@ -1,0 +1,40 @@
+[package]
+name = "restate-szamlazz-endpoint"
+version.workspace = true
+description = "Standalone endpoint hosting the szamlazz.hu services for Restate"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["szamlazz", "invoice", "restate", "durable", "hungary"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "restate-szamlazz"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+restate-szamlazz = { workspace = true, features = ["schemars"] }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
+restate-sdk = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+figment = { version = "0.10.19", features = ["test"] }
+serde_json = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true
+
+# The endpoint ships as a container image (see Dockerfile); cargo-dist only distributes the CLI.
+[package.metadata.dist]
+dist = false

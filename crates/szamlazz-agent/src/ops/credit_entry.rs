@@ -145,7 +145,7 @@ impl RegisterCreditEntry {
 }
 
 /// The invoice's payment state after the credit entries were registered.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CreditEntryResult {
     /// The invoice the payments were registered on (`szamlaszam`).
@@ -301,6 +301,30 @@ mod tests {
         assert_eq!(result.customer_account_url, None);
     }
 
+    /// The payment state is journal-safe: it round-trips through JSON with the
+    /// payment method as its wire token.
+    #[test]
+    fn credit_entry_result_round_trips_through_json() {
+        let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
+        let response = RawResponse::new(
+            [
+                ("szlahu_kintlevoseg", "8100"),
+                ("szlahu_fizetesmod", "%C3%A1tutal%C3%A1s"),
+            ],
+            body.to_vec(),
+        );
+        let result = sample().parse(&response).expect("success");
+        assert_eq!(result.payment_method, Some(PaymentMethod::Transfer));
+
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(json["invoice_number"], "E-TST-2026-3");
+        assert_eq!(json["outstanding"], "8100");
+        assert_eq!(json["payment_method"], "átutalás");
+
+        let restored: CreditEntryResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, result);
+    }
+
     #[test]
     fn version_two_rejects_non_xml_body_even_with_success_headers() {
         let response = RawResponse::new(
@@ -341,6 +365,22 @@ mod tests {
         let error = sample().parse(&response).expect_err("error");
         match error {
             ResponseError::Api(api) => assert_eq!(api.code, crate::ErrorCode::InvalidCredentials),
+            other => panic!("expected api error, got {other:?}"),
+        }
+    }
+
+    /// A credit entry on a reversed invoice is rejected with 463 in the body
+    /// only — szamlazz.hu sets no `szlahu_error_code` header on this path.
+    #[test]
+    fn body_only_error_is_typed() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[463]]></hibakod><hibauzenet><![CDATA[Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ.]]></hibauzenet></xmlszamlavalasz>"#;
+        let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
+        let error = sample().parse(&response).expect_err("error");
+        match error {
+            ResponseError::Api(api) => {
+                assert_eq!(api.code, crate::ErrorCode::PaymentOnReversedInvoice);
+                assert!(api.message.starts_with("Sztornózó vagy sztornózott"));
+            }
             other => panic!("expected api error, got {other:?}"),
         }
     }

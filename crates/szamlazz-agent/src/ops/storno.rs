@@ -16,6 +16,34 @@ use crate::xml;
 /// invoice is itself a newly issued document, so the response is a
 /// [`CreatedInvoice`]; its PDF, when [`StornoInvoice::download_pdf`] is set,
 /// arrives decoded in [`CreatedInvoice::pdf`].
+///
+/// # Server behaviour
+///
+/// Observed against a szamlazz.hu test account; the response shape alone does
+/// not tell these cases apart, so check
+/// [`CreatedInvoice::reverses`] after every call.
+///
+/// - **Repeat storno is idempotent.** Reversing an already reversed invoice
+///   returns success echoing the *existing* storno invoice — same number,
+///   same negative totals, same [`document_id`](CreatedInvoice::document_id).
+///   No second storno invoice is issued and no error code is raised, so
+///   "created now" and "already existed" are indistinguishable from the
+///   response. Re-sending a storno after a transport failure is therefore
+///   safe.
+/// - **Storno of a storno invoice** is rejected with
+///   [`ErrorCode::StornoOfReversalInvoice`](crate::ErrorCode::StornoOfReversalInvoice)
+///   (14).
+/// - **Storno of an invoice that has a corrective invoice** is rejected with
+///   [`ErrorCode::HasCorrectiveInvoice`](crate::ErrorCode::HasCorrectiveInvoice)
+///   (221).
+/// - **Storno of a proforma or a delivery note** is a success-shaped no-op:
+///   the response echoes the *requested* document unchanged (its own number,
+///   positive totals) and nothing is reversed. Only
+///   [`CreatedInvoice::reverses`] detects this.
+/// - **Payments are not carried over.** After the reversal, the original
+///   invoice's recorded payments disappear from its queried XML and the storno
+///   invoice's outstanding amount is its full negative gross, ignoring prior
+///   credit entries.
 #[doc(alias = "xmlszamlast")]
 #[doc(alias = "sztornó")]
 #[doc(alias = "számla sztornózás")]
@@ -42,17 +70,26 @@ pub struct StornoInvoice {
     pub aggregator: Option<String>,
     /// Guardian processing flag (`guardian`) for contracted integrations.
     pub guardian: Option<bool>,
-    /// External identifier (`szamlaKulsoAzon`).
+    /// External identifier stored on the storno invoice (`szamlaKulsoAzon`).
     ///
-    /// The official docs conflict on its meaning here: the request page
-    /// describes it as an alternative lookup key referencing the invoice being
-    /// reversed (usable only if it was set at creation), while the XML sample
-    /// comment describes assigning an identifier to the storno invoice. The
-    /// wire output is identical either way; prefer the lookup reading and do
-    /// not rely on the identifier being stored on the storno invoice.
+    /// The official docs describe this field both as a lookup key for the
+    /// invoice being reversed and as an identifier assigned to the storno
+    /// invoice. Observed behaviour, sent together with
+    /// [`invoice_number`](Self::invoice_number): the value is stored on the
+    /// *created storno invoice*, which then resolves through
+    /// [`InvoiceSelector::ExternalId`](crate::ops::query_pdf::InvoiceSelector::ExternalId);
+    /// the original keeps its own external identifier. It is not used to look
+    /// up the original when `invoice_number` is present. It attaches only on
+    /// the call that actually creates the storno invoice: a repeat storno
+    /// echoes the existing storno invoice and silently drops the identifier.
     pub external_id: Option<String>,
     /// Issue date of the storno invoice (`keltDatum`). `None` lets szamlazz.hu
     /// use today.
+    ///
+    /// Leave it `None`: on e-invoice accounts any `keltDatum` other than today
+    /// is rejected with
+    /// [`ErrorCode::IssueDateMustBeToday`](crate::ErrorCode::IssueDateMustBeToday)
+    /// (352).
     #[doc(alias = "keltDatum")]
     pub issue_date: Option<Date>,
     /// Fulfillment date of the storno invoice (`teljesitesDatum`).
@@ -216,9 +253,84 @@ mod tests {
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let created = sample().parse(&response).expect("success");
         assert_eq!(created.invoice_number.as_str(), "E-TST-2026-3");
+        assert_eq!(created.document_id, None);
         assert_eq!(created.net_total, Some(dec!(30000)));
         assert_eq!(created.gross_total, Some(dec!(38100)));
         assert!(created.pdf.is_none());
+    }
+
+    /// The observed storno response: a new number, negative totals, and the
+    /// storno invoice's own document id in `szlahu_id`.
+    #[test]
+    fn parses_observed_storno_response() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>CTEST-2026-42</szamlaszam><szamlanetto>-1000</szamlanetto><szamlabrutto>-1270</szamlabrutto><kintlevoseg>-1270</kintlevoseg></xmlszamlavalasz>"#;
+        let response = RawResponse::new(
+            [
+                ("szlahu_szamlaszam", "CTEST-2026-42"),
+                ("szlahu_id", "924307747"),
+                ("szlahu_bruttovegosszeg", "-1270"),
+            ],
+            body.to_vec(),
+        );
+        let request = StornoInvoice::new("CTEST-2026-40");
+        let created = request.parse(&response).expect("success");
+        assert_eq!(created.invoice_number.as_str(), "CTEST-2026-42");
+        assert_eq!(created.document_id, Some(924_307_747));
+        assert_eq!(created.gross_total, Some(dec!(-1270)));
+        assert_eq!(created.outstanding, Some(dec!(-1270)));
+        assert!(created.reverses(&request.invoice_number));
+    }
+
+    /// The issued storno invoice is journal-safe: it round-trips through JSON.
+    #[test]
+    fn created_invoice_round_trips_through_json() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>CTEST-2026-42</szamlaszam><szamlanetto>-1000</szamlanetto><szamlabrutto>-1270</szamlabrutto><kintlevoseg>-1270</kintlevoseg><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
+        let response = RawResponse::new([("szlahu_id", "924307747")], body.to_vec());
+        let created = StornoInvoice::new("CTEST-2026-40")
+            .parse(&response)
+            .expect("success");
+
+        let json = serde_json::to_value(&created).expect("serialize");
+        assert_eq!(json["invoice_number"], "CTEST-2026-42");
+        assert_eq!(json["gross_total"], "-1270");
+        assert_eq!(json["document_id"], 924_307_747);
+        assert_eq!(json["pdf"], "JVBERi0=");
+
+        let restored: CreatedInvoice = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, created);
+    }
+
+    /// Storno of a proforma or delivery note succeeds on the wire but echoes
+    /// the requested document unchanged; `reverses` is the only tell.
+    #[test]
+    fn success_shaped_no_op_is_not_a_reversal() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>D-CTEST-14</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg></xmlszamlavalasz>"#;
+        let response = RawResponse::new([("szlahu_id", "924309236")], body.to_vec());
+        let request = StornoInvoice::new("D-CTEST-14");
+        let created = request.parse(&response).expect("wire success");
+        assert_eq!(created.invoice_number, request.invoice_number);
+        assert!(!created.reverses(&request.invoice_number));
+    }
+
+    #[test]
+    fn observed_rejections_are_typed() {
+        for (code, expected) in [
+            ("14", crate::ErrorCode::StornoOfReversalInvoice),
+            ("221", crate::ErrorCode::HasCorrectiveInvoice),
+            ("352", crate::ErrorCode::IssueDateMustBeToday),
+        ] {
+            let body = format!(
+                r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>{code}</hibakod><hibauzenet>rejected</hibauzenet></xmlszamlavalasz>"#
+            );
+            let response = RawResponse::new(
+                [("szlahu_error_code", code), ("szlahu_error", "rejected")],
+                body.into_bytes(),
+            );
+            match sample().parse(&response).expect_err("error") {
+                ResponseError::Api(api) => assert_eq!(api.code, expected, "code {code}"),
+                other => panic!("expected api error, got {other:?}"),
+            }
+        }
     }
 
     #[test]

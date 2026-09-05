@@ -4,11 +4,20 @@
 //! in `szlahu_*` response headers or the response XML — never via HTTP status
 //! codes. [`ErrorCode`] gives the documented codes typed names with English
 //! documentation; the Hungarian message is kept verbatim in [`ApiError`].
+//!
+//! Which channel carries the error depends on the operation: invoice creation,
+//! storno, and proforma deletion set `szlahu_error_code`/`szlahu_error`
+//! headers *and* a `<hibakod>`/`<hibauzenet>` body, while the XML query (code
+//! 7) and credit-entry registration (code 463) report in the body only. Every
+//! parser in this crate therefore reads the body's `<hibakod>` as well as the
+//! headers; see [`RawResponse::header_error`](crate::wire::RawResponse::header_error).
 
 /// A documented Számla Agent error code.
 ///
 /// The set is open: codes not documented (or added later by szamlazz.hu) parse
-/// as [`ErrorCode::Unknown`].
+/// as [`ErrorCode::Unknown`]. Codes marked *observed* are undocumented but were
+/// reproduced against a szamlazz.hu test account; their Hungarian messages are
+/// quoted verbatim.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -21,7 +30,19 @@ pub enum ErrorCode {
     /// number, order number, or external identifier on PDF/XML queries).
     /// Receipt operations report an unknown receipt number as code 339, which
     /// parses as [`ErrorCode::Unknown`].
+    ///
+    /// On queries the code is reported in the body only (no `szlahu_error_code`
+    /// header). A proforma that has been converted into an invoice — by an
+    /// explicit reference or by an invoice issued under the same order number —
+    /// also returns 7 by number and by external identifier, exactly like a
+    /// deleted one.
     MissingData,
+    /// 14 (observed) — the referenced document is itself a storno or credit
+    /// invoice and cannot be reversed or credited: `Sztornó és jóváíró számlát
+    /// nem lehet sem sztornózni, sem jóváírni.` Returned by the storno
+    /// operation when [`StornoInvoice::invoice_number`](crate::ops::storno::StornoInvoice::invoice_number)
+    /// names a storno invoice.
+    StornoOfReversalInvoice,
     /// 53 — the XML was not received as a proper multipart file field.
     XmlNotAFile,
     /// 54 — e-invoice issuance not enabled: missing subscription permission or
@@ -37,7 +58,29 @@ pub enum ErrorCode {
     /// 57 — malformed request XML.
     MalformedXml,
     /// 71 — the order number already exists on another document.
+    ///
+    /// Fires only when the account setting *Rendelésszám ismétlődés tiltása*
+    /// (disable order number repetition) is on. The check is scoped per
+    /// document type — an invoice, a proforma, a prepayment invoice, a final
+    /// invoice, and a delivery note may all carry the same order number — and
+    /// storno and corrective invoices are exempt (a storno invoice inherits
+    /// its original's order number; a corrective invoice may repeat it).
+    /// Reversing an invoice frees its order number for reuse, and a
+    /// byte-identical resend while the first document is live returns that
+    /// document instead of an error.
     DuplicateOrderNumber,
+    /// 73 (observed) — the referenced prepayment invoice cannot be identified:
+    /// `A hivatkozott előlegszámla nem beazonosítható. Rendelésszám: …,
+    /// előlegszámla száma: ….` Returned for a
+    /// [final invoice](crate::ops::invoice::InvoiceKind::Final) whose
+    /// prepayment invoice number or order number does not resolve to a live
+    /// prepayment invoice. This is
+    /// also how the server enforces one final invoice per prepayment invoice:
+    /// once a prepayment invoice has been settled by a final invoice, a second
+    /// final invoice referencing it gets 73 even with the correct number and
+    /// order number. It is checked before the duplicate-order-number rule
+    /// (71/152).
+    PrepaymentInvoiceNotIdentifiable,
     /// 135 — the user is logged into szamlazz.hu in a browser; log out to run
     /// the Agent.
     BrowserSessionActive,
@@ -46,12 +89,25 @@ pub enum ErrorCode {
     LoginBlocked,
     /// 152 — the order number already exists on another document; the message
     /// names the offending order number.
+    ///
+    /// Same rule as [`ErrorCode::DuplicateOrderNumber`]: requires the account
+    /// setting *Rendelésszám ismétlődés tiltása*, is scoped per document type,
+    /// exempts storno and corrective invoices, and a reversed invoice's order
+    /// number becomes reusable. The message (`Már létező rendelésszám: ….
+    /// Az ismétlődés engedélyezhető a Beállítások oldalon.`) names the order
+    /// number — whitespace-trimmed — but never the existing invoice number;
+    /// recovering that requires a query by order number.
     DuplicateOrderNumberNamed,
     /// 164 — the user has access to multiple accounts; the Agent requires
     /// single-account access (use an agent key).
     MultipleAccounts,
     /// 202 — the invoice number prefix (`szamlaszamElotag`) is not registered.
     UnregisteredPrefix,
+    /// 221 (observed) — the invoice has a corrective invoice and cannot be
+    /// reversed: `Ez a számla nem sztornózható (van helyesbítő számlája).`
+    /// Returned by the storno operation; the corrective invoice remains the
+    /// only way to change such an invoice.
+    HasCorrectiveInvoice,
     /// 259 — line item net value must equal unit price × quantity.
     NetValueMismatch,
     /// 260 — line item VAT value must equal net × rate / 100.
@@ -72,6 +128,18 @@ pub enum ErrorCode {
     /// 338 — a receipt call identifier has already been used; no duplicate
     /// receipt is issued and the prior success is not replayed.
     DuplicateReceiptCallId,
+    /// 352 (observed) — the issue date (`keltDatum`) may only be today:
+    /// `A számla kelte csak a mai nap lehet: ….` Observed on a storno request
+    /// carrying an earlier `keltDatum` on an e-invoice account; omit
+    /// [`StornoInvoice::issue_date`](crate::ops::storno::StornoInvoice::issue_date)
+    /// to let the server date the storno invoice.
+    IssueDateMustBeToday,
+    /// 463 (observed) — a credit entry was registered against a reversed or
+    /// reversing invoice: `Sztornózó vagy sztornózott számlához nem tartozhat
+    /// kifizetettségi információ.` Reported in the body only (no
+    /// `szlahu_error_code` header). Reversal also removes the original
+    /// invoice's recorded payments from its queried XML.
+    PaymentOnReversedInvoice,
     /// 537 — an item reached the maximum of 400 data erasure codes.
     ErasureCodeLimit,
     /// 538 — data erasure codes are unavailable on demo/test accounts.
@@ -90,17 +158,20 @@ impl ErrorCode {
             Self::Maintenance => "1",
             Self::InvalidCredentials => "3",
             Self::MissingData => "7",
+            Self::StornoOfReversalInvoice => "14",
             Self::XmlNotAFile => "53",
             Self::EInvoiceNotEnabled => "54",
             Self::EInvoiceSigningFailed => "55",
             Self::InvoiceNotificationDeliveryFailed => "56",
             Self::MalformedXml => "57",
             Self::DuplicateOrderNumber => "71",
+            Self::PrepaymentInvoiceNotIdentifiable => "73",
             Self::BrowserSessionActive => "135",
             Self::LoginBlocked => "136",
             Self::DuplicateOrderNumberNamed => "152",
             Self::MultipleAccounts => "164",
             Self::UnregisteredPrefix => "202",
+            Self::HasCorrectiveInvoice => "221",
             Self::NetValueMismatch => "259",
             Self::VatValueMismatch => "260",
             Self::GrossValueMismatch => "261",
@@ -109,6 +180,8 @@ impl ErrorCode {
             Self::GrossValueInvalid => "264",
             Self::ProformaNotFound => "335",
             Self::DuplicateReceiptCallId => "338",
+            Self::IssueDateMustBeToday => "352",
+            Self::PaymentOnReversedInvoice => "463",
             Self::ErasureCodeLimit => "537",
             Self::ErasureCodesUnavailable => "538",
             Self::ErasureCodesDisabled => "539",
@@ -136,17 +209,20 @@ impl From<&str> for ErrorCode {
             "1" => Self::Maintenance,
             "3" => Self::InvalidCredentials,
             "7" => Self::MissingData,
+            "14" => Self::StornoOfReversalInvoice,
             "53" => Self::XmlNotAFile,
             "54" => Self::EInvoiceNotEnabled,
             "55" => Self::EInvoiceSigningFailed,
             "56" => Self::InvoiceNotificationDeliveryFailed,
             "57" => Self::MalformedXml,
             "71" => Self::DuplicateOrderNumber,
+            "73" => Self::PrepaymentInvoiceNotIdentifiable,
             "135" => Self::BrowserSessionActive,
             "136" => Self::LoginBlocked,
             "152" => Self::DuplicateOrderNumberNamed,
             "164" => Self::MultipleAccounts,
             "202" => Self::UnregisteredPrefix,
+            "221" => Self::HasCorrectiveInvoice,
             "259" => Self::NetValueMismatch,
             "260" => Self::VatValueMismatch,
             "261" => Self::GrossValueMismatch,
@@ -155,6 +231,8 @@ impl From<&str> for ErrorCode {
             "264" => Self::GrossValueInvalid,
             "335" => Self::ProformaNotFound,
             "338" => Self::DuplicateReceiptCallId,
+            "352" => Self::IssueDateMustBeToday,
+            "463" => Self::PaymentOnReversedInvoice,
             "537" => Self::ErasureCodeLimit,
             "538" => Self::ErasureCodesUnavailable,
             "539" => Self::ErasureCodesDisabled,
@@ -300,4 +378,101 @@ pub enum ResponseError {
     /// The response could not be parsed.
     #[error(transparent)]
     Parse(#[from] ParseError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every named variant, so the round-trip test cannot silently skip one.
+    const NAMED: [ErrorCode; 30] = [
+        ErrorCode::Maintenance,
+        ErrorCode::InvalidCredentials,
+        ErrorCode::MissingData,
+        ErrorCode::StornoOfReversalInvoice,
+        ErrorCode::XmlNotAFile,
+        ErrorCode::EInvoiceNotEnabled,
+        ErrorCode::EInvoiceSigningFailed,
+        ErrorCode::InvoiceNotificationDeliveryFailed,
+        ErrorCode::MalformedXml,
+        ErrorCode::DuplicateOrderNumber,
+        ErrorCode::PrepaymentInvoiceNotIdentifiable,
+        ErrorCode::BrowserSessionActive,
+        ErrorCode::LoginBlocked,
+        ErrorCode::DuplicateOrderNumberNamed,
+        ErrorCode::MultipleAccounts,
+        ErrorCode::UnregisteredPrefix,
+        ErrorCode::HasCorrectiveInvoice,
+        ErrorCode::NetValueMismatch,
+        ErrorCode::VatValueMismatch,
+        ErrorCode::GrossValueMismatch,
+        ErrorCode::NetValueInvalid,
+        ErrorCode::VatValueInvalid,
+        ErrorCode::GrossValueInvalid,
+        ErrorCode::ProformaNotFound,
+        ErrorCode::DuplicateReceiptCallId,
+        ErrorCode::IssueDateMustBeToday,
+        ErrorCode::PaymentOnReversedInvoice,
+        ErrorCode::ErasureCodeLimit,
+        ErrorCode::ErasureCodesUnavailable,
+        ErrorCode::ErasureCodesDisabled,
+    ];
+
+    #[test]
+    fn named_codes_round_trip_through_the_wire_code() {
+        for code in NAMED {
+            assert_eq!(ErrorCode::from(code.code()), code, "{code:?}");
+            assert_eq!(ErrorCode::from(code.code().to_owned()), code, "{code:?}");
+            assert_eq!(code.to_string(), code.code(), "{code:?}");
+            assert!(
+                !matches!(ErrorCode::from(code.code()), ErrorCode::Unknown(_)),
+                "{code:?} must not parse as Unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_codes_round_trip() {
+        for code in NAMED {
+            let numeric: u16 = code.code().parse().expect("named codes are numeric");
+            assert_eq!(ErrorCode::from(numeric), code, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn observed_storno_and_credit_codes_are_typed() {
+        assert_eq!(ErrorCode::from("14"), ErrorCode::StornoOfReversalInvoice);
+        assert_eq!(
+            ErrorCode::from("73"),
+            ErrorCode::PrepaymentInvoiceNotIdentifiable
+        );
+        assert_eq!(ErrorCode::from("221"), ErrorCode::HasCorrectiveInvoice);
+        assert_eq!(ErrorCode::from("352"), ErrorCode::IssueDateMustBeToday);
+        assert_eq!(ErrorCode::from("463"), ErrorCode::PaymentOnReversedInvoice);
+    }
+
+    #[test]
+    fn wire_code_is_trimmed_and_unknown_codes_are_preserved() {
+        assert_eq!(
+            ErrorCode::from(" 463 "),
+            ErrorCode::PaymentOnReversedInvoice
+        );
+        assert_eq!(
+            ErrorCode::from("FUTURE_CODE"),
+            ErrorCode::Unknown("FUTURE_CODE".to_owned())
+        );
+        assert_eq!(ErrorCode::Unknown("999".to_owned()).code(), "999");
+    }
+
+    #[test]
+    fn only_transient_codes_are_retryable() {
+        for code in NAMED {
+            let expected = matches!(
+                code,
+                ErrorCode::Maintenance | ErrorCode::EInvoiceSigningFailed
+            );
+            assert_eq!(code.is_retryable(), expected, "{code:?}");
+        }
+        assert!(!ErrorCode::Unknown("999".to_owned()).is_retryable());
+    }
 }

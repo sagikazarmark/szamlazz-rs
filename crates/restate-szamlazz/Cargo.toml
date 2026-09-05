@@ -1,0 +1,46 @@
+[package]
+name = "restate-szamlazz"
+version.workspace = true
+description = "Restate services issuing and managing szamlazz.hu documents with durable, idempotent execution"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["szamlazz", "invoice", "restate", "durable", "hungary"]
+categories = ["api-bindings"]
+
+[features]
+default = []
+## JSON Schema derivation for the contract types (OpenAPI via Restate discovery).
+schemars = ["dep:schemars", "restate-sdk/schemars"]
+
+[dependencies]
+szamlazz-agent = { workspace = true, features = ["client-reqwest"] }
+
+http = { workspace = true }
+jiff = { workspace = true }
+restate-sdk = { workspace = true }
+rust_decimal = { workspace = true }
+schemars = { workspace = true, optional = true, features = ["jiff02", "rust_decimal1"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+static_assertions = "1.1.0"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true
+
+# `schemars` adds typed request/response schemas to the discovery manifest and is part of the
+# public API surface.
+[package.metadata.docs.rs]
+all-features = true

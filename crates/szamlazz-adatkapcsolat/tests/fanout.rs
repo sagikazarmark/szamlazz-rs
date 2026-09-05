@@ -1,11 +1,12 @@
 //! Fan-out handler tests: delivery to all members, failure aggregation, ack
 //! merging.
 
+use std::future::ready;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use szamlazz_adatkapcsolat::{
-    Ack, Document, Fanout, Handler as _, InvoiceAck, InvoiceDirection, InvoiceDocument,
+    Ack, Document, Fanout, Handler as _, InvoiceAck, InvoiceDirection, InvoiceDocument, MaybeSend,
     ReceiptBatch,
 };
 
@@ -40,36 +41,42 @@ struct Probe {
 impl szamlazz_adatkapcsolat::Handler for Probe {
     type Error = String;
 
-    async fn outgoing_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
+    fn outgoing_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail {
-            return Err("probe failed".to_owned());
+            return ready(Err("probe failed".to_owned()));
         }
         if self.disconnect {
-            return Ok(InvoiceAck::disconnect());
+            return ready(Ok(InvoiceAck::disconnect()));
         }
         let ack = InvoiceAck::accept(invoice.info.id);
-        Ok(match self.registration {
+        ready(Ok(match self.registration {
             Some(registration) => ack.with_registration_number(registration),
             None => ack,
-        })
+        }))
     }
 
     async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
         self.outgoing_invoice(invoice).await
     }
 
-    async fn bank_transaction(
+    fn bank_transaction(
         &self,
         _tx: szamlazz_adatkapcsolat::BankTransaction,
-    ) -> Result<Ack, String> {
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Ack::accept())
+        ready(Ok(Ack::accept()))
     }
 
-    async fn receipts(&self, _batch: ReceiptBatch) -> Result<Ack, String> {
+    fn receipts(
+        &self,
+        _batch: ReceiptBatch,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Ack::accept())
+        ready(Ok(Ack::accept()))
     }
 }
 

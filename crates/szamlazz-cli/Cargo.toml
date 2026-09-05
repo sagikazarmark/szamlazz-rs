@@ -19,9 +19,9 @@ szamlazz-adatkapcsolat = { workspace = true, features = ["axum"] }
 szamlazz-agent = { workspace = true, features = ["client-reqwest"] }
 szamlazz-ipn = { workspace = true, features = ["axum", "serde"] }
 
-anyhow = "1.0.103"
+anyhow = { workspace = true }
 axum = { workspace = true, features = ["tokio", "http1"] }
-clap = { version = "4.6.1", features = ["derive", "env"] }
+clap = { workspace = true }
 jiff = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }

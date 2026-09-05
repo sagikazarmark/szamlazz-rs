@@ -54,7 +54,7 @@ impl QueryInvoicePdf {
 }
 
 /// A fetched invoice PDF with the totals reported alongside it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoicePdf {
     /// The invoice number (`szamlaszam`).
@@ -153,6 +153,21 @@ mod tests {
         assert_eq!(fetched.net_total, Some(dec!(30000)));
         assert_eq!(fetched.gross_total, Some(dec!(38100)));
         assert_eq!(fetched.pdf.as_bytes(), b"%PDF-");
+    }
+
+    /// The fetched PDF is journal-safe: it round-trips through JSON as base64.
+    #[test]
+    fn invoice_pdf_round_trips_through_json() {
+        let body = include_bytes!("../../tests/synthetic/querying_pdf_xmlszamlavalasz.xml");
+        let response = RawResponse::new::<&str, &str>([], body.to_vec());
+        let fetched = sample().parse(&response).expect("success");
+
+        let json = serde_json::to_value(&fetched).expect("serialize");
+        assert_eq!(json["invoice_number"], "E-TST-2026-3");
+        assert_eq!(json["pdf"], "JVBERi0=");
+
+        let restored: InvoicePdf = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, fetched);
     }
 
     #[test]

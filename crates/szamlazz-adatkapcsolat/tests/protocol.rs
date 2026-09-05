@@ -8,10 +8,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt as _;
 use rust_decimal::dec;
+use std::future::ready;
 use std::sync::{Arc, Mutex};
 use szamlazz_adatkapcsolat::{
     Ack, BankTransaction, Document, Handler, InvoiceAck, InvoiceAppearance, InvoiceDocument,
-    KEY_HEADER, ReceiptBatch, TransactionDirection, VatRate,
+    KEY_HEADER, MaybeSend, ReceiptBatch, TransactionDirection, VatRate,
 };
 use tower::util::ServiceExt as _;
 
@@ -280,28 +281,42 @@ struct TestHandler {
 impl Handler for TestHandler {
     type Error = String;
 
-    async fn outgoing_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
+    fn outgoing_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
         if self.fail {
-            return Err("database down".to_owned());
+            return ready(Err("database down".to_owned()));
         }
         let registration = if self.invalid_ack {
             "invalid\0registration"
         } else {
             "IKT-1"
         };
-        Ok(InvoiceAck::accept(invoice.info.id).with_registration_number(registration))
+        ready(Ok(
+            InvoiceAck::accept(invoice.info.id).with_registration_number(registration)
+        ))
     }
 
-    async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
-        Ok(InvoiceAck::accept(invoice.info.id))
+    fn incoming_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+        ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
-    async fn bank_transaction(&self, _tx: BankTransaction) -> Result<Ack, String> {
-        Ok(Ack::accept())
+    fn bank_transaction(
+        &self,
+        _tx: BankTransaction,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+        ready(Ok(Ack::accept()))
     }
 
-    async fn receipts(&self, _batch: ReceiptBatch) -> Result<Ack, String> {
-        Ok(Ack::accept())
+    fn receipts(
+        &self,
+        _batch: ReceiptBatch,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+        ready(Ok(Ack::accept()))
     }
 }
 
@@ -356,20 +371,32 @@ struct MismatchedAck;
 impl Handler for MismatchedAck {
     type Error = String;
 
-    async fn outgoing_invoice(&self, _invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
-        Ok(InvoiceAck::accept(-1))
+    fn outgoing_invoice(
+        &self,
+        _invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+        ready(Ok(InvoiceAck::accept(-1)))
     }
 
-    async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
-        Ok(InvoiceAck::accept(invoice.info.id))
+    fn incoming_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+        ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
-    async fn bank_transaction(&self, _tx: BankTransaction) -> Result<Ack, String> {
-        Ok(Ack::accept())
+    fn bank_transaction(
+        &self,
+        _tx: BankTransaction,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+        ready(Ok(Ack::accept()))
     }
 
-    async fn receipts(&self, _batch: ReceiptBatch) -> Result<Ack, String> {
-        Ok(Ack::accept())
+    fn receipts(
+        &self,
+        _batch: ReceiptBatch,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+        ready(Ok(Ack::accept()))
     }
 }
 
@@ -588,21 +615,33 @@ struct TenantHandler {
 impl Handler for TenantHandler {
     type Error = String;
 
-    async fn outgoing_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
+    fn outgoing_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
         self.calls.lock().expect("calls").push(self.tenant);
-        Ok(InvoiceAck::accept(invoice.info.id))
+        ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
-    async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
-        Ok(InvoiceAck::accept(invoice.info.id))
+    fn incoming_invoice(
+        &self,
+        invoice: InvoiceDocument,
+    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+        ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
-    async fn bank_transaction(&self, _tx: BankTransaction) -> Result<Ack, String> {
-        Ok(Ack::accept())
+    fn bank_transaction(
+        &self,
+        _tx: BankTransaction,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+        ready(Ok(Ack::accept()))
     }
 
-    async fn receipts(&self, _batch: ReceiptBatch) -> Result<Ack, String> {
-        Ok(Ack::accept())
+    fn receipts(
+        &self,
+        _batch: ReceiptBatch,
+    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+        ready(Ok(Ack::accept()))
     }
 }
 

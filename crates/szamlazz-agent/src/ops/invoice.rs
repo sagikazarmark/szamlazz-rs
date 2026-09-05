@@ -641,12 +641,20 @@ impl CreateInvoice {
 
 /// A successful invoice-creation result, including PDF previews that do not
 /// issue a numbered document.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoiceCreationResult {
     /// The assigned invoice number (`szamlaszam`). Absent for PDF previews,
     /// which do not issue a document.
     pub invoice_number: Option<InvoiceNumber>,
+    /// szamlazz.hu's internal document identifier (`szlahu_id` header).
+    ///
+    /// The same value the XML query returns as
+    /// [`InvoiceInfo::id`](crate::ops::query_xml::InvoiceInfo::id); it is a
+    /// document identifier, not an account or supplier identifier, and is
+    /// distinct for every issued document. `None` when the header is absent
+    /// (as on PDF previews) or not a number.
+    pub document_id: Option<u64>,
     /// Net total (`szamlanetto`).
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
@@ -664,11 +672,20 @@ pub struct InvoiceCreationResult {
 }
 
 /// A successfully issued numbered invoice, such as a storno invoice.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CreatedInvoice {
     /// The assigned invoice number (`szamlaszam`).
     pub invoice_number: InvoiceNumber,
+    /// szamlazz.hu's internal document identifier (`szlahu_id` header).
+    ///
+    /// The same value the XML query returns as
+    /// [`InvoiceInfo::id`](crate::ops::query_xml::InvoiceInfo::id); for a
+    /// storno invoice, the original's identifier reappears as the storno's
+    /// [`economic_event_id`](crate::ops::query_xml::InvoiceInfo::economic_event_id).
+    /// A document identifier, not an account or supplier identifier. `None`
+    /// when the header is absent or not a number.
+    pub document_id: Option<u64>,
     /// Net total (`szamlanetto`).
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
@@ -683,6 +700,28 @@ pub struct CreatedInvoice {
     /// Whether the invoice was issued but Számlázz.hu could not deliver its
     /// notification (`56`). The issued invoice must not be retried.
     pub notification_delivery_failed: bool,
+}
+
+impl CreatedInvoice {
+    /// Whether this document is a reversal of `original`: a *different*
+    /// invoice number with a negative gross total.
+    ///
+    /// The check every caller must make after a
+    /// [`StornoInvoice`](crate::ops::storno::StornoInvoice): szamlazz.hu
+    /// answers a storno request for a proforma or a delivery note with a
+    /// success-shaped response that merely echoes the requested document
+    /// (same number, positive totals) and reverses nothing. A repeat storno of
+    /// an already reversed invoice also passes this check — it echoes the
+    /// existing storno invoice, which is a genuine reversal.
+    ///
+    /// Returns `false` when the gross total is unknown.
+    #[must_use]
+    pub fn reverses(&self, original: &InvoiceNumber) -> bool {
+        self.invoice_number != *original
+            && self
+                .gross_total
+                .is_some_and(|gross| gross.is_sign_negative())
+    }
 }
 
 impl AgentRequest for CreateInvoice {
@@ -1060,6 +1099,7 @@ pub(crate) fn parse_creation_result(
 
     Ok(InvoiceCreationResult {
         invoice_number,
+        document_id: parse_document_id_header(response),
         net_total: if notification_delivery_failed {
             net_total.unwrap_or(None)
         } else {
@@ -1126,6 +1166,7 @@ fn parse_notification_fallback(
 
     Ok(InvoiceCreationResult {
         invoice_number: Some(invoice_number),
+        document_id: parse_document_id_header(response),
         net_total: parse_decimal_header(response, "szlahu_nettovegosszeg").unwrap_or(None),
         gross_total: parse_decimal_header(response, "szlahu_bruttovegosszeg").unwrap_or(None),
         outstanding: parse_decimal_header(response, "szlahu_kintlevoseg").unwrap_or(None),
@@ -1140,6 +1181,17 @@ fn parse_notification_fallback(
 fn nonblank_invoice_number(value: &str) -> Option<InvoiceNumber> {
     let value = value.trim();
     (!value.is_empty()).then(|| InvoiceNumber::new(value))
+}
+
+/// The document identifier from the `szlahu_id` header.
+///
+/// Lenient on purpose: the identifier is auxiliary, and a successful issuance
+/// must never be reported as a parse failure because of it. An absent, blank,
+/// or non-numeric header is `None`.
+fn parse_document_id_header(response: &RawResponse) -> Option<u64> {
+    response
+        .header("szlahu_id")
+        .and_then(|value| value.trim().parse().ok())
 }
 
 fn parse_decimal_header(
@@ -1179,6 +1231,7 @@ pub(crate) fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, Res
         invoice_number: result
             .invoice_number
             .ok_or(ParseError::Missing("szamlaszam"))?,
+        document_id: result.document_id,
         net_total: result.net_total,
         gross_total: result.gross_total,
         outstanding: result.outstanding,
@@ -1505,10 +1558,106 @@ mod tests {
             created.invoice_number.as_ref().map(InvoiceNumber::as_str),
             Some("E-TST-2026-3")
         );
+        assert_eq!(created.document_id, None);
         assert_eq!(created.net_total, Some(dec!(30000)));
         assert_eq!(created.gross_total, Some(dec!(38100)));
         assert!(created.pdf.is_none());
         assert!(!created.notification_delivery_failed);
+    }
+
+    /// The creation result is journal-safe: it round-trips through JSON with
+    /// the PDF as base64.
+    #[test]
+    fn creation_result_round_trips_through_json() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>E-TST-2026-3</szamlaszam><szamlanetto>30000</szamlanetto><szamlabrutto>38100</szamlabrutto><kintlevoseg>38100</kintlevoseg><vevoifiokurl>https://example.test/acct</vevoifiokurl><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
+        let response = RawResponse::new([("szlahu_id", "924307402")], body.to_vec());
+        let created = sample().parse(&response).expect("success");
+        assert_eq!(created.pdf.as_ref().map(Pdf::as_bytes), Some(&b"%PDF-"[..]));
+        assert_eq!(created.document_id, Some(924_307_402));
+
+        let json = serde_json::to_value(&created).expect("serialize");
+        assert_eq!(json["invoice_number"], "E-TST-2026-3");
+        assert_eq!(json["gross_total"], "38100");
+        assert_eq!(json["pdf"], "JVBERi0=");
+
+        let restored: InvoiceCreationResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, created);
+    }
+
+    #[test]
+    fn document_id_comes_from_the_szlahu_id_header() {
+        let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
+        let response = RawResponse::new(
+            [
+                ("szlahu_szamlaszam", "E-TST-2026-3"),
+                ("szlahu_id", " 924307402 "),
+            ],
+            body.to_vec(),
+        );
+        let created = sample().parse(&response).expect("success");
+        assert_eq!(created.document_id, Some(924_307_402));
+
+        // The identifier is auxiliary: a blank or malformed header never
+        // turns a successful issuance into a parse failure.
+        for value in ["", "not-a-number", "-1"] {
+            let response = RawResponse::new([("szlahu_id", value)], body.to_vec());
+            let created = sample().parse(&response).expect("success");
+            assert_eq!(created.document_id, None, "header {value:?}");
+        }
+    }
+
+    #[test]
+    fn notification_failure_keeps_document_id() {
+        let response = RawResponse::new(
+            [
+                ("szlahu_error_code", "56"),
+                ("szlahu_error", "notification failed"),
+                ("szlahu_szamlaszam", "E-2026-123"),
+                ("szlahu_id", "924307402"),
+            ],
+            b"notification failed".to_vec(),
+        );
+        let created = sample().parse(&response).expect("invoice was issued");
+        assert_eq!(created.document_id, Some(924_307_402));
+        assert!(created.notification_delivery_failed);
+
+        let body = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>E-2026-123</szamlaszam></xmlszamlavalasz>"#;
+        let response = RawResponse::new([("szlahu_id", "924307402")], body.to_vec());
+        let created = sample().parse(&response).expect("invoice was issued");
+        assert_eq!(created.document_id, Some(924_307_402));
+        assert!(created.notification_delivery_failed);
+    }
+
+    fn created(number: &str, gross: Option<Decimal>) -> CreatedInvoice {
+        CreatedInvoice {
+            invoice_number: InvoiceNumber::new(number),
+            document_id: None,
+            net_total: None,
+            gross_total: gross,
+            outstanding: None,
+            customer_account_url: None,
+            pdf: None,
+            notification_delivery_failed: false,
+        }
+    }
+
+    #[test]
+    fn reverses_requires_a_new_number_with_a_negative_gross() {
+        let original = InvoiceNumber::new("CTEST-2026-40");
+
+        // A genuine storno invoice (also what a repeat storno echoes).
+        assert!(created("CTEST-2026-42", Some(dec!(-1270))).reverses(&original));
+
+        // Storno of a proforma or delivery note: the requested document is
+        // echoed unchanged.
+        assert!(!created("CTEST-2026-40", Some(dec!(1270))).reverses(&original));
+        // A different number with positive totals reversed nothing either.
+        assert!(!created("CTEST-2026-41", Some(dec!(1270))).reverses(&original));
+        // Same number, negative gross (not observed) is not a reversal.
+        assert!(!created("CTEST-2026-40", Some(dec!(-1270))).reverses(&original));
+        // Unknown totals cannot prove a reversal.
+        assert!(!created("CTEST-2026-42", None).reverses(&original));
+        assert!(!created("CTEST-2026-42", Some(dec!(0))).reverses(&original));
     }
 
     #[test]

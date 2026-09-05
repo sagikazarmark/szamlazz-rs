@@ -474,7 +474,7 @@ impl AgentRequest for SendReceipt {
 /// A successfully created, cancelled, or queried receipt
 /// (`xmlnyugtavalasz`).
 #[doc(alias = "xmlnyugtavalasz")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ReceiptResult {
     /// The receipt data.
@@ -485,7 +485,7 @@ pub struct ReceiptResult {
 
 /// A receipt as returned by szamlazz.hu (`nyugta`).
 #[doc(alias = "nyugta")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Receipt {
     /// Internal szamlazz.hu identifier (`id`).
@@ -545,7 +545,7 @@ pub struct Receipt {
 /// VAT category code (`afatipus`); [`ReceiptItem::vat_rate`] combines them
 /// into a typed rate.
 #[doc(alias = "tétel")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ReceiptItem {
     /// Item name (`megnevezes`).
@@ -576,7 +576,7 @@ pub struct ReceiptItem {
 }
 
 /// General-ledger metadata returned for a receipt item (`fokonyv`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ReceiptItemLedger {
     /// Revenue general-ledger account (`arbevetel`).
@@ -599,7 +599,7 @@ impl ReceiptItem {
 
 /// Receipt totals (`osszegek`): per-VAT-rate subtotals and the grand total.
 #[doc(alias = "összegek")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ReceiptTotals {
     /// Subtotals per VAT rate (`afakulcsossz`).
@@ -610,7 +610,7 @@ pub struct ReceiptTotals {
 
 /// The subtotal for one VAT rate (`afakulcsossz`).
 #[doc(alias = "áfakulcs összesítés")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct VatRateTotal {
     /// VAT category code (`afatipus`), set when a special code applies.
@@ -641,7 +641,7 @@ impl VatRateTotal {
 
 /// The grand total of a receipt (`totalossz`).
 #[doc(alias = "totál összesítés")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct TotalAmounts {
     /// Net total (`netto`).
@@ -1254,6 +1254,31 @@ mod tests {
         let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
         let result = create_sample().parse(&response).expect("success");
         assert_eq!(result.pdf.expect("pdf").as_bytes(), b"%PDF-");
+    }
+
+    /// The receipt result is journal-safe: it round-trips through JSON with
+    /// the payment method and currency as their wire tokens and the PDF as
+    /// base64.
+    #[test]
+    fn receipt_result_round_trips_through_json() {
+        let body = include_str!("../../tests/synthetic/xmlnyugtavalasz.xml").replace(
+            "<sikeres>true</sikeres>",
+            "<sikeres>true</sikeres><nyugtaPdf>JVBERi0=</nyugtaPdf>",
+        );
+        let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+        let result = query_sample().parse(&response).expect("success");
+        assert!(result.pdf.is_some(), "the fixture carries a PDF");
+
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(json["receipt"]["receipt_number"], "NYGT-TST-2026-123");
+        assert_eq!(json["receipt"]["payment_method"], "cash");
+        assert_eq!(json["receipt"]["currency"], "EUR");
+        assert_eq!(json["receipt"]["items"][0]["vat_code"], "27");
+        assert_eq!(json["receipt"]["totals"]["by_rate"][0]["vat_type"], "ÁKK");
+        assert_eq!(json["pdf"], "JVBERi0=");
+
+        let restored: ReceiptResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, result);
     }
 
     #[test]
