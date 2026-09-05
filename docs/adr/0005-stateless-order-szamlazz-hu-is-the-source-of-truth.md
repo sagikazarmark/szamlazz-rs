@@ -41,13 +41,13 @@ deterministic external id derived from the key alone provides it without state.
 `Szamlazz.Order` keeps **no state**. The Virtual Object exists for its per-key lock. Everything else is answered
 by querying szamlazz.hu through external ids that are deterministic from the key:
 
-- slot kinds: `"{slug}:{order}:{kind}"`, `kind ∈ proforma | invoice | prepayment | final`
+- slot kinds: `"{namespace}:{order}:{kind}"`, `kind ∈ proforma | invoice | prepayment | final`
   (`ExternalId::for_kind`);
-- correctives: `"{slug}:{order}:corrective:{correction_id}"` — the caller names each corrective; a new
+- correctives: `"{namespace}:{order}:corrective:{correction_id}"` — the caller names each corrective; a new
   `correction_id` issues a new corrective by contract, the same id finds the one it issued
   (`ExternalId::for_corrective`);
-- storno: `"{slug}:{order}:storno:{original_number}"` (`ExternalId::for_storno`), and
-  `"{slug}:by-number:{number}:storno"` for `Szamlazz.Agent.storno` of a document no `Order` manages.
+- storno: `"{namespace}:{order}:storno:{original_number}"` (`ExternalId::for_storno`), and
+  `"{namespace}:by-number:{number}:storno"` for `Szamlazz.Agent.storno` of a document no `Order` manages.
 
 **Last-writer-wins replaces the generation counter.** The question a create asks is "what is the newest document
 of this kind we issued for this order?", which is exactly what the external-id query answers. After a storno the

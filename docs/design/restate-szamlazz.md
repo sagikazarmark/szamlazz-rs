@@ -452,8 +452,9 @@ supplier id — never the key.
   invocation; after the drain and the switch the first scoped create for the order phase 1 invoiced →
   `already_issued` under the unchanged external id; unscoped → 400 `unknown_account` naming the scoped path, with
   `namespace` and `account` journaled and zero szamlazz.hu requests, and an unknown scope likewise; the same order
-  key under `acme` and `beta` concurrently with the **same** `Idempotency-Key` → two invocation ids, two `issued`
-  with each account's own key on the wire exactly once (and the key replaying each scope's own completion);
+  key under `acme` and `beta` concurrently → two `issued` with each account's own key on the create wire exactly
+  once; the **same** `Idempotency-Key` under the two scopes → two invocation ids and two documents, and the key
+  replayed under either scope returning that scope's own completion without a call;
   `create_invoice` → purge → `storno_invoice` → `reversed` → purge → `create_invoice {reissue}` → `issued` on an order
   Restate holds nothing of, then the scoped `get` seeing the new holder; `acme`'s seller bank account changed between
   two executions of a create step (the first loses its reply) → both executions carry the journaled bank account

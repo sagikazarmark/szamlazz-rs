@@ -83,7 +83,6 @@ struct Doc<'a> {
     number: &'a str,
     tipus: &'a str,
     order: Option<&'a str>,
-    supplier: u64,
     reversed: bool,
     referenced_invoice: Option<&'a str>,
     referenced_proforma: Option<&'a str>,
@@ -95,7 +94,6 @@ impl<'a> Doc<'a> {
             number,
             tipus,
             order: Some(order),
-            supplier: SUPPLIER,
             reversed: false,
             referenced_invoice: None,
             referenced_proforma: None,
@@ -110,13 +108,12 @@ impl<'a> Doc<'a> {
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+  <szallito><id>{SUPPLIER}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
   <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{rendelesszam}<teszt>true</teszt>{sztornozott}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
 </szamla>"#,
-            supplier = self.supplier,
             number = self.number,
             tipus = self.tipus,
             hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
@@ -192,12 +189,15 @@ fn create() -> MockBuilder {
     op("action-xmlagentxmlfile")
 }
 
-/// A create request carrying `agent_key` (`<szamlaagentkulcs>`): what tells
-/// one account's traffic from another's on the wire.
+/// The `<szamlaagentkulcs>` element carrying `agent_key`: what tells one
+/// account's traffic from another's on the wire.
+fn agent_key_tag(agent_key: &str) -> String {
+    format!("<szamlaagentkulcs>{agent_key}</szamlaagentkulcs>")
+}
+
+/// A create request carrying `agent_key`.
 fn create_with_key(agent_key: &str) -> MockBuilder {
-    create().and(body_string_contains(format!(
-        "<szamlaagentkulcs>{agent_key}</szamlaagentkulcs>"
-    )))
+    create().and(body_string_contains(agent_key_tag(agent_key)))
 }
 
 /// A create request whose seller block carries `bank_account`.
@@ -375,6 +375,19 @@ struct JournalEntry {
 }
 
 impl JournalEntry {
+    /// One `sys_journal` row (`index`, `entry_type`, `name`, `raw`).
+    fn from_row(row: &Value) -> Self {
+        Self {
+            index: row["index"].as_u64().expect("index"),
+            entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
+            name: row["name"].as_str().map(str::to_owned),
+            raw: row["raw"]
+                .as_str()
+                .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
+                .unwrap_or_default(),
+        }
+    }
+
     /// Whether the entry is a `ctx.run` command (named).
     fn is_run(&self) -> bool {
         self.entry_type == "Command: Run"
@@ -418,6 +431,24 @@ struct Invocation {
     completion_failure: Option<String>,
     scope: Option<String>,
     handler: String,
+}
+
+impl Invocation {
+    /// The columns every `sys_invocation` query of the harness selects.
+    const COLUMNS: &str = "status, completion_failure, scope, target_handler_name";
+
+    /// One `sys_invocation` row with [`Self::COLUMNS`].
+    fn from_row(row: &Value) -> Self {
+        Self {
+            status: row["status"].as_str().unwrap_or_default().to_owned(),
+            completion_failure: row["completion_failure"].as_str().map(str::to_owned),
+            scope: row["scope"].as_str().map(str::to_owned),
+            handler: row["target_handler_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    }
 }
 
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
@@ -762,7 +793,7 @@ impl Harness {
     /// Serves `order` and `agent` on a free port of this host and registers
     /// the deployment with the server: a new URI is a new revision of both
     /// services, and new invocations route to it.
-    async fn serve_and_register(&self, order: Order, agent: Agent) -> u16 {
+    async fn serve_and_register(&self, order: Order, agent: Agent) {
         let listener = TcpListener::bind("0.0.0.0:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         listener.set_nonblocking(true).expect("nonblocking");
@@ -796,7 +827,6 @@ impl Harness {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        port
     }
 
     /// The single → multi flag day, as the endpoint README scripts it: make
@@ -982,38 +1012,21 @@ impl Harness {
                 "SELECT index, entry_type, name, raw FROM sys_journal WHERE id = '{invocation_id}' ORDER BY index"
             ))
             .await;
-        rows.iter()
-            .map(|row| JournalEntry {
-                index: row["index"].as_u64().expect("index"),
-                entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
-                name: row["name"].as_str().map(str::to_owned),
-                raw: row["raw"]
-                    .as_str()
-                    .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
-                    .unwrap_or_default(),
-            })
-            .collect()
+        rows.iter().map(JournalEntry::from_row).collect()
     }
 
     /// The `sys_invocation` row of an invocation.
     async fn invocation(&self, invocation_id: &str) -> Invocation {
         let rows = self
             .sql(&format!(
-                "SELECT status, completion_failure, scope, target_handler_name FROM sys_invocation WHERE id = '{invocation_id}'"
+                "SELECT {} FROM sys_invocation WHERE id = '{invocation_id}'",
+                Invocation::COLUMNS
             ))
             .await;
         let row = rows
             .first()
             .unwrap_or_else(|| panic!("no sys_invocation row for {invocation_id}"));
-        Invocation {
-            status: row["status"].as_str().unwrap_or_default().to_owned(),
-            completion_failure: row["completion_failure"].as_str().map(str::to_owned),
-            scope: row["scope"].as_str().map(str::to_owned),
-            handler: row["target_handler_name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-        }
+        Invocation::from_row(row)
     }
 
     /// Watches the invocations on Virtual Object `key` for four seconds (a
@@ -1151,15 +1164,7 @@ impl Harness {
             journals
                 .entry(row["id"].as_str().expect("id").to_owned())
                 .or_default()
-                .push(JournalEntry {
-                    index: row["index"].as_u64().expect("index"),
-                    entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
-                    name: row["name"].as_str().map(str::to_owned),
-                    raw: row["raw"]
-                        .as_str()
-                        .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
-                        .unwrap_or_default(),
-                });
+                .push(JournalEntry::from_row(row));
         }
         journals
     }
@@ -1167,23 +1172,16 @@ impl Harness {
     /// Every `sys_invocation` row the server still holds.
     async fn all_invocations(&self) -> Vec<(String, Invocation)> {
         let rows = self
-            .sql(
-                "SELECT id, status, completion_failure, scope, target_handler_name FROM sys_invocation ORDER BY id",
-            )
+            .sql(&format!(
+                "SELECT id, {} FROM sys_invocation ORDER BY id",
+                Invocation::COLUMNS
+            ))
             .await;
         rows.iter()
             .map(|row| {
                 (
                     row["id"].as_str().expect("id").to_owned(),
-                    Invocation {
-                        status: row["status"].as_str().unwrap_or_default().to_owned(),
-                        completion_failure: row["completion_failure"].as_str().map(str::to_owned),
-                        scope: row["scope"].as_str().map(str::to_owned),
-                        handler: row["target_handler_name"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
-                    },
+                    Invocation::from_row(row),
                 )
             })
             .collect()
@@ -1232,6 +1230,7 @@ async fn e2e_order_protocol() {
     // Phase 2: the flag day, then the multi-account deployment by scope.
     flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
     same_order_key_under_two_scopes_issues_on_both_accounts(&h).await;
+    same_idempotency_key_under_two_scopes_is_two_invocations(&h).await;
     purged_order_is_stornoed_and_reissued(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
@@ -2298,10 +2297,12 @@ async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness
     );
 }
 
-/// (xvii) the same order key under scopes `acme` and `beta`, concurrently and
-/// with the **same** `Idempotency-Key`: two Virtual Objects, two invocation
-/// ids, two documents, each account's own agent key on the wire exactly once
-/// — Restate namespaces the key and the idempotency identity per scope.
+/// (xvii) the same order key under scopes `acme` and `beta`, concurrently:
+/// two Virtual Objects, two `issued`, each account's own agent key on the
+/// create wire exactly once — Restate namespaces the Virtual Object key per
+/// scope, and the prologue opens each execution's gateway on its own
+/// account. (The lookup queries carry the key as well; the create bodies are
+/// what identify *which account issued*.)
 async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
     h.reset().await;
     h.absent("E2E-17", &["prepayment", "proforma", "invoice"])
@@ -2323,20 +2324,8 @@ async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
 
     let body = create_body(dec!(1000), false);
     let (acme, beta) = tokio::join!(
-        h.call_scoped(
-            "acme",
-            "E2E-17",
-            "create_invoice",
-            &body,
-            "e2e-17-shared-key"
-        ),
-        h.call_scoped(
-            "beta",
-            "E2E-17",
-            "create_invoice",
-            &body,
-            "e2e-17-shared-key"
-        ),
+        h.call_scoped("acme", "E2E-17", "create_invoice", &body, "e2e-17-acme"),
+        h.call_scoped("beta", "E2E-17", "create_invoice", &body, "e2e-17-beta"),
     );
     assert_eq!(acme.status, 200, "{}", acme.body);
     assert_eq!(beta.status, 200, "{}", beta.body);
@@ -2355,11 +2344,6 @@ async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
         beta.body["external_id"], "acct:E2E-17:invoice",
         "the same namespace and order: the same external id on two szamlazz.hu accounts"
     );
-    assert_ne!(
-        acme.invocation_id(),
-        beta.invocation_id(),
-        "the same Idempotency-Key under two scopes is two invocations"
-    );
 
     let creates = h.create_bodies().await;
     assert_eq!(creates.len(), 2, "one create per account");
@@ -2367,10 +2351,10 @@ async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
         assert_eq!(
             creates
                 .iter()
-                .filter(|body| body.contains(&format!("<szamlaagentkulcs>{key}</szamlaagentkulcs>")))
+                .filter(|body| body.contains(&agent_key_tag(key)))
                 .count(),
             1,
-            "{key} on the wire exactly once"
+            "{key} on the create wire exactly once"
         );
     }
     for (reply, scope, id) in [(&acme, "acme", "acme"), (&beta, "beta", "beta")] {
@@ -2385,24 +2369,70 @@ async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
             String::from_utf8_lossy(&account.raw)
         );
     }
-
-    // The same key again under each scope replays each scope's own completion.
-    let before = h.requests_seen().await;
-    let replay = h
-        .call_scoped(
-            "beta",
-            "E2E-17",
-            "create_invoice",
-            &create_body(dec!(1000), false),
-            "e2e-17-shared-key",
-        )
-        .await;
-    assert_eq!(replay.status, 200, "{}", replay.body);
-    assert_eq!(replay.body["invoice_number"], "SZ-B17");
-    assert_eq!(replay.invocation_id(), beta.invocation_id());
-    assert_eq!(h.requests_seen().await, before, "a replay, not a call");
     eprintln!(
-        "(xvii) same order key + same Idempotency-Key under two scopes → two invocations, two documents, each key once: pass"
+        "(xvii) same order key under two scopes concurrently → two issued, each key on the create wire once: pass"
+    );
+}
+
+/// (xvii-b) the **same** `Idempotency-Key` under two scopes is two
+/// invocations — two `x-restate-id`s, two documents — because Restate hashes
+/// the scope into the idempotency identity; and the key replayed under
+/// either scope returns that scope's own stored completion without a call.
+async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-17B", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-17B")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_with_key(AGENT_KEY)
+        .respond_with(created("SZ-A17B", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create_with_key(KEY_B)
+        .respond_with(created("SZ-B17B", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let body = create_body(dec!(1000), false);
+    let acme = h
+        .call_scoped("acme", "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
+        .await;
+    let beta = h
+        .call_scoped("beta", "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
+        .await;
+    assert_eq!(acme.status, 200, "{}", acme.body);
+    assert_eq!(beta.status, 200, "{}", beta.body);
+    assert_eq!(acme.body["outcome"], "issued", "{}", acme.body);
+    assert_eq!(beta.body["outcome"], "issued", "{}", beta.body);
+    assert_eq!(acme.body["invoice_number"], "SZ-A17B");
+    assert_eq!(beta.body["invoice_number"], "SZ-B17B");
+    assert_ne!(
+        acme.invocation_id(),
+        beta.invocation_id(),
+        "the same Idempotency-Key under two scopes is two invocations"
+    );
+    assert_eq!(h.create_bodies().await.len(), 2, "two documents");
+
+    // The key again under each scope replays that scope's own completion.
+    let before = h.requests_seen().await;
+    for (scope, original) in [("acme", &acme), ("beta", &beta)] {
+        let replay = h
+            .call_scoped(scope, "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
+            .await;
+        assert_eq!(replay.status, 200, "{}", replay.body);
+        assert_eq!(
+            replay.body["invoice_number"], original.body["invoice_number"],
+            "{scope}"
+        );
+        assert_eq!(replay.invocation_id(), original.invocation_id(), "{scope}");
+    }
+    assert_eq!(h.requests_seen().await, before, "replays, not calls");
+    eprintln!(
+        "(xvii-b) same Idempotency-Key under two scopes → two invocation ids, two documents; each replays its own: pass"
     );
 }
 
@@ -2452,9 +2482,7 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
         .mount(&h.mock)
         .await;
     storno()
-        .and(body_string_contains(format!(
-            "<szamlaagentkulcs>{AGENT_KEY}</szamlaagentkulcs>"
-        )))
+        .and(body_string_contains(agent_key_tag(AGENT_KEY)))
         .respond_with(created("SS-18", "-1000", "-1270"))
         .expect(1)
         .mount(&h.mock)
@@ -2656,11 +2684,13 @@ async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
     let body = create_body(dec!(1000), false);
     let call = h.call_scoped("beta", "E2E-20", "create_invoice", &body, "e2e-20-k1");
     let rotate = async {
-        // Rotate as soon as the first execution's create is seen — the
-        // re-execution is a second away — then read the `account` entry the
-        // first execution journaled while the invocation is still in flight.
+        // The first execution's create is on the wire: the `account` entry is
+        // journaled and the re-execution is a second away. Read the entry as
+        // journaled *before* the rotation, then rotate. (Journal entries are
+        // immutable, so the comparison below proves the rotation left the
+        // second execution's account as journaled — the credentials are not
+        // part of it.)
         h.wait_for_creates(1).await;
-        h.multi().rotate("beta", KEY_B_V2);
         let invocations = h.all_invocations().await;
         let (id, _) = invocations
             .iter()
@@ -2674,6 +2704,7 @@ async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
             .expect("the account result while in flight")
             .raw
             .clone();
+        h.multi().rotate("beta", KEY_B_V2);
         (id.clone(), before)
     };
     let (reply, (id, before)) = tokio::join!(call, rotate);
@@ -2685,22 +2716,31 @@ async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
     let creates = h.create_bodies().await;
     assert_eq!(creates.len(), 2, "two executions of the create step");
     assert!(
-        creates[0].contains(&format!("<szamlaagentkulcs>{KEY_B}</szamlaagentkulcs>")),
+        creates[0].contains(&agent_key_tag(KEY_B)),
         "execution one carried the old key"
     );
     assert!(
-        creates[1].contains(&format!("<szamlaagentkulcs>{KEY_B_V2}</szamlaagentkulcs>")),
+        creates[1].contains(&agent_key_tag(KEY_B_V2)),
         "execution two carried the rotated key"
     );
     let journal = h.journal(reply.invocation_id()).await;
-    let after = &run_result(&journal, "account")
-        .expect("the account result")
-        .raw;
-    assert_eq!(*after, before, "the journaled account is byte-identical");
+    let account = run_result(&journal, "account").expect("the account result");
+    assert_eq!(
+        account.raw, before,
+        "the journaled account is byte-identical"
+    );
+    assert!(account.raw_contains("\"id\":\"beta\""));
     assert!(
-        after
-            .windows(b"\"id\":\"beta\"".len())
-            .any(|w| w == b"\"id\":\"beta\"")
+        !account.raw_contains(KEY_B) && !account.raw_contains(KEY_B_V2),
+        "neither key is in the account entry"
+    );
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|entry| entry.is_run() && entry.name.as_deref() == Some("account"))
+            .count(),
+        1,
+        "the re-execution replayed the account, it did not resolve again"
     );
     eprintln!(
         "(xx) credential rotation between executions → new key on the wire, account entry unchanged: pass"

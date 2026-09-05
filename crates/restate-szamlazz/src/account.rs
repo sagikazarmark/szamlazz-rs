@@ -20,7 +20,10 @@ use crate::config::{AccountMode, Defaults, SellerConfig};
 
 pub mod static_resolver;
 
-pub use static_resolver::{StaticAccount, StaticConfig, StaticConfigError, StaticResolver};
+pub use static_resolver::{
+    AccountTable, InvalidScope, MAX_SCOPE_LEN, StaticAccount, StaticConfig, StaticConfigError,
+    StaticResolver,
+};
 
 /// One szamlazz.hu account as the worker knows it — never the agent key.
 ///

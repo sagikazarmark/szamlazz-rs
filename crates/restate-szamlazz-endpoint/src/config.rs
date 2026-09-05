@@ -1,8 +1,9 @@
 //! Endpoint configuration: the deployment-level
 //! [`WorkerConfig`](restate_szamlazz::WorkerConfig) (`namespace`, `[issue]`,
 //! `[resolve]`), the static resolver's accounts
-//! ([`StaticConfig`](restate_szamlazz::account::StaticConfig): `[account]`)
-//! and what only the hosting process cares about (request identity keys).
+//! ([`StaticConfig`](restate_szamlazz::account::StaticConfig): `[account]` or
+//! `[accounts.<scope>]`) and what only the hosting process cares about
+//! (request identity keys).
 
 use anyhow::{Context as _, Result, bail};
 use figment::Figment;
@@ -13,9 +14,12 @@ use serde::Deserialize;
 /// The complete endpoint configuration.
 ///
 /// Both library configurations are flattened, so the file layout is
-/// `namespace`, `[issue]`, `[resolve]` and `[account]` (with its
-/// `[account.defaults]` and `[account.seller]`) plus `identity_keys`, all at
-/// the top level. Load it with [`EndpointConfig::load`].
+/// `namespace`, `[issue]`, `[resolve]`, either `[account]` or a table of
+/// `[accounts.<scope>]` (each with its `defaults` and `seller`), plus
+/// `identity_keys`, all at the top level. Load it with
+/// [`EndpointConfig::load`]; the shape's own rules (exactly one shape, the
+/// multi-account uniqueness rules) are checked when the static resolver is
+/// built from `accounts`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EndpointConfig {
     /// The deployment-level settings of the services.
@@ -48,8 +52,7 @@ impl EndpointConfig {
     /// [`WorkerConfig::validate`] fails. The accounts are validated when the
     /// static resolver is built.
     pub fn load(figment: &Figment) -> Result<Self> {
-        let legacy: LegacyLayout = figment.extract().context("failed to parse configuration")?;
-        legacy.refuse()?;
+        PreReleaseLayout::refuse(figment)?;
         let config: Self = figment.extract().context("failed to parse configuration")?;
         config.worker.validate().context("invalid configuration")?;
         Ok(config)
@@ -58,34 +61,30 @@ impl EndpointConfig {
 
 /// The keys of the pre-release layout, which the current shape would silently
 /// ignore: the namespace was `account.slug`, and the document defaults and the
-/// seller block were top-level tables rather than part of `[account]`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct LegacyLayout {
-    defaults: Option<figment::value::Value>,
-    seller: Option<figment::value::Value>,
-    account: LegacyAccount,
-}
+/// seller block were top-level tables rather than part of `[account]`. The
+/// crate has never been released, so there is no compatibility shim — only a
+/// clear refusal.
+struct PreReleaseLayout;
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct LegacyAccount {
-    slug: Option<figment::value::Value>,
-}
+impl PreReleaseLayout {
+    /// The moved keys, each with where it went.
+    const MOVED: [(&'static str, &'static str); 3] = [
+        (
+            "account.slug",
+            "`account.slug` is now the top-level `namespace`",
+        ),
+        ("defaults", "`[defaults]` is now `[account.defaults]`"),
+        ("seller", "`[seller]` is now `[account.seller]`"),
+    ];
 
-impl LegacyLayout {
-    /// Fails with a message naming every moved key that is present.
-    fn refuse(&self) -> Result<()> {
-        let mut moved = Vec::new();
-        if self.account.slug.is_some() {
-            moved.push("`account.slug` is now the top-level `namespace`");
-        }
-        if self.defaults.is_some() {
-            moved.push("`[defaults]` is now `[account.defaults]`");
-        }
-        if self.seller.is_some() {
-            moved.push("`[seller]` is now `[account.seller]`");
-        }
+    /// Fails with a message naming every moved key that is present in
+    /// `figment`.
+    fn refuse(figment: &Figment) -> Result<()> {
+        let moved: Vec<&str> = Self::MOVED
+            .iter()
+            .filter(|(key, _)| figment.find_value(key).is_ok())
+            .map(|(_, message)| *message)
+            .collect();
         if moved.is_empty() {
             return Ok(());
         }
@@ -343,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_namespace_or_account_fails_to_parse() {
+    fn missing_namespace_fails_to_parse_and_no_account_is_refused_by_the_resolver() {
         let error = load("[account]\nid = \"acme\"\nagent_key = \"k\"").expect_err("no namespace");
         assert!(
             format!("{error:#}").contains("namespace"),

@@ -20,7 +20,7 @@
 //! ```
 //!
 //! **Multi-account** — a table of `[accounts.<scope>]`, each reachable under
-//! its scope only; an unscoped request is unscoped (`unknown_account`):
+//! its scope only; an unscoped request is `unknown_account`:
 //!
 //! ```toml
 //! [accounts.acme]
@@ -109,37 +109,33 @@ pub struct StaticAccount {
     pub seller: SellerConfig,
 }
 
-/// Where an account sits in the configuration: `account` in the
-/// single-account shape, `accounts.<scope>` in the multi-account shape.
-/// Names the account in a [`StaticConfigError`].
+/// Where an account sits in the configuration; names the account in a
+/// [`StaticConfigError`] and displays as the key path (`account`,
+/// `accounts.<scope>`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Table(Option<String>);
+pub enum AccountTable {
+    /// The `[account]` table of the single-account shape.
+    Single,
+    /// The `[accounts.<scope>]` table of the multi-account shape.
+    Scoped(String),
+}
 
-impl Table {
-    /// The `[account]` table.
-    #[must_use]
-    pub const fn account() -> Self {
-        Self(None)
-    }
-
-    /// The `[accounts.<scope>]` table.
-    #[must_use]
-    pub fn accounts(scope: impl Into<String>) -> Self {
-        Self(Some(scope.into()))
-    }
-
+impl AccountTable {
     /// The scope of an `[accounts.<scope>]` table; `None` for `[account]`.
     #[must_use]
     pub fn scope(&self) -> Option<&str> {
-        self.0.as_deref()
+        match self {
+            Self::Single => None,
+            Self::Scoped(scope) => Some(scope),
+        }
     }
 }
 
-impl fmt::Display for Table {
+impl fmt::Display for AccountTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            None => f.write_str("account"),
-            Some(scope) => write!(f, "accounts.{scope}"),
+        match self {
+            Self::Single => f.write_str("account"),
+            Self::Scoped(scope) => write!(f, "accounts.{scope}"),
         }
     }
 }
@@ -166,13 +162,13 @@ pub enum StaticConfigError {
     #[error("{table}.id must not be empty")]
     EmptyId {
         /// The account's table.
-        table: Table,
+        table: AccountTable,
     },
     /// The account's `agent_key` is empty or blank.
     #[error("{table}.agent_key must not be empty (account {id})")]
     EmptyAgentKey {
         /// The account's table.
-        table: Table,
+        table: AccountTable,
         /// The account.
         id: AccountId,
     },
@@ -180,7 +176,7 @@ pub enum StaticConfigError {
     #[error("{table}.endpoint (account {id}): {source}")]
     InvalidEndpoint {
         /// The account's table.
-        table: Table,
+        table: AccountTable,
         /// The account.
         id: AccountId,
         /// Why the endpoint is invalid.
@@ -191,7 +187,7 @@ pub enum StaticConfigError {
     #[error("{table}.supplier_id is required in the multi-account shape (account {id})")]
     MissingSupplierId {
         /// The account's table.
-        table: Table,
+        table: AccountTable,
         /// The account.
         id: AccountId,
     },
@@ -201,9 +197,9 @@ pub enum StaticConfigError {
         /// The shared id.
         id: AccountId,
         /// The first account's table.
-        first: Table,
+        first: AccountTable,
         /// The second account's table.
-        second: Table,
+        second: AccountTable,
     },
     /// Two accounts share a `supplier_id`: one szamlazz.hu account would be
     /// reachable under two scopes.
@@ -212,18 +208,18 @@ pub enum StaticConfigError {
         /// The shared supplier id.
         supplier_id: u64,
         /// The first account's table.
-        first: Table,
+        first: AccountTable,
         /// The second account's table.
-        second: Table,
+        second: AccountTable,
     },
     /// Two accounts share an `(endpoint, agent_key)` pair: one szamlazz.hu
     /// account would be reachable under two scopes. The key is not echoed.
     #[error("{first} and {second} share an endpoint and agent key")]
     DuplicateCredentials {
         /// The first account's table.
-        first: Table,
+        first: AccountTable,
         /// The second account's table.
-        second: Table,
+        second: AccountTable,
     },
 }
 
@@ -273,7 +269,7 @@ struct Entry {
 impl Entry {
     /// Validates one account and builds its [`Account`]; the shape-level
     /// rules (supplier id, uniqueness) are the caller's.
-    fn build(table: &Table, config: StaticAccount) -> Result<Self, StaticConfigError> {
+    fn build(table: &AccountTable, config: StaticAccount) -> Result<Self, StaticConfigError> {
         let StaticAccount {
             id,
             agent_key,
@@ -345,89 +341,65 @@ impl StaticResolver {
     /// The configured accounts with the scope each is reachable under:
     /// `None` for the single-account shape's one account.
     pub fn accounts(&self) -> impl Iterator<Item = (Option<&str>, &Account)> {
-        let (single, multi) = match &self.shape {
-            Shape::Single(entry) => (Some((None, &entry.account)), None),
-            Shape::Multi(entries) => (
-                None,
-                Some(
-                    entries
-                        .iter()
-                        .map(|(scope, entry)| (Some(scope.as_str()), &entry.account)),
-                ),
-            ),
-        };
-        single.into_iter().chain(multi.into_iter().flatten())
+        self.entries().map(|(scope, entry)| (scope, &entry.account))
     }
 
-    fn entries(&self) -> impl Iterator<Item = &Entry> {
-        let (single, multi) = match &self.shape {
-            Shape::Single(entry) => (Some(entry.as_ref()), None),
-            Shape::Multi(entries) => (None, Some(entries.values())),
-        };
-        single.into_iter().chain(multi.into_iter().flatten())
+    /// Every entry with its scope; the one place the two shapes are walked.
+    fn entries(&self) -> Box<dyn Iterator<Item = (Option<&str>, &Entry)> + '_> {
+        match &self.shape {
+            Shape::Single(entry) => Box::new(std::iter::once((None, entry.as_ref()))),
+            Shape::Multi(entries) => Box::new(
+                entries
+                    .iter()
+                    .map(|(scope, entry)| (Some(scope.as_str()), entry)),
+            ),
+        }
     }
 
     /// Builds the multi-account shape, enforcing the checkable half of the
-    /// safety contract.
+    /// safety contract in one pass: every account is built, then its id,
+    /// supplier id and `(endpoint, agent key)` are claimed against the
+    /// accounts before it.
     fn multi(accounts: BTreeMap<String, StaticAccount>) -> Result<Self, StaticConfigError> {
         let mut entries = BTreeMap::new();
-        let mut ids: BTreeMap<&str, Table> = BTreeMap::new();
-        let mut suppliers: BTreeMap<u64, Table> = BTreeMap::new();
-        let mut credentials: BTreeMap<(&str, &str), Table> = BTreeMap::new();
-        // Built first so that the uniqueness maps can borrow from them.
-        let built: Vec<(Table, Entry, Secret)> = accounts
-            .into_iter()
-            .map(|(scope, account)| {
-                validate_scope(&scope).map_err(|source| StaticConfigError::InvalidScope {
-                    scope: scope.clone(),
-                    source,
-                })?;
-                let table = Table::accounts(scope);
-                let agent_key = account.agent_key.clone();
-                let entry = Entry::build(&table, account)?;
-                if entry.account.supplier_id.is_none() {
-                    return Err(StaticConfigError::MissingSupplierId {
-                        table,
-                        id: entry.account.id,
-                    });
-                }
-                Ok((table, entry, agent_key))
-            })
-            .collect::<Result<_, _>>()?;
-        for (table, entry, agent_key) in &built {
-            let account = &entry.account;
-            if let Some(first) = ids.insert(account.id.as_str(), table.clone()) {
+        let mut ids: BTreeMap<String, AccountTable> = BTreeMap::new();
+        let mut suppliers: BTreeMap<u64, AccountTable> = BTreeMap::new();
+        let mut credentials: BTreeMap<(String, String), AccountTable> = BTreeMap::new();
+        for (scope, account) in accounts {
+            validate_scope(&scope).map_err(|source| StaticConfigError::InvalidScope {
+                scope: scope.clone(),
+                source,
+            })?;
+            let table = AccountTable::Scoped(scope.clone());
+            let agent_key = account.agent_key.expose().to_owned();
+            let entry = Entry::build(&table, account)?;
+            let Some(supplier_id) = entry.account.supplier_id else {
+                return Err(StaticConfigError::MissingSupplierId {
+                    table,
+                    id: entry.account.id,
+                });
+            };
+            if let Some(first) = ids.insert(entry.account.id.to_string(), table.clone()) {
                 return Err(StaticConfigError::DuplicateId {
-                    id: account.id.clone(),
+                    id: entry.account.id,
                     first,
-                    second: table.clone(),
+                    second: table,
                 });
             }
-            let supplier_id = account
-                .supplier_id
-                .expect("checked when the entry was built");
             if let Some(first) = suppliers.insert(supplier_id, table.clone()) {
                 return Err(StaticConfigError::DuplicateSupplierId {
                     supplier_id,
                     first,
-                    second: table.clone(),
+                    second: table,
                 });
             }
-            if let Some(first) = credentials.insert(
-                (account.endpoint.as_str(), agent_key.expose()),
-                table.clone(),
-            ) {
+            let pair = (entry.account.endpoint.to_string(), agent_key);
+            if let Some(first) = credentials.insert(pair, table.clone()) {
                 return Err(StaticConfigError::DuplicateCredentials {
                     first,
-                    second: table.clone(),
+                    second: table,
                 });
             }
-        }
-        for (table, entry, _) in built {
-            let scope = table
-                .scope()
-                .expect("multi-account tables carry their scope")
-                .to_owned();
             entries.insert(scope, entry);
         }
         Ok(Self {
@@ -447,7 +419,7 @@ impl TryFrom<StaticConfig> for StaticResolver {
         match (config.account, config.accounts) {
             (Some(_), accounts) if !accounts.is_empty() => Err(StaticConfigError::BothShapes),
             (Some(account), _) => Ok(Self {
-                shape: Shape::Single(Box::new(Entry::build(&Table::account(), account)?)),
+                shape: Shape::Single(Box::new(Entry::build(&AccountTable::Single, account)?)),
             }),
             (None, accounts) if accounts.is_empty() => Err(StaticConfigError::NoAccount),
             (None, accounts) => Self::multi(accounts),
@@ -489,6 +461,7 @@ impl CredentialStore for StaticResolver {
     ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
         Box::pin(async move {
             self.entries()
+                .map(|(_, entry)| entry)
                 .find(|entry| entry.account.credential_ref == *credential_ref)
                 .map(|entry| entry.credentials.clone())
                 .ok_or_else(|| FetchError::Gone {
@@ -631,7 +604,7 @@ mod tests {
         assert!(matches!(
             StaticResolver::try_from(config),
             Err(StaticConfigError::InvalidEndpoint { table, id, .. })
-                if table == Table::account() && id.as_str() == "acme"
+                if table == AccountTable::Single && id.as_str() == "acme"
         ));
 
         let mut config = single();
@@ -640,7 +613,7 @@ mod tests {
         assert!(matches!(
             &error,
             StaticConfigError::EmptyAgentKey { table, id }
-                if *table == Table::account() && id.as_str() == "acme"
+                if *table == AccountTable::Single && id.as_str() == "acme"
         ));
         assert_eq!(
             error.to_string(),
@@ -652,7 +625,7 @@ mod tests {
         let error = StaticResolver::try_from(config).expect_err("blank id");
         assert!(matches!(
             &error,
-            StaticConfigError::EmptyId { table } if *table == Table::account()
+            StaticConfigError::EmptyId { table } if *table == AccountTable::Single
         ));
         assert_eq!(error.to_string(), "account.id must not be empty");
     }
@@ -773,7 +746,7 @@ mod tests {
         assert!(matches!(
             &error,
             StaticConfigError::MissingSupplierId { table, id }
-                if *table == Table::accounts("beta_events") && id.as_str() == "beta"
+                if *table == AccountTable::Scoped("beta_events".to_owned()) && id.as_str() == "beta"
         ));
         assert_eq!(
             error.to_string(),
@@ -789,7 +762,7 @@ mod tests {
         assert!(matches!(
             &error,
             StaticConfigError::DuplicateSupplierId { supplier_id: 972_720, first, second }
-                if *first == Table::accounts("acme") && *second == Table::accounts("beta_events")
+                if *first == AccountTable::Scoped("acme".to_owned()) && *second == AccountTable::Scoped("beta_events".to_owned())
         ));
         assert_eq!(
             error.to_string(),
@@ -811,7 +784,7 @@ mod tests {
         assert!(matches!(
             &error,
             StaticConfigError::DuplicateCredentials { first, second }
-                if *first == Table::accounts("acme") && *second == Table::accounts("beta_events")
+                if *first == AccountTable::Scoped("acme".to_owned()) && *second == AccountTable::Scoped("beta_events".to_owned())
         ));
         assert!(!error.to_string().contains(KEY), "{error}");
         assert!(!format!("{error:?}").contains(KEY), "{error:?}");
@@ -849,8 +822,8 @@ mod tests {
             &error,
             StaticConfigError::DuplicateId { id, first, second }
                 if id.as_str() == "acme"
-                    && *first == Table::accounts("acme")
-                    && *second == Table::accounts("beta_events")
+                    && *first == AccountTable::Scoped("acme".to_owned())
+                    && *second == AccountTable::Scoped("beta_events".to_owned())
         ));
         assert_eq!(
             error.to_string(),
@@ -912,7 +885,7 @@ mod tests {
         assert!(matches!(
             &error,
             StaticConfigError::InvalidEndpoint { table, id, .. }
-                if *table == Table::accounts("beta_events") && id.as_str() == "beta"
+                if *table == AccountTable::Scoped("beta_events".to_owned()) && id.as_str() == "beta"
         ));
         assert!(
             error

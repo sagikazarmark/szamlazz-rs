@@ -148,9 +148,10 @@ activation details.
   `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`) and `[resolve]` (the resolve policy:
   the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m` by default). `IssueConfig::run_retry_policy`
   is the `RunRetryPolicy` of the create and storno steps, `ResolveConfig::run_retry_policy` that of the `account`
-  step. `validate()` checks the cross-field invariants. Nothing account-shaped is here: document defaults
-  (`config::Defaults`) and the seller block (`config::SellerConfig`) belong to the `Account`. Secrets are
-  `config::Secret`, whose `Debug` output is redacted.
+  step. `validate()` checks the cross-field invariants. Nothing account-shaped is in it: document defaults and the
+  seller block belong to the `Account` — their value types (`config::Defaults`, `config::SellerConfig`,
+  `config::AccountMode`, and `config::Secret`, whose `Debug` output is redacted) live in `config` so that any
+  resolver's configuration can reuse them.
 - `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`, `StaticConfig`: one
   szamlazz.hu account as the worker knows it (never its key), the bundle of the two pluggable traits both services
   hold, and the configuration-backed implementation of both. `StaticConfig` is either `[account]` (`id`,
@@ -285,8 +286,9 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   the hex-decoded `raw` of the create run's result). Then the documented single → multi **flag day** (private,
   drain, register the multi-account revision, public) and the multi-account phase: the first scoped create for an
   order invoiced unscoped finds it under the unchanged external id; unscoped → `unknown_account`; the same order key
-  under two scopes concurrently with the same `Idempotency-Key` → two invocations and two documents with each
-  account's key on the wire exactly once; an order whose invocations were purged stornoed and reissued; an account
+  under two scopes concurrently → two `issued` with each account's key on the create wire exactly once; the same
+  `Idempotency-Key` under two scopes → two invocation ids and two documents, each replaying its own completion; an
+  order whose invocations were purged stornoed and reissued; an account
   change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
   rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that
   no agent key of the run appears in the hex-decoded `raw` of any journal entry of any invocation, nor in any

@@ -1,6 +1,10 @@
-//! Deployment-level configuration: what is constant for a deployment, is not
+//! Configuration types: the deployment-level [`WorkerConfig`] the Restate
+//! services hold, and the account-level building blocks a resolver's
+//! configuration is written in.
+//!
+//! [`WorkerConfig`] is what is constant for a deployment, is not
 //! account-shaped, and therefore neither travels in a request payload nor
-//! routes through the gateway.
+//! routes through the gateway:
 //!
 //! ```toml
 //! namespace = "acct"            # the external-id prefix; permanent
@@ -23,12 +27,12 @@
 //! file format and environment merging, and merges the static resolver's
 //! account configuration ([`StaticConfig`](crate::account::StaticConfig))
 //! beside these keys. Everything account-shaped — credentials, mode, supplier
-//! pin, endpoint, document defaults, seller block — lives on the
-//! [`Account`](crate::account::Account) a resolver produces, and the services
-//! read it through [`Gateway::account`](crate::gateway::Gateway::account).
-//! The account-level building blocks a resolver's configuration reuses
-//! ([`AccountMode`], [`Defaults`], [`SellerConfig`], [`Secret`]) are defined
-//! here.
+//! pin, endpoint, document defaults, seller block — is carried by the
+//! [`Account`](crate::account::Account) a resolver produces and read by the
+//! services through [`Gateway::account`](crate::gateway::Gateway::account);
+//! the value types those fields are made of ([`AccountMode`], [`Defaults`],
+//! [`SellerConfig`], and [`Secret`] for a key written inline) are defined
+//! here so that any resolver's configuration can reuse them.
 
 use std::fmt;
 use std::str::FromStr;
