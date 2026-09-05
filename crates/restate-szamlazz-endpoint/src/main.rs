@@ -15,7 +15,8 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::http_server::HttpServer;
 use restate_sdk::service::Discoverable;
-use restate_szamlazz::{Accounts, Agent, Order, WorkerConfig};
+use restate_szamlazz::account::StaticResolver;
+use restate_szamlazz::{Accounts, Agent, Order};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::EndpointConfig;
@@ -55,9 +56,7 @@ impl Cli {
 
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
 
-        let config: EndpointConfig = figment.extract().context("failed to parse configuration")?;
-        config.service.validate().context("invalid configuration")?;
-        Ok(config)
+        EndpointConfig::load(&figment)
     }
 }
 
@@ -82,24 +81,29 @@ async fn main() -> Result<()> {
 }
 
 /// Wires the configuration into the two services and binds them to one
-/// endpoint: the account opens the gateway, the rest is the services'
-/// [`WorkerConfig`]. Logs what was bound; never the agent key.
+/// endpoint: the static resolver over `[account]` is the `Accounts` bundle
+/// both services hold beside the deployment-level `WorkerConfig`. Logs what
+/// was bound — the resolved account's id, mode, endpoint and supplier pin —
+/// never the agent key.
 fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     let EndpointConfig {
-        service: config,
+        worker,
+        accounts,
         identity_keys,
     } = config;
 
+    let resolver = StaticResolver::try_from(accounts).context("invalid account configuration")?;
+    let account = resolver.account();
     tracing::info!(
-        namespace = %config.account.slug,
-        mode = ?config.account.mode,
-        endpoint = ?config.account.endpoint,
-        supplier_id = ?config.account.supplier_id,
+        namespace = %worker.namespace,
+        account = %account.id,
+        mode = ?account.mode,
+        endpoint = %account.endpoint,
+        supplier_id = ?account.supplier_id,
         "loaded szamlazz.hu account configuration"
     );
 
-    let accounts = Accounts::try_from(&config).context("failed to load the account")?;
-    let worker = WorkerConfig::from(&config);
+    let accounts = Accounts::from(resolver);
     let order = Order::from_parts(accounts.clone(), worker.clone());
     let agent = Agent::from_parts(accounts, worker);
 
@@ -139,48 +143,76 @@ mod tests {
     use restate_szamlazz::contract::Selector;
     use restate_szamlazz::gateway::QueryOutcome;
     use wiremock::matchers::{body_string_contains, method};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
     use super::*;
 
-    fn config(extra: &str) -> EndpointConfig {
-        Figment::from(Toml::string(&format!(
+    /// A loaded configuration for the test account at `endpoint` with `extra`
+    /// top-level keys.
+    fn config(extra: &str, endpoint: &str, agent_key: &str) -> EndpointConfig {
+        EndpointConfig::load(&Figment::from(Toml::string(&format!(
             r#"
             {extra}
+            namespace = "acct"
 
             [account]
-            slug = "acct"
-            agent_key = "agent-key"
+            id = "acme"
+            agent_key = "{agent_key}"
             mode = "test"
-            endpoint = "http://127.0.0.1:1/"
+            endpoint = "{endpoint}"
             "#
-        )))
-        .extract()
-        .expect("configuration should parse")
+        ))))
+        .expect("configuration should load")
     }
 
     #[test]
-    fn builds_the_endpoint_from_a_parsed_config() {
-        build_endpoint(config("")).expect("endpoint should build");
+    fn builds_the_endpoint_from_a_loaded_config() {
+        build_endpoint(config("", "http://127.0.0.1:1/", "agent-key"))
+            .expect("endpoint should build");
     }
 
     #[test]
     fn accepts_identity_keys() {
         build_endpoint(config(
             r#"identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f", "publickeyv1_ChjENKeMvCtRnqG2mrBK1HmPKufgFUc98K8B3ononQvp"]"#,
+            "http://127.0.0.1:1/",
+            "agent-key",
         ))
         .expect("endpoint should build with identity keys");
     }
 
     #[test]
     fn rejects_an_invalid_identity_key() {
-        let Err(error) = build_endpoint(config(r#"identity_keys = ["not-a-key"]"#)) else {
+        let Err(error) = build_endpoint(config(
+            r#"identity_keys = ["not-a-key"]"#,
+            "http://127.0.0.1:1/",
+            "agent-key",
+        )) else {
             panic!("an invalid identity key should fail the build");
         };
 
         assert!(
             error.to_string().contains("not-a-key"),
             "the error should name the key: {error}"
+        );
+    }
+
+    /// The account's own invariants — here a blank agent key — are checked
+    /// when the static resolver is built, before anything is bound.
+    #[test]
+    fn rejects_an_invalid_account() {
+        let Err(error) = build_endpoint(config("", "http://127.0.0.1:1/", " ")) else {
+            panic!("a blank agent key should fail the build");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("invalid account configuration"),
+            "{message}"
+        );
+        assert!(message.contains("agent_key must not be empty"), "{message}");
+        assert!(
+            message.contains("acme"),
+            "the error names the account: {message}"
         );
     }
 
@@ -198,33 +230,36 @@ mod tests {
         );
     }
 
+    fn query() -> MockBuilder {
+        Mock::given(method("POST")).and(body_string_contains("action-szamla_agent_xml"))
+    }
+
+    fn not_found() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[7]]></hibakod><hibauzenet><![CDATA[Hiányzó adat]]></hibauzenet></xmlszamlavalasz>"#,
+            "application/xml",
+        )
+    }
+
+    /// The configured endpoint and agent key are what the gateway opened by
+    /// every handler's prologue speaks with.
     #[tokio::test]
-    async fn config_endpoint_reaches_the_gateway() {
+    async fn configured_endpoint_and_key_reach_the_gateway() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("action-szamla_agent_xml"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[7]]></hibakod><hibauzenet><![CDATA[Hiányzó adat]]></hibauzenet></xmlszamlavalasz>"#,
-                "application/xml",
+        query()
+            .and(body_string_contains(
+                "<szamlaagentkulcs>agent-key</szamlaagentkulcs>",
             ))
+            .respond_with(not_found())
             .expect(1)
             .mount(&server)
             .await;
 
-        let config: EndpointConfig = Figment::from(Toml::string(&format!(
-            r#"
-            [account]
-            slug = "acct"
-            agent_key = "agent-key"
-            mode = "test"
-            endpoint = "{}/"
-            "#,
-            server.uri()
-        )))
-        .extract()
-        .expect("configuration should parse");
+        let config = config("", &format!("{}/", server.uri()), "agent-key");
         // What every handler's prologue does: resolve, fetch, open.
-        let accounts = Accounts::try_from(&config.service).expect("accounts should build");
+        let accounts = Accounts::from(
+            StaticResolver::try_from(config.accounts).expect("accounts should build"),
+        );
         let account = accounts.resolve(None).await.expect("the unscoped account");
         let credentials = accounts.fetch(&account).await.expect("its credentials");
         let gateway = Gateway::open(account, credentials).expect("gateway should build");

@@ -323,28 +323,44 @@ occurrence is logged at `warn` with the namespace and the code (never the key).
 
 ## 9. Configuration (deployment-constant; never in payloads)
 
-```toml
-[account]
-slug = "acct"                 # the namespace: 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
-agent_key = "..."             # or env RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
-endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
-mode = "live"                 # live | test — validated against <teszt> on every adopted document
-supplier_id = 972720          # optional; when set, validated against szallito/id on every adopted document
+Two configuration types, both serde-`Deserialize` only (the host chooses the format). `WorkerConfig` is the
+deployment-level part the services hold; `StaticConfig` is the static resolver's account, and everything
+account-shaped — credentials, mode, supplier pin, endpoint, document defaults, seller block — lives on the `Account`
+it produces (read by the services through `Gateway::account()`). The endpoint binary flattens both into one file:
 
-[defaults]   # as v1: e_invoice, language, currency, exchange_rate_bank, template?, send_email?, number_prefix?, extra_logo?, aggregator?, guardian?
-[seller]     # as v1
+```toml
+namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
+
 [issue]      # the issue policy: the run retry policy of the create (§5 step 4) and storno (§6 step 3) steps; shapes no journal entry
 max_attempts = 5              # executions of the step, including the first
 initial_delay = "2m"          # before the first re-execution; > client timeout + the longest observed server stall
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound (the attempt count is not durable across replays — ADR 0004)
+
+[resolve]    # the resolve policy: the run retry policy of the prologue's `account` step; no attempt cap — the duration is the bound
+initial_delay = "1s"
+factor = 2.0
+max_delay = "10s"
+max_duration = "1m"
+
+[account]
+id = "acme"                   # the resolver's identifier of the account; journaled with every invocation, never a resolution input
+agent_key = "..."             # or env RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY; inline in the static resolver, credential_ref = id
+endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
+mode = "live"                 # live | test — validated against <teszt> on every adopted document
+supplier_id = 972720          # optional; when set, validated against szallito/id on every adopted document
+
+[account.defaults]   # as v1: e_invoice, language, currency, exchange_rate_bank, template?, send_email?, number_prefix?, extra_logo?, aggregator?, guardian?
+[account.seller]     # as v1
 ```
 
-The **resolve policy** — the run retry policy of the prologue's `account` step — is the other deployment-level
-setting on `WorkerConfig` (`ResolveConfig`: `initial_delay = "1s"`, `factor = 2.0`, `max_delay = "10s"`,
-`max_duration = "1m"`, no attempt cap — the duration is the bound). It has no configuration key yet; the endpoint
-uses the defaults until #31 lays out the new shape. Set explicitly for the same reason as the issue policy.
+Both policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
+server would spend the handler's `invocation_retry_policy` instead. `WorkerConfig::validate` checks the cross-field
+invariants (`max_attempts ≥ 1`, `initial_delay ≤ max_delay`, `factor ≥ 1` on both policies);
+`StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint). The pre-release layout
+(`account.slug`, top-level `[defaults]` / `[seller]`) is refused by name — the crate has never been released, there
+is no compatibility shim.
 
 There is no `detect_foreign`: the order-number hint runs on every lookup except for correctives.
 
@@ -353,8 +369,10 @@ Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `
 
 ## 10. Endpoint
 
-Unchanged from v1: `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting;
-`identity_keys`; tracing; container image on `v*` tags.
+`restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting
+(`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY`); `identity_keys`; tracing;
+container image on `v*` tags. The start-up log names the namespace and the resolved account's id, mode, endpoint and
+supplier id — never the key.
 
 ## 11. Testing
 

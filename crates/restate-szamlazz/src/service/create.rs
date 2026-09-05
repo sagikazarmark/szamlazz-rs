@@ -675,28 +675,25 @@ impl Execution {
 #[cfg(test)]
 mod tests {
     use restate_sdk::errors::TerminalError;
-    use serde_json::json;
+    use szamlazz_agent::Credentials;
 
     use super::*;
-    use crate::config::{Config, WorkerConfig};
+    use crate::account::{Account, Endpoint};
+    use crate::config::{AccountMode, WorkerConfig};
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
     use crate::gateway::Gateway;
 
     /// An execution as the prologue would build it for the test account.
     fn order() -> Execution {
-        let config: Config = serde_json::from_value(json!({
-            "account": {
-                "slug": "acct",
-                "agent_key": "key",
-                "endpoint": "http://127.0.0.1:1/",
-                "mode": "test",
-            },
-        }))
-        .expect("config");
+        let mut account = Account::new("acct", "acct");
+        account.mode = AccountMode::Test;
+        account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
         Execution {
-            gateway: Arc::new(Gateway::new(&config).expect("gateway")),
-            config: WorkerConfig::from(&config),
+            gateway: Arc::new(
+                Gateway::open(account, Credentials::agent_key("key")).expect("gateway"),
+            ),
+            config: WorkerConfig::new("acct".parse().expect("namespace")),
         }
     }
 

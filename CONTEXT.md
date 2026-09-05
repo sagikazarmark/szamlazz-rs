@@ -85,7 +85,7 @@ The Agent's optional per-document identifier, used by the worker as the identity
 _Avoid_: idempotency key (szamlazz.hu does not treat it as one), generation (no counter — the newest holder is the answer), external reference
 
 **Namespace**:
-The external-id prefix of this deployment (`{namespace}:{order}:{kind}`); chosen by the operator, opaque to szamlazz.hu, permanent — changing it would hide every document issued so far. 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it is the separator. Configured as `account.slug` for now. Type: `restate_szamlazz::config::Namespace`.
+The external-id prefix of this deployment (`{namespace}:{order}:{kind}`); chosen by the operator, opaque to szamlazz.hu, permanent — changing it would hide every document issued so far. 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it is the separator. Configured as the top-level `namespace` key of the deployment configuration, beside `[issue]` and `[resolve]` on `WorkerConfig`; it is not part of any account. Type: `restate_szamlazz::config::Namespace`.
 _Avoid_: slug, account slug, prefix (ambiguous with the invoice number prefix)
 
 **Account**:
@@ -153,5 +153,5 @@ What one handler execution runs on: the *Gateway* the *Prologue* opened and the 
 _Avoid_: attempt (for the handler; the SDK's word for a run retry is also "attempt", and neither is journaled), session (the szamlazz.hu cookie), context (the SDK's `ctx`)
 
 **Resolve policy**:
-The run retry policy of the *Prologue*'s `account` step: `initial_delay` growing by `factor` to `max_delay`, bounded by `max_duration`, no attempt cap. Deployment-level (on `WorkerConfig`), shapes no journal entry, set explicitly for the same reason as the *Issue policy*. Defaults `1s → 10s`, `1m`; no configuration key until #31. Type: `restate_szamlazz::config::ResolveConfig`.
+The run retry policy of the *Prologue*'s `account` step: `initial_delay` growing by `factor` to `max_delay`, bounded by `max_duration`, no attempt cap. Deployment-level (on `WorkerConfig`), shapes no journal entry, set explicitly for the same reason as the *Issue policy*. Defaults `1s → 10s`, `1m`; configured as `[resolve]` in the deployment configuration. Type: `restate_szamlazz::config::ResolveConfig`.
 _Avoid_: retry policy without qualification, account policy

@@ -10,20 +10,23 @@ use restate_sdk::service::Discoverable;
 use serde_json::json;
 
 use super::{Agent, Order};
-use crate::account::ResolveError;
-use crate::config::{Config, Namespace, WorkerConfig};
+use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
+use crate::config::{Namespace, WorkerConfig};
 use crate::gateway::Gateway;
 
-fn config() -> Config {
-    serde_json::from_value(json!({
+/// The `Accounts` bundle of a test account at `endpoint` with `agent_key`,
+/// through the static resolver — what the endpoint binary builds.
+fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
+    let config: StaticConfig = serde_json::from_value(json!({
         "account": {
-            "slug": "acct",
-            "agent_key": "key",
-            "endpoint": "http://127.0.0.1:1/",
+            "id": "acct",
+            "agent_key": agent_key,
+            "endpoint": endpoint,
             "mode": "test",
         },
     }))
-    .expect("config")
+    .expect("config");
+    Accounts::from(StaticResolver::try_from(config).expect("resolver"))
 }
 
 fn namespace() -> Namespace {
@@ -171,13 +174,13 @@ fn agent_discovers_as_a_service_with_three_handlers() {
 /// settings, and nothing else — no gateway, no client.
 #[tokio::test]
 async fn services_bind_to_an_endpoint() {
-    let config = config();
-    let order = Order::new(&config).expect("order");
+    let worker = WorkerConfig::new(namespace());
+    let order = Order::from_parts(accounts("http://127.0.0.1:1/", "key"), worker.clone());
     let agent = Agent::from_parts(order.accounts().clone(), order.config().clone());
     assert_eq!(order.config(), agent.config());
-    assert_eq!(*order.config(), WorkerConfig::from(&config));
+    assert_eq!(*order.config(), worker);
     assert_eq!(order.config().namespace.as_str(), "acct");
-    // The adapter: the single account, unscoped, with the inline key.
+    // The static resolver: the single account, unscoped, with the inline key.
     let account = order.accounts().resolve(None).await.expect("account");
     assert_eq!(account.id.as_str(), "acct");
     assert!(account.mode.is_test());
@@ -317,16 +320,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
         .expect(1)
         .mount(&server)
         .await;
-    let config: Config = serde_json::from_value(json!({
-        "account": {
-            "slug": "acct",
-            "agent_key": KEY,
-            "endpoint": server.uri(),
-            "mode": "test",
-        },
-    }))
-    .expect("config");
-    let order = Order::new(&config).expect("order");
+    let order = Order::from_parts(accounts(&server.uri(), KEY), WorkerConfig::new(namespace()));
 
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()

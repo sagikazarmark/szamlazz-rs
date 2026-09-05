@@ -23,14 +23,15 @@ image live in [`restate-szamlazz-endpoint`](../restate-szamlazz-endpoint).
 Bind both services to a Restate endpoint of your own:
 
 ```rust
-use std::sync::Arc;
-
 use restate_sdk::prelude::{Endpoint, HttpServer};
-use restate_szamlazz::{Agent, Config, Order};
+use restate_szamlazz::account::{StaticConfig, StaticResolver};
+use restate_szamlazz::{Accounts, Agent, Order, WorkerConfig};
 
-async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let order = Order::new(&config)?;
-    let agent = Agent::from_parts(order.accounts().clone(), order.config().clone());
+async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    worker.validate()?;
+    let accounts = Accounts::from(StaticResolver::try_from(accounts)?);
+    let order = Order::from_parts(accounts.clone(), worker.clone());
+    let agent = Agent::from_parts(accounts, worker);
     let endpoint = Endpoint::builder().bind(order).bind(agent).build();
     HttpServer::new(endpoint)
         .listen_and_serve("0.0.0.0:9080".parse()?)
@@ -39,11 +40,13 @@ async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`Config` only implements `Deserialize`; the host chooses the file format and environment merging (the endpoint
-binary uses figment). Call `Config::validate()` after parsing. `Order::new` wraps the single account of `Config` in
-the static resolver as the `Accounts` bundle (account resolver + credential store) and keeps the deployment-level
-`WorkerConfig` (namespace, issue and resolve policies); `Agent` shares both. Neither holds a gateway or a client:
-every handler resolves its account and opens a `Gateway` for its own execution.
+Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
+(the endpoint binary uses figment). `WorkerConfig` is the deployment-level part — the `namespace` of the external
+ids, the `[issue]` and `[resolve]` policies; call `validate()` after parsing. `StaticConfig` is the static
+resolver's `[account]`, and `StaticResolver::try_from` validates it and implements both the account resolver and
+the credential store; `Accounts::from` bundles the two. A deployment with its own resolver and store builds
+`Accounts::new` over them instead. Neither service holds a gateway or a client: every handler resolves its account
+and opens a `Gateway` for its own execution.
 
 ## Scope Contract
 
@@ -79,7 +82,7 @@ What it relies on:
   its `Account` in a durable step named `account` under the resolve policy, so an invocation finishes on the
   account it started on; the journaled `Account` (visible in the Restate UI for the retention period) carries
   everything but the agent key. Unscoped and unknown scopes are `unknown_account` (400) before anything is
-  issued; the single-account `Config` path serves its account unscoped and knows no scope.
+  issued; the static resolver's single `[account]` is served unscoped and knows no scope.
 - **Credentials are fetched on every handler execution, outside the journal**, and held only for that
   execution — a rotation is picked up on the next execution of every in-flight invocation, and no agent key is
   ever written into Restate (the `Credentials` type has no serde implementation). A failed fetch is a
@@ -134,17 +137,19 @@ activation details.
   validated (1–64 bytes, no control characters, no internal whitespace runs).
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document — `for_kind`, `for_corrective`,
   `for_storno`, `for_unmanaged_storno`.
-- `Config`: the deployment configuration — `[account]` (`slug`, `agent_key`, `endpoint`, `mode`,
-  `supplier_id`), `[defaults]`, `[seller]`, `[issue]` (the issue policy: `max_attempts`, `initial_delay`, `factor`,
-  `max_delay`, `max_duration`). Secrets are `config::Secret`, whose `Debug` output is redacted. `account.slug` is
-  the `config::Namespace` — the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`. `WorkerConfig`
-  (`namespace`, `issue`, `resolve`) is the deployment-level part the services hold; `IssueConfig::run_retry_policy`
+- `WorkerConfig`: the deployment-level configuration the services hold — `namespace` (the `config::Namespace`, the
+  external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`, permanent), `[issue]` (the issue policy:
+  `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`) and `[resolve]` (the resolve policy:
+  the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m` by default). `IssueConfig::run_retry_policy`
   is the `RunRetryPolicy` of the create and storno steps, `ResolveConfig::run_retry_policy` that of the `account`
-  step (`1s` → `10s`, bounded by `1m`; no configuration key until #31).
-- `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`: one szamlazz.hu account
-  as the worker knows it (never its key), the bundle of the two pluggable traits both services hold, and the
-  configuration-backed implementation of both — `Accounts::try_from(&Config)` is the adapter from the library
-  `Config`.
+  step. `validate()` checks the cross-field invariants. Nothing account-shaped is here: document defaults
+  (`config::Defaults`) and the seller block (`config::SellerConfig`) belong to the `Account`. Secrets are
+  `config::Secret`, whose `Debug` output is redacted.
+- `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`, `StaticConfig`: one
+  szamlazz.hu account as the worker knows it (never its key), the bundle of the two pluggable traits both services
+  hold, and the configuration-backed implementation of both — `StaticConfig` is `[account]` (`id`, `agent_key`,
+  `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`), `StaticResolver::try_from` validates it, and
+  `Accounts::from` bundles it as resolver and store.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
   `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome

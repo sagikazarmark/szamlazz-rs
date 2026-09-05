@@ -16,7 +16,7 @@ use http::Uri;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
 
-use crate::config::{AccountMode, Config, Defaults, SellerConfig};
+use crate::config::{AccountMode, Defaults, SellerConfig};
 
 pub mod static_resolver;
 
@@ -87,26 +87,6 @@ impl Account {
             seller: SellerConfig::default(),
             credential_ref: credential_ref.into(),
         }
-    }
-}
-
-/// The legacy path: the account of a [`Config`], whose one identifier is the
-/// namespace — it becomes both the id and the credential reference.
-impl TryFrom<&Config> for Account {
-    type Error = InvalidEndpoint;
-
-    fn try_from(config: &Config) -> Result<Self, Self::Error> {
-        let namespace = config.account.slug.as_str();
-        let mut account = Self::new(namespace, namespace);
-        account.mode = config.account.mode;
-        account.supplier_id = config.account.supplier_id;
-        account.endpoint = match &config.account.endpoint {
-            Some(endpoint) => Endpoint::parse(endpoint)?,
-            None => Endpoint::production(),
-        };
-        account.defaults.clone_from(&config.defaults);
-        account.seller.clone_from(&config.seller);
-        Ok(account)
     }
 }
 
@@ -428,16 +408,6 @@ impl From<StaticResolver> for Accounts {
     fn from(resolver: StaticResolver) -> Self {
         let resolver = Arc::new(resolver);
         Self::new(Arc::clone(&resolver) as Arc<dyn AccountResolver>, resolver)
-    }
-}
-
-/// The adapter from the library [`Config`]: its single account through the
-/// static resolver. Goes with `Config` in #31.
-impl TryFrom<&Config> for Accounts {
-    type Error = InvalidEndpoint;
-
-    fn try_from(config: &Config) -> Result<Self, Self::Error> {
-        StaticResolver::try_from(config).map(Self::from)
     }
 }
 

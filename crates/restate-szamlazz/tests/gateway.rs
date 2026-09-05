@@ -5,7 +5,7 @@
 
 use jiff::civil::date;
 use restate_szamlazz::account::{Account, Endpoint};
-use restate_szamlazz::config::{AccountMode, Config};
+use restate_szamlazz::config::AccountMode;
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
@@ -16,7 +16,6 @@ use restate_szamlazz::gateway::{
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
-use serde_json::json;
 use szamlazz_agent::ops::invoice::InvoiceCreationResult;
 use szamlazz_agent::{Credentials, InvoiceNumber};
 use wiremock::matchers::{body_string_contains, method};
@@ -31,20 +30,14 @@ const CREDENTIAL_CODES: [&str; 4] = ["3", "135", "136", "164"];
 
 // ----- fixtures --------------------------------------------------------------
 
-/// A gateway for a test account pinned to `SUPPLIER`; every found document is
-/// validated against those two pins.
+/// A gateway for a test account pinned to `SUPPLIER`, opened as the prologue
+/// would open it; every found document is validated against those two pins.
 fn gateway(server: &MockServer) -> Gateway {
-    let config: Config = serde_json::from_value(json!({
-        "account": {
-            "slug": "acct",
-            "agent_key": "key",
-            "endpoint": server.uri(),
-            "mode": "test",
-            "supplier_id": SUPPLIER,
-        },
-    }))
-    .expect("config");
-    Gateway::new(&config).expect("gateway")
+    let mut account = Account::new("acct", "acct");
+    account.mode = AccountMode::Test;
+    account.supplier_id = Some(SUPPLIER);
+    account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+    Gateway::open(account, Credentials::agent_key("key")).expect("gateway")
 }
 
 fn order() -> OrderKey {

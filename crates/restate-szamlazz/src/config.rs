@@ -1,38 +1,34 @@
-//! Deployment configuration: everything that is constant for a deployment and
-//! therefore never travels in a request payload.
+//! Deployment-level configuration: what is constant for a deployment, is not
+//! account-shaped, and therefore neither travels in a request payload nor
+//! routes through the gateway.
 //!
 //! ```toml
-//! [account]
-//! slug = "acct"
-//! agent_key = "..."
-//! mode = "live"
-//! supplier_id = 972720
+//! namespace = "acct"            # the external-id prefix; permanent
 //!
-//! [defaults]
-//! language = "hu"
-//! currency = "HUF"
-//!
-//! [issue]
+//! [issue]                       # the run retry policy of the create and storno steps
 //! max_attempts = 5
 //! initial_delay = "2m"
 //! factor = 2.0
 //! max_delay = "10m"
 //! max_duration = "1h"
+//!
+//! [resolve]                     # the run retry policy of the `account` step
+//! initial_delay = "1s"
+//! factor = 2.0
+//! max_delay = "10s"
+//! max_duration = "1m"
 //! ```
 //!
 //! The types only implement `Deserialize`; the endpoint binary chooses the
-//! file format and environment merging.
-//!
-//! A parsed [`Config`] is split at construction: the gateway takes the account
-//! (credentials, mode, supplier pin, defaults, seller) and the services keep a
-//! [`WorkerConfig`] (namespace, issue policy). `account.slug` is the
-//! [`Namespace`]; the key keeps its old name for now.
-//!
-//! This is the legacy path. The account model the services will resolve per
-//! invocation lives in [`crate::account`]: an [`Account`](crate::account::Account)
-//! is built from a `Config` with `TryFrom`, and the static resolver's own
-//! configuration ([`StaticConfig`](crate::account::StaticConfig)) carries the
-//! account fields without the namespace.
+//! file format and environment merging, and merges the static resolver's
+//! account configuration ([`StaticConfig`](crate::account::StaticConfig))
+//! beside these keys. Everything account-shaped — credentials, mode, supplier
+//! pin, endpoint, document defaults, seller block — lives on the
+//! [`Account`](crate::account::Account) a resolver produces, and the services
+//! read it through [`Gateway::account`](crate::gateway::Gateway::account).
+//! The account-level building blocks a resolver's configuration reuses
+//! ([`AccountMode`], [`Defaults`], [`SellerConfig`], [`Secret`]) are defined
+//! here.
 
 use std::fmt;
 use std::str::FromStr;
@@ -42,125 +38,125 @@ use restate_sdk::context::RunRetryPolicy;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 
-/// The complete deployment configuration.
+/// The deployment-level settings the Restate services hold: what is not
+/// account-shaped and therefore does not route through the gateway.
 ///
-/// The Restate services do not hold it: the account-shaped part is read
-/// through [`Gateway::account`](crate::gateway::Gateway::account) and the rest
-/// is a [`WorkerConfig`].
-#[derive(Debug, Clone, Deserialize)]
-pub struct Config {
-    /// The single szamlazz.hu account this deployment issues for.
-    pub account: AccountConfig,
-    /// Document defaults that per-call overrides may change.
-    #[serde(default)]
-    pub defaults: Defaults,
-    /// The seller block; account data is used where absent.
-    #[serde(default)]
-    pub seller: SellerConfig,
+/// The namespace prefixes every external id the deployment issues; the issue
+/// policy is the run retry policy of the create and storno steps; the resolve
+/// policy is the run retry policy of the `account` step. Both policies
+/// default when absent. Call [`validate`](Self::validate) after parsing for
+/// the cross-field invariants `Deserialize` cannot express.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WorkerConfig {
+    /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
+    pub namespace: Namespace,
     /// The issue policy: the run retry policy of the create and storno steps.
     #[serde(default)]
     pub issue: IssueConfig,
+    /// The resolve policy: the run retry policy of the `account` step.
+    #[serde(default)]
+    pub resolve: ResolveConfig,
 }
 
-impl Config {
+impl WorkerConfig {
+    /// The settings for `namespace` with the default issue and resolve
+    /// policies.
+    #[must_use]
+    pub fn new(namespace: Namespace) -> Self {
+        Self {
+            namespace,
+            issue: IssueConfig::default(),
+            resolve: ResolveConfig::default(),
+        }
+    }
+
     /// Checks the cross-field invariants that `Deserialize` cannot express.
     ///
     /// The namespace is validated when parsed and needs no further check.
     ///
     /// # Errors
     ///
-    /// Returns the first violated invariant: an empty agent key,
-    /// `issue.max_attempts == 0`, `issue.initial_delay` greater than
-    /// `issue.max_delay`, or `issue.factor` below 1.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.account.agent_key.expose().trim().is_empty() {
-            return Err(ConfigError::EmptyAgentKey);
-        }
+    /// Returns the first violated invariant: `issue.max_attempts == 0`, an
+    /// `initial_delay` greater than the `max_delay` of the same policy, or a
+    /// `factor` below 1 on either policy.
+    pub fn validate(&self) -> Result<(), WorkerConfigError> {
         if self.issue.max_attempts == 0 {
-            return Err(ConfigError::ZeroMaxAttempts);
+            return Err(WorkerConfigError::ZeroMaxAttempts);
         }
-        if self.issue.initial_delay > self.issue.max_delay {
-            return Err(ConfigError::DelayOrder {
-                initial: self.issue.initial_delay,
-                max: self.issue.max_delay,
-            });
-        }
-        if self.issue.factor.is_nan() || self.issue.factor < 1.0 {
-            return Err(ConfigError::InvalidFactor(self.issue.factor));
+        for (policy, initial, max, factor) in [
+            (
+                Policy::Issue,
+                self.issue.initial_delay,
+                self.issue.max_delay,
+                self.issue.factor,
+            ),
+            (
+                Policy::Resolve,
+                self.resolve.initial_delay,
+                self.resolve.max_delay,
+                self.resolve.factor,
+            ),
+        ] {
+            if initial > max {
+                return Err(WorkerConfigError::DelayOrder {
+                    policy,
+                    initial,
+                    max,
+                });
+            }
+            if factor.is_nan() || factor < 1.0 {
+                return Err(WorkerConfigError::InvalidFactor { policy, factor });
+            }
         }
         Ok(())
     }
 }
 
-/// The deployment-level settings the Restate services hold: what is not
-/// account-shaped and therefore does not route through the gateway.
-///
-/// The namespace prefixes every external id the deployment issues; the issue
-/// policy is the run retry policy of the create and storno steps; the resolve
-/// policy is the run retry policy of the `account` step. Built from a
-/// [`Config`] for now (the adapter goes with #31).
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkerConfig {
-    /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
-    pub namespace: Namespace,
-    /// The issue policy: the run retry policy of the create and storno steps.
-    pub issue: IssueConfig,
-    /// The resolve policy: the run retry policy of the `account` step.
-    pub resolve: ResolveConfig,
-}
-
-impl From<&Config> for WorkerConfig {
-    fn from(config: &Config) -> Self {
-        Self {
-            namespace: config.account.slug.clone(),
-            issue: config.issue.clone(),
-            resolve: ResolveConfig::default(),
-        }
-    }
-}
-
-/// A [`Config`] that parsed but violates an invariant.
+/// A [`WorkerConfig`] that parsed but violates an invariant.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum ConfigError {
-    /// `account.agent_key` is empty or blank.
-    #[error("account.agent_key must not be empty")]
-    EmptyAgentKey,
+pub enum WorkerConfigError {
     /// `issue.max_attempts` is zero.
     #[error("issue.max_attempts must be at least 1")]
     ZeroMaxAttempts,
-    /// `issue.initial_delay` exceeds `issue.max_delay`.
-    #[error("issue.initial_delay ({initial:?}) must not exceed issue.max_delay ({max:?})")]
+    /// A policy's `initial_delay` exceeds its `max_delay`.
+    #[error("{policy}.initial_delay ({initial:?}) must not exceed {policy}.max_delay ({max:?})")]
     DelayOrder {
+        /// The policy.
+        policy: Policy,
         /// The configured initial delay.
         initial: Duration,
         /// The configured maximum delay.
         max: Duration,
     },
-    /// `issue.factor` is below 1 (the delay would shrink) or not a number.
-    #[error("issue.factor ({0}) must be a number of at least 1")]
-    InvalidFactor(f32),
+    /// A policy's `factor` is below 1 (the delay would shrink) or not a
+    /// number.
+    #[error("{policy}.factor ({factor}) must be a number of at least 1")]
+    InvalidFactor {
+        /// The policy.
+        policy: Policy,
+        /// The configured factor.
+        factor: f32,
+    },
 }
 
-/// The szamlazz.hu account.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AccountConfig {
-    /// The deployment's [`Namespace`], the external-id prefix
-    /// (`{namespace}:{order}:{kind}`). The key is `slug` for now.
-    pub slug: Namespace,
-    /// The Agent key (`számlaagentkulcs`).
-    pub agent_key: Secret,
-    /// The Számla Agent endpoint; `None` uses the production URL.
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    /// Whether the account is a live or a test account; validated against
-    /// `teszt` on every document found under our external ids.
-    #[serde(default)]
-    pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`). Optional pin; when set it is
-    /// validated against every document found under our external ids.
-    #[serde(default)]
-    pub supplier_id: Option<u64>,
+/// One of the two run retry policies of a [`WorkerConfig`]; names the
+/// configuration table in a [`WorkerConfigError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Policy {
+    /// `[issue]`, the [`IssueConfig`].
+    Issue,
+    /// `[resolve]`, the [`ResolveConfig`].
+    Resolve,
+}
+
+impl fmt::Display for Policy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Issue => "issue",
+            Self::Resolve => "resolve",
+        })
+    }
 }
 
 /// Whether the account is live or a test account.
@@ -644,33 +640,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn full_config_parses() {
-        let config: Config = serde_json::from_value(json!({
-            "account": {
-                "slug": "acct-1",
-                "agent_key": "key",
-                "endpoint": "http://127.0.0.1:1234/szamla/",
-                "mode": "test",
-                "supplier_id": 972_720,
-            },
-            "defaults": {
-                "e_invoice": true,
-                "language": "en",
-                "currency": "EUR",
-                "exchange_rate_bank": "OTP",
-                "template": "SzlaMost",
-                "send_email": true,
-                "number_prefix": "WEB",
-                "extra_logo": "logo",
-                "aggregator": "agg",
-                "guardian": true,
-            },
-            "seller": {
-                "bank": "Bank",
-                "bank_account": "1234",
-                "signer_name": "Signer",
-                "email": {"reply_to": "r@e.hu", "subject": "S", "body": "B"},
-            },
+    fn full_worker_config_parses() {
+        let config: WorkerConfig = serde_json::from_value(json!({
+            "namespace": "acct-1",
             "issue": {
                 "max_attempts": 3,
                 "initial_delay": "90s",
@@ -678,65 +650,55 @@ mod tests {
                 "max_delay": "1h",
                 "max_duration": "2h",
             },
+            "resolve": {
+                "initial_delay": "2s",
+                "factor": 3.0,
+                "max_delay": "20s",
+                "max_duration": "5m",
+            },
         }))
         .expect("parse");
 
-        assert_eq!(config.account.slug.as_str(), "acct-1");
-        assert_eq!(config.account.agent_key.expose(), "key");
-        assert_eq!(
-            config.account.endpoint.as_deref(),
-            Some("http://127.0.0.1:1234/szamla/")
-        );
-        assert_eq!(config.account.mode, AccountMode::Test);
-        assert!(config.account.mode.is_test());
-        assert_eq!(config.account.supplier_id, Some(972_720));
-        assert!(config.defaults.e_invoice);
-        assert_eq!(config.defaults.language, "en");
-        assert_eq!(config.defaults.currency, "EUR");
-        assert_eq!(config.defaults.exchange_rate_bank, "OTP");
-        assert_eq!(config.defaults.guardian, Some(true));
-        assert_eq!(config.seller.bank.as_deref(), Some("Bank"));
-        assert_eq!(config.seller.email.subject.as_deref(), Some("S"));
+        assert_eq!(config.namespace.as_str(), "acct-1");
         assert_eq!(config.issue.max_attempts, 3);
         assert_eq!(config.issue.initial_delay, Duration::from_secs(90));
         assert_eq!(config.issue.factor.to_bits(), 1.5f32.to_bits());
         assert_eq!(config.issue.max_delay, Duration::from_secs(3600));
         assert_eq!(config.issue.max_duration, Duration::from_secs(7200));
+        assert_eq!(config.resolve.initial_delay, Duration::from_secs(2));
+        assert_eq!(config.resolve.factor.to_bits(), 3.0f32.to_bits());
+        assert_eq!(config.resolve.max_delay, Duration::from_secs(20));
+        assert_eq!(config.resolve.max_duration, Duration::from_secs(300));
         config.validate().expect("valid");
-
-        let seller = config.seller.to_seller();
-        assert_eq!(seller.bank_account.as_deref(), Some("1234"));
-        assert_eq!(seller.signer_name.as_deref(), Some("Signer"));
-        let email = seller.email.expect("email block");
-        assert_eq!(email.reply_to.as_deref(), Some("r@e.hu"));
-        assert_eq!(email.body.as_deref(), Some("B"));
     }
 
+    /// Only the namespace is required; both policies default, and the parsed
+    /// minimum equals [`WorkerConfig::new`].
     #[test]
-    fn minimal_config_uses_spec_defaults() {
-        let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct", "agent_key": "key"},
-        }))
-        .expect("parse");
+    fn minimal_worker_config_is_the_namespace_with_default_policies() {
+        let config: WorkerConfig =
+            serde_json::from_value(json!({ "namespace": "acct" })).expect("parse");
 
-        assert_eq!(config.account.endpoint, None);
-        assert_eq!(config.account.mode, AccountMode::Live);
-        assert_eq!(config.account.supplier_id, None);
-        assert_eq!(config.defaults, Defaults::default());
-        assert!(!config.defaults.e_invoice);
-        assert_eq!(config.defaults.language, "hu");
-        assert_eq!(config.defaults.currency, "HUF");
-        assert_eq!(config.defaults.exchange_rate_bank, "MNB");
-        assert_eq!(config.defaults.template, None);
-        assert_eq!(config.seller, SellerConfig::default());
-        assert_eq!(config.seller.to_seller().email, None);
+        assert_eq!(
+            config,
+            WorkerConfig::new("acct".parse().expect("namespace"))
+        );
         assert_eq!(config.issue, IssueConfig::default());
         assert_eq!(config.issue.max_attempts, 5);
         assert_eq!(config.issue.initial_delay, Duration::from_secs(120));
         assert_eq!(config.issue.factor.to_bits(), 2.0f32.to_bits());
         assert_eq!(config.issue.max_delay, Duration::from_secs(600));
         assert_eq!(config.issue.max_duration, Duration::from_secs(3600));
+        assert_eq!(config.resolve, ResolveConfig::default());
+        assert_eq!(config.resolve.initial_delay, Duration::from_secs(1));
+        assert_eq!(config.resolve.max_delay, Duration::from_secs(10));
+        assert_eq!(config.resolve.max_duration, Duration::from_secs(60));
         config.validate().expect("valid");
+
+        assert!(
+            serde_json::from_value::<WorkerConfig>(json!({})).is_err(),
+            "the namespace has no default"
+        );
     }
 
     /// The namespace is 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it
@@ -747,11 +709,9 @@ mod tests {
             let namespace: Namespace = accepted.parse().expect(accepted);
             assert_eq!(namespace.as_str(), accepted);
             assert_eq!(namespace.to_string(), accepted);
-            let config: Config = serde_json::from_value(json!({
-                "account": {"slug": accepted, "agent_key": "key"},
-            }))
-            .expect(accepted);
-            assert_eq!(config.account.slug, namespace);
+            let config: WorkerConfig =
+                serde_json::from_value(json!({ "namespace": accepted })).expect(accepted);
+            assert_eq!(config.namespace, namespace);
         }
 
         let too_long = "a".repeat(17);
@@ -771,42 +731,9 @@ mod tests {
                 "{input:?}"
             );
             assert_eq!(Namespace::try_from(input.to_owned()), Err(expected));
-            let result = serde_json::from_value::<Config>(json!({
-                "account": {"slug": input, "agent_key": "key"},
-            }));
+            let result = serde_json::from_value::<WorkerConfig>(json!({ "namespace": input }));
             assert!(result.is_err(), "{input:?} should be rejected");
         }
-    }
-
-    /// The services hold only the deployment-level settings: the namespace,
-    /// the issue policy and the resolve policy, taken from the parsed
-    /// configuration (the resolve policy has no key yet and is the default).
-    #[test]
-    fn worker_config_is_the_namespace_and_the_policies() {
-        let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct-1", "agent_key": "key", "mode": "test"},
-            "issue": {"max_attempts": 3, "initial_delay": "90s", "max_delay": "1h"},
-        }))
-        .expect("parse");
-
-        let worker = WorkerConfig::from(&config);
-        assert_eq!(worker.namespace.as_str(), "acct-1");
-        assert_eq!(worker.issue.max_attempts, 3);
-        assert_eq!(worker.issue.initial_delay, Duration::from_secs(90));
-        assert_eq!(worker.issue.max_delay, Duration::from_secs(3600));
-        assert_eq!(
-            worker.issue.factor.to_bits(),
-            2.0f32.to_bits(),
-            "unset fields keep their defaults"
-        );
-        assert_eq!(
-            worker,
-            WorkerConfig {
-                namespace: "acct-1".parse().expect("namespace"),
-                issue: config.issue.clone(),
-                resolve: ResolveConfig::default(),
-            }
-        );
     }
 
     /// The resolve policy is the run retry policy of the `account` step:
@@ -851,39 +778,65 @@ mod tests {
     }
 
     #[test]
-    fn validate_reports_invariants() {
-        fn config(issue: &serde_json::Value, agent_key: &str) -> Config {
+    fn validate_reports_invariants_of_both_policies() {
+        fn config(issue: &serde_json::Value, resolve: &serde_json::Value) -> WorkerConfig {
             serde_json::from_value(json!({
-                "account": {"slug": "acct", "agent_key": agent_key},
+                "namespace": "acct",
                 "issue": issue,
+                "resolve": resolve,
             }))
             .expect("parse")
         }
+        let none = json!({});
 
         assert_eq!(
-            config(&json!({}), " ").validate(),
-            Err(ConfigError::EmptyAgentKey)
+            config(&json!({"max_attempts": 0}), &none).validate(),
+            Err(WorkerConfigError::ZeroMaxAttempts)
         );
         assert_eq!(
-            config(&json!({"max_attempts": 0}), "key").validate(),
-            Err(ConfigError::ZeroMaxAttempts)
-        );
-        assert_eq!(
-            config(&json!({"initial_delay": "11m"}), "key").validate(),
-            Err(ConfigError::DelayOrder {
+            config(&json!({"initial_delay": "11m"}), &none).validate(),
+            Err(WorkerConfigError::DelayOrder {
+                policy: Policy::Issue,
                 initial: Duration::from_mins(11),
                 max: Duration::from_secs(600),
             })
         );
         assert_eq!(
-            config(&json!({"initial_delay": "10m"}), "key").validate(),
+            config(&json!({"initial_delay": "10m"}), &none).validate(),
             Ok(())
         );
         assert_eq!(
-            config(&json!({"factor": 0.5}), "key").validate(),
-            Err(ConfigError::InvalidFactor(0.5))
+            config(&json!({"factor": 0.5}), &none).validate(),
+            Err(WorkerConfigError::InvalidFactor {
+                policy: Policy::Issue,
+                factor: 0.5
+            })
         );
-        assert_eq!(config(&json!({"factor": 1.0}), "key").validate(), Ok(()));
+        assert_eq!(config(&json!({"factor": 1.0}), &none).validate(), Ok(()));
+
+        assert_eq!(
+            config(&none, &json!({"initial_delay": "11s"})).validate(),
+            Err(WorkerConfigError::DelayOrder {
+                policy: Policy::Resolve,
+                initial: Duration::from_secs(11),
+                max: Duration::from_secs(10),
+            })
+        );
+        assert_eq!(
+            config(&none, &json!({"factor": 0.0})).validate(),
+            Err(WorkerConfigError::InvalidFactor {
+                policy: Policy::Resolve,
+                factor: 0.0
+            })
+        );
+        assert_eq!(
+            config(&none, &json!({"initial_delay": "11s"}))
+                .validate()
+                .expect_err("error")
+                .to_string(),
+            "resolve.initial_delay (11s) must not exceed resolve.max_delay (10s)",
+            "the error names the table"
+        );
     }
 
     #[test]
@@ -947,14 +900,43 @@ mod tests {
 
     #[test]
     fn secret_debug_is_redacted() {
-        let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct", "agent_key": "hunter2"},
-        }))
-        .expect("parse");
-        let debug = format!("{config:?}");
+        let secret: Secret = serde_json::from_value(json!("hunter2")).expect("parse");
+        let debug = format!("{secret:?}");
         assert!(!debug.contains("hunter2"), "{debug}");
-        assert!(debug.contains("Secret(***)"));
+        assert_eq!(debug, "Secret(***)");
+        assert_eq!(secret.expose(), "hunter2");
         assert_eq!(format!("{:?}", Secret::new("x")), "Secret(***)");
         assert_eq!(Secret::from("x"), Secret::from("x".to_owned()));
+        let numeric: Secret = serde_json::from_value(json!(12_345_678)).expect("parse");
+        assert_eq!(numeric.expose(), "12345678");
+    }
+
+    #[test]
+    fn seller_config_projects_to_the_agent_seller_block() {
+        let seller: SellerConfig = serde_json::from_value(json!({
+            "bank": "Bank",
+            "bank_account": "1234",
+            "signer_name": "Signer",
+            "email": {"reply_to": "r@e.hu", "subject": "S", "body": "B"},
+        }))
+        .expect("parse");
+        let block = seller.to_seller();
+        assert_eq!(block.bank.as_deref(), Some("Bank"));
+        assert_eq!(block.bank_account.as_deref(), Some("1234"));
+        assert_eq!(block.signer_name.as_deref(), Some("Signer"));
+        let email = block.email.expect("email block");
+        assert_eq!(email.reply_to.as_deref(), Some("r@e.hu"));
+        assert_eq!(email.subject.as_deref(), Some("S"));
+        assert_eq!(email.body.as_deref(), Some("B"));
+
+        assert_eq!(
+            SellerConfig::default().to_seller().email,
+            None,
+            "no email block unless a field is set"
+        );
+        assert_eq!(Defaults::default().language, "hu");
+        assert_eq!(Defaults::default().currency, "HUF");
+        assert_eq!(Defaults::default().exchange_rate_bank, "MNB");
+        assert!(!Defaults::default().e_invoice);
     }
 }

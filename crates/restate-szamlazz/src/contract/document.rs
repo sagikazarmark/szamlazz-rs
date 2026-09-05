@@ -1,8 +1,9 @@
 //! The per-call document input: buyer, line items, payment terms and the few
 //! per-call overrides of the configured defaults.
 //!
-//! These types are a *projection* of the Számla Agent model: deployment
-//! constants live in [`Config`](crate::config::Config), line totals are
+//! These types are a *projection* of the Számla Agent model: account
+//! constants live on the resolved [`Account`](crate::account::Account) (its
+//! [`Defaults`](crate::config::Defaults) and seller block), line totals are
 //! computed here, and the payment method is an English enum. Each type
 //! converts into its `szamlazz_agent` counterpart.
 

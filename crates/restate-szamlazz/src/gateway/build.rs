@@ -200,19 +200,22 @@ mod tests {
     use szamlazz_agent::{Credentials, PaymentMethod};
 
     use super::*;
-    use crate::config::Config;
+    use crate::account::{Account, Endpoint};
+    use crate::config::{Defaults, SellerConfig};
     use crate::contract::document::tests::sample_document;
     use crate::contract::{DocumentKind, ExchangeRateInput};
 
+    /// A gateway for the test account with `defaults` and a fixed seller
+    /// block, as the prologue would open it.
     fn gateway(defaults: &serde_json::Value) -> Gateway {
-        let config: Config = serde_json::from_value(json!({
-            "account": {"slug": "acct", "agent_key": "key",
-                        "endpoint": "http://127.0.0.1:1/"},
-            "defaults": defaults,
-            "seller": {"bank": "Bank", "bank_account": "1234", "email": {"subject": "Hi"}},
-        }))
-        .expect("config");
-        Gateway::new(&config).expect("gateway")
+        let mut account = Account::new("acct", "acct");
+        account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
+        account.defaults = serde_json::from_value::<Defaults>(defaults.clone()).expect("defaults");
+        account.seller = serde_json::from_value::<SellerConfig>(
+            json!({"bank": "Bank", "bank_account": "1234", "email": {"subject": "Hi"}}),
+        )
+        .expect("seller");
+        Gateway::open(account, Credentials::agent_key("key")).expect("gateway")
     }
 
     fn order() -> OrderKey {
@@ -220,7 +223,7 @@ mod tests {
     }
 
     fn external_id() -> ExternalId {
-        ExternalId::new("acct:ORD-1:invoice:0")
+        ExternalId::new("acct:ORD-1:invoice")
     }
 
     #[test]
@@ -261,7 +264,7 @@ mod tests {
         assert!(!create.download_pdf);
         assert_eq!(create.aggregator.as_deref(), Some("agg"));
         assert_eq!(create.guardian, Some(true));
-        assert_eq!(create.external_id.as_deref(), Some("acct:ORD-1:invoice:0"));
+        assert_eq!(create.external_id.as_deref(), Some("acct:ORD-1:invoice"));
         assert_eq!(create.header.order_number.as_deref(), Some("ORD-1"));
         assert_eq!(create.header.issue_date, Some(date(2026, 9, 3)));
         assert_eq!(create.header.fulfillment_date, date(2026, 7, 4));

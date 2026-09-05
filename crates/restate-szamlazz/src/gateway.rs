@@ -43,8 +43,7 @@ use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::{ApiError, Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
 use tracing::Instrument as _;
 
-use crate::account::{Account, InvalidEndpoint};
-use crate::config::Config;
+use crate::account::Account;
 use crate::contract::{DocumentKind, IssuedKind, PaymentEntry, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
@@ -56,25 +55,11 @@ pub use build::{DocumentRefs, InputError, gross_total};
 /// client plus the [`Account`] it is opened for.
 ///
 /// Opened with [`Gateway::open`] for one handler execution from a resolved
-/// account and freshly fetched credentials; [`Gateway::new`] is the legacy
-/// path from a [`Config`].
+/// account and freshly fetched credentials.
 #[derive(Debug, Clone)]
 pub struct Gateway {
     client: Client,
     account: Account,
-}
-
-/// [`Gateway::new`] failure: the [`Config`] names an endpoint that is not an
-/// http(s) URL, or the HTTP client cannot be constructed.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum OpenError {
-    /// `account.endpoint` is not an http(s) URL.
-    #[error("account.endpoint: {0}")]
-    Endpoint(#[from] InvalidEndpoint),
-    /// The Számla Agent client could not be built.
-    #[error(transparent)]
-    Client(#[from] BuildError),
 }
 
 /// The lookup step (design §5 step 3): what identifies the document whose
@@ -600,19 +585,6 @@ impl Gateway {
             .endpoint(account.endpoint.as_str())
             .build()?;
         Ok(Self { client, account })
-    }
-
-    /// Opens the gateway for the account in `config`: the legacy path, with
-    /// agent-key credentials and the configured endpoint override.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the endpoint is not an http(s) URL or the HTTP
-    /// client cannot be constructed.
-    pub fn new(config: &Config) -> Result<Self, OpenError> {
-        let account = Account::try_from(config)?;
-        let credentials = Credentials::agent_key(config.account.agent_key.expose());
-        Ok(Self::open(account, credentials)?)
     }
 
     /// The account the gateway speaks for: the only way the services read

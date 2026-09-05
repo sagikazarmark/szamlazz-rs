@@ -31,45 +31,52 @@ One deployment serves one szamlazz.hu account. A second account is a second depl
 
 ## Configuration
 
-The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload.
+The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload: the deployment-level settings at the top (`namespace`, `[issue]`, `[resolve]`) and the szamlazz.hu account under `[account]`.
 
 ```toml
 identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]
+namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id ({namespace}:{order}:{kind}); permanent
 
-[account]
-slug = "acct"                 # the namespace: 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
-agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
-endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
-mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
-supplier_id = 972720          # optional pin; when set, validated against szallito/id on every document found under our external ids
-
-[defaults]
-e_invoice = false
-language = "hu"
-currency = "HUF"
-exchange_rate_bank = "MNB"
-template = "default"          # optional
-send_email = false            # optional
-number_prefix = "..."         # optional
-extra_logo = "..."            # optional
-aggregator = "..."            # optional, not overridable per call
-guardian = false              # optional, not overridable per call
-
-[seller]                      # all optional; account data used where absent
-bank = "..."
-bank_account = "..."
-signer_name = "..."
-[seller.email]
-reply_to = "..."
-subject = "..."
-body = "..."
-
-[issue]                       # the issue policy: the run retry policy of the create and storno steps
+[issue]                       # optional; the issue policy: the run retry policy of the create and storno steps
 max_attempts = 5              # executions of the step, including the first
 initial_delay = "2m"          # before the first re-execution; longer than a client timeout plus the longest observed server stall
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound on re-executing the step
+
+[resolve]                     # optional; the resolve policy: the run retry policy of the `account` step (no attempt cap)
+initial_delay = "1s"
+factor = 2.0
+max_delay = "10s"
+max_duration = "1m"
+
+[account]
+id = "acme"                   # the account's identifier as the worker knows it; journaled with every invocation, shown in the Restate UI
+agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
+endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
+mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
+supplier_id = 972720          # optional pin; when set, validated against szallito/id on every document found under our external ids
+
+[account.defaults]            # all optional
+e_invoice = false
+language = "hu"
+currency = "HUF"
+exchange_rate_bank = "MNB"
+template = "default"
+send_email = false
+number_prefix = "..."
+extra_logo = "..."
+aggregator = "..."            # not overridable per call
+guardian = false              # not overridable per call
+
+[account.seller]              # all optional; account data used where absent
+bank = "..."
+bank_account = "..."
+signer_name = "..."
+[account.seller.email]
+reply_to = "..."
+subject = "..."
+body = "..."
 ```
 
 `account.agent_key` (the Számla Agent key) is a secret. Keep it out of the file and supply it through the environment instead:
@@ -79,7 +86,9 @@ RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY="..." \
 restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_DEFAULTS__CURRENCY=EUR`). Only `[account]` is required; `slug` and `agent_key` have no defaults. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged.
+Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). `namespace` and `[account]` with `id` and `agent_key` are required; everything else has a default. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged; the start-up log names the namespace and the account's `id`, `mode`, `endpoint` and `supplier_id`.
+
+The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is not supported and fails to load with an error naming the moved keys.
 
 ## Running
 
@@ -101,7 +110,7 @@ For local development the repository root has a `compose.yaml` with a Restate se
 
 Every handler takes and returns JSON; the discovery manifest carries JSON Schemas for all of them, so Restate's OpenAPI export documents the full contract. Domain outcomes are data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or `conflict` with a `conflict_reason`.
 
-`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{namespace}:{order}:{kind}`, the namespace being `account.slug`), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, three on `Szamlazz.Agent`:
+`Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{namespace}:{order}:{kind}`, the namespace being the top-level `namespace` key), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, three on `Szamlazz.Agent`:
 
 | Handler | Description |
 |---|---|
@@ -117,10 +126,10 @@ Every handler takes and returns JSON; the discovery manifest carries JSON Schema
 | `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. |
 | `Szamlazz.Agent.storno` | Reverses an invoice that no `Szamlazz.Order` manages; a document carrying an order number is answered with `managed_by_order` instead. |
 
-A create request through the ingress:
+A create request through the ingress (`/restate/call/{service}/{key}/{handler}`):
 
 ```sh
-curl localhost:8080/Szamlazz.Order/ORD-1001/create_invoice \
+curl localhost:8080/restate/call/Szamlazz.Order/ORD-1001/create_invoice \
   -H 'content-type: application/json' \
   -H 'idempotency-key: 8b2f6c4e-0001' \
   -d '{

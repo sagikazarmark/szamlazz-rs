@@ -32,7 +32,7 @@ use super::{
     Account, AccountId, AccountResolver, BoxFuture, CredentialRef, CredentialStore, Endpoint,
     FetchError, InvalidEndpoint, ResolveError,
 };
-use crate::config::{AccountMode, Config, Defaults, Secret, SellerConfig};
+use crate::config::{AccountMode, Defaults, Secret, SellerConfig};
 
 /// The static resolver's configuration: one `[account]`.
 #[derive(Debug, Clone, Deserialize)]
@@ -147,20 +147,6 @@ impl TryFrom<StaticConfig> for StaticResolver {
         Ok(Self {
             account,
             credentials: Credentials::agent_key(agent_key.expose()),
-        })
-    }
-}
-
-/// The adapter from the library [`Config`]: the single account it describes,
-/// with its inline agent key, as the static resolver. Goes with `Config` in
-/// #31.
-impl TryFrom<&Config> for StaticResolver {
-    type Error = InvalidEndpoint;
-
-    fn try_from(config: &Config) -> Result<Self, Self::Error> {
-        Ok(Self {
-            account: Account::try_from(config)?,
-            credentials: Credentials::agent_key(config.account.agent_key.expose()),
         })
     }
 }

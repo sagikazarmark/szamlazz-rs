@@ -27,8 +27,8 @@
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 
-use crate::account::{Accounts, InvalidEndpoint};
-use crate::config::{Config, WorkerConfig};
+use crate::account::Accounts;
+use crate::config::WorkerConfig;
 
 mod agent;
 mod create;
@@ -53,19 +53,6 @@ pub struct Order {
 }
 
 impl Order {
-    /// Builds the object for the single account of `config` through the
-    /// static resolver: the legacy path (goes with `Config` in #31).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the endpoint is not an http(s) URL.
-    pub fn new(config: &Config) -> Result<Self, InvalidEndpoint> {
-        Ok(Self::from_parts(
-            Accounts::try_from(config)?,
-            WorkerConfig::from(config),
-        ))
-    }
-
     /// Builds the object over the account resolver and credential store in
     /// `accounts` and the deployment-level `config`.
     #[must_use]
@@ -108,19 +95,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Builds the service for the single account of `config` through the
-    /// static resolver: the legacy path (goes with `Config` in #31).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the endpoint is not an http(s) URL.
-    pub fn new(config: &Config) -> Result<Self, InvalidEndpoint> {
-        Ok(Self::from_parts(
-            Accounts::try_from(config)?,
-            WorkerConfig::from(config),
-        ))
-    }
-
     /// Builds the service over the account resolver and credential store in
     /// `accounts` and the deployment-level `config`.
     #[must_use]

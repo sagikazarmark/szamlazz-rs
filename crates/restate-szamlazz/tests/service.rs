@@ -25,9 +25,9 @@ use jiff::civil::date;
 use restate_sdk::prelude::{Endpoint, HttpServer};
 use restate_szamlazz::account::{
     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
-    ResolveError, StaticResolver,
+    ResolveError, StaticConfig, StaticResolver,
 };
-use restate_szamlazz::config::{Config, ResolveConfig, WorkerConfig};
+use restate_szamlazz::config::{ResolveConfig, WorkerConfig};
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, DocumentState, LineItemInput, OrderStatus, PaymentMethod,
 };
@@ -468,14 +468,18 @@ impl CredentialStore for ScriptedAccounts {
 /// resolver and store, with short policies so that retries and exhaustion are
 /// observable within the test.
 fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
-    let config: Config = serde_json::from_value(json!({
+    let accounts: StaticConfig = serde_json::from_value(json!({
         "account": {
-            "slug": "acct",
+            "id": "acct",
             "agent_key": AGENT_KEY,
             "endpoint": endpoint,
             "mode": "test",
             "supplier_id": SUPPLIER,
         },
+    }))
+    .expect("config");
+    let worker: WorkerConfig = serde_json::from_value(json!({
+        "namespace": "acct",
         // A short issue policy: two executions of the create step, one
         // second apart, so exhaustion is observable within the test.
         "issue": {
@@ -487,10 +491,10 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
         },
     }))
     .expect("config");
-    // The static resolver of `config` behind the script, and a short resolve
-    // policy so a scripted outage is retried within the test.
+    // The static resolver behind the script, and a short resolve policy so a
+    // scripted outage is retried within the test.
     let scripted = Arc::new(ScriptedAccounts::new(
-        StaticResolver::try_from(&config).expect("resolver"),
+        StaticResolver::try_from(accounts).expect("resolver"),
     ));
     let accounts = Accounts::new(
         Arc::clone(&scripted) as Arc<dyn AccountResolver>,
@@ -503,7 +507,7 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
             max_delay: Duration::from_secs(1),
             max_duration: Duration::from_secs(30),
         },
-        ..WorkerConfig::from(&config)
+        ..worker
     };
     let order = Order::from_parts(accounts.clone(), worker.clone());
     let agent = Agent::from_parts(accounts, worker);
