@@ -127,6 +127,7 @@ mod tests {
 
     use figment::Jail;
     use figment::providers::{Env, Format, Toml};
+    use restate_szamlazz::account::StaticResolver;
     use restate_szamlazz::config::{AccountMode, IssueConfig, ResolveConfig};
 
     use super::*;
@@ -206,7 +207,12 @@ mod tests {
         assert_eq!(config.worker.resolve.max_delay, Duration::from_secs(10));
         assert_eq!(config.worker.resolve.max_duration, Duration::from_secs(60));
 
-        let account = &config.accounts.account;
+        let account = config
+            .accounts
+            .account
+            .as_ref()
+            .expect("the single account");
+        assert!(config.accounts.accounts.is_empty());
         assert_eq!(account.id.as_str(), "acme");
         assert_eq!(account.agent_key.expose(), "agent-key");
         assert_eq!(
@@ -250,12 +256,17 @@ mod tests {
         assert_eq!(config.worker.namespace.as_str(), "acct");
         assert_eq!(config.worker.issue, IssueConfig::default());
         assert_eq!(config.worker.resolve, ResolveConfig::default());
-        assert_eq!(config.accounts.account.id.as_str(), "acme");
-        assert_eq!(config.accounts.account.endpoint, None);
-        assert_eq!(config.accounts.account.mode, AccountMode::Live);
-        assert_eq!(config.accounts.account.supplier_id, None);
-        assert_eq!(config.accounts.account.defaults.currency, "HUF");
-        assert_eq!(config.accounts.account.seller.bank_account, None);
+        let account = config
+            .accounts
+            .account
+            .as_ref()
+            .expect("the single account");
+        assert_eq!(account.id.as_str(), "acme");
+        assert_eq!(account.endpoint, None);
+        assert_eq!(account.mode, AccountMode::Live);
+        assert_eq!(account.supplier_id, None);
+        assert_eq!(account.defaults.currency, "HUF");
+        assert_eq!(account.seller.bank_account, None);
         assert!(config.identity_keys.is_empty());
     }
 
@@ -277,14 +288,19 @@ mod tests {
             )
             .expect("configuration should load");
 
-            assert_eq!(config.accounts.account.agent_key.expose(), "from-env");
-            assert_eq!(config.accounts.account.mode, AccountMode::Test);
-            assert_eq!(config.accounts.account.defaults.currency, "EUR");
+            let account = config
+                .accounts
+                .account
+                .as_ref()
+                .expect("the single account");
+            assert_eq!(account.agent_key.expose(), "from-env");
+            assert_eq!(account.mode, AccountMode::Test);
+            assert_eq!(account.defaults.currency, "EUR");
             assert_eq!(config.worker.issue.max_attempts, 3);
             assert_eq!(config.worker.namespace.as_str(), "from-env");
             // Untouched values survive the merge.
-            assert_eq!(config.accounts.account.id.as_str(), "acme");
-            assert_eq!(config.accounts.account.defaults.language, "hu");
+            assert_eq!(account.id.as_str(), "acme");
+            assert_eq!(account.defaults.language, "hu");
             assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
             Ok(())
         });
@@ -334,11 +350,101 @@ mod tests {
             "the error names the missing key: {error:#}"
         );
 
-        let error = load("namespace = \"acct\"").expect_err("no account");
+        // Neither shape parses (`account` is optional, `accounts` defaults to
+        // empty); the static resolver refuses it when built.
+        let config = load("namespace = \"acct\"").expect("parses without accounts");
+        assert!(config.accounts.account.is_none());
+        assert!(config.accounts.accounts.is_empty());
+        let error = StaticResolver::try_from(config.accounts).expect_err("no account");
         assert!(
-            format!("{error:#}").contains("account"),
-            "the error names the missing table: {error:#}"
+            error.to_string().contains("no account is configured"),
+            "{error}"
         );
+    }
+
+    /// The multi-account shape: `[accounts.<scope>]` tables parse into the
+    /// static resolver's map, and a per-scope environment override addresses
+    /// one account's key (`…ACCOUNTS__<SCOPE>__AGENT_KEY`) and nothing else.
+    #[test]
+    fn multi_account_shape_parses_and_per_scope_environment_overrides_apply() {
+        const MULTI: &str = r#"
+            namespace = "acct"
+
+            [accounts.acme]
+            id = "acme"
+            agent_key = "key-acme-file"
+            endpoint = "http://127.0.0.1:1/"
+            mode = "test"
+            supplier_id = 972720
+
+            [accounts.acme.seller]
+            bank_account = "11111111-22222222"
+
+            [accounts.beta_events]
+            id = "beta"
+            agent_key = "key-beta-file"
+            endpoint = "http://127.0.0.1:1/"
+            mode = "test"
+            supplier_id = 972721
+        "#;
+
+        let config = load(MULTI).expect("configuration should load");
+        assert!(config.accounts.account.is_none());
+        assert_eq!(
+            config.accounts.accounts.keys().collect::<Vec<_>>(),
+            ["acme", "beta_events"]
+        );
+        assert_eq!(
+            config.accounts.accounts["acme"].agent_key.expose(),
+            "key-acme-file"
+        );
+
+        Jail::expect_with(|jail| {
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY", "key-acme-env");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__MODE", "live");
+
+            let config = EndpointConfig::load(
+                &Figment::from(Toml::string(MULTI))
+                    .merge(Env::prefixed("RESTATE_SZAMLAZZ_").split("__")),
+            )
+            .expect("configuration should load");
+
+            let acme = &config.accounts.accounts["acme"];
+            let beta = &config.accounts.accounts["beta_events"];
+            assert_eq!(acme.agent_key.expose(), "key-acme-env");
+            assert_eq!(acme.mode, AccountMode::Test);
+            assert_eq!(
+                acme.seller.bank_account.as_deref(),
+                Some("11111111-22222222"),
+                "the rest of the table survives"
+            );
+            assert_eq!(
+                beta.agent_key.expose(),
+                "key-beta-file",
+                "the other account's key is untouched"
+            );
+            assert_eq!(beta.mode, AccountMode::Live);
+            assert_eq!(beta.id.as_str(), "beta");
+
+            // What the binary then builds: each account under its scope.
+            let resolver = StaticResolver::try_from(config.accounts).expect("resolver");
+            assert!(resolver.is_scoped());
+            assert_eq!(resolver.accounts().count(), 2);
+            Ok(())
+        });
+    }
+
+    /// Both shapes in one file parse — figment cannot know they are exclusive
+    /// — and the static resolver refuses the combination when built.
+    #[test]
+    fn both_shapes_are_refused_when_the_resolver_is_built() {
+        let config = load(&format!(
+            "{}\n[accounts.beta]\nid = \"beta\"\nagent_key = \"k\"\nsupplier_id = 1",
+            minimal()
+        ))
+        .expect("parses");
+        let error = StaticResolver::try_from(config.accounts).expect_err("both shapes");
+        assert!(error.to_string().contains("mutually exclusive"), "{error}");
     }
 
     /// The pre-release layout — `account.slug`, top-level `[defaults]` and

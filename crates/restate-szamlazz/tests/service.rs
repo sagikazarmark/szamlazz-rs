@@ -8,14 +8,30 @@
 //! instead of starting a container; it must run with the three experimental
 //! flags ([`SERVER_FLAGS`]) — `compose.yaml` sets them.
 //!
+//! The run has two phases on one Restate server. The first registers a
+//! **single-account** deployment (the static resolver's `[account]` behind a
+//! scripted resolver and store) and runs the order protocol unscoped. The
+//! second performs the documented single → multi **flag day** — private,
+//! drain, register the **multi-account** deployment (two accounts, reachable
+//! by scope only, behind a test-local mutable resolver and store), public —
+//! and proves the isolation properties multi-account mode leans on: the same
+//! order key issuing concurrently under two scopes with each account's own
+//! key on the wire, the same `Idempotency-Key` under two scopes being two
+//! invocations, credential rotation and account changes between executions,
+//! an order Restate has no memory of, and — over the hex-decoded `raw` of
+//! every journal entry of every invocation in the run — that no agent key
+//! was ever journaled.
+//!
 //! The harness calls through the `/restate/call/…` and
 //! `/restate/scope/{scope}/call/…` ingress paths, reports the invocation id
 //! (`x-restate-id`) and parses fault bodies, and reads `sys_journal` /
 //! `sys_invocation` through the SQL introspection API — `raw` hex-decoded to
 //! bytes, since run results are stored as bytes.
 
+use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
@@ -39,10 +55,24 @@ use szamlazz_agent::Credentials;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
+/// The supplier id of the test account — and, after the flag day, of the
+/// `acme` account, which is the same szamlazz.hu account.
 const SUPPLIER: u64 = 972_720;
-/// The agent key of the test account: a sentinel that must never appear in a
-/// journal entry.
+/// The supplier id of the `beta` account of the multi-account phase.
+const SUPPLIER_B: u64 = 972_721;
+/// The agent key of the test account (and of `acme` after the flag day): a
+/// sentinel that must never appear in a journal entry.
 const AGENT_KEY: &str = "e2e-agent-key-sentinel-7d1f4b";
+/// The agent key of the `beta` account; a second sentinel.
+const KEY_B: &str = "e2e-agent-key-b-sentinel-2e7f41";
+/// `beta`'s key after the rotation scenario; a third sentinel.
+const KEY_B_V2: &str = "e2e-agent-key-b-rotated-sentinel-5ba9c0";
+/// Every agent key the run puts on the wire; none may be journaled.
+const AGENT_KEYS: [&str; 3] = [AGENT_KEY, KEY_B, KEY_B_V2];
+/// `acme`'s seller bank account in the multi-account phase, and the value
+/// the account-change scenario replaces it with.
+const BANK_ACCOUNT: &str = "11111111-22222222-33333333";
+const BANK_ACCOUNT_CHANGED: &str = "44444444-55555555-66666666";
 const IMAGE: &str = "docker.restate.dev/restatedev/restate:1.7.8";
 const INGRESS_PORT: u16 = 18080;
 const ADMIN_PORT: u16 = 19070;
@@ -53,6 +83,7 @@ struct Doc<'a> {
     number: &'a str,
     tipus: &'a str,
     order: Option<&'a str>,
+    supplier: u64,
     reversed: bool,
     referenced_invoice: Option<&'a str>,
     referenced_proforma: Option<&'a str>,
@@ -64,6 +95,7 @@ impl<'a> Doc<'a> {
             number,
             tipus,
             order: Some(order),
+            supplier: SUPPLIER,
             reversed: false,
             referenced_invoice: None,
             referenced_proforma: None,
@@ -78,12 +110,13 @@ impl<'a> Doc<'a> {
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>{SUPPLIER}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+  <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
   <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{rendelesszam}<teszt>true</teszt>{sztornozott}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
 </szamla>"#,
+            supplier = self.supplier,
             number = self.number,
             tipus = self.tipus,
             hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
@@ -157,6 +190,21 @@ fn number_query(number: &str) -> MockBuilder {
 
 fn create() -> MockBuilder {
     op("action-xmlagentxmlfile")
+}
+
+/// A create request carrying `agent_key` (`<szamlaagentkulcs>`): what tells
+/// one account's traffic from another's on the wire.
+fn create_with_key(agent_key: &str) -> MockBuilder {
+    create().and(body_string_contains(format!(
+        "<szamlaagentkulcs>{agent_key}</szamlaagentkulcs>"
+    )))
+}
+
+/// A create request whose seller block carries `bank_account`.
+fn create_with_bank_account(bank_account: &str) -> MockBuilder {
+    create().and(body_string_contains(format!(
+        "<bankszamlaszam>{bank_account}</bankszamlaszam>"
+    )))
 }
 
 fn storno() -> MockBuilder {
@@ -478,19 +526,6 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
         },
     }))
     .expect("config");
-    let worker: WorkerConfig = serde_json::from_value(json!({
-        "namespace": "acct",
-        // A short issue policy: two executions of the create step, one
-        // second apart, so exhaustion is observable within the test.
-        "issue": {
-            "max_attempts": 2,
-            "initial_delay": "1s",
-            "factor": 2.0,
-            "max_delay": "2s",
-            "max_duration": "1m",
-        },
-    }))
-    .expect("config");
     // The static resolver behind the script, and a short resolve policy so a
     // scripted outage is retried within the test.
     let scripted = Arc::new(ScriptedAccounts::new(
@@ -500,7 +535,29 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
         Arc::clone(&scripted) as Arc<dyn AccountResolver>,
         Arc::clone(&scripted) as Arc<dyn CredentialStore>,
     );
-    let worker = WorkerConfig {
+    let order = Order::from_parts(accounts.clone(), worker_config());
+    let agent = Agent::from_parts(accounts, worker_config());
+    (scripted, order, agent)
+}
+
+/// The deployment-level settings of both phases — the flag day keeps the
+/// namespace — with short policies: two executions of the create step one
+/// second apart, so exhaustion and re-execution are observable within the
+/// test, and a one-second resolve policy so a scripted outage is retried
+/// within it.
+fn worker_config() -> WorkerConfig {
+    let worker: WorkerConfig = serde_json::from_value(json!({
+        "namespace": "acct",
+        "issue": {
+            "max_attempts": 2,
+            "initial_delay": "1s",
+            "factor": 2.0,
+            "max_delay": "2s",
+            "max_duration": "1m",
+        },
+    }))
+    .expect("config");
+    WorkerConfig {
         resolve: ResolveConfig {
             initial_delay: Duration::from_secs(1),
             factor: 1.0,
@@ -508,10 +565,134 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
             max_duration: Duration::from_secs(30),
         },
         ..worker
-    };
-    let order = Order::from_parts(accounts.clone(), worker.clone());
-    let agent = Agent::from_parts(accounts, worker);
-    (scripted, order, agent)
+    }
+}
+
+/// A resolver and store whose accounts and keys the test can change while
+/// invocations are in flight — what a database-backed deployment looks like
+/// to the worker, and what the rotation and account-change scenarios drive.
+/// Seeded from the static resolver's multi-account shape, so the shape is
+/// exercised end to end too.
+#[derive(Debug)]
+struct MutableAccounts {
+    /// The accounts by the scope each is reachable under.
+    accounts: Mutex<BTreeMap<String, Account>>,
+    /// The credentials by credential reference.
+    keys: Mutex<BTreeMap<String, Credentials>>,
+}
+
+impl MutableAccounts {
+    async fn seeded_from(resolver: &StaticResolver) -> Self {
+        let mut accounts = BTreeMap::new();
+        let mut keys = BTreeMap::new();
+        for (scope, account) in resolver.accounts() {
+            let scope = scope.expect("the multi-account shape scopes every account");
+            let credentials = resolver
+                .fetch(&account.credential_ref)
+                .await
+                .expect("the inline key");
+            keys.insert(account.credential_ref.to_string(), credentials);
+            accounts.insert(scope.to_owned(), account.clone());
+        }
+        Self {
+            accounts: Mutex::new(accounts),
+            keys: Mutex::new(keys),
+        }
+    }
+
+    /// Replaces the credentials under `credential_ref`: a rotation.
+    fn rotate(&self, credential_ref: &str, agent_key: &str) {
+        self.keys
+            .lock()
+            .expect("keys")
+            .insert(credential_ref.to_owned(), Credentials::agent_key(agent_key));
+    }
+
+    /// Changes the account reachable under `scope` in place.
+    fn update(&self, scope: &str, change: impl FnOnce(&mut Account)) {
+        let mut accounts = self.accounts.lock().expect("accounts");
+        change(
+            accounts
+                .get_mut(scope)
+                .unwrap_or_else(|| panic!("no account under scope {scope}")),
+        );
+    }
+}
+
+impl AccountResolver for MutableAccounts {
+    fn resolve<'a>(
+        &'a self,
+        scope: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Account, ResolveError>> {
+        Box::pin(async move {
+            let Some(scope) = scope else {
+                return Err(ResolveError::Unscoped);
+            };
+            self.accounts
+                .lock()
+                .expect("accounts")
+                .get(scope)
+                .cloned()
+                .ok_or_else(|| ResolveError::Unknown {
+                    scope: scope.to_owned(),
+                })
+        })
+    }
+}
+
+impl CredentialStore for MutableAccounts {
+    fn fetch<'a>(
+        &'a self,
+        credential_ref: &'a CredentialRef,
+    ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
+        Box::pin(async move {
+            self.keys
+                .lock()
+                .expect("keys")
+                .get(credential_ref.as_str())
+                .cloned()
+                .ok_or_else(|| FetchError::Gone {
+                    credential_ref: credential_ref.clone(),
+                })
+        })
+    }
+}
+
+/// The two services of the multi-account phase at `endpoint`: `acme` is the
+/// szamlazz.hu account of the single-account phase (same key, same supplier
+/// id — the flag day changes configuration, not the account), `beta` is a
+/// second one. Reachable by scope only.
+async fn multi_account_services(endpoint: &str) -> (Arc<MutableAccounts>, Order, Agent) {
+    let config: StaticConfig = serde_json::from_value(json!({
+        "accounts": {
+            "acme": {
+                "id": "acme",
+                "agent_key": AGENT_KEY,
+                "endpoint": endpoint,
+                "mode": "test",
+                "supplier_id": SUPPLIER,
+                "seller": { "bank_account": BANK_ACCOUNT },
+            },
+            "beta": {
+                "id": "beta",
+                "agent_key": KEY_B,
+                "endpoint": endpoint,
+                "mode": "test",
+                "supplier_id": SUPPLIER_B,
+            },
+        },
+    }))
+    .expect("config");
+    let resolver = StaticResolver::try_from(config).expect("resolver");
+    assert!(resolver.is_scoped());
+    let mutable = Arc::new(MutableAccounts::seeded_from(&resolver).await);
+    let accounts = Accounts::new(
+        Arc::clone(&mutable) as Arc<dyn AccountResolver>,
+        Arc::clone(&mutable) as Arc<dyn CredentialStore>,
+    );
+    let order = Order::from_parts(accounts.clone(), worker_config());
+    let agent = Agent::from_parts(accounts, worker_config());
+    (mutable, order, agent)
 }
 
 struct Harness {
@@ -519,6 +700,8 @@ struct Harness {
     mock: MockServer,
     http: reqwest::Client,
     script: Arc<ScriptedAccounts>,
+    /// The multi-account phase's resolver and store, once the flag day ran.
+    multi: Option<Arc<MutableAccounts>>,
 }
 
 impl Harness {
@@ -565,6 +748,21 @@ impl Harness {
 
         // Serve the endpoint on a free port and register it.
         let (scripted, order, agent) = services(&mock.uri());
+        let harness = Self {
+            restate,
+            mock,
+            http,
+            script: scripted,
+            multi: None,
+        };
+        harness.serve_and_register(order, agent).await;
+        harness
+    }
+
+    /// Serves `order` and `agent` on a free port of this host and registers
+    /// the deployment with the server: a new URI is a new revision of both
+    /// services, and new invocations route to it.
+    async fn serve_and_register(&self, order: Order, agent: Agent) -> u16 {
         let listener = TcpListener::bind("0.0.0.0:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         listener.set_nonblocking(true).expect("nonblocking");
@@ -579,8 +777,9 @@ impl Harness {
             json!({ "uri": format!("http://host.docker.internal:{port}"), "force": true });
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            let response = http
-                .post(format!("{}/deployments", restate.admin))
+            let response = self
+                .http
+                .post(format!("{}/deployments", self.restate.admin))
                 .json(&deployment)
                 .send()
                 .await;
@@ -597,12 +796,64 @@ impl Harness {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        port
+    }
 
-        Self {
-            restate,
-            mock,
-            http,
-            script: scripted,
+    /// The single → multi flag day, as the endpoint README scripts it: make
+    /// both services private, poll `sys_invocation` until nothing is in
+    /// flight, register the multi-account deployment (the same namespace, the
+    /// same szamlazz.hu account now under scope `acme` plus a second one under
+    /// `beta`), make the services public again. Callers then use scoped paths.
+    async fn switch_to_multi_account(&mut self) {
+        self.set_public(false).await;
+        self.drain().await;
+        let (mutable, order, agent) = multi_account_services(&self.mock.uri()).await;
+        self.serve_and_register(order, agent).await;
+        self.multi = Some(mutable);
+        self.set_public(true).await;
+    }
+
+    /// The multi-account phase's resolver and store.
+    fn multi(&self) -> &MutableAccounts {
+        self.multi
+            .as_deref()
+            .expect("the flag day has run (switch_to_multi_account)")
+    }
+
+    /// `PATCH /services/{service}` with `public` for both services.
+    async fn set_public(&self, public: bool) {
+        for service in ["Szamlazz.Order", "Szamlazz.Agent"] {
+            let response = self
+                .http
+                .patch(format!("{}/services/{service}", self.restate.admin))
+                .json(&json!({ "public": public }))
+                .send()
+                .await
+                .expect("modify service");
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            assert!(
+                (200..300).contains(&status),
+                "PATCH /services/{service} public={public} failed ({status}): {body}"
+            );
+        }
+    }
+
+    /// Waits until `sys_invocation` holds no invocation that is not completed.
+    async fn drain(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let in_flight = self
+                .sql("SELECT id, status FROM sys_invocation WHERE status <> 'completed'")
+                .await;
+            if in_flight.is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invocations still in flight: {in_flight:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 
@@ -685,6 +936,23 @@ impl Harness {
             )
             .await;
         assert_eq!(reply.status, 200, "get on {key}: {}", reply.body);
+        reply.body
+    }
+
+    /// `Szamlazz.Order.get` under `scope`.
+    async fn get_scoped(&self, scope: &str, key: &str) -> Value {
+        let reply = self
+            .invoke(
+                &format!("/restate/scope/{scope}/call/Szamlazz.Order/{key}/get"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(
+            reply.status, 200,
+            "get on {key} under {scope}: {}",
+            reply.body
+        );
         reply.body
     }
 
@@ -843,6 +1111,84 @@ impl Harness {
         self.mock.received_requests().await.expect("requests").len()
     }
 
+    /// The bodies of the create requests szamlazz.hu has seen so far.
+    async fn create_bodies(&self) -> Vec<String> {
+        self.mock
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .filter(|body| body.contains("name=\"action-xmlagentxmlfile\""))
+            .collect()
+    }
+
+    /// Waits until szamlazz.hu has seen at least `count` create requests: the
+    /// moment between two executions of a create step whose first lost its
+    /// reply, when a between-executions change can be made.
+    async fn wait_for_creates(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.create_bodies().await.len() >= count {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "szamlazz.hu did not see {count} create request(s)"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Every journal entry of every invocation the server still holds, with
+    /// `raw` hex-decoded, keyed by invocation id.
+    async fn all_journals(&self) -> BTreeMap<String, Vec<JournalEntry>> {
+        let rows = self
+            .sql("SELECT id, index, entry_type, name, raw FROM sys_journal ORDER BY id, index")
+            .await;
+        let mut journals: BTreeMap<String, Vec<JournalEntry>> = BTreeMap::new();
+        for row in &rows {
+            journals
+                .entry(row["id"].as_str().expect("id").to_owned())
+                .or_default()
+                .push(JournalEntry {
+                    index: row["index"].as_u64().expect("index"),
+                    entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
+                    name: row["name"].as_str().map(str::to_owned),
+                    raw: row["raw"]
+                        .as_str()
+                        .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
+                        .unwrap_or_default(),
+                });
+        }
+        journals
+    }
+
+    /// Every `sys_invocation` row the server still holds.
+    async fn all_invocations(&self) -> Vec<(String, Invocation)> {
+        let rows = self
+            .sql(
+                "SELECT id, status, completion_failure, scope, target_handler_name FROM sys_invocation ORDER BY id",
+            )
+            .await;
+        rows.iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().expect("id").to_owned(),
+                    Invocation {
+                        status: row["status"].as_str().unwrap_or_default().to_owned(),
+                        completion_failure: row["completion_failure"].as_str().map(str::to_owned),
+                        scope: row["scope"].as_str().map(str::to_owned),
+                        handler: row["target_handler_name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Mounts the code-7 answers for the external ids of `kinds` under
     /// `order`.
     async fn absent(&self, order: &str, kinds: &[&str]) {
@@ -864,7 +1210,9 @@ async fn e2e_order_protocol() {
         eprintln!("skipping: docker daemon not available");
         return;
     }
-    let h = Harness::start().await;
+    let mut h = Harness::start().await;
+
+    // Phase 1: the single-account deployment, unscoped.
     issued_then_already_issued(&h).await;
     idempotency_key_replays_without_calling_szamlazz(&h).await;
     duplicate_order_number_reconciles(&h).await;
@@ -880,6 +1228,14 @@ async fn e2e_order_protocol() {
     purged_invocation_queries_szamlazz_again(&h).await;
     flaky_resolver_is_retried_by_the_resolve_policy(&h).await;
     failing_credential_store_is_a_terminal_unavailable(&h).await;
+
+    // Phase 2: the flag day, then the multi-account deployment by scope.
+    flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
+    same_order_key_under_two_scopes_issues_on_both_accounts(&h).await;
+    purged_order_is_stornoed_and_reissued(&h).await;
+    account_change_between_executions_does_not_reach_the_invocation(&h).await;
+    credential_rotation_between_executions_is_picked_up(&h).await;
+    no_agent_key_in_any_journal_of_the_run(&h).await;
 }
 
 /// (i) create ⇒ `issued`; a second call with a **new** key ⇒
@@ -1823,5 +2179,590 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
     assert_eq!(issued["outcome"], "issued", "{issued}");
     eprintln!(
         "(xv) failing credential store → terminal unavailable, zero szamlazz.hu requests: pass"
+    );
+}
+
+// ----- phase 2: the flag day and the multi-account deployment ------------------
+
+/// (xvi) the single → multi flag day. While the services are private the
+/// ingress refuses a call without creating an invocation; after the drain
+/// and the switch — same namespace, the same szamlazz.hu account now under
+/// scope `acme` — the first scoped create for an order the single-account
+/// phase invoiced finds it under the unchanged external id
+/// (`already_issued`); an unscoped call on the multi-account deployment is
+/// `unknown_account` (400) with `namespace` and `account` journaled and
+/// nothing else, and zero szamlazz.hu requests.
+async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness) {
+    h.reset().await;
+
+    // Private: the ingress refuses the call itself; nothing reaches the
+    // handler or szamlazz.hu.
+    h.set_public(false).await;
+    let reply = h
+        .call(
+            "E2E-16",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-16-private",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "a private service: {}", reply.body);
+    assert_eq!(reply.invocation_id, None, "no invocation was created");
+    assert_eq!(h.requests_seen().await, 0);
+
+    h.switch_to_multi_account().await;
+
+    // The document issued unscoped in phase 1 (E2E-1 → SZ-2) is found by the
+    // first scoped create under `acme`: the external id did not change.
+    h.absent("E2E-1", &["prepayment", "proforma"]).await;
+    external_id_query("acct:E2E-1:invoice")
+        .respond_with(Doc::new("SZ-2", "SZ", "E2E-1").response())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_scoped(
+            "acme",
+            "E2E-1",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-1-scoped-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-2");
+    assert_eq!(reply.body["external_id"], "acct:E2E-1:invoice");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
+    let journal = h.journal(reply.invocation_id()).await;
+    let account = run_result(&journal, "account").expect("the account result");
+    assert!(
+        account.raw_contains("\"id\":\"acme\""),
+        "{:?}",
+        String::from_utf8_lossy(&account.raw)
+    );
+
+    // Unscoped on the multi-account deployment: refused before anything is
+    // issued, the resolution journaled as data.
+    h.reset().await;
+    let reply = h
+        .call(
+            "E2E-16",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-16-unscoped",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert!(fault.message.contains("unscoped"), "{fault:?}");
+    assert!(
+        fault.message.contains("/restate/scope/"),
+        "the fault tells the caller how to address an account: {fault:?}"
+    );
+    let runs: Vec<_> = h
+        .journal(reply.invocation_id())
+        .await
+        .into_iter()
+        .filter(JournalEntry::is_run)
+        .filter_map(|entry| entry.name)
+        .collect();
+    assert_eq!(runs, ["namespace", "account"], "{runs:?}");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.scope, None, "{invocation:?}");
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+
+    // A scope no account is reachable by is unknown the same way.
+    let reply = h
+        .call_scoped(
+            "gamma",
+            "E2E-16",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-16-gamma",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert!(fault.message.contains("gamma"), "{fault:?}");
+    assert_eq!(h.requests_seen().await, 0);
+    eprintln!(
+        "(xvi) flag day: private → drain → multi; scoped create finds the unscoped-phase document; unscoped → unknown_account: pass"
+    );
+}
+
+/// (xvii) the same order key under scopes `acme` and `beta`, concurrently and
+/// with the **same** `Idempotency-Key`: two Virtual Objects, two invocation
+/// ids, two documents, each account's own agent key on the wire exactly once
+/// — Restate namespaces the key and the idempotency identity per scope.
+async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-17", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-17")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_with_key(AGENT_KEY)
+        .respond_with(created("SZ-A17", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create_with_key(KEY_B)
+        .respond_with(created("SZ-B17", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let body = create_body(dec!(1000), false);
+    let (acme, beta) = tokio::join!(
+        h.call_scoped(
+            "acme",
+            "E2E-17",
+            "create_invoice",
+            &body,
+            "e2e-17-shared-key"
+        ),
+        h.call_scoped(
+            "beta",
+            "E2E-17",
+            "create_invoice",
+            &body,
+            "e2e-17-shared-key"
+        ),
+    );
+    assert_eq!(acme.status, 200, "{}", acme.body);
+    assert_eq!(beta.status, 200, "{}", beta.body);
+    assert_eq!(acme.body["outcome"], "issued", "{}", acme.body);
+    assert_eq!(beta.body["outcome"], "issued", "{}", beta.body);
+    assert_eq!(
+        acme.body["invoice_number"], "SZ-A17",
+        "acme's key issued acme's document"
+    );
+    assert_eq!(
+        beta.body["invoice_number"], "SZ-B17",
+        "beta's key issued beta's document"
+    );
+    assert_eq!(acme.body["external_id"], "acct:E2E-17:invoice");
+    assert_eq!(
+        beta.body["external_id"], "acct:E2E-17:invoice",
+        "the same namespace and order: the same external id on two szamlazz.hu accounts"
+    );
+    assert_ne!(
+        acme.invocation_id(),
+        beta.invocation_id(),
+        "the same Idempotency-Key under two scopes is two invocations"
+    );
+
+    let creates = h.create_bodies().await;
+    assert_eq!(creates.len(), 2, "one create per account");
+    for key in [AGENT_KEY, KEY_B] {
+        assert_eq!(
+            creates
+                .iter()
+                .filter(|body| body.contains(&format!("<szamlaagentkulcs>{key}</szamlaagentkulcs>")))
+                .count(),
+            1,
+            "{key} on the wire exactly once"
+        );
+    }
+    for (reply, scope, id) in [(&acme, "acme", "acme"), (&beta, "beta", "beta")] {
+        let invocation = h.invocation(reply.invocation_id()).await;
+        assert_eq!(invocation.scope.as_deref(), Some(scope), "{invocation:?}");
+        assert_eq!(invocation.status, "completed");
+        let journal = h.journal(reply.invocation_id()).await;
+        let account = run_result(&journal, "account").expect("the account result");
+        assert!(
+            account.raw_contains(&format!("\"id\":\"{id}\"")),
+            "{scope}: {:?}",
+            String::from_utf8_lossy(&account.raw)
+        );
+    }
+
+    // The same key again under each scope replays each scope's own completion.
+    let before = h.requests_seen().await;
+    let replay = h
+        .call_scoped(
+            "beta",
+            "E2E-17",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-17-shared-key",
+        )
+        .await;
+    assert_eq!(replay.status, 200, "{}", replay.body);
+    assert_eq!(replay.body["invoice_number"], "SZ-B17");
+    assert_eq!(replay.invocation_id(), beta.invocation_id());
+    assert_eq!(h.requests_seen().await, before, "a replay, not a call");
+    eprintln!(
+        "(xvii) same order key + same Idempotency-Key under two scopes → two invocations, two documents, each key once: pass"
+    );
+}
+
+/// (xviii) an order Restate has no memory of: `acme` issues an invoice, the
+/// invocation is purged; `storno_invoice` → `reversed` (its lookup finds the
+/// document by number on szamlazz.hu), purged; `create_invoice {reissue}` →
+/// `issued` as the newest holder of the same external id. Nothing but the
+/// order key and the scope was needed.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: issue, purge, storno, purge, reissue, get"
+)]
+async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-18", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-18")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_with_key(AGENT_KEY)
+        .respond_with(created("SZ-18", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let issued = h
+        .call_scoped(
+            "acme",
+            "E2E-18",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-18-k1",
+        )
+        .await;
+    assert_eq!(issued.status, 200, "{}", issued.body);
+    assert_eq!(issued.body["outcome"], "issued", "{}", issued.body);
+    h.purge(issued.invocation_id()).await;
+
+    // Storno: the invoice is verified by number and reversed.
+    h.reset().await;
+    number_query("SZ-18")
+        .respond_with(Doc::new("SZ-18", "SZ", "E2E-18").response())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-18:storno:SZ-18")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno()
+        .and(body_string_contains(format!(
+            "<szamlaagentkulcs>{AGENT_KEY}</szamlaagentkulcs>"
+        )))
+        .respond_with(created("SS-18", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reversed = h
+        .call_scoped(
+            "acme",
+            "E2E-18",
+            "storno_invoice",
+            &json!({ "invoice_number": "SZ-18" }),
+            "e2e-18-s1",
+        )
+        .await;
+    assert_eq!(reversed.status, 200, "{}", reversed.body);
+    assert_eq!(reversed.body["outcome"], "reversed", "{}", reversed.body);
+    assert_eq!(reversed.body["storno_number"], "SS-18");
+    h.purge(reversed.invocation_id()).await;
+    assert!(
+        h.journal(issued.invocation_id()).await.is_empty()
+            && h.journal(reversed.invocation_id()).await.is_empty(),
+        "Restate holds nothing of the order"
+    );
+
+    // Reissue: the lookup sees the reversed document and its storno; the
+    // create step issues the next one under the same id.
+    h.reset().await;
+    h.absent("E2E-18", &["prepayment", "proforma"]).await;
+    external_id_query("acct:E2E-18:invoice")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::new("SZ-18", "SZ", "E2E-18")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-18")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-18"),
+                ..Doc::new("SS-18", "SS", "E2E-18")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    create_with_key(AGENT_KEY)
+        .respond_with(created("SZ-18B", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reissued = h
+        .call_scoped(
+            "acme",
+            "E2E-18",
+            "create_invoice",
+            &create_body(dec!(1000), true),
+            "e2e-18-k2",
+        )
+        .await;
+    assert_eq!(reissued.status, 200, "{}", reissued.body);
+    assert_eq!(reissued.body["outcome"], "issued", "{}", reissued.body);
+    assert_eq!(reissued.body["invoice_number"], "SZ-18B");
+    assert_eq!(reissued.body["external_id"], "acct:E2E-18:invoice");
+
+    // The scoped live view sees the new holder.
+    h.reset().await;
+    h.absent("E2E-18", &["proforma", "prepayment", "final"])
+        .await;
+    external_id_query("acct:E2E-18:invoice")
+        .respond_with(Doc::new("SZ-18B", "SZ", "E2E-18").response())
+        .mount(&h.mock)
+        .await;
+    let status = h.get_scoped("acme", "E2E-18").await;
+    assert_eq!(status["invoice"]["number"], "SZ-18B", "{status}");
+    assert_eq!(status["invoice"]["state"], "live");
+    eprintln!("(xviii) purged order → storno → reversed; purged → reissue → issued: pass");
+}
+
+/// (xix) `acme`'s seller bank account changes between two executions of a
+/// create step (the first loses its reply): the second execution's create
+/// carries the **journaled** account's bank account — the invocation
+/// finishes on the account it started on — and only new invocations see the
+/// change.
+async fn account_change_between_executions_does_not_reach_the_invocation(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-19", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-19")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The first create with the journaled bank account loses its reply; the
+    // second, still with it, lands. The changed one never reaches the wire.
+    create_with_bank_account(BANK_ACCOUNT)
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create_with_bank_account(BANK_ACCOUNT)
+        .respond_with(created("SZ-19", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create_with_bank_account(BANK_ACCOUNT_CHANGED)
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+
+    let body = create_body(dec!(1000), false);
+    let call = h.call_scoped("acme", "E2E-19", "create_invoice", &body, "e2e-19-k1");
+    let change = async {
+        h.wait_for_creates(1).await;
+        h.multi().update("acme", |account| {
+            account.seller.bank_account = Some(BANK_ACCOUNT_CHANGED.to_owned());
+        });
+    };
+    let (reply, ()) = tokio::join!(call, change);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-19");
+    let creates = h.create_bodies().await;
+    assert_eq!(creates.len(), 2, "two executions of the create step");
+    assert!(
+        creates
+            .iter()
+            .all(|body| body.contains(&format!("<bankszamlaszam>{BANK_ACCOUNT}</bankszamlaszam>"))),
+        "both executions carry the journaled seller"
+    );
+    let journal = h.journal(reply.invocation_id()).await;
+    let account = run_result(&journal, "account").expect("the account result");
+    assert!(
+        account.raw_contains(BANK_ACCOUNT) && !account.raw_contains(BANK_ACCOUNT_CHANGED),
+        "{:?}",
+        String::from_utf8_lossy(&account.raw)
+    );
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|entry| entry.is_run() && entry.name.as_deref() == Some("account"))
+            .count(),
+        1,
+        "the re-execution replayed the account, it did not resolve again"
+    );
+
+    // A new invocation resolves the changed account.
+    h.reset().await;
+    h.absent("E2E-19B", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-19B")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_with_bank_account(BANK_ACCOUNT_CHANGED)
+        .respond_with(created("SZ-19B", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_scoped(
+            "acme",
+            "E2E-19B",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-19b-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    eprintln!("(xix) account change between executions → the journaled account wins: pass");
+}
+
+/// (xx) `beta`'s agent key is rotated between two executions of a create
+/// step (the first loses its reply): the second execution fetches the
+/// credentials again and carries the new key, while the journaled `account`
+/// entry is byte-identical before and after — credentials are never in it.
+async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-20", &["prepayment", "proforma", "invoice"])
+        .await;
+    order_query("E2E-20")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_with_key(KEY_B)
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create_with_key(KEY_B_V2)
+        .respond_with(created("SZ-20", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let body = create_body(dec!(1000), false);
+    let call = h.call_scoped("beta", "E2E-20", "create_invoice", &body, "e2e-20-k1");
+    let rotate = async {
+        // Rotate as soon as the first execution's create is seen — the
+        // re-execution is a second away — then read the `account` entry the
+        // first execution journaled while the invocation is still in flight.
+        h.wait_for_creates(1).await;
+        h.multi().rotate("beta", KEY_B_V2);
+        let invocations = h.all_invocations().await;
+        let (id, _) = invocations
+            .iter()
+            .find(|(_, invocation)| {
+                invocation.scope.as_deref() == Some("beta")
+                    && invocation.handler == "create_invoice"
+                    && invocation.status != "completed"
+            })
+            .expect("the in-flight invocation under beta");
+        let before = run_result(&h.journal(id).await, "account")
+            .expect("the account result while in flight")
+            .raw
+            .clone();
+        (id.clone(), before)
+    };
+    let (reply, (id, before)) = tokio::join!(call, rotate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-20");
+    assert_eq!(reply.invocation_id(), id);
+
+    let creates = h.create_bodies().await;
+    assert_eq!(creates.len(), 2, "two executions of the create step");
+    assert!(
+        creates[0].contains(&format!("<szamlaagentkulcs>{KEY_B}</szamlaagentkulcs>")),
+        "execution one carried the old key"
+    );
+    assert!(
+        creates[1].contains(&format!("<szamlaagentkulcs>{KEY_B_V2}</szamlaagentkulcs>")),
+        "execution two carried the rotated key"
+    );
+    let journal = h.journal(reply.invocation_id()).await;
+    let after = &run_result(&journal, "account")
+        .expect("the account result")
+        .raw;
+    assert_eq!(*after, before, "the journaled account is byte-identical");
+    assert!(
+        after
+            .windows(b"\"id\":\"beta\"".len())
+            .any(|w| w == b"\"id\":\"beta\"")
+    );
+    eprintln!(
+        "(xx) credential rotation between executions → new key on the wire, account entry unchanged: pass"
+    );
+}
+
+/// (xxi) the leak check over the whole run: the hex-decoded `raw` of every
+/// journal entry of every invocation the server holds, and every
+/// `completion_failure`, contain none of the agent keys the run put on the
+/// wire — while the scan does find the positive control's sentinel from
+/// (xii), so it reads real bytes.
+async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
+    const POSITIVE_CONTROL: &str = "SENTINEL-8f3a2c-LEAK-CONTROL";
+    let journals = h.all_journals().await;
+    let invocations = h.all_invocations().await;
+    assert!(
+        journals.len() >= 20 && invocations.len() >= journals.len(),
+        "the scan covers the run: {} journals, {} invocations",
+        journals.len(),
+        invocations.len()
+    );
+    let entries = journals.values().map(Vec::len).sum::<usize>();
+    assert!(entries >= 100, "{entries} journal entries");
+
+    let mut leaks = Vec::new();
+    for (id, journal) in &journals {
+        for entry in journal {
+            for key in AGENT_KEYS {
+                if entry.raw_contains(key) {
+                    leaks.push(format!(
+                        "{id} entry {} ({}, {:?}) contains {key}",
+                        entry.index, entry.entry_type, entry.name
+                    ));
+                }
+            }
+        }
+    }
+    for (id, invocation) in &invocations {
+        if let Some(failure) = &invocation.completion_failure {
+            for key in AGENT_KEYS {
+                if failure.contains(key) {
+                    leaks.push(format!("{id} completion_failure contains {key}"));
+                }
+            }
+        }
+    }
+    assert!(leaks.is_empty(), "agent keys in Restate: {leaks:#?}");
+
+    assert!(
+        journals
+            .values()
+            .flatten()
+            .any(|entry| entry.raw_contains(POSITIVE_CONTROL)),
+        "the positive control's sentinel is found by the same scan"
+    );
+    let scoped = invocations
+        .iter()
+        .filter(|(_, invocation)| invocation.scope.is_some())
+        .count();
+    assert!(scoped >= 8, "{scoped} scoped invocations were scanned");
+    eprintln!(
+        "(xxi) no agent key in {entries} journal entries of {} invocations ({scoped} scoped); positive control found: pass",
+        invocations.len()
     );
 }

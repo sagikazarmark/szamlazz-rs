@@ -25,9 +25,9 @@ docker run --rm -p 9080:9080 \
 
 ## Prerequisite
 
-The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON**. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id query inside every execution of the create step is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
+The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON** on every account the deployment issues for. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id query inside every execution of the create step is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
 
-One deployment serves one szamlazz.hu account. A second account is a second deployment with its own `Szamlazz.Order` service.
+One deployment serves one szamlazz.hu account unscoped (`[account]`) **or** any number of accounts selected per request by the Restate scope (`[accounts.<scope>]`); see [Multi-account mode](#multi-account-mode).
 
 ## Configuration
 
@@ -90,6 +90,60 @@ Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `
 
 The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is not supported and fails to load with an error naming the moved keys.
 
+## Multi-account mode
+
+Several szamlazz.hu accounts in one deployment, selected per request by the **Restate scope**: the caller addresses `/restate/scope/{scope}/call/Szamlazz.Order/{order}/{handler}` (and `/restate/scope/{scope}/call/Szamlazz.Agent/{handler}`), and the worker resolves the scope to the account configured under `[accounts.<scope>]`. Restate namespaces the Virtual Object key and the `Idempotency-Key` per scope, so two accounts' orders never share a lock or a stored response — the same order number under two scopes is two `Szamlazz.Order` instances. The scope is the only channel for the account: no header, body field or key prefix selects it.
+
+```toml
+namespace = "acct"            # one namespace for the deployment; every account's external ids share it
+
+[accounts.acme]               # reachable as /restate/scope/acme/call/…
+id = "acme"
+agent_key = "..."             # prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
+supplier_id = 972720          # REQUIRED in this shape
+mode = "live"
+
+[accounts.acme.seller]
+bank_account = "..."
+
+[accounts.beta_events]        # reachable as /restate/scope/beta_events/call/…
+id = "beta"
+agent_key = "..."             # prefer RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__AGENT_KEY
+supplier_id = 972721
+```
+
+`[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: a missing `supplier_id` (the only server-side account identity the worker can validate a found document against), two accounts sharing a `supplier_id`, two sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
+
+**Scope format.** The static resolver's scope keys are `[a-z0-9_]`, 1–36 bytes — a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`, non-empty, at most 36 bytes; a dashed UUID is exactly 36), chosen so that environment overrides can address them (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the constraint on the account identifiers your application uses as scopes with this binary; a deployment with its own `AccountResolver` may use Restate's full format.
+
+**The scope is routing, not authorization.** Anyone who can reach the ingress under a scope issues on that account. Put the ingress behind a gateway that sets the scope from the authenticated identity, never forwards a caller-supplied scope path, and strips `x-restate-*` request headers. Kafka ingress arrives unscoped and is unsupported in this mode.
+
+### Single → multi flag day
+
+Going from `[account]` to `[accounts.<scope>]` is a configuration change plus a caller change, with **no data migration**: the namespace stays, so the first scoped create for an already-invoiced order finds its document under the unchanged external id. What must not happen is one szamlazz.hu account being reachable under two identities at once (unscoped *and* under its scope), which would split an order's lock across two Virtual Objects — so drain first, switch, then resume. Scripted against the admin API (`:9070`) and the `restate` CLI:
+
+```sh
+# 1. Make both services private: the ingress refuses new calls (400) without creating invocations.
+curl -X PATCH localhost:9070/services/Szamlazz.Order -H 'content-type: application/json' -d '{"public": false}'
+curl -X PATCH localhost:9070/services/Szamlazz.Agent -H 'content-type: application/json' -d '{"public": false}'
+
+# 2. Drain: wait until nothing is in flight (the SQL introspection API; the same query the e2e harness polls).
+until [ "$(curl -s localhost:9070/query -H 'accept: application/json' -H 'content-type: application/json' \
+      -d '{"query": "SELECT count(*) AS n FROM sys_invocation WHERE status <> '"'"'completed'"'"'"}' | jq -r '.rows[0].n')" = "0" ]; do sleep 2; done
+
+# 3. Switch the configuration — keep `namespace`; move the account under `[accounts.<scope>]` and add `supplier_id` —
+#    and register the new revision (a new deployment URI; the old revision serves nothing once drained).
+restate deployments register http://host:9081
+
+# 4. Point callers at scoped paths: /restate/scope/{scope}/call/Szamlazz.Order/{order}/{handler}.
+
+# 5. Make the services public again.
+curl -X PATCH localhost:9070/services/Szamlazz.Order -H 'content-type: application/json' -d '{"public": true}'
+curl -X PATCH localhost:9070/services/Szamlazz.Agent -H 'content-type: application/json' -d '{"public": true}'
+```
+
+The same drain–switch–resume procedure applies to any change of the scope → account mapping. The mapping is append-only: moving traffic to another szamlazz.hu account means a new scope, never re-pointing an existing one. The end-to-end suite performs this flag day on a live Restate server (`tests/service.rs`, phase 2).
+
 ## Running
 
 ```sh
@@ -126,7 +180,7 @@ Every handler takes and returns JSON; the discovery manifest carries JSON Schema
 | `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. |
 | `Szamlazz.Agent.storno` | Reverses an invoice that no `Szamlazz.Order` manages; a document carrying an order number is answered with `managed_by_order` instead. |
 
-A create request through the ingress (`/restate/call/{service}/{key}/{handler}`):
+A create request through the ingress (`/restate/call/{service}/{key}/{handler}`; on a multi-account deployment `/restate/scope/{scope}/call/{service}/{key}/{handler}`):
 
 ```sh
 curl localhost:8080/restate/call/Szamlazz.Order/ORD-1001/create_invoice \
@@ -154,7 +208,7 @@ curl localhost:8080/restate/call/Szamlazz.Order/ORD-1001/create_invoice \
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
 | `invalid_input` | 400 | The request is malformed or names a document szamlazz.hu does not know. | Fix the request. |
-| `unknown_account` | 400 | The request names no account of this deployment: it arrived under a scope (`/restate/scope/{scope}/call/…`) on this single-account deployment, which serves its account unscoped only. Nothing was issued. | Call unscoped (`/restate/call/…`); do not retry as is. |
+| `unknown_account` | 400 | The request names no account of this deployment: it arrived unscoped on a multi-account deployment (`[accounts.<scope>]`, which serves accounts by scope only), or under a scope no account is reachable by — on a single-account deployment (`[account]`, served unscoped only), any scope. Nothing was issued. | Fix the address — `/restate/scope/{scope}/call/…` with a configured scope, or `/restate/call/…` on a single-account deployment; do not retry as is. |
 | `account_mismatch` | 409 | A document carrying this order's number belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ). | Check `account.mode` / `account.supplier_id`; do not retry blindly. |
 | `outcome_unknown` | 500 | The create or storno step ran out of its `[issue]` policy while a document may or may not have been issued. | Retry with a new `Idempotency-Key` or read `get`. |
 | `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent — or the worker's own account resolver or credential store could not answer. | Retry with a new `Idempotency-Key` later. |

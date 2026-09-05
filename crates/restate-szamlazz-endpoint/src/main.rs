@@ -81,10 +81,11 @@ async fn main() -> Result<()> {
 }
 
 /// Wires the configuration into the two services and binds them to one
-/// endpoint: the static resolver over `[account]` is the `Accounts` bundle
-/// both services hold beside the deployment-level `WorkerConfig`. Logs what
-/// was bound — the resolved account's id, mode, endpoint and supplier pin —
-/// never the agent key.
+/// endpoint: the static resolver over `[account]` or `[accounts.<scope>]` is
+/// the `Accounts` bundle both services hold beside the deployment-level
+/// `WorkerConfig`. Logs what was bound — the namespace, the shape, and each
+/// resolved account's scope, id, mode, endpoint and supplier pin — never an
+/// agent key.
 fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     let EndpointConfig {
         worker,
@@ -93,15 +94,22 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     } = config;
 
     let resolver = StaticResolver::try_from(accounts).context("invalid account configuration")?;
-    let account = resolver.account();
     tracing::info!(
         namespace = %worker.namespace,
-        account = %account.id,
-        mode = ?account.mode,
-        endpoint = %account.endpoint,
-        supplier_id = ?account.supplier_id,
+        scoped = resolver.is_scoped(),
+        accounts = resolver.accounts().count(),
         "loaded szamlazz.hu account configuration"
     );
+    for (scope, account) in resolver.accounts() {
+        tracing::info!(
+            scope = scope.unwrap_or("<unscoped>"),
+            account = %account.id,
+            mode = ?account.mode,
+            endpoint = %account.endpoint,
+            supplier_id = ?account.supplier_id,
+            "szamlazz.hu account"
+        );
+    }
 
     let accounts = Accounts::from(resolver);
     let order = Order::from_parts(accounts.clone(), worker.clone());

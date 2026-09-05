@@ -82,7 +82,13 @@ What it relies on:
   its `Account` in a durable step named `account` under the resolve policy, so an invocation finishes on the
   account it started on; the journaled `Account` (visible in the Restate UI for the retention period) carries
   everything but the agent key. Unscoped and unknown scopes are `unknown_account` (400) before anything is
-  issued; the static resolver's single `[account]` is served unscoped and knows no scope.
+  issued. The **scope** is the only channel for the account — never a header, a body field or the key — and it is
+  routing, not authorization: the ingress sits behind a gateway that sets it from the authenticated identity.
+- **One szamlazz.hu account under exactly one scope, no fan-in; the mapping append-only.** Unscoped counts as a
+  scope value. Two scopes reaching one account would split an order's per-key lock across two Virtual Objects.
+  The static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape
+  is served by scope only and is checked at load time (a `supplier_id` on every account, unique supplier ids,
+  unique `(endpoint, agent_key)` pairs, unique ids); a resolver of your own must guarantee it itself.
 - **Credentials are fetched on every handler execution, outside the journal**, and held only for that
   execution — a rotation is picked up on the next execution of every in-flight invocation, and no agent key is
   ever written into Restate (the `Credentials` type has no serde implementation). A failed fetch is a
@@ -147,9 +153,11 @@ activation details.
   `config::Secret`, whose `Debug` output is redacted.
 - `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`, `StaticConfig`: one
   szamlazz.hu account as the worker knows it (never its key), the bundle of the two pluggable traits both services
-  hold, and the configuration-backed implementation of both — `StaticConfig` is `[account]` (`id`, `agent_key`,
-  `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`), `StaticResolver::try_from` validates it, and
-  `Accounts::from` bundles it as resolver and store.
+  hold, and the configuration-backed implementation of both. `StaticConfig` is either `[account]` (`id`,
+  `agent_key`, `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`; reachable unscoped) or a table of
+  `[accounts.<scope>]` (the same fields, `supplier_id` required; each reachable under its scope only, keys
+  `[a-z0-9_]` of at most 36 bytes so environment overrides can address them) — never both. `StaticResolver::try_from`
+  validates it, and `Accounts::from` bundles it as resolver and store.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
   `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome
@@ -267,12 +275,22 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
-  for szamlazz.hu — issued → already_issued, `Idempotency-Key` replay, 152 → reconciled, storno → reversed → stale
-  create → `reissue`, `reissue` on live → `conflict{live}`, an external reversal, proforma auto-link and `consumed`
-  in `get`, an exhausted create step answering a structured `outcome_unknown` within the run policy's delays with
-  the run's retries visible on `sys_invocation` while it is in flight, a scoped call reaching the handlers, a purged
-  invocation querying szamlazz.hu again, and a positive control for the journal-leak check (a sentinel in a
-  szamlazz.hu rejection is found in the hex-decoded `raw` of the create run's result). The harness calls through
+  for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued, `Idempotency-Key`
+  replay, 152 → reconciled, storno → reversed → stale create → `reissue`, `reissue` on live → `conflict{live}`, an
+  external reversal, proforma auto-link and `consumed` in `get`, an exhausted create step answering a structured
+  `outcome_unknown` within the run policy's delays with the run's retries visible on `sys_invocation` while it is in
+  flight, a scoped call answered `unknown_account` with zero szamlazz.hu requests, a purged invocation querying
+  szamlazz.hu again, a flaky resolver retried under the resolve policy, a failing credential store as a terminal
+  `unavailable`, and a positive control for the journal-leak check (a sentinel in a szamlazz.hu rejection is found in
+  the hex-decoded `raw` of the create run's result). Then the documented single → multi **flag day** (private,
+  drain, register the multi-account revision, public) and the multi-account phase: the first scoped create for an
+  order invoiced unscoped finds it under the unchanged external id; unscoped → `unknown_account`; the same order key
+  under two scopes concurrently with the same `Idempotency-Key` → two invocations and two documents with each
+  account's key on the wire exactly once; an order whose invocations were purged stornoed and reissued; an account
+  change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
+  rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that
+  no agent key of the run appears in the hex-decoded `raw` of any journal entry of any invocation, nor in any
+  `completion_failure`, while the same scan finds the positive control's sentinel. The harness calls through
   `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses fault bodies and reads
   `sys_journal` / `sys_invocation` through the SQL introspection API. It skips with a message when the docker
   daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server (which must

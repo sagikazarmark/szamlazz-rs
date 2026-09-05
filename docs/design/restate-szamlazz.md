@@ -10,8 +10,9 @@ can say "issue the invoice for order X" and get exactly one legal document under
 concurrent callers and reversals — with a JSON API that is a *projection* of the Agent model: deployment constants
 moved to config, line totals computed, one handler per document kind, no PDF.
 
-Non-goals for v1: PDF download, receipts, taxpayer query, IPN / Adatkapcsolat ingestion, the proforma → payment →
-invoice lifecycle workflow, multiple szamlazz.hu accounts in one deployment.
+Non-goals: PDF download, receipts, taxpayer query, IPN / Adatkapcsolat ingestion, the proforma → payment → invoice
+lifecycle workflow. Several szamlazz.hu accounts in one deployment, selected per request by the Restate scope, are in
+scope since #20 (§9, §11).
 
 ## 2. Crates
 
@@ -362,6 +363,41 @@ invariants (`max_attempts ≥ 1`, `initial_delay ≤ max_delay`, `factor ≥ 1` 
 (`account.slug`, top-level `[defaults]` / `[seller]`) is refused by name — the crate has never been released, there
 is no compatibility shim.
 
+**Multi-account shape.** Instead of `[account]`, a table of `[accounts.<scope>]` with the same fields; the two are
+mutually exclusive (both present is a load error) and there is no default account. Each account is reachable under
+its scope only (`/restate/scope/{scope}/call/…`); an unscoped request is `unknown_account`, as a scoped request is on
+the single-account shape. Load-time validation enforces the checkable half of the resolver's safety contract — one
+szamlazz.hu account under exactly one scope, no fan-in: `supplier_id` required on every account (the only
+server-side account identity), unique supplier ids, unique `(endpoint, agent_key)` pairs, unique ids (the credential
+reference). Scope keys are `[a-z0-9_]`, 1–36 bytes: a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`,
+non-empty, ≤ 36 bytes — a dashed UUID is exactly 36) chosen so that environment overrides can address them
+(`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the documented constraint
+on the account identifiers a caller uses as scopes with the static resolver. The namespace is one per deployment and
+shared by every account.
+
+```toml
+namespace = "acct"
+
+[accounts.acme]
+id = "acme"
+agent_key = "..."
+supplier_id = 972720          # required
+
+[accounts.beta_events]
+id = "beta"
+agent_key = "..."
+supplier_id = 972721
+```
+
+**Single → multi flag day** (no data migration; the namespace stays, so the first scoped create for an
+already-invoiced order finds it under the unchanged external id): make both services private
+(`PATCH /services/{name} {"public": false}` — the ingress refuses new calls without creating invocations), poll
+`sys_invocation` until no row has `status <> 'completed'`, register the new revision with the switched configuration
+(a new deployment URI), point callers at scoped paths, make the services public. The drain is what keeps one
+szamlazz.hu account from being reachable unscoped and under its scope at the same time. The same drain–switch–resume
+applies to any change of the scope → account mapping, which is append-only. Scripted in the endpoint README and
+performed by the e2e suite (§11).
+
 There is no `detect_foreign`: the order-number hint runs on every lookup except for correctives.
 
 Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `due_date`, `payment_method`, `paid`,
@@ -410,6 +446,22 @@ supplier id — never the key.
   text never echoing the resolver's message) within the resolve policy's delays, and still one `account` entry; a
   store that fails every fetch → 503 `unavailable` after three fetches, zero szamlazz.hu requests, and the same
   order issuing once the store is back.
+  Then, on the same server, the **flag day** and the **multi-account phase** (two accounts behind a test-local
+  mutable resolver and store seeded from the static resolver's `[accounts.<scope>]` shape: `acme` is the phase-1
+  account — same key, same supplier id — and `beta` a second one): while private the ingress answers 400 with no
+  invocation; after the drain and the switch the first scoped create for the order phase 1 invoiced →
+  `already_issued` under the unchanged external id; unscoped → 400 `unknown_account` naming the scoped path, with
+  `namespace` and `account` journaled and zero szamlazz.hu requests, and an unknown scope likewise; the same order
+  key under `acme` and `beta` concurrently with the **same** `Idempotency-Key` → two invocation ids, two `issued`
+  with each account's own key on the wire exactly once (and the key replaying each scope's own completion);
+  `create_invoice` → purge → `storno_invoice` → `reversed` → purge → `create_invoice {reissue}` → `issued` on an order
+  Restate holds nothing of, then the scoped `get` seeing the new holder; `acme`'s seller bank account changed between
+  two executions of a create step (the first loses its reply) → both executions carry the journaled bank account
+  and only a new invocation sees the change; `beta`'s key rotated between two executions → the second carries the
+  new key while the `account` entry read in flight and after completion is byte-identical; and, over every
+  `sys_journal` row of every invocation the server holds (hex-decoded `raw`) plus every
+  `sys_invocation.completion_failure`, none of the three agent keys of the run — while the same scan finds the
+  positive control's sentinel.
   The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH
