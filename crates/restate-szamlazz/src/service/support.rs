@@ -2,8 +2,6 @@
 //! fault → `TerminalError` mapping, journaled runs and the validation of
 //! documents found under our external ids.
 
-use std::time::Duration;
-
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
@@ -135,11 +133,6 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
 }
 
-/// The next backoff of a doubling schedule capped at `max`.
-pub(super) fn next_backoff(current: Duration, max: Duration) -> Duration {
-    current.saturating_mul(2).min(max)
-}
-
 /// What a query by one of our external ids found (design §3).
 ///
 /// Every caller matches all three variants: an issuing handler refuses a
@@ -203,11 +196,8 @@ macro_rules! journal_helpers {
             use std::error::Error as StdError;
             use std::future::Future;
             use std::sync::Arc;
-            use std::time::Duration;
 
-            use restate_sdk::context::{
-                ContextSideEffects as _, ContextTimers as _, RunFuture as _, RunRetryPolicy,
-            };
+            use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
             use restate_sdk::errors::{HandlerError, TerminalError};
             use restate_sdk::prelude::$ctx;
             use restate_sdk::serde::Json;
@@ -217,7 +207,9 @@ macro_rules! journal_helpers {
             use super::{Fault, Lookup};
             use crate::config::Namespace;
             use crate::contract::{IssuedKind, Selector};
-            use crate::gateway::{Gateway, InvoiceDocumentExt as _, QueryOutcome};
+            use crate::gateway::{
+                Gateway, InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome,
+            };
             use crate::identity::{ExternalId, OrderKey};
 
             /// Journals the result of `f` under `name`, executing it at most
@@ -271,17 +263,6 @@ macro_rules! journal_helpers {
                     .retry_policy(policy)
                     .await?;
                 Ok(value)
-            }
-
-            /// Durable sleep; a zero duration is skipped.
-            pub(in crate::service) async fn sleep(
-                ctx: &$ctx<'_>,
-                duration: Duration,
-            ) -> Result<(), HandlerError> {
-                if !duration.is_zero() {
-                    ctx.sleep(duration).await?;
-                }
-                Ok(())
             }
 
             /// Journaled query of document `number` (a verify).
@@ -353,6 +334,23 @@ macro_rules! journal_helpers {
                 let gateway = Arc::clone(gateway);
                 let order = order.clone();
                 run_once(ctx, name, move || async move { gateway.hint(&order).await }).await
+            }
+
+            /// The storno lookup step (design §6 step 2): one read-only
+            /// journaled query of the storno external id.
+            pub(in crate::service) async fn lookup_storno(
+                ctx: &$ctx<'_>,
+                gateway: &Arc<Gateway>,
+                external_id: &ExternalId,
+                number: &str,
+            ) -> Result<StornoLookupOutcome, HandlerError> {
+                let gateway = Arc::clone(gateway);
+                let external_id = external_id.clone();
+                let number = number.to_owned();
+                run_once(ctx, format!("lookup-storno-{number}"), move || async move {
+                    gateway.lookup_storno(&external_id, &number).await
+                })
+                .await
             }
 
             /// The storno number of a reversed document, when the order-number

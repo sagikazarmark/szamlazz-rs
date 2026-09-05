@@ -124,12 +124,12 @@ activation details.
   `max_delay`, `max_duration`). Secrets are `config::Secret`, whose `Debug` output is redacted. `account.slug` is
   the `config::Namespace` — the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`. `WorkerConfig`
   (`namespace`, `issue`) is the deployment-level part the services hold; `IssueConfig::run_retry_policy` is the
-  create step's `RunRetryPolicy`.
+  `RunRetryPolicy` of the create and storno steps.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
-  `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome as data; `create`
-  alone returns `Err(Unconfirmed)` for an outcome that is *not* known, which is what its run retry policy
-  re-executes. It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
+  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome
+  as data; `create` and `storno` alone return `Err(Unconfirmed)` for an outcome that is *not* known, which is what
+  their run retry policy re-executes. It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
   configuration by the services goes through `Gateway::account()`. `Szamlazz.Order` calls it inside `ctx.run`; the
   `Szamlazz.Agent` Restate service is a thin facade over the same instance. No Restate service calls another.
 - `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
@@ -219,7 +219,9 @@ sends nothing. A lost reply is re-queried once, immediately; when nothing landed
 Restate re-executes it after the delay. When the policy is exhausted (or the invocation is cancelled mid-create)
 the handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next
 invocation's lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number
-answer their re-query cannot resolve is `rejected`.
+answer their re-query cannot resolve is `rejected`. Storno has the same shape: a read-only lookup of the storno
+external id (`lookup-storno-{number}`) and a storno step (`storno-{number}`) under the same issue policy, query-first
+on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
 
 ## Testing
 
@@ -227,8 +229,9 @@ answer their re-query cannot resolve is `rejected`.
   tests of the adapters, and the wiremock tests of the gateway against synthetic szamlazz.hu responses
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
   exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
-  `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — plus storno validation including the
-  proforma / delivery-note no-op, 335, 7, and the credential codes 3/135/136/164 on every operation).
+  `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — the storno lookup and step — `AlreadyReversed`
+  on a re-executed step, a lost reply re-queried once, `Unconfirmed` when nothing landed — plus storno validation
+  including the proforma / delivery-note no-op, 335, 7, and the credential codes 3/135/136/164 on every operation).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   end to end against a real Restate server in docker with wiremock standing in for szamlazz.hu — issued →
   already_issued, `Idempotency-Key` replay, 152 → reconciled, storno → reversed → stale create → `reissue`,

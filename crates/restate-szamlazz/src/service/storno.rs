@@ -8,20 +8,29 @@ use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::Order;
-use super::support::{Fault, Lookup, next_backoff, order_key};
+use super::support::{Fault, Lookup, order_key};
 use super::support::{object, shared};
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
     DocumentStatus, IssuedKind, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    DeleteOutcome, InvoiceDocumentExt as _, QueryOutcome, StornoAttempt,
+    DeleteOutcome, InvoiceDocumentExt as _, QueryOutcome, StornoAttempt, StornoLookupOutcome,
     StornoOutcome as GatewayStorno, issued_kind_of,
 };
 use crate::identity::{ExternalId, OrderKey};
 
-/// Storno re-send attempts per invocation (design §6 step 2).
-const STORNO_ATTEMPTS: u32 = 3;
+/// What the storno step sends, settled by the verify step.
+struct StornoIntent {
+    /// The kind of the invoice being reversed, for the fault's identity.
+    kind: Option<IssuedKind>,
+    /// The invoice to reverse.
+    number: String,
+    /// `{namespace}:{order}:storno:{number}`.
+    storno_id: ExternalId,
+    comment: Option<String>,
+    e_invoice: bool,
+}
 
 impl Order {
     // ----- storno_invoice (§6) ---------------------------------------------
@@ -48,80 +57,105 @@ impl Order {
             ControlFlow::Continue(found) => found,
             ControlFlow::Break(response) => return Ok(response),
         };
+        let kind = issued_kind_of(&found.info.document_type);
         let e_invoice = found
             .e_invoice()
             .unwrap_or(gateway.account().defaults.e_invoice);
+        let intent = StornoIntent {
+            kind,
+            number: number.clone(),
+            storno_id,
+            comment,
+            e_invoice,
+        };
 
-        // Step 2: the query-first re-send loop.
-        let mut backoff = self.config.issue.initial_delay;
-        for attempt in 1..=STORNO_ATTEMPTS {
-            let outcome = {
-                let gateway = Arc::clone(gateway);
-                let number = number.clone();
-                let storno_id = storno_id.clone();
-                let comment = comment.clone();
-                object::run_once(
-                    ctx,
-                    format!("storno-{number}-{attempt}"),
-                    move || async move {
-                        gateway
-                            .storno(StornoAttempt {
-                                invoice_number: &number,
-                                external_id: &storno_id,
-                                comment: comment.as_deref(),
-                                e_invoice,
-                            })
-                            .await
-                    },
-                )
-                .await?
-            };
-            // Step 3.
-            return Ok(match outcome {
-                GatewayStorno::Reversed(storno) => {
-                    StornoResponse::new(StornoOutcome::Reversed, number)
-                        .with_storno_number(storno.invoice_number.as_str())
-                }
-                GatewayStorno::AlreadyReversed { storno_number } => {
-                    StornoResponse::new(StornoOutcome::Reversed, number)
-                        .with_storno_number(storno_number)
-                }
-                GatewayStorno::NotStornoable => not_stornoable(number),
-                GatewayStorno::Rejected { code, message } => {
-                    StornoResponse::new(StornoOutcome::Rejected, number)
-                        .with_code(code)
-                        .with_message(message)
-                }
-                GatewayStorno::CredentialsRejected { code, message } => {
-                    return Err(Fault::credentials_rejected(namespace, code, message)
-                        .about(
-                            &order,
-                            issued_kind_of(&found.info.document_type),
-                            storno_id.as_str(),
-                        )
-                        .into());
-                }
-                GatewayStorno::Unknown { .. } | GatewayStorno::Transport(_) => {
-                    if attempt < STORNO_ATTEMPTS {
-                        object::sleep(ctx, backoff).await?;
-                        backoff = next_backoff(backoff, self.config.issue.max_delay);
-                    }
-                    continue;
-                }
-            });
+        // Step 2: lookup — a storno of ours already under the id.
+        match object::lookup_storno(ctx, gateway, &intent.storno_id, &number).await? {
+            StornoLookupOutcome::Absent => {}
+            StornoLookupOutcome::AlreadyReversed { storno_number } => {
+                return Ok(StornoResponse::new(StornoOutcome::Reversed, number)
+                    .with_storno_number(storno_number));
+            }
+            StornoLookupOutcome::CredentialsRejected { code, message } => {
+                return Err(Fault::credentials_rejected(namespace, code, message)
+                    .about(&order, kind, intent.storno_id.as_str())
+                    .into());
+            }
+            StornoLookupOutcome::Transport(message) => {
+                return Err(Fault::unavailable(message)
+                    .about(&order, kind, intent.storno_id.as_str())
+                    .into());
+            }
         }
 
-        // Exhausted: the next call is safe — step 1 and the storno pre-query
-        // find the storno if it landed.
-        Err(Fault::outcome_unknown(format!(
-            "{STORNO_ATTEMPTS} storno attempts exhausted without confirmation; retry with a new Idempotency-Key"
-        ))
-        .about(
-            &order,
-            issued_kind_of(&found.info.document_type),
-            storno_id.as_str(),
+        // Step 3: the storno step, under the issue policy.
+        let outcome = self.storno_step(ctx, &order, &intent).await?;
+
+        // Step 4: branch on data.
+        Ok(match outcome {
+            GatewayStorno::Reversed(storno) => StornoResponse::new(StornoOutcome::Reversed, number)
+                .with_storno_number(storno.invoice_number.as_str()),
+            GatewayStorno::AlreadyReversed { storno_number } => {
+                StornoResponse::new(StornoOutcome::Reversed, number)
+                    .with_storno_number(storno_number)
+            }
+            GatewayStorno::NotStornoable => not_stornoable(number),
+            GatewayStorno::Rejected { code, message } => {
+                StornoResponse::new(StornoOutcome::Rejected, number)
+                    .with_code(code)
+                    .with_message(message)
+            }
+            GatewayStorno::CredentialsRejected { code, message } => {
+                return Err(Fault::credentials_rejected(namespace, code, message)
+                    .about(&order, kind, intent.storno_id.as_str())
+                    .into());
+            }
+        })
+    }
+
+    /// Step 3: one durable step under the issue policy's run retry policy,
+    /// query-first on every execution (the query is inside the closure: a
+    /// separate journaled pre-query would replay its stale "nothing" on the
+    /// retry and re-send). Any `Err` from the run — exhaustion (500) or
+    /// cancellation (409) — is `outcome_unknown` about this storno: nothing
+    /// is recorded, the next invocation's verify and lookup find whatever
+    /// landed.
+    async fn storno_step(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        intent: &StornoIntent,
+    ) -> Result<GatewayStorno, HandlerError> {
+        let gateway = Arc::clone(&self.gateway);
+        let number = intent.number.clone();
+        let external_id = intent.storno_id.clone();
+        let comment = intent.comment.clone();
+        let e_invoice = intent.e_invoice;
+        object::run_retrying(
+            ctx,
+            format!("storno-{}", intent.number),
+            self.config.issue.run_retry_policy(),
+            move || async move {
+                gateway
+                    .storno(StornoAttempt {
+                        invoice_number: &number,
+                        external_id: &external_id,
+                        comment: comment.as_deref(),
+                        e_invoice,
+                    })
+                    .await
+            },
         )
-        .into())
+        .await
+        .map_err(|error| {
+            Fault::outcome_unknown(format!(
+                "the storno step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
+                error.code(),
+                error.message()
+            ))
+            .about(order, intent.kind, intent.storno_id.as_str())
+            .into()
+        })
     }
 
     /// Step 1 of the storno protocol: the document must be known, carry this

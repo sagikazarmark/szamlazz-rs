@@ -92,6 +92,16 @@ above the ≈ 39 minutes five attempts at `2m → 10m` take). No propagation-lag
 the closure: read-your-writes lag by external id is measured at ≈ 0 (behaviour notes), so the one
 immediate re-query after an open outcome is enough, and "nothing" means nothing.
 
+## Amended (#30): the storno step under the same policy
+
+Storno had kept a hand-rolled loop (three `run_once` attempts, a durable sleep, a doubling backoff read
+off `issue.initial_delay` / `max_delay`). It now has the shape of the create: a read-only lookup step
+(`lookup-storno-{number}`) and one `ctx.run` (`storno-{number}`) under the same issue policy, query-first
+inside the closure, `Err(Unconfirmed)` only for an unknown answer, exhaustion mapped to
+`outcome_unknown{order, kind, external_id}` — on `Szamlazz.Order.storno_invoice` and on
+`Szamlazz.Agent.storno` alike. The issue policy is now the only retry envelope in the crate; no attempt
+counter or sleep remains.
+
 ## Consequences
 
 - Kill is safe because there is nothing to compensate: the external-id query inside the create

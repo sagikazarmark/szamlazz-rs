@@ -201,6 +201,9 @@ impl Restate {
                 "run",
                 "--rm",
                 "-d",
+                // Docker Desktop resolves `host.docker.internal` on its own;
+                // a Linux daemon needs the alias to reach the endpoint.
+                "--add-host=host.docker.internal:host-gateway",
                 "-p",
                 &format!("{INGRESS_PORT}:8080"),
                 "-p",

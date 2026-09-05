@@ -89,13 +89,13 @@ inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   id
 |---|---|---|
 | `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected` |
 | `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
-| `storno` | `StornoRequest` → `StornoResponse` | query first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else storno with ext id `"{namespace}:by-number:{number}:storno"`; 3/135/136/164 → `credentials_rejected` |
+| `storno` | `StornoRequest` → `StornoResponse` | verify first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the storno step under the issue policy; exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
 Steps 0–2 and the lookup are `ctx.run`s with `RunRetryPolicy::max_attempts(1)` whose expected outcomes are data. The
 create step is the one `ctx.run` under a retry policy — the **issue policy** (§9) — because it is the one step whose
-outcome can be *unknown*.
+outcome can be *unknown*. The storno step (§6) is the other write step and runs under the same policy.
 
 0. **Validate (pure).** Order key from `ctx.key()`. Validate buyer, items (≥ 1), dates. Normalise `buyer.name`.
    Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
@@ -189,24 +189,42 @@ corrective by contract.
 ## 6. Storno protocol (`Szamlazz.Order.storno_invoice`)
 
 Storno is natively idempotent on the server (a repeat echoes the existing storno — verified) and an external id on
-the storno request attaches to the storno document (verified).
+the storno request attaches to the storno document (verified). It has the shape of issuing (§5): a read-only lookup
+step and one write step under the issue policy, query-first on every execution.
 
-1. `ctx.run(verify number)`: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
-   `Szamlazz.Agent.storno`); `sztornozott == Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno
-   number via the hint when the newest document is the matching `SS`); `tipus ∉ {SZ, ES, VS, HS}` → `rejected{not_stornoable}`.
-2. Loop ≤ 3 attempts (`issue.initial_delay`, ×2, ≤ `issue.max_delay`): `ctx.run("storno-{number}-{n}", || gateway.storno(StornoAttempt{ number,
-   external_id: "{namespace}:{order}:storno:{number}", comment, e_invoice }))`:
-   (a) query by the storno ext id → `SS` with `hivszamlaszam == number` → `AlreadyReversed{storno_number}`;
+1. **Verify.** `ctx.run(verify number)`: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
+   `Szamlazz.Agent.storno`); `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; `sztornozott ==
+   Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno number via the hint when the newest document
+   is the matching `SS`); `tipus ∉ {SZ, ES, VS, HS}` → `rejected{not_stornoable}`.
+2. **Lookup** — one read-only durable step, `ctx.run("lookup-storno-{number}", || gateway.lookup_storno(external_id,
+   number))` with `external_id = "{namespace}:{order}:storno:{number}"`: query by the storno ext id → `SS` with
+   `hivszamlaszam == number` → `AlreadyReversed{storno_number}` → `outcome: reversed{storno_number}`; 7 or another
+   holder → `Absent` → proceed (a storno is idempotent server-side, so a stray holder is not a stop); 3/135/136/164 →
+   `TerminalError{credentials_rejected}`; transport → `TerminalError{unavailable}`.
+3. **Storno** — one durable step under the issue policy (§9), `ctx.run("storno-{number}", || gateway.storno(StornoAttempt{
+   number, external_id, comment, e_invoice }))`. **Every execution is query-first, inside the closure** (the rule of §5
+   step 4): the gateway returns `Ok(StornoOutcome)` for every known answer and `Err(Unconfirmed)` — retryable to the
+   SDK — only when szamlazz.hu's answer is not known; the closure never returns a `TerminalError` itself.
+   (a) leading query by the storno ext id → the matching `SS` → `AlreadyReversed{storno_number}` (an earlier
+   execution sent it; **nothing is sent**); 3/135/136/164 → `Ok(CredentialsRejected)`; transport → `Err(Transport)`
+   (never send when the check itself failed);
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon}` **without `keltDatum`** (352 otherwise — verified);
    (c) validate: `invoice_number ≠ requested ∧ gross < 0` → `Reversed`; echo of the requested number →
    `NotStornoable`; API errors → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
-   `221` = has a corrective — typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 on
-   (a) or (b) → `CredentialsRejected{code, message}`; `Transport | Unknown` → backoff, loop.
-3. `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `Rejected` → `outcome: rejected{code}`;
-   `CredentialsRejected` → `TerminalError{credentials_rejected}` (that attempt issued nothing); exhausted →
-   `TerminalError{outcome_unknown}` (the next call is safe: step 1 and 2(a) find the storno if it landed).
+   `221` = has a corrective — typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 →
+   `CredentialsRejected{code, message}`; a transport failure or an open code (1, 55, 56, `szlahu_down`) → re-query
+   the storno ext id once, immediately → the matching `SS` → `AlreadyReversed{storno_number}` (what was sent landed);
+   nothing → `Err(Transport | Open)`, and the run policy re-executes the step after its delay, beginning again at (a).
+   Any `Err` from the run — exhaustion (500) or cancellation (409) — is mapped to `TerminalError{outcome_unknown,
+   json{order, kind, external_id}}`; nothing is recorded, the next call's steps 1–2 find the storno if it landed.
+4. **Branch on data.** `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `NotStornoable` →
+   `rejected{not_stornoable}`; `Rejected` → `outcome: rejected{code, message}`; `CredentialsRejected` →
+   `TerminalError{credentials_rejected}` (that execution issued nothing).
 
-`e_invoice` for the storno: the verified document's `eszamla` when known, else config.
+`e_invoice` for the storno: the verified document's `eszamla` when known, else the account default.
+
+`Szamlazz.Agent.storno` runs the same lookup and storno steps under `"{namespace}:by-number:{number}:storno"` after its
+own verify (§4).
 
 `delete_proforma({force})`: `ctx.run(query "…:proforma")`: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
@@ -276,16 +294,15 @@ supplier_id = 972720          # optional; when set, validated against szallito/i
 
 [defaults]   # as v1: e_invoice, language, currency, exchange_rate_bank, template?, send_email?, number_prefix?, extra_logo?, aggregator?, guardian?
 [seller]     # as v1
-[issue]      # the issue policy: the create step's run retry policy (§5 step 4); shapes no journal entry
-max_attempts = 5              # executions of the create step, including the first
+[issue]      # the issue policy: the run retry policy of the create (§5 step 4) and storno (§6 step 3) steps; shapes no journal entry
+max_attempts = 5              # executions of the step, including the first
 initial_delay = "2m"          # before the first re-execution; > client timeout + the longest observed server stall
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound (the attempt count is not durable across replays — ADR 0004)
 ```
 
-Until #30 the storno loop reads `initial_delay` / `max_delay` for its own doubling backoff. There is no
-`detect_foreign`: the order-number hint runs on every lookup except for correctives.
+There is no `detect_foreign`: the order-number hint runs on every lookup except for correctives.
 
 Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `due_date`, `payment_method`, `paid`,
 `comment?`, `issue_date?`, overrides.

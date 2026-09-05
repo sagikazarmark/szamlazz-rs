@@ -64,8 +64,8 @@ reply_to = "..."
 subject = "..."
 body = "..."
 
-[issue]                       # the issue policy: the create step's run retry policy
-max_attempts = 5              # executions of the create step, including the first
+[issue]                       # the issue policy: the run retry policy of the create and storno steps
+max_attempts = 5              # executions of the step, including the first
 initial_delay = "2m"          # before the first re-execution; longer than a client timeout plus the longest observed server stall
 factor = 2.0
 max_delay = "10m"
@@ -146,13 +146,13 @@ curl localhost:8080/Szamlazz.Order/ORD-1001/create_invoice \
 |---|---|---|---|
 | `invalid_input` | 400 | The request is malformed or names a document szamlazz.hu does not know. | Fix the request. |
 | `account_mismatch` | 409 | A document carrying this order's number belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ). | Check `account.mode` / `account.supplier_id`; do not retry blindly. |
-| `outcome_unknown` | 500 | The create step (or a storno) ran out of its `[issue]` policy while a document may or may not have been issued. | Retry with a new `Idempotency-Key` or read `get`. |
+| `outcome_unknown` | 500 | The create or storno step ran out of its `[issue]` policy while a document may or may not have been issued. | Retry with a new `Idempotency-Key` or read `get`. |
 | `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent. | Retry with a new `Idempotency-Key` later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (codes 3 invalid credentials, 135 browser session active, 136 login blocked, 164 multiple accounts). The execution that raised it **issued nothing** (szamlazz.hu answers these codes before acting on a request); an earlier one may have landed with a lost reply. The worker logs a `warn` with the namespace and the code. | Page the operator: fix `account.agent_key` (or the account state on szamlazz.hu). Then retry with a new `Idempotency-Key` or read `get`. |
 
 A 503 whose `x-restate-error-source` is `invocation` is **this worker's** answer — `unavailable` or `credentials_rejected` — not the Restate ingress being down. Restate's [HTTP invocation docs](https://docs.restate.dev/invoke/http#retrying-requests) say to treat `invocation` errors as non-retryable and to auto-retry a `5xx` only when its source is `ingress` (or absent); do that here as well: page on an `invocation` 503 instead of retrying into it — `credentials_rejected` in particular repeats identically until the deployment is fixed — and only then retry with a new `Idempotency-Key`.
 
-Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery. Issuing itself is a read-only lookup step and a create step whose every execution — Restate re-executes it under the `[issue]` policy while szamlazz.hu's answer is unknown — queries the external id before it sends; that query is what the next call reconciles against, and an exhausted create step is a structured `outcome_unknown` naming the order, kind and external id. A killed invocation also reaches the caller as HTTP 500 with `x-restate-error-source: invocation`, carrying the last retryable error's message. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery. Issuing itself is a read-only lookup step and a create step whose every execution — Restate re-executes it under the `[issue]` policy while szamlazz.hu's answer is unknown — queries the external id before it sends; that query is what the next call reconciles against, and an exhausted create step is a structured `outcome_unknown` naming the order, kind and external id. Storno has the same two steps under the same policy. A killed invocation also reaches the caller as HTTP 500 with `x-restate-error-source: invocation`, carrying the last retryable error's message. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
 
 ## Request Identity
 

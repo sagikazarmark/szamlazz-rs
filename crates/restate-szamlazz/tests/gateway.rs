@@ -12,7 +12,7 @@ use restate_szamlazz::contract::{
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
     InvoiceDocumentExt as _, LookupOutcome, LookupRequest, QueryError, QueryOutcome,
-    SetPaymentsOutcome, StornoAttempt, StornoOutcome, Unconfirmed,
+    SetPaymentsOutcome, StornoAttempt, StornoLookupOutcome, StornoOutcome, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -1328,6 +1328,94 @@ fn storno_attempt(external_id: &ExternalId) -> StornoAttempt<'_> {
 }
 
 #[tokio::test]
+async fn storno_lookup_finds_our_storno_under_the_id() {
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new("SS-1", "SS")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.gateway.lookup_storno(&storno_id, "SZ-1").await,
+        StornoLookupOutcome::AlreadyReversed {
+            storno_number: "SS-1".to_owned(),
+        }
+    );
+    assert_eq!(h.bodies().await.len(), 1, "read-only: one query");
+}
+
+#[tokio::test]
+async fn storno_lookup_is_absent_on_a_miss_or_another_holder() {
+    // Code 7, and a holder that is not the storno of `SZ-1` (a storno is
+    // idempotent server-side, so proceeding past a stray holder is safe).
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.lookup_storno(&storno_id, "SZ-1").await,
+        StornoLookupOutcome::Absent
+    );
+
+    let h = Harness::start().await;
+    external_id_query(storno_id.as_str())
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-9"),
+                ..Doc::new("SS-9", "SS")
+            }
+            .response(),
+        )
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.lookup_storno(&storno_id, "SZ-1").await,
+        StornoLookupOutcome::Absent
+    );
+}
+
+#[tokio::test]
+async fn storno_lookup_reports_rejected_credentials_and_a_failed_query() {
+    for code in CREDENTIAL_CODES {
+        let h = Harness::start().await;
+        let storno_id = storno_id();
+        external_id_query(storno_id.as_str())
+            .respond_with(body_error(code, "login"))
+            .mount(&h.server)
+            .await;
+        assert_eq!(
+            h.gateway.lookup_storno(&storno_id, "SZ-1").await,
+            StornoLookupOutcome::CredentialsRejected {
+                code: code.to_owned(),
+                message: "login".to_owned(),
+            },
+            "{code}"
+        );
+    }
+
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.gateway.lookup_storno(&storno_id, "SZ-1").await,
+        StornoLookupOutcome::Transport(_)
+    ));
+}
+
+#[tokio::test]
 async fn storno_reversed_is_validated() {
     let h = Harness::start().await;
     let storno_id = storno_id();
@@ -1343,7 +1431,7 @@ async fn storno_reversed_is_validated() {
         .await;
 
     match h.gateway.storno(storno_attempt(&storno_id)).await {
-        StornoOutcome::Reversed(storno) => {
+        Ok(StornoOutcome::Reversed(storno)) => {
             assert_eq!(storno.invoice_number.as_str(), "SS-1");
             assert_eq!(storno.gross_total, Some(dec!(-1270)));
             assert_eq!(storno.document_id, Some(924_307_747));
@@ -1373,7 +1461,7 @@ async fn storno_echo_is_not_stornoable() {
 
     assert_eq!(
         h.gateway.storno(storno_attempt(&storno_id)).await,
-        StornoOutcome::NotStornoable
+        Ok(StornoOutcome::NotStornoable)
     );
 }
 
@@ -1392,10 +1480,10 @@ async fn storno_rejections_are_typed() {
             .await;
         assert_eq!(
             h.gateway.storno(storno_attempt(&storno_id)).await,
-            StornoOutcome::Rejected {
+            Ok(StornoOutcome::Rejected {
                 code: code.to_owned(),
                 message: message.to_owned(),
-            }
+            })
         );
     }
 }
@@ -1422,9 +1510,9 @@ async fn storno_pre_query_hit_is_already_reversed() {
 
     assert_eq!(
         h.gateway.storno(storno_attempt(&storno_id)).await,
-        StornoOutcome::AlreadyReversed {
+        Ok(StornoOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
-        }
+        })
     );
 }
 
@@ -1447,10 +1535,10 @@ async fn credential_codes_on_the_storno_are_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.storno(storno_attempt(&storno_id)).await,
-            StornoOutcome::CredentialsRejected {
+            Ok(StornoOutcome::CredentialsRejected {
                 code: code.to_owned(),
                 message: "login".to_owned(),
-            },
+            }),
             "pre-query {code}"
         );
 
@@ -1466,21 +1554,25 @@ async fn credential_codes_on_the_storno_are_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.storno(storno_attempt(&storno_id)).await,
-            StornoOutcome::CredentialsRejected {
+            Ok(StornoOutcome::CredentialsRejected {
                 code: code.to_owned(),
                 message: "login".to_owned(),
-            },
+            }),
             "send {code}"
         );
     }
 }
 
 #[tokio::test]
-async fn storno_unknown_and_transport() {
+async fn storno_with_a_lost_reply_re_queries_once_and_is_unconfirmed_when_nothing_landed() {
+    // An open code (55) and a lost reply (500): each is re-queried once,
+    // immediately; nothing under the storno id leaves the step unconfirmed,
+    // so the run retry policy re-executes it.
     let h = Harness::start().await;
     let storno_id = storno_id();
     external_id_query(storno_id.as_str())
         .respond_with(not_found())
+        .expect(4)
         .mount(&h.server)
         .await;
     storno()
@@ -1495,15 +1587,91 @@ async fn storno_unknown_and_transport() {
 
     assert_eq!(
         h.gateway.storno(storno_attempt(&storno_id)).await,
-        StornoOutcome::Unknown {
+        Err(Unconfirmed::Open {
             code: Some("55".to_owned()),
             message: "signing".to_owned(),
-        }
+        })
     );
     assert!(matches!(
         h.gateway.storno(storno_attempt(&storno_id)).await,
-        StornoOutcome::Transport(_)
+        Err(Unconfirmed::Transport(_))
     ));
+}
+
+#[tokio::test]
+async fn storno_re_executed_after_a_lost_reply_finds_the_storno_and_sends_nothing() {
+    // The step, driven twice: the first execution's reply is lost, its
+    // immediate re-query still sees nothing; the second execution's leading
+    // query finds the storno that landed and sends nothing.
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .up_to_n_times(2)
+        .mount(&h.server)
+        .await;
+    external_id_query(storno_id.as_str())
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new("SS-1", "SS")
+            }
+            .response(),
+        )
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert!(matches!(
+        h.gateway.storno(storno_attempt(&storno_id)).await,
+        Err(Unconfirmed::Transport(_))
+    ));
+    assert_eq!(
+        h.gateway.storno(storno_attempt(&storno_id)).await,
+        Ok(StornoOutcome::AlreadyReversed {
+            storno_number: "SS-1".to_owned(),
+        })
+    );
+    assert_eq!(h.bodies().await.len(), 4, "query, storno, re-query; query");
+}
+
+#[tokio::test]
+async fn storno_lost_reply_whose_re_query_finds_the_storno_is_reversed() {
+    // The reply is lost but the storno landed: the immediate re-query finds
+    // the `SS` and settles the step without a second send.
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query(storno_id.as_str())
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new("SS-1", "SS")
+            }
+            .response(),
+        )
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.gateway.storno(storno_attempt(&storno_id)).await,
+        Ok(StornoOutcome::AlreadyReversed {
+            storno_number: "SS-1".to_owned(),
+        })
+    );
 }
 
 // ----- delete / credit -------------------------------------------------------

@@ -2,7 +2,7 @@
 //! async fn per `ctx.run`, over the [`szamlazz_agent::Client`], returning
 //! every expected szamlazz.hu outcome **as data** — a rejection, a duplicate
 //! order number, a not-found or a no-op storno is a value, never an `Err`.
-//! The one exception is deliberate: the create step returns
+//! The one exception is deliberate: the create and storno steps return
 //! [`Unconfirmed`] when szamlazz.hu's answer is *not* known, so that the
 //! type says what the run retry policy may re-execute.
 //!
@@ -221,16 +221,17 @@ pub enum CreateOutcome {
     },
 }
 
-/// The create step ended without a settled outcome: the run retry policy
-/// re-executes the step, whose leading query then finds whatever landed.
+/// The create or storno step ended without a settled outcome: the run retry
+/// policy re-executes the step, whose leading query then finds whatever
+/// landed.
 ///
 /// Every variant follows an immediate external-id re-query that found no live
-/// document of ours (read-your-writes lag is ≈ 0, so "nothing" is not lag).
+/// document of ours (read-your-writes lag ≈ 0, so "nothing" is not lag).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unconfirmed {
     /// The HTTP exchange or the response parse failed — on the leading query
-    /// (nothing was sent), on the create, or on the re-query itself.
+    /// (nothing was sent), on the create or storno, or on the re-query itself.
     #[error("transport failure: {0}")]
     Transport(String),
     /// szamlazz.hu reported an open code, one that leaves the outcome open:
@@ -243,7 +244,7 @@ pub enum Unconfirmed {
         message: String,
     },
     /// szamlazz.hu refused the order number as a duplicate (71/152), yet the
-    /// order-number query knows nothing under the order.
+    /// order-number query knows nothing under the order. Create only.
     #[error("duplicate order number {code} reported but nothing is under the order: {message}")]
     Contradiction {
         /// The szamlazz.hu code (`71` or `152`).
@@ -391,12 +392,40 @@ pub enum QueryError {
     Transport(String),
 }
 
-/// One storno attempt (design §6 step 2).
+/// What the storno lookup step found (design §6 step 2), read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum StornoLookupOutcome {
+    /// Nothing under the storno external id (code 7), or a holder that is not
+    /// the storno of the invoice — a storno is idempotent server-side, so the
+    /// storno step proceeds past a stray holder.
+    Absent,
+    /// The `SS` reversing the invoice holds the storno external id: a storno
+    /// of ours was issued. Nothing will be sent.
+    AlreadyReversed {
+        /// The storno invoice number.
+        storno_number: String,
+    },
+    /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
+    /// may be concluded and nothing will be sent. See
+    /// [`is_credentials_rejected`].
+    CredentialsRejected {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
+    /// The query failed (transport, parse, unavailability or another
+    /// szamlazz.hu error); nothing may be concluded.
+    Transport(String),
+}
+
+/// The storno step (design §6 step 3): what identifies the storno to send.
 #[derive(Debug, Clone, Copy)]
 pub struct StornoAttempt<'a> {
     /// The invoice to reverse.
     pub invoice_number: &'a str,
-    /// The external id attached to the storno invoice and pre-queried first
+    /// The external id attached to the storno invoice and queried first
     /// (`{namespace}:{order}:storno:{number}` or `{namespace}:by-number:{number}:storno`).
     pub external_id: &'a ExternalId,
     /// Comment placed on the storno invoice.
@@ -405,15 +434,20 @@ pub struct StornoAttempt<'a> {
     pub e_invoice: bool,
 }
 
-/// The result of one storno attempt.
+/// The settled result of the storno step: szamlazz.hu's answer is known.
+/// What is *not* settled is an [`Unconfirmed`] error, which the run retry
+/// policy re-executes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum StornoOutcome {
     /// The invoice is reversed by the storno invoice szamlazz.hu issued (now,
     /// or echoed by an idempotent repeat), validated with
     /// [`CreatedInvoice::reverses`] by [`Gateway::storno`].
     Reversed(CreatedInvoice),
-    /// The pre-query found the storno invoice under the storno external id;
-    /// nothing was sent.
+    /// The storno invoice is under the storno external id — found by the
+    /// leading query (an earlier execution of this step, or the lookup step's
+    /// race, sent it) or by the re-query after a lost reply. Nothing was
+    /// sent, or what was sent landed.
     AlreadyReversed {
         /// The storno invoice number.
         storno_number: String,
@@ -430,37 +464,15 @@ pub enum StornoOutcome {
         message: String,
     },
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
-    /// pre-query or the storno; this attempt issued nothing. See
-    /// [`is_credentials_rejected`].
+    /// leading query, the storno or a re-query; this execution issued
+    /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
+    /// key would only repeat the answer. See [`is_credentials_rejected`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
         /// The szamlazz.hu message.
         message: String,
     },
-    /// The storno may or may not have been issued; re-query before retrying.
-    Unknown {
-        /// The szamlazz.hu code, when one was reported.
-        code: Option<String>,
-        /// What was reported.
-        message: String,
-    },
-    /// The HTTP exchange or the response parse failed.
-    Transport(String),
-}
-
-/// A failed storno pre-query: rejected credentials as
-/// [`StornoOutcome::CredentialsRejected`], anything else as
-/// [`StornoOutcome::Transport`] — never send when the check itself failed.
-impl From<QueryError> for StornoOutcome {
-    fn from(error: QueryError) -> Self {
-        match error {
-            QueryError::CredentialsRejected { code, message } => {
-                Self::CredentialsRejected { code, message }
-            }
-            other => Self::Transport(other.to_string()),
-        }
-    }
 }
 
 /// The result of a proforma deletion.
@@ -944,13 +956,59 @@ impl Gateway {
         self.query_raw(invoice_selector(selector)).await
     }
 
-    /// One storno attempt, query-first (design §6 step 2): the storno external
-    /// id is queried and an `SS` referencing the invoice is
-    /// [`StornoOutcome::AlreadyReversed`]; otherwise `xmlszamlast` is sent
-    /// with the external id, comment and e-invoice flag and **no issue date**
-    /// (352 otherwise), and the response is validated with
-    /// [`szamlazz_agent::ops::invoice::CreatedInvoice::reverses`].
-    pub async fn storno(&self, attempt: StornoAttempt<'_>) -> StornoOutcome {
+    /// The storno lookup step (design §6 step 2), read-only: the storno
+    /// external id is queried and the `SS` reversing `invoice_number` is
+    /// [`StornoLookupOutcome::AlreadyReversed`]; code 7 or another holder is
+    /// [`StornoLookupOutcome::Absent`]; rejected credentials are
+    /// [`StornoLookupOutcome::CredentialsRejected`]; any other failure is
+    /// [`StornoLookupOutcome::Transport`].
+    pub async fn lookup_storno(
+        &self,
+        external_id: &ExternalId,
+        invoice_number: &str,
+    ) -> StornoLookupOutcome {
+        let span = tracing::info_span!(
+            "gateway.lookup_storno",
+            number = %invoice_number,
+            external_id = %external_id,
+        );
+        match self
+            .storno_seen(external_id, invoice_number)
+            .instrument(span)
+            .await
+        {
+            Ok(Some(storno_number)) => StornoLookupOutcome::AlreadyReversed { storno_number },
+            Ok(None) => StornoLookupOutcome::Absent,
+            Err(QueryError::CredentialsRejected { code, message }) => {
+                StornoLookupOutcome::CredentialsRejected { code, message }
+            }
+            Err(error) => StornoLookupOutcome::Transport(error.to_string()),
+        }
+    }
+
+    /// The storno step (design §6 step 3), query-first on every execution.
+    ///
+    /// 1. Query the storno external id: an `SS` referencing the invoice is
+    ///    [`StornoOutcome::AlreadyReversed`] — an earlier execution sent it;
+    ///    code 7 (or another holder) continues; rejected credentials are
+    ///    [`StornoOutcome::CredentialsRejected`]; a failed query is
+    ///    [`Unconfirmed::Transport`] — never send when the check itself
+    ///    failed.
+    /// 2. Send `xmlszamlast` with the external id, comment and e-invoice flag
+    ///    and **no issue date** (352 otherwise): a response validated with
+    ///    [`CreatedInvoice::reverses`] is [`StornoOutcome::Reversed`], an
+    ///    echo of the requested number [`StornoOutcome::NotStornoable`], a
+    ///    refusal [`StornoOutcome::Rejected`], rejected credentials
+    ///    [`StornoOutcome::CredentialsRejected`]. A lost reply or an open
+    ///    code is re-queried once, immediately: a landed storno settles the
+    ///    step as [`StornoOutcome::AlreadyReversed`], nothing is
+    ///    [`Unconfirmed`].
+    ///
+    /// # Errors
+    ///
+    /// [`Unconfirmed`] when the outcome is not settled; the caller's run retry
+    /// policy re-executes the step.
+    pub async fn storno(&self, attempt: StornoAttempt<'_>) -> Result<StornoOutcome, Unconfirmed> {
         let span = tracing::info_span!(
             "gateway.storno",
             number = %attempt.invoice_number,
@@ -959,22 +1017,13 @@ impl Gateway {
         self.storno_inner(attempt).instrument(span).await
     }
 
-    async fn storno_inner(&self, attempt: StornoAttempt<'_>) -> StornoOutcome {
-        match self
-            .query_raw(InvoiceSelector::ExternalId(
-                attempt.external_id.as_str().to_owned(),
-            ))
-            .await
-        {
-            Ok(document) if document.is_storno_of(attempt.invoice_number) => {
-                let storno_number = document.number().to_owned();
-                tracing::info!(storno_number = %storno_number, "storno already issued");
-                return StornoOutcome::AlreadyReversed { storno_number };
-            }
-            Ok(_) | Err(QueryError::NotFound) => {}
-            Err(error) => return StornoOutcome::from(error),
+    async fn storno_inner(&self, attempt: StornoAttempt<'_>) -> Result<StornoOutcome, Unconfirmed> {
+        // Step 1: the leading query.
+        if let Some(settled) = self.storno_settled_by_query(&attempt).await? {
+            return Ok(settled);
         }
 
+        // Step 2: send.
         let mut request = StornoInvoice::new(attempt.invoice_number);
         request.e_invoice = attempt.e_invoice;
         request.external_id = Some(attempt.external_id.as_str().to_owned());
@@ -988,23 +1037,103 @@ impl Gateway {
         match self.client.send(&request).await {
             Ok(created) if created.reverses(&request.invoice_number) => {
                 tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
-                StornoOutcome::Reversed(created)
+                Ok(StornoOutcome::Reversed(created))
             }
             Ok(created) => {
                 tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
-                StornoOutcome::NotStornoable
+                Ok(StornoOutcome::NotStornoable)
             }
             Err(error) => match classify_failure(error) {
                 Failure::Rejected { code, message } | Failure::Duplicate { code, message } => {
                     tracing::info!(code = %code, "storno rejected");
-                    StornoOutcome::Rejected { code, message }
+                    Ok(StornoOutcome::Rejected { code, message })
                 }
                 Failure::CredentialsRejected { code, message } => {
-                    StornoOutcome::CredentialsRejected { code, message }
+                    Ok(StornoOutcome::CredentialsRejected { code, message })
                 }
-                Failure::Unknown { code, message } => StornoOutcome::Unknown { code, message },
-                Failure::Transport(message) => StornoOutcome::Transport(message),
+                Failure::Unknown { code, message } => {
+                    tracing::warn!(code = ?code, "open code; re-querying");
+                    self.storno_settle_or(&attempt, Unconfirmed::Open { code, message })
+                        .await
+                }
+                Failure::Transport(message) => {
+                    tracing::warn!("transport failure; re-querying");
+                    self.storno_settle_or(&attempt, Unconfirmed::Transport(message))
+                        .await
+                }
             },
+        }
+    }
+
+    /// The immediate re-query after a storno whose reply was lost or open:
+    /// a landed storno settles the step; nothing is `unconfirmed`.
+    async fn storno_settle_or(
+        &self,
+        attempt: &StornoAttempt<'_>,
+        unconfirmed: Unconfirmed,
+    ) -> Result<StornoOutcome, Unconfirmed> {
+        match self.storno_settled_by_query(attempt).await? {
+            Some(settled) => Ok(settled),
+            None => Err(unconfirmed),
+        }
+    }
+
+    /// The storno-external-id query of the storno step: `Some` when it
+    /// settles the step — the `SS` reversing the invoice
+    /// ([`StornoOutcome::AlreadyReversed`]) or rejected credentials — `None`
+    /// when no storno of ours is there.
+    ///
+    /// # Errors
+    ///
+    /// [`Unconfirmed::Transport`] when the query itself failed.
+    async fn storno_settled_by_query(
+        &self,
+        attempt: &StornoAttempt<'_>,
+    ) -> Result<Option<StornoOutcome>, Unconfirmed> {
+        match self
+            .storno_seen(attempt.external_id, attempt.invoice_number)
+            .await
+        {
+            Ok(Some(storno_number)) => Ok(Some(StornoOutcome::AlreadyReversed { storno_number })),
+            Ok(None) => Ok(None),
+            Err(QueryError::CredentialsRejected { code, message }) => {
+                Ok(Some(StornoOutcome::CredentialsRejected { code, message }))
+            }
+            Err(error) => Err(Unconfirmed::Transport(error.to_string())),
+        }
+    }
+
+    /// The storno-external-id query of the storno lookup and storno steps:
+    /// the number of the `SS` reversing `invoice_number` when it holds the
+    /// id, `None` on code 7 or when the holder is something else (a storno is
+    /// idempotent server-side, so proceeding past a stray holder is safe).
+    ///
+    /// # Errors
+    ///
+    /// The failed query (transport, parse, unavailability, rejected
+    /// credentials or another szamlazz.hu error).
+    async fn storno_seen(
+        &self,
+        external_id: &ExternalId,
+        invoice_number: &str,
+    ) -> Result<Option<String>, QueryError> {
+        let selector = InvoiceSelector::ExternalId(external_id.as_str().to_owned());
+        match self.query_raw(selector).await {
+            Ok(document) if document.is_storno_of(invoice_number) => {
+                let storno_number = document.number().to_owned();
+                tracing::info!(storno_number = %storno_number, "storno already issued");
+                Ok(Some(storno_number))
+            }
+            Ok(document) => {
+                tracing::warn!(
+                    number = %document.number(),
+                    tipus = %document.info.document_type,
+                    "the storno external id holds another document"
+                );
+                Ok(None)
+            }
+            Err(QueryError::NotFound) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 

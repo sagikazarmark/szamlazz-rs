@@ -57,7 +57,7 @@ pub struct Config {
     /// The seller block; account data is used where absent.
     #[serde(default)]
     pub seller: SellerConfig,
-    /// The issue policy: the create step's run retry policy.
+    /// The issue policy: the run retry policy of the create and storno steps.
     #[serde(default)]
     pub issue: IssueConfig,
 }
@@ -96,12 +96,13 @@ impl Config {
 /// account-shaped and therefore does not route through the gateway.
 ///
 /// The namespace prefixes every external id the deployment issues; the issue
-/// policy is the create step's run retry policy. Built from a [`Config`].
+/// policy is the run retry policy of the create and storno steps. Built from a
+/// [`Config`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerConfig {
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
     pub namespace: Namespace,
-    /// The issue policy: the create step's run retry policy.
+    /// The issue policy: the run retry policy of the create and storno steps.
     pub issue: IssueConfig,
 }
 
@@ -446,17 +447,17 @@ impl SellerEmailConfig {
 }
 
 /// The issue policy: the run retry policy of the create step (design §5
-/// step 4). Restate re-executes the step after `initial_delay`, multiplying
-/// the delay by `factor` up to `max_delay`, until `max_attempts` executions or
-/// `max_duration` — then the step fails and the handler reports
-/// `outcome_unknown`. The policy shapes no journal entry.
+/// step 4) and the storno step (§6 step 3). Restate re-executes the step after
+/// `initial_delay`, multiplying the delay by `factor` up to `max_delay`, until
+/// `max_attempts` executions or `max_duration` — then the step fails and the
+/// handler reports `outcome_unknown`. The policy shapes no journal entry.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a plain number of
 /// seconds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IssueConfig {
-    /// Executions of the create step, including the first. Default `5`.
+    /// Executions of the step, including the first. Default `5`.
     pub max_attempts: u32,
     /// Delay before the first re-execution. Default `2m`: longer than the
     /// client timeout plus the longest observed server stall, so a request
@@ -752,8 +753,8 @@ mod tests {
         );
     }
 
-    /// The issue policy is the create step's run retry policy, every field
-    /// set: `RunRetryPolicy::new()` has factor 1.0 and no caps, and
+    /// The issue policy is the run retry policy of the create and storno
+    /// steps, every field set: `RunRetryPolicy::new()` has factor 1.0 and no caps, and
     /// `default()` caps at 2 s / 50 s — neither is what the policy says.
     #[test]
     fn issue_policy_maps_to_the_run_retry_policy_field_for_field() {
