@@ -12,7 +12,6 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
-use super::support::{object, service, shared};
 use super::{Agent, Order};
 use crate::contract::{
     CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest, DeleteProformaResponse,
@@ -54,7 +53,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.issue_kind(&ctx, DocumentKind::Proforma, request.into_inner()))
             .await
             .map(Json)
@@ -80,7 +79,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.issue_kind(&ctx, DocumentKind::Invoice, request.into_inner()))
             .await
             .map(Json)
@@ -114,7 +113,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.issue_kind(&ctx, DocumentKind::Prepayment, request.into_inner()))
             .await
             .map(Json)
@@ -140,7 +139,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.issue_kind(&ctx, DocumentKind::Final, request.into_inner()))
             .await
             .map(Json)
@@ -166,7 +165,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.correct(&ctx, request.into_inner()))
             .await
             .map(Json)
@@ -191,7 +190,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.storno(&ctx, request.into_inner()))
             .await
             .map(Json)
@@ -216,7 +215,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Json<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
-        let execution = object::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         Box::pin(execution.delete(&ctx, request.into_inner()))
             .await
             .map(Json)
@@ -231,7 +230,7 @@ impl Order {
         journal_retention = "1d"
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
-        let execution = shared::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue_shared(&ctx).await?;
         execution.status(&ctx).await.map(Json)
     }
 }
@@ -259,7 +258,7 @@ impl Agent {
         ctx: Context<'_>,
         request: Json<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
-        let execution = service::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         execution
             .query_request(&ctx, request.into_inner())
             .await
@@ -279,7 +278,7 @@ impl Agent {
         ctx: Context<'_>,
         request: Json<SetPaymentsRequest>,
     ) -> HandlerResult<Json<SetPaymentsResponse>> {
-        let execution = service::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         execution
             .set_payments_request(&ctx, request.into_inner())
             .await
@@ -299,7 +298,7 @@ impl Agent {
         ctx: Context<'_>,
         request: Json<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        let execution = service::prologue(&ctx, &self.accounts, &self.config).await?;
+        let execution = self.prologue(&ctx).await?;
         execution
             .storno_request(&ctx, request.into_inner())
             .await

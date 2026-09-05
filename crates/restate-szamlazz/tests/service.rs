@@ -341,13 +341,15 @@ impl JournalEntry {
 }
 
 /// The result of the run named `name`: the `Notification: Run` row that
-/// follows its command.
+/// follows its command before any other command (the handlers await every
+/// run, so its notification is the next journal event after the command).
 fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a JournalEntry> {
     let command = journal
         .iter()
         .position(|entry| entry.is_run() && entry.name.as_deref() == Some(name))?;
     journal[command + 1..]
         .iter()
+        .take_while(|entry| !entry.entry_type.starts_with("Command:"))
         .find(|entry| entry.entry_type == "Notification: Run")
 }
 
@@ -380,12 +382,12 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The static resolver behind a script: the resolver fails the next N
-/// resolutions with `unavailable`, and the store can be taken down. What
-/// #25's e2e drives — a resolver that fails then succeeds, a store that
-/// always fails — on the one deployment the harness registers.
+/// The static resolver and store behind a script: the resolver fails the
+/// next N resolutions with `unavailable`, and the store can be taken down.
+/// What the prologue's e2e drives — a resolver that fails then succeeds, a
+/// store that always fails — on the one deployment the harness registers.
 #[derive(Debug)]
-struct Scripted {
+struct ScriptedAccounts {
     inner: StaticResolver,
     /// Resolutions left to fail with `unavailable`.
     resolver_failures: AtomicU32,
@@ -397,7 +399,7 @@ struct Scripted {
     fetches: AtomicU32,
 }
 
-impl Scripted {
+impl ScriptedAccounts {
     fn new(inner: StaticResolver) -> Self {
         Self {
             inner,
@@ -425,7 +427,7 @@ impl Scripted {
     }
 }
 
-impl AccountResolver for Scripted {
+impl AccountResolver for ScriptedAccounts {
     fn resolve<'a>(
         &'a self,
         scope: Option<&'a str>,
@@ -445,7 +447,7 @@ impl AccountResolver for Scripted {
     }
 }
 
-impl CredentialStore for Scripted {
+impl CredentialStore for ScriptedAccounts {
     fn fetch<'a>(
         &'a self,
         credential_ref: &'a CredentialRef,
@@ -465,7 +467,7 @@ impl CredentialStore for Scripted {
 /// The two services for the test account at `endpoint`, over the scripted
 /// resolver and store, with short policies so that retries and exhaustion are
 /// observable within the test.
-fn services(endpoint: &str) -> (Arc<Scripted>, Order, Agent) {
+fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
     let config: Config = serde_json::from_value(json!({
         "account": {
             "slug": "acct",
@@ -487,7 +489,7 @@ fn services(endpoint: &str) -> (Arc<Scripted>, Order, Agent) {
     .expect("config");
     // The static resolver of `config` behind the script, and a short resolve
     // policy so a scripted outage is retried within the test.
-    let scripted = Arc::new(Scripted::new(
+    let scripted = Arc::new(ScriptedAccounts::new(
         StaticResolver::try_from(&config).expect("resolver"),
     ));
     let accounts = Accounts::new(
@@ -512,7 +514,7 @@ struct Harness {
     restate: Restate,
     mock: MockServer,
     http: reqwest::Client,
-    accounts: Arc<Scripted>,
+    script: Arc<ScriptedAccounts>,
 }
 
 impl Harness {
@@ -596,7 +598,7 @@ impl Harness {
             restate,
             mock,
             http,
-            accounts: scripted,
+            script: scripted,
         }
     }
 
@@ -742,8 +744,10 @@ impl Harness {
         }
     }
 
-    /// Watches the invocations on Virtual Object `key` for four seconds and
-    /// records what `sys_invocation` reports **while they are in flight**:
+    /// Watches the invocations on Virtual Object `key` for four seconds (a
+    /// detached task, so it carries its own copy of the query — `sql` borrows
+    /// the harness) and records what `sys_invocation` reports **while they
+    /// are in flight**:
     /// `retry_count`, `last_failure` and `last_failure_related_command_name`
     /// are attempt state, cleared once the invocation completes — a completed
     /// row shows neither the count nor the failing command (verified against
@@ -1522,7 +1526,7 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
         .await;
     let reply = h
         .call_agent_scoped(
-            "tenant-a",
+            "acme-events",
             "query",
             &json!({ "selector": { "invoice_number": "SZ-12" } }),
         )
@@ -1530,11 +1534,11 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
     assert_eq!(fault.code, "unknown_account", "{fault:?}");
-    assert!(fault.message.contains("tenant-a"), "{fault:?}");
+    assert!(fault.message.contains("acme-events"), "{fault:?}");
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(
         invocation.scope.as_deref(),
-        Some("tenant-a"),
+        Some("acme-events"),
         "{invocation:?}"
     );
     assert_eq!(invocation.handler, "query");
@@ -1543,7 +1547,7 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     // entry — the resolution is data — and nothing after it.
     let reply = h
         .call_scoped(
-            "tenant-a",
+            "acme-events",
             "E2E-12",
             "create_invoice",
             &create_body(dec!(1000), false),
@@ -1680,8 +1684,8 @@ async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness) {
         .mount(&h.mock)
         .await;
 
-    let resolutions_before = h.accounts.resolutions();
-    h.accounts.fail_next_resolutions(2);
+    let resolutions_before = h.script.resolutions();
+    h.script.fail_next_resolutions(2);
     let started = Instant::now();
     let watch = h.watch("E2E-14");
     let reply = h
@@ -1701,7 +1705,7 @@ async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness) {
         "the resolve policy's delay was honoured, not the handler's: {elapsed:?}"
     );
     assert_eq!(
-        h.accounts.resolutions() - resolutions_before,
+        h.script.resolutions() - resolutions_before,
         3,
         "two failures, then the answer"
     );
@@ -1745,8 +1749,8 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
         .mount(&h.mock)
         .await;
 
-    let fetches_before = h.accounts.fetches();
-    h.accounts.set_store_down(true);
+    let fetches_before = h.script.fetches();
+    h.script.set_store_down(true);
     let started = Instant::now();
     let reply = h
         .call(
@@ -1757,7 +1761,7 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
         )
         .await;
     let elapsed = started.elapsed();
-    h.accounts.set_store_down(false);
+    h.script.set_store_down(false);
     assert_eq!(reply.status, 503, "{}", reply.body);
     let fault = reply.fault();
     assert_eq!(fault.code, "unavailable", "{fault:?}");
@@ -1768,7 +1772,7 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
         "terminal, not routed into the handler's retries: {elapsed:?}"
     );
     assert_eq!(
-        h.accounts.fetches() - fetches_before,
+        h.script.fetches() - fetches_before,
         3,
         "the short in-process retry: three fetches"
     );

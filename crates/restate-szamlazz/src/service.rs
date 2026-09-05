@@ -24,6 +24,9 @@
 //! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`)
 //!   registered as `Szamlazz.Agent`.
 
+use restate_sdk::errors::HandlerError;
+use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
+
 use crate::account::{Accounts, InvalidEndpoint};
 use crate::config::{Config, WorkerConfig};
 
@@ -35,6 +38,8 @@ mod storno;
 mod support;
 
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
+
+use prologue::Execution;
 
 /// The `Order` Virtual Object: one instance per order number. Registered as
 /// `Szamlazz.Order`.
@@ -79,6 +84,19 @@ impl Order {
     pub fn config(&self) -> &WorkerConfig {
         &self.config
     }
+
+    /// The prologue of an exclusive handler: pin → resolve → fetch → open.
+    async fn prologue(&self, ctx: &ObjectContext<'_>) -> Result<Execution, HandlerError> {
+        support::object::prologue(ctx, &self.accounts, &self.config).await
+    }
+
+    /// The prologue of a shared handler (`get`).
+    async fn prologue_shared(
+        &self,
+        ctx: &SharedObjectContext<'_>,
+    ) -> Result<Execution, HandlerError> {
+        support::shared::prologue(ctx, &self.accounts, &self.config).await
+    }
 }
 
 /// The stateless `Szamlazz.Agent` service: by-number operations over the
@@ -120,6 +138,11 @@ impl Agent {
     #[must_use]
     pub fn config(&self) -> &WorkerConfig {
         &self.config
+    }
+
+    /// The prologue of every handler: pin → resolve → fetch → open.
+    async fn prologue(&self, ctx: &Context<'_>) -> Result<Execution, HandlerError> {
+        support::service::prologue(ctx, &self.accounts, &self.config).await
     }
 }
 

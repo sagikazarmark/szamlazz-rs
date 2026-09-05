@@ -10,8 +10,8 @@ can say "issue the invoice for order X" and get exactly one legal document under
 concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the source of truth, reached through
 deterministic external ids (`{namespace}:{order}:{kind}`) so that any invocation can find what an earlier one
 issued. The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of
-unmanaged documents) over the same gateway. Both are projections of the Számla Agent model: deployment constants
-live in config, line totals are computed, domain outcomes are returned as data.
+unmanaged documents) over the same gateway module. Both are projections of the Számla Agent model: deployment
+constants live in config, line totals are computed, domain outcomes are returned as data.
 
 The design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md), the decisions
 behind it in [`docs/adr/`](../../docs/adr), and the szamlazz.hu behavior it relies on in
@@ -149,9 +149,11 @@ activation details.
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
   `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome
   as data; `create` and `storno` alone return `Err(Unconfirmed)` for an outcome that is *not* known, which is what
-  their run retry policy re-executes. It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
-  configuration by the services goes through `Gateway::account()`. `Szamlazz.Order` calls it inside `ctx.run`; the
-  `Szamlazz.Agent` Restate service is a thin facade over the same instance. No Restate service calls another.
+  their run retry policy re-executes. It is not a second client: the Számla Agent `Client` is the transport it
+  wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
+  per handler execution by the prologue (`Gateway::open`) and never outlives it. `Szamlazz.Order` calls it inside
+  `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate service calls
+  another.
 - `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
   registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
   handlers. Both are built `from_parts(Accounts, WorkerConfig)`; every handler runs the prologue — pin the

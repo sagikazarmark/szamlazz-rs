@@ -422,7 +422,7 @@ pub enum StornoLookupOutcome {
 
 /// The storno step (design §6 step 3): what identifies the storno to send.
 #[derive(Debug, Clone, Copy)]
-pub struct StornoAttempt<'a> {
+pub struct StornoStepRequest<'a> {
     /// The invoice to reverse.
     pub invoice_number: &'a str,
     /// The external id attached to the storno invoice and queried first
@@ -1008,34 +1008,40 @@ impl Gateway {
     ///
     /// [`Unconfirmed`] when the outcome is not settled; the caller's run retry
     /// policy re-executes the step.
-    pub async fn storno(&self, attempt: StornoAttempt<'_>) -> Result<StornoOutcome, Unconfirmed> {
+    pub async fn storno(
+        &self,
+        request: StornoStepRequest<'_>,
+    ) -> Result<StornoOutcome, Unconfirmed> {
         let span = tracing::info_span!(
             "gateway.storno",
-            number = %attempt.invoice_number,
-            external_id = %attempt.external_id,
+            number = %request.invoice_number,
+            external_id = %request.external_id,
         );
-        self.storno_inner(attempt).instrument(span).await
+        self.storno_inner(request).instrument(span).await
     }
 
-    async fn storno_inner(&self, attempt: StornoAttempt<'_>) -> Result<StornoOutcome, Unconfirmed> {
+    async fn storno_inner(
+        &self,
+        request: StornoStepRequest<'_>,
+    ) -> Result<StornoOutcome, Unconfirmed> {
         // Step 1: the leading query.
-        if let Some(settled) = self.storno_settled_by_query(&attempt).await? {
+        if let Some(settled) = self.storno_settled_by_query(&request).await? {
             return Ok(settled);
         }
 
         // Step 2: send.
-        let mut request = StornoInvoice::new(attempt.invoice_number);
-        request.e_invoice = attempt.e_invoice;
-        request.external_id = Some(attempt.external_id.as_str().to_owned());
-        request.comment = attempt.comment.map(str::to_owned);
-        request
+        let mut storno = StornoInvoice::new(request.invoice_number);
+        storno.e_invoice = request.e_invoice;
+        storno.external_id = Some(request.external_id.as_str().to_owned());
+        storno.comment = request.comment.map(str::to_owned);
+        storno
             .aggregator
             .clone_from(&self.account.defaults.aggregator);
-        request.guardian = self.account.defaults.guardian;
-        request.issue_date = None;
+        storno.guardian = self.account.defaults.guardian;
+        storno.issue_date = None;
 
-        match self.client.send(&request).await {
-            Ok(created) if created.reverses(&request.invoice_number) => {
+        match self.client.send(&storno).await {
+            Ok(created) if created.reverses(&storno.invoice_number) => {
                 tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
                 Ok(StornoOutcome::Reversed(created))
             }
@@ -1053,12 +1059,12 @@ impl Gateway {
                 }
                 Failure::Unknown { code, message } => {
                     tracing::warn!(code = ?code, "open code; re-querying");
-                    self.storno_settle_or(&attempt, Unconfirmed::Open { code, message })
+                    self.storno_settle_or(&request, Unconfirmed::Open { code, message })
                         .await
                 }
                 Failure::Transport(message) => {
                     tracing::warn!("transport failure; re-querying");
-                    self.storno_settle_or(&attempt, Unconfirmed::Transport(message))
+                    self.storno_settle_or(&request, Unconfirmed::Transport(message))
                         .await
                 }
             },
@@ -1069,10 +1075,10 @@ impl Gateway {
     /// a landed storno settles the step; nothing is `unconfirmed`.
     async fn storno_settle_or(
         &self,
-        attempt: &StornoAttempt<'_>,
+        request: &StornoStepRequest<'_>,
         unconfirmed: Unconfirmed,
     ) -> Result<StornoOutcome, Unconfirmed> {
-        match self.storno_settled_by_query(attempt).await? {
+        match self.storno_settled_by_query(request).await? {
             Some(settled) => Ok(settled),
             None => Err(unconfirmed),
         }
@@ -1088,10 +1094,10 @@ impl Gateway {
     /// [`Unconfirmed::Transport`] when the query itself failed.
     async fn storno_settled_by_query(
         &self,
-        attempt: &StornoAttempt<'_>,
+        request: &StornoStepRequest<'_>,
     ) -> Result<Option<StornoOutcome>, Unconfirmed> {
         match self
-            .storno_seen(attempt.external_id, attempt.invoice_number)
+            .storno_seen(request.external_id, request.invoice_number)
             .await
         {
             Ok(Some(storno_number)) => Ok(Some(StornoOutcome::AlreadyReversed { storno_number })),

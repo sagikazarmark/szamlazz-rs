@@ -7,9 +7,11 @@ use serde::Serialize;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use crate::config::Namespace;
-use crate::contract::{IssuedKind, TerminalCode};
-use crate::gateway::{InvoiceDocumentExt as _, QueryOutcome};
-use crate::identity::OrderKey;
+use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
+use crate::gateway::{
+    InvoiceDocumentExt as _, QueryOutcome, StornoOutcome as GatewayStornoOutcome,
+};
+use crate::identity::{ExternalId, OrderKey};
 
 /// A fault raised as a `TerminalError` (design §7): never a domain outcome.
 ///
@@ -140,6 +142,50 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
 }
 
+/// What the storno step sends (design §6 step 3), built from what the verify
+/// step found. Shared by `Szamlazz.Order.storno_invoice` and
+/// `Szamlazz.Agent.storno`, whose storno external ids differ.
+#[derive(Debug, Clone)]
+pub(super) struct StornoIntent {
+    /// The invoice to reverse.
+    pub(super) number: String,
+    /// `{namespace}:{order}:storno:{number}` or
+    /// `{namespace}:by-number:{number}:storno`.
+    pub(super) storno_id: ExternalId,
+    pub(super) comment: Option<String>,
+    pub(super) e_invoice: bool,
+}
+
+/// The settled storno step as the handlers' `StornoResponse`: reversed (now
+/// or already), not stornoable, or rejected. Rejected credentials are the
+/// caller's fault to raise, with the identity it knows.
+pub(super) fn storno_response(
+    outcome: GatewayStornoOutcome,
+    number: String,
+) -> Result<StornoResponse, (String, String)> {
+    Ok(match outcome {
+        GatewayStornoOutcome::Reversed(storno) => {
+            StornoResponse::new(StornoOutcome::Reversed, number)
+                .with_storno_number(storno.invoice_number.as_str())
+        }
+        GatewayStornoOutcome::AlreadyReversed { storno_number } => {
+            StornoResponse::new(StornoOutcome::Reversed, number)
+                .with_storno_number(storno_number)
+        }
+        GatewayStornoOutcome::NotStornoable => StornoResponse::new(StornoOutcome::Rejected, number)
+            .with_code("not_stornoable")
+            .with_message(
+                "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
+            ),
+        GatewayStornoOutcome::Rejected { code, message } => {
+            StornoResponse::new(StornoOutcome::Rejected, number)
+                .with_code(code)
+                .with_message(message)
+        }
+        GatewayStornoOutcome::CredentialsRejected { code, message } => return Err((code, message)),
+    })
+}
+
 /// What a query by one of our external ids found (design §3).
 ///
 /// Every caller matches all three variants: an issuing handler refuses a
@@ -211,15 +257,16 @@ macro_rules! journal_helpers {
             use serde::Serialize;
             use serde::de::DeserializeOwned;
 
-            use super::{Fault, Lookup};
+            use super::{Fault, Lookup, StornoIntent};
             use crate::account::Accounts;
             use crate::config::{Namespace, WorkerConfig};
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{
                 Gateway, InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome,
+                StornoOutcome as GatewayStornoOutcome, StornoStepRequest,
             };
             use crate::identity::{ExternalId, OrderKey};
-            use crate::service::prologue::{self, Execution, Resolution};
+            use crate::service::prologue::{self as decisions, Execution};
 
             /// The prologue of every handler (design §4): pin → resolve →
             /// fetch → open.
@@ -261,19 +308,19 @@ macro_rules! journal_helpers {
                         "account",
                         config.resolve.run_retry_policy(),
                         move || async move {
-                            prologue::resolution(accounts.resolve(scope.as_deref()).await)
+                            decisions::resolution(accounts.resolve(scope.as_deref()).await)
                         },
                     )
                     .await
-                    .map_err(|error| prologue::resolve_exhausted(&error))?
+                    .map_err(|error| decisions::resolve_exhausted(&error))?
                 };
-                let account = prologue::account_of(resolution)?;
+                let account = decisions::account_of(resolution)?;
 
                 // 4. Fetch, outside the journal.
-                let credentials = prologue::fetch_credentials(accounts, &account).await?;
+                let credentials = decisions::fetch_credentials(accounts, &account).await?;
 
                 // 5. Open.
-                let gateway = prologue::open(account, credentials)?;
+                let gateway = decisions::open(account, credentials)?;
                 Ok(Execution { gateway, config })
             }
 
@@ -406,15 +453,54 @@ macro_rules! journal_helpers {
             pub(in crate::service) async fn lookup_storno(
                 ctx: &$ctx<'_>,
                 gateway: &Arc<Gateway>,
-                external_id: &ExternalId,
-                number: &str,
+                intent: &StornoIntent,
             ) -> Result<StornoLookupOutcome, HandlerError> {
                 let gateway = Arc::clone(gateway);
-                let external_id = external_id.clone();
-                let number = number.to_owned();
+                let external_id = intent.storno_id.clone();
+                let number = intent.number.clone();
                 run_once(ctx, format!("lookup-storno-{number}"), move || async move {
                     gateway.lookup_storno(&external_id, &number).await
                 })
+                .await
+            }
+
+            /// The storno step (design §6 step 3): one durable step under the
+            /// issue policy's run retry policy, query-first on every execution
+            /// (the query is inside the closure: a separate journaled query
+            /// would replay its stale "nothing" on the retry and re-send).
+            ///
+            /// # Errors
+            ///
+            /// The `TerminalError` the run ends with — exhaustion (500) or
+            /// cancellation (409); the caller maps it to `outcome_unknown`
+            /// about its document. Nothing is recorded: the next call's
+            /// lookup finds whatever landed.
+            pub(in crate::service) async fn storno_step(
+                ctx: &$ctx<'_>,
+                gateway: &Arc<Gateway>,
+                policy: RunRetryPolicy,
+                intent: &StornoIntent,
+            ) -> Result<GatewayStornoOutcome, TerminalError> {
+                let gateway = Arc::clone(gateway);
+                let number = intent.number.clone();
+                let external_id = intent.storno_id.clone();
+                let comment = intent.comment.clone();
+                let e_invoice = intent.e_invoice;
+                run_retrying(
+                    ctx,
+                    format!("storno-{}", intent.number),
+                    policy,
+                    move || async move {
+                        gateway
+                            .storno(StornoStepRequest {
+                                invoice_number: &number,
+                                external_id: &external_id,
+                                comment: comment.as_deref(),
+                                e_invoice,
+                            })
+                            .await
+                    },
+                )
                 .await
             }
 

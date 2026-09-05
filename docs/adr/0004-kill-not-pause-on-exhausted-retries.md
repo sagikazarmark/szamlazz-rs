@@ -99,8 +99,10 @@ off `issue.initial_delay` / `max_delay`). It now has the shape of the create: a 
 (`lookup-storno-{number}`) and one `ctx.run` (`storno-{number}`) under the same issue policy, query-first
 inside the closure, `Err(Unconfirmed)` only for an unknown answer, exhaustion mapped to
 `outcome_unknown{order, kind, external_id}` — on `Szamlazz.Order.storno_invoice` and on
-`Szamlazz.Agent.storno` alike. The issue policy is now the only retry envelope in the crate; no attempt
-counter or sleep remains.
+`Szamlazz.Agent.storno` alike. No durable attempt counter or `ctx.sleep` remains: the issue policy is
+the retry envelope of every szamlazz.hu write, and the resolve policy (#25) that of the `account` step.
+The one in-process retry left is the prologue's credential fetch — three fetches 200 ms apart, outside
+the journal, then a terminal `unavailable` — which is deliberately not a Restate retry (design §4).
 
 ## Consequences
 

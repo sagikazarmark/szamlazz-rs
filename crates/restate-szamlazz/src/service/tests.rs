@@ -184,8 +184,8 @@ async fn services_bind_to_an_endpoint() {
     assert!(order.accounts().fetch(&account).await.is_ok());
     assert!(
         matches!(
-            agent.accounts().resolve(Some("tenant")).await,
-            Err(ResolveError::Unknown { scope }) if scope == "tenant"
+            agent.accounts().resolve(Some("acme-events")).await,
+            Err(ResolveError::Unknown { scope }) if scope == "acme-events"
         ),
         "a single-account deployment knows no scope"
     );

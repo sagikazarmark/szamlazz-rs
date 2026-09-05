@@ -12,7 +12,7 @@ use restate_szamlazz::contract::{
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
     InvoiceDocumentExt as _, LookupOutcome, LookupRequest, QueryError, QueryOutcome,
-    SetPaymentsOutcome, StornoAttempt, StornoLookupOutcome, StornoOutcome, Unconfirmed,
+    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -1318,8 +1318,8 @@ async fn credential_codes_on_a_query_are_credentials_rejected() {
 
 // ----- storno ----------------------------------------------------------------
 
-fn storno_attempt(external_id: &ExternalId) -> StornoAttempt<'_> {
-    StornoAttempt {
+fn storno_request(external_id: &ExternalId) -> StornoStepRequest<'_> {
+    StornoStepRequest {
         invoice_number: "SZ-1",
         external_id,
         comment: Some("wrong buyer"),
@@ -1430,7 +1430,7 @@ async fn storno_reversed_is_validated() {
         .mount(&h.server)
         .await;
 
-    match h.gateway.storno(storno_attempt(&storno_id)).await {
+    match h.gateway.storno(storno_request(&storno_id)).await {
         Ok(StornoOutcome::Reversed(storno)) => {
             assert_eq!(storno.invoice_number.as_str(), "SS-1");
             assert_eq!(storno.gross_total, Some(dec!(-1270)));
@@ -1460,7 +1460,7 @@ async fn storno_echo_is_not_stornoable() {
         .await;
 
     assert_eq!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::NotStornoable)
     );
 }
@@ -1479,7 +1479,7 @@ async fn storno_rejections_are_typed() {
             .mount(&h.server)
             .await;
         assert_eq!(
-            h.gateway.storno(storno_attempt(&storno_id)).await,
+            h.gateway.storno(storno_request(&storno_id)).await,
             Ok(StornoOutcome::Rejected {
                 code: code.to_owned(),
                 message: message.to_owned(),
@@ -1489,7 +1489,7 @@ async fn storno_rejections_are_typed() {
 }
 
 #[tokio::test]
-async fn storno_pre_query_hit_is_already_reversed() {
+async fn storno_leading_query_hit_is_already_reversed() {
     let h = Harness::start().await;
     let storno_id = storno_id();
     external_id_query(storno_id.as_str())
@@ -1509,7 +1509,7 @@ async fn storno_pre_query_hit_is_already_reversed() {
         .await;
 
     assert_eq!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
         })
@@ -1519,7 +1519,7 @@ async fn storno_pre_query_hit_is_already_reversed() {
 #[tokio::test]
 async fn credential_codes_on_the_storno_are_credentials_rejected() {
     // Both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno` run
-    // this step; the pre-query and the send each report the rejection.
+    // this step; the leading query and the send each report the rejection.
     for code in CREDENTIAL_CODES {
         let h = Harness::start().await;
         let storno_id = storno_id();
@@ -1534,12 +1534,12 @@ async fn credential_codes_on_the_storno_are_credentials_rejected() {
             .mount(&h.server)
             .await;
         assert_eq!(
-            h.gateway.storno(storno_attempt(&storno_id)).await,
+            h.gateway.storno(storno_request(&storno_id)).await,
             Ok(StornoOutcome::CredentialsRejected {
                 code: code.to_owned(),
                 message: "login".to_owned(),
             }),
-            "pre-query {code}"
+            "leading query {code}"
         );
 
         let h = Harness::start().await;
@@ -1553,7 +1553,7 @@ async fn credential_codes_on_the_storno_are_credentials_rejected() {
             .mount(&h.server)
             .await;
         assert_eq!(
-            h.gateway.storno(storno_attempt(&storno_id)).await,
+            h.gateway.storno(storno_request(&storno_id)).await,
             Ok(StornoOutcome::CredentialsRejected {
                 code: code.to_owned(),
                 message: "login".to_owned(),
@@ -1586,14 +1586,14 @@ async fn storno_with_a_lost_reply_re_queries_once_and_is_unconfirmed_when_nothin
         .await;
 
     assert_eq!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Err(Unconfirmed::Open {
             code: Some("55".to_owned()),
             message: "signing".to_owned(),
         })
     );
     assert!(matches!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Err(Unconfirmed::Transport(_))
     ));
 }
@@ -1627,11 +1627,11 @@ async fn storno_re_executed_after_a_lost_reply_finds_the_storno_and_sends_nothin
         .await;
 
     assert!(matches!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Err(Unconfirmed::Transport(_))
     ));
     assert_eq!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
         })
@@ -1667,7 +1667,7 @@ async fn storno_lost_reply_whose_re_query_finds_the_storno_is_reversed() {
         .await;
 
     assert_eq!(
-        h.gateway.storno(storno_attempt(&storno_id)).await,
+        h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
         })

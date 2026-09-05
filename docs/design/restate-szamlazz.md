@@ -26,9 +26,11 @@ Layering (ADR 0001): the `gateway` is a Rust module that speaks to szamlazz.hu o
 `szamlazz_agent::Client` (the transport it wraps; it is not a second client) and the account, and exposes one plain
 async fn per durable step with outcome-as-data. `Szamlazz.Order` calls it inside `ctx.run`; `Szamlazz.Agent` is a thin
 stateless facade over it for by-number operations. Every read of account configuration by the services — the
-ownership-validation pins, the document defaults, the seller block — goes through `Gateway::account()`; the services
-hold only the gateway and a `WorkerConfig` with the deployment-level settings (the namespace of the external ids, the
-issue policy). No Restate service calls another; no `Order` handler calls a handler on its own key.
+ownership-validation pins, the document defaults, the seller block — goes through `Gateway::account()`. The services
+hold no gateway: each holds the `Accounts` bundle (account resolver + credential store) and a `WorkerConfig` with the
+deployment-level settings (the namespace of the external ids, the issue and resolve policies), and every handler's
+prologue (§4) resolves its account and opens a gateway for its own execution. No Restate service calls another; no
+`Order` handler calls a handler on its own key.
 
 ## 3. Principle: szamlazz.hu is the source of truth (ADR 0005)
 
@@ -232,7 +234,7 @@ step and one write step under the issue policy, query-first on every execution.
    `hivszamlaszam == number` → `AlreadyReversed{storno_number}` → `outcome: reversed{storno_number}`; 7 or another
    holder → `Absent` → proceed (a storno is idempotent server-side, so a stray holder is not a stop); 3/135/136/164 →
    `TerminalError{credentials_rejected}`; transport → `TerminalError{unavailable}`.
-3. **Storno** — one durable step under the issue policy (§9), `ctx.run("storno-{number}", || gateway.storno(StornoAttempt{
+3. **Storno** — one durable step under the issue policy (§9), `ctx.run("storno-{number}", || gateway.storno(StornoStepRequest{
    number, external_id, comment, e_invoice }))`. **Every execution is query-first, inside the closure** (the rule of §5
    step 4): the gateway returns `Ok(StornoOutcome)` for every known answer and `Err(Unconfirmed)` — retryable to the
    SDK — only when szamlazz.hu's answer is not known; the closure never returns a `TerminalError` itself.

@@ -12,12 +12,14 @@ step's `Err(Unconfirmed)` is reserved for an answer that is *not* known and is w
 policy re-executes), and is unit-testable with wiremock. The `Order` Virtual Object (key = order
 number) calls these functions **inside its own `ctx.run` closures**. A thin, stateless
 `Szamlazz.Agent` Restate service exposes `query`,
-`set_payments` and `storno` for by-number operations over the same module instance. No Restate
+`set_payments` and `storno` for by-number operations over the same module. No Restate
 service calls another, and `Order` never invokes a handler on its own key. The dependency direction
 the owner asked for — `Order` depends on the gateway, nothing depends on `Order` — is a compile-time
 fact: `Szamlazz.Order → gateway ← Szamlazz.Agent`. Everything the services know about the account
-they read through `Gateway::account()`; they hold no other account handle, only the deployment-level
-`WorkerConfig` (namespace, issue policy).
+they read through `Gateway::account()`. Since #25 neither service holds a gateway: both hold the
+`Accounts` bundle (account resolver + credential store) and the deployment-level `WorkerConfig`
+(namespace, issue and resolve policies), and every handler's prologue resolves its account and opens a
+gateway for its own execution.
 
 The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, the identity
 types, the module, both services — no state, ADR 0005; `restate-sdk` is an unconditional dependency), and

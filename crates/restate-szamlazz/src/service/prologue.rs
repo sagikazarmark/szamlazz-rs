@@ -1,10 +1,12 @@
 //! The prologue every handler runs after parsing its key (design §4): pin the
-//! namespace, resolve the account, fetch its credentials, open the gateway —
-//! and the pure decisions of those steps, which are what can be unit-tested
-//! (the SDK has no mock context; the durable behaviour is asserted end to
-//! end).
+//! namespace, resolve the account, fetch its credentials, open the gateway.
+//! This module holds the decisions of those steps — pure functions, which are
+//! what can be unit-tested (the SDK has no mock context; the durable behaviour
+//! is asserted end to end) — and the one step that runs outside the journal,
+//! the credential fetch. The durable steps themselves are stamped per context
+//! type in `support::{object, shared, service}::prologue`.
 //!
-//! The ingress-path guard (#27) slots in before resolution.
+//! The ingress-path guard slots in before resolution.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,10 +93,11 @@ pub(super) fn resolve_exhausted(error: &TerminalError) -> Fault {
     ))
 }
 
-/// The in-process retry of the credential fetch: attempts and the pause
-/// before each retry. Short by design — a prolonged store outage is a
-/// terminal `unavailable`, not a handler retry.
+/// Fetches of the credential store per handler execution, including the
+/// first. Short by design — a prolonged store outage is a terminal
+/// `unavailable`, not a handler retry.
 const FETCH_ATTEMPTS: u32 = 3;
+/// The pause before each re-fetch.
 const FETCH_PAUSE: Duration = Duration::from_millis(200);
 
 /// Fetches the account's credentials outside the journal, on every
@@ -204,13 +207,13 @@ mod tests {
         );
 
         let unknown = resolution(Err(ResolveError::Unknown {
-            scope: "tenant-a".to_owned(),
+            scope: "acme-events".to_owned(),
         }))
         .expect("data");
         assert_eq!(
             unknown,
             Resolution::Unknown {
-                scope: "tenant-a".to_owned()
+                scope: "acme-events".to_owned()
             }
         );
         let (status, body) = fault_body(account_of(unknown).expect_err("fault"));
@@ -220,7 +223,7 @@ mod tests {
             body["message"]
                 .as_str()
                 .expect("message")
-                .contains("tenant-a"),
+                .contains("acme-events"),
             "{body}"
         );
     }
