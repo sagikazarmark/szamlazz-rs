@@ -60,7 +60,10 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
     `Account`: `rendelesszam == order ∧ tipus ∈ kind-set ∧ teszt == account.mode ∧ (account.supplier_id unset ∨
     szallito/id == account.supplier_id)`; anything else → `conflict{external_id_collision}`. `mode` defaults to
     `live` and is always checked; `supplier_id` is optional in the single-account shape and required in the
-    multi-account shape (§9).
+    multi-account shape (§9). The account pins (`teszt`, `szallito/id`) are checked on **every** found document, by
+    external id or by number: `Szamlazz.Order`'s verifies and `Szamlazz.Agent.query` / `storno` raise
+    `TerminalError{account_mismatch}` on a document that fails them (§4, §6), so a misconfigured account fails on
+    its first found document on any handler. `set_payments` finds no document and is the one exemption (§4).
 - **Retry identity** is Restate's ingress `Idempotency-Key` (caller-side, recommended; see §8). The service does not
   know whether one was used, so it never relies on it for safety.
 - **Buyer name is serialised byte-identically on every attempt**: normalised once (trim + NFC) at validation. The
@@ -139,9 +142,9 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 | Handler | Input → Output | Notes |
 |---|---|---|
 | `check_account` | `()` → `CheckAccountResponse { scope, account: { id, mode, supplier_id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue as every handler, then one step (`probe`) — a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries (two segments; every issued id has three or more) — expecting code 7; `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**: reporting it is the probe's purpose); a failed exchange is `TerminalError{unavailable}`. `scope` is what the SDK saw — `null` under a scoped call means the server did not forward the scope (protocol v7 off). Credential acceptance is the only szamlazz.hu-verified fact it returns — the account fields echo the *configured* account, since the supplier id appears only in found-document bodies. Issues nothing. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works. `max_attempts = 3, kill`; `journal_retention = "1d"` (explicit, so the leak assertion can scan it) |
-| `query` | `QueryRequest { selector }` → `QueryResponse` | projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected`; `journal_retention = "1d"` |
-| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry`; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
-| `storno` | `StornoRequest` → `StornoResponse` | verify first; document carries `rendelesszam` → `outcome: managed_by_order{key}`; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the storno step under the issue policy; exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
+| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) journaling the document as found; a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected`; `journal_retention = "1d"` |
+| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately the one handler with no account check**: a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
+| `storno` | `StornoRequest` → `StornoResponse` | verify first; document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document — it checks the pins itself); else `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the storno step under the issue policy; exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
@@ -234,7 +237,7 @@ derives `consumed` from the `ES`. `create_final` — `ctx.run(query "…:prepaym
 `conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server
 enforces one final per prepayment (73 → `rejected`); the server does not net the prepayment into the final's totals.
 `correct_invoice` — `ctx.run(verify invoice_number)`: 7 → `invalid_input`, reversed → `conflict{base_reversed}`,
-`rendelesszam ≠ key` → `conflict{not_managed}`; ext id `…:corrective:{correction_id}`; the same lookup and create
+`rendelesszam ≠ key` → `conflict{not_managed}`, `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; ext id `…:corrective:{correction_id}`; the same lookup and create
 steps with the corrective exemption (verified): no order-number hint — the live base invoice under the order is
 expected — and a 71/152 the re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new
 corrective by contract.
@@ -279,7 +282,7 @@ answers when one account names another's invoice number is unverified — behavi
 `e_invoice` for the storno: the verified document's `eszamla` when known, else the account default.
 
 `Szamlazz.Agent.storno` runs the same lookup and storno steps under `"{namespace}:by-number:{number}:storno"` after its
-own verify (§4).
+own verify (§4), which — once the document is not an `Order`'s — applies the same account-pin check as step 1.
 
 `delete_proforma({force})`: `ctx.run(query "…:proforma")`: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
@@ -335,6 +338,17 @@ on a request, and on the 71/152 re-query path the create was already refused as 
 have landed with a lost reply, which is why it is a fault under the "every error means outcome unknown" rule and never
 `rejected`. Every
 occurrence is logged at `warn` with the namespace and the code (never the key).
+
+`account_mismatch`: a document found **by number** — `Szamlazz.Order`'s verifies (`storno_invoice`, the corrective's
+base), `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` — belongs to another szamlazz.hu account than the one the
+invocation resolved to: its `teszt` is not the account's mode, or its `szallito/id` is not the account's set supplier
+id. The same pins failing on a document found under one of our external ids are `conflict{external_id_collision}`
+(§3). The message names the document and the observed and expected pins, never the key (no document carries it). It
+is the worker's configuration or the caller's scope, not a transient: nothing was sent by the execution that raised
+it, and the same request repeats it until `mode` / `supplier_id` (or the scope) is fixed. `set_payments` sends without
+a query and cannot raise it (§4). What it cannot detect: a wrong-scope request naming an invoice number that also
+exists on the resolved account — that document legitimately matches the account's pins; only safety-contract rule 5
+(the caller records the scope as used; ADR 0006) prevents the case (behaviour notes).
 
 ## 8. Caller contract (documented in the crate READMEs)
 
@@ -458,8 +472,10 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
 - `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
   `journal_retention`, no input — and attributes), an endpoint build smoke test, `prepare` refusing
   `options.proforma` on every kind but `create_invoice`, the issue policy's field-for-field mapping onto
-  `RunRetryPolicy`, the fault → status mapping, the probe outcome → `credentials` mapping, and a sentinel test that
-  the agent key reaches neither the `credentials_rejected` warning nor the fault body.
+  `RunRetryPolicy`, the fault → status mapping, the probe outcome → `credentials` mapping, the account pins of a
+  document found by number (`teszt` and supplier mismatch → `account_mismatch` naming the observed and expected pins,
+  an unset supplier pin unchecked, the order number not a pin), and two sentinel tests that the agent key reaches
+  neither the `credentials_rejected` warning nor the fault body of `credentials_rejected` or `account_mismatch`.
 - End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
@@ -498,7 +514,14 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   and under `beta` → each its own account with `scope` as the SDK saw it, `credentials: ok`, and each account's
   key on its probe query exactly once; unscoped → 400 `unknown_account`;
   `create_invoice` → purge → `storno_invoice` → `reversed` → purge → `create_invoice {reissue}` → `issued` on an order
-  Restate holds nothing of, then the scoped `get` seeing the new holder; `acme`'s seller bank account changed between
+  Restate holds nothing of, then the scoped `get` seeing the new holder; `Szamlazz.Agent.storno` under `acme` on a
+  document whose `teszt` is `false`, or whose `szallito/id` is `beta`'s → 409 `account_mismatch` naming the observed
+  pins with only `namespace`, `account`, `verify-{number}` journaled and the storno mock `expect(0)`; the same
+  `beta`-supplier document once `acme` pins no supplier id → `reversed` with `acme`'s key on the storno; a document
+  of `acme`'s pins → `reversed` through verify, lookup and storno; an order-bearing document of foreign pins →
+  `managed_by_order` with nothing checked or sent; `Szamlazz.Agent.query` under `acme` → 409 `account_mismatch` on a
+  `teszt = false` document, the projection (`test`, `supplier_id`, totals) on a matching one, 404 `not_found` on 7;
+  `acme`'s seller bank account changed between
   two executions of a create step (the first loses its reply) → both executions carry the journaled bank account
   and only a new invocation sees the change; `beta`'s key rotated between two executions → the second carries the
   new key while the `account` entry read in flight and after completion is byte-identical; and, over every

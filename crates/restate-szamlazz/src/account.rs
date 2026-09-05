@@ -47,9 +47,13 @@ pub use static_resolver::{
 /// A document found under one of our external ids is ours only when it
 /// carries the order number, the `tipus` of the kind, `teszt` equal to
 /// [`mode`](Self::mode) and — when both are known — the account's
-/// [`supplier_id`](Self::supplier_id). The mode defaults to live and is
+/// [`supplier_id`](Self::supplier_id). The last two pins are checked on every
+/// document any handler finds, by external id or by number: a document that
+/// fails them is `conflict{external_id_collision}` under our id and the
+/// `account_mismatch` fault by number (`Szamlazz.Order`'s verifies,
+/// `Szamlazz.Agent.query` and `storno`). The mode defaults to live and is
 /// always checked: a test account configured as live fails on its first
-/// found document instead of issuing on the wrong account.
+/// found document, on any handler, instead of issuing on the wrong account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Account {

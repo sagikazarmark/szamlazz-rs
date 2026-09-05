@@ -87,7 +87,9 @@ impl Order {
 }
 
 /// The stateless `Szamlazz.Agent` service: by-number operations over the
-/// same accounts as [`Order`].
+/// same accounts as [`Order`]. `query` and `storno` check the document they
+/// find against the resolved account (`account_mismatch` on a mismatch);
+/// `set_payments` finds none and is exempt.
 #[derive(Debug, Clone)]
 pub struct Agent {
     accounts: Accounts,

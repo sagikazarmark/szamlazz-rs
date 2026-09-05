@@ -86,17 +86,33 @@ struct Doc<'a> {
     reversed: bool,
     referenced_invoice: Option<&'a str>,
     referenced_proforma: Option<&'a str>,
+    /// `teszt` — the document's account mode, one of the two account pins.
+    test: bool,
+    /// `szallito/id` — the document's supplier id, the other account pin.
+    supplier_id: u64,
 }
 
 impl<'a> Doc<'a> {
+    /// A live test-account document of `order` from [`SUPPLIER`].
     const fn new(number: &'a str, tipus: &'a str, order: &'a str) -> Self {
+        Self {
+            order: Some(order),
+            ..Self::unmanaged(number, tipus)
+        }
+    }
+
+    /// A live test-account document from [`SUPPLIER`] carrying no order
+    /// number: issued outside the worker, reachable by number only.
+    const fn unmanaged(number: &'a str, tipus: &'a str) -> Self {
         Self {
             number,
             tipus,
-            order: Some(order),
+            order: None,
             reversed: false,
             referenced_invoice: None,
             referenced_proforma: None,
+            test: true,
+            supplier_id: SUPPLIER,
         }
     }
 
@@ -108,17 +124,19 @@ impl<'a> Doc<'a> {
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>{SUPPLIER}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{rendelesszam}<teszt>true</teszt>{sztornozott}</alap>
+  <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
 </szamla>"#,
+            supplier_id = self.supplier_id,
             number = self.number,
             tipus = self.tipus,
             hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
             hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
             rendelesszam = opt("rendelesszam", self.order),
+            test = self.test,
             sztornozott = if self.reversed {
                 "<sztornozott>true</sztornozott>"
             } else {
@@ -209,6 +227,16 @@ fn create_with_bank_account(bank_account: &str) -> MockBuilder {
 
 fn storno() -> MockBuilder {
     op("action-szamla_agent_st")
+}
+
+/// A storno request that must not reach szamlazz.hu: a handler that stops
+/// before sending.
+async fn storno_never_sent(mock: &MockServer) {
+    storno()
+        .respond_with(created("SS-X", "-1000", "-1270"))
+        .expect(0)
+        .mount(mock)
+        .await;
 }
 
 /// The sentinel external id `check_account` probes under the run's namespace.
@@ -350,6 +378,22 @@ impl Reply {
             .unwrap_or_else(|| panic!("an error envelope with a message: {}", self.body));
         serde_json::from_str(message)
             .unwrap_or_else(|error| panic!("a structured fault ({error}): {message}"))
+    }
+
+    /// The reply is the `account_mismatch` fault (409) about `number`: it
+    /// names the document and the observed pin `observed`, carries no order
+    /// identity (a by-number check) and never the agent key.
+    fn assert_account_mismatch(&self, number: &str, observed: &str) -> Fault {
+        assert_eq!(self.status, 409, "{}", self.body);
+        let fault = self.fault();
+        assert_eq!(fault.code, "account_mismatch", "{fault:?}");
+        assert!(fault.message.contains(number), "{fault:?}");
+        assert!(fault.message.contains(observed), "{fault:?}");
+        assert_eq!(fault.order, None, "{fault:?}");
+        for key in AGENT_KEYS {
+            assert!(!fault.message.contains(key), "{fault:?}");
+        }
+        fault
     }
 }
 
@@ -1263,6 +1307,8 @@ async fn e2e_order_protocol() {
     same_idempotency_key_under_two_scopes_is_two_invocations(&h).await;
     check_account_under_each_scope_names_its_account(&h).await;
     purged_order_is_stornoed_and_reissued(&h).await;
+    agent_storno_checks_the_found_document_against_the_account(&h).await;
+    agent_query_checks_the_found_document_against_the_account(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
     no_agent_key_in_any_journal_of_the_run(&h).await;
@@ -2716,6 +2762,224 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     assert_eq!(status["invoice"]["number"], "SZ-18B", "{status}");
     assert_eq!(status["invoice"]["state"], "live");
     eprintln!("(xviii) purged order → storno → reversed; purged → reissue → issued: pass");
+}
+
+/// (xviii-b) `Szamlazz.Agent.storno` acts on nothing it has not checked
+/// against the account the invocation resolved to: a document whose `teszt`
+/// is not `acme`'s mode, or whose `szallito/id` is `beta`'s, is
+/// `account_mismatch` (409) after the verify alone — nothing is sent, the
+/// fault names the observed pins and never the key. Without a supplier pin the
+/// supplier id is not checked; a document of the account's own pins is
+/// reversed as before; and a document carrying an order number is
+/// `managed_by_order` before any pin is looked at — it is `Szamlazz.Order`'s,
+/// which checks them itself.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the five answers of the verify's account check"
+)]
+async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness) {
+    let storno_of = |number: &str| json!({ "invoice_number": number });
+
+    // A live-account document on the test account `acme`.
+    h.reset().await;
+    number_query("SZ-21")
+        .respond_with(
+            Doc {
+                test: false,
+                ..Doc::unmanaged("SZ-21", "SZ")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-21"))
+        .await;
+    reply.assert_account_mismatch("SZ-21", "teszt = false");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "verify-SZ-21"],
+        "the verify is the only step journaled"
+    );
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    // `beta`'s document under `acme`'s scope.
+    h.reset().await;
+    number_query("SZ-22")
+        .respond_with(
+            Doc {
+                supplier_id: SUPPLIER_B,
+                ..Doc::unmanaged("SZ-22", "SZ")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-22"))
+        .await;
+    reply.assert_account_mismatch("SZ-22", &format!("supplier Some({SUPPLIER_B})"));
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    // The same document once `acme` pins no supplier id: not checked, and
+    // the storno proceeds with `acme`'s key.
+    h.reset().await;
+    h.multi()
+        .update("acme", |account| account.supplier_id = None);
+    number_query("SZ-22")
+        .respond_with(
+            Doc {
+                supplier_id: SUPPLIER_B,
+                ..Doc::unmanaged("SZ-22", "SZ")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:by-number:SZ-22:storno")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno()
+        .and(body_string_contains(agent_key_tag(AGENT_KEY)))
+        .respond_with(created("SS-22", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-22"))
+        .await;
+    h.multi()
+        .update("acme", |account| account.supplier_id = Some(SUPPLIER));
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-22", "{}", reply.body);
+
+    // A document of `acme`'s own pins: reversed, as before.
+    h.reset().await;
+    number_query("SZ-23")
+        .respond_with(Doc::unmanaged("SZ-23", "SZ").response())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:by-number:SZ-23:storno")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno()
+        .and(body_string_contains(agent_key_tag(AGENT_KEY)))
+        .respond_with(created("SS-23", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-23"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-23", "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-SZ-23",
+            "lookup-storno-SZ-23",
+            "storno-SZ-23"
+        ]
+    );
+
+    // A document carrying an order number is `Szamlazz.Order`'s, whatever
+    // its pins: `managed_by_order`, no check, nothing sent.
+    h.reset().await;
+    number_query("SZ-24")
+        .respond_with(
+            Doc {
+                test: false,
+                supplier_id: SUPPLIER_B,
+                ..Doc::new("SZ-24", "SZ", "E2E-24")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-24"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "managed_by_order", "{}", reply.body);
+    assert_eq!(reply.body["order_key"], "E2E-24", "{}", reply.body);
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+    eprintln!(
+        "(xviii-b) Szamlazz.Agent.storno: teszt / supplier mismatch → account_mismatch with nothing sent; unpinned supplier not checked; own pins → reversed; order-bearing → managed_by_order: pass"
+    );
+}
+
+/// (xviii-c) `Szamlazz.Agent.query` answers a found document that is not the
+/// resolved account's as `account_mismatch` (409) instead of the projection —
+/// the loudest signal on a freshly onboarded account, whose first found
+/// document is most likely a read. A document of the account's pins is the
+/// projection as before; code 7 is 404 `not_found` as before.
+async fn agent_query_checks_the_found_document_against_the_account(h: &Harness) {
+    let query_of = |number: &str| json!({ "selector": { "invoice_number": number } });
+
+    h.reset().await;
+    number_query("SZ-25")
+        .respond_with(
+            Doc {
+                test: false,
+                ..Doc::unmanaged("SZ-25", "SZ")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "query", &query_of("SZ-25"))
+        .await;
+    reply.assert_account_mismatch("SZ-25", "teszt = false");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "query"]
+    );
+
+    h.reset().await;
+    number_query("SZ-26")
+        .respond_with(Doc::new("SZ-26", "SZ", "E2E-26").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "query", &query_of("SZ-26"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-26", "{}", reply.body);
+    assert_eq!(reply.body["document_type"], "SZ", "{}", reply.body);
+    assert_eq!(reply.body["order_number"], "E2E-26", "{}", reply.body);
+    assert_eq!(reply.body["test"], true, "{}", reply.body);
+    assert_eq!(reply.body["supplier_id"], SUPPLIER, "{}", reply.body);
+    assert_eq!(reply.body["gross_total"], "1270", "{}", reply.body);
+
+    h.reset().await;
+    number_query("SZ-27")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "query", &query_of("SZ-27"))
+        .await;
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    assert_eq!(reply.fault().code, "not_found", "{}", reply.body);
+    eprintln!(
+        "(xviii-c) Szamlazz.Agent.query: mismatched pins → account_mismatch; own pins → the projection; 7 → not_found: pass"
+    );
 }
 
 /// (xix) `acme`'s seller bank account changes between two executions of a

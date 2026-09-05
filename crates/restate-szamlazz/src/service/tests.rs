@@ -1,13 +1,15 @@
 //! Discovery and binding tests of the Restate adapters (design §11): the
 //! service names, the handler set with its shared flags and the per-handler
 //! retry policy, plus an `Endpoint` build — and the fault → `TerminalError`
-//! mapping the handlers share, including the sentinel that the agent key
-//! reaches neither the `credentials_rejected` warning nor the fault body.
+//! mapping the handlers share, the account pins of a found document, and the
+//! sentinels that the agent key reaches neither the `credentials_rejected`
+//! warning nor the fault body of `credentials_rejected` or `account_mismatch`.
 
 use restate_sdk::discovery::{HandlerType, RetryPolicyOnMaxAttempts, ServiceType};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::service::Discoverable;
 use serde_json::json;
+use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
@@ -31,6 +33,57 @@ fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
 
 fn namespace() -> Namespace {
     "acct".parse().expect("namespace")
+}
+
+/// The supplier id of the documents [`found`] builds.
+const SUPPLIER: u64 = 972_720;
+
+/// szamlazz.hu's `<szamla>` XML of a live `SZ-1` of `ORD-1` from a test
+/// account with `supplier_id`, with the given `alap` elements overridden.
+fn szamla_xml(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> String {
+    let mut alap = vec![
+        ("szamlaszam", "SZ-1"),
+        ("tipus", "SZ"),
+        ("eszamla", "2"),
+        ("rendelesszam", "ORD-1"),
+        ("teszt", "true"),
+    ];
+    for &(tag, value) in alap_overrides {
+        match alap.iter_mut().find(|(name, _)| *name == tag) {
+            Some(slot) => slot.1 = value,
+            None => alap.push((tag, value)),
+        }
+    }
+    let alap = alap.iter().fold(String::new(), |mut xml, (tag, value)| {
+        use std::fmt::Write as _;
+        write!(xml, "<{tag}>{value}</{tag}>").expect("writing to a String cannot fail");
+        xml
+    });
+    format!(
+        r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
+          <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
+          <alap><id>1</id>{alap}</alap>
+          <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>
+          <osszegek><totalossz><netto>0</netto><afa>0</afa><brutto>0</brutto></totalossz></osszegek>
+          </szamla>"#
+    )
+}
+
+/// The document of [`szamla_xml`], parsed as a query answer.
+fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
+    use szamlazz_agent::InvoiceNumber;
+    use szamlazz_agent::ops::query_pdf::InvoiceSelector;
+    use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
+    use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+
+    Box::new(
+        QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new("SZ-1")))
+            .parse(&RawResponse::new::<&str, &str>(
+                [],
+                szamla_xml(supplier_id, alap_overrides).into_bytes(),
+            ))
+            .expect("parse"),
+    )
 }
 
 #[test]
@@ -398,56 +451,66 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     assert_eq!(body["code"], "credentials_rejected");
 }
 
+/// The agent key never reaches the `account_mismatch` fault body either: it is
+/// built from the pins of the found document and the resolved account, and no
+/// document carries the key. The key is demonstrably on the wire when the
+/// document is found, and demonstrably absent from what the gateway returns
+/// and what the fault says.
+#[tokio::test]
+async fn account_mismatch_never_leaks_the_agent_key() {
+    use restate_sdk::errors::TerminalError;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::support::check_pins;
+    use crate::gateway::QueryOutcome;
+
+    const KEY: &str = "sentinel-agent-key-4b8e1d";
+    let server = MockServer::start().await;
+    // A live-account document of another supplier — what a test account
+    // configured as live, or the wrong account's key, finds by number.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            szamla_xml(1, &[("szamlaszam", "SZ-2"), ("teszt", "false")]),
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let order = Order::from_parts(accounts(&server.uri(), KEY), WorkerConfig::new(namespace()));
+
+    let account = order.accounts().resolve(None).await.expect("account");
+    let credentials = order.accounts().fetch(&account).await.expect("credentials");
+    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let verified = gateway.verify("SZ-2").await;
+    let QueryOutcome::Found(found) = verified.clone() else {
+        panic!("expected Found, got {verified:?}");
+    };
+    let mismatch = TerminalError::from(check_pins(gateway.account(), &found).expect_err("a fault"));
+
+    let sent = server.received_requests().await.expect("requests");
+    assert!(
+        String::from_utf8_lossy(&sent[0].body).contains(KEY),
+        "the sentinel key must have been on the wire for the test to mean anything"
+    );
+    assert!(!format!("{verified:?}").contains(KEY), "{verified:?}");
+    assert_eq!(mismatch.code(), 409);
+    assert!(!mismatch.message().contains(KEY), "{}", mismatch.message());
+    let body: serde_json::Value = serde_json::from_str(mismatch.message()).expect("json body");
+    assert_eq!(body["code"], "account_mismatch");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("SZ-2"), "{message}");
+    assert!(message.contains("teszt = false"), "{message}");
+    assert!(message.contains("supplier Some(1)"), "{message}");
+}
+
 #[test]
 fn lookup_classifies_query_outcomes() {
-    use szamlazz_agent::InvoiceNumber;
-    use szamlazz_agent::ops::query_pdf::InvoiceSelector;
-    use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
-    use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
-
     use super::support::Lookup;
     use crate::contract::IssuedKind;
     use crate::gateway::QueryOutcome;
     use crate::identity::OrderKey;
 
-    /// A live `SZ-1` of `ORD-1` from a test account, with the given `alap`
-    /// elements overridden.
-    fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
-        let mut alap = vec![
-            ("szamlaszam", "SZ-1"),
-            ("tipus", "SZ"),
-            ("eszamla", "2"),
-            ("rendelesszam", "ORD-1"),
-            ("teszt", "true"),
-        ];
-        for &(tag, value) in alap_overrides {
-            match alap.iter_mut().find(|(name, _)| *name == tag) {
-                Some(slot) => slot.1 = value,
-                None => alap.push((tag, value)),
-            }
-        }
-        let alap = alap.iter().fold(String::new(), |mut xml, (tag, value)| {
-            use std::fmt::Write as _;
-            write!(xml, "<{tag}>{value}</{tag}>").expect("writing to a String cannot fail");
-            xml
-        });
-        let body = format!(
-            r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
-              <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-              <alap><id>1</id>{alap}</alap>
-              <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>
-              <osszegek><totalossz><netto>0</netto><afa>0</afa><brutto>0</brutto></totalossz></osszegek>
-              </szamla>"#
-        );
-
-        Box::new(
-            QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new("SZ-1")))
-                .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
-                .expect("parse"),
-        )
-    }
-
-    const SUPPLIER: u64 = 972_720;
     let order = OrderKey::parse("ORD-1").expect("order");
     let namespace = namespace();
     let classify = |outcome: QueryOutcome, supplier: Option<u64>| {
@@ -497,4 +560,67 @@ fn lookup_classifies_query_outcomes() {
     assert_eq!(error.code(), 503);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "credentials_rejected");
+}
+
+/// Every handler that finds a document checks it against the account the
+/// invocation resolved to (design §3): `teszt` must equal the account's mode
+/// and, when the account pins a supplier id, `szallito/id` must match it. A
+/// mismatch is the `account_mismatch` fault (409) naming the observed pins and
+/// the resolved account's — a test account configured as live fails loudly on
+/// its first found document.
+#[test]
+fn a_found_document_must_belong_to_the_resolved_account() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::check_pins;
+    use crate::account::Account;
+    use crate::config::AccountMode;
+
+    let mut account = Account::new("acct", "acct");
+    account.mode = AccountMode::Test;
+    account.supplier_id = Some(SUPPLIER);
+
+    check_pins(&account, &found(SUPPLIER, &[])).expect("ours");
+    check_pins(&account, &found(SUPPLIER, &[("rendelesszam", "OTHER")]))
+        .expect("the order number is not a pin of the account");
+
+    // A live document on a test account, or a test document on a live one.
+    let fault = check_pins(&account, &found(SUPPLIER, &[("teszt", "false")])).expect_err("a fault");
+    let error = TerminalError::from(fault);
+    assert_eq!(error.code(), 409);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "account_mismatch");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("SZ-1"), "{message}");
+    assert!(message.contains("teszt = false"), "{message}");
+    assert!(message.contains("teszt = true"), "{message}");
+    assert_eq!(
+        body.get("order"),
+        None,
+        "no order identity on a by-number check"
+    );
+
+    let mut live = account.clone();
+    live.mode = AccountMode::Live;
+    let fault = check_pins(&live, &found(SUPPLIER, &[])).expect_err("a fault");
+    let body: serde_json::Value =
+        serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
+    assert_eq!(body["code"], "account_mismatch");
+
+    // Another supplier, when the account pins one.
+    let fault = check_pins(&account, &found(1, &[])).expect_err("a fault");
+    let body: serde_json::Value =
+        serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
+    assert_eq!(body["code"], "account_mismatch");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("supplier Some(1)"), "{message}");
+    assert!(
+        message.contains(&format!("supplier Some({SUPPLIER})")),
+        "{message}"
+    );
+
+    // No supplier pin: the supplier id is not checked.
+    let mut unpinned = account.clone();
+    unpinned.supplier_id = None;
+    check_pins(&unpinned, &found(1, &[])).expect("unpinned");
 }

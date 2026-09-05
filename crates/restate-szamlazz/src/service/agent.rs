@@ -1,5 +1,9 @@
 //! The stateless `Szamlazz.Agent` service handlers: `query`, `set_payments`
 //! and `storno` by document number, and the `check_account` probe.
+//!
+//! `query` and `storno` check the document they find against the account the
+//! invocation resolved to (`support::check_pins`) before they answer or
+//! send; `set_payments` finds no document and is exempt.
 
 use std::sync::Arc;
 
@@ -10,7 +14,7 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::service::{lookup_storno, run_once, storno_step};
-use super::support::{Fault, StornoIntent, storno_response, terminal};
+use super::support::{Fault, StornoIntent, check_pins, storno_response, terminal};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     SetPaymentsRequest, SetPaymentsResponse, StornoOutcome, StornoRequest, StornoResponse,
@@ -41,10 +45,15 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> Result<CredentialsChec
     }
 }
 
-/// The journaled result of the `query` handler's run.
+/// The journaled result of the `query` handler's run: the document as found,
+/// checked against the account and projected after the journal — the same
+/// entry `verify` writes, so the check reads one shape everywhere. (Before
+/// #32 the entry was the projection; a `query` in flight across that deploy
+/// replays an undecodable entry and is killed — accepted for a one-step
+/// read-only handler with a one-day journal retention.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum QueryRun {
-    Found(Box<QueryResponse>),
+    Found(Box<InvoiceDocument>),
     NotFound,
     CredentialsRejected { code: String, message: String },
     Api { code: String, message: String },
@@ -55,7 +64,7 @@ enum QueryRun {
 impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
     fn from(result: Result<InvoiceDocument, QueryError>) -> Self {
         match result {
-            Ok(document) => Self::Found(Box::new(QueryResponse::from(&document))),
+            Ok(document) => Self::Found(Box::new(document)),
             Err(QueryError::NotFound) => Self::NotFound,
             Err(QueryError::CredentialsRejected { code, message }) => {
                 Self::CredentialsRejected { code, message }
@@ -97,6 +106,13 @@ impl Execution {
         ))
     }
 
+    /// The `query` handler: one durable step (`query`) — the document as
+    /// szamlazz.hu returned it — then the account check every handler that
+    /// finds a document runs, and the projection. A document that is not the
+    /// resolved account's is `account_mismatch`, not a projection that looks
+    /// fine: on a freshly onboarded account the first found document is most
+    /// likely a read, and a 409 naming the observed `teszt` and supplier id is
+    /// the louder signal.
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
@@ -109,7 +125,10 @@ impl Execution {
         })
         .await?;
         match run {
-            QueryRun::Found(response) => Ok(*response),
+            QueryRun::Found(found) => {
+                check_pins(self.gateway.account(), &found)?;
+                Ok(QueryResponse::from(&*found))
+            }
             QueryRun::NotFound => Err(terminal(
                 404,
                 "not_found",
@@ -129,6 +148,13 @@ impl Execution {
         }
     }
 
+    /// The `set_payments` handler: one durable step (`set-payments-{number}`)
+    /// that registers the credit entries without a preceding query.
+    /// Deliberately the one handler without the account check of a found
+    /// document: it finds none — a verify round trip (about a second per
+    /// credit entry) to catch a misconfiguration every other found document
+    /// already catches is not worth it, and a credit entry is not a legal
+    /// document.
     pub(super) async fn set_payments_request(
         &self,
         ctx: &Context<'_>,
@@ -169,6 +195,9 @@ impl Execution {
         }
     }
 
+    /// The `storno` handler: verify by number, then — for a document carrying
+    /// no order number that belongs to the resolved account — the lookup and
+    /// storno steps of design §6 under the by-number storno external id.
     pub(super) async fn storno_request(
         &self,
         ctx: &Context<'_>,
@@ -212,10 +241,14 @@ impl Execution {
             .map(str::trim)
             .filter(|order| !order.is_empty())
         {
+            // `Szamlazz.Order`'s document: it checks the pins itself.
             return Ok(
                 StornoResponse::new(StornoOutcome::ManagedByOrder, number).with_order_key(order)
             );
         }
+        // This is the handler that issues a legal document by number: the
+        // document must be the resolved account's before anything is sent.
+        check_pins(self.gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
             return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
         }

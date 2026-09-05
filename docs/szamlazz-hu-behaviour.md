@@ -175,13 +175,17 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 - **By-number operations under the wrong scope** (multi-account mode, ADR 0006): what szamlazz.hu answers
   when account A's agent key queries, credits or stornos an invoice *number* that belongs to account B —
   7 (not on this account's query surface) is expected, but a shared number space or a different code is
-  possible; only one account was probed. Moderate: `Szamlazz.Order.storno_invoice` verifies first and
-  refuses a document whose `teszt` / `szallito/id` are not the resolved account's (`account_mismatch`);
-  `Szamlazz.Agent.query`, `set_payments` and `storno` check no account pin — by-number operations act on
-  whatever szamlazz.hu returns to that account's key (a found document does carry `teszt` and `szallito/id`;
-  the check is simply not made there). The
-  worker relies on szamlazz.hu answering 7 across accounts; the caller records the scope as used per order
-  (safety contract rule 5) precisely so that the case is never exercised.
+  possible; only one account was probed. Moderate: every handler that finds a document by number —
+  `Szamlazz.Order.storno_invoice` and `correct_invoice` on their verify, `Szamlazz.Agent.query` and
+  `Szamlazz.Agent.storno` on what they find — refuses one whose `teszt` / `szallito/id` are not the resolved
+  account's (`account_mismatch`), so B's document reaching A's key is caught whatever szamlazz.hu answers;
+  `Szamlazz.Agent.set_payments` sends without a query and checks nothing (a credit entry is not a legal
+  document). What stays undetectable is the collision: a wrong-scope request naming a number that also exists
+  on the resolved account acts on *that* account's document, which legitimately matches its pins. So the
+  worker no longer relies on 7 across accounts for safety — 7 is `not_found`, B's document is
+  `account_mismatch` — and what remains unverified is only whether the number spaces can overlap at all; the
+  caller records the scope as used per order (safety contract rule 5) precisely so that the case is never
+  exercised.
 
 ## Go-live checklist
 

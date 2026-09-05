@@ -298,8 +298,12 @@ pub enum TerminalCode {
     /// szamlazz.hu could not be reached for a check that must succeed before
     /// anything is issued.
     Unavailable,
-    /// A document found under our identity belongs to a different szamlazz.hu
-    /// account.
+    /// A document found by number belongs to a different szamlazz.hu account
+    /// than the one the invocation resolved to: its `teszt` is not the
+    /// account's mode, or its `szallito/id` is not the account's supplier id.
+    /// Raised by every handler that finds a document — `Szamlazz.Order` on a
+    /// verify, `Szamlazz.Agent.query` and `storno` on what they find — before
+    /// it is acted on; `set_payments` finds none and is exempt.
     AccountMismatch,
     /// The request is malformed or names a document szamlazz.hu does not
     /// know.

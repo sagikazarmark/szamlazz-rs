@@ -8,7 +8,7 @@ use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
-use super::support::{Fault, Lookup, StornoIntent, order_key, storno_response};
+use super::support::{Fault, Lookup, StornoIntent, check_pins, order_key, storno_response};
 use super::support::{object, shared};
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
@@ -133,14 +133,7 @@ impl Execution {
                     .with_conflict_reason(ConflictReason::NotManaged),
             ));
         }
-        let account = gateway.account();
-        if !found.account_matches(account.mode.is_test(), account.supplier_id) {
-            return Err(Fault::account_mismatch(format!(
-                "document {number} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
-                found.info.test, found.supplier.id
-            ))
-            .into());
-        }
+        check_pins(gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
             // Idempotent: already reversed by anyone.
             let storno_number =

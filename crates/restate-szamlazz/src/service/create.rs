@@ -19,7 +19,7 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::object::{lookup, run_once, run_retrying, verify};
-use super::support::{Fault, Lookup, order_key};
+use super::support::{Fault, Lookup, check_pins, order_key};
 use crate::config::Namespace;
 use crate::contract::response::outstanding;
 use crate::contract::{
@@ -228,7 +228,7 @@ impl Execution {
                 if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
                     return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
                 }
-                self.check_account(&found)?;
+                check_pins(self.gateway.account(), &found)?;
                 if found.info.reversed == Some(true) {
                     return Ok(identity.conflict_about(ConflictReason::BaseReversed, number));
                 }
@@ -314,22 +314,6 @@ impl Execution {
         self.gateway
             .build_create(kind, document, order, external_id, refs)
             .map_err(|error| Fault::invalid_input(error.to_string()))
-    }
-
-    /// A document verified by number that carries this order's number must
-    /// also belong to the gateway's account.
-    fn check_account(&self, found: &InvoiceDocument) -> Result<(), Fault> {
-        let account = self.gateway.account();
-        if found.account_matches(account.mode.is_test(), account.supplier_id) {
-            Ok(())
-        } else {
-            Err(Fault::account_mismatch(format!(
-                "document {} carries this order's number but belongs to another szamlazz.hu account (teszt = {}, supplier {:?})",
-                found.number(),
-                found.info.test,
-                found.supplier.id
-            )))
-        }
     }
 
     // ----- step 1: exclusivity ---------------------------------------------

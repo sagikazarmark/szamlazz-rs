@@ -153,7 +153,9 @@ activation details.
   `base_reversed`, `not_managed`.
 - `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
   `unavailable` (503; also the prologue's own faults: the resolve policy exhausted, the credential store gone or
-  unavailable), `account_mismatch` (409), `invalid_input` (400), `credentials_rejected`
+  unavailable), `account_mismatch` (409: a document found by number — on `Szamlazz.Order`'s verifies,
+  `Szamlazz.Agent.query` or `storno` — belongs to another szamlazz.hu account than the resolved one; `set_payments`
+  finds none and is exempt), `invalid_input` (400), `credentials_rejected`
   (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the execution that
   raised it issued nothing) and `unknown_account` (400: the request names no account of this deployment).
 - `contract::CheckAccountResponse` (`CheckedAccount`, `CredentialsCheck`): the output of
@@ -285,7 +287,7 @@ answer a by-number miss as 404 `not_found` and pass a szamlazz.hu error through 
 |---|---|---|---|
 | `invalid_input` | 400 | The request is malformed or names a document szamlazz.hu does not know. | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
-| `account_mismatch` | 409 | A document carrying this order's number belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's). | Check the account's `mode` / `supplier_id`; do not retry blindly. |
+| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued. | Rule 2. |
 | `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent — or the account resolver or credential store could not answer. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
@@ -322,7 +324,9 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
 ## Testing
 
 - `cargo test -p restate-szamlazz` runs the contract, config and identity unit tests, the discovery and binding
-  tests of the adapters, and the wiremock tests of the gateway against synthetic szamlazz.hu responses
+  tests of the adapters (with the account pins of a document found by number and the sentinels that the agent key
+  reaches neither the `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch`
+  fault), and the wiremock tests of the gateway against synthetic szamlazz.hu responses
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
   exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
   `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — the storno lookup and step — `AlreadyReversed`
@@ -346,7 +350,11 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   under two scopes concurrently → two `issued` with each account's key on the create wire exactly once; the same
   `Idempotency-Key` under two scopes → two invocation ids and two documents, each replaying its own completion;
   `check_account` under each scope → its own account with its key on the probe, unscoped → `unknown_account`; an
-  order whose invocations were purged stornoed and reissued; an account
+  order whose invocations were purged stornoed and reissued; `Szamlazz.Agent.storno` refusing a document whose
+  `teszt` or `szallito/id` is not the resolved account's as `account_mismatch` after the verify alone (storno mock
+  `expect(0)`), not checking the supplier id when the account pins none, reversing a document of the account's own
+  pins, and answering an order-bearing document `managed_by_order` before any pin is looked at; `Szamlazz.Agent.query`
+  answering a mismatched document `account_mismatch`, a matching one as the projection and code 7 as `not_found`; an account
   change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
   rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that
   no agent key of the run appears in the hex-decoded `raw` of any journal entry of any invocation, nor in any

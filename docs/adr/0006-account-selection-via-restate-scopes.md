@@ -257,8 +257,9 @@ PRD story 16 first read "optional; unset means unchecked". Rejected on review: a
 whether an account is a test account, and unset-means-unchecked would have removed a default-on guard
 that ADR 0002, ADR 0005, design §3 and both READMEs state — `teszt == account.mode` on every found
 document. With the default `live`, a test account configured as live fails loudly on its first found
-document (`account_mismatch` on a verify, `conflict{external_id_collision}` on a lookup) instead of issuing
-on the wrong account.
+document, on any handler that finds one (`account_mismatch` on a verify or a by-number query,
+`conflict{external_id_collision}` on a lookup) instead of issuing on the wrong account. Every handler that
+finds a document runs the check; `Szamlazz.Agent.set_payments` finds none and is the one exemption (#32).
 
 ### A credential-store outage is a terminal `unavailable`
 
@@ -347,6 +348,11 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   in all — the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` keep their
   by-number 404 `not_found` and 422 pass-through of szamlazz.hu's own code (design §4) beside them. The
   caller-contract sentence is unchanged.
+- `account_mismatch` is raised on **every** document a handler finds by number, not only on `Szamlazz.Order`'s
+  verifies: `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` check the found document's `teszt` and
+  `szallito/id` against the resolved account before they answer or send (#32). A wrong-scope by-number request
+  that reaches another account's document is therefore caught; one that names a number the resolved account
+  also holds is not — that document matches the pins — which is what rule 5 is for.
 - The prologue adds two journal entries to every invocation (`namespace`, `account`) and one szamlazz.hu-free
   round trip to the resolver and the store per execution.
 - A caller's `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under the scope

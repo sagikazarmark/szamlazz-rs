@@ -1,11 +1,13 @@
 //! Plumbing shared by the `Szamlazz.Order` and `Szamlazz.Agent` handlers: the
-//! fault → `TerminalError` mapping, journaled runs and the validation of
-//! documents found under our external ids.
+//! fault → `TerminalError` mapping, journaled runs, the validation of
+//! documents found under our external ids and the account check of documents
+//! found by number.
 
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
+use crate::account::Account;
 use crate::config::Namespace;
 use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
@@ -140,6 +142,38 @@ pub(super) fn terminal(status: u16, code: &str, message: impl Into<String>) -> H
 pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
     OrderKey::parse(key)
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
+}
+
+/// The account pins of a document found by number: it must belong to the
+/// account the invocation resolved to (design §3) — `teszt` equal to the
+/// account's mode and, when the account pins a supplier id and the document
+/// carries one, `szallito/id` equal to it. Every handler that finds a document
+/// runs this check — `Szamlazz.Order` on its verifies, `Szamlazz.Agent.query`
+/// and `storno` on what they find — so a misconfigured account (a test account
+/// configured as live, a wrong supplier id) fails loudly on its first found
+/// document instead of acting on the wrong account. `Szamlazz.Agent.set_payments`
+/// is exempt: it sends without a query, and a credit entry is not a legal
+/// document. Not to be confused with the `check_account` probe, which finds
+/// nothing and echoes configuration.
+///
+/// # Errors
+///
+/// The `account_mismatch` fault (409), naming the document and the observed
+/// and expected pins. No document carries the agent key, so neither does the
+/// message.
+pub(super) fn check_pins(account: &Account, found: &InvoiceDocument) -> Result<(), Fault> {
+    if found.account_matches(account.mode.is_test(), account.supplier_id) {
+        Ok(())
+    } else {
+        Err(Fault::account_mismatch(format!(
+            "document {} belongs to another szamlazz.hu account: it carries teszt = {}, supplier {:?}; the resolved account expects teszt = {}, supplier {:?}",
+            found.number(),
+            found.info.test,
+            found.supplier.id,
+            account.mode.is_test(),
+            account.supplier_id,
+        )))
+    }
 }
 
 /// What the storno step sends (design §6 step 3), built from what the verify
