@@ -543,6 +543,18 @@ scripts.
 
 ## 11. Testing
 
+szamlazz.hu is stood in for by **wiremock, not a fake**: every test states the answer szamlazz.hu gives, byte for
+byte, so a test is reviewable against the verified facts in `docs/szamlazz-hu-behaviour.md` rather than against a
+second model of the server that could be wrong while every test passes. What the protocol's hard cases need — a lost
+reply, `szlahu_down`, a specific code, "exactly n creates on the wire", "this account's key on this request" — is
+what canned responses and `expect(n)` do natively. The cost is that the stubs of one scenario must agree with each
+other by hand (a document is reachable by number, order number and external id with one body), which #51 puts behind
+a consistency layer in the harness. A stateful fake would be reconsidered for one capability only: property tests of
+the exactly-once invariant (random handler sequences under two scopes, "at most one live document per kind per
+order, the newest holder under every external id"), which no stub can express. Neither approach exercises a handler
+without Restate — the SDK has no `ObjectContext` harness — so handler decisions are tested end to end or as the pure
+functions they are extracted into.
+
 - `gateway`: wiremock tests using upstream-shaped responses — the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
   (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
