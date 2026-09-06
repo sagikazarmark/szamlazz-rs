@@ -251,7 +251,9 @@ gateway opened for this execution.
    - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
      → `CredentialsRejected{code, message}` — settled data, **not** `Unconfirmed`: re-executing with the same key would
      only repeat the answer, so the run policy is not spent on it.
-   - Transport failure or an open code (1, 55, 56 without a number, `szlahu_down`): re-query the external id once,
+   - Transport failure or an open code (1, 55, 56 without a number, a code the agent crate does not know —
+     `szamlazz_agent::OutcomeClass::Unknown`, because it may be a refusal or a new "issued, but…" code like 55/56,
+     and `rejected` would assert that no document exists (#13) — or `szlahu_down`): re-query the external id once,
      immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; found reversed (reversed between the send
      and the re-query) → `Reversed(doc)`; collision → `Collision`; nothing → `Err(Transport | Open)`. The run policy then re-executes the whole handler after the delay: the journal
      replays to the create step and the leading query runs again — the re-check ADR 0002 sizes the 2-minute gap for.
@@ -344,7 +346,8 @@ answers when one account names another's invoice number is unverified — behavi
    `not_stornoable` although the storno document had landed); echo of the requested number →
    `NotStornoable`; API errors → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
    `221` = has a corrective — typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 →
-   `CredentialsRejected{code, message}`; a transport failure or an open code (1, 55, 56, `szlahu_down`) → re-query
+    `CredentialsRejected{code, message}`; a transport failure or an open code (1, 55, 56, a code the agent crate
+    does not know, `szlahu_down`) → re-query
    the storno ext id once, immediately → the matching `SS` → `AlreadyReversed{storno_number}` (what was sent landed);
    nothing → `Err(Transport | Open)`, and the run policy re-executes the step after its delay, beginning again at (a).
    Any `Err` from the run — exhaustion (500) or cancellation (409) — is mapped to `TerminalError{outcome_unknown,
@@ -670,7 +673,8 @@ functions they are extracted into.
 - `gateway`: wiremock tests using upstream-shaped responses — the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
   (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
-  landed, the 71/152 matrix incl. `existing_number` and the contradiction settled after one send, the corrective's
+  landed — a code the agent crate does not know among them, on the create and the storno send —, the 71/152 matrix
+  incl. `existing_number` and the contradiction settled after one send, the corrective's
   71/152 → `Rejected`), storno validation incl. the D/SL no-op, the zero-gross storno as `Reversed`, the storno body
   carrying `<teljesitesDatum>` equal to the step request's date and no `<keltDatum>`, the two sends of a
   re-executed storno step byte-identical (`assert_eq!` on the bodies), a verified document's `telj` surfaced as

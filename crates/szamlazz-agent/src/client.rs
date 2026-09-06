@@ -18,7 +18,7 @@
 //! ```
 
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ParseError, RequestError, ResponseError};
+use crate::error::{ApiError, OutcomeClass, ParseError, RequestError, ResponseError};
 use crate::wire::{AgentRequest, ENDPOINT, RawResponse};
 
 /// Failure of a Számla Agent call made through [`Client`].
@@ -43,8 +43,33 @@ pub enum ClientError {
     /// after the server already issued the document means a retry issues a
     /// duplicate. Receipt call ids prevent duplicate issuance by returning
     /// error 338 on reuse, but a retry does not replay the original success.
+    /// [`ClientError::outcome_class`] says which failures leave the outcome
+    /// open.
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
+}
+
+impl ClientError {
+    /// What this failure says about the document the request asked for — may
+    /// one exist despite the error? See [`OutcomeClass`].
+    ///
+    /// A request refused before it was sent ([`ClientError::Request`]) is
+    /// [`OutcomeClass::Rejected`]: nothing reached szamlazz.hu. An API error's
+    /// class is its [`ErrorCode::outcome_class`](crate::ErrorCode::outcome_class).
+    /// A transport failure, unavailability (`szlahu_down`) and an unparseable
+    /// response are [`OutcomeClass::Unknown`]: the request may have been
+    /// acted on, and the caller must query by external id before sending it
+    /// again.
+    #[must_use]
+    pub fn outcome_class(&self) -> OutcomeClass {
+        match self {
+            Self::Request(_) => OutcomeClass::Rejected,
+            Self::Api(api) => api.code.outcome_class(),
+            Self::Parse(_) | Self::ServiceUnavailable(_) | Self::Transport(_) => {
+                OutcomeClass::Unknown
+            }
+        }
+    }
 }
 
 impl From<ResponseError> for ClientError {

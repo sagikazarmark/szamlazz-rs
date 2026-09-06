@@ -74,7 +74,8 @@ pub struct ReadmeDoctests;
 
 pub use credentials::{AgentKey, Credentials};
 pub use error::{
-    ApiError, ArithmeticError, ErrorCode, ParseError, RequestError, ResponseError, XmlError,
+    ApiError, ArithmeticError, ErrorCode, OutcomeClass, ParseError, RequestError, ResponseError,
+    XmlError,
 };
 pub use item::{LineItem, LineItemLedger, MAX_ERASURE_CODE_COUNT, Rounding};
 pub use types::{

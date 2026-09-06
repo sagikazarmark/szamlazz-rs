@@ -65,7 +65,9 @@ use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
-use szamlazz_agent::{ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber};
+use szamlazz_agent::{
+    ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, OutcomeClass,
+};
 use tracing::Instrument as _;
 
 use crate::account::Account;
@@ -279,7 +281,8 @@ pub enum Unconfirmed {
     #[error("transport failure: {0}")]
     Transport(String),
     /// szamlazz.hu reported an open code, one that leaves the outcome open:
-    /// 1, 55, 56 without a number, or `szlahu_down`.
+    /// 1, 55, 56 without a number, a code the agent crate does not know
+    /// ([`OutcomeClass::Unknown`]), or `szlahu_down`.
     #[error("open code {}: {message}", code.as_deref().unwrap_or("szlahu_down"))]
     Open {
         /// The szamlazz.hu code, when one was reported.
@@ -1627,11 +1630,19 @@ enum Seen {
 }
 
 /// A failed create-like call, classified for the outcome enums.
+///
+/// The API-code arms come from [`ErrorCode::outcome_class`]; the worker adds
+/// [`Failure::CredentialsRejected`] on top (a fault of its configuration, not
+/// of the request) and keeps the transport/parse failures apart from
+/// `szlahu_down` because [`Unconfirmed`] reports them differently.
 enum Failure {
+    /// [`OutcomeClass::Rejected`] or [`OutcomeClass::NotFound`]: szamlazz.hu
+    /// refused before acting; on a write, 7 is a missing field.
     Rejected {
         code: String,
         message: String,
     },
+    /// [`OutcomeClass::DuplicateOrderNumber`] (71/152).
     Duplicate {
         code: String,
         message: String,
@@ -1641,6 +1652,9 @@ enum Failure {
         code: String,
         message: String,
     },
+    /// [`OutcomeClass::Unknown`] — 1, 55, 56 without a number, a code the
+    /// agent crate does not know, or any class added to the crate later — and
+    /// `szlahu_down` (`code: None`): the outcome is open, re-query.
     Unknown {
         code: Option<String>,
         message: String,
@@ -1658,22 +1672,18 @@ fn classify_failure(error: ClientError) -> Failure {
         }
         ClientError::Api(api) => {
             let code = api.code.code().to_owned();
-            match api.code {
-                ErrorCode::DuplicateOrderNumber | ErrorCode::DuplicateOrderNumberNamed => {
-                    Failure::Duplicate {
-                        code,
-                        message: api.message,
-                    }
+            let message = api.message;
+            match api.code.outcome_class() {
+                OutcomeClass::DuplicateOrderNumber => Failure::Duplicate { code, message },
+                OutcomeClass::Rejected | OutcomeClass::NotFound => {
+                    Failure::Rejected { code, message }
                 }
-                ErrorCode::Maintenance
-                | ErrorCode::EInvoiceSigningFailed
-                | ErrorCode::InvoiceNotificationDeliveryFailed => Failure::Unknown {
+                // `Unknown`, and any class the agent crate adds later: a
+                // document may exist, so the step re-queries rather than
+                // claims `rejected`.
+                _ => Failure::Unknown {
                     code: Some(code),
-                    message: api.message,
-                },
-                _ => Failure::Rejected {
-                    code,
-                    message: api.message,
+                    message,
                 },
             }
         }

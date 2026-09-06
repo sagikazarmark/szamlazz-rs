@@ -5,6 +5,13 @@
 //! codes. [`ErrorCode`] gives the documented codes typed names with English
 //! documentation; the Hungarian message is kept verbatim in [`ApiError`].
 //!
+//! Two questions are answered per error, and they are different questions:
+//! [`ErrorCode::is_retryable`] — can the same *query* succeed later — and
+//! [`ErrorCode::outcome_class`] (also on [`ResponseError`] and the client's
+//! error) — may a *document* have been created despite the error. A
+//! document-issuing integration acts on the second: it re-queries by external
+//! id before it ever re-sends a create.
+//!
 //! Which channel carries the error depends on the operation: invoice creation,
 //! storno, and proforma deletion set `szlahu_error_code`/`szlahu_error`
 //! headers *and* a `<hibakod>`/`<hibauzenet>` body, while the XML query (code
@@ -68,6 +75,11 @@ pub enum ErrorCode {
     /// Reversing an invoice frees its order number for reuse, and a
     /// byte-identical resend while the first document is live returns that
     /// document instead of an error.
+    ///
+    /// Nothing new was created ([`OutcomeClass::DuplicateOrderNumber`]); a
+    /// query by order number names the existing document. Treat the code as
+    /// a settled refusal even when that query then finds nothing under the
+    /// order: re-sending the create only repeats the answer.
     DuplicateOrderNumber,
     /// 73 (observed) — the referenced prepayment invoice cannot be identified:
     /// `A hivatkozott előlegszámla nem beazonosítható. Rendelésszám: …,
@@ -96,7 +108,8 @@ pub enum ErrorCode {
     /// number becomes reusable. The message (`Már létező rendelésszám: ….
     /// Az ismétlődés engedélyezhető a Beállítások oldalon.`) names the order
     /// number — whitespace-trimmed — but never the existing invoice number;
-    /// recovering that requires a query by order number.
+    /// recovering that requires a query by order number. Like 71, a settled
+    /// refusal: nothing new was created, and re-sending only repeats it.
     DuplicateOrderNumberNamed,
     /// 164 — the user has access to multiple accounts; the Agent requires
     /// single-account access (use an agent key).
@@ -189,16 +202,110 @@ impl ErrorCode {
         }
     }
 
-    /// Whether retrying the same request later can succeed.
+    /// Whether the *same request* can succeed later, for a **query**: `true`
+    /// for 1 (maintenance) and 55 (e-invoice signing failed), which szamlazz.hu
+    /// asks integrations to retry at most ~5 times and never in a tight loop.
     ///
-    /// szamlazz.hu asks integrations to retry at most ~5 times and never in a
-    /// tight loop. Note that invoice creation has no idempotency key: a retry
-    /// after a *transport* timeout can issue a duplicate legal document. Only
-    /// retry on errors the server itself reported.
+    /// This is **not** permission to re-send a document-creating request.
+    /// Invoice creation has no idempotency key, and 1 and 55 are exactly the
+    /// codes after which a document *may already exist* — 55 in particular
+    /// means "issued, signing failed" — so `while error.is_retryable() {
+    /// resend }` on a create can issue a duplicate legal document. Before
+    /// re-sending a create, storno or receipt, query by the external id
+    /// (`szamlaKulsoAzon`) the request carried and act on
+    /// [`outcome_class`](Self::outcome_class): re-send only when nothing is
+    /// there. The reference implementation is the `restate-szamlazz` worker's
+    /// create step, whose every execution queries first and sends only when
+    /// the external id holds nothing.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Maintenance | Self::EInvoiceSigningFailed)
     }
+
+    /// What this code says about the document the request asked for — may one
+    /// exist despite the error? See [`OutcomeClass`] for the caller's action
+    /// per class.
+    ///
+    /// The table follows what was verified against szamlazz.hu:
+    ///
+    /// | Class | Codes |
+    /// |---|---|
+    /// | [`Unknown`](OutcomeClass::Unknown) | 1, 55, 56, and every code this crate does not know ([`ErrorCode::Unknown`]) |
+    /// | [`DuplicateOrderNumber`](OutcomeClass::DuplicateOrderNumber) | 71, 152 |
+    /// | [`NotFound`](OutcomeClass::NotFound) | 7 |
+    /// | [`Rejected`](OutcomeClass::Rejected) | everything else, the credential codes 3, 135, 136 and 164 included |
+    ///
+    /// 56 surfaces as an error only when the response carries no document
+    /// number — with one, the parsers report success with
+    /// `notification_delivery_failed` set — so as an error it always leaves
+    /// the outcome open. An unknown code is classified conservatively: it may
+    /// be a refusal, or a new "issued, but…" code like 55 and 56.
+    #[must_use]
+    pub fn outcome_class(&self) -> OutcomeClass {
+        match self {
+            Self::Maintenance
+            | Self::EInvoiceSigningFailed
+            | Self::InvoiceNotificationDeliveryFailed
+            | Self::Unknown(_) => OutcomeClass::Unknown,
+            Self::DuplicateOrderNumber | Self::DuplicateOrderNumberNamed => {
+                OutcomeClass::DuplicateOrderNumber
+            }
+            Self::MissingData => OutcomeClass::NotFound,
+            Self::InvalidCredentials
+            | Self::StornoOfReversalInvoice
+            | Self::XmlNotAFile
+            | Self::EInvoiceNotEnabled
+            | Self::MalformedXml
+            | Self::PrepaymentInvoiceNotIdentifiable
+            | Self::BrowserSessionActive
+            | Self::LoginBlocked
+            | Self::MultipleAccounts
+            | Self::UnregisteredPrefix
+            | Self::HasCorrectiveInvoice
+            | Self::NetValueMismatch
+            | Self::VatValueMismatch
+            | Self::GrossValueMismatch
+            | Self::NetValueInvalid
+            | Self::VatValueInvalid
+            | Self::GrossValueInvalid
+            | Self::ProformaNotFound
+            | Self::DuplicateReceiptCallId
+            | Self::IssueDateMustBeToday
+            | Self::PaymentOnReversedInvoice
+            | Self::ErasureCodeLimit
+            | Self::ErasureCodesUnavailable
+            | Self::ErasureCodesDisabled => OutcomeClass::Rejected,
+        }
+    }
+}
+
+/// What a szamlazz.hu error says about the document the request asked for:
+/// whether one may exist despite the error.
+///
+/// Answers the question a document-issuing integration must ask before it
+/// retries — *may a document have been created?* — which
+/// [`ErrorCode::is_retryable`] does not: invoice creation has no idempotency
+/// key, so re-sending a create after a code that left the outcome open can
+/// issue a duplicate legal document. Each variant states the caller's action.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutcomeClass {
+    /// szamlazz.hu refused the request before acting: no document was
+    /// created. Fix the request (or, for the credential codes, the account)
+    /// before sending again.
+    Rejected,
+    /// A document may or may not have been created. Reconcile before anything
+    /// else: query by the external id (`szamlaKulsoAzon`) the request
+    /// carried and act on what is there; re-send only when nothing is.
+    Unknown,
+    /// Another document already carries the order number (71/152); nothing
+    /// new was created. Query by order number to find it — the message names
+    /// the order number, never the existing document.
+    DuplicateOrderNumber,
+    /// The referenced document is not on the query surface (7): on a query
+    /// the selector matched nothing, on a write a required field or the
+    /// referenced document is missing. Nothing was created either way.
+    NotFound,
 }
 
 impl From<&str> for ErrorCode {
@@ -400,6 +507,23 @@ pub enum ResponseError {
     Parse(#[from] ParseError),
 }
 
+impl ResponseError {
+    /// What this failure says about the document the request asked for — may
+    /// one exist despite the error? See [`OutcomeClass`].
+    ///
+    /// An API error's class is its [`ErrorCode::outcome_class`]. Unavailability
+    /// (`szlahu_down`) and an unparseable response are
+    /// [`OutcomeClass::Unknown`]: szamlazz.hu produced no answer the caller
+    /// can conclude from, so a document may have been issued.
+    #[must_use]
+    pub fn outcome_class(&self) -> OutcomeClass {
+        match self {
+            Self::Api(api) => api.code.outcome_class(),
+            Self::ServiceUnavailable(_) | Self::Parse(_) => OutcomeClass::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +618,105 @@ mod tests {
             assert_eq!(code.is_retryable(), expected, "{code:?}");
         }
         assert!(!ErrorCode::Unknown("999".to_owned()).is_retryable());
+    }
+
+    /// The class of every named code, from `docs/szamlazz-hu-behaviour.md`
+    /// ("Error codes and header presence"): the codes after which a document
+    /// may exist are 1, 55 and 56 (the latter surfaces as an error only
+    /// without a number); 71/152 name an existing document; 7 is "not on the
+    /// query surface"; every other code refuses before acting.
+    #[test]
+    fn every_named_code_has_an_outcome_class() {
+        let table: [(ErrorCode, OutcomeClass); 30] = [
+            (ErrorCode::Maintenance, OutcomeClass::Unknown),
+            (ErrorCode::InvalidCredentials, OutcomeClass::Rejected),
+            (ErrorCode::MissingData, OutcomeClass::NotFound),
+            (ErrorCode::StornoOfReversalInvoice, OutcomeClass::Rejected),
+            (ErrorCode::XmlNotAFile, OutcomeClass::Rejected),
+            (ErrorCode::EInvoiceNotEnabled, OutcomeClass::Rejected),
+            (ErrorCode::EInvoiceSigningFailed, OutcomeClass::Unknown),
+            (
+                ErrorCode::InvoiceNotificationDeliveryFailed,
+                OutcomeClass::Unknown,
+            ),
+            (ErrorCode::MalformedXml, OutcomeClass::Rejected),
+            (
+                ErrorCode::DuplicateOrderNumber,
+                OutcomeClass::DuplicateOrderNumber,
+            ),
+            (
+                ErrorCode::PrepaymentInvoiceNotIdentifiable,
+                OutcomeClass::Rejected,
+            ),
+            (ErrorCode::BrowserSessionActive, OutcomeClass::Rejected),
+            (ErrorCode::LoginBlocked, OutcomeClass::Rejected),
+            (
+                ErrorCode::DuplicateOrderNumberNamed,
+                OutcomeClass::DuplicateOrderNumber,
+            ),
+            (ErrorCode::MultipleAccounts, OutcomeClass::Rejected),
+            (ErrorCode::UnregisteredPrefix, OutcomeClass::Rejected),
+            (ErrorCode::HasCorrectiveInvoice, OutcomeClass::Rejected),
+            (ErrorCode::NetValueMismatch, OutcomeClass::Rejected),
+            (ErrorCode::VatValueMismatch, OutcomeClass::Rejected),
+            (ErrorCode::GrossValueMismatch, OutcomeClass::Rejected),
+            (ErrorCode::NetValueInvalid, OutcomeClass::Rejected),
+            (ErrorCode::VatValueInvalid, OutcomeClass::Rejected),
+            (ErrorCode::GrossValueInvalid, OutcomeClass::Rejected),
+            (ErrorCode::ProformaNotFound, OutcomeClass::Rejected),
+            (ErrorCode::DuplicateReceiptCallId, OutcomeClass::Rejected),
+            (ErrorCode::IssueDateMustBeToday, OutcomeClass::Rejected),
+            (ErrorCode::PaymentOnReversedInvoice, OutcomeClass::Rejected),
+            (ErrorCode::ErasureCodeLimit, OutcomeClass::Rejected),
+            (ErrorCode::ErasureCodesUnavailable, OutcomeClass::Rejected),
+            (ErrorCode::ErasureCodesDisabled, OutcomeClass::Rejected),
+        ];
+        assert_eq!(
+            table.len(),
+            NAMED.len(),
+            "the table covers every named code"
+        );
+        for (code, expected) in table {
+            assert!(NAMED.contains(&code), "{code:?} is a named code");
+            assert_eq!(code.outcome_class(), expected, "{code:?}");
+        }
+    }
+
+    /// A code the crate does not know may be a refusal or a new "issued, but…"
+    /// code: the conservative answer is that a document may exist.
+    #[test]
+    fn unknown_codes_classify_as_unknown() {
+        assert_eq!(
+            ErrorCode::Unknown("999".to_owned()).outcome_class(),
+            OutcomeClass::Unknown
+        );
+        assert_eq!(
+            ErrorCode::from("FUTURE_CODE").outcome_class(),
+            OutcomeClass::Unknown
+        );
+    }
+
+    /// A response error's class is its code's when szamlazz.hu answered, and
+    /// `Unknown` when it did not: `szlahu_down` and an unparseable body both
+    /// leave the outcome open.
+    #[test]
+    fn response_errors_without_an_answer_leave_the_outcome_open() {
+        let rejected = ResponseError::Api(ApiError {
+            code: ErrorCode::NetValueMismatch,
+            message: "net".to_owned(),
+        });
+        assert_eq!(rejected.outcome_class(), OutcomeClass::Rejected);
+
+        let open = ResponseError::Api(ApiError {
+            code: ErrorCode::EInvoiceSigningFailed,
+            message: "signing".to_owned(),
+        });
+        assert_eq!(open.outcome_class(), OutcomeClass::Unknown);
+
+        let down = ResponseError::ServiceUnavailable("maintenance".to_owned());
+        assert_eq!(down.outcome_class(), OutcomeClass::Unknown);
+
+        let parse = ResponseError::Parse(ParseError::Missing("szamlaszam"));
+        assert_eq!(parse.outcome_class(), OutcomeClass::Unknown);
     }
 }

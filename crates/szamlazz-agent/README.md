@@ -118,6 +118,7 @@ szamlazz.hu verifies every row's arithmetic server-side — net = unit price × 
 
 - Identifiers are English; Rustdoc search also finds types by Hungarian names such as `díjbekérő` and `kintlévőség` through doc aliases.
 - Errors are typed as `ErrorCode` values while preserving the verbatim Hungarian message.
+- Two different questions are answered per error. `ErrorCode::is_retryable()` says whether the same *query* can succeed later (codes 1 and 55). `outcome_class()` — on `ErrorCode`, `ResponseError` and `ClientError` — says whether a *document may exist* despite the error: `Rejected` (nothing was created), `Unknown` (1, 55, 56, `szlahu_down`, a transport or parse failure, any code the crate does not know — query by external id before re-sending), `DuplicateOrderNumber` (71/152) or `NotFound` (7). Re-sending a create because `is_retryable()` is true can issue a duplicate legal document; act on `outcome_class()` instead.
 - Agent code 56 means issuance succeeded but notification delivery failed. It sets `notification_delivery_failed = true`; do not retry that issued document.
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client never retries automatically.

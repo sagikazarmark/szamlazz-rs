@@ -8,7 +8,8 @@ use jiff::civil::date;
 use rust_decimal::dec;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::{
-    Client, ClientError, Credentials, Currency, Language, LineItem, PaymentMethod, VatRate,
+    Client, ClientError, Credentials, Currency, Language, LineItem, OutcomeClass, PaymentMethod,
+    VatRate,
 };
 use wiremock::matchers::{header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -158,4 +159,80 @@ async fn rejects_invalid_request_before_http() {
             .expect("requests")
             .is_empty()
     );
+}
+
+/// Every failure the client can produce, classified by what it says about the
+/// document: a failure that never reached szamlazz.hu or that it refused is
+/// `Rejected`; one after which it may have issued the document — a lost
+/// exchange, `szlahu_down`, a body the crate cannot read, an open code — is
+/// `Unknown`.
+#[tokio::test]
+async fn classifies_every_failure_by_outcome() {
+    fn client_for(server: &MockServer) -> Client {
+        Client::builder()
+            .credentials(Credentials::agent_key("key"))
+            .endpoint(server.uri())
+            .build()
+            .expect("client")
+    }
+    async fn send_to(response: ResponseTemplate) -> ClientError {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        client_for(&server)
+            .send(&sample_invoice())
+            .await
+            .expect_err("error")
+    }
+
+    let transport = Client::builder()
+        .credentials(Credentials::agent_key("key"))
+        .endpoint("not a valid URL")
+        .build()
+        .expect("client")
+        .send(&sample_invoice())
+        .await
+        .expect_err("error");
+    assert!(matches!(transport, ClientError::Transport(_)));
+    assert_eq!(transport.outcome_class(), OutcomeClass::Unknown);
+
+    let down =
+        send_to(ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance")).await;
+    assert!(matches!(down, ClientError::ServiceUnavailable(_)));
+    assert_eq!(down.outcome_class(), OutcomeClass::Unknown);
+
+    let parse =
+        send_to(ResponseTemplate::new(200).set_body_raw(b"<not xml".to_vec(), "text/plain")).await;
+    assert!(matches!(parse, ClientError::Parse(_)), "{parse:?}");
+    assert_eq!(parse.outcome_class(), OutcomeClass::Unknown);
+
+    let open = send_to(
+        ResponseTemplate::new(200)
+            .insert_header("szlahu_error_code", "55")
+            .insert_header("szlahu_error", "signing"),
+    )
+    .await;
+    assert!(matches!(open, ClientError::Api(_)));
+    assert_eq!(open.outcome_class(), OutcomeClass::Unknown);
+
+    let refused = send_to(
+        ResponseTemplate::new(200)
+            .insert_header("szlahu_error_code", "259")
+            .insert_header("szlahu_error", "net"),
+    )
+    .await;
+    assert!(matches!(refused, ClientError::Api(_)));
+    assert_eq!(refused.outcome_class(), OutcomeClass::Rejected);
+
+    let server = MockServer::start().await;
+    let mut request = sample_invoice();
+    request.items.clear();
+    let never_sent = client_for(&server)
+        .send(&request)
+        .await
+        .expect_err("invalid request");
+    assert!(matches!(never_sent, ClientError::Request(_)));
+    assert_eq!(never_sent.outcome_class(), OutcomeClass::Rejected);
 }

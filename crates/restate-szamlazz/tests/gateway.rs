@@ -1117,6 +1117,54 @@ async fn create_with_an_open_outcome_is_found_when_the_re_query_sees_the_documen
     }
 }
 
+#[tokio::test]
+async fn create_answered_with_a_code_the_crate_does_not_know_is_an_open_outcome() {
+    // A code the agent crate does not know may be a refusal or a new "issued,
+    // but…" code like 55 and 56: the create and the storno step treat it as
+    // open — re-query once, then `Unconfirmed::Open` when nothing landed —
+    // rather than claim `rejected`, which would assert that no document exists.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("999", "ismeretlen"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.create(None).await,
+        Err(Unconfirmed::Open {
+            code: Some("999".to_owned()),
+            message: "ismeretlen".to_owned(),
+        })
+    );
+
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(api_error("999", "ismeretlen"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        h.gateway.storno(storno_request(&storno_id)).await,
+        Err(Unconfirmed::Open {
+            code: Some("999".to_owned()),
+            message: "ismeretlen".to_owned(),
+        })
+    );
+}
+
 // ----- create: the duplicate order number (71/152) --------------------------
 
 const DUPLICATE_MESSAGE: &str = "M%C3%A1r+l%C3%A9tez%C5%91+rendel%C3%A9ssz%C3%A1m";
