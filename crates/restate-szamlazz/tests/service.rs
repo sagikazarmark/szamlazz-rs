@@ -49,7 +49,7 @@ use restate_szamlazz::account::{
     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
     ResolveError, StaticConfig, StaticResolver,
 };
-use restate_szamlazz::config::{ResolveConfig, WorkerConfig};
+use restate_szamlazz::config::WorkerConfig;
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, DocumentState, LineItemInput, OrderStatus, PaymentMethod,
 };
@@ -811,7 +811,7 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
 /// plus a margin), which the endpoint's loader enforces and this suite — whose
 /// szamlazz.hu is a scripted mock that answers at once — has no use for.
 fn worker_config() -> WorkerConfig {
-    let worker: WorkerConfig = serde_json::from_value(json!({
+    serde_json::from_value(json!({
         "namespace": "acct",
         "issue": {
             "max_attempts": 2,
@@ -827,17 +827,14 @@ fn worker_config() -> WorkerConfig {
             "max_delay": "1s",
             "max_duration": "30s",
         },
-    }))
-    .expect("config");
-    WorkerConfig {
-        resolve: ResolveConfig {
-            initial_delay: Duration::from_secs(1),
-            factor: 1.0,
-            max_delay: Duration::from_secs(1),
-            max_duration: Duration::from_secs(30),
+        "resolve": {
+            "initial_delay": "1s",
+            "factor": 1.0,
+            "max_delay": "1s",
+            "max_duration": "30s",
         },
-        ..worker
-    }
+    }))
+    .expect("config")
 }
 
 /// A resolver and store whose accounts and keys the test can change while

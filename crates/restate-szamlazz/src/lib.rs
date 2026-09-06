@@ -23,7 +23,19 @@
 //! ## Features
 //!
 //! - `schemars` — `JsonSchema` derives on every [`contract`] type, so the Restate discovery
-//!   manifest and the `OpenAPI` export carry typed request and response schemas.
+//!   manifest and the `OpenAPI` export carry typed request and response schemas. It enables
+//!   `restate-sdk/schemars` too, and Cargo unifies features per build: with it on, every
+//!   `Json<T>` handler on the same endpoint — your own included — needs `T: JsonSchema`.
+//!
+//! ## Compatibility
+//!
+//! The crate re-exports the two crates it is built on, [`restate_sdk`] and [`szamlazz_agent`],
+//! and the two Számla Agent types the [`CredentialStore`] trait is written in, [`Credentials`]
+//! and [`AgentKey`] — so an embedder pins one version of each. The coupling is
+//! restate-szamlazz 0.x ⇔ szamlazz-agent 0.x (same minor) ⇔ restate-sdk 0.12 ⇔ Restate server
+//! 1.7.8 with protocol v7. The SDK's `#[restate_sdk::service]` macro expands to `::restate_sdk`
+//! paths, so a crate that defines services of its own also names `restate-sdk` as a direct
+//! dependency, at the same minor; binding only [`Order`] and [`Agent`] needs the re-export alone.
 //!
 //! # Services
 //!
@@ -31,7 +43,7 @@
 //! stateless service registered as `Szamlazz.Agent`. Both hold the [`Accounts`] bundle (the
 //! account resolver and the credential store) and a [`WorkerConfig`]; every handler resolves
 //! its account and opens a [`Gateway`] for its own execution. Build the bundle from the static
-//! resolver's configuration (or your own resolver and store) and bind both to an endpoint:
+//! resolver's configuration and bind both to an endpoint:
 //!
 //! ```no_run
 //! # async fn serve(
@@ -54,6 +66,111 @@
 //! # }
 //! ```
 //!
+//! ## Your own resolver and store
+//!
+//! A deployment that keeps its accounts in a database and its agent keys in a credential store
+//! of its own implements [`AccountResolver`] and [`CredentialStore`] itself — both are
+//! object-safe traits returning a [`BoxFuture`](account::BoxFuture) — and bundles them with
+//! [`Accounts::new`]. Their safety contracts are on the traits. Two things the compiler will
+//! otherwise tell you about: `account::Endpoint` (the Számla Agent URL an [`Account`] carries)
+//! and `restate_sdk::prelude::Endpoint` (the Restate endpoint) share a name, so alias one; and
+//! when one value is both resolver and store, `db.clone()` coerces to `Arc<dyn AccountResolver>`
+//! at the argument but `Arc::clone(&db)` does not (the expected type makes it
+//! `Arc::<dyn AccountResolver>::clone`, whose argument no longer matches) — call `.clone()` on
+//! the value.
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//!
+//! use restate_sdk::prelude::*;
+//! use restate_szamlazz::account::{
+//!     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore,
+//!     Endpoint as AgentEndpoint, FetchError, ResolveError,
+//! };
+//! use restate_szamlazz::config::AccountMode;
+//! use restate_szamlazz::{Agent, Credentials, Order, WorkerConfig};
+//!
+//! /// Your database handle; `account_row` is its query.
+//! struct Db {
+//!     // pool: sqlx::PgPool, …
+//! }
+//! # struct Row { id: String, supplier_id: u64, test: bool, credential_ref: String }
+//! # impl Db {
+//! #     async fn account_row(&self, _scope: &str) -> Result<Option<Row>, std::io::Error> {
+//! #         unimplemented!()
+//! #     }
+//! # }
+//!
+//! impl AccountResolver for Db {
+//!     fn resolve<'a>(
+//!         &'a self,
+//!         scope: Option<&'a str>,
+//!     ) -> BoxFuture<'a, Result<Account, ResolveError>> {
+//!         Box::pin(async move {
+//!             let scope = scope.ok_or(ResolveError::Unscoped)?;
+//!             // SELECT id, supplier_id, test, credential_ref FROM accounts WHERE scope = $1
+//!             let row = self.account_row(scope).await.map_err(ResolveError::unavailable)?;
+//!             let Some(row) = row else {
+//!                 return Err(ResolveError::Unknown { scope: scope.to_owned() });
+//!             };
+//!             let mut account = Account::new(row.id, row.credential_ref);
+//!             account.supplier_id = Some(row.supplier_id);
+//!             account.mode = if row.test { AccountMode::Test } else { AccountMode::Live };
+//!             account.endpoint = AgentEndpoint::production();
+//!             Ok(account)
+//!         })
+//!     }
+//! }
+//!
+//! /// Your credential store's client; `agent_key` is its read.
+//! struct Keys {
+//!     // client: …
+//! }
+//! # impl Keys {
+//! #     async fn agent_key(&self, _credential_ref: &str) -> Result<Option<String>, std::io::Error> {
+//! #         unimplemented!()
+//! #     }
+//! # }
+//!
+//! impl CredentialStore for Keys {
+//!     fn fetch<'a>(
+//!         &'a self,
+//!         credential_ref: &'a CredentialRef,
+//!     ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
+//!         Box::pin(async move {
+//!             let key = self.agent_key(credential_ref.as_str()).await.map_err(FetchError::unavailable)?;
+//!             key.map(Credentials::agent_key).ok_or_else(|| FetchError::Gone {
+//!                 credential_ref: credential_ref.clone(),
+//!             })
+//!         })
+//!     }
+//! }
+//!
+//! /// A service of your own on the same endpoint.
+//! struct Backoffice;
+//!
+//! #[restate_sdk::service]
+//! impl Backoffice {
+//!     #[handler]
+//!     async fn ping(&self, _ctx: Context<'_>) -> HandlerResult<String> {
+//!         Ok("pong".to_owned())
+//!     }
+//! }
+//!
+//! # async fn serve(db: Db, keys: Keys, worker: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
+//! let accounts = Accounts::new(Arc::new(db), Arc::new(keys));
+//! let endpoint = Endpoint::builder()
+//!     .bind(Order::from_parts(accounts.clone(), worker.clone()))
+//!     .bind(Agent::from_parts(accounts, worker))
+//!     .bind(Backoffice)
+//!     .build();
+//! HttpServer::new(endpoint)
+//!     .listen_and_serve("0.0.0.0:9080".parse()?)
+//!     .await;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Domain outcomes (`issued`, `already_issued`, `reconciled`, `reversed`, `rejected`,
 //! `conflict{reason}`) are returned as data with HTTP 200. A `TerminalError` carries a
 //! [`contract::TerminalCode`] and always means "outcome unknown — retry with a new
@@ -69,6 +186,10 @@ pub mod identity;
 pub mod service;
 #[cfg(test)]
 pub(crate) mod test_support;
+
+pub use restate_sdk;
+pub use szamlazz_agent;
+pub use szamlazz_agent::{AgentKey, Credentials};
 
 pub use account::{Account, AccountResolver, Accounts, CredentialStore};
 pub use config::WorkerConfig;

@@ -48,9 +48,31 @@ resolver's configuration in one of two mutually exclusive shapes — a single `[
 of `[accounts.<scope>]`, each served under its scope only (`/restate/scope/{scope}/call/…`) — and
 `StaticResolver::try_from` validates it and implements both the account resolver and the credential store;
 `Accounts::from` bundles the two. A deployment with its own resolver and store builds `Accounts::new` over them
-instead. Neither service holds a gateway or a client: every handler resolves its account and opens a `Gateway` for
+instead — the [crate documentation](https://docs.rs/restate-szamlazz/latest/restate_szamlazz/#your-own-resolver-and-store)
+has a database-backed resolver, a credential store of the embedder's own and a service of the embedder's own on one
+endpoint, and names the two compiler errors that path hits (`account::Endpoint` vs `restate_sdk::prelude::Endpoint`
+— alias one — and, when one value is both resolver and store, `Arc::clone(&db)` inferring
+`Arc::<dyn AccountResolver>::clone` and failing where `db.clone()` coerces). The checklist a resolver of your own
+must guarantee is on the `AccountResolver` and `CredentialStore`
+rustdoc. Neither service holds a gateway or a client: every handler resolves its account and opens a `Gateway` for
 its own execution. Going from `[account]` to `[accounts.<scope>]` is a flag day with no data migration, scripted in
 the [endpoint README](../restate-szamlazz-endpoint/README.md#single--multi-flag-day).
+
+## Compatibility
+
+The crate re-exports the two crates it is built on — `restate_szamlazz::restate_sdk` and
+`restate_szamlazz::szamlazz_agent` — and the two Számla Agent types the `CredentialStore` trait is written in,
+`restate_szamlazz::{Credentials, AgentKey}`, so an embedder pins one version of each and never meets two
+`Credentials` types. The coupling is:
+
+| restate-szamlazz | szamlazz-agent | restate-sdk | Restate server |
+|---|---|---|---|
+| 0.x | 0.x, same minor | 0.12 | 1.7.8 with protocol v7 (`vqueues`, `protocol_v7`, `scoped_virtual_objects` for multi-account mode) |
+
+The SDK's `#[restate_sdk::service]` / `#[object]` macros expand to `::restate_sdk` paths, so a crate that defines
+services of its own also names `restate-sdk` as a direct dependency at the same minor (Cargo unifies the two into one
+build of the SDK); a crate that binds only `Order` and `Agent` needs the re-export alone. The workspace MSRV is
+Rust 1.92.
 
 ## Scope Contract
 
@@ -137,7 +159,11 @@ with `reissue: true` and a new `Idempotency-Key` ([ADR 0003](../../docs/adr/0003
 The crate has no default features; `restate-sdk` is always a dependency.
 
 - `schemars`: derives JSON Schema for the contract types, so Restate's discovery manifest and OpenAPI export
-  document every handler's input and output. Forwards to `restate-sdk`'s `schemars` feature.
+  document every handler's input and output. Enables `restate-sdk/schemars` as well — and Cargo unifies features
+  per build, so with it on, `restate_sdk::serde::Json<T>` implements `PayloadMetadata` only for `T: JsonSchema`:
+  every `Json<T>` handler on the shared endpoint, the embedder's own included, must derive `schemars::JsonSchema`
+  on its `T` (or implement `PayloadMetadata` by hand). The contract types' schema descriptions are plain prose —
+  no rustdoc link syntax leaks into the OpenAPI export (a schema test pins it).
 
 See the [crate documentation](https://docs.rs/restate-szamlazz/latest/restate_szamlazz/) for API and feature
 semantics and the [generated feature graph](https://docs.rs/crate/restate-szamlazz/latest/features) for
@@ -217,7 +243,14 @@ activation details.
   resolver's configuration can reuse them.
 - `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`, `StaticConfig`: one
   szamlazz.hu account as the worker knows it (never its key), the bundle of the two pluggable traits both services
-  hold, and the configuration-backed implementation of both. `StaticConfig` is either `[account]` (`id`,
+  hold, and the configuration-backed implementation of both. The traits are object-safe (`BoxFuture`), require no
+  `Debug`, and carry the checklist a resolver of your own guarantees — no fan-in, append-only, a `supplier_id` pin
+  on every account once there is more than one (recommended, never required: the one pin that catches an agent key
+  under the wrong scope), unique supplier ids among the accounts that pin one, unique `(endpoint, credentials)`
+  pairs, `mode` matching `teszt`, a stable `credential_ref` across rotations, never caching `Unscoped` / `Unknown`;
+  the prologue logs a `warn` when a scoped request resolves to an account without a supplier pin. `Accounts`' `Debug` (and so
+  `Order`'s and `Agent`'s) names the trait objects without descending into them, so a store that derives `Debug`
+  over a key map cannot print its keys through the services. `StaticConfig` is either `[account]` (`id`,
   `agent_key`, `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`; reachable unscoped) or a table of
   `[accounts.<scope>]` (the same fields; each reachable under its scope only, keys
   `[a-z0-9_]` of at most 36 bytes so environment overrides can address them) — never both. `StaticResolver::try_from`

@@ -197,7 +197,8 @@ pub enum InvalidCorrectionId {
 /// with its own handler and external id.
 ///
 /// Correctives are not kinds in this sense (an order may carry any number of
-/// them); see [`IssuedKind`] for the kind of an issued document.
+/// them); the kind of an issued document, correctives included, is
+/// `IssuedKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -240,8 +241,8 @@ impl fmt::Display for DocumentKind {
     }
 }
 
-/// The kind of a document the service issued: the four [`DocumentKind`]s plus
-/// correctives.
+/// The kind of a document the service issued: the four kinds of
+/// `DocumentKind` plus correctives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -728,5 +729,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The doc comments of the contract types become the `description`s of
+    /// the discovery manifest and the `OpenAPI` export, which render them as
+    /// prose: rustdoc's link syntax — ``[`Type`]``, ``[text](path)`` — would
+    /// appear verbatim there. Every description of every schema — the root's,
+    /// each property's, each `$defs` entry's and each enum variant's — is
+    /// plain prose.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn schema_descriptions_carry_no_rustdoc_link_syntax() {
+        /// Every `(path, description)` under `value`.
+        fn descriptions(path: &str, value: &serde_json::Value, found: &mut Vec<(String, String)>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        let child_path = format!("{path}/{key}");
+                        if key == "description"
+                            && let Some(text) = child.as_str()
+                        {
+                            found.push((child_path, text.to_owned()));
+                        } else {
+                            descriptions(&child_path, child, found);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        descriptions(&format!("{path}/{index}"), item, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let schemas = [
+            ("CreateRequest", schemars::schema_for!(CreateRequest)),
+            ("CorrectRequest", schemars::schema_for!(CorrectRequest)),
+            ("StornoRequest", schemars::schema_for!(StornoRequest)),
+            (
+                "DeleteProformaRequest",
+                schemars::schema_for!(DeleteProformaRequest),
+            ),
+            ("QueryRequest", schemars::schema_for!(QueryRequest)),
+            (
+                "QueryTaxpayerRequest",
+                schemars::schema_for!(QueryTaxpayerRequest),
+            ),
+            (
+                "SetPaymentsRequest",
+                schemars::schema_for!(SetPaymentsRequest),
+            ),
+            ("CreateResponse", schemars::schema_for!(CreateResponse)),
+            ("StornoResponse", schemars::schema_for!(StornoResponse)),
+            (
+                "DeleteProformaResponse",
+                schemars::schema_for!(DeleteProformaResponse),
+            ),
+            ("QueryResponse", schemars::schema_for!(QueryResponse)),
+            (
+                "QueryTaxpayerResponse",
+                schemars::schema_for!(QueryTaxpayerResponse),
+            ),
+            (
+                "SetPaymentsResponse",
+                schemars::schema_for!(SetPaymentsResponse),
+            ),
+            (
+                "CheckAccountResponse",
+                schemars::schema_for!(CheckAccountResponse),
+            ),
+            ("OrderStatus", schemars::schema_for!(OrderStatus)),
+            ("DocumentKind", schemars::schema_for!(DocumentKind)),
+            ("IssuedKind", schemars::schema_for!(IssuedKind)),
+        ];
+        let mut leaks = Vec::new();
+        for (name, schema) in &schemas {
+            let json = serde_json::to_value(schema).expect("serialize");
+            let mut found = Vec::new();
+            descriptions(name, &json, &mut found);
+            assert!(!found.is_empty(), "{name}: the walk found no description");
+            for (path, text) in found {
+                if ["[`", "](", "`]"]
+                    .iter()
+                    .any(|marker| text.contains(marker))
+                {
+                    leaks.push(format!("{path}: {text}"));
+                }
+            }
+        }
+        assert!(
+            leaks.is_empty(),
+            "rustdoc link syntax leaks into these OpenAPI descriptions:\n{}",
+            leaks.join("\n---\n")
+        );
     }
 }

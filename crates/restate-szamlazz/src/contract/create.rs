@@ -95,6 +95,22 @@ pub struct CorrectRequest {
     pub document: DocumentInput,
 }
 
+impl CorrectRequest {
+    /// A corrective of `invoice_number` under `correction_id`.
+    #[must_use]
+    pub fn new(
+        invoice_number: impl Into<String>,
+        correction_id: CorrectionId,
+        document: DocumentInput,
+    ) -> Self {
+        Self {
+            invoice_number: invoice_number.into(),
+            correction_id,
+            document,
+        }
+    }
+}
+
 /// The domain outcome of a create or correct request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -120,8 +136,8 @@ pub enum Outcome {
     Conflict,
 }
 
-/// Why a request was answered with [`Outcome::Conflict`] or
-/// [`StornoOutcome::Conflict`](super::StornoOutcome::Conflict).
+/// Why a create, correct or storno request was answered with `outcome:
+/// conflict`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -134,8 +150,8 @@ pub enum ConflictReason {
     PrepaidChain,
     /// `create_proforma` while the order's invoice, prepayment invoice or
     /// final invoice of ours is live (see `existing_number`): a proforma after
-    /// the invoice makes no sense. Not [`Foreign`](Self::Foreign) — the
-    /// document is this order's, issued by this service.
+    /// the invoice makes no sense. Not `foreign` — the document is this
+    /// order's, issued by this service.
     OrderInvoiced,
     /// `reissue: true` while the document is live.
     Live,
@@ -185,7 +201,7 @@ pub enum Warning {
 pub struct CreateResponse {
     /// The domain outcome.
     pub outcome: Outcome,
-    /// Present when `outcome` is [`Outcome::Conflict`].
+    /// Present when `outcome` is `conflict`.
     #[serde(default)]
     pub conflict_reason: Option<ConflictReason>,
     /// The document kind.
@@ -195,8 +211,8 @@ pub struct CreateResponse {
     /// The document's number, when one exists.
     #[serde(default)]
     pub invoice_number: Option<String>,
-    /// The storno invoice number, when `outcome` is [`Outcome::Reversed`]
-    /// and it is known.
+    /// The storno invoice number, when `outcome` is `reversed` and it is
+    /// known.
     #[serde(default)]
     pub storno_number: Option<String>,
     /// Net total (`nettó végösszeg`).
@@ -215,11 +231,11 @@ pub struct CreateResponse {
     /// `live`, the foreign document on `foreign`, …).
     #[serde(default)]
     pub existing_number: Option<String>,
-    /// szamlazz.hu error code on [`Outcome::Rejected`] (and on
+    /// szamlazz.hu error code on `rejected` (and on
     /// `conflict{duplicate_order_number}`).
     #[serde(default)]
     pub code: Option<String>,
-    /// szamlazz.hu error message on [`Outcome::Rejected`].
+    /// szamlazz.hu error message on `rejected`.
     #[serde(default)]
     pub message: Option<String>,
     /// Informational flags.

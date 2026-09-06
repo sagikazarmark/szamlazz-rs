@@ -1,10 +1,11 @@
 //! The prologue every handler runs after parsing its key (design §4): pin the
 //! namespace, resolve the account, fetch its credentials, open the gateway.
-//! This module holds the decisions of those steps — pure functions, which are
-//! what can be unit-tested (the SDK has no mock context; the durable behaviour
-//! is asserted end to end) — and the one step that runs outside the journal,
-//! the credential fetch. The durable steps themselves are stamped per context
-//! type in `support::{object, shared, service}::prologue`.
+//! This module holds the decisions of those steps — functions of their inputs
+//! whose only effect is a log line, which is what can be unit-tested (the SDK
+//! has no mock context; the durable behaviour is asserted end to end) — and
+//! the one step that runs outside the journal, the credential fetch. The
+//! durable steps themselves are stamped per context type in
+//! `support::{object, shared, service}::prologue`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,11 +56,36 @@ pub(super) struct ResolverUnavailable(#[source] BoxError);
 
 /// The `account` step's closure result: every answer of the resolver as
 /// data, its unavailability as the retryable error.
+///
+/// Runs inside the step's closure, so it runs once per resolution and not on
+/// a replay. A **scoped** request that resolves to an account without a
+/// supplier pin is logged at `warn`: on a multi-account deployment the
+/// supplier id is the only server-side account identity a found document
+/// exposes and the one pin that catches an agent key configured under the
+/// wrong scope (`mode` alone cannot), and without it a document of another
+/// account under one of our external ids passes ownership validation. The pin
+/// is optional in every shape (#88) — the worker cannot verify a configured
+/// value — so this is advice to the operator, not a refusal: the worker says
+/// so and proceeds. Unscoped — the single-account shape — is silent.
 pub(super) fn resolution(
+    scope: Option<&str>,
     result: Result<Account, ResolveError>,
 ) -> Result<Resolution, ResolverUnavailable> {
     match result {
-        Ok(account) => Ok(Resolution::Account(Box::new(account))),
+        Ok(account) => {
+            if let (Some(scope), None) = (scope, account.supplier_id) {
+                tracing::warn!(
+                    scope,
+                    account = %account.id,
+                    "a scoped request resolved to an account without a supplier_id pin; \
+                     pinning supplier_id on every account of a multi-account resolver is \
+                     recommended — it is the only server-side account identity a found \
+                     document exposes, and the one pin that catches an agent key under \
+                     the wrong scope"
+                );
+            }
+            Ok(Resolution::Account(Box::new(account)))
+        }
         Err(ResolveError::Unscoped) => Ok(Resolution::Unscoped),
         Err(ResolveError::Unknown { scope }) => Ok(Resolution::Unknown { scope }),
         Err(ResolveError::Unavailable(source)) => Err(ResolverUnavailable(source)),
@@ -180,7 +206,7 @@ mod tests {
     #[test]
     fn a_resolved_account_is_the_resolution() {
         assert_eq!(
-            resolution(Ok(account())).expect("data"),
+            resolution(None, Ok(account())).expect("data"),
             Resolution::Account(Box::new(account()))
         );
         assert_eq!(
@@ -189,9 +215,59 @@ mod tests {
         );
     }
 
+    /// A scoped request that resolves to an account without a supplier pin is
+    /// a resolver running without the one server-side account identity a
+    /// found document exposes: the worker warns, once per resolution, naming
+    /// the scope and the account. Unscoped — the single-account shape, where
+    /// the pin is optional by design — and a pinned account are silent.
+    #[test]
+    fn a_scoped_resolution_without_a_supplier_pin_warns_once() {
+        use crate::test_support::LogCapture;
+
+        let capture = LogCapture::default();
+        let guard = capture.subscribe();
+        // Warm up the callsite under this thread's subscriber (see
+        // `LogCapture`); the warm-up is told apart by its scope.
+        drop(resolution(Some("warmup"), Ok(account())));
+        LogCapture::rebuild_interest();
+
+        drop(resolution(Some("acme-events"), Ok(account())));
+        let scoped = capture.logs();
+        drop(resolution(None, Ok(account())));
+        let mut pinned = account();
+        pinned.supplier_id = Some(972_720);
+        drop(resolution(Some("acme-events"), Ok(pinned)));
+        drop(resolution(
+            Some("acme-events"),
+            Err(ResolveError::Unknown {
+                scope: "acme-events".to_owned(),
+            }),
+        ));
+        drop(guard);
+
+        let scoped_lines: Vec<&str> = scoped
+            .lines()
+            .filter(|line| line.contains("scope=\"acme-events\""))
+            .collect();
+        assert_eq!(scoped_lines.len(), 1, "{scoped}");
+        let line = scoped_lines[0];
+        assert!(line.contains("WARN"), "{line}");
+        assert!(line.contains("account=acct"), "{line}");
+        assert!(line.contains("supplier"), "{line}");
+
+        let all = capture.logs();
+        assert_eq!(
+            all.lines()
+                .filter(|line| line.contains("WARN") && !line.contains("warmup"))
+                .count(),
+            1,
+            "only the unpinned scoped resolution warns: {all}"
+        );
+    }
+
     #[test]
     fn unscoped_and_unknown_are_data_and_the_unknown_account_fault() {
-        let unscoped = resolution(Err(ResolveError::Unscoped)).expect("data");
+        let unscoped = resolution(None, Err(ResolveError::Unscoped)).expect("data");
         assert_eq!(unscoped, Resolution::Unscoped);
         let (status, body) = fault_body(account_of(unscoped).expect_err("fault"));
         assert_eq!(status, 400);
@@ -204,9 +280,12 @@ mod tests {
             "{body}"
         );
 
-        let unknown = resolution(Err(ResolveError::Unknown {
-            scope: "acme-events".to_owned(),
-        }))
+        let unknown = resolution(
+            None,
+            Err(ResolveError::Unknown {
+                scope: "acme-events".to_owned(),
+            }),
+        )
         .expect("data");
         assert_eq!(
             unknown,
@@ -228,9 +307,12 @@ mod tests {
 
     #[test]
     fn an_unavailable_resolver_is_the_retryable_error_and_never_echoes_its_cause() {
-        let error = resolution(Err(ResolveError::unavailable(std::io::Error::other(
-            "connection refused to db.internal:5432 (secret-dsn)",
-        ))))
+        let error = resolution(
+            None,
+            Err(ResolveError::unavailable(std::io::Error::other(
+                "connection refused to db.internal:5432 (secret-dsn)",
+            ))),
+        )
         .expect_err("retryable");
         let rendered = error.to_string();
         assert_eq!(rendered, "the account resolver is unavailable");

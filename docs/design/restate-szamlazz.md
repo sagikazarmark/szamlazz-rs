@@ -155,7 +155,9 @@ record header, so "arrives unscoped" is not the reason — no scenario exercises
 set outside the gateway of the safety contract (ADR 0006).
 
 Handler-level behaviour is observable only under Restate (the SDK has no mock context), so the prologue's decisions
-are pure functions with unit tests (`service::prologue`) and the durable behaviour is asserted end to end (§11).
+are functions of their inputs with unit tests (`service::prologue`; their only effect is a log line — the `warn` on a
+scoped request resolving to an account without a `supplier_id`, #43) and the durable behaviour is asserted end to end
+(§11).
 
 ### `Szamlazz.Agent` (stateless Service, `#[restate_sdk::service(name = "Szamlazz.Agent")]`)
 

@@ -30,16 +30,22 @@
 //! max_duration = "1m"
 //! ```
 //!
-//! The types only implement `Deserialize`; the endpoint binary chooses the
-//! file format and environment merging, and merges the static resolver's
-//! account configuration ([`StaticConfig`](crate::account::StaticConfig))
-//! beside these keys. Everything account-shaped — credentials, mode, supplier
-//! pin, endpoint, document defaults, seller block — is carried by the
+//! [`WorkerConfig`] and [`Secret`] only implement `Deserialize`; the endpoint
+//! binary chooses the file format and environment merging, and merges the
+//! static resolver's account configuration
+//! ([`StaticConfig`](crate::account::StaticConfig)) beside these keys.
+//! Everything account-shaped — credentials, mode, supplier pin, endpoint,
+//! document defaults, seller block — is carried by the
 //! [`Account`](crate::account::Account) a resolver produces and read by the
 //! services through [`Gateway::account`](crate::gateway::Gateway::account);
 //! the value types those fields are made of ([`AccountMode`], [`Defaults`],
 //! [`SellerConfig`], and [`Secret`] for a key written inline) are defined
-//! here so that any resolver's configuration can reuse them.
+//! here so that any resolver's configuration can reuse them. The value types
+//! also implement `Serialize`: they ride inside the journaled `Account`, so
+//! they are additive-only and `#[non_exhaustive]`. The three policies are
+//! `#[non_exhaustive]` too — deployment-level, journaled nowhere, but fields
+//! may be added — so build any of them from `Default::default()` (or
+//! deserialize it) and set fields.
 
 use std::fmt;
 use std::str::FromStr;
@@ -403,8 +409,13 @@ impl From<&str> for Secret {
 
 /// Document defaults; [`DocumentOverrides`](crate::contract::DocumentOverrides)
 /// may change the first seven per call.
+///
+/// Journaled inside the [`Account`](crate::account::Account), so
+/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct Defaults {
     /// Issue e-invoices (`e-számla`). Default `false`.
     pub e_invoice: bool,
@@ -449,8 +460,13 @@ impl Default for Defaults {
 }
 
 /// The seller (`eladó`) block; the account's own data is used where absent.
+///
+/// Journaled inside the [`Account`](crate::account::Account), so
+/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct SellerConfig {
     /// Bank name.
     pub bank: Option<String>,
@@ -477,8 +493,13 @@ impl SellerConfig {
 }
 
 /// Settings of the notification email szamlazz.hu sends to buyers.
+///
+/// Journaled inside the [`Account`](crate::account::Account) through
+/// [`SellerConfig`], so additive-only and `#[non_exhaustive]`: start from
+/// [`Default::default`] and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct SellerEmailConfig {
     /// Reply-to address.
     pub reply_to: Option<String>,
@@ -513,9 +534,11 @@ impl SellerEmailConfig {
 /// which [`WorkerConfig::validate`] enforces.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`).
+/// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
+/// deserialize it, or start from [`Default::default`] and set fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct IssueConfig {
     /// Executions of the step, including the first. Default `5`.
     pub max_attempts: u32,
@@ -606,9 +629,11 @@ impl IssueConfig {
 /// 0004, #87). A worker outage is the invocation retry policy's business.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`).
+/// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
+/// deserialize it, or start from [`Default::default`] and set fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct ReadConfig {
     /// Executions of the step, including the first. Default `5`.
     pub max_attempts: u32,
@@ -664,9 +689,11 @@ impl ReadConfig {
 /// `invocation_retry_policy` instead.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`).
+/// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
+/// deserialize it, or start from [`Default::default`] and set fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct ResolveConfig {
     /// Delay before the first re-execution. Default `1s`.
     #[serde(with = "duration_str")]
@@ -707,13 +734,14 @@ impl ResolveConfig {
 
 /// Parses a duration written as `"90s"`, `"2m"`, `"1h"` or a plain number of
 /// seconds (`"90"`). The string form of what a duration field of the policies
-/// takes; a field also takes the number as a bare integer.
+/// takes; a field also takes the number as a bare integer. The grammar is
+/// part of the configuration contract; the parser is not part of the API.
 ///
 /// # Errors
 ///
 /// Returns an error for an empty string, an unknown suffix, a non-integer
 /// amount or an amount that overflows.
-pub fn parse_duration(value: &str) -> Result<Duration, InvalidDuration> {
+pub(crate) fn parse_duration(value: &str) -> Result<Duration, InvalidDuration> {
     let value = value.trim();
     if value.is_empty() {
         return Err(InvalidDuration::Empty);
@@ -737,7 +765,7 @@ pub fn parse_duration(value: &str) -> Result<Duration, InvalidDuration> {
 /// Formats a whole-second duration in the largest unit that divides it
 /// evenly: `"1h"`, `"2m"`, `"90s"`. Sub-second precision is dropped.
 #[must_use]
-pub fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs > 0 && secs.is_multiple_of(3600) {
         format!("{}h", secs / 3600)
@@ -748,10 +776,10 @@ pub fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// A string that is not a valid duration.
+/// A string that is not a valid duration; surfaces as serde's error message on
+/// a duration field of the policies.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum InvalidDuration {
+pub(crate) enum InvalidDuration {
     /// The string is empty.
     #[error("duration must not be empty")]
     Empty,

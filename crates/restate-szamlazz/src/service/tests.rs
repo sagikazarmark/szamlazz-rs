@@ -276,6 +276,78 @@ async fn services_bind_to_an_endpoint() {
     let _endpoint = Endpoint::builder().bind(order).bind(agent).build();
 }
 
+/// An embedder's store naturally derives `Debug` over its key map. The
+/// crate's own `Debug` impls — `Accounts`, and `Order` / `Agent` over it —
+/// never descend into the plugged-in resolver or store, so such a store's
+/// keys cannot reach a log line through the services' `Debug`.
+#[test]
+fn a_leaky_store_does_not_print_its_keys_through_accounts_order_or_agent() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use szamlazz_agent::Credentials;
+
+    use crate::account::{
+        Account, AccountResolver, BoxFuture, CredentialRef, CredentialStore, FetchError,
+        ResolveError,
+    };
+
+    const KEY: &str = "sentinel-agent-key-7d2f9a";
+
+    /// What a database-backed deployment might write first: the raw keys in
+    /// a map, `Debug` derived.
+    #[derive(Debug, Clone)]
+    struct Leaky {
+        keys: BTreeMap<String, String>,
+    }
+
+    impl AccountResolver for Leaky {
+        fn resolve<'a>(
+            &'a self,
+            _scope: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Account, ResolveError>> {
+            Box::pin(async { Ok(Account::new("acme", "acme-key")) })
+        }
+    }
+
+    impl CredentialStore for Leaky {
+        fn fetch<'a>(
+            &'a self,
+            credential_ref: &'a CredentialRef,
+        ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
+            Box::pin(async move {
+                self.keys
+                    .get(credential_ref.as_str())
+                    .map(|key| Credentials::agent_key(key.as_str()))
+                    .ok_or_else(|| FetchError::Gone {
+                        credential_ref: credential_ref.clone(),
+                    })
+            })
+        }
+    }
+
+    let leaky = Arc::new(Leaky {
+        keys: BTreeMap::from([("acme-key".to_owned(), KEY.to_owned())]),
+    });
+    assert!(
+        format!("{leaky:?}").contains(KEY),
+        "the store really does print its keys"
+    );
+
+    let accounts = Accounts::new(leaky.clone() as Arc<dyn AccountResolver>, leaky);
+    let order = Order::from_parts(accounts.clone(), WorkerConfig::new(namespace()));
+    let agent = Agent::from_parts(accounts.clone(), WorkerConfig::new(namespace()));
+    for (label, rendering) in [
+        ("Accounts", format!("{accounts:?}")),
+        ("Order", format!("{order:?}")),
+        ("Agent", format!("{agent:?}")),
+        ("Order alternate", format!("{order:#?}")),
+    ] {
+        assert!(!rendering.contains(KEY), "{label}: {rendering}");
+        assert!(!rendering.contains("acme-key"), "{label}: {rendering}");
+    }
+}
+
 /// A handler's body is decoded by the handler, not the SDK: `Body<T>`'s SDK
 /// `Deserialize` never fails — it keeps the verdict — so a malformed body
 /// reaches the handler and leaves it as the structured `invalid_input` fault
@@ -536,39 +608,13 @@ fn credentials_rejected_fault_names_the_code_and_the_document() {
 /// demonstrably on the wire when the rejection is observed.
 #[tokio::test]
 async fn credentials_rejected_never_leaks_the_agent_key() {
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
     use restate_sdk::errors::TerminalError;
-    use tracing_subscriber::fmt::MakeWriter;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::support::Fault;
     use crate::gateway::QueryOutcome;
-
-    /// A `MakeWriter` collecting formatted events into a shared buffer.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("capture").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for Capture {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
+    use crate::test_support::LogCapture;
 
     const KEY: &str = "sentinel-agent-key-9f3a7c";
     let server = MockServer::start().await;
@@ -582,27 +628,17 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
         .await;
     let order = Order::from_parts(accounts(&server.uri(), KEY), WorkerConfig::new(namespace()));
 
-    let capture = Capture::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(capture.clone())
-        .with_ansi(false)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
+    let capture = LogCapture::default();
+    let guard = capture.subscribe();
 
-    // Pin the warning's callsite to this thread's subscriber. tracing caches
-    // a callsite's interest on its first hit — and only once a subscriber has
-    // raised the global max level, so it cannot be pre-registered — and a
-    // first hit from a parallel test thread, which has no subscriber, would
-    // cache it as disabled. Hitting it here registers it; the rebuild
-    // re-evaluates it against this thread's subscriber in case a parallel
-    // thread was first. The warm-up event is told apart by its namespace.
+    // Pin the warning's callsite to this thread's subscriber (see
+    // `LogCapture`). The warm-up event is told apart by its namespace.
     drop(Fault::credentials_rejected(
         &"warmup".parse().expect("namespace"),
         "0",
         "warm-up",
     ));
-    tracing::callsite::rebuild_interest_cache();
+    LogCapture::rebuild_interest();
 
     // What the prologue does: resolve, fetch, open — then the gateway
     // observes the code and the fault is built.
@@ -628,7 +664,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     );
     assert!(!format!("{outcome:?}").contains(KEY), "{outcome:?}");
 
-    let logs = String::from_utf8(capture.0.lock().expect("capture").clone()).expect("utf-8");
+    let logs = capture.logs();
     assert!(logs.contains("WARN"), "{logs}");
     assert!(logs.contains("namespace=acct"), "{logs}");
     assert!(logs.contains("code=3"), "{logs}");

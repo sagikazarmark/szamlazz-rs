@@ -99,9 +99,14 @@ while the same scan finds a sentinel deliberately journaled as a positive contro
 ### The safety contract
 
 Seven rules, listed in full in the library README's "what it relies on" and, rule by rule, on the *Account
-resolver*, *Credential store* and *Scope* entries of `CONTEXT.md`; the traits document their own halves
-(rules 1–2 on `AccountResolver`, the fetch-every-execution rule on `CredentialStore`). The worker enforces what
-it can (the static resolver at load time) and *relies on* the rest.
+resolver*, *Credential store* and *Scope* entries of `CONTEXT.md`; the traits document their own halves as a
+checklist on their rustdoc (rules 1–2 plus the load-time checks the static resolver makes — unique `(endpoint,
+credentials)` pairs, unique supplier ids among the accounts that pin one, `mode` matching `teszt` — a `supplier_id`
+pin on every account once there is more than one as a recommendation (optional in every shape, see below), a stable
+`credential_ref` across rotations and never caching `Unscoped` / `Unknown` on `AccountResolver`; the
+fetch-every-execution and stable-reference rules on `CredentialStore`; #43). The worker enforces what it can (the
+static resolver at load time; the prologue logs a `warn` when a **scoped** request resolves to an account without a
+`supplier_id`) and *relies on* the rest.
 
 1. **One szamlazz.hu account is reachable under exactly one scope value.** Unscoped counts as a value.
    No fan-in: two scopes reaching one account would split an order's per-key lock across two Virtual
