@@ -9,8 +9,9 @@
 //! ```
 //!
 //! These are the tests that answer what the docs leave open: rounding
-//! tolerance of `LineItem::calculated_for_currency`, rejected `InvoiceKind` combinations,
-//! and empty-vs-omitted element handling.
+//! tolerance of the whole-forint HUF line totals (`LineItem::try_calculated` with
+//! `Rounding::minor_unit`, which `calculated_for_currency` shares for HUF), rejected
+//! `InvoiceKind` combinations, and empty-vs-omitted element handling.
 
 #![cfg(feature = "client-reqwest")]
 

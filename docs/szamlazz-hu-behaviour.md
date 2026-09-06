@@ -185,6 +185,17 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   hint) and the customer-facing narrative; not a safety issue.
 - Internal whitespace and NFC handling of order numbers (only edge whitespace and case tested). Low:
   rejected rather than guessed.
+- **Line-item rounding tolerance and sub-minor-unit values** (review 2026-09-06 probes 9 and 10, findings A-03,
+  A-04, A-05). The HUF path rounds the net to whole forints before szamlazz.hu's `nettoErtek = nettoEgysegar ×
+  mennyiseg` check (259); the only evidence it tolerates any discrepancy is the `#[ignore]`d
+  `tests/live.rs::invoice_lifecycle` (`2 × 1234.56 = 2469.12 → 2469`, a 0.12 difference, gross 3136 accepted on
+  2026-09-03) — the worst case, half a forint, has not been sent. What szamlazz.hu
+  does with a non-HUF value below the minor unit (`100.005 EUR` — round for print, or reject) is unobserved: the
+  worker no longer sends one (`Rounding::minor_unit` on every line since #60; the exact arithmetic is
+  `Rounding::Exact`, or the compatibility form `calculated_for_currency`, chosen explicitly). Whether `afakulcs`
+  accepts `27.00` is likewise unobserved — every fixture shows integer tokens, and `VatRate::Percent` now renders
+  them normalised — so only a caller sending `VatRate::Other("27.00")` would find out. Low: a rejection is
+  `rejected{code}` with nothing issued. Go-live steps 12 and 13 are the checks.
 - **Credential codes 3, 135, 136, 164** (invalid credentials, browser session active, login blocked,
   multiple accounts): none was observed on the probe account. The worker relies on szamlazz.hu's
   documentation that they are answered **before any write** — so the attempt that sees one has sent
@@ -230,7 +241,9 @@ before starting.
 | 9 | P48-P2 — create an invoice whose `teljesitesDatum` is in a **previous month**, storno it with `teljesitesDatum` = that date, query the `SS` by number | `sikeres=true`, no error; the `SS`'s `<telj>` equals the original's, its `<kelt>` is today | The storno date the worker sends is accepted on this account (ADR 0007); a rejection here blocks every storno |
 | 10 | Storno of a settled `ES` — create an `ES` under a fresh order, a `VS` settling it (`elolegSzamlaszam`), then storno the `ES`; query the `VS` by number | Either a refusal (221-like, `sikeres=false`, headers set) or a new `SS` with the `VS` still live, `<sztornozott>` absent | Whether the state "`VS` live, `ES` reversed" is reachable at all, and the code if it is refused (type it); the final invoice's exclusivity row (#62) is right either way |
 | 11 | `SZ` beside a live `VS` — on the step-10 order (or a fresh `ES` → `VS` pair), send a plain `SZ` under the same order number, with the toggle ON | Expected: accepted (the repetition toggle is per kind) — a live `SZ` and a live `VS` on one order; record any 71/152 instead | The server does not refuse cross-kind double billing, so `exclusivity-final` (`conflict{prepaid_chain}`) is the only guard (#62); storno the `SZ` and `VS` afterwards |
+| 12 | R-9 — one HUF line whose rounded net differs from `nettoEgysegar × mennyiseg` by 0.5 (`2 × 1234.25`, `nettoErtek=2469`); one EUR line sent via `LineItem::new` with a three-decimal net (`100.005`, `afaErtek=27.00135`), query both by number | HUF: `sikeres=true` — the tolerance of the 259–261 checks covers half a forint; EUR: record whether it is accepted, and what `<netto>`/`<afa>` the query returns (rounded for print, or verbatim), or the code | The worker sends the minor-unit rounding of `Rounding::minor_unit` on every line; a 259/260/261 on the HUF line means unit prices must be whole forints; the EUR answer is what `Rounding::Exact` callers get |
+| 13 | R-10 — create with `<afakulcs>27.00</afakulcs>` (via `VatRate::Other("27.00")`; the crate's `Percent` renders `27`), and once with `27.0` | Success, or the code | Whether the normalisation `VatRate::as_wire` performs is a nicety or a necessity — a caller sending `Other("27.00")` or an unnormalised percentage is `rejected` (nothing issued) if this fails |
 
-Record `szallito/id`, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj` and the
-step-10/11 answers in the deployment notes; if any expectation fails, stop and revisit the corresponding ADR before
-go-live.
+Record `szallito/id`, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj`, the
+step-10/11 answers and the step-12 EUR body in the deployment notes; if any expectation fails, stop and revisit the
+corresponding ADR before go-live.

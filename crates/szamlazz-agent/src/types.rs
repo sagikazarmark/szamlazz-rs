@@ -237,10 +237,17 @@ impl VatRate {
     }
 
     /// The exact wire token.
+    ///
+    /// A percentage is normalised — trailing zeros dropped, so `27.00`, `27.0`
+    /// and `27` all render as `27` and `5.50` as `5.5`. Request-side
+    /// `afakulcs` is an `xsd:string`, so szamlazz.hu matches it as text against
+    /// a set whose every documented member is an integer, and the integer form
+    /// is the one every fixture shows; whether `27.00` would also be accepted
+    /// is unverified. Codes render verbatim.
     #[must_use]
     pub fn as_wire(&self) -> Cow<'_, str> {
         match self {
-            Self::Percent(rate) => Cow::Owned(rate.to_string()),
+            Self::Percent(rate) => Cow::Owned(rate.normalize().to_string()),
             Self::Aam => Cow::Borrowed("AAM"),
             Self::Tam => Cow::Borrowed("TAM"),
             Self::Tahk => Cow::Borrowed("TAHK"),
@@ -378,6 +385,30 @@ impl Currency {
     #[must_use]
     pub fn is_huf(&self) -> bool {
         self.0 == "HUF" || self.0 == "Ft"
+    }
+
+    /// The number of decimal places of the currency's minor unit — the ISO
+    /// 4217 exponent: 2 for most currencies, 0 for JPY or ISK, 3 for KWD or
+    /// BHD, 4 for CLF.
+    ///
+    /// HUF (`HUF`/`Ft`) is 0, not ISO 4217's 2: the fillér is out of
+    /// circulation and szamlazz.hu works in whole forints. A code the table
+    /// does not know is treated like the common case, 2.
+    #[must_use]
+    pub fn minor_unit_digits(&self) -> u32 {
+        if self.is_huf() {
+            return 0;
+        }
+        match self.0.as_ref() {
+            // ISO 4217 exponent 0.
+            "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF"
+            | "UGX" | "UYI" | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
+            // ISO 4217 exponent 3.
+            "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+            // ISO 4217 exponent 4.
+            "CLF" | "UYW" => 4,
+            _ => 2,
+        }
     }
 }
 
@@ -693,6 +724,8 @@ impl<'de> serde::Deserialize<'de> for TaxpayerStatus {
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::dec;
+
     use super::*;
 
     #[test]
@@ -711,6 +744,26 @@ mod tests {
             VatRate::Other("BRAND_NEW".into())
         );
         assert_eq!("27".parse::<VatRate>(), Ok(VatRate::percent(27)));
+    }
+
+    #[test]
+    fn percent_wire_token_drops_trailing_zeros() {
+        // A rate from a DECIMAL(5,2) column or `dec!(27.00)` carries a scale;
+        // szamlazz.hu string-matches `afakulcs`, so the token is normalised.
+        assert_eq!(VatRate::Percent(dec!(27.00)).as_wire(), "27");
+        assert_eq!(VatRate::Percent(dec!(27.0)).as_wire(), "27");
+        assert_eq!(VatRate::Percent(dec!(5.50)).as_wire(), "5.5");
+        assert_eq!(VatRate::Percent(dec!(27.5)).as_wire(), "27.5");
+        assert_eq!(VatRate::Percent(dec!(0.00)).as_wire(), "0");
+        assert_eq!(VatRate::from("27.00").as_wire(), "27");
+        assert_eq!(VatRate::from("27.00").to_string(), "27");
+        assert_eq!(
+            serde_json::to_string(&VatRate::Percent(dec!(18.00))).expect("json"),
+            "\"18\""
+        );
+        // A code is passed through verbatim — `Other` is the way to send a
+        // literal `27.00` if a probe ever needs to.
+        assert_eq!(VatRate::Other("27.00".into()).as_wire(), "27.00");
     }
 
     #[test]
@@ -759,6 +812,22 @@ mod tests {
         assert!(Currency::from("Ft").is_huf());
         assert!(Currency::from(String::from("HUF")).is_huf());
         assert!(!Currency::EUR.is_huf());
+    }
+
+    #[test]
+    fn minor_unit_digits_follow_iso_4217_except_whole_forints() {
+        // szamlazz.hu works in whole forints although ISO 4217 gives HUF two.
+        assert_eq!(Currency::HUF.minor_unit_digits(), 0);
+        assert_eq!(Currency::new("Ft").minor_unit_digits(), 0);
+        assert_eq!(Currency::EUR.minor_unit_digits(), 2);
+        assert_eq!(Currency::USD.minor_unit_digits(), 2);
+        assert_eq!(Currency::new("JPY").minor_unit_digits(), 0);
+        assert_eq!(Currency::new("ISK").minor_unit_digits(), 0);
+        assert_eq!(Currency::new("KWD").minor_unit_digits(), 3);
+        assert_eq!(Currency::new("BHD").minor_unit_digits(), 3);
+        assert_eq!(Currency::new("CLF").minor_unit_digits(), 4);
+        // An unknown code is treated like the common case.
+        assert_eq!(Currency::new("XYZ").minor_unit_digits(), 2);
     }
 
     #[test]

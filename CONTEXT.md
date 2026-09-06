@@ -69,10 +69,11 @@ Agent request field selecting the response body format: 1 = plain text or raw PD
 The unpaid remainder of an invoice's gross total.
 
 **VAT rate (áfakulcs)**:
-A numeric percentage or a NAV-defined special code (AAM, TAM, EUT, KBAET, …) on a line item. The code set is NAV-driven and changes over time — it is an open set, not a fixed enum.
+A numeric percentage or a NAV-defined special code (AAM, TAM, EUT, KBAET, …) on a line item. The code set is NAV-driven and changes over time — it is an open set, not a fixed enum. A percentage's wire token is normalised (`27.00` → `27`, `5.50` → `5.5`): request-side `afakulcs` is an `xsd:string` matched against a set whose every documented member is an integer, and whether `27.00` would also pass is unverified (go-live step 13).
 
 **Line item (tétel)**:
-One row of a document: name, quantity, unit, net unit price, VAT rate, and net/VAT/gross values whose arithmetic szamlazz.hu verifies server-side.
+One row of a document: name, quantity, unit, net unit price, VAT rate, and net/VAT/gross values whose arithmetic szamlazz.hu verifies server-side. When the crate derives the values (`LineItem::try_calculated`) the rounding is an explicit `Rounding` — the currency's *minor unit* (whole forints for HUF, cents for EUR; the choice the worker makes for every document), a fixed scale, or exact — half away from zero at each step, and a value that does not fit a decimal is `ArithmeticError`, never a panic (the infallible `calculated*` forms panic, documented). The worker answers that error as `invalid_input`.
+_Avoid_: "currency-aware" for `calculated_for_currency` (it is exact, not minor-unit, for every currency but HUF — the pre-#60 default, kept only on that method), unrounded/exact as a default
 
 ### Restate worker concepts
 

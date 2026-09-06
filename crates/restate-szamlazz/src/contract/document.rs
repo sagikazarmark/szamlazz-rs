@@ -14,7 +14,7 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::{Buyer, ExchangeRate, PostalAddress};
-use szamlazz_agent::{Currency, LineItem, VatRate};
+use szamlazz_agent::{ArithmeticError, Currency, LineItem, Rounding, VatRate};
 
 /// One document to issue: everything the caller decides per call.
 ///
@@ -279,8 +279,10 @@ impl From<TaxpayerStatus> for szamlazz_agent::TaxpayerStatus {
 /// One row of a document (`tétel`).
 ///
 /// Net, VAT and gross values are not part of the input: the service computes
-/// them with [`LineItem::calculated_for_currency`] so that the arithmetic
-/// szamlazz.hu verifies server-side always holds.
+/// them with [`LineItem::try_calculated`], rounded to the currency's minor
+/// unit — whole forints for HUF, cents for EUR — half away from zero at each
+/// step, so that the arithmetic szamlazz.hu verifies server-side always holds
+/// and the wire carries what the printed document can state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -330,21 +332,25 @@ impl LineItemInput {
         VatRate::from(self.vat_rate.as_str())
     }
 
-    /// The Agent line item with net, VAT and gross computed for `currency`
-    /// (whole forints for HUF, exact decimals otherwise).
-    #[must_use]
-    pub fn to_line_item(&self, currency: &Currency) -> LineItem {
-        let mut item = LineItem::calculated_for_currency(
+    /// The Agent line item with net, VAT and gross computed for `currency`,
+    /// rounded to its minor unit ([`Rounding::minor_unit`]).
+    ///
+    /// # Errors
+    ///
+    /// [`ArithmeticError`] when a derived value overflows a [`Decimal`]; the
+    /// service answers it as `invalid_input`.
+    pub fn to_line_item(&self, currency: &Currency) -> Result<LineItem, ArithmeticError> {
+        let mut item = LineItem::try_calculated(
             self.name.clone(),
             self.quantity,
             self.unit.clone(),
             self.unit_price,
             self.vat_rate(),
-            currency,
-        );
+            Rounding::minor_unit(currency),
+        )?;
         item.id.clone_from(&self.id);
         item.comment.clone_from(&self.comment);
-        item
+        Ok(item)
     }
 }
 
@@ -652,17 +658,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn line_item_computes_totals_for_currency() {
+    fn line_item_computes_totals_to_the_currency_minor_unit() {
         let mut input = LineItemInput::new("x", dec!(3), "db", dec!(33.335), "27");
         input.id = Some("SKU-1".to_owned());
-        let huf = input.to_line_item(&Currency::HUF);
+        let huf = input.to_line_item(&Currency::HUF).expect("fits");
         assert_eq!(huf.net_value, dec!(100));
         assert_eq!(huf.vat_value, dec!(27));
         assert_eq!(huf.gross_value, dec!(127));
         assert_eq!(huf.id.as_deref(), Some("SKU-1"));
         assert_eq!(huf.vat_rate, VatRate::percent(27));
-        let eur = input.to_line_item(&Currency::EUR);
-        assert_eq!(eur.net_value, dec!(100.005));
+        // Cents, not the exact 100.005 / 27.00135 / 127.00635.
+        let eur = input.to_line_item(&Currency::EUR).expect("fits");
+        assert_eq!(eur.net_value, dec!(100.01));
+        assert_eq!(eur.vat_value, dec!(27.00));
+        assert_eq!(eur.gross_value, dec!(127.01));
+    }
+
+    #[test]
+    fn line_item_overflow_is_an_error_not_a_panic() {
+        let input = LineItemInput::new("x", dec!(10), "db", Decimal::MAX, "27");
+        assert_eq!(
+            input.to_line_item(&Currency::HUF),
+            Err(ArithmeticError::NetOverflow)
+        );
     }
 
     #[test]
