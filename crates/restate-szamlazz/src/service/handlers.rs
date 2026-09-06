@@ -257,7 +257,7 @@ impl Order {
 /// The `Szamlazz.Agent` service: query, credit entries and storno by document
 /// number, and the `check_account` probe. Never calls into `Order`; a
 /// document that carries an order number is reported as `managed_by_order`
-/// instead.
+/// instead — after the account check every found document gets.
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the
@@ -306,8 +306,19 @@ impl Agent {
     }
 
     /// Registers credit entries (`jóváírás`) on an invoice.
+    ///
+    /// With `additive: true` this is **at-least-once**: a lost reply is
+    /// `outcome_unknown`, and the one retry after a crash re-sends the same
+    /// entries, each of which appends a second copy. The retry waits out the
+    /// 60 s client timeout (never the server's ~500 ms default) so that it
+    /// cannot re-send while the first send is still in flight; a caller that
+    /// sees `outcome_unknown` queries the invoice before re-sending.
     #[handler(
-        invocation_retry_policy(max_attempts = 2, on_max_attempts = "kill"),
+        invocation_retry_policy(
+            initial_interval = "2m",
+            max_attempts = 2,
+            on_max_attempts = "kill"
+        ),
         inactivity_timeout = "2m",
         abort_timeout = "2m",
         journal_retention = "3d",
@@ -326,11 +337,13 @@ impl Agent {
             .map(Json)
     }
 
-    /// Reverses an invoice that no `Order` manages.
+    /// Reverses an invoice that no `Order` manages. The storno step is the
+    /// same closure `Szamlazz.Order` runs (query, send, re-query at 60 s
+    /// each), so the timeouts are the same (ADR 0004).
     #[handler(
         invocation_retry_policy(max_attempts = 2, on_max_attempts = "kill"),
-        inactivity_timeout = "2m",
-        abort_timeout = "2m",
+        inactivity_timeout = "4m",
+        abort_timeout = "3m",
         journal_retention = "3d",
         idempotency_retention = "30d"
     )]

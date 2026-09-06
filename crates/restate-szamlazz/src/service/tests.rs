@@ -225,9 +225,9 @@ fn agent_discovers_as_a_service_with_four_handlers() {
             }
             assert!(handler.output.is_some(), "{name} returns an output");
         } else {
+            // The two writes: two attempts, kill; the journal and the
+            // idempotency completion retained like `Szamlazz.Order`'s.
             assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
-            assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
-            assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
             assert_eq!(
                 handler.journal_retention,
                 Some(3 * 24 * 3_600_000),
@@ -238,6 +238,26 @@ fn agent_discovers_as_a_service_with_four_handlers() {
                 Some(30 * 24 * 3_600_000),
                 "{name}"
             );
+            if name == "storno" {
+                // The storno step is the same closure `Szamlazz.Order` sizes
+                // at 4m/3m (query, send, re-query at 60 s each — ADR 0004):
+                // anything shorter suspends a slow storno mid-step.
+                assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
+                assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
+            } else {
+                assert_eq!(name, "set_payments");
+                assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
+                assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
+                // `additive: true` is at-least-once: the retry after a crash
+                // re-sends, so it must wait out the 60 s client timeout —
+                // never the server's ~500 ms default — so that it cannot
+                // re-send while the first send is still in flight.
+                assert_eq!(
+                    handler.retry_policy_initial_interval,
+                    Some(120_000),
+                    "{name}"
+                );
+            }
         }
     }
 }

@@ -111,9 +111,10 @@ pub enum LookupOutcome {
     /// The external id resolves to a document that fails validation (another
     /// order, kind, account mode or supplier).
     Collision(Box<InvoiceDocument>),
-    /// A live invoice-kind document that is not ours exists under the order
-    /// number. Reported even when our own document under the id is reversed:
-    /// no create — reissue or not — may proceed past it.
+    /// A live invoice-kind document under the order number that is neither
+    /// in `our_numbers` nor the document seen under the external id — another
+    /// channel's. Reported even when our own document under the id is
+    /// reversed: no create — reissue or not — may proceed past it.
     Foreign(Box<InvoiceDocument>),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// external-id query or the hint; nothing may be concluded and nothing
@@ -207,7 +208,9 @@ pub enum CreateOutcome {
         message: String,
         /// The newest document under the order, when it is a live document of
         /// the kind being issued; absent when a document of another kind (or a
-        /// reversed one) is newest, and when the naming query itself failed.
+        /// reversed one) is newest, when the order-number query knows nothing
+        /// under the order (a contradiction, logged at `warn` and settled all
+        /// the same), and when the naming query itself failed.
         existing_number: Option<String>,
     },
     /// szamlazz.hu refused the document; nothing was created.
@@ -249,15 +252,6 @@ pub enum Unconfirmed {
         /// The szamlazz.hu code, when one was reported.
         code: Option<String>,
         /// What was reported.
-        message: String,
-    },
-    /// szamlazz.hu refused the order number as a duplicate (71/152), yet the
-    /// order-number query knows nothing under the order. Create only.
-    #[error("duplicate order number {code} reported but nothing is under the order: {message}")]
-    Contradiction {
-        /// The szamlazz.hu code (`71` or `152`).
-        code: String,
-        /// The szamlazz.hu message.
         message: String,
     },
 }
@@ -932,9 +926,13 @@ impl Gateway {
     /// [`CreateOutcome::Reconciled`]; every other settled answer of the query
     /// (a collision, a document reversed since the lookup, the lookup's
     /// reversed document live again) is reported as such; otherwise the
-    /// duplicate is not ours — the order-number query names it when the
-    /// newest document under the order is a live document of the kind being
-    /// issued, and its miss is a contradiction.
+    /// duplicate is not ours — [`CreateOutcome::DuplicateOrderNumber`], named
+    /// through the order-number query when the newest document under the
+    /// order is a live document of the kind being issued. The query's miss is
+    /// a contradiction (szamlazz.hu refused the order number yet knows nothing
+    /// under it), logged at `warn` and settled all the same: the refusal is
+    /// an answer szamlazz.hu already gave, and re-sending would only repeat
+    /// it.
     ///
     /// Correctives are exempt from the order-number check, so their
     /// unresolved 71/152 is an ordinary [`CreateOutcome::Rejected`], without
@@ -968,8 +966,15 @@ impl Gateway {
             }
             Ok(_) => None,
             Err(QueryError::NotFound) => {
-                tracing::warn!(code = %code, "duplicate order number but nothing under the order");
-                return Err(Unconfirmed::Contradiction { code, message });
+                // A contradiction — szamlazz.hu refused the order number yet
+                // knows nothing under it — but still a refusal it has already
+                // given: settled, not re-sent.
+                tracing::warn!(
+                    code = %code,
+                    order = %request.order,
+                    "duplicate order number reported but nothing is under the order"
+                );
+                None
             }
             Err(QueryError::CredentialsRejected { code, message }) => {
                 return Ok(CreateOutcome::CredentialsRejected { code, message });

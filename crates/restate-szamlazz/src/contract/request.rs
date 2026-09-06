@@ -166,6 +166,14 @@ pub struct SetPaymentsRequest {
     /// The credit entries (`jóváírások`); szamlazz.hu accepts at most five.
     pub entries: Vec<PaymentEntry>,
     /// Add to the existing entries instead of replacing them.
+    ///
+    /// **At-least-once.** Replacing is idempotent — a repeat sends the same
+    /// final state — but additive entries are appended by every send that
+    /// reaches szamlazz.hu, and the handler cannot tell a lost reply from a
+    /// lost request: an `outcome_unknown` fault, or the handler's one retry
+    /// after a crash, may have landed the entries already. A caller that sees
+    /// `outcome_unknown` on an additive call queries the invoice
+    /// (`Szamlazz.Agent.query`) before re-sending.
     #[serde(default)]
     pub additive: bool,
 }

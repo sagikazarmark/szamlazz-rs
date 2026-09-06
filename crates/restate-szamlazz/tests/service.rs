@@ -1308,6 +1308,7 @@ async fn e2e_order_protocol() {
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
+    proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(&h).await;
     a_malformed_body_is_a_structured_invalid_input(&h).await;
     an_untrimmed_order_key_is_refused(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
@@ -1745,7 +1746,9 @@ async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
 /// `consumed` by the invoice.
 async fn proforma_auto_link_and_consumed(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-7", &["proforma"]).await;
+    // The proforma create checks that the order is not invoiced yet.
+    h.absent("E2E-7", &["invoice", "prepayment", "proforma"])
+        .await;
     order_query("E2E-7")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -2075,6 +2078,77 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
     assert_eq!(issued["invoice_number"], "ES-10");
     assert_eq!(issued["external_id"], "acct:E2E-10:prepayment");
     eprintln!("(x) create_prepayment: proforma option refused, no proforma lookup: pass");
+}
+
+/// (x-a) `create_proforma` on an order whose invoice or prepayment invoice is
+/// live: our own document (under `…:invoice` / `…:prepayment`) is
+/// `conflict{order_invoiced, existing_number}` — a proforma after the invoice
+/// makes no sense, but the invoice is ours, not another channel's — while a
+/// live invoice under the order number that is under none of our ids stays
+/// `conflict{foreign}`. Nothing is created either way.
+async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Harness) {
+    let body = json!({ "document": document(dec!(1000)) });
+
+    // Our own live invoice, then our own live prepayment invoice.
+    for (ours, other, number, tipus) in [
+        ("invoice", "prepayment", "SZ-33", "SZ"),
+        ("prepayment", "invoice", "ES-33", "ES"),
+    ] {
+        h.reset().await;
+        h.absent("E2E-33", &[other, "proforma"]).await;
+        external_id_query(&format!("acct:E2E-33:{ours}"))
+            .respond_with(Doc::new(number, tipus, "E2E-33").response())
+            .mount(&h.mock)
+            .await;
+        order_query("E2E-33")
+            .respond_with(Doc::new(number, tipus, "E2E-33").response())
+            .mount(&h.mock)
+            .await;
+        create()
+            .respond_with(created("D-33", "1000", "1270"))
+            .expect(0)
+            .mount(&h.mock)
+            .await;
+        let conflict = h
+            .ok(
+                "E2E-33",
+                "create_proforma",
+                &body,
+                &format!("e2e-33-p-{ours}"),
+            )
+            .await;
+        assert_eq!(conflict["outcome"], "conflict", "{ours}: {conflict}");
+        assert_eq!(
+            conflict["conflict_reason"], "order_invoiced",
+            "{ours}: {conflict}"
+        );
+        assert_eq!(conflict["existing_number"], number, "{ours}");
+        assert_eq!(conflict["kind"], "proforma");
+        assert_eq!(conflict["external_id"], "acct:E2E-33:proforma");
+    }
+
+    // A live invoice under the order number that is under none of our ids.
+    h.reset().await;
+    h.absent("E2E-33", &["invoice", "prepayment", "proforma"])
+        .await;
+    order_query("E2E-33")
+        .respond_with(Doc::new("SZ-FOREIGN", "SZ", "E2E-33").response())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("D-33", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let conflict = h
+        .ok("E2E-33", "create_proforma", &body, "e2e-33-p-foreign")
+        .await;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(conflict["conflict_reason"], "foreign", "{conflict}");
+    assert_eq!(conflict["existing_number"], "SZ-FOREIGN");
+    eprintln!(
+        "(x-a) create_proforma after our invoice → conflict{{order_invoiced}}; after a foreign one → conflict{{foreign}}: pass"
+    );
 }
 
 /// (x-b) a malformed body — one carrying a field the contract does not
@@ -3356,12 +3430,12 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
 /// `account_mismatch` (409) after the verify alone — nothing is sent, the
 /// fault names the observed pins and never the key. Without a supplier pin the
 /// supplier id is not checked; a document of the account's own pins is
-/// reversed as before; and a document carrying an order number is
-/// `managed_by_order` before any pin is looked at — it is `Szamlazz.Order`'s,
-/// which checks them itself.
+/// reversed as before; and a document carrying an order number is checked
+/// like any other before it is answered as `managed_by_order` — the document
+/// is in hand, and another account's order number is not echoed.
 #[allow(
     clippy::too_many_lines,
-    reason = "one scenario: the five answers of the verify's account check"
+    reason = "one scenario: the six answers of the verify's account check"
 )]
 async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness) {
     let storno_of = |number: &str| json!({ "invoice_number": number });
@@ -3478,8 +3552,10 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
         ]
     );
 
-    // A document carrying an order number is `Szamlazz.Order`'s, whatever
-    // its pins: `managed_by_order`, no check, nothing sent.
+    // A document carrying an order number is checked against the account
+    // first — the document is in hand, and another account's order number
+    // must not be echoed: mismatched pins are `account_mismatch`; the
+    // account's own pins are `managed_by_order`, nothing sent either way.
     h.reset().await;
     number_query("SZ-24")
         .respond_with(
@@ -3497,12 +3573,30 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
     let reply = h
         .call_agent_scoped("acme", "storno", &storno_of("SZ-24"))
         .await;
+    reply.assert_account_mismatch("SZ-24", "teszt = false");
+    assert!(
+        !reply.body.to_string().contains("E2E-24"),
+        "another account's order number is not echoed: {}",
+        reply.body
+    );
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    h.reset().await;
+    number_query("SZ-25")
+        .respond_with(Doc::new("SZ-25", "SZ", "E2E-25").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-25"))
+        .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "managed_by_order", "{}", reply.body);
-    assert_eq!(reply.body["order_key"], "E2E-24", "{}", reply.body);
+    assert_eq!(reply.body["order_key"], "E2E-25", "{}", reply.body);
     assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
     eprintln!(
-        "(xviii-b) Szamlazz.Agent.storno: teszt / supplier mismatch → account_mismatch with nothing sent; unpinned supplier not checked; own pins → reversed; order-bearing → managed_by_order: pass"
+        "(xviii-b) Szamlazz.Agent.storno: teszt / supplier mismatch → account_mismatch with nothing sent; unpinned supplier not checked; own pins → reversed; order-bearing → pins first, then managed_by_order: pass"
     );
 }
 

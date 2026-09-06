@@ -184,6 +184,25 @@ struct Intent {
     our_numbers: Vec<String>,
 }
 
+/// Step 1's table: the other kinds whose live document of ours refuses a
+/// create of `kind`, with the reason. The invoice and prepayment chains are
+/// exclusive (`prepaid_chain`); a proforma after either makes no sense
+/// (`order_invoiced`) — and without those two lookups the order-number hint of
+/// step 3 would report the order's own invoice as `foreign`, which claims
+/// another channel issued it. The final invoice's check is
+/// [`Execution::prepayment_for_final`], not exclusivity.
+const fn exclusive_with(kind: DocumentKind) -> &'static [(DocumentKind, ConflictReason)] {
+    match kind {
+        DocumentKind::Invoice => &[(DocumentKind::Prepayment, ConflictReason::PrepaidChain)],
+        DocumentKind::Prepayment => &[(DocumentKind::Invoice, ConflictReason::PrepaidChain)],
+        DocumentKind::Proforma => &[
+            (DocumentKind::Invoice, ConflictReason::OrderInvoiced),
+            (DocumentKind::Prepayment, ConflictReason::OrderInvoiced),
+        ],
+        DocumentKind::Final => &[],
+    }
+}
+
 impl Execution {
     // ----- entry points ----------------------------------------------------
 
@@ -201,33 +220,22 @@ impl Execution {
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
         let mut refs = Refs::default();
 
-        // Step 1: exclusivity.
-        match kind {
-            DocumentKind::Invoice => {
-                if let Some(response) = self
-                    .exclusivity(ctx, &prepared, &identity, DocumentKind::Prepayment)
-                    .await?
-                {
-                    return Ok(response);
-                }
+        // Step 1: exclusivity — the other kinds whose live document refuses
+        // this create — then, for a final invoice, its prepayment.
+        for &(other, reason) in exclusive_with(kind) {
+            if let Some(response) = self
+                .exclusivity(ctx, &prepared, &identity, other, reason)
+                .await?
+            {
+                return Ok(response);
             }
-            DocumentKind::Prepayment => {
-                if let Some(response) = self
-                    .exclusivity(ctx, &prepared, &identity, DocumentKind::Invoice)
-                    .await?
-                {
-                    return Ok(response);
-                }
-            }
-            DocumentKind::Final => {
-                if let Some(response) = self
-                    .prepayment_for_final(ctx, &prepared, &identity, &mut refs)
-                    .await?
-                {
-                    return Ok(response);
-                }
-            }
-            DocumentKind::Proforma => {}
+        }
+        if kind == DocumentKind::Final
+            && let Some(response) = self
+                .prepayment_for_final(ctx, &prepared, &identity, &mut refs)
+                .await?
+        {
+            return Ok(response);
         }
 
         // Step 2: the proforma link. Invoices only: the Agent cannot carry
@@ -398,8 +406,8 @@ impl Execution {
 
     // ----- step 1: exclusivity ---------------------------------------------
 
-    /// The invoice and prepayment chains are exclusive: a live document of
-    /// `other` is `conflict{prepaid_chain}`.
+    /// A live document of ours under `other`'s external id refuses the
+    /// create as `conflict{reason, existing_number}` ([`exclusive_with`]).
     ///
     /// A document under the other id that fails validation is
     /// `conflict{external_id_collision}`, never "absent": the query returns
@@ -411,6 +419,7 @@ impl Execution {
         prepared: &Prepared,
         identity: &Identity,
         other: DocumentKind,
+        reason: ConflictReason,
     ) -> Result<Option<CreateResponse>, HandlerError> {
         let other_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, other);
         let found = lookup(
@@ -427,7 +436,7 @@ impl Execution {
                 Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
             }
             Lookup::Ours(found) if found.is_live() => {
-                Some(identity.conflict_about(ConflictReason::PrepaidChain, found.number()))
+                Some(identity.conflict_about(reason, found.number()))
             }
             Lookup::Absent | Lookup::Ours(_) => None,
         })
@@ -751,6 +760,30 @@ mod tests {
 
     fn ord_1() -> OrderKey {
         OrderKey::parse("ORD-1").expect("order")
+    }
+
+    /// Step 1's table: the invoice and prepayment chains refuse each other
+    /// (`prepaid_chain`); a proforma is refused by either (`order_invoiced`),
+    /// so that the order's own invoice is never met by the hint as `foreign`;
+    /// the final invoice's check is `prepayment_for_final`, not exclusivity.
+    #[test]
+    fn exclusivity_table_names_the_other_kinds_and_their_reasons() {
+        assert_eq!(
+            exclusive_with(DocumentKind::Invoice),
+            [(DocumentKind::Prepayment, ConflictReason::PrepaidChain)]
+        );
+        assert_eq!(
+            exclusive_with(DocumentKind::Prepayment),
+            [(DocumentKind::Invoice, ConflictReason::PrepaidChain)]
+        );
+        assert_eq!(
+            exclusive_with(DocumentKind::Proforma),
+            [
+                (DocumentKind::Invoice, ConflictReason::OrderInvoiced),
+                (DocumentKind::Prepayment, ConflictReason::OrderInvoiced),
+            ]
+        );
+        assert_eq!(exclusive_with(DocumentKind::Final), []);
     }
 
     /// `options.proforma` is an invoice option: the Agent cannot carry

@@ -704,7 +704,7 @@ pub struct CreatedInvoice {
 
 impl CreatedInvoice {
     /// Whether this document is a reversal of `original`: a *different*
-    /// invoice number with a negative gross total.
+    /// invoice number with a gross total that is not positive.
     ///
     /// The check every caller must make after a
     /// [`StornoInvoice`](crate::ops::storno::StornoInvoice): szamlazz.hu
@@ -712,15 +712,15 @@ impl CreatedInvoice {
     /// success-shaped response that merely echoes the requested document
     /// (same number, positive totals) and reverses nothing. A repeat storno of
     /// an already reversed invoice also passes this check — it echoes the
-    /// existing storno invoice, which is a genuine reversal.
+    /// existing storno invoice, which is a genuine reversal. So does the
+    /// storno of a zero-total invoice, whose storno document carries a gross
+    /// of `0`.
     ///
     /// Returns `false` when the gross total is unknown.
     #[must_use]
     pub fn reverses(&self, original: &InvoiceNumber) -> bool {
         self.invoice_number != *original
-            && self
-                .gross_total
-                .is_some_and(|gross| gross.is_sign_negative())
+            && self.gross_total.is_some_and(|gross| gross <= Decimal::ZERO)
     }
 }
 
@@ -1642,11 +1642,13 @@ mod tests {
     }
 
     #[test]
-    fn reverses_requires_a_new_number_with_a_negative_gross() {
+    fn reverses_requires_a_new_number_with_a_non_positive_gross() {
         let original = InvoiceNumber::new("CTEST-2026-40");
 
         // A genuine storno invoice (also what a repeat storno echoes).
         assert!(created("CTEST-2026-42", Some(dec!(-1270))).reverses(&original));
+        // The storno of a zero-total invoice: a new number, a gross of 0.
+        assert!(created("CTEST-2026-42", Some(dec!(0))).reverses(&original));
 
         // Storno of a proforma or delivery note: the requested document is
         // echoed unchanged.
@@ -1655,9 +1657,10 @@ mod tests {
         assert!(!created("CTEST-2026-41", Some(dec!(1270))).reverses(&original));
         // Same number, negative gross (not observed) is not a reversal.
         assert!(!created("CTEST-2026-40", Some(dec!(-1270))).reverses(&original));
+        // Same number, zero gross: the echo of a zero-total proforma.
+        assert!(!created("CTEST-2026-40", Some(dec!(0))).reverses(&original));
         // Unknown totals cannot prove a reversal.
         assert!(!created("CTEST-2026-42", None).reverses(&original));
-        assert!(!created("CTEST-2026-42", Some(dec!(0))).reverses(&original));
     }
 
     #[test]

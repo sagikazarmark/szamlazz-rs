@@ -1,7 +1,8 @@
 # Exhausted retries kill the invocation instead of pausing it
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
-amended by #22 (the create step under a run retry policy), #30 (the storno step) and #37 (the read policy), below.
+amended by #22 (the create step under a run retry policy), #30 (the storno step), #37 (the read policy) and #41
+(the `Szamlazz.Agent` writes' timeouts and retry interval), below.
 Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the retry policy and timeout
 values, the verified Restate facts, and the operational alerts. Superseded: the `pending` slot as what makes
 kill safe (there is no state; the external-id query inside the create step is), the runbook and caller
@@ -21,7 +22,7 @@ correcting, storno and delete handlers carry `invocation_retry_policy(initial_in
 factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "kill")` with
 `inactivity_timeout = "4m"` and `abort_timeout = "3m"` (the create closure may take up to 180 s:
 the leading external-id query, the create, a re-query, 60 s each). `Szamlazz.Agent.set_payments` and `storno` use `max_attempts = 2,
-kill`; read-only handlers (`Szamlazz.Order.get` with `verify`, `Szamlazz.Agent.query`) may retry more freely
+kill` (their timeouts and `set_payments`'s retry interval: #41, below); read-only handlers (`Szamlazz.Order.get` with `verify`, `Szamlazz.Agent.query`) may retry more freely
 because queries are safe to repeat, but they kill too. The external-id query inside the create step
 is what makes kill safe; kill is what keeps the key reachable.
 
@@ -143,6 +144,27 @@ one invocation with one create on the wire and `last_failure_related_command_nam
 while in flight; a lookup that never answers is a 503 `unavailable{order, kind, external_id}` with
 zero creates. The accepted risk of #22 applies unchanged: the attempt count is not durable across every
 replay, `max_duration` is the bound.
+
+## Amended (#41): the `Szamlazz.Agent` writes' timeouts and retry interval
+
+`Szamlazz.Agent.storno` runs the same three-call storno closure as `Szamlazz.Order.storno_invoice` (query, send,
+re-query at up to 60 s each, ~180 s in the worst case) but carried `inactivity_timeout = 2m` /
+`abort_timeout = 2m`, below that worst case: a slow storno was suspended and resumed mid-step — not lossy, the
+re-execution's leading query finds a landed storno, but a full prologue replay and a needless round. It now
+carries `Szamlazz.Order`'s `4m` / `3m`; the discovery test asserts them.
+
+`Szamlazz.Agent.set_payments` had `max_attempts = 2, kill` with no `initial_interval`, so the one retry after a
+crash ran on the server's ~500 ms default. Its send is **at-least-once** under `additive: true` — every send that
+reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request — so a retry
+that fires while the first send is still in flight (the client waits up to 60 s) could append twice. It now
+carries an explicit `initial_interval = "2m"`, longer than the client timeout; the `outcome_unknown` message is
+conditional on `additive` ("query the invoice before re-sending" rather than "call set_payments again"), and the
+hazard is stated on the request field and in both READMEs. Its timeouts stay `2m` / `2m` (one send).
+
+Amended #41 also settled the 71/152 contradiction (design §5 step 4): a duplicate-order-number refusal with nothing
+under the order was `Err(Unconfirmed::Contradiction)` and re-sent the create for up to five executions; it is now
+`conflict{duplicate_order_number}` without `existing_number` on the first occurrence, logged at `warn` — the
+refusal is an answer szamlazz.hu already gave.
 
 ## Consequences
 

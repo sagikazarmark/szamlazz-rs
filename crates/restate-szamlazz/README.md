@@ -154,7 +154,9 @@ activation details.
   malformed body is the structured `invalid_input` fault instead of the SDK's plain-text 400. Same discovery
   schema as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
 - `contract::Outcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
-  `conflict` with a reason — `prepaid_chain`, `live`, `foreign`, `duplicate_order_number`,
+  `conflict` with a reason — `prepaid_chain`, `order_invoiced` (a proforma after the order's own live invoice or
+  prepayment invoice), `live`, `foreign` (a live invoice under the order number that is under none of the order's
+  external ids — another channel's), `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
   `base_reversed`, `not_managed`.
 - `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
@@ -309,7 +311,7 @@ plain-text `Cannot decode input payload`:
 | `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field, or its `Order` key has leading or trailing whitespace; refused before anything is journaled or sent — or it names a document szamlazz.hu does not know, or an option the handler does not take. | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
-| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued. | Rule 2. |
+| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued — or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` — **at-least-once**: every send that reached szamlazz.hu appended the entries — query the invoice before re-sending; a replacing call is repeated as is. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
 
@@ -323,8 +325,11 @@ Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
 `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m`, `abort_timeout = 3m`,
 `journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3` and
-`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.set_payments` and `storno` use two
-attempts, `query` and `check_account` three with the same one-day journal retention. Kill, not pause: a paused invocation
+`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.storno` uses two attempts with
+`Szamlazz.Order`'s timeouts (its storno step is the same closure); `set_payments` two attempts with an explicit
+`initial_interval = 2m` — longer than the 60 s client timeout, so the retry after a crash cannot re-send while the
+first send is still in flight, which matters because an additive send is at-least-once; `query` and `check_account`
+three with the same one-day journal retention. Kill, not pause: a paused invocation
 holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
 external-id query inside the create step is what makes that safe.
 
@@ -402,7 +407,8 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   order whose invocations were purged stornoed and reissued; `Szamlazz.Agent.storno` refusing a document whose
   `teszt` or `szallito/id` is not the resolved account's as `account_mismatch` after the verify alone (storno mock
   `expect(0)`), not checking the supplier id when the account pins none, reversing a document of the account's own
-  pins, and answering an order-bearing document `managed_by_order` before any pin is looked at; `Szamlazz.Agent.query`
+  pins, and checking an order-bearing document's pins before answering it — mismatched pins `account_mismatch`
+  without echoing the other account's order number, the account's own pins `managed_by_order`; `Szamlazz.Agent.query`
   answering a mismatched document `account_mismatch`, a matching one as the projection and code 7 as `not_found`; an account
   change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
   rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that

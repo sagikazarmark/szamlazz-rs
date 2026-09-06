@@ -50,10 +50,16 @@ pub enum ConflictReason {
     /// A live prepayment invoice (or, for `create_prepayment`, a live invoice)
     /// exists for the order: the two chains are exclusive.
     PrepaidChain,
+    /// `create_proforma` while the order's invoice or prepayment invoice of
+    /// ours is live (see `existing_number`): a proforma after the invoice
+    /// makes no sense. Not [`Foreign`](Self::Foreign) — the document is this
+    /// order's, issued by this service.
+    OrderInvoiced,
     /// `reissue: true` while the document is live.
     Live,
-    /// A live invoice-kind document that is not ours exists under the order
-    /// number; see `existing_number`.
+    /// A live invoice-kind document under the order number that is under none
+    /// of this order's external ids — another channel or namespace on the
+    /// same szamlazz.hu account; see `existing_number`.
     Foreign,
     /// szamlazz.hu refuses the order number as a duplicate (71/152) and no
     /// live document of ours can be found under our external id.
@@ -886,6 +892,7 @@ mod tests {
     fn every_conflict_reason_is_snake_case() {
         let reasons = [
             (ConflictReason::PrepaidChain, "prepaid_chain"),
+            (ConflictReason::OrderInvoiced, "order_invoiced"),
             (ConflictReason::Live, "live"),
             (ConflictReason::Foreign, "foreign"),
             (

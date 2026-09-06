@@ -1188,18 +1188,24 @@ async fn duplicate_order_number_has_no_existing_number_when_another_kind_is_newe
 }
 
 #[tokio::test]
-async fn duplicate_order_number_with_nothing_under_the_order_is_unconfirmed() {
+async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_a_number() {
+    // szamlazz.hu refused the order number, yet knows nothing under it: a
+    // contradiction, but still a refusal — settled on the first occurrence
+    // (the harness's create mock expects exactly one send), without a number
+    // to name.
     let h = duplicate_harness(not_found()).await;
     order_query()
         .respond_with(not_found())
+        .expect(1)
         .mount(&h.server)
         .await;
 
     assert_eq!(
         h.create(None).await,
-        Err(Unconfirmed::Contradiction {
+        Ok(CreateOutcome::DuplicateOrderNumber {
             code: "152".to_owned(),
             message: "Már létező rendelésszám".to_owned(),
+            existing_number: None,
         })
     );
 }
@@ -1769,6 +1775,33 @@ async fn storno_reversed_is_validated() {
     assert!(body.contains("<megjegyzes>wrong buyer</megjegyzes>"));
     assert!(body.contains("<eszamla>true</eszamla>"));
     assert!(!body.contains("<keltDatum>"), "352 otherwise");
+}
+
+#[tokio::test]
+async fn storno_of_a_zero_gross_invoice_is_reversed() {
+    // The storno of a 0-HUF invoice (a free ticket) lands as a document
+    // with a new number and a gross of 0: a reversal, not the echo of a
+    // proforma or delivery note, which keeps the requested number.
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(created("SS-1", "0", "0"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.gateway.storno(storno_request(&storno_id)).await {
+        Ok(StornoOutcome::Reversed(storno)) => {
+            assert_eq!(storno.invoice_number.as_str(), "SS-1");
+            assert_eq!(storno.gross_total, Some(dec!(0)));
+        }
+        other => panic!("expected Reversed, got {other:?}"),
+    }
 }
 
 #[tokio::test]

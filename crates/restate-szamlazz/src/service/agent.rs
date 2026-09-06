@@ -5,7 +5,8 @@
 //! invocation resolved to (`support::check_pins`) before they answer or
 //! send; `set_payments` finds no document and is exempt. Every read — the
 //! probe, `query`, the verify and the storno lookup — runs under the read
-//! policy; `set_payments` is a write without a retry of its own.
+//! policy; `set_payments` is a write without a retry of its own, and with
+//! `additive: true` an at-least-once one (see [`SetPaymentsRequest::additive`]).
 
 use std::sync::Arc;
 
@@ -36,6 +37,21 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
             CredentialsCheck::Rejected { code, message }
         }
     }
+}
+
+/// The `outcome_unknown` fault of `set_payments` after a lost reply. What the
+/// caller does next depends on `additive`: a replacing call is idempotent and
+/// is simply repeated; an additive one is at-least-once — the lost send may
+/// have appended the entries — so the caller queries the invoice first.
+fn set_payments_unknown(additive: bool, message: &str) -> Fault {
+    let next = if additive {
+        "the entries are additive and may have landed — query the invoice before re-sending"
+    } else {
+        "call set_payments again"
+    };
+    Fault::outcome_unknown(format!(
+        "credit entry registration outcome unknown: {message}; {next}"
+    ))
 }
 
 impl Execution {
@@ -147,16 +163,17 @@ impl Execution {
             SetPaymentsOutcome::CredentialsRejected { code, message } => {
                 Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
             }
-            SetPaymentsOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
-                "credit entry registration outcome unknown: {message}; call set_payments again"
-            ))
-            .into()),
+            SetPaymentsOutcome::Transport(message) => {
+                Err(set_payments_unknown(additive, &message).into())
+            }
         }
     }
 
-    /// The `storno` handler: verify by number, then — for a document carrying
-    /// no order number that belongs to the resolved account — the lookup and
-    /// storno steps of design §6 under the by-number storno external id.
+    /// The `storno` handler: verify by number and check the found document
+    /// against the resolved account, then — for a document carrying no order
+    /// number — the lookup and storno steps of design §6 under the by-number
+    /// storno external id. A document carrying an order number is answered
+    /// as `managed_by_order` after the check, never before it.
     pub(super) async fn storno_request(
         &self,
         ctx: &Context<'_>,
@@ -167,8 +184,7 @@ impl Execution {
             comment,
         } = request;
 
-        // Query first: a document with an order number is managed by an
-        // `Order`; this service never calls into it.
+        // Query first: everything below is about the document as found.
         let found = {
             let gateway = Arc::clone(&self.gateway);
             let number = number.clone();
@@ -195,6 +211,11 @@ impl Execution {
                 );
             }
         };
+        // This is the handler that issues a legal document by number: the
+        // document must be the resolved account's before anything is said or
+        // sent about it — even "it is an order's": the document is in hand,
+        // and another account's order number must not be echoed.
+        check_pins(self.gateway.account(), &found)?;
         if let Some(order) = found
             .info
             .order_number
@@ -202,14 +223,11 @@ impl Execution {
             .map(str::trim)
             .filter(|order| !order.is_empty())
         {
-            // `Szamlazz.Order`'s document: it checks the pins itself.
+            // `Szamlazz.Order`'s document; this service never calls into it.
             return Ok(
                 StornoResponse::new(StornoOutcome::ManagedByOrder, number).with_order_key(order)
             );
         }
-        // This is the handler that issues a legal document by number: the
-        // document must be the resolved account's before anything is sent.
-        check_pins(self.gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
             return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
         }
@@ -258,7 +276,48 @@ impl Execution {
 
 #[cfg(test)]
 mod tests {
+    use restate_sdk::errors::TerminalError;
+
     use super::*;
+
+    /// `set_payments` with `additive: true` is at-least-once: a lost reply
+    /// may have appended the entries, so the fault tells the caller to query
+    /// the invoice before re-sending; a replacing call is repeated as is.
+    #[test]
+    fn the_set_payments_fault_tells_an_additive_caller_to_query_first() {
+        let additive = TerminalError::from(set_payments_unknown(true, "connection reset"));
+        assert_eq!(additive.code(), 500);
+        assert!(
+            additive.message().contains("connection reset"),
+            "{}",
+            additive.message()
+        );
+        assert!(
+            additive
+                .message()
+                .contains("query the invoice before re-sending"),
+            "{}",
+            additive.message()
+        );
+        assert!(
+            !additive.message().contains("call set_payments again"),
+            "{}",
+            additive.message()
+        );
+
+        let replacing = TerminalError::from(set_payments_unknown(false, "connection reset"));
+        assert_eq!(replacing.code(), 500);
+        assert!(
+            replacing.message().contains("call set_payments again"),
+            "{}",
+            replacing.message()
+        );
+        assert!(
+            !replacing.message().contains("query the invoice"),
+            "{}",
+            replacing.message()
+        );
+    }
 
     /// Every probe outcome is data: a wrong key is `credentials: rejected`,
     /// not a fault. (An exchange that settled nothing is not an outcome at
