@@ -46,17 +46,19 @@ impl Execution {
             ControlFlow::Break(response) => return Ok(response),
         };
         let kind = issued_kind_of(&found.info.document_type);
-        let e_invoice = found
-            .e_invoice()
-            .unwrap_or(gateway.account().defaults.e_invoice);
-        let intent = StornoIntent {
-            number: number.clone(),
-            storno_id,
+        // Every fault from here on is about this storno.
+        let about = |fault: Fault| fault.about(&order, kind, storno_id.as_str());
+        // The intent is a pure function of the verified document: a `telj`
+        // it does not carry is a fault after every answer that needs no
+        // send (ADR 0007).
+        let intent = StornoIntent::from_verified(
+            &found,
+            gateway.account(),
+            number.clone(),
+            storno_id.clone(),
             comment,
-            e_invoice,
-        };
-        // Every fault of steps 2–3 is about this storno.
-        let about = |fault: Fault| fault.about(&order, kind, intent.storno_id.as_str());
+        )
+        .map_err(about)?;
 
         // Step 2: lookup — a storno of ours already under the id.
         match object::lookup_storno(ctx, self, &intent)

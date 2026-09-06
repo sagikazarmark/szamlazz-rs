@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use jiff::civil::date;
+use jiff::civil::{Date, date};
 use restate_sdk::prelude::{Endpoint, HttpServer};
 use restate_szamlazz::account::{
     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
@@ -84,6 +84,10 @@ const ADMIN_PORT: u16 = 19070;
 
 // ----- szamlazz.hu fixtures (mirroring tests/gateway.rs) --------------------
 
+/// The `telj` every document of the run carries unless a scenario says
+/// otherwise: the fulfillment date a storno of it must repeat (ADR 0007).
+const ORIGINAL_TELJ: Date = date(2026, 7, 15);
+
 struct Doc<'a> {
     number: &'a str,
     tipus: &'a str,
@@ -99,6 +103,8 @@ struct Doc<'a> {
     /// szamlazz.hu never echoes it, so it is not in the body, but it is a
     /// selector the document is reachable by ([`holds`]).
     external_id: Option<&'a str>,
+    /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
+    fulfillment_date: Option<Date>,
 }
 
 impl<'a> Doc<'a> {
@@ -123,6 +129,7 @@ impl<'a> Doc<'a> {
             test: true,
             supplier_id: SUPPLIER,
             external_id: None,
+            fulfillment_date: Some(ORIGINAL_TELJ),
         }
     }
 
@@ -131,11 +138,12 @@ impl<'a> Doc<'a> {
             value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
         };
         let eszamla = if self.tipus == "D" { 0 } else { 2 };
+        let telj = self.fulfillment_date.map(|date| date.to_string());
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
   <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
+  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{telj}{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
@@ -145,6 +153,7 @@ impl<'a> Doc<'a> {
             tipus = self.tipus,
             hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
             hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
+            telj = opt("telj", telj.as_deref()),
             rendelesszam = opt("rendelesszam", self.order),
             test = self.test,
             sztornozott = if self.reversed {
@@ -237,6 +246,23 @@ fn create_with_bank_account(bank_account: &str) -> MockBuilder {
 
 fn storno() -> MockBuilder {
     op("action-szamla_agent_st")
+}
+
+/// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: the storno
+/// repeating the original's fulfillment date (ADR 0007).
+fn original_telj_tag() -> String {
+    format!("<teljesitesDatum>{ORIGINAL_TELJ}</teljesitesDatum>")
+}
+
+/// A storno request carrying the fixture's `telj` ([`ORIGINAL_TELJ`]) as its
+/// `teljesitesDatum` — what every storno of a fixture document must send.
+fn storno_repeating_telj() -> MockBuilder {
+    storno().and(body_string_contains(original_telj_tag()))
+}
+
+/// The body of a `storno_invoice` / `Szamlazz.Agent.storno` call on `number`.
+fn storno_of(number: &str) -> Value {
+    json!({ "invoice_number": number })
 }
 
 /// A storno request that must not reach szamlazz.hu: a handler that stops
@@ -1362,13 +1388,24 @@ impl Harness {
 
     /// The bodies of the create requests szamlazz.hu has seen so far.
     async fn create_bodies(&self) -> Vec<String> {
+        self.bodies_of("action-xmlagentxmlfile").await
+    }
+
+    /// The bodies of the storno requests szamlazz.hu has seen so far.
+    async fn storno_bodies(&self) -> Vec<String> {
+        self.bodies_of("action-szamla_agent_st").await
+    }
+
+    /// The bodies of the requests of `action` szamlazz.hu has seen so far.
+    async fn bodies_of(&self, action: &str) -> Vec<String> {
+        let marker = format!("name=\"{action}\"");
         self.mock
             .received_requests()
             .await
             .expect("requests")
             .iter()
             .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-            .filter(|body| body.contains("name=\"action-xmlagentxmlfile\""))
+            .filter(|body| body.contains(&marker))
             .collect()
     }
 
@@ -1468,6 +1505,7 @@ async fn e2e_order_protocol() {
     idempotency_key_replays_without_calling_szamlazz(&h).await;
     duplicate_order_number_reconciles(&h).await;
     storno_then_stale_create_then_reissue(&h).await;
+    storno_repeats_the_originals_fulfillment_date_or_refuses(&h).await;
     reissue_on_live_is_a_conflict(&h).await;
     external_reversal_detected(&h).await;
     reversal_between_executions_is_reversed_not_reissued(&h).await;
@@ -1499,6 +1537,7 @@ async fn e2e_order_protocol() {
     agent_storno_checks_the_found_document_against_the_account(&h).await;
     agent_query_checks_the_found_document_against_the_account(&h).await;
     agent_query_taxpayer_runs_on_the_scoped_account(&h).await;
+    agent_storno_repeats_the_originals_fulfillment_date_or_refuses(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
     no_agent_key_in_any_journal_of_the_run(&h).await;
@@ -1681,8 +1720,10 @@ async fn mount_reversed_sz1(h: &Harness) {
         .await;
 }
 
-/// (iv) storno ⇒ `reversed{storno_number}`; a create ⇒ `reversed`; a create
-/// with `reissue` ⇒ `issued` as the newest holder of the same external id.
+/// (iv) storno ⇒ `reversed{storno_number}` with the storno carrying the
+/// original's `telj` as `teljesitesDatum` and no `keltDatum` (ADR 0007); a
+/// create ⇒ `reversed`; a create with `reissue` ⇒ `issued` as the newest
+/// holder of the same external id.
 async fn storno_then_stale_create_then_reissue(h: &Harness) {
     h.reset().await;
     h.holds(&Doc {
@@ -1694,7 +1735,7 @@ async fn storno_then_stale_create_then_reissue(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    storno()
+    storno_repeating_telj()
         .respond_with(created("SS-1", "-1000", "-1270"))
         .expect(1)
         .mount(&h.mock)
@@ -1710,6 +1751,13 @@ async fn storno_then_stale_create_then_reissue(h: &Harness) {
     assert_eq!(reversed["outcome"], "reversed", "{reversed}");
     assert_eq!(reversed["storno_number"], "SS-1");
     assert_eq!(reversed["invoice_number"], "SZ-1");
+    let stornos = h.storno_bodies().await;
+    assert_eq!(stornos.len(), 1);
+    assert!(
+        !stornos[0].contains("<keltDatum>"),
+        "no issue date on a storno: {}",
+        stornos[0]
+    );
 
     // The stale create: the lookup finds the reversed document.
     mount_reversed_sz1(h).await;
@@ -1751,6 +1799,181 @@ async fn storno_then_stale_create_then_reissue(h: &Harness) {
     assert_eq!(reissued["external_id"], "acct:E2E-1:invoice");
     assert_eq!(reissued["invoice_number"], "SZ-2");
     eprintln!("(iv) storno → reversed; stale create → reversed; reissue → issued: pass");
+}
+
+/// (iv-b) the storno's `teljesitesDatum` (ADR 0007), end to end. A verified
+/// original without a `telj` is 503 `unavailable` about the storno — order,
+/// kind and the storno external id — with only the prologue and the verify
+/// journaled and nothing sent; the fault comes **after** the answers that
+/// need no send, so a `telj`-less document of another order is still
+/// `conflict{not_managed}`, a `telj`-less proforma still
+/// `rejected{not_stornoable}` and a `telj`-less reversed invoice still
+/// `reversed` with its storno number from the hint. And a storno whose first
+/// reply is lost is re-executed under the issue policy with a byte-identical
+/// body — the date is a pure function of the journaled verify — under one
+/// `storno-{number}` entry.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the fault, its three predecessors and the re-executed step"
+)]
+async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harness) {
+    let without_telj = |number: &'static str, order: &'static str| Doc {
+        fulfillment_date: None,
+        ..Doc::new(number, "SZ", order)
+    };
+
+    // The fault: a live invoice of this order without a `telj`.
+    h.reset().await;
+    number_query("SZ-4A")
+        .respond_with(without_telj("SZ-4A", "E2E-4").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call("E2E-4", "storno_invoice", &storno_of("SZ-4A"), "e2e-4-s1")
+        .await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert!(fault.message.contains("SZ-4A"), "{fault:?}");
+    assert!(fault.message.contains("fulfillment date"), "{fault:?}");
+    assert!(fault.message.contains("nothing was sent"), "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-4"), "{fault:?}");
+    assert_eq!(fault.kind.as_deref(), Some("invoice"), "{fault:?}");
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-4:storno:SZ-4A"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "verify-storno-SZ-4A"],
+        "the verify is the last step journaled"
+    );
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    // Before the fault: another order's document is `conflict{not_managed}`.
+    h.reset().await;
+    number_query("SZ-4B")
+        .respond_with(without_telj("SZ-4B", "OTHER-4").response())
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let conflict = h
+        .ok("E2E-4", "storno_invoice", &storno_of("SZ-4B"), "e2e-4-s2")
+        .await;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(conflict["conflict_reason"], "not_managed", "{conflict}");
+    assert_eq!(h.requests_seen().await, 1);
+
+    // Before the fault: a proforma is `rejected{not_stornoable}`.
+    h.reset().await;
+    number_query("D-4C")
+        .respond_with(
+            Doc {
+                fulfillment_date: None,
+                ..Doc::new("D-4C", "D", "E2E-4")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let rejected = h
+        .ok("E2E-4", "storno_invoice", &storno_of("D-4C"), "e2e-4-s3")
+        .await;
+    assert_eq!(rejected["outcome"], "rejected", "{rejected}");
+    assert_eq!(rejected["code"], "not_stornoable", "{rejected}");
+    assert_eq!(h.requests_seen().await, 1);
+
+    // Before the fault: an already reversed invoice is `reversed`, with the
+    // storno number from the hint.
+    h.reset().await;
+    number_query("SZ-4D")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..without_telj("SZ-4D", "E2E-4")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-4")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-4D"),
+                ..Doc::new("SS-4D", "SS", "E2E-4")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call("E2E-4", "storno_invoice", &storno_of("SZ-4D"), "e2e-4-s4")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-4D", "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-storno-SZ-4D",
+            "hint-storno-SZ-4D"
+        ]
+    );
+    assert_eq!(h.requests_seen().await, 2, "the verify and the hint");
+
+    // A lost reply: the first execution's send answers 500 and its re-query
+    // still misses; the second execution's send lands. Both sends carry the
+    // same bytes — the same `teljesitesDatum` — under one run entry.
+    h.reset().await;
+    number_query("SZ-4E")
+        .respond_with(Doc::new("SZ-4E", "SZ", "E2E-4").response())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-4:storno:SZ-4E")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno_repeating_telj()
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_repeating_telj()
+        .respond_with(created("SS-4E", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-4", "storno_invoice", &storno_of("SZ-4E"), "e2e-4-s5")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-4E", "{}", reply.body);
+    let stornos = h.storno_bodies().await;
+    assert_eq!(stornos.len(), 2, "two executions of the storno step");
+    assert_eq!(
+        stornos[0], stornos[1],
+        "the re-executed storno is byte-identical"
+    );
+    assert!(stornos[0].contains(&original_telj_tag()));
+    assert!(!stornos[0].contains("<keltDatum>"));
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs.iter().filter(|name| *name == "storno-SZ-4E").count(),
+        1,
+        "one storno step entry: {runs:?}"
+    );
+    eprintln!(
+        "(iv-b) telj-less original → unavailable about the storno with nothing sent, after not_managed / not_stornoable / reversed; lost storno reply → byte-identical re-execution: pass"
+    );
 }
 
 /// (v) `reissue: true` while the document is live ⇒ `conflict{live}`.
@@ -3553,7 +3776,7 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    storno()
+    storno_repeating_telj()
         .and(body_string_contains(agent_key_tag(AGENT_KEY)))
         .respond_with(created("SS-18", "-1000", "-1270"))
         .expect(1)
@@ -3650,8 +3873,6 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     reason = "one scenario: the six answers of the verify's account check"
 )]
 async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness) {
-    let storno_of = |number: &str| json!({ "invoice_number": number });
-
     // A live-account document on the test account `acme`.
     h.reset().await;
     number_query("SZ-21")
@@ -3711,7 +3932,7 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    storno()
+    storno_repeating_telj()
         .and(body_string_contains(agent_key_tag(AGENT_KEY)))
         .respond_with(created("SS-22", "-1000", "-1270"))
         .expect(1)
@@ -3733,7 +3954,7 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    storno()
+    storno_repeating_telj()
         .and(body_string_contains(agent_key_tag(AGENT_KEY)))
         .respond_with(created("SS-23", "-1000", "-1270"))
         .expect(1)
@@ -3953,6 +4174,144 @@ async fn agent_query_taxpayer_runs_on_the_scoped_account(h: &Harness) {
 
     eprintln!(
         "(xviii-d) Szamlazz.Agent.query_taxpayer under acme and beta → each asks NAV with its own key, one step taxpayer-{{prefix}} for the full number and the stem, valid: false as data; malformed → invalid_input before the prologue: pass"
+    );
+}
+
+/// (xviii-e) `Szamlazz.Agent.storno` repeats the original's `telj` too (ADR
+/// 0007), under a scope: a document of `acme`'s pins is reversed with the
+/// storno carrying `teljesitesDatum` and `acme`'s key; one without a `telj`
+/// is 503 `unavailable` naming the invoice — without `order`, `kind` or
+/// `external_id`, as this handler's other faults — with only the verify
+/// journaled and nothing sent; and the fault comes after the answers that
+/// need no send: a `telj`-less document of foreign pins is still
+/// `account_mismatch`, an order-bearing one still `managed_by_order`, a
+/// reversed one still `reversed`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the date on the wire, the fault and its three predecessors"
+)]
+async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harness) {
+    let without_telj = |number: &'static str| Doc {
+        fulfillment_date: None,
+        ..Doc::unmanaged(number, "SZ")
+    };
+
+    // The date on the wire.
+    h.reset().await;
+    number_query("SZ-31")
+        .respond_with(Doc::unmanaged("SZ-31", "SZ").response())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:by-number:SZ-31:storno")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno_repeating_telj()
+        .and(body_string_contains(agent_key_tag(AGENT_KEY)))
+        .respond_with(created("SS-31", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-31"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-31", "{}", reply.body);
+    let stornos = h.storno_bodies().await;
+    assert_eq!(stornos.len(), 1);
+    assert!(!stornos[0].contains("<keltDatum>"), "{}", stornos[0]);
+
+    // The fault, without an order identity.
+    h.reset().await;
+    number_query("SZ-32")
+        .respond_with(without_telj("SZ-32").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-32"))
+        .await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert!(fault.message.contains("SZ-32"), "{fault:?}");
+    assert!(fault.message.contains("fulfillment date"), "{fault:?}");
+    assert_eq!(fault.order, None, "{fault:?}");
+    assert_eq!(fault.kind, None, "{fault:?}");
+    assert_eq!(fault.external_id, None, "{fault:?}");
+    for key in AGENT_KEYS {
+        assert!(!fault.message.contains(key), "{fault:?}");
+    }
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "verify-SZ-32"],
+        "the verify is the only step journaled"
+    );
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    // Before the fault: foreign pins are `account_mismatch`.
+    h.reset().await;
+    number_query("SZ-33")
+        .respond_with(
+            Doc {
+                test: false,
+                ..without_telj("SZ-33")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-33"))
+        .await;
+    reply.assert_account_mismatch("SZ-33", "teszt = false");
+    assert_eq!(h.requests_seen().await, 1);
+
+    // Before the fault: an order-bearing document is `managed_by_order`.
+    h.reset().await;
+    number_query("SZ-34")
+        .respond_with(
+            Doc {
+                fulfillment_date: None,
+                ..Doc::new("SZ-34", "SZ", "E2E-34")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-34"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "managed_by_order", "{}", reply.body);
+    assert_eq!(reply.body["order_key"], "E2E-34", "{}", reply.body);
+    assert_eq!(h.requests_seen().await, 1);
+
+    // Before the fault: a reversed document is `reversed`.
+    h.reset().await;
+    number_query("SZ-35")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..without_telj("SZ-35")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-35"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+    eprintln!(
+        "(xviii-e) Szamlazz.Agent.storno: teljesitesDatum on the wire; telj-less → unavailable without an order identity, after account_mismatch / managed_by_order / reversed: pass"
     );
 }
 

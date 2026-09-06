@@ -3,7 +3,7 @@
 //! credential rejections and failed exchanges — `Unanswered` on the reads,
 //! `Unconfirmed` on the writes — against synthetic szamlazz.hu responses.
 
-use jiff::civil::date;
+use jiff::civil::{Date, date};
 use restate_szamlazz::account::{Account, Endpoint};
 use restate_szamlazz::config::AccountMode;
 use restate_szamlazz::contract::{
@@ -70,6 +70,16 @@ fn document() -> DocumentInput {
     )
 }
 
+/// The `telj` every document of these tests carries unless a test says
+/// otherwise: the fulfillment date a storno of it must repeat (ADR 0007).
+const ORIGINAL_TELJ: Date = date(2026, 7, 15);
+
+/// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: what every
+/// storno of a fixture document must send.
+fn original_telj_tag() -> String {
+    format!("<teljesitesDatum>{ORIGINAL_TELJ}</teljesitesDatum>")
+}
+
 /// A queried document, rendered as the `szamla` response XML.
 struct Doc<'a> {
     number: &'a str,
@@ -81,6 +91,8 @@ struct Doc<'a> {
     test: bool,
     supplier_id: u64,
     payments: &'a [&'a str],
+    /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
+    fulfillment_date: Option<Date>,
 }
 
 impl<'a> Doc<'a> {
@@ -95,6 +107,7 @@ impl<'a> Doc<'a> {
             test: true,
             supplier_id: SUPPLIER,
             payments: &[],
+            fulfillment_date: Some(ORIGINAL_TELJ),
         }
     }
 
@@ -111,6 +124,7 @@ impl<'a> Doc<'a> {
         let opt = |tag: &str, value: Option<&str>| {
             value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
         };
+        let telj = self.fulfillment_date.map(|date| date.to_string());
         let payments = if self.payments.is_empty() {
             String::new()
         } else {
@@ -129,7 +143,7 @@ impl<'a> Doc<'a> {
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
   <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><gazdEsemAzon>924307338</gazdEsemAzon><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
+  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><gazdEsemAzon>924307338</gazdEsemAzon><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{telj}{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
@@ -140,6 +154,7 @@ impl<'a> Doc<'a> {
             tipus = self.tipus,
             hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
             hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
+            telj = opt("telj", telj.as_deref()),
             rendelesszam = opt("rendelesszam", self.order),
             test = self.test,
             sztornozott = if self.reversed {
@@ -1473,6 +1488,8 @@ async fn verify_query_and_hint() {
         Ok(QueryOutcome::Found(found)) => {
             assert_eq!(found.number(), "SZ-1");
             assert_eq!(found.payment_amounts(), vec![dec!(500), dec!(770)]);
+            // The `telj` the storno handlers repeat (ADR 0007).
+            assert_eq!(found.info.fulfillment_date, Some(ORIGINAL_TELJ));
         }
         other => panic!("expected Found, got {other:?}"),
     }
@@ -1533,6 +1550,31 @@ async fn verify_query_and_hint() {
         h.gateway.hint(&order()).await,
         Err(Unanswered::Transport(_))
     ));
+}
+
+#[tokio::test]
+async fn verify_of_a_document_without_telj_has_no_fulfillment_date() {
+    // szamlazz.hu's schema has `telj` mandatory; a document without the
+    // element still parses — the gateway reports the fact, and the storno
+    // handlers refuse to send on it (ADR 0007).
+    let h = Harness::start().await;
+    number_query("SZ-1")
+        .respond_with(
+            Doc {
+                fulfillment_date: None,
+                ..Doc::new("SZ-1", "SZ")
+            }
+            .response(),
+        )
+        .mount(&h.server)
+        .await;
+    match h.gateway.verify("SZ-1").await {
+        Ok(QueryOutcome::Found(found)) => {
+            assert_eq!(found.number(), "SZ-1");
+            assert_eq!(found.info.fulfillment_date, None);
+        }
+        other => panic!("expected Found, got {other:?}"),
+    }
 }
 
 // ----- credentials -------------------------------------------------------------
@@ -1684,12 +1726,15 @@ async fn probe_without_an_answer_is_unanswered() {
 
 // ----- storno ----------------------------------------------------------------
 
+/// The storno step request of `SZ-1`, repeating the original's `telj`
+/// ([`ORIGINAL_TELJ`]) as its `fulfillment_date` (ADR 0007).
 fn storno_request(external_id: &ExternalId) -> StornoStepRequest<'_> {
     StornoStepRequest {
         invoice_number: "SZ-1",
         external_id,
         comment: Some("wrong buyer"),
         e_invoice: true,
+        fulfillment_date: ORIGINAL_TELJ,
     }
 }
 
@@ -1824,6 +1869,10 @@ async fn storno_reversed_is_validated() {
     assert!(body.contains("<szamlaKulsoAzon>acct:ORD-1:storno:SZ-1</szamlaKulsoAzon>"));
     assert!(body.contains("<megjegyzes>wrong buyer</megjegyzes>"));
     assert!(body.contains("<eszamla>true</eszamla>"));
+    assert!(
+        body.contains(&original_telj_tag()),
+        "the storno repeats the original's fulfillment date (ADR 0007): {body}"
+    );
     assert!(!body.contains("<keltDatum>"), "352 otherwise");
 }
 
@@ -2004,6 +2053,16 @@ async fn storno_with_a_lost_reply_re_queries_once_and_is_unconfirmed_when_nothin
         h.gateway.storno(storno_request(&storno_id)).await,
         Err(Unconfirmed::Transport(_))
     ));
+
+    // Both executions built the storno from the same step request, so the
+    // two sends are byte-identical — the date included (ADR 0007).
+    let bodies = h.bodies().await;
+    assert_eq!(bodies.len(), 6, "query, storno, re-query; twice");
+    assert_eq!(
+        bodies[1], bodies[4],
+        "the re-executed storno is byte-identical"
+    );
+    assert!(bodies[1].contains(&original_telj_tag()));
 }
 
 #[tokio::test]
