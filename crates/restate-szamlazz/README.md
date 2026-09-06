@@ -64,7 +64,9 @@ What `Szamlazz.Order` guarantees:
 - **Correctives** are issued under a caller-supplied `correction_id`; the same id finds the corrective it
   issued, a new id issues a new one.
 - **Storno** (`storno_invoice`) and **proforma deletion** are idempotent; a document reversed by anyone — the
-  UI, support, this service — is reported as `reversed` from `<sztornozott>`.
+  UI, support, this service — is reported as `reversed` from `<sztornozott>`. The storno carries the original's
+  fulfillment date (`teljesitesDatum` = the verified document's `telj`), which NAV requires it to repeat; the
+  caller cannot set it ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)).
 - **Domain outcomes are data** (HTTP 200) and errors are reserved for faults, so a caller can always tell "the
   document exists" from "the outcome is unknown".
 - **`get`** is a live view: what szamlazz.hu holds under the order's four external ids right now, never a
@@ -321,7 +323,7 @@ plain-text `Cannot decode input payload`:
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and `query_taxpayer` finds no document (a taxpayer record carries no pins): the two handlers that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued — or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` — **at-least-once**: every send that reached szamlazz.hu appended the entries — query the invoice before re-sending; a replacing call is repeated as is. |
-| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from, or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so it is not sent ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)) — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
 
 A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
@@ -367,7 +369,10 @@ the handler fails with `TerminalError{outcome_unknown}` naming the order, kind a
 invocation's lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number
 answer their re-query cannot resolve is `rejected`. Storno has the same shape: a read-only lookup of the storno
 external id (`lookup-storno-{number}`) and a storno step (`storno-{number}`) under the same issue policy, query-first
-on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
+on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`. The storno request is a
+pure function of the verified original — its `telj` as `teljesitesDatum`, its `eszamla` (or the account default) as
+the e-invoice flag — so every execution of the step sends byte-identical bytes; a verified original without a `telj`
+is `unavailable` with nothing sent, raised after the answers that need no send.
 
 ## Testing
 
@@ -376,7 +381,9 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   schemars`, every request schema closed with `additionalProperties: false` and the response schemas open), the
   discovery and binding tests of the adapters (with `Body<T>` turning a malformed body — an unknown field, a wrong
   type, a missing field, invalid JSON — into the 400 `invalid_input` fault while discovering exactly as `Json<T>`,
-  the account pins of a document found by number, the `Order` handlers' key parsing refusing an untrimmed key as
+  the account pins of a document found by number, the storno intent built from a verified document — its `telj` as
+  the fulfillment date, `eszamla` lifted with the account default as fallback, an empty `telj` as the 503
+  `unavailable` fault naming the invoice — the `Order` handlers' key parsing refusing an untrimmed key as
   `invalid_input` while `OrderKey::parse` still trims, and the sentinels that the agent key reaches neither the
   `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch` fault), and the
   wiremock tests of the gateway against synthetic szamlazz.hu responses
@@ -384,7 +391,9 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   exemption from the hint, `Unanswered` on a lost reply and `Api` on another code — and the create step — `Issued`,
   `Found` on a re-executed step, the open codes and `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 →
   `Rejected` — the storno lookup and step — `AlreadyReversed` on a re-executed step, a lost reply re-queried once,
-  `Unconfirmed` when nothing landed — plus storno validation including the proforma / delivery-note no-op, 335, 7,
+  `Unconfirmed` when nothing landed, the body carrying `<teljesitesDatum>` and no `<keltDatum>`, two executions
+  after a lost reply sending byte-identical bodies — plus storno validation including the proforma / delivery-note
+  no-op, a verified document's `telj` (and its absence) surfaced, 335, 7,
   the credential codes 3/135/136/164 on every operation, every read fn answering a 500, an empty body or
   `szlahu_down` as `Err(Unanswered)` rather than data, the `check_account` probe as exactly one query of the
   sentinel id with a wrong key as data, and the taxpayer query answering a known prefix as `Found` with NAV's
@@ -404,7 +413,12 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
   for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued, `Idempotency-Key`
-  replay, 152 → reconciled, storno → reversed → stale create → `reissue`, `reissue` on live → `conflict{live}`, an
+  replay, 152 → reconciled, storno → reversed (the storno mock matched on `<teljesitesDatum>` equal to the original's
+  `telj`, no `<keltDatum>`) → stale create → `reissue`, a `telj`-less original answered 503 `unavailable` naming the
+  order, kind and storno external id with only the verify journaled and the storno mock `expect(0)` — after a
+  `telj`-less document of another order → `conflict{not_managed}`, a `telj`-less proforma → `rejected{not_stornoable}`
+  and a `telj`-less reversed invoice → `reversed` with its storno number — a storno whose first reply is lost
+  re-executed with a byte-identical body under one `storno-{number}` entry, `reissue` on live → `conflict{live}`, an
   external reversal, proforma auto-link and `consumed` in `get`, `options.proforma: {number}` checked like every
   found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
   the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
@@ -430,7 +444,10 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   `teszt` or `szallito/id` is not the resolved account's as `account_mismatch` after the verify alone (storno mock
   `expect(0)`), not checking the supplier id when the account pins none, reversing a document of the account's own
   pins, and checking an order-bearing document's pins before answering it — mismatched pins `account_mismatch`
-  without echoing the other account's order number, the account's own pins `managed_by_order`; `Szamlazz.Agent.query`
+  without echoing the other account's order number, the account's own pins `managed_by_order`; `Szamlazz.Agent.storno`
+  sending `<teljesitesDatum>` equal to the original's `telj` and answering a `telj`-less original 503 `unavailable`
+  without an order identity, only the verify journaled and nothing sent — after `account_mismatch`,
+  `managed_by_order` and `reversed` on `telj`-less documents; `Szamlazz.Agent.query`
   answering a mismatched document `account_mismatch`, a matching one as the projection and code 7 as `not_found`;
   `Szamlazz.Agent.query_taxpayer` under each scope asking NAV with that scope's key and nothing else on the wire, the
   full tax number under one scope and the bare stem under the other both journaling one `taxpayer-12345678` step,

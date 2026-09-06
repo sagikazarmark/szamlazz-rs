@@ -253,6 +253,13 @@ pub struct Waybill {
 #[non_exhaustive]
 pub struct InvoiceHeader {
     /// Issue date (`keltDatum`). `None` lets szamlazz.hu use today.
+    ///
+    /// A request, not a guarantee: on the test account a create sent with
+    /// yesterday's date was answered `sikeres=true` with the issued invoice's
+    /// `<kelt>` set to **today** — the value is silently replaced, not
+    /// rejected (a storno with a non-today `keltDatum` *is* rejected, with
+    /// 352). Read the date back from the created document rather than
+    /// assuming the one sent.
     #[doc(alias = "keltDatum")]
     pub issue_date: Option<Date>,
     /// Fulfillment date (`teljesitesDatum`).

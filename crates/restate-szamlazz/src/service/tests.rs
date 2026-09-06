@@ -38,13 +38,21 @@ fn namespace() -> Namespace {
 /// The supplier id of the documents [`found`] builds.
 pub(super) const SUPPLIER: u64 = 972_720;
 
+/// The `telj` of the documents [`found`] builds: the fulfillment date a
+/// storno of them must repeat (ADR 0007). Override `telj` with `""` for a
+/// document szamlazz.hu returned without one.
+pub(super) const ORIGINAL_TELJ: jiff::civil::Date = jiff::civil::date(2026, 7, 15);
+
 /// szamlazz.hu's `<szamla>` XML of a live `SZ-1` of `ORD-1` from a test
 /// account with `supplier_id`, with the given `alap` elements overridden.
 fn szamla_xml(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> String {
+    let telj = ORIGINAL_TELJ.to_string();
     let mut alap = vec![
         ("szamlaszam", "SZ-1"),
         ("tipus", "SZ"),
         ("eszamla", "2"),
+        ("kelt", "2026-09-03"),
+        ("telj", telj.as_str()),
         ("rendelesszam", "ORD-1"),
         ("teszt", "true"),
     ];
@@ -449,6 +457,7 @@ fn faults_serialise_their_code_and_status() {
         (Fault::invalid_input("x"), 400, "invalid_input"),
         (Fault::account_mismatch("x"), 409, "account_mismatch"),
         (Fault::unavailable("x"), 503, "unavailable"),
+        (Fault::missing_fulfillment_date("SZ-1"), 503, "unavailable"),
         (
             Fault::credentials_rejected(&namespace(), "3", "x"),
             503,
@@ -890,4 +899,97 @@ fn a_found_document_must_belong_to_the_resolved_account() {
     let mut unpinned = account.clone();
     unpinned.supplier_id = None;
     check_pins(&unpinned, &found(1, &[])).expect("unpinned");
+}
+
+/// The storno intent both storno handlers build from the verified original
+/// (design §6 step 3, ADR 0007): the storno repeats the original's `telj`,
+/// lifts `eszamla` from the document with the account default as fallback,
+/// and an original szamlazz.hu returned without a `telj` — its schema has
+/// the element mandatory — is the `unavailable` fault naming the invoice,
+/// never a send without the date or with a default.
+#[test]
+fn the_storno_intent_repeats_the_originals_fulfillment_date() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::StornoIntent;
+    use crate::account::Account;
+    use crate::config::AccountMode;
+    use crate::contract::IssuedKind;
+    use crate::identity::{ExternalId, OrderKey};
+
+    let mut account = Account::new("acct", "acct");
+    account.mode = AccountMode::Test;
+    account.supplier_id = Some(SUPPLIER);
+    account.defaults.e_invoice = false;
+    let storno_id = || ExternalId::new("acct:ORD-1:storno:SZ-1");
+
+    // `telj` present: the intent carries it; `eszamla = 2` is an e-invoice.
+    let intent = StornoIntent::from_verified(
+        &found(SUPPLIER, &[]),
+        &account,
+        "SZ-1".to_owned(),
+        storno_id(),
+        Some("wrong buyer".to_owned()),
+    )
+    .expect("an intent");
+    assert_eq!(intent.fulfillment_date, ORIGINAL_TELJ);
+    assert_eq!(intent.number, "SZ-1");
+    assert_eq!(intent.storno_id, storno_id());
+    assert_eq!(intent.comment.as_deref(), Some("wrong buyer"));
+    assert!(intent.e_invoice, "lifted from the document");
+
+    // `eszamla = 1` is paper; an appearance the crate does not know (`0`,
+    // what a proforma carries) falls back to the account default.
+    let paper = StornoIntent::from_verified(
+        &found(SUPPLIER, &[("eszamla", "1")]),
+        &account,
+        "SZ-1".to_owned(),
+        storno_id(),
+        None,
+    )
+    .expect("an intent");
+    assert!(!paper.e_invoice);
+    account.defaults.e_invoice = true;
+    let unknown = StornoIntent::from_verified(
+        &found(SUPPLIER, &[("eszamla", "0")]),
+        &account,
+        "SZ-1".to_owned(),
+        storno_id(),
+        None,
+    )
+    .expect("an intent");
+    assert!(unknown.e_invoice, "the account default");
+
+    // `telj` empty (parsed as absent): the fault, 503 `unavailable`, naming
+    // the invoice; `.about(..)` attaches the storno identity as every fault.
+    let fault = StornoIntent::from_verified(
+        &found(SUPPLIER, &[("telj", "")]),
+        &account,
+        "SZ-1".to_owned(),
+        storno_id(),
+        None,
+    )
+    .expect_err("a fault");
+    let error = TerminalError::from(fault.clone());
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("SZ-1"), "{message}");
+    assert!(message.contains("fulfillment date"), "{message}");
+    assert!(message.contains("nothing was sent"), "{message}");
+    assert!(message.contains("Idempotency-Key"), "{message}");
+    assert_eq!(body.get("order"), None);
+
+    let order = OrderKey::parse("ORD-1").expect("order");
+    let about = TerminalError::from(fault.about(
+        &order,
+        Some(IssuedKind::Invoice),
+        "acct:ORD-1:storno:SZ-1",
+    ));
+    let body: serde_json::Value = serde_json::from_str(about.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(body["order"], "ORD-1");
+    assert_eq!(body["kind"], "invoice");
+    assert_eq!(body["external_id"], "acct:ORD-1:storno:SZ-1");
 }

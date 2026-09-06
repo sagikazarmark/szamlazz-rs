@@ -65,7 +65,7 @@ use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
-use szamlazz_agent::{ApiError, Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
+use szamlazz_agent::{ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber};
 use tracing::Instrument as _;
 
 use crate::account::Account;
@@ -601,6 +601,11 @@ pub struct StornoStepRequest<'a> {
     pub comment: Option<&'a str>,
     /// Issue the storno as an e-invoice.
     pub e_invoice: bool,
+    /// The storno's `teljesitesDatum`: the verified original's `telj`, which
+    /// NAV requires the storno to repeat (ADR 0007). A pure function of the
+    /// journaled verify result, so every execution of the step sends the
+    /// same date.
+    pub fulfillment_date: Date,
 }
 
 /// The settled result of the storno step: szamlazz.hu's answer is known.
@@ -1303,8 +1308,10 @@ impl Gateway {
     ///    [`StornoOutcome::CredentialsRejected`]; a failed query is
     ///    [`Unconfirmed::Transport`] — never send when the check itself
     ///    failed.
-    /// 2. Send `xmlszamlast` with the external id, comment and e-invoice flag
-    ///    and **no issue date** (352 otherwise): a response validated with
+    /// 2. Send `xmlszamlast` with the external id, comment, e-invoice flag and
+    ///    `teljesitesDatum` — the verified original's `telj`, which NAV
+    ///    requires the storno to repeat (ADR 0007) — and **no issue date**
+    ///    (352 otherwise): a response validated with
     ///    [`CreatedInvoice::reverses`] is [`StornoOutcome::Reversed`], an
     ///    echo of the requested number [`StornoOutcome::NotStornoable`], a
     ///    refusal [`StornoOutcome::Rejected`], rejected credentials
@@ -1348,6 +1355,7 @@ impl Gateway {
             .clone_from(&self.account.defaults.aggregator);
         storno.guardian = self.account.defaults.guardian;
         storno.issue_date = None;
+        storno.fulfillment_date = Some(request.fulfillment_date);
 
         match self.client.send(&storno).await {
             Ok(created) if created.reverses(&storno.invoice_number) => {

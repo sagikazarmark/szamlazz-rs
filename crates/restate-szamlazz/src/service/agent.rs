@@ -25,8 +25,7 @@ use crate::contract::{
     StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    InvoiceDocumentExt as _, ProbeOutcome, QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome,
-    TaxpayerOutcome,
+    ProbeOutcome, QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, TaxpayerOutcome,
 };
 use crate::identity::ExternalId;
 
@@ -285,15 +284,16 @@ impl Execution {
         if found.info.reversed == Some(true) {
             return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
         }
-        let e_invoice = found
-            .e_invoice()
-            .unwrap_or(self.gateway.account().defaults.e_invoice);
-        let intent = StornoIntent {
-            number: number.clone(),
-            storno_id: ExternalId::for_unmanaged_storno(&self.config.namespace, &number),
+        // The intent is a pure function of the verified document: a `telj`
+        // it does not carry is a fault after every answer that needs no send
+        // (ADR 0007). No document type pre-check here — the echo tells.
+        let intent = StornoIntent::from_verified(
+            &found,
+            self.gateway.account(),
+            number.clone(),
+            ExternalId::for_unmanaged_storno(&self.config.namespace, &number),
             comment,
-            e_invoice,
-        };
+        )?;
 
         // The lookup step: a storno of ours already under the id.
         match lookup_storno(ctx, self, &intent).await? {

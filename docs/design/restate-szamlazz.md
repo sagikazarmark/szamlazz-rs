@@ -94,7 +94,7 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
 | `create_prepayment` | exclusive | `CreateRequest` → `CreateResponse` (v1: one prepayment per order) |
 | `create_final` | exclusive | `CreateRequest` → `CreateResponse` (requires a live prepayment; passes `elolegSzamlaszam`) |
 | `correct_invoice` | exclusive | `CorrectRequest { invoice_number, correction_id, document }` → `CreateResponse` |
-| `storno_invoice` | exclusive | `StornoRequest { invoice_number, comment? }` → `StornoResponse` |
+| `storno_invoice` | exclusive | `StornoRequest { invoice_number, comment? }` → `StornoResponse`; the storno repeats the verified original's `telj` as `teljesitesDatum` (ADR 0007) — never a caller's date |
 | `delete_proforma` | exclusive | `DeleteProformaRequest { force }` → `DeleteProformaResponse` |
 | `get` | shared | `()` → `OrderStatus` (live view) |
 
@@ -165,7 +165,7 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 | `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling the document as found (the same `QueryOutcome` a verify writes); a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; another code → 422 pass-through; 3/135/136/164 → `credentials_rejected`; a query szamlazz.hu never answered through the read policy → `unavailable`; `journal_retention = "1d"` |
 | `query_taxpayer` | `QueryTaxpayerRequest { tax_number }` → `QueryTaxpayerResponse { valid, name?, tax_number?, vat_code?, addresses[] }` | the NAV taxpayer lookup (`xmltaxpayer`) on the account the scope resolves to, so an embedder needs no second credential path for this one read. `tax_number` is the bare eight-digit stem (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`), nothing else — no whitespace, no other separator; the handler derives the prefix, and a number in neither form is `TerminalError{invalid_input}` naming the input and the accepted forms, refused **before the prologue** like a malformed body (nothing journaled, nothing sent). Then the prologue as every handler and one step, `taxpayer-{prefix}` — the prefix, not the number as sent, so the stem and the full number name the same entry — under the read policy (§9), journaling the crate-owned projection (`TaxpayerOutcome::Found(QueryTaxpayerResponse)`), never the agent crate's `TaxpayerInfo`. **Every answer is data**: `valid: false` (NAV knows no taxpayer under the prefix) is a normal 200; 3/135/136/164 → `credentials_rejected`; any other `funcCode ≠ OK` — szamlazz.hu's own code or NAV's relayed `errorCode` — is an *answer*, passed through as 422 like `query`'s and never retried, so a NAV outage surfaces as a terminal 422 the caller may retry with a new `Idempotency-Key`; an exchange that produced no answer is the read's `Unanswered`, re-executed, `unavailable` on exhaustion. **No account check** — with `set_payments` one of the two handlers exempt from it: it finds no document, and a taxpayer record is NAV's, not the account's, so it carries no pins. No caching in the worker (ADR 0005: nothing to store that szamlazz.hu does not answer); the caller caches, with a TTL on the order of a day. `max_attempts = 3, kill`; `journal_retention = "1d"` |
 | `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately without an account check** (with `query_taxpayer`, one of the two handlers exempt from it): a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; run `max_attempts(1)` — a write with no retry of its own, so a lost reply is `outcome_unknown`; 3/135/136/164 → `credentials_rejected`. **`additive: true` is at-least-once**: every send that reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request, so the `outcome_unknown` message is conditional on `additive` — "query the invoice before re-sending" rather than "call set_payments again" — and the handler's retry policy is explicit, `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default) so that it cannot re-send while the first send is still in flight. `inactivity_timeout = 2m, abort_timeout = 2m` (one send) |
-| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-{number}`, under the read policy); then, **before anything else is said about the document**, `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled — the document is in hand, and another account's order number must not be echoed, nor the "fails loudly on its first found document" guarantee delayed by a call; then document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document); else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the lookup under the read policy, exhaustion → `unavailable`; the storno step under the issue policy, exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected`. `max_attempts = 2, kill`; `inactivity_timeout = 4m, abort_timeout = 3m` — the storno step is the same closure `Szamlazz.Order` runs (query, send, re-query at 60 s each; ADR 0004), and anything shorter suspends a slow storno mid-step |
+| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-{number}`, under the read policy); then, **before anything else is said about the document**, `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled — the document is in hand, and another account's order number must not be echoed, nor the "fails loudly on its first found document" guarantee delayed by a call; then document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document); `sztornozott` → `outcome: reversed` (no storno number: this handler takes no hint); then a document without a `telj` → `TerminalError{unavailable}` naming the invoice, without `order` / `kind` / `external_id` like this handler's other faults (ADR 0007 — the storno must repeat that date, so nothing is sent; no document-type pre-check here, the echo tells); else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` with `teljesitesDatum` = the original's `telj` (the lookup under the read policy, exhaustion → `unavailable`; the storno step under the issue policy, exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected`. `max_attempts = 2, kill`; `inactivity_timeout = 4m, abort_timeout = 3m` — the storno step is the same closure `Szamlazz.Order` runs (query, send, re-query at 60 s each; ADR 0004), and anything shorter suspends a slow storno mid-step |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
@@ -301,7 +301,12 @@ answers when one account names another's invoice number is unverified — behavi
    Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno number via the hint when the newest document
    is the matching `SS` — best effort: a hint the read policy could not get answered reports the reversal without the
    number rather than failing a handler whose answer is already known); `tipus ∉ {SZ, ES, VS, HS}` →
-   `rejected{not_stornoable}`.
+   `rejected{not_stornoable}`. **Then, last**, a document without a `telj` → `TerminalError{unavailable,
+   json{order, kind, external_id}}` naming the invoice (ADR 0007): the storno must repeat that date and no default
+   can be right — szamlazz.hu's query schema has `telj` mandatory, so an absent one is szamlazz.hu breaking its
+   schema, the same class as an `Api` answer a read cannot conclude from — and nothing is sent. It comes after every
+   answer above so that a `telj`-less document that is already reversed, not managed or not stornoable still gets
+   that answer.
 2. **Lookup** — one read-only durable step under the read policy, `ctx.run("lookup-storno-{number}", ||
    gateway.lookup_storno(external_id, number))` with `external_id = "{namespace}:{order}:storno:{number}"`: query by the
    storno ext id → `SS` with `hivszamlaszam == number` → `AlreadyReversed{storno_number}` → `outcome:
@@ -310,13 +315,20 @@ answers when one account names another's invoice number is unverified — behavi
    `TerminalError{unavailable}`; no answer → `Err(Unanswered)`, retried by the read policy, exhaustion →
    `TerminalError{unavailable, json{order, kind, external_id}}`.
 3. **Storno** — one durable step under the issue policy (§9), `ctx.run("storno-{number}", || gateway.storno(StornoStepRequest{
-   number, external_id, comment, e_invoice }))`. **Every execution is query-first, inside the closure** (the rule of §5
+   number, external_id, comment, e_invoice, fulfillment_date }))`, built from the *storno intent* — `{ number,
+   storno_id, comment?, e_invoice, fulfillment_date }`, one pure function of the verified document and the resolved
+   account (`StornoIntent::from_verified`) that both storno handlers share; the step rebuilds the request from it
+   on every execution, so every send is byte-identical, and nothing beyond the verify's result is journaled.
+   **Every execution is query-first, inside the closure** (the rule of §5
    step 4): the gateway returns `Ok(StornoOutcome)` for every known answer and `Err(Unconfirmed)` — retryable to the
    SDK — only when szamlazz.hu's answer is not known; the closure never returns a `TerminalError` itself.
    (a) leading query by the storno ext id → the matching `SS` → `AlreadyReversed{storno_number}` (an earlier
    execution sent it; **nothing is sent**); 3/135/136/164 → `Ok(CredentialsRejected)`; transport → `Err(Transport)`
    (never send when the check itself failed);
-   (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon}` **without `keltDatum`** (352 otherwise — verified);
+   (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon, teljesitesDatum}` — `teljesitesDatum` = the verified
+   original's `telj`, which NAV requires the storno to repeat (ADR 0007; szamlazz.hu defaults to it when the element
+   is omitted and accepts any date silently when it is not — verified — so the explicit date is what fails loudly)
+   — **without `keltDatum`** (352 otherwise — verified);
    (c) validate: `invoice_number ≠ requested ∧ gross ≤ 0` → `Reversed` (`CreatedInvoice::reverses`; `≤`, not `<`:
    the storno of a 0-HUF invoice — a free ticket — lands as a new number with a gross of `0`, and `< 0` reported it
    `not_stornoable` although the storno document had landed); echo of the requested number →
@@ -331,12 +343,19 @@ answers when one account names another's invoice number is unverified — behavi
    `rejected{not_stornoable}`; `Rejected` → `outcome: rejected{code, message}`; `CredentialsRejected` →
    `TerminalError{credentials_rejected}` (that execution issued nothing).
 
-`e_invoice` for the storno: the verified document's `eszamla` when known, else the account default.
+`e_invoice` for the storno: the verified document's `eszamla` when known, else the account default — an open code set
+for which the account's own default is a legitimate choice. `fulfillment_date` has no such fallback: it is a fiscal
+fact of the document (ADR 0007). No post-storno read verifies the `SS`'s `telj` (the storno document is immutable and
+cannot be stornoed, so a mismatch found afterwards is un-actionable); the go-live checklist verifies it once per
+account.
 
 `Szamlazz.Agent.storno` runs the same lookup and storno steps under `"{namespace}:by-number:{number}:storno"` after its
 own verify (§4), which applies the same account-pin check as step 1 to every document it finds — before it answers an
 order-bearing one as `managed_by_order`, since the document is in hand and another account's order number must not be
-echoed.
+echoed — and builds the same storno intent from what it found, so its storno carries the original's `telj` too and a
+`telj`-less original is the same `unavailable`, without an order identity. It checks no document type before sending
+(it relies on the echo), so a `telj`-less proforma or delivery note reaching it would be `unavailable` rather than
+`rejected{not_stornoable}` — accepted, twice theoretical (ADR 0007).
 
 `delete_proforma({force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
@@ -413,7 +432,10 @@ prologue's `account` step before anything is issued; the same request never succ
 fixes the scope rather than retrying. `unavailable` is the answer to an *exhausted read policy* (§9) — szamlazz.hu did
 not answer a read through every execution the policy allows, or the invocation was cancelled mid-read — naming the
 step and the last failure, about the document when the step knows one; a szamlazz.hu code a read cannot conclude
-from (`Api`) is the same fault without a retry. It also covers the prologue's own faults: the resolve policy
+from (`Api`) is the same fault without a retry, and so is a verified storno original **without a `telj`** (§6 step 1,
+ADR 0007: szamlazz.hu breaking its own schema on a date the storno must repeat — nothing is sent; the message names
+the invoice, and `Szamlazz.Order.storno_invoice` attaches the order, kind and storno external id). It also covers the
+prologue's own faults: the resolve policy
 exhausted, the credential store gone or unavailable through the in-process retry. Like every fault it means
 "outcome unknown": a read that fails may sit before a create that an earlier execution already landed.
 
@@ -607,7 +629,10 @@ functions they are extracted into.
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
   (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
   landed, the 71/152 matrix incl. `existing_number` and the contradiction settled after one send, the corrective's
-  71/152 → `Rejected`), storno validation incl. the D/SL no-op, the zero-gross storno as `Reversed`, 335, 7, and the
+  71/152 → `Rejected`), storno validation incl. the D/SL no-op, the zero-gross storno as `Reversed`, the storno body
+  carrying `<teljesitesDatum>` equal to the step request's date and no `<keltDatum>`, the two sends of a
+  re-executed storno step byte-identical (`assert_eq!` on the bodies), a verified document's `telj` surfaced as
+  `fulfillment_date` and a document without the element as `None`, 335, 7, and the
   credential codes 3/135/136/164 as `CredentialsRejected` on
   every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query,
   taxpayer query, probe); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
@@ -643,7 +668,10 @@ functions they are extracted into.
   manifest too — `prepare` refusing
   `options.proforma` on every kind but `create_invoice`, the issue and read policies' field-for-field mapping onto
   `RunRetryPolicy` and `WorkerConfig::validate` on all three tables, the fault → status mapping incl. the exhausted
-  read → `unavailable{step, last failure}` about the document, the `set_payments` fault's message differing by
+  read → `unavailable{step, last failure}` about the document and the missing-`telj` fault as a 503 `unavailable`,
+  the storno intent built from a verified document (`telj` present → `fulfillment_date` equals it with `e_invoice`
+  lifted from `eszamla` or the account default; `<telj></telj>` → the fault naming the invoice, `.about(..)` adding
+  the order, kind and external id), the `set_payments` fault's message differing by
   `additive`, `Lookup::classify` on `Api`, the probe outcome →
   `credentials` mapping, the account pins of a
   document found by number (`teszt` and supplier mismatch → `account_mismatch` naming the observed and expected pins,
@@ -668,7 +696,13 @@ functions they are extracted into.
 - End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
-  152 → reconciled; storno → reversed; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
+  152 → reconciled; storno → reversed with the storno mock matched on `<teljesitesDatum>` equal to the fixture's
+  `telj` and no `<keltDatum>` on the wire; a `telj`-less original → 503 `unavailable` naming the invoice with
+  `order`, `kind` and the storno external id, only `namespace`, `account` and `verify-storno-{number}` journaled and
+  the storno mock `expect(0)` — after a `telj`-less document of another order → `conflict{not_managed}`, a
+  `telj`-less proforma → `rejected{not_stornoable}` and a `telj`-less reversed invoice → `reversed` with its storno
+  number from the hint, nothing sent in any case; a storno whose first reply is lost re-executed under the issue
+  policy with two byte-identical bodies and one `storno-{number}` entry; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
   live → `conflict{live}`; `sztornozott` → reversed; a document reversed in the UI between two executions of the
   create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; a
   create whose reply is lost and whose immediate re-query finds the document → `issued` within the one execution,
@@ -728,7 +762,12 @@ functions they are extracted into.
   `beta`-supplier document once `acme` pins no supplier id → `reversed` with `acme`'s key on the storno; a document
   of `acme`'s pins → `reversed` through verify, lookup and storno; an order-bearing document of foreign pins →
   409 `account_mismatch` whose body does not echo the other account's order number, and an order-bearing document
-  of `acme`'s pins → `managed_by_order{key}`, nothing sent either way; `Szamlazz.Agent.query` under `acme` → 409 `account_mismatch` on a
+  of `acme`'s pins → `managed_by_order{key}`, nothing sent either way; `Szamlazz.Agent.storno` under `acme` on a
+  document of its pins → `reversed` with `<teljesitesDatum>` equal to the fixture's `telj` and `acme`'s key on the
+  storno and no `<keltDatum>`, on a `telj`-less document → 503 `unavailable` naming the invoice without `order`,
+  `kind` or `external_id`, only the verify journaled and the storno mock `expect(0)` — after a `telj`-less document
+  of foreign pins → `account_mismatch`, an order-bearing one → `managed_by_order` and a reversed one → `reversed`;
+  `Szamlazz.Agent.query` under `acme` → 409 `account_mismatch` on a
   `teszt = false` document, the projection (`test`, `supplier_id`, totals) on a matching one, 404 `not_found` on 7;
   `acme`'s seller bank account changed between
   two executions of a create step (the first loses its reply) → both executions carry the journaled bank account

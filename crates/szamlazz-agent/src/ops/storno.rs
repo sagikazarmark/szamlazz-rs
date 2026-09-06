@@ -93,6 +93,17 @@ pub struct StornoInvoice {
     #[doc(alias = "keltDatum")]
     pub issue_date: Option<Date>,
     /// Fulfillment date of the storno invoice (`teljesitesDatum`).
+    ///
+    /// NAV requires a storno to carry the same fulfillment date as the
+    /// invoice it reverses (no exception — the same-month latitude is for
+    /// correctives). Observed: with the element omitted, szamlazz.hu sets the
+    /// storno's `telj` to the original's; an explicit date equal to the
+    /// original's is accepted silently — and so is one in another month or
+    /// in the future, without any error or warning (the szamlazz.hu UI
+    /// warns; the Agent API does not). Set it to the original's `telj`, read
+    /// from a query of the original: the explicit value is what fails loudly
+    /// if the server default ever changes, while a wrong one is never caught
+    /// here.
     #[doc(alias = "teljesítés dátum")]
     pub fulfillment_date: Option<Date>,
     /// Free-text comment (`megjegyzes`), e.g. the reason for the reversal.

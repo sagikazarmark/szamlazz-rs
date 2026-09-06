@@ -6,6 +6,7 @@
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use szamlazz_agent::Date;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Resolution;
@@ -87,6 +88,18 @@ impl Fault {
             "szamlazz.hu answered the query with code {}: {}; nothing may be concluded — retry with a new Idempotency-Key or read get",
             code.into(),
             message.into()
+        ))
+    }
+
+    /// The verified original of a storno carries no `telj` (ADR 0007).
+    /// szamlazz.hu's query schema has the element mandatory — the legal "no
+    /// separate date" case is an equal `telj`, never an absent one — so this
+    /// is szamlazz.hu breaking its own schema: the same class as an
+    /// inconclusive answer, and answered the same way. The storno must repeat
+    /// that date and no default can be right, so nothing is sent.
+    pub(super) fn missing_fulfillment_date(number: &str) -> Self {
+        Self::unavailable(format!(
+            "szamlazz.hu returned invoice {number} without a fulfillment date (telj), which the storno must repeat; nothing was sent — retry with a new Idempotency-Key, or query the invoice"
         ))
     }
 
@@ -255,7 +268,46 @@ pub(super) struct StornoIntent {
     /// `{namespace}:by-number:{number}:storno`.
     pub(super) storno_id: ExternalId,
     pub(super) comment: Option<String>,
+    /// The verified document's `eszamla` when known, else the account
+    /// default — an open code set for which the account's own default is a
+    /// legitimate choice.
     pub(super) e_invoice: bool,
+    /// The verified document's `telj`, which the storno repeats as its
+    /// `teljesitesDatum` (ADR 0007): a fiscal fact of the document for which
+    /// no default can be right, so it is never defaulted.
+    pub(super) fulfillment_date: Date,
+}
+
+impl StornoIntent {
+    /// The intent for reversing the verified `found` — `number`, as the
+    /// caller named it — under `storno_id`: `e_invoice` lifted from the
+    /// document with `account`'s default as fallback, `fulfillment_date` the
+    /// document's own `telj`. A pure function of the journaled verify result,
+    /// so every execution rebuilds the same request.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault::missing_fulfillment_date`] when the document carries no
+    /// `telj`; the callers raise it after every answer that needs no send.
+    pub(super) fn from_verified(
+        found: &InvoiceDocument,
+        account: &Account,
+        number: String,
+        storno_id: ExternalId,
+        comment: Option<String>,
+    ) -> Result<Self, Fault> {
+        let fulfillment_date = found
+            .info
+            .fulfillment_date
+            .ok_or_else(|| Fault::missing_fulfillment_date(&number))?;
+        Ok(Self {
+            e_invoice: found.e_invoice().unwrap_or(account.defaults.e_invoice),
+            number,
+            storno_id,
+            comment,
+            fulfillment_date,
+        })
+    }
 }
 
 /// The settled storno step as the handlers' `StornoResponse`: reversed (now
@@ -607,6 +659,8 @@ macro_rules! journal_helpers {
             /// issue policy's run retry policy, query-first on every execution
             /// (the query is inside the closure: a separate journaled query
             /// would replay its stale "nothing" on the retry and re-send).
+            /// The request is rebuilt from the intent on every execution —
+            /// the date included — so every send is byte-identical.
             ///
             /// # Errors
             ///
@@ -624,6 +678,7 @@ macro_rules! journal_helpers {
                 let external_id = intent.storno_id.clone();
                 let comment = intent.comment.clone();
                 let e_invoice = intent.e_invoice;
+                let fulfillment_date = intent.fulfillment_date;
                 run_retrying(
                     ctx,
                     format!("storno-{}", intent.number),
@@ -635,6 +690,7 @@ macro_rules! journal_helpers {
                                 external_id: &external_id,
                                 comment: comment.as_deref(),
                                 e_invoice,
+                                fulfillment_date,
                             })
                             .await
                     },
