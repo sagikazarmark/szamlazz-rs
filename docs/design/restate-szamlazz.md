@@ -178,7 +178,9 @@ write step and runs under the same policy. Every step runs on the account the pr
 gateway opened for this execution.
 
 0. **Validate (pure).** Order key from `ctx.key()`. Validate buyer, items (≥ 1), dates. Normalise `buyer.name`.
-   Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
+   Compute line totals with `LineItem::try_calculated` rounded to the currency's minor unit
+   (`Rounding::minor_unit`: whole forints for HUF, cents for EUR); a value that overflows is `invalid_input`. Build
+   `CreateInvoice` from input + the account's
    defaults and seller block (read through the gateway) + per-call overrides,
    `external_id = "{namespace}:{order}:invoice"`, `download_pdf = false`.
 1. **Exclusivity.** `ctx.run(query "{namespace}:{order}:prepayment")`: live `ES` → `conflict{prepaid_chain, existing_number}`;

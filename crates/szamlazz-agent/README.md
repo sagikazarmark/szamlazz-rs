@@ -14,7 +14,7 @@ Enable `client-reqwest` to use the ready-made async client:
 ```rust
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::{
-    Client, Credentials, Currency, Date, Language, LineItem, PaymentMethod, VatRate,
+    Client, Credentials, Currency, Date, Language, LineItem, PaymentMethod, Rounding, VatRate,
 };
 
 async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,14 +26,14 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
         Currency::HUF,
         Language::Hungarian,
     );
-    let item = LineItem::calculated_for_currency(
+    let item = LineItem::try_calculated(
         "Development",
         1.into(),
         "hour",
         10_000.into(),
         VatRate::percent(27),
-        &Currency::HUF,
-    );
+        Rounding::minor_unit(&Currency::HUF),
+    )?;
     let request = CreateInvoice::new(
         InvoiceKind::invoice(),
         header,
@@ -66,6 +66,21 @@ No features are enabled by default. The [crate documentation](https://docs.rs/sz
 | Delete a proforma | `ops::proforma::DeleteProforma` |
 | Create, storno, query, or send receipts | `ops::receipt::*` |
 | Look up a taxpayer through NAV | `ops::taxpayer::QueryTaxpayer` |
+
+## Line Items
+
+szamlazz.hu verifies every row's arithmetic server-side — net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT (error codes 259–264) — and the crate does not duplicate that check. It offers three ways to fill the values:
+
+- **`LineItem::try_calculated(…, rounding)`** derives them and returns `ArithmeticError` instead of panicking when a value does not fit a `Decimal`. Use it on values you do not control. The rounding is an explicit choice:
+  - `Rounding::minor_unit(&currency)` — the currency's minor unit: whole forints for HUF (`Currency::minor_unit_digits` returns 0 for HUF although ISO 4217 says 2 — the fillér is out of circulation and szamlazz.hu works in whole forints), cents for EUR, thousandths for KWD, 2 for a code the table does not know. This is what the invoice can state and what NAV reporting takes, so it is the choice for a document that must reconcile to the caller's ledger.
+  - `Rounding::Scale(n)` — a fixed number of decimal places.
+  - `Rounding::Exact` — no rounding; a `100.005 EUR` net goes on the wire with a five-decimal VAT. szamlazz.hu then rounds each value to two decimals on its own and does not recompute the gross: `100.004 / 27.00108 / 127.00508` is stored as `100 / 27 / 127.01`, a document whose gross is not net + VAT (observed on the test account). Ask for this only when your business rule requires it and you accept that.
+
+  Rounding is half away from zero and applied at each step — the net is rounded before the VAT is derived from it — so gross = net + VAT holds exactly on the wire, and what is sent is what szamlazz.hu stores. The rounded net can differ from unit price × quantity by up to half a minor unit (`2 × 1234.25 HUF = 2468.5 → 2469`); szamlazz.hu's `net = price × qty` check (259) tolerated discrepancies of 0.5, 1 and 2 HUF on the test account and rejected 5 and 10, so the half unit is safely inside — hand-computed values passed to `LineItem::new` are the ones that can hit it.
+- **`LineItem::calculated(…)`** and **`LineItem::calculated_for_currency(…, &currency)`** are the infallible forms: two decimals, and whole forints for HUF with **exact, unrounded** arithmetic for every other currency, respectively. Both panic on overflow; `calculated_for_currency` is kept for compatibility with the pre-0.4 non-HUF behaviour.
+- **`LineItem::new(…)`** takes net, VAT and gross as your system computed them and sends them as-is.
+
+`VatRate::Percent` renders its wire token normalised — `27.00`, `27.0` and `27` all go out as `27`, `5.50` as `5.5`. szamlazz.hu accepts `27.00` and `27.0` as well (test account), so this is hygiene: the integer form is the one every fixture shows, and a queried rate comes back as a double (`27.0`) that round-trips to `27` this way.
 
 ## Protocol Notes
 

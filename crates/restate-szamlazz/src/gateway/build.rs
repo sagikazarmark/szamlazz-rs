@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use szamlazz_agent::ops::invoice::{
     Buyer, CreateInvoice, ExchangeRate, InvoiceHeader, InvoiceKind, InvoiceTemplate,
 };
-use szamlazz_agent::{Currency, InvoiceNumber, Language};
+use szamlazz_agent::{ArithmeticError, Currency, InvoiceNumber, Language};
 
 use super::Gateway;
 use crate::contract::{DocumentInput, IssuedKind};
@@ -54,6 +54,16 @@ pub enum InputError {
         kind: IssuedKind,
         /// The missing reference.
         reference: &'static str,
+    },
+    /// A line item's net, VAT or gross value does not fit a decimal; named by
+    /// its position in `items`, as the caller's JSON has it.
+    #[error("items[{index}]: {source}")]
+    ItemOverflow {
+        /// The zero-based position of the item in `items`.
+        index: usize,
+        /// Which value overflowed.
+        #[source]
+        source: ArithmeticError,
     },
 }
 
@@ -155,8 +165,12 @@ impl Gateway {
         let items = document
             .items
             .iter()
-            .map(|item| item.to_line_item(&currency))
-            .collect();
+            .enumerate()
+            .map(|(index, item)| {
+                item.to_line_item(&currency)
+                    .map_err(|source| InputError::ItemOverflow { index, source })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut create = CreateInvoice::new(invoice_kind, header, buyer, items);
         create.e_invoice = overrides.e_invoice.unwrap_or(defaults.e_invoice);
@@ -203,7 +217,7 @@ mod tests {
     use crate::account::{Account, Endpoint};
     use crate::config::{Defaults, SellerConfig};
     use crate::contract::document::tests::sample_document;
-    use crate::contract::{DocumentKind, ExchangeRateInput};
+    use crate::contract::{DocumentKind, ExchangeRateInput, LineItemInput};
 
     /// A gateway for the test account with `defaults` and a fixed seller
     /// block, as the prologue would open it.
@@ -468,6 +482,39 @@ mod tests {
             Err(InputError::UnknownLanguage("tlh".to_owned()))
         );
         assert_eq!(IssuedKind::from(DocumentKind::Final), IssuedKind::Final);
+    }
+
+    #[test]
+    fn overflowing_line_item_is_an_input_error_naming_the_item() {
+        let gateway = gateway(&json!({}));
+        let mut document = sample_document();
+        document.items.push(LineItemInput::new(
+            "adversarial",
+            dec!(10),
+            "db",
+            Decimal::MAX,
+            "27",
+        ));
+        let error = gateway
+            .build_create(
+                IssuedKind::Invoice,
+                &document,
+                &order(),
+                &external_id(),
+                DocumentRefs::default(),
+            )
+            .expect_err("overflow");
+        assert_eq!(
+            error,
+            InputError::ItemOverflow {
+                index: 1,
+                source: ArithmeticError::NetOverflow,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "items[1]: line item net value (unit price × quantity) overflows a decimal"
+        );
     }
 
     #[test]

@@ -259,6 +259,26 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// A derived line-item value that does not fit a [`Decimal`](rust_decimal::Decimal).
+///
+/// Returned by [`LineItem::try_calculated`](crate::LineItem::try_calculated);
+/// the infallible constructors panic with the same message instead. Each
+/// variant names the step of the arithmetic szamlazz.hu verifies server-side
+/// (net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ArithmeticError {
+    /// `unit_price × quantity` overflows.
+    #[error("line item net value (unit price × quantity) overflows a decimal")]
+    NetOverflow,
+    /// `net × rate / 100` overflows.
+    #[error("line item VAT value (net × rate / 100) overflows a decimal")]
+    VatOverflow,
+    /// `net + VAT` overflows.
+    #[error("line item gross value (net + VAT) overflows a decimal")]
+    GrossOverflow,
+}
+
 /// A request that cannot satisfy the Számla Agent wire contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

@@ -8,9 +8,10 @@
 //! SZAMLAZZ_AGENT_KEY=... cargo test -p szamlazz-agent --features client-reqwest --test live -- --ignored
 //! ```
 //!
-//! These are the tests that answer what the docs leave open: rounding
-//! tolerance of `LineItem::calculated_for_currency`, rejected `InvoiceKind` combinations,
-//! and empty-vs-omitted element handling.
+//! These are the tests that answer what the docs leave open: that the
+//! whole-forint HUF line totals of `Rounding::minor_unit` stay inside the
+//! tolerance of szamlazz.hu's `net = price × qty` check, rejected
+//! `InvoiceKind` combinations, and empty-vs-omitted element handling.
 
 #![cfg(feature = "client-reqwest")]
 
@@ -20,7 +21,9 @@ use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceK
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
-use szamlazz_agent::{Client, Credentials, Currency, Language, LineItem, PaymentMethod, VatRate};
+use szamlazz_agent::{
+    Client, Credentials, Currency, Language, LineItem, PaymentMethod, Rounding, VatRate,
+};
 
 fn client() -> Client {
     let key = std::env::var("SZAMLAZZ_AGENT_KEY")
@@ -44,14 +47,21 @@ fn document(kind: InvoiceKind) -> CreateInvoice {
             Language::Hungarian,
         ),
         Buyer::new("Teszt Vevő Kft.", "1010", "Budapest", "Teszt utca 1."),
-        vec![LineItem::calculated_for_currency(
-            "Integrációs teszt tétel",
-            dec!(2),
-            "db",
-            dec!(1234.56),
-            VatRate::percent(27),
-            &Currency::HUF,
-        )],
+        vec![
+            // The worst case of minor-unit rounding: 2 × 1234.25 = 2468.5 →
+            // 2469, a net half a forint off `price × qty`, inside the 259
+            // tolerance szamlazz.hu was observed to have (P60: 2 accepted, 5
+            // refused).
+            LineItem::try_calculated(
+                "Integrációs teszt tétel",
+                dec!(2),
+                "db",
+                dec!(1234.25),
+                VatRate::percent(27),
+                Rounding::minor_unit(&Currency::HUF),
+            )
+            .expect("fits"),
+        ],
     );
     invoice.download_pdf = true;
     invoice
@@ -80,7 +90,8 @@ async fn invoice_lifecycle() {
         .expect("create");
     assert!(created.pdf.is_some(), "requested PDF must be present");
     // HUF totals round to whole forints at each monetary step:
-    // 2 × 1234.56 = 2469.12 → 2469; VAT 27% = 666.63 → 667; gross 3136.
+    // 2 × 1234.25 = 2468.5 → 2469; VAT 27% = 666.63 → 667; gross 3136.
+    assert_eq!(created.net_total, Some(dec!(2469)));
     assert_eq!(created.gross_total, Some(dec!(3136)));
 
     let created_number = created

@@ -59,8 +59,10 @@ mod xml;
 pub use client::{Client, ClientError};
 
 pub use credentials::{AgentKey, Credentials};
-pub use error::{ApiError, ErrorCode, ParseError, RequestError, ResponseError, XmlError};
-pub use item::{LineItem, LineItemLedger, MAX_ERASURE_CODE_COUNT};
+pub use error::{
+    ApiError, ArithmeticError, ErrorCode, ParseError, RequestError, ResponseError, XmlError,
+};
+pub use item::{LineItem, LineItemLedger, MAX_ERASURE_CODE_COUNT, Rounding};
 pub use types::{
     Currency, InvoiceNumber, Language, PaymentMethod, Pdf, ReceiptNumber, TaxpayerStatus, VatRate,
 };
