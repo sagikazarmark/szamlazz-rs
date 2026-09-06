@@ -135,7 +135,7 @@ namespace = "acct"            # one namespace for the deployment; every account'
 [accounts.acme]               # reachable as /restate/scope/acme/call/…
 id = "acme"
 agent_key = "acme-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
-supplier_id = 972720          # REQUIRED in this shape
+supplier_id = 972720          # optional pin: the seller record's id (szallito/id) on the account's documents
 mode = "live"
 
 [accounts.acme.seller]
@@ -144,10 +144,11 @@ bank_account = "..."
 [accounts.beta_events]        # reachable as /restate/scope/beta_events/call/…
 id = "beta"
 agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__AGENT_KEY
-supplier_id = 972721
 ```
 
-`[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: a missing `supplier_id` (the only server-side account identity the worker can validate a found document against), two accounts sharing a `supplier_id`, two sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
+`[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: two accounts sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), two pinning the same `supplier_id`, or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
+
+**`supplier_id` is an optional pin, in this shape too.** It is `szallito/id` — szamlazz.hu's id for the seller record printed on every document the account issues, 972720 on the szamlazz.hu test account; read it off any of the account's documents with `Szamlazz.Agent.query` or `szamlazz invoice get --json` (`.supplier.id`). When set, every document a handler finds is checked against it and a mismatch is `account_mismatch` (409) or `conflict{external_id_collision}` — which catches an agent key configured under the wrong scope on the first found document, something `mode` alone cannot. The worker cannot verify the value itself (szamlazz.hu has no "which account am I?" operation, and `check_account` finds no document), so it is a fact you record, not one the worker establishes; leave it unset until you have read it off a real document rather than guess it.
 
 **Scope format.** The static resolver's scope keys are `[a-z0-9_]`, 1–36 bytes — a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`, non-empty, at most 36 characters — ASCII, so bytes; a dashed UUID is exactly 36), chosen so that environment overrides can address them (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the constraint on the account identifiers your application uses as scopes with this binary; a deployment with its own `AccountResolver` may use Restate's full format.
 

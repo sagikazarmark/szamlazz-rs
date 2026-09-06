@@ -125,9 +125,9 @@ it can (the static resolver at load time) and *relies on* the rest.
 **Blast radius.** Before, whoever reached the ingress could issue on one account; now, on every account
 the deployment serves, under whichever scope they name. The gateway of rule 6 is the boundary, and it is
 the operator's, not the worker's. The static resolver's `[accounts.<scope>]` shape enforces the checkable
-half of rule 1 at load time: a `supplier_id` on every account (the only server-side account identity a
-found document exposes), unique supplier ids, unique `(endpoint, agent_key)` pairs, unique ids. A
-database-backed resolver must guarantee rules 1 and 2 itself.
+half of rule 1 at load time: unique `(endpoint, agent_key)` pairs, unique ids, and unique `supplier_id`s among
+the accounts that pin one. *Amended (XPRB probe, 2026-09-06):* the pin is optional in this shape too — see the
+decision bullet below. A database-backed resolver must guarantee rules 1 and 2 itself.
 
 ### Experimental Restate dependencies
 
@@ -311,9 +311,18 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   szamlazz.hu's `JSESSIONID` cookie; a shared or cached client would carry one account's session into
   another account's request. The fresh client is a *session boundary*, not a performance choice. A resolver
   may cache accounts internally.
-- **Mandatory `supplier_id` in the multi-account shape.** The only server-side account identity a found
-  document exposes (`szallito/id`, in query bodies only); required to enforce rule 1 at load time and to
-  validate every found document against the account the worker believes it is talking to.
+- **Optional `supplier_id` in both shapes.** *Amended (XPRB probe, 2026-09-06; originally mandatory in the
+  multi-account shape):* `szallito/id` is the id of the account's **seller record** — the `<szallito>` block is
+  the seller as printed on the document, and szamlazz.hu documents the `<id>` nowhere (the same `szallitoTipus`
+  names the third-party vendor on an incoming invoice). It is a usable proxy for the account because one account
+  is one company, and it was constant on 22/22 queries of the test account; but the worker cannot verify a
+  configured value (no operation answers "which account am I?", and `check_account` finds no document), so
+  requiring it made onboarding depend on an operator-recorded number while adding no server-verified fact — two
+  fabricated ids pass the load-time check as readily as two real ones. Set, it still does what it always did:
+  every found document is validated against it, so an agent key configured under the wrong scope fails on the
+  first found document (`account_mismatch` / `conflict{external_id_collision}`), which `mode` alone cannot
+  catch; and two accounts pinning the same id are refused at load. The load-time half of rule 1 rests on unique
+  `(endpoint, agent_key)` pairs and ids, as it did in substance before. The behaviour notes record the probe.
 - **Credential failures are faults**, never `rejected` (above).
 - **Trait objects, not generics**, for the resolver and store: a type parameter would leak into the
   SDK-generated `OrderClient` / `AgentClient`.
@@ -386,9 +395,10 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   accepted retry-count risk, the run-policy facts restated above); the prologue's resolve policy and the
   in-process credential fetch are the two retry envelopes it did not have.
 - **ADR 0005.** Amended: the validation pins (`teszt == account.mode ∧ (account.supplier_id unset ∨
-  szallito/id == supplier_id)`) are read from the resolved `Account`, per invocation, and `supplier_id` is
-  required in the multi-account shape; "pin `supplier_id` in config" means on the `Account`. The
-  order-number hint is unconditional (the `detect_foreign` setting is gone). The rest holds.
+  szallito/id == supplier_id)`) are read from the resolved `Account`, per invocation; "pin `supplier_id` in
+  config" means on the `Account`, and the pin is optional in both shapes (the multi-account requirement of the
+  original text was lifted by the XPRB amendment above). The order-number hint is unconditional (the
+  `detect_foreign` setting is gone). The rest holds.
 
 ## Historical notes
 

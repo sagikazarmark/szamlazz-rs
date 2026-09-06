@@ -111,8 +111,8 @@ What it relies on:
   1. One szamlazz.hu account is reachable under exactly one scope value; unscoped counts as a value; no fan-in
      (two scopes reaching one account would split an order's per-key lock across two Virtual Objects). The
      static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape is
-     served by scope only and is checked at load time (a `supplier_id` on every account, unique supplier ids,
-     unique `(endpoint, agent_key)` pairs, unique ids).
+     served by scope only and is checked at load time (unique `(endpoint, agent_key)` pairs, unique ids, and
+     unique `supplier_id`s among the accounts that pin one — the pin is optional in both shapes).
   2. The scope → account mapping is append-only: moving traffic to another account means a new scope, never
      re-pointing an existing one. Appending a scope cannot create fan-in; any change that could put one account
      under two identities at once (the single → multi flag day above all) is a drain–switch–resume.
@@ -219,7 +219,7 @@ activation details.
   szamlazz.hu account as the worker knows it (never its key), the bundle of the two pluggable traits both services
   hold, and the configuration-backed implementation of both. `StaticConfig` is either `[account]` (`id`,
   `agent_key`, `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`; reachable unscoped) or a table of
-  `[accounts.<scope>]` (the same fields, `supplier_id` required; each reachable under its scope only, keys
+  `[accounts.<scope>]` (the same fields; each reachable under its scope only, keys
   `[a-z0-9_]` of at most 36 bytes so environment overrides can address them) — never both. `StaticResolver::try_from`
   validates it, and `Accounts::from` bundles it as resolver and store.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
