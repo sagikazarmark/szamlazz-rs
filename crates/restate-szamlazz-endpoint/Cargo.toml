@@ -32,6 +32,11 @@ figment = { version = "0.10.19", features = ["test"] }
 serde_json = { workspace = true }
 wiremock = { workspace = true }
 
+# `tests/stop.rs` sends SIGTERM/SIGINT to the spawned binary with `kill(2)`
+# rather than by running a `kill` executable, which the slim test image lacks.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.31", features = ["signal"] }
+
 [lints]
 workspace = true
 

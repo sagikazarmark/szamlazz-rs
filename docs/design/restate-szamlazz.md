@@ -453,7 +453,9 @@ exists on the resolved account — that document legitimately matches the accoun
 Two configuration types, both serde-`Deserialize` only (the host chooses the format). `WorkerConfig` is the
 deployment-level part the services hold — the namespace and the three run retry policies; `StaticConfig` is the static resolver's account, and everything
 account-shaped — credentials, mode, supplier pin, endpoint, document defaults, seller block — lives on the `Account`
-it produces (read by the services through `Gateway::account()`). The endpoint binary flattens both into one file:
+it produces (read by the services through `Gateway::account()`). The endpoint binary reads one file with both side by
+side — its own layout type has one explicit field per top-level key and assembles the two library types from them,
+so a parse error keeps the key path and the source figment attaches (a `#[serde(flatten)]` would drop both):
 
 ```toml
 namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
@@ -490,12 +492,26 @@ supplier_id = 972720          # optional; when set, validated against szallito/i
 ```
 
 All three policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
-server would spend the handler's `invocation_retry_policy` instead. `WorkerConfig::validate` checks the cross-field
+server would spend the handler's `invocation_retry_policy` instead. Durations are `"90s"`, `"2m"`, `"1h"` or a bare
+non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
 invariants (`max_attempts ≥ 1` on the issue and read policies, `initial_delay ≤ max_delay` and `factor ≥ 1` on all
 three);
-`StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint). The pre-release layout
-(`account.slug`, top-level `[defaults]` / `[seller]`) is refused by name — the crate has never been released, there
-is no compatibility shim.
+`StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint).
+
+**The endpoint's loader is strict.** Before the typed extraction it walks the merged figment value against the known
+key tree — the top level, the policies, each account table and its `defaults` / `seller` / `seller.email` — and
+refuses every unknown key at once, naming the key, its path, its source (the file, or the environment variable that
+set it) and what is accepted there; a typo such as `mod = "test"` or `[isue]` fails at start-up instead of silently
+running a test account as live or leaving a policy at its default. The refusal lives in the loader rather than as
+`#[serde(deny_unknown_fields)]` on the library types because the account-shaped value types are journaled inside
+`Account` and must stay permissive for replay; a test checks the tree against the `Serialize` output of the library
+types so it cannot drift. The same walk names both account shapes with their sources when both are present (a stray
+`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` on a multi-account file would otherwise surface as the partial account's
+`missing field id`), and refuses the pre-release layout (`account.slug`, top-level `[defaults]` / `[seller]`) with each
+moved key named — the crate has never been released, there is no compatibility shim. Environment override values are
+read as **strings** and the field's type decides (`extract_lossy`: `"3"` is `3` on a count, `"true"` on a flag), so an
+all-digit agent key keeps its leading zeros; figment's own environment provider would parse it as a number.
+`--check-config` runs the loader and builds the endpoint, then exits 0 without listening.
 
 **Multi-account shape.** Instead of `[account]`, a table of `[accounts.<scope>]` with the same fields; the two are
 mutually exclusive (both present is a load error) and there is no default account. Each account is reachable under
@@ -514,12 +530,12 @@ namespace = "acct"
 
 [accounts.acme]
 id = "acme"
-agent_key = "..."
+agent_key = "acme-key"        # distinct per account: a shared (endpoint, agent_key) pair is refused at load
 supplier_id = 972720          # required
 
 [accounts.beta_events]
 id = "beta"
-agent_key = "..."
+agent_key = "beta-key"
 supplier_id = 972721
 ```
 
@@ -539,9 +555,11 @@ Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `
 
 ## 10. Endpoint
 
-`restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting
+`restate-szamlazz --config <file> --bind 0.0.0.0 --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting
 (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY`;
-`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY` in the multi-account shape); `identity_keys`; tracing;
+`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY` in the multi-account shape), every value a string the key's type
+reads; `identity_keys`; tracing; `--check-config` for CI and init containers (loads, validates, builds the endpoint,
+logs the start-up summary, exits 0 without listening — non-zero with the error otherwise);
 container image on `v*` tags, running as a non-root user (uid 65532) with `STOPSIGNAL SIGTERM`. The start-up log
 names the namespace, whether the deployment is scoped, and per account its scope (or `<unscoped>`), id, mode,
 endpoint and supplier id — never the key — then the bound address and the signals that stop the process. `SIGTERM`
@@ -585,9 +603,17 @@ functions they are extracted into.
   carry none.
 - `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
   `journal_retention`, no input — and attributes: `Szamlazz.Agent.storno`'s `4m` / `3m` timeouts and
-  `set_payments`'s explicit `initial_interval = 2m`), an endpoint build smoke test, an integration test of the endpoint
-  binary (spawned on an ephemeral port with an environment-only configuration, `SIGTERM` and `SIGINT` each end it
-  with status 0 within seconds, and the start-up log names both), `Body<T>` — a well-formed body
+  `set_payments`'s explicit `initial_interval = 2m`), an endpoint build smoke test, two integration tests of the
+  endpoint binary (spawned on an ephemeral port with an environment-only configuration, `SIGTERM` and `SIGINT` each
+  end it with status 0 within seconds, the start-up log names both and honours `--bind`; `--check-config` on each
+  fixture exits 0 with the start-up summary and without listening, and on an unknown key — in the file and in the
+  environment — an invalid identity key or a missing file exits non-zero with the error), the loader (every unknown
+  key at every level named with its path and source — `[isue]`, `mod`, `supplyer_id`, `curency`, `bnk`, a misspelt
+  environment variable — and every one at once; a wrong type naming key and source; both shapes naming both sources
+  rather than the partial account's missing field; environment values as strings the type reads, the all-digit agent
+  key byte-exact through to a wiremock szamlazz.hu; the known-key tree matched field for field against the library
+  types' `Serialize` output; every TOML example of the endpoint README, design §9 and `fixtures/` loading and building
+  its accounts), `Body<T>` — a well-formed body
   decodes, a misspelt option / a wrong type / a missing field / an empty body each leave the handler as the 400
   `invalid_input` fault naming the field, and its schema and input metadata are `Json<T>`'s, in the discovery
   manifest too — `prepare` refusing

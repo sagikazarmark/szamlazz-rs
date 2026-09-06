@@ -1,0 +1,15 @@
+namespace = "acct"            # one namespace for the deployment; every account's external ids share it
+
+[accounts.acme]               # reachable as /restate/scope/acme/call/…
+id = "acme"
+agent_key = "acme-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
+supplier_id = 972720          # REQUIRED in this shape
+mode = "live"
+
+[accounts.acme.seller]
+bank_account = "..."
+
+[accounts.beta_events]        # reachable as /restate/scope/beta_events/call/…
+id = "beta"
+agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__AGENT_KEY
+supplier_id = 972721

@@ -486,8 +486,8 @@ impl SellerEmailConfig {
 /// `max_attempts` executions or `max_duration` — then the step fails and the
 /// handler reports `outcome_unknown`. The policy shapes no journal entry.
 ///
-/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a plain number of
-/// seconds.
+/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
+/// integer read as seconds (`90`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IssueConfig {
@@ -553,8 +553,8 @@ impl IssueConfig {
 /// executions over about two minutes ride out such a stall without holding
 /// the caller much longer than the create step's own client timeout would.
 ///
-/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a plain number of
-/// seconds.
+/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
+/// integer read as seconds (`90`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReadConfig {
@@ -610,6 +610,9 @@ impl ReadConfig {
 /// Set explicitly for the same reason as the issue policy: the SDK's default
 /// run policy sends no retry delay and the server would spend the handler's
 /// `invocation_retry_policy` instead.
+///
+/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
+/// integer read as seconds (`90`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResolveConfig {
@@ -651,7 +654,8 @@ impl ResolveConfig {
 }
 
 /// Parses a duration written as `"90s"`, `"2m"`, `"1h"` or a plain number of
-/// seconds.
+/// seconds (`"90"`). The string form of what a duration field of the policies
+/// takes; a field also takes the number as a bare integer.
 ///
 /// # Errors
 ///
@@ -710,11 +714,19 @@ pub enum InvalidDuration {
     Overflow,
 }
 
-/// `#[serde(with)]` helper for durations in the `"2m"` string form.
+/// `#[serde(with)]` helper for durations: serialized in the `"2m"` string
+/// form, deserialized from that form or from a bare non-negative integer read
+/// as seconds.
 mod duration_str {
+    use std::fmt;
     use std::time::Duration;
 
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::{Unexpected, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    /// What a duration field expects, as serde's error message names it.
+    const EXPECTED: &str =
+        "a duration such as \"90s\", \"2m\", \"1h\" or a non-negative number of seconds";
 
     pub(super) fn serialize<S: Serializer>(
         duration: &Duration,
@@ -726,8 +738,31 @@ mod duration_str {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Duration, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        super::parse_duration(&value).map_err(serde::de::Error::custom)
+        struct StringOrSeconds;
+
+        impl Visitor<'_> for StringOrSeconds {
+            type Value = Duration;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(EXPECTED)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                super::parse_duration(value).map_err(E::custom)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(Duration::from_secs(value))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                u64::try_from(value)
+                    .map(Duration::from_secs)
+                    .map_err(|_| E::invalid_value(Unexpected::Signed(value), &self))
+            }
+        }
+
+        deserializer.deserialize_any(StringOrSeconds)
     }
 }
 
@@ -1111,7 +1146,43 @@ mod tests {
         assert_eq!(json["max_duration"], "1h");
         let back: IssueConfig = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, IssueConfig::default());
-        assert!(serde_json::from_value::<IssueConfig>(json!({"initial_delay": 120})).is_err());
+    }
+
+    /// A duration field takes the `"2m"` string form or a bare non-negative
+    /// integer, read as seconds — on every policy, as the doc comments say.
+    /// A float, a negative number or another type is refused.
+    #[test]
+    fn duration_fields_accept_a_bare_integer_as_seconds() {
+        let issue: IssueConfig =
+            serde_json::from_value(json!({"initial_delay": 120, "max_delay": "10m"}))
+                .expect("integer seconds");
+        assert_eq!(issue.initial_delay, Duration::from_secs(120));
+        assert_eq!(issue.max_delay, Duration::from_secs(600));
+
+        let read: ReadConfig =
+            serde_json::from_value(json!({"max_duration": 0})).expect("zero seconds");
+        assert_eq!(read.max_duration, Duration::ZERO);
+
+        let resolve: ResolveConfig =
+            serde_json::from_value(json!({"initial_delay": 2})).expect("integer seconds");
+        assert_eq!(resolve.initial_delay, Duration::from_secs(2));
+
+        for rejected in [
+            json!(1.5),
+            json!(-1),
+            json!(true),
+            json!([1]),
+            json!({"s": 1}),
+        ] {
+            let error = serde_json::from_value::<IssueConfig>(json!({"initial_delay": rejected}))
+                .expect_err(&format!("{rejected} is not a duration"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("expected a duration such as \"90s\", \"2m\", \"1h\""),
+                "the error says what a duration is: {rejected}: {error}"
+            );
+        }
     }
 
     #[test]
