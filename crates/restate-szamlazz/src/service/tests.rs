@@ -194,9 +194,8 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             }
             assert!(handler.output.is_some(), "{name} returns an output");
         } else {
-            // The two writes: two attempts, kill; the journal and the
-            // idempotency completion retained like `Szamlazz.Order`'s.
-            assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
+            // The two writes: kill; the journal and the idempotency completion
+            // retained like `Szamlazz.Order`'s.
             assert_eq!(
                 handler.journal_retention,
                 Some(3 * 24 * 3_600_000),
@@ -207,13 +206,13 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 Some(30 * 24 * 3_600_000),
                 "{name}"
             );
-            // Both writes wait out the 60 s client timeout before the one
-            // retry after a crash — never the server's ~500 ms default — so
-            // that the re-execution cannot run while the first send is still
-            // in flight: `set_payments` because an additive send is
-            // at-least-once, `storno` because its re-execution's leading query
-            // would otherwise look before the cut send has landed (ADR 0004).
-            // The same rule floors the issue policy's `initial_delay`.
+            // Both writes wait out the 60 s client timeout before the retry
+            // after a crash — never the server's ~500 ms default — so that the
+            // re-execution cannot run while the first send is still in flight:
+            // `set_payments` because an additive send is at-least-once,
+            // `storno` because its re-execution's leading query would
+            // otherwise look before the cut send has landed (ADR 0004). The
+            // same rule floors the issue policy's `initial_delay`.
             assert_eq!(
                 handler.retry_policy_initial_interval,
                 Some(120_000),
@@ -224,13 +223,27 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 "{name}: initial_interval under IssueConfig::MIN_INITIAL_DELAY"
             );
             if name == "storno" {
-                // The storno step is the same closure `Szamlazz.Order` sizes
-                // at 4m/3m (query, send, re-query at 60 s each — ADR 0004):
-                // anything shorter suspends a slow storno mid-step.
+                // The storno step is the same closure `Szamlazz.Order` runs, so
+                // the policy is `Szamlazz.Order`'s throughout (ADR 0004, #87):
+                // five attempts, 2m → 10m — invocation attempts are spent only
+                // on worker-side failures and every re-dispatch is query-first,
+                // so nothing about an unmanaged storno justifies a shorter
+                // budget — and the 4m/3m timeouts (query, send, re-query at
+                // 60 s each): anything shorter suspends a slow storno mid-step.
+                assert_eq!(handler.retry_policy_max_interval, Some(600_000), "{name}");
+                assert_eq!(
+                    handler.retry_policy_exponentiation_factor,
+                    Some(2.0),
+                    "{name}"
+                );
+                assert_eq!(handler.retry_policy_max_attempts, Some(5), "{name}");
                 assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
                 assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
             } else {
                 assert_eq!(name, "set_payments");
+                // Two attempts: an additive send is at-least-once, so every
+                // invocation attempt is a potential second copy of the entries.
+                assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
                 assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
                 assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
             }

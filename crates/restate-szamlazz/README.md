@@ -204,7 +204,7 @@ activation details.
 - `WorkerConfig`: the deployment-level configuration the services hold — `namespace` (the `config::Namespace`, the
   external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`, permanent), `[issue]` (the issue policy:
   `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`; `5` executions, `2m` → `10m`, bounded by
-  `1h` by default), `[read]` (the read policy: the same fields; `3` executions, `5s` → `30s`, bounded by `2m` by
+  `1h` by default), `[read]` (the read policy: the same fields; `5` executions, `5s` → `60s`, bounded by `5m` by
   default) and `[resolve]` (the resolve policy: the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m`
   by default). `IssueConfig::run_retry_policy` is the `RunRetryPolicy` of the create and storno steps,
   `ReadConfig::run_retry_policy` that of every read-only step, `ResolveConfig::run_retry_policy` that of the `account`
@@ -293,15 +293,24 @@ worker; callers authenticate to Restate ingress separately.
 
 1. Send an **`Idempotency-Key`** per logical request. Restate dedupes retries and attaches concurrent duplicates
    to the in-flight invocation.
-2. An **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler means
-   "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`", never "no document exists". Restate
-   replays a failed invocation's stored completion under the same key for the retention period, so the same key
-   would repeat the failure; the retry with a new key reconciles by external id and is safe. A call that timed out on
-   the client side may still run once the key frees; `get` is the way to learn its outcome. The other faults are
-   settled — nothing landed: `invalid_input`, `unknown_account`, `not_found` and `account_mismatch` are raised before
-   anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit
-   entries it was sent). Retrying as is repeats the answer: fix the request, the number, the scope or the account —
-   or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
+2. Tell a **fault** from **no answer** before deciding what to do with the key.
+   - **A fault** is a 5xx **with a body the worker wrote** and `x-restate-error-source: invocation`: the invocation
+     completed, and Restate stores that completion under the key for the retention period, so the same key would
+     replay the failure. An **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or
+     storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`", never "no
+     document exists"; the retry with a new key reconciles by external id and is safe.
+   - **No answer** — your client timed out, or the ingress answered with a 5xx whose source is *not* `invocation` —
+     means the invocation is still in flight: it runs on once the key frees, and under a worker outage Restate
+     re-dispatches it for up to ~24 min on `Szamlazz.Order` (five attempts, 2 m → 10 m). **Keep the key** and retry
+     with it — the retry attaches to the in-flight invocation and receives its outcome — or read `get`; a new key
+     here would start a second invocation that queues behind the first.
+   - **A killed invocation** (attempts exhausted) is a fault whose body is the last retryable error's **text**, not
+     the worker's `{code, message}` JSON: treat an unparsable 5xx `invocation` body as `outcome_unknown`.
+   - **The other faults are settled** — nothing landed: `invalid_input`, `unknown_account`, `not_found` and
+     `account_mismatch` are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an
+     error (to a read, or refusing the credit entries it was sent). Retrying as is repeats the answer: fix the
+     request, the number, the scope or the account — or, for a `szamlazz_error` relaying a NAV outage, retry later
+     with a new key.
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send
    `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document is
    `conflict{live}`, so the flag can never cause a duplicate.
@@ -348,14 +357,20 @@ Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
 `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m`, `abort_timeout = 3m`,
 `journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3` and
-`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.storno` and `set_payments` use two attempts with an
-explicit `initial_interval = 2m` — longer than the 60 s client timeout, so the retry after a crash cannot run while the
-first send is still in flight: for `set_payments` because an additive send is at-least-once, for `storno` because its
-re-execution's leading query would otherwise look before a cut send has landed; `storno` carries `Szamlazz.Order`'s
-timeouts (its storno step is the same closure), `set_payments` `2m` / `2m` (one send); `query`, `query_taxpayer`
-and `check_account` three with the same one-day journal retention. Kill, not pause: a paused invocation
-holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
-external-id query inside the create step is what makes that safe.
+`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.storno` carries `Szamlazz.Order`'s policy
+and timeouts throughout (its storno step is the same closure); `set_payments` uses two attempts with the same
+`initial_interval = 2m` and `2m` / `2m` timeouts (one send) — two, because an additive send is at-least-once and
+every attempt is a potential second copy of the entries; `query`, `query_taxpayer` and `check_account` three with the
+same one-day journal retention. The 2 m interval is longer than the 60 s client timeout, so the retry after a crash
+cannot run while the first send is still in flight. **An invocation attempt is spent only on a worker-side failure**
+— the worker unreachable, a rollout cutting the connection, the abort timeout, an undecodable journal — never on a
+run retry: a step re-executed under `[issue]`, `[read]` or `[resolve]` is re-dispatched by the server without
+advancing the handler's attempt count (verified end to end against 1.7.8). So the run policies decide how long a
+szamlazz.hu outage is tolerated, the invocation policy how long a worker outage is (~24 min of back-off on the
+`Szamlazz.Order` writes and `Szamlazz.Agent.storno`, 2 min on `set_payments`), and szamlazz.hu's "max 5 attempts"
+etiquette is the issue policy's business — every re-dispatch is query-first and multiplies no sends. Kill, not
+pause: a paused invocation holds the order's key and blocks the very handler that would reconcile it. Kill releases
+the key, and the external-id query inside the create step is what makes that safe.
 
 Inside a handler, issuing is two durable steps. The **lookup** (`lookup-{kind}`) is read-only and settles every
 case that needs no create: a live document of ours is `already_issued` (or `conflict{live}` with `reissue`), a
@@ -363,8 +378,8 @@ reversed one is `reversed` (or proceeds with `reissue`), an invalid holder is `c
 live invoice under the order that is not ours is `conflict{foreign}`. Like every read-only step of both services —
 the exclusivity and proforma-link lookups before it, the verifies, the order-number hint, the storno lookup, `get`'s
 four queries, `Szamlazz.Agent.query`, `query_taxpayer`'s one step (`taxpayer-{prefix}`), the `check_account` probe —
-it runs under the **read policy** (`[read]`: `3`
-executions `5s` → `30s`, bounded by `2m` by default): every szamlazz.hu *answer* is journaled data, and a query
+it runs under the **read policy** (`[read]`: `5`
+executions `5s` → `60s`, bounded by `5m` by default): every szamlazz.hu *answer* is journaled data, and a query
 szamlazz.hu did not answer — a transport or parse failure, `szlahu_down` — is the step's retryable error
 (`Unanswered`), re-executed after the policy's delay; a read writes nothing, so re-executing it is safe and its
 answer is as fresh as a first one. When the read policy is exhausted the handler fails with

@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use jiff::civil::{Date, date};
 use restate_sdk::prelude::{Endpoint, HttpServer};
+use restate_sdk::service::Discoverable;
 use restate_szamlazz::account::{
     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
     ResolveError, StaticConfig, StaticResolver,
@@ -336,6 +337,18 @@ async fn holds(mock: &MockServer, doc: &Doc<'_>) {
     }
 }
 
+/// The next external-id query for `id` loses its reply (a 500 with no body)
+/// once; whatever is mounted after this answers from the second query on —
+/// wiremock takes the first active match in mount order, and an
+/// `up_to_n_times(1)` mock is inactive after its one match.
+async fn loses_reply_once(mock: &MockServer, id: &str) {
+    external_id_query(id)
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(mock)
+        .await;
+}
+
 /// szamlazz.hu holds `doc` under its external id from the `misses + 1`th
 /// query on: code 7 for `misses` queries, the document afterwards. The number
 /// and order selectors are not mounted — the document is absent before the
@@ -424,6 +437,19 @@ fn docker_available() -> bool {
         .args(["info"])
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+/// The `max_attempts` of `handler`'s invocation retry policy as the service
+/// discovers it — what the deployment registered with the server, read from
+/// the same source rather than copied.
+fn discovered_max_attempts<S: Discoverable>(handler: &str) -> u64 {
+    S::discover()
+        .handlers
+        .into_iter()
+        .find(|h| h.name.as_str() == handler)
+        .unwrap_or_else(|| panic!("no handler {handler}"))
+        .retry_policy_max_attempts
+        .unwrap_or_else(|| panic!("{handler} pins no max_attempts"))
 }
 
 /// The experimental server flags multi-account mode depends on (design §4,
@@ -1299,22 +1325,34 @@ impl Harness {
         Invocation::from_row(row)
     }
 
-    /// Watches the invocations on Virtual Object `key` for four seconds (a
-    /// detached task, so it carries its own copy of the query — `sql` borrows
-    /// the harness) and records what `sys_invocation` reports **while they
-    /// are in flight**:
-    /// `retry_count`, `last_failure` and `last_failure_related_command_name`
-    /// are attempt state, cleared once the invocation completes — a completed
-    /// row shows neither the count nor the failing command (verified against
-    /// 1.7.8). Start it before the call, await it after.
+    /// How often [`watch_for`](Self::watch_for) samples `sys_invocation`; a
+    /// run retry under the 1 s test policies is visible for ten samples.
+    const WATCH_POLL: Duration = Duration::from_millis(100);
+
+    /// [`watch_for`](Self::watch_for) over four seconds — enough for the one
+    /// or two run retries a scenario provokes under the 1 s test policies.
     fn watch(&self, key: &str) -> tokio::task::JoinHandle<Retries> {
+        self.watch_for(key, Duration::from_secs(4))
+    }
+
+    /// Watches the invocations on Virtual Object `key` for `window` (a
+    /// detached task polling every [`Self::WATCH_POLL`], so it carries its own
+    /// copy of the query — `sql` borrows the harness) and records what
+    /// `sys_invocation` reports **while they are in flight**: `retry_count`
+    /// (the invoker's count of starts), `last_failure` and
+    /// `last_failure_related_command_name` are attempt state, cleared once the
+    /// invocation completes — a completed row shows neither the count nor the
+    /// failing command (verified against 1.7.8). Start it before the call,
+    /// await it after.
+    fn watch_for(&self, key: &str, window: Duration) -> tokio::task::JoinHandle<Retries> {
         let admin = self.restate.admin.clone();
         let http = self.http.clone();
         let key = key.to_owned();
+        let polls = window.as_millis() / Self::WATCH_POLL.as_millis();
         tokio::spawn(async move {
             let mut retries = Retries::default();
-            for _ in 0..40 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            for _ in 0..polls {
+                tokio::time::sleep(Self::WATCH_POLL).await;
                 let body: Value = http
                     .post(format!("{admin}/query"))
                     .header("accept", "application/json")
@@ -1490,6 +1528,12 @@ impl Harness {
         holds_after_misses(&self.mock, misses, doc).await;
     }
 
+    /// The next external-id query for `id` loses its reply once: see
+    /// [`loses_reply_once`]. Mount before the steady answers.
+    async fn loses_reply_once(&self, id: &str) {
+        loses_reply_once(&self.mock, id).await;
+    }
+
     /// The create lands but its reply is lost, and `doc` is the holder of its
     /// external id from that moment on: see [`create_lands_but_reply_lost`].
     async fn create_lands_but_reply_lost(&self, doc: &Doc<'_>) {
@@ -1531,6 +1575,7 @@ async fn e2e_order_protocol() {
     flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     exhausted_lookup_read_is_a_structured_unavailable(&h).await;
     flaky_get_read_is_retried_by_the_read_policy(&h).await;
+    run_retries_do_not_spend_invocation_attempts(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
     check_account_names_the_account_and_reports_the_credentials(&h).await;
     purged_invocation_queries_szamlazz_again(&h).await;
@@ -2986,10 +3031,9 @@ async fn an_untrimmed_order_key_is_refused(h: &Harness) {
 /// finds nothing ⇒ the run retry policy re-executes the step (one second
 /// later under the test policy — not the handler's two-minute
 /// `initial_interval`), and its exhaustion is a structured `outcome_unknown`
-/// fault naming the order, kind and external id. The
-/// `sys_invocation.retry_count` assertion — run retries must not consume the
-/// handler's `invocation_retry_policy` budget — waits for the SQL helper
-/// of #29.
+/// fault naming the order, kind and external id. That run retries spend
+/// none of the handler's `invocation_retry_policy` attempts is (xi-e)'s
+/// proof; here `retry_count` is only checked to have moved.
 async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
     h.reset().await;
     h.absent("E2E-11", &["prepayment", "final", "proforma", "invoice"])
@@ -3035,9 +3079,9 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
     );
 
     // The run's re-execution is visible while the invocation is in flight:
-    // `retry_count` counts it (at least 1; the server's exact accounting is
-    // its own) with the create step named as the failing command — and the
-    // completed invocation carries the structured fault.
+    // `retry_count` — the invoker's count of starts — counts it, with the
+    // create step named as the failing command — and the completed invocation
+    // carries the structured fault.
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
         retries.failing_commands,
@@ -3090,11 +3134,7 @@ async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
         .await;
     // The first execution of the lookup step loses its reply; the second,
     // and the create step's own leading query, miss cleanly.
-    external_id_query("acct:E2E-27:invoice")
-        .respond_with(ResponseTemplate::new(500))
-        .up_to_n_times(1)
-        .mount(&h.mock)
-        .await;
+    h.loses_reply_once("acct:E2E-27:invoice").await;
     external_id_query("acct:E2E-27:invoice")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -3254,11 +3294,7 @@ async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
         ..Doc::new("SZ-29", "SZ", "E2E-29")
     })
     .await;
-    external_id_query("acct:E2E-29:proforma")
-        .respond_with(ResponseTemplate::new(500))
-        .up_to_n_times(1)
-        .mount(&h.mock)
-        .await;
+    h.loses_reply_once("acct:E2E-29:proforma").await;
     external_id_query("acct:E2E-29:proforma")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -3295,6 +3331,92 @@ async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
         "{runs:?}"
     );
     eprintln!("(xi-d) flaky get read → retried by the read policy, status complete: pass");
+}
+
+/// (xi-e) **run retries do not spend invocation attempts** — the fact every
+/// retry budget of the worker rests on (ADR 0004, #87): a re-execution the
+/// SDK asks for with a delay (`next_retry_delay`, a run retry policy) is
+/// re-dispatched by the server without advancing the handler's
+/// `invocation_retry_policy` iterator, whose attempts are spent only on
+/// worker-side failures. Proved on `get`: all four of its reads lose their
+/// reply once, so the read policy re-executes the invocation four times —
+/// more re-executions than the handler's `max_attempts` (read from discovery)
+/// would allow if they counted — and the status still completes with what
+/// szamlazz.hu holds, instead of the invocation being killed.
+/// `sys_invocation.retry_count` is the invoker's count of starts
+/// (`start_count`; verified against 1.7.8), so it is seen past the handler's
+/// `max_attempts` while the invocation is in flight.
+async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
+    h.reset().await;
+    // Each of the four reads loses its reply once — mounted before the steady
+    // answers, which take over from the second query on.
+    for kind in ["proforma", "invoice", "prepayment", "final"] {
+        h.loses_reply_once(&format!("acct:E2E-30:{kind}")).await;
+    }
+    h.absent("E2E-30", &["proforma", "prepayment", "final"])
+        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-30:invoice"),
+        ..Doc::new("SZ-30", "SZ", "E2E-30")
+    })
+    .await;
+
+    // Four re-executions must be more than the handler would tolerate as
+    // attempts, or completing proves nothing.
+    let get_max_attempts = discovered_max_attempts::<Order>("get");
+    assert!(
+        get_max_attempts < 4,
+        "`get` allows {get_max_attempts} attempts; this scenario needs to re-execute more often than that"
+    );
+
+    let started = Instant::now();
+    let watch = h.watch_for("E2E-30", Duration::from_secs(12));
+    let reply = h.get_reply("E2E-30").await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let status = &reply.body;
+    assert_eq!(status["invoice"]["number"], "SZ-30", "{status}");
+    assert_eq!(status["invoice"]["state"], "live");
+    assert_eq!(status["proforma"], Value::Null);
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "four run retries one second apart, not the handler's policy: {elapsed:?}"
+    );
+
+    // Four re-executions on top of the first start: the count is seen past
+    // the handler's budget (each re-execution is visible for the 1 s back-off
+    // before it), and the invocation completes rather than being killed —
+    // run retries spent none of its attempts.
+    assert!(
+        retries.max_retry_count > get_max_attempts,
+        "retry_count must exceed get's max_attempts ({get_max_attempts}): {retries:?}"
+    );
+    assert_eq!(
+        retries.failing_commands,
+        ["get-proforma", "get-invoice", "get-prepayment", "get-final"],
+        "each read failed once, in order: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.completion_failure, None, "{invocation:?}");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "get-proforma",
+            "get-invoice",
+            "get-prepayment",
+            "get-final",
+        ],
+        "one journal entry per step, the retries invisible in the journal: {runs:?}"
+    );
+    eprintln!(
+        "(xi-e) run retries do not spend invocation attempts: {} starts against max_attempts = {get_max_attempts}, completed: pass",
+        retries.max_retry_count
+    );
 }
 
 /// (xii) the harness capabilities of #29 that the multi-account tickets

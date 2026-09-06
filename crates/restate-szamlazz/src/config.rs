@@ -17,11 +17,11 @@
 //! max_duration = "1h"
 //!
 //! [read]                        # the run retry policy of every read-only step
-//! max_attempts = 3
+//! max_attempts = 5
 //! initial_delay = "5s"
 //! factor = 2.0
-//! max_delay = "30s"
-//! max_duration = "2m"
+//! max_delay = "60s"
+//! max_duration = "5m"
 //!
 //! [resolve]                     # the run retry policy of the `account` step
 //! initial_delay = "1s"
@@ -595,26 +595,32 @@ impl IssueConfig {
 ///
 /// A read may be retried freely: it writes nothing, and a re-executed
 /// closure's answer is exactly as fresh as a first answer. The defaults are
-/// short — szamlazz.hu is observed to stall for a minute at a time, and three
-/// executions over about two minutes ride out such a stall without holding
-/// the caller much longer than the create step's own client timeout would.
+/// sized for szamlazz.hu, not for the worker: five executions 5 → 10 → 20 →
+/// 40 s apart ride out a blip of about a minute, and — szamlazz.hu is observed
+/// to stall for a minute at a time — a stalling szamlazz.hu is waited out up
+/// to the 5 m bound, instead of failing the invocation with a terminal
+/// `unavailable` that is stored under the caller's `Idempotency-Key` for the
+/// retention period. This policy, not the handlers' invocation retry policy,
+/// is what decides how long a szamlazz.hu outage is tolerated: a run retry is
+/// re-dispatched by the server without spending an invocation attempt (ADR
+/// 0004, #87). A worker outage is the invocation retry policy's business.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
 /// integer read as seconds (`90`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReadConfig {
-    /// Executions of the step, including the first. Default `3`.
+    /// Executions of the step, including the first. Default `5`.
     pub max_attempts: u32,
     /// Delay before the first re-execution. Default `5s`.
     #[serde(with = "duration_str")]
     pub initial_delay: Duration,
     /// Multiplier of the delay after each re-execution. Default `2.0`.
     pub factor: f32,
-    /// Cap of the delay. Default `30s`.
+    /// Cap of the delay. Default `60s`.
     #[serde(with = "duration_str")]
     pub max_delay: Duration,
-    /// Hard bound on the time spent re-executing the step. Default `2m`.
+    /// Hard bound on the time spent re-executing the step. Default `5m`.
     #[serde(with = "duration_str")]
     pub max_duration: Duration,
 }
@@ -622,11 +628,11 @@ pub struct ReadConfig {
 impl Default for ReadConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 3,
+            max_attempts: 5,
             initial_delay: Duration::from_secs(5),
             factor: 2.0,
-            max_delay: Duration::from_secs(30),
-            max_duration: Duration::from_mins(2),
+            max_delay: Duration::from_mins(1),
+            max_duration: Duration::from_mins(5),
         }
     }
 }
@@ -963,8 +969,8 @@ mod tests {
     fn read_policy_maps_to_the_run_retry_policy_field_for_field() {
         assert_eq!(
             format!("{:?}", ReadConfig::default().run_retry_policy()),
-            "RunRetryPolicy { initial_delay: 5s, factor: 2.0, max_delay: Some(30s), \
-             max_attempts: Some(3), max_duration: Some(120s) }"
+            "RunRetryPolicy { initial_delay: 5s, factor: 2.0, max_delay: Some(60s), \
+             max_attempts: Some(5), max_duration: Some(300s) }"
         );
         let short = ReadConfig {
             max_attempts: 2,
@@ -1005,16 +1011,30 @@ mod tests {
         let minimal: WorkerConfig =
             serde_json::from_value(json!({ "namespace": "acct" })).expect("parse");
         assert_eq!(minimal.read, ReadConfig::default());
-        assert_eq!(minimal.read.max_attempts, 3);
+        assert_eq!(minimal.read.max_attempts, 5);
         assert_eq!(minimal.read.initial_delay, Duration::from_secs(5));
         assert_eq!(minimal.read.factor.to_bits(), 2.0f32.to_bits());
-        assert_eq!(minimal.read.max_delay, Duration::from_secs(30));
-        assert_eq!(minimal.read.max_duration, Duration::from_secs(120));
+        assert_eq!(minimal.read.max_delay, Duration::from_secs(60));
+        assert_eq!(minimal.read.max_duration, Duration::from_secs(300));
         assert_eq!(
             minimal,
             WorkerConfig::new("acct".parse().expect("namespace")),
             "`new` carries the default read policy too"
         );
+        // The delays between the default executions — initial × factor^n,
+        // each under the cap — sum to 75 s: a read rides out a szamlazz.hu
+        // blip of about a minute instead of poisoning the caller's key with a
+        // 503, and the bound is what a stalling szamlazz.hu runs into (#87).
+        let read = &minimal.read;
+        let back_off: Duration = (0..read.max_attempts - 1)
+            .map(|n| {
+                read.initial_delay
+                    .mul_f32(read.factor.powi(n.cast_signed()))
+            })
+            .map(|delay| delay.min(read.max_delay))
+            .sum();
+        assert_eq!(back_off, Duration::from_secs(75));
+        assert!(back_off < read.max_duration, "the back-off fits the bound");
     }
 
     /// `[read]` is held to the same invariants as `[issue]`, and the error
@@ -1039,14 +1059,14 @@ mod tests {
             "read.max_attempts must be at least 1"
         );
         assert_eq!(
-            config(&json!({"initial_delay": "31s"})).validate(),
+            config(&json!({"initial_delay": "61s"})).validate(),
             Err(WorkerConfigError::DelayOrder {
                 policy: Policy::Read,
-                initial: Duration::from_secs(31),
-                max: Duration::from_secs(30),
+                initial: Duration::from_secs(61),
+                max: Duration::from_secs(60),
             })
         );
-        assert_eq!(config(&json!({"initial_delay": "30s"})).validate(), Ok(()));
+        assert_eq!(config(&json!({"initial_delay": "60s"})).validate(), Ok(()));
         assert_eq!(
             config(&json!({"factor": 0.5})).validate(),
             Err(WorkerConfigError::InvalidFactor {
@@ -1056,11 +1076,11 @@ mod tests {
         );
         assert_eq!(config(&json!({"factor": 1.0})).validate(), Ok(()));
         assert_eq!(
-            config(&json!({"initial_delay": "31s"}))
+            config(&json!({"initial_delay": "61s"}))
                 .validate()
                 .expect_err("error")
                 .to_string(),
-            "read.initial_delay (31s) must not exceed read.max_delay (30s)",
+            "read.initial_delay (61s) must not exceed read.max_delay (60s)",
             "the error names the table"
         );
     }
