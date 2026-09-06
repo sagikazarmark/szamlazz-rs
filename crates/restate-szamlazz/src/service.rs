@@ -35,6 +35,8 @@ mod agent;
 mod body;
 mod create;
 mod handlers;
+#[cfg(test)]
+mod journal;
 mod prologue;
 mod storno;
 mod support;

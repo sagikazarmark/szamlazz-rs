@@ -22,16 +22,36 @@
 //! Tracing events carry external ids, kinds, numbers and codes — never buyer
 //! data.
 //!
+//! # Journaled types are additive-only
+//!
 //! The outcome types derive `serde` so that the Restate services can journal
-//! them as the result of a `ctx.run`. The document outcomes carry the agent
-//! crate's response types as they are — [`InvoiceDocument`],
-//! [`InvoiceCreationResult`], [`CreatedInvoice`] — which round-trip through
-//! JSON; a journaled document therefore includes the buyer block szamlazz.hu
-//! returned with it. [`TaxpayerOutcome`] carries the crate-owned
+//! them as the result of a `ctx.run`. An in-flight invocation replays the
+//! entries the *previous* deployment wrote, and an entry the new code cannot
+//! decode is a retryable SDK error: the invocation replays into the same
+//! failure until its attempts are spent — holding the order key the whole time
+//! — and is killed. So every type the services journal is **additive-only**: a
+//! new field carries a serde default, a new variant may be added, and no field
+//! or variant is renamed, removed or retyped. This holds for the outcomes here
+//! ([`LookupOutcome`], [`CreateOutcome`], [`QueryOutcome`],
+//! [`StornoLookupOutcome`], [`StornoOutcome`], [`DeleteOutcome`],
+//! [`SetPaymentsOutcome`], [`ProbeOutcome`], [`TaxpayerOutcome`]), for the
+//! prologue's journaled [`Account`] and pinned namespace, and for the agent
+//! crate's response types the document outcomes carry **as they are** —
+//! [`InvoiceDocument`], [`InvoiceCreationResult`], [`CreatedInvoice`] and
+//! everything they nest — whose JSON layout is thereby part of this crate's
+//! journal contract. [`TaxpayerOutcome`] carries the crate-owned
 //! [`QueryTaxpayerResponse`] instead — a projection that is additive-only by
-//! contract, so a change in the agent crate cannot make a journaled taxpayer
-//! answer undecodable. [`InvoiceDocumentExt`] adds the checks the services
-//! make on a queried document before trusting or acting on it.
+//! the same rule, so a change to the agent crate's `TaxpayerInfo` cannot reach
+//! a journaled taxpayer answer. The rule is checked in CI: `service::journal`
+//! pins one JSON fixture per variant of every journaled type under
+//! `tests/journal/` and replays every fixture ever committed through the
+//! current types; the `Journaled` marker trait the run helpers require is the
+//! link from the `ctx.run` sites to that directory (ADR 0005, journal
+//! compatibility). A journaled document therefore includes the buyer block
+//! szamlazz.hu returned with it.
+//!
+//! [`InvoiceDocumentExt`] adds the checks the services make on a queried
+//! document before trusting or acting on it.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

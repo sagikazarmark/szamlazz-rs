@@ -391,6 +391,15 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   registered data, an unknown one as `Found{valid: false}`, a wrong key as `CredentialsRejected`, NAV's relayed
   `funcCode ERROR` or a szamlazz.hu code as `Api`, and a 500, an unparseable body or `szlahu_down` as
   `Err(Unanswered)`).
+- The same run checks **journal compatibility**: every type the services journal as a `ctx.run` result is
+  additive-only (the rule is in the `gateway` module docs and
+  [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md)), and
+  `tests/journal/<type>/<variant>.json` pins one fixture per variant. The generator fails when the current code
+  writes a different shape; the compatibility test replays every fixture ever committed through the current types.
+  After an additive change, regenerate with `UPDATE_JOURNAL_FIXTURES=1 cargo test -p restate-szamlazz journal` — it
+  writes missing fixtures and archives a differing one beside the new shape — and review the diff as a contract
+  change. Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on
+  upgrade.
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in

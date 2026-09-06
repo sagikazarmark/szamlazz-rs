@@ -76,7 +76,9 @@ Resolution is split so that the *decision* is durable and the *secret* is not.
    (verified: `account_change_between_executions_does_not_reach_the_invocation`). The journaled `Account` is
    visible in the Restate UI for the journal retention period and contains no secret, so that is safe. The
    type is additive-only — a new field gets `#[serde(default)]`, nothing is renamed or removed — so an old
-   journal replays on new code. `unscoped` and `unknown` are journaled and never retried; only the
+   journal replays on new code (since #47 the rule covers every journaled type and is pinned by fixtures;
+   [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md), *Journal compatibility*).
+   `unscoped` and `unknown` are journaled and never retried; only the
    resolver's *unavailability* is a retryable error, whose display text never echoes the resolver's own
    message (it becomes `last_failure` on `sys_invocation`).
 2. The credentials are fetched **on every handler execution, including replays**, outside the journal,

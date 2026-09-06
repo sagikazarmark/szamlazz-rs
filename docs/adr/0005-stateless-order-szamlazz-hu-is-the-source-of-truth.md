@@ -2,7 +2,8 @@
 
 Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) — the account whose
 szamlazz.hu is the source of truth is the one the invocation's scope resolved to, and the validation pins are
-read from that journaled `Account` (below).
+read from that journaled `Account` (below); amended by #47 — every journaled type is additive-only and pinned
+by fixtures (the *Journal compatibility* section).
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,
@@ -130,3 +131,62 @@ line of the closure on every execution — is the guard, the key is deduplicatio
 - ADR 0002's `{gen}` suffix, `request_id` and "written to state before the first call", ADR 0003's `request_id`
   and flag-free service-side reissue, and ADR 0004's `pending` slot, operator runbook and
   `idempotency_retention = 7d` (now `30d`) are superseded; the rest of each still holds.
+
+## Amended (#47): journal compatibility — every journaled type is additive-only, pinned by fixtures
+
+Giving up state migrations (above) did not give up every compatibility rule: the *journal* is the one thing an
+in-flight invocation carries across a deploy. Every `ctx.run` result — the `namespace` pin, the `account` step's
+`Resolution` (carrying the `Account`), and the gateway's `LookupOutcome`, `CreateOutcome`, `QueryOutcome`,
+`StornoLookupOutcome`, `StornoOutcome`, `DeleteOutcome`, `SetPaymentsOutcome`, `ProbeOutcome`, `TaxpayerOutcome`
+— is written as JSON by the deployment that ran the step and read back by whichever deployment replays the
+invocation. An entry
+the new code cannot decode is a retryable SDK error: the invocation replays into the same failure until the
+handler's attempts are spent (five on the `Szamlazz.Order` issuing handlers, 2 m apart and doubling to 10 m —
+about 24 minutes holding the order key) and is killed. The `Account` was documented additive-only from ADR 0006; the outcome types
+embed `szamlazz_agent`'s `InvoiceDocument`, `InvoiceCreationResult` and `CreatedInvoice` *as they are*, whose serde
+layout had no such rule — and the `Szamlazz.Agent.query` handler's run enum had already been reshaped once (#32),
+accepted then for a one-step read-only handler with a one-day retention.
+
+**Decision.** Every journaled type is **additive-only**: a new field carries a serde default, a new variant may be
+added, and no field or variant is renamed, removed or retyped. The rule covers the agent crate's response types
+the outcomes carry, whose JSON layout is thereby part of this crate's journal contract, and is stated once, in the
+`gateway` module docs. It is enforced in CI by `service::journal`:
+
+- **the generator** pins one JSON fixture per variant of every journaled type under
+  `crates/restate-szamlazz/tests/journal/<type>/<variant>.json` — the JSON the current code writes must equal the
+  committed file byte for byte, and the run never writes unless `UPDATE_JOURNAL_FIXTURES=1`. Under that flag a
+  missing fixture is written, and a *differing* one is kept beside the new shape as `<variant>.<n>.json` before the
+  new shape is written, so an old shape is archived rather than overwritten;
+- **the compatibility test** replays every fixture in every type's directory — the current shapes and every shape
+  archived before them — through the current types: each must decode *and* re-encode to a superset of itself (a
+  renamed `Option` field silently decodes to `None`; the superset check catches it where "decodes" alone would not).
+  A directory with no journaled type behind it fails, so a type that stops being journaled is removed knowingly;
+- the `Journaled` marker trait is the bound of the run helpers (`run_once`, `run_retrying`, `run_reading`): only an
+  implementor can be a `ctx.run` result, and the pins take only implementors, so the trait is the link from the
+  run sites to the fixture directory. Each enum's pins name its variants in an exhaustive `match`, so a new variant
+  fails to compile until it is listed, and the generator then asks for its fixture.
+
+The fixtures carry every element the wire can put in a document — postal addresses, ledger blocks, a financial
+item, labels, two payments, a PDF — so a rename anywhere in the nested agent types is caught, not only at the top.
+Verified on a scratch branch: renaming `InvoiceDocument::labels` fails both tests on every document-carrying
+fixture (missing field `tags`); renaming `LookupOutcome::Reversed::storno_number` fails the compatibility test on
+the superset check ("decodes, but re-encodes without part of the fixture"); adding a defaulted field to `Account`
+passes the compatibility test, fails the generator on the one changed fixture, and regenerates into
+`account.1.json` + `account.json` with both replaying.
+
+**Considered: crate-owned projections instead of the agent's types.** The document outcomes could carry
+restate-szamlazz's own `JournaledDocument` / `JournaledCreation` structs mapped from the agent's, decoupling the
+journal from the agent crate's layout. Rejected for them: it duplicates some twenty-five fields across three types
+plus a mapping layer that can itself drift, for a coupling the fixtures already make visible — a change to the agent
+types fails this crate's CI through the workspace, which is the wanted outcome. The agent crate's `query_xml` module
+already promises its response types round-trip through JSON "for journaling or caching"; the fixtures hold it to
+that. `TaxpayerOutcome` (#49) is the one journaled type that took the projection route — `QueryTaxpayerResponse`
+is crate-owned and doubles as the handler's response, so there is no second type to keep in step — and it is pinned
+by the same fixtures (`tests/journal/taxpayer-outcome/`), so either route ends in the same check.
+
+**Consequences.** An upgrade with in-flight invocations is safe by construction, and the endpoint README's
+rolling-update guidance says so with this section as the reason: the drain-first roll is still recommended to
+avoid stalling in-flight orders for a retry interval, but it is not what keeps them alive. A change that *must*
+break a journaled shape is a deliberate act: delete the archived fixture, and drain before deploying (the
+flag-day script) so that nothing is in flight to be killed. `Journaled` is `pub(super)` to `service`; a new run
+site outside `service::support` would have to bypass the helpers to journal an unpinned type.
