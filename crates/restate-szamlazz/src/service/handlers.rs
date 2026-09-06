@@ -12,12 +12,14 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
+use super::agent::taxpayer_prefix;
 use super::support::order_key;
 use super::{Agent, Body, Order};
 use crate::contract::{
     CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
     DeleteProformaResponse, DocumentKind, OrderStatus, QueryRequest, QueryResponse,
-    SetPaymentsRequest, SetPaymentsResponse, StornoRequest, StornoResponse,
+    QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
+    StornoRequest, StornoResponse,
 };
 
 /// The `Szamlazz.Order` Virtual Object, keyed by the order number
@@ -255,9 +257,10 @@ impl Order {
 }
 
 /// The `Szamlazz.Agent` service: query, credit entries and storno by document
-/// number, and the `check_account` probe. Never calls into `Order`; a
-/// document that carries an order number is reported as `managed_by_order`
-/// instead — after the account check every found document gets.
+/// number, the NAV taxpayer lookup by tax number, and the `check_account`
+/// probe. Never calls into `Order`; a document that carries an order number
+/// is reported as `managed_by_order` instead — after the account check every
+/// found document gets.
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the
@@ -303,6 +306,39 @@ impl Agent {
         let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
         execution.query_request(&ctx, request).await.map(Json)
+    }
+
+    /// Looks a Hungarian taxpayer up through NAV (`xmltaxpayer`) by tax
+    /// number — the bare eight-digit stem or the full `NNNNNNNN-N-NN` form —
+    /// on the account the request's scope resolves to, so an embedder needs
+    /// no second credential path for this one read. Read-only, one step
+    /// under the read policy; `valid: false` is data. Not cached here: the
+    /// caller caches, with a TTL on the order of a day. The journal is
+    /// retained a day so that it can be inspected; there is nothing to
+    /// replay.
+    #[handler(
+        invocation_retry_policy(
+            initial_interval = "10s",
+            factor = 2.0,
+            max_interval = "1m",
+            max_attempts = 3,
+            on_max_attempts = "kill"
+        ),
+        journal_retention = "1d"
+    )]
+    async fn query_taxpayer(
+        &self,
+        ctx: Context<'_>,
+        request: Body<QueryTaxpayerRequest>,
+    ) -> HandlerResult<Json<QueryTaxpayerResponse>> {
+        // Both refusals precede the prologue: nothing journaled, nothing sent.
+        let request = request.into_request()?;
+        let prefix = taxpayer_prefix(&request)?;
+        let execution = self.prologue(&ctx).await?;
+        execution
+            .query_taxpayer_request(&ctx, prefix)
+            .await
+            .map(Json)
     }
 
     /// Registers credit entries (`jóváírás`) on an invoice.

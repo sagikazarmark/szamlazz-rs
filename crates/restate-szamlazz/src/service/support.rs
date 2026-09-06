@@ -189,9 +189,11 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
 /// runs this check — `Szamlazz.Order` on its verifies, `Szamlazz.Agent.query`
 /// and `storno` on what they find — so a misconfigured account (a test account
 /// configured as live, a wrong supplier id) fails loudly on its first found
-/// document instead of acting on the wrong account. `Szamlazz.Agent.set_payments`
-/// is exempt: it sends without a query, and a credit entry is not a legal
-/// document. Not to be confused with the `check_account` probe, which finds
+/// document instead of acting on the wrong account. Two handlers are exempt:
+/// `Szamlazz.Agent.set_payments` sends without a query, and a credit entry is
+/// not a legal document; `Szamlazz.Agent.query_taxpayer` finds no document
+/// at all — a taxpayer record is NAV's, not the account's, and carries no
+/// pins. Not to be confused with the `check_account` probe, which finds
 /// nothing and echoes configuration.
 ///
 /// # Errors

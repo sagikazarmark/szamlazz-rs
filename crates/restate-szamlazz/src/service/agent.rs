@@ -1,29 +1,50 @@
 //! The stateless `Szamlazz.Agent` service handlers: `query`, `set_payments`
-//! and `storno` by document number, and the `check_account` probe.
+//! and `storno` by document number, `query_taxpayer` by tax number, and the
+//! `check_account` probe.
 //!
 //! `query` and `storno` check the document they find against the account the
 //! invocation resolved to (`support::check_pins`) before they answer or
-//! send; `set_payments` finds no document and is exempt. Every read — the
-//! probe, `query`, the verify and the storno lookup — runs under the read
-//! policy; `set_payments` is a write without a retry of its own, and with
-//! `additive: true` an at-least-once one (see [`SetPaymentsRequest::additive`]).
+//! send; `set_payments` and `query_taxpayer` find no document and are
+//! exempt. Every read — the probe, `query`, `query_taxpayer`, the verify and
+//! the storno lookup — runs under the read policy; `set_payments` is a write
+//! without a retry of its own, and with `additive: true` an at-least-once
+//! one (see [`SetPaymentsRequest::additive`]).
 
 use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::Context;
+use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
 use super::support::service::{lookup_storno, run_once, run_reading, storno_step};
 use super::support::{Fault, StornoIntent, check_pins, storno_response, terminal};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
-    SetPaymentsRequest, SetPaymentsResponse, StornoOutcome, StornoRequest, StornoResponse,
+    QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
+    StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
     InvoiceDocumentExt as _, ProbeOutcome, QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome,
+    TaxpayerOutcome,
 };
 use crate::identity::ExternalId;
+
+/// The prefix `query_taxpayer` asks NAV about, or the `invalid_input` fault
+/// for a tax number in neither accepted form. Decided before the prologue:
+/// the same request never succeeds, so nothing is journaled or sent for it.
+pub(super) fn taxpayer_prefix(request: &QueryTaxpayerRequest) -> Result<TaxpayerPrefix, Fault> {
+    request
+        .prefix()
+        .map_err(|error| Fault::invalid_input(error.to_string()))
+}
+
+/// The name of `query_taxpayer`'s one durable step: `taxpayer-{prefix}`. The
+/// prefix, not the tax number as sent, so the stem and the full number name
+/// the same entry.
+pub(super) fn taxpayer_step(prefix: &TaxpayerPrefix) -> String {
+    format!("taxpayer-{}", prefix.as_str())
+}
 
 /// What the probe step settled, as `check_account`'s `credentials`. Every
 /// probe outcome is data: a wrong key is `rejected`, reporting it is the
@@ -123,13 +144,46 @@ impl Execution {
         }
     }
 
+    /// The `query_taxpayer` handler: one durable step (`taxpayer-{prefix}`)
+    /// under the read policy — NAV's answer as szamlazz.hu relayed it,
+    /// projected onto the crate-owned response — then the projection as is.
+    /// `valid: false` is the answer, not a fault. Finds no document, so like
+    /// `set_payments` it runs no account check: a taxpayer record is NAV's,
+    /// not the account's, and carries no pins. Any other `funcCode ≠ OK` —
+    /// szamlazz.hu's code or NAV's relayed one — is an answer: passed through
+    /// as 422 like `query`'s, never retried; a NAV outage therefore surfaces
+    /// as a terminal 422 the caller may retry with a new `Idempotency-Key`.
+    pub(super) async fn query_taxpayer_request(
+        &self,
+        ctx: &Context<'_>,
+        prefix: TaxpayerPrefix,
+    ) -> Result<QueryTaxpayerResponse, HandlerError> {
+        let gateway = Arc::clone(&self.gateway);
+        let step = taxpayer_step(&prefix);
+        let outcome = run_reading(ctx, step, self, move || async move {
+            gateway.query_taxpayer(&prefix).await
+        })
+        .await?;
+        match outcome {
+            TaxpayerOutcome::Found(taxpayer) => Ok(taxpayer),
+            TaxpayerOutcome::CredentialsRejected { code, message } => {
+                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
+            }
+            TaxpayerOutcome::Api { code, message } => Err(terminal(
+                422,
+                &code,
+                format!("szamlazz.hu error {code}: {message}"),
+            )),
+        }
+    }
+
     /// The `set_payments` handler: one durable step (`set-payments-{number}`)
     /// that registers the credit entries without a preceding query.
-    /// Deliberately the one handler without the account check of a found
-    /// document: it finds none — a verify round trip (about a second per
-    /// credit entry) to catch a misconfiguration every other found document
-    /// already catches is not worth it, and a credit entry is not a legal
-    /// document.
+    /// Deliberately without the account check of a found document (with
+    /// `query_taxpayer`, one of the two handlers exempt from it): it finds
+    /// none — a verify round trip (about a second per credit entry) to catch
+    /// a misconfiguration every other found document already catches is not
+    /// worth it, and a credit entry is not a legal document.
     pub(super) async fn set_payments_request(
         &self,
         ctx: &Context<'_>,
@@ -316,6 +370,90 @@ mod tests {
             !replacing.message().contains("query the invoice"),
             "{}",
             replacing.message()
+        );
+    }
+
+    /// The bare stem and the full tax number are one request to szamlazz.hu
+    /// and one journal entry: the same prefix, the same step name — a caller
+    /// that sends the full number and one that sends the stem replay each
+    /// other's step.
+    #[test]
+    fn a_full_tax_number_and_its_stem_name_the_same_step() {
+        let stem = taxpayer_prefix(&QueryTaxpayerRequest::new("12345678")).expect("stem");
+        let full = taxpayer_prefix(&QueryTaxpayerRequest::new("12345678-2-42")).expect("full");
+        assert_eq!(stem, full);
+        assert_eq!(taxpayer_step(&stem), "taxpayer-12345678");
+        assert_eq!(taxpayer_step(&full), "taxpayer-12345678");
+    }
+
+    /// A tax number in neither accepted form is the caller's request:
+    /// `invalid_input` (400) naming the input and the accepted forms, decided
+    /// before the prologue — nothing journaled, nothing sent — for every
+    /// rejected form alike (whitespace, a wrong length, a partial or wrong
+    /// suffix, another separator, a non-digit, non-ASCII digits).
+    #[test]
+    fn a_tax_number_in_neither_form_is_invalid_input() {
+        for tax_number in [
+            "",
+            "1234567",
+            "123456789",
+            " 12345678",
+            "12345678 ",
+            "12345678-2",
+            "12345678-2-4",
+            "12345678-2-423",
+            "12345678-24-2",
+            "12345678_2_42",
+            "1234567a",
+            "12345678-a-42",
+            "１２３４５６７８",
+            "12 345 678",
+        ] {
+            let fault =
+                taxpayer_prefix(&QueryTaxpayerRequest::new(tax_number)).expect_err(tax_number);
+            let error = TerminalError::from(fault);
+            assert_eq!(error.code(), 400, "{tax_number:?}");
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json");
+            assert_eq!(body["code"], "invalid_input", "{tax_number:?}: {body}");
+            let message = body["message"].as_str().expect("message");
+            assert!(
+                message.contains(&format!("{tax_number:?}")),
+                "{tax_number:?} is named: {message}"
+            );
+            assert!(
+                message.contains("(12345678)") && message.contains("(12345678-2-42)"),
+                "{tax_number:?} names both accepted forms: {message}"
+            );
+            assert_eq!(
+                body.get("order"),
+                None,
+                "a by-number fault carries no order"
+            );
+        }
+    }
+
+    /// An exhausted read of the taxpayer step is the `unavailable` fault
+    /// naming the step by its prefix — `taxpayer-{prefix}` — and the last
+    /// failure, never the tax number as the caller sent it.
+    #[test]
+    fn an_exhausted_taxpayer_read_is_unavailable_naming_the_step() {
+        use super::super::support::read_exhausted;
+
+        let prefix = taxpayer_prefix(&QueryTaxpayerRequest::new("12345678-2-42")).expect("full");
+        let last = TerminalError::new_with_code(500, "szamlazz.hu is unavailable: maintenance");
+        let error = TerminalError::from(read_exhausted(&taxpayer_step(&prefix), &last));
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json");
+        assert_eq!(body["code"], "unavailable", "{body}");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("taxpayer-12345678"), "{message}");
+        assert!(
+            message.contains("maintenance"),
+            "names the last failure: {message}"
+        );
+        assert!(
+            !message.contains("12345678-2-42"),
+            "the step, not the input: {message}"
         );
     }
 

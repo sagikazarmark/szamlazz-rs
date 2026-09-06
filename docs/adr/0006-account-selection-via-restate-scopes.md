@@ -261,7 +261,9 @@ that ADR 0002, ADR 0005, design §3 and both READMEs state — `teszt == account
 document. With the default `live`, a test account configured as live fails loudly on its first found
 document, on any handler that finds one (`account_mismatch` on a verify or a by-number query,
 `conflict{external_id_collision}` on a lookup) instead of issuing on the wrong account. Every handler that
-finds a document runs the check; `Szamlazz.Agent.set_payments` finds none and is the one exemption (#32).
+finds a document runs the check; `Szamlazz.Agent.set_payments` finds none and is the one exemption (#32) —
+joined since #49 by `Szamlazz.Agent.query_taxpayer`, which finds none either (a taxpayer record is NAV's, not the
+account's, and carries no pins).
 
 ### A credential-store outage is a terminal `unavailable`
 

@@ -101,6 +101,13 @@ impl QueryTaxpayer {
     }
 }
 
+/// A query for an already validated prefix; cannot fail.
+impl From<TaxpayerPrefix> for QueryTaxpayer {
+    fn from(tax_number_prefix: TaxpayerPrefix) -> Self {
+        Self { tax_number_prefix }
+    }
+}
+
 /// A taxpayer as registered in the NAV Online Invoice system.
 #[doc(alias = "adóalany")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -435,6 +442,13 @@ mod tests {
             "1234567".parse::<TaxpayerPrefix>(),
             Err(TaxpayerPrefixError)
         );
+    }
+
+    /// A validated prefix builds the query without a second validation.
+    #[test]
+    fn query_is_built_from_a_validated_prefix() {
+        let prefix: TaxpayerPrefix = "12345678".parse().expect("valid");
+        assert_eq!(QueryTaxpayer::from(prefix), sample());
     }
 
     #[test]
