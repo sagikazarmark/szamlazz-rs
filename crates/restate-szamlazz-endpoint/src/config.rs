@@ -3,30 +3,72 @@
 //! `[read]`, `[resolve]`), the static resolver's accounts
 //! ([`StaticConfig`](restate_szamlazz::account::StaticConfig): `[account]` or
 //! `[accounts.<scope>]`) and what only the hosting process cares about
-//! (request identity keys).
+//! (request identity keys). Strict: a key the configuration does not know, at
+//! any level, is refused with its path and source ([`schema`]).
+
+mod schema;
+mod sources;
+
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use figment::Figment;
+use figment::providers::{Format, Json, Toml, Yaml};
 use restate_szamlazz::WorkerConfig;
-use restate_szamlazz::account::StaticConfig;
+use restate_szamlazz::account::{StaticAccount, StaticConfig};
+use restate_szamlazz::config::{IssueConfig, Namespace, ReadConfig, ResolveConfig};
 use serde::Deserialize;
+
+pub use sources::{EnvOverrides, PlainKeys};
+
+/// The environment prefix of configuration overrides; `__` nests
+/// (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` → `account.agent_key`).
+pub const ENV_PREFIX: &str = "RESTATE_SZAMLAZZ_";
+
+/// The configuration sources: the file at `path`, if any — TOML, JSON or
+/// YAML by extension — with the `RESTATE_SZAMLAZZ_` environment overrides
+/// merged on top. Environment values are strings, read by the field's type
+/// ([`EnvOverrides`]).
+///
+/// # Errors
+///
+/// Returns an error when the file does not exist or its extension is not
+/// one of `.toml`, `.json`, `.yaml`, `.yml`. A file that exists but does not
+/// parse is reported by [`EndpointConfig::load`].
+pub fn figment(path: Option<&Path>) -> Result<Figment> {
+    let mut figment = Figment::new();
+
+    if let Some(path) = path {
+        if !path.exists() {
+            bail!("config file not found: {}", path.display());
+        }
+
+        figment = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("toml") => figment.merge(PlainKeys(Toml::file(path))),
+            Some("json") => figment.merge(PlainKeys(Json::file(path))),
+            Some("yaml" | "yml") => figment.merge(PlainKeys(Yaml::file(path))),
+            _ => bail!("unsupported config file format; use .toml, .json, .yaml, or .yml"),
+        };
+    }
+
+    Ok(figment.merge(EnvOverrides::new()))
+}
 
 /// The complete endpoint configuration.
 ///
-/// Both library configurations are flattened, so the file layout is
-/// `namespace`, `[issue]`, `[read]`, `[resolve]`, either `[account]` or a table of
-/// `[accounts.<scope>]` (each with its `defaults` and `seller`), plus
-/// `identity_keys`, all at the top level. Load it with
-/// [`EndpointConfig::load`]; the shape's own rules (exactly one shape, the
-/// multi-account uniqueness rules) are checked when the static resolver is
-/// built from `accounts`.
-#[derive(Debug, Clone, Deserialize)]
+/// The file layout is `namespace`, `[issue]`, `[read]`, `[resolve]`, either
+/// `[account]` or a table of `[accounts.<scope>]` (each with its `defaults`
+/// and `seller`), plus `identity_keys`, all at the top level (see
+/// [`Layout`]). Load it with [`EndpointConfig::load`], which refuses unknown
+/// keys and both shapes at once; the accounts' own rules (a non-blank id and
+/// key, the multi-account uniqueness rules) are checked when the static
+/// resolver is built from `accounts`.
+#[derive(Debug, Clone)]
 pub struct EndpointConfig {
     /// The deployment-level settings of the services.
-    #[serde(flatten)]
     pub worker: WorkerConfig,
     /// The accounts of the static resolver.
-    #[serde(flatten)]
     pub accounts: StaticConfig,
     /// Restate request identity public keys (`publickeyv1_...`).
     ///
@@ -35,8 +77,53 @@ pub struct EndpointConfig {
     /// rotation. Accepts a list or a comma/whitespace-delimited string, so
     /// the `RESTATE_SZAMLAZZ_IDENTITY_KEYS` environment override stays a
     /// plain string.
-    #[serde(default, deserialize_with = "identity_keys")]
     pub identity_keys: Vec<String>,
+}
+
+/// The file layout, one explicit field per top-level key. The library's
+/// [`WorkerConfig`] and [`StaticConfig`] are assembled from it rather than
+/// flattened into it, so a parse error keeps the key path and the source
+/// figment attaches — `#[serde(flatten)]` deserializes through a buffer that
+/// drops both.
+#[derive(Debug, Deserialize)]
+struct Layout {
+    namespace: Namespace,
+    #[serde(default)]
+    issue: IssueConfig,
+    #[serde(default)]
+    read: ReadConfig,
+    #[serde(default)]
+    resolve: ResolveConfig,
+    #[serde(default)]
+    account: Option<StaticAccount>,
+    #[serde(default)]
+    accounts: BTreeMap<String, StaticAccount>,
+    #[serde(default, deserialize_with = "identity_keys")]
+    identity_keys: Vec<String>,
+}
+
+impl From<Layout> for EndpointConfig {
+    fn from(layout: Layout) -> Self {
+        let Layout {
+            namespace,
+            issue,
+            read,
+            resolve,
+            account,
+            accounts,
+            identity_keys,
+        } = layout;
+        Self {
+            worker: WorkerConfig {
+                namespace,
+                issue,
+                read,
+                resolve,
+            },
+            accounts: StaticConfig { account, accounts },
+            identity_keys,
+        }
+    }
 }
 
 impl EndpointConfig {
@@ -45,53 +132,23 @@ impl EndpointConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error when the figment does not parse, when it uses the
-    /// pre-release layout (top-level `[defaults]` / `[seller]`, or
-    /// `account.slug` instead of `namespace`) — named explicitly, since serde
-    /// would otherwise ignore the moved keys — or when
-    /// [`WorkerConfig::validate`] fails. The accounts are validated when the
-    /// static resolver is built.
+    /// Returns an error when the figment holds a key the configuration does
+    /// not know, at any level — every such key is named with its path and its
+    /// source; the pre-release layout's moved keys (`account.slug`, top-level
+    /// `[defaults]` / `[seller]`) with where they went — or both account
+    /// shapes at once (each named with its source); when it does not parse;
+    /// or when [`WorkerConfig::validate`] fails. The accounts themselves are
+    /// validated when the static resolver is built.
     pub fn load(figment: &Figment) -> Result<Self> {
-        PreReleaseLayout::refuse(figment)?;
-        let config: Self = figment.extract().context("failed to parse configuration")?;
+        schema::check(figment).context("invalid configuration")?;
+        // Lossy: an environment value is a string, and the field's type
+        // decides how it is read (`"3"` → `3` where a number is expected).
+        let layout: Layout = figment
+            .extract_lossy()
+            .context("failed to parse configuration")?;
+        let config = Self::from(layout);
         config.worker.validate().context("invalid configuration")?;
         Ok(config)
-    }
-}
-
-/// The keys of the pre-release layout, which the current shape would silently
-/// ignore: the namespace was `account.slug`, and the document defaults and the
-/// seller block were top-level tables rather than part of `[account]`. The
-/// crate has never been released, so there is no compatibility shim — only a
-/// clear refusal.
-struct PreReleaseLayout;
-
-impl PreReleaseLayout {
-    /// The moved keys, each with where it went.
-    const MOVED: [(&'static str, &'static str); 3] = [
-        (
-            "account.slug",
-            "`account.slug` is now the top-level `namespace`",
-        ),
-        ("defaults", "`[defaults]` is now `[account.defaults]`"),
-        ("seller", "`[seller]` is now `[account.seller]`"),
-    ];
-
-    /// Fails with a message naming every moved key that is present in
-    /// `figment`.
-    fn refuse(figment: &Figment) -> Result<()> {
-        let moved: Vec<&str> = Self::MOVED
-            .iter()
-            .filter(|(key, _)| figment.find_value(key).is_ok())
-            .map(|(_, message)| *message)
-            .collect();
-        if moved.is_empty() {
-            return Ok(());
-        }
-        bail!(
-            "the configuration uses the pre-release layout: {}; see the restate-szamlazz-endpoint README",
-            moved.join("; ")
-        );
     }
 }
 
@@ -125,7 +182,7 @@ mod tests {
     use std::time::Duration;
 
     use figment::Jail;
-    use figment::providers::{Env, Format, Toml};
+    use figment::providers::{Format, Toml};
     use restate_szamlazz::account::StaticResolver;
     use restate_szamlazz::config::{AccountMode, IssueConfig, ReadConfig, ResolveConfig};
 
@@ -195,8 +252,64 @@ mod tests {
         "#
     }
 
+    /// Loads `toml` as the binary would load a file: through [`PlainKeys`].
     fn load(toml: &str) -> Result<EndpointConfig> {
-        EndpointConfig::load(&Figment::from(Toml::string(toml)))
+        EndpointConfig::load(&Figment::from(PlainKeys(Toml::string(toml))))
+    }
+
+    /// Loads `toml` with the process environment's `RESTATE_SZAMLAZZ_`
+    /// overrides on top, as the binary does; call it inside a [`Jail`].
+    fn load_with_env(toml: &str) -> Result<EndpointConfig> {
+        EndpointConfig::load(
+            &Figment::from(PlainKeys(Toml::string(toml))).merge(EnvOverrides::new()),
+        )
+    }
+
+    /// Every documented example configuration — the fixtures, every TOML
+    /// block of the endpoint README, the library README, the workspace README
+    /// and the design document — loads and builds its accounts, so the
+    /// documentation cannot drift from what the loader accepts (a key the
+    /// loader does not know fails here).
+    #[test]
+    fn every_documented_example_loads() {
+        let documents = [
+            ("endpoint README", include_str!("../README.md")),
+            (
+                "library README",
+                include_str!("../../restate-szamlazz/README.md"),
+            ),
+            ("workspace README", include_str!("../../../README.md")),
+            (
+                "design document",
+                include_str!("../../../docs/design/restate-szamlazz.md"),
+            ),
+        ];
+        let mut examples = vec![
+            (
+                "fixtures/single.toml",
+                include_str!("../fixtures/single.toml"),
+            ),
+            (
+                "fixtures/multi.toml",
+                include_str!("../fixtures/multi.toml"),
+            ),
+        ];
+        for (name, document) in documents {
+            for block in document
+                .split("```toml\n")
+                .skip(1)
+                .filter_map(|rest| rest.split_once("```").map(|(block, _)| block))
+            {
+                examples.push((name, block));
+            }
+        }
+        assert!(examples.len() >= 6, "the documents carry TOML examples");
+
+        for (name, toml) in examples {
+            let config = load(toml).unwrap_or_else(|error| panic!("{name}: {error:#}\n{toml}"));
+            StaticResolver::try_from(config.accounts)
+                .unwrap_or_else(|error| panic!("{name}: {error}\n{toml}"));
+        }
     }
 
     #[test]
@@ -285,32 +398,40 @@ mod tests {
     /// Environment overrides address every level with `__`: the agent key
     /// and the mode under `[account]`, a document default under
     /// `[account.defaults]`, an issue-policy field, a read-policy field and
-    /// the namespace itself.
+    /// the namespace itself. Every value is a string the field's type reads:
+    /// `"3"` is `3` on a count, `"1.5"` on a factor, `"true"` on a flag,
+    /// `"90"` seconds on a duration, `"972720"` on the supplier pin — and an
+    /// all-digit agent key stays the string it was written as, leading zero
+    /// included.
     #[test]
-    fn environment_overrides_nest_with_double_underscores() {
+    fn environment_overrides_nest_with_double_underscores_and_are_read_as_strings() {
         Jail::expect_with(|jail| {
-            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", "from-env");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", "0071234");
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__MODE", "test");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__SUPPLIER_ID", "972721");
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY", "EUR");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__E_INVOICE", "true");
             jail.set_env("RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS", "3");
+            jail.set_env("RESTATE_SZAMLAZZ_ISSUE__FACTOR", "1.5");
+            jail.set_env("RESTATE_SZAMLAZZ_ISSUE__INITIAL_DELAY", "90");
             jail.set_env("RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS", "4");
             jail.set_env("RESTATE_SZAMLAZZ_NAMESPACE", "from-env");
 
-            let config = EndpointConfig::load(
-                &Figment::from(Toml::string(SPEC_EXAMPLE))
-                    .merge(Env::prefixed("RESTATE_SZAMLAZZ_").split("__")),
-            )
-            .expect("configuration should load");
+            let config = load_with_env(SPEC_EXAMPLE).expect("configuration should load");
 
             let account = config
                 .accounts
                 .account
                 .as_ref()
                 .expect("the single account");
-            assert_eq!(account.agent_key.expose(), "from-env");
+            assert_eq!(account.agent_key.expose(), "0071234", "byte-exact");
             assert_eq!(account.mode, AccountMode::Test);
+            assert_eq!(account.supplier_id, Some(972_721));
             assert_eq!(account.defaults.currency, "EUR");
+            assert!(account.defaults.e_invoice);
             assert_eq!(config.worker.issue.max_attempts, 3);
+            assert_eq!(config.worker.issue.factor.to_bits(), 1.5f32.to_bits());
+            assert_eq!(config.worker.issue.initial_delay, Duration::from_secs(90));
             assert_eq!(config.worker.read.max_attempts, 4);
             assert_eq!(config.worker.namespace.as_str(), "from-env");
             // Untouched values survive the merge.
@@ -318,6 +439,95 @@ mod tests {
             assert_eq!(account.defaults.language, "hu");
             assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
             assert_eq!(config.worker.read.max_delay, Duration::from_secs(30));
+            Ok(())
+        });
+    }
+
+    /// A string a numeric field cannot read is a parse error naming the
+    /// variable, not a silently defaulted setting.
+    #[test]
+    fn an_environment_value_the_field_cannot_read_is_refused() {
+        Jail::expect_with(|jail| {
+            jail.set_env("RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS", "three");
+            let error = load_with_env(minimal()).expect_err("`three` is not a count");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS"),
+                "{message}"
+            );
+            assert!(message.contains("\"three\""), "{message}");
+            Ok(())
+        });
+    }
+
+    /// The binary's sources: a file by extension — TOML, JSON or YAML — with
+    /// the environment on top; a missing file and an unknown extension are
+    /// refused before anything is read.
+    #[test]
+    fn sources_are_the_file_by_extension_and_the_environment() {
+        Jail::expect_with(|jail| {
+            jail.create_file("config.toml", minimal())?;
+            jail.create_file(
+                "config.json",
+                r#"{"namespace": "acct", "account": {"id": "acme", "agent_key": "k"}}"#,
+            )?;
+            jail.create_file(
+                "config.yaml",
+                "namespace: acct\naccount:\n  id: acme\n  agent_key: k\n",
+            )?;
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__MODE", "test");
+
+            for file in ["config.toml", "config.json", "config.yaml"] {
+                let figment = figment(Some(Path::new(file))).expect(file);
+                let config = EndpointConfig::load(&figment).expect(file);
+                assert_eq!(config.worker.namespace.as_str(), "acct", "{file}");
+                let account = config.accounts.account.as_ref().expect(file);
+                assert_eq!(account.id.as_str(), "acme", "{file}");
+                assert_eq!(
+                    account.mode,
+                    AccountMode::Test,
+                    "{file}: the environment is merged on top"
+                );
+            }
+
+            let error = figment(Some(Path::new("missing.toml"))).expect_err("missing");
+            assert!(
+                error.to_string().contains("config file not found"),
+                "{error}"
+            );
+
+            jail.create_file("config.ini", "namespace = acct")?;
+            let error = figment(Some(Path::new("config.ini"))).expect_err("unsupported");
+            assert!(
+                error.to_string().contains("unsupported config file format"),
+                "{error}"
+            );
+
+            // No file: the environment alone.
+            jail.set_env("RESTATE_SZAMLAZZ_NAMESPACE", "env");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__ID", "acme");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", "k");
+            let config =
+                EndpointConfig::load(&figment(None).expect("no file")).expect("environment only");
+            assert_eq!(config.worker.namespace.as_str(), "env");
+            Ok(())
+        });
+    }
+
+    /// A file's key paths render plainly in errors — `issue.factor`, not
+    /// figment's `default.issue.factor` — beside the file they came from.
+    #[test]
+    fn file_key_paths_render_without_the_profile_prefix() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "bad.toml",
+                &format!("{}\n[issue]\nfactor = \"x\"", minimal()),
+            )?;
+            let error = EndpointConfig::load(&figment(Some(Path::new("bad.toml"))).expect("file"))
+                .expect_err("`x` is not a factor");
+            let message = format!("{error:#}");
+            assert!(message.contains("for key \"issue.factor\""), "{message}");
+            assert!(message.contains("bad.toml TOML file"), "{message}");
             Ok(())
         });
     }
@@ -347,11 +557,7 @@ mod tests {
                 "publickeyv1_old,publickeyv1_new",
             );
 
-            let config = EndpointConfig::load(
-                &Figment::from(Toml::string(minimal()))
-                    .merge(Env::prefixed("RESTATE_SZAMLAZZ_").split("__")),
-            )
-            .expect("configuration should load");
+            let config = load_with_env(minimal()).expect("configuration should load");
 
             assert_eq!(config.identity_keys, ["publickeyv1_old", "publickeyv1_new"]);
             Ok(())
@@ -419,11 +625,7 @@ mod tests {
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY", "key-acme-env");
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__MODE", "live");
 
-            let config = EndpointConfig::load(
-                &Figment::from(Toml::string(MULTI))
-                    .merge(Env::prefixed("RESTATE_SZAMLAZZ_").split("__")),
-            )
-            .expect("configuration should load");
+            let config = load_with_env(MULTI).expect("configuration should load");
 
             let acme = &config.accounts.accounts["acme"];
             let beta = &config.accounts.accounts["beta_events"];
@@ -450,17 +652,68 @@ mod tests {
         });
     }
 
-    /// Both shapes in one file parse — figment cannot know they are exclusive
-    /// — and the static resolver refuses the combination when built.
+    /// Both shapes in one configuration are refused at load, naming both
+    /// tables and where each came from — in particular a multi-account file
+    /// plus a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` left over from the
+    /// flag day, which materialises a partial `[account]`: the error names
+    /// `account` and the rule, not `missing field id`.
     #[test]
-    fn both_shapes_are_refused_when_the_resolver_is_built() {
-        let config = load(&format!(
+    fn both_shapes_are_refused_at_load_naming_both_sources() {
+        let error = load(&format!(
             "{}\n[accounts.beta]\nid = \"beta\"\nagent_key = \"k\"\nsupplier_id = 1",
             minimal()
         ))
-        .expect("parses");
-        let error = StaticResolver::try_from(config.accounts).expect_err("both shapes");
-        assert!(error.to_string().contains("mutually exclusive"), "{error}");
+        .expect_err("both shapes in one file");
+        let message = format!("{error:#}");
+        assert!(message.contains("`account`"), "{message}");
+        assert!(message.contains("`accounts`"), "{message}");
+        assert!(message.contains("mutually exclusive"), "{message}");
+
+        Jail::expect_with(|jail| {
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", "stray");
+            let error = load_with_env(
+                r#"
+                    namespace = "acct"
+
+                    [accounts.acme]
+                    id = "acme"
+                    agent_key = "k"
+                    supplier_id = 1
+                    "#,
+            )
+            .expect_err("a stray single-shape override on a multi-account file");
+            let message = format!("{error:#}");
+            assert!(message.contains("`account`"), "{message}");
+            assert!(message.contains("environment variable"), "{message}");
+            assert!(message.contains("`accounts`"), "{message}");
+            assert!(message.contains("TOML source string"), "{message}");
+            assert!(
+                !message.contains("missing field"),
+                "the both-shapes rule, not the partial account's parse error: {message}"
+            );
+            assert!(
+                !message.contains("stray"),
+                "the key is not echoed: {message}"
+            );
+
+            // And the other way round: a stray scoped override on a
+            // single-account file.
+            jail.clear_env();
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY", "stray");
+            let error = load_with_env(minimal())
+                .expect_err("a stray multi-shape override on a single-account file");
+            let message = format!("{error:#}");
+            assert!(message.contains("mutually exclusive"), "{message}");
+            assert!(
+                message.contains("`accounts` from environment variables"),
+                "{message}"
+            );
+            assert!(
+                !message.contains("stray"),
+                "the key is not echoed: {message}"
+            );
+            Ok(())
+        });
     }
 
     /// The pre-release layout — `account.slug`, top-level `[defaults]` and
@@ -498,6 +751,154 @@ mod tests {
         assert!(message.contains("`[account.seller]`"), "{message}");
         assert!(!message.contains("`account.slug`"), "{message}");
         assert!(!message.contains("`[account.defaults]`"), "{message}");
+    }
+
+    /// An unknown key is refused at every level — the top level, a policy,
+    /// an account table and its `defaults` / `seller` / `seller.email`
+    /// sub-tables, in either shape — with an error naming the key, its path
+    /// and where it came from, instead of being ignored and leaving the
+    /// setting at its default.
+    #[test]
+    fn unknown_keys_are_refused_with_their_path_and_source() {
+        const MULTI: &str = r#"
+            namespace = "acct"
+
+            [accounts.acme]
+            id = "acme"
+            agent_key = "k"
+            supplier_id = 1
+        "#;
+        let cases = [
+            // A misspelt policy table leaves the issue policy at its default.
+            (
+                format!("{}\n[isue]\nmax_attempts = 1", minimal()),
+                "isue",
+                "issue",
+            ),
+            // A misspelt `mode` runs a test account as live.
+            (
+                format!("{}\nmod = \"test\"", minimal()),
+                "account.mod",
+                "mode",
+            ),
+            // A misspelt `supplier_id` drops the supplier pin.
+            (
+                format!("{}\nsupplyer_id = 1", minimal()),
+                "account.supplyer_id",
+                "supplier_id",
+            ),
+            (
+                format!("{}\n[account.defaults]\ncurency = \"EUR\"", minimal()),
+                "account.defaults.curency",
+                "currency",
+            ),
+            (
+                format!("{MULTI}\n[accounts.acme.seller]\nbnk = \"B\""),
+                "accounts.acme.seller.bnk",
+                "bank",
+            ),
+            (
+                format!("{MULTI}\n[accounts.acme.seller.email]\nsubjet = \"S\""),
+                "accounts.acme.seller.email.subjet",
+                "subject",
+            ),
+            (
+                format!("{}\n[read]\nmax_atempts = 1", minimal()),
+                "read.max_atempts",
+                "max_attempts",
+            ),
+            (
+                format!("{}\n[resolve]\nmax_attempts = 1", minimal()),
+                "resolve.max_attempts",
+                "max_delay",
+            ),
+        ];
+        for (toml, path, expected) in cases {
+            let error = load(&toml)
+                .err()
+                .unwrap_or_else(|| panic!("`{path}` must not load"));
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!("unknown key `{path}`")),
+                "the error names the key and its path: {message}"
+            );
+            assert!(
+                message.contains("TOML source string"),
+                "the error names the source: {message}"
+            );
+            assert!(
+                message.contains(&format!("`{expected}`")),
+                "the error lists what is expected there: {message}"
+            );
+        }
+
+        // Every unknown key is reported, not just the first.
+        let error = load(&format!("{}\nmod = \"test\"\n[isue]\nx = 1", minimal()))
+            .expect_err("two unknown keys");
+        let message = format!("{error:#}");
+        assert!(message.contains("unknown key `isue`"), "{message}");
+        assert!(message.contains("unknown key `account.mod`"), "{message}");
+
+        // The value under an unknown key is never echoed: a misspelt
+        // `agent_key` holds the secret.
+        let error = load(&format!(
+            "{}\nagent_kye = \"sentinel-secret-9f1c\"",
+            minimal()
+        ))
+        .expect_err("a misspelt agent_key");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("unknown key `account.agent_kye`"),
+            "{message}"
+        );
+        assert!(!message.contains("sentinel-secret-9f1c"), "{message}");
+
+        // The environment is a source like any other.
+        Jail::expect_with(|jail| {
+            jail.set_env("RESTATE_SZAMLAZZ_ACOUNT__MODE", "test");
+            let error = load_with_env(minimal())
+                .expect_err("a misspelt environment override must not load");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("unknown key `acount` (RESTATE_SZAMLAZZ_ACOUNT__MODE)"),
+                "the error names the key and the variable that set it: {message}"
+            );
+            assert!(message.contains("in environment variables"), "{message}");
+            Ok(())
+        });
+    }
+
+    /// A parse error names the key it happened at and where that key came
+    /// from — a wrong type under `[issue]` in a file, a wrong type under
+    /// `[account.defaults]` from the environment — not just serde's message.
+    #[test]
+    fn parse_errors_name_the_key_path_and_the_source() {
+        let error = load(&format!("{}\n[issue]\ninitial_delay = true", minimal()))
+            .expect_err("a boolean is not a duration");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("issue.initial_delay"),
+            "the error names the key path: {message}"
+        );
+        assert!(
+            message.contains("TOML source string"),
+            "the error names the source: {message}"
+        );
+
+        Jail::expect_with(|jail| {
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__E_INVOICE", "sometimes");
+            let error = load_with_env(minimal()).expect_err("`sometimes` is not a boolean");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__E_INVOICE"),
+                "the error names the variable: {message}"
+            );
+            assert!(
+                message.contains("in environment variables"),
+                "the error names the source: {message}"
+            );
+            Ok(())
+        });
     }
 
     #[test]

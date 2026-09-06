@@ -1,0 +1,50 @@
+identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]
+namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id ({namespace}:{order}:{kind}); permanent
+
+[issue]                       # optional; the issue policy: the run retry policy of the create and storno steps
+max_attempts = 5              # executions of the step, including the first
+initial_delay = "2m"          # before the first re-execution; longer than a client timeout plus the longest observed server stall
+factor = 2.0
+max_delay = "10m"
+max_duration = "1h"           # the hard bound on re-executing the step
+
+[read]                        # optional; the read policy: the run retry policy of every read-only step (lookups, verifies, hints, get, query, check_account)
+max_attempts = 3              # executions of the step, including the first
+initial_delay = "5s"          # before the first re-execution
+factor = 2.0
+max_delay = "30s"
+max_duration = "2m"           # the hard bound; sized to ride out szamlazz.hu's observed minute-long stalls
+
+[resolve]                     # optional; the resolve policy: the run retry policy of the `account` step (no attempt cap)
+initial_delay = "1s"
+factor = 2.0
+max_delay = "10s"
+max_duration = "1m"
+
+[account]
+id = "acme"                   # the account's identifier as the worker knows it; journaled with every invocation, shown in the Restate UI
+agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
+endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
+mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
+supplier_id = 972720          # optional pin; when set, validated against szallito/id on every document found under our external ids
+
+[account.defaults]            # all optional
+e_invoice = false
+language = "hu"
+currency = "HUF"
+exchange_rate_bank = "MNB"
+template = "default"
+send_email = false
+number_prefix = "..."
+extra_logo = "..."
+aggregator = "..."            # not overridable per call
+guardian = false              # not overridable per call
+
+[account.seller]              # all optional; account data used where absent
+bank = "..."
+bank_account = "..."
+signer_name = "..."
+[account.seller.email]
+reply_to = "..."
+subject = "..."
+body = "..."

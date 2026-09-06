@@ -8,13 +8,11 @@ mod config;
 
 use std::future::Future;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use clap::Parser;
-use figment::Figment;
-use figment::providers::{Env, Format, Json, Toml, Yaml};
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::http_server::HttpServer;
 use restate_sdk::service::Discoverable;
@@ -24,10 +22,6 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::EndpointConfig;
-
-/// The environment prefix of configuration overrides; `__` nests
-/// (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` → `account.agent_key`).
-const ENV_PREFIX: &str = "RESTATE_SZAMLAZZ_";
 
 /// The signals that stop the process, as the start-up log names them.
 #[cfg(unix)]
@@ -43,31 +37,24 @@ struct Cli {
     #[arg(long, value_name = "FILE", env = "CONFIG_FILE")]
     config: Option<PathBuf>,
 
+    /// Address to bind.
+    #[arg(long, value_name = "ADDR", default_value_t = IpAddr::V4(Ipv4Addr::UNSPECIFIED), env = "BIND_ADDR")]
+    bind: IpAddr,
+
     /// Port to listen on.
     #[arg(long, default_value = "9080", env = "PORT")]
     port: u16,
+
+    /// Load and validate the configuration, build the endpoint, log what
+    /// would be served and exit 0 — without listening. Non-zero with the
+    /// error otherwise. For CI and init containers.
+    #[arg(long)]
+    check_config: bool,
 }
 
 impl Cli {
     fn load_config(&self) -> Result<EndpointConfig> {
-        let mut figment = Figment::new();
-
-        if let Some(path) = self.config.as_deref() {
-            if !path.exists() {
-                bail!("config file not found: {}", path.display());
-            }
-
-            figment = match path.extension().and_then(|extension| extension.to_str()) {
-                Some("toml") => figment.merge(Toml::file(path)),
-                Some("json") => figment.merge(Json::file(path)),
-                Some("yaml" | "yml") => figment.merge(Yaml::file(path)),
-                _ => bail!("unsupported config file format; use .toml, .json, .yaml, or .yml"),
-            };
-        }
-
-        figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
-
-        EndpointConfig::load(&figment)
+        EndpointConfig::load(&config::figment(self.config.as_deref())?)
     }
 }
 
@@ -81,11 +68,16 @@ async fn main() -> Result<()> {
     let config = cli.load_config()?;
     let endpoint = build_endpoint(config)?;
 
+    if cli.check_config {
+        tracing::info!("configuration is valid; not listening (--check-config)");
+        return Ok(());
+    }
+
     // The signal handlers go in before the port opens: from the moment a
     // Restate server can reach the endpoint, a stop is honoured rather than
     // fatal.
     let stop = stop_signal().context("failed to install the stop signal handlers")?;
-    let bind_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cli.port));
+    let bind_addr = SocketAddr::from((cli.bind, cli.port));
     let listener = TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("failed to bind {bind_addr}"))?;
@@ -206,6 +198,10 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::result_large_err,
+    reason = "`figment::Jail::expect_with` dictates the closure's `figment::Error` return type"
+)]
 mod tests {
     use figment::Figment;
     use figment::providers::{Format, Toml};
@@ -290,7 +286,9 @@ mod tests {
     fn missing_config_file_is_reported() {
         let cli = Cli {
             config: Some(PathBuf::from("/nonexistent/restate-szamlazz.toml")),
+            bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 9080,
+            check_config: false,
         };
 
         let error = cli.load_config().expect_err("a missing file should fail");
@@ -326,18 +324,70 @@ mod tests {
             .await;
 
         let config = config("", &format!("{}/", server.uri()), "agent-key");
-        // What every handler's prologue does: resolve, fetch, open.
+        let outcome = gateway(config)
+            .await
+            .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
+            .await;
+
+        assert_eq!(outcome, Ok(QueryOutcome::NotFound));
+    }
+
+    /// An agent key given through the environment reaches szamlazz.hu exactly
+    /// as written — an all-digit key with a leading zero included, which a
+    /// value parsed as a number would lose.
+    #[tokio::test]
+    async fn an_all_digit_agent_key_from_the_environment_reaches_the_gateway_byte_exact() {
+        const KEY: &str = "0071234";
+        let server = MockServer::start().await;
+        query()
+            .and(body_string_contains(format!(
+                "<szamlaagentkulcs>{KEY}</szamlaagentkulcs>"
+            )))
+            .respond_with(not_found())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut loaded = None;
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "restate-szamlazz.toml",
+                &format!(
+                    r#"
+                    namespace = "acct"
+
+                    [account]
+                    id = "acme"
+                    mode = "test"
+                    endpoint = "{}/"
+                    "#,
+                    server.uri()
+                ),
+            )?;
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", KEY);
+            let figment = config::figment(Some(std::path::Path::new("restate-szamlazz.toml")))
+                .expect("the sources should assemble");
+            loaded = Some(EndpointConfig::load(&figment).expect("configuration should load"));
+            Ok(())
+        });
+        let config = loaded.expect("the configuration was loaded inside the jail");
+
+        let outcome = gateway(config)
+            .await
+            .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
+            .await;
+
+        assert_eq!(outcome, Ok(QueryOutcome::NotFound));
+    }
+
+    /// What every handler's prologue does with the loaded accounts: resolve
+    /// the unscoped account, fetch its credentials, open the gateway.
+    async fn gateway(config: EndpointConfig) -> Gateway {
         let accounts = Accounts::from(
             StaticResolver::try_from(config.accounts).expect("accounts should build"),
         );
         let account = accounts.resolve(None).await.expect("the unscoped account");
         let credentials = accounts.fetch(&account).await.expect("its credentials");
-        let gateway = Gateway::open(account, credentials).expect("gateway should build");
-
-        let outcome = gateway
-            .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
-            .await;
-
-        assert_eq!(outcome, Ok(QueryOutcome::NotFound));
+        Gateway::open(account, credentials).expect("gateway should build")
     }
 }

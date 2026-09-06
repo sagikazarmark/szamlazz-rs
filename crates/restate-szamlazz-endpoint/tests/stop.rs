@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_restate-szamlazz");
 
+/// The default bind address, every interface.
+const ANY: &str = "0.0.0.0";
+
 /// The message of the start-up log line; it follows the bind and the signal
 /// handlers, so once it is out a stop is honoured.
 const STARTED: &str = "starting Restate szamlazz.hu endpoint";
@@ -28,7 +31,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
 fn sigterm_stops_the_endpoint_with_status_0() {
-    let stopped = Endpoint::start().stop("TERM");
+    let stopped = Endpoint::start(ANY).stop("TERM");
 
     stopped.assert_status_0();
     assert!(
@@ -40,7 +43,7 @@ fn sigterm_stops_the_endpoint_with_status_0() {
 
 #[test]
 fn sigint_stops_the_endpoint_with_status_0() {
-    let stopped = Endpoint::start().stop("INT");
+    let stopped = Endpoint::start(ANY).stop("INT");
 
     stopped.assert_status_0();
     assert!(
@@ -55,7 +58,7 @@ fn sigint_stops_the_endpoint_with_status_0() {
 /// process.
 #[test]
 fn the_start_up_log_names_the_bound_address_and_the_stop_signals() {
-    let endpoint = Endpoint::start();
+    let endpoint = Endpoint::start(ANY);
     let line = endpoint.start_line();
 
     assert_ne!(endpoint.port(), 0, "an ephemeral port was bound: {line}");
@@ -67,9 +70,23 @@ fn the_start_up_log_names_the_bound_address_and_the_stop_signals() {
     endpoint.stop("TERM").assert_status_0();
 }
 
-/// A running endpoint: the child, its stdout lines as a reader thread hands
-/// them over, and the lines seen so far (the last one is the start-up line).
+/// `--bind` replaces the default `0.0.0.0`: the start-up line names the
+/// address that was asked for.
+#[test]
+fn bind_selects_the_address() {
+    let endpoint = Endpoint::start("127.0.0.1");
+    let line = endpoint.start_line();
+
+    assert_ne!(endpoint.port(), 0, "bound on 127.0.0.1: {line}");
+
+    endpoint.stop("TERM").assert_status_0();
+}
+
+/// A running endpoint: the address it was asked to bind, the child, its
+/// stdout lines as a reader thread hands them over, and the lines seen so far
+/// (the last one is the start-up line).
 struct Endpoint {
+    bind: &'static str,
     child: Child,
     lines: Receiver<String>,
     log: Vec<String>,
@@ -82,12 +99,12 @@ struct Stopped {
 }
 
 impl Endpoint {
-    /// Spawns the binary on an ephemeral port with an environment-only
-    /// configuration and waits for its start-up line; fails with the log
-    /// when the process exits first or [`START_TIMEOUT`] passes.
-    fn start() -> Self {
+    /// Spawns the binary on `bind` and an ephemeral port with an
+    /// environment-only configuration and waits for its start-up line; fails
+    /// with the log when the process exits first or [`START_TIMEOUT`] passes.
+    fn start(bind: &'static str) -> Self {
         let mut child = Command::new(BINARY)
-            .args(["--port", "0"])
+            .args(["--bind", bind, "--port", "0"])
             .env_clear()
             .env("RUST_LOG", "info")
             .env("NO_COLOR", "1")
@@ -113,6 +130,7 @@ impl Endpoint {
         });
 
         let mut endpoint = Self {
+            bind,
             child,
             lines,
             log: Vec::new(),
@@ -150,11 +168,12 @@ impl Endpoint {
         self.log.last().expect("the start-up line was seen")
     }
 
-    /// The port of the `addr=0.0.0.0:{port}` field of the start-up line.
+    /// The port of the `addr={bind}:{port}` field of the start-up line, at
+    /// the address the endpoint was asked to bind.
     fn port(&self) -> u16 {
         let line = self.start_line();
         let (_, rest) = line
-            .split_once("addr=0.0.0.0:")
+            .split_once(&format!("addr={}:", self.bind))
             .unwrap_or_else(|| panic!("the start-up line should name the bound address: {line}"));
         rest.split_whitespace()
             .next()

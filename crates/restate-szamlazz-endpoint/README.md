@@ -95,9 +95,35 @@ RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY="..." \
 restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS=5`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). `namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, and — per account — its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`.
+Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS=5`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). An environment value is read as the **string** it was set to, and the key's type decides what it means: `3` is a count on `max_attempts`, `1.5` a factor, `true` a flag, `90` ninety seconds on a duration — and an agent key is taken exactly as written, so an all-digit key keeps its leading zeros (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY=0071234` reaches szamlazz.hu as `0071234`; no quoting needed). Durations are `"90s"`, `"2m"`, `"1h"` or a bare non-negative integer of seconds, in the file and in the environment alike.
 
-The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is not supported and fails to load with an error naming the moved keys.
+`namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, and — per account — its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`.
+
+**The configuration is strict.** A key the binary does not know — at any level: the top level, a policy table, an account table, its `defaults`, `seller` or `seller.email` — is refused at start-up with an error naming the key, its path, where it came from and what is accepted there, instead of being ignored and leaving the setting at its default:
+
+```
+Error: invalid configuration
+
+Caused by:
+    2 unknown keys:
+      unknown key `account.mod` in restate-szamlazz.toml TOML file; expected one of `id`, `agent_key`, `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`
+      unknown key `isue` (RESTATE_SZAMLAZZ_ISUE__MAX_ATTEMPTS) in environment variables; expected one of `namespace`, `issue`, `read`, `resolve`, `account`, `accounts`, `identity_keys`
+```
+
+Every unknown key is reported at once. A value of the wrong type is refused the same way, naming the key and the source (`invalid type: found string "three", expected u32 for key "RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS" in environment variables`); `[account]` together with a non-empty `[accounts]` names both tables and where each came from — the case of a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` left over after the [flag day](#single--multi-flag-day), which would otherwise materialise a partial `[account]`. The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is refused with the same error, each moved key named with where it went. Then the invariants are checked (`WorkerConfig::validate`, the static resolver's account rules) and the process exits with the first violated one.
+
+**Check a configuration without starting.** `--check-config` loads and validates the configuration, builds the endpoint — so an account or identity-key error surfaces too — logs the same summary the start-up log prints and exits 0 without listening; an invalid configuration exits non-zero with the error. Run it in CI and as an init container before the real process:
+
+```sh
+$ restate-szamlazz --check-config --config restate-szamlazz.toml
+INFO restate_szamlazz: loaded szamlazz.hu account configuration namespace=acct scoped=false accounts=1
+INFO restate_szamlazz: szamlazz.hu account scope="<unscoped>" account=acme mode=Live endpoint=https://www.szamlazz.hu/szamla/ supplier_id=Some(972720)
+INFO restate_szamlazz: bound Restate service service=Szamlazz.Order kind=VirtualObject handlers=8
+INFO restate_szamlazz: bound Restate service service=Szamlazz.Agent kind=Service handlers=4
+INFO restate_szamlazz: configuration is valid; not listening (--check-config)
+```
+
+The two example files under [`fixtures/`](fixtures) — the single-account configuration above and the multi-account one below — are what the test suite runs `--check-config` against.
 
 ## Multi-account mode
 
@@ -108,7 +134,7 @@ namespace = "acct"            # one namespace for the deployment; every account'
 
 [accounts.acme]               # reachable as /restate/scope/acme/call/…
 id = "acme"
-agent_key = "..."             # prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
+agent_key = "acme-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
 supplier_id = 972720          # REQUIRED in this shape
 mode = "live"
 
@@ -117,7 +143,7 @@ bank_account = "..."
 
 [accounts.beta_events]        # reachable as /restate/scope/beta_events/call/…
 id = "beta"
-agent_key = "..."             # prefer RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__AGENT_KEY
+agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__AGENT_KEY
 supplier_id = 972721
 ```
 
@@ -184,10 +210,10 @@ The mapping is append-only: moving traffic to another szamlazz.hu account means 
 ## Running
 
 ```sh
-restate-szamlazz --config restate-szamlazz.toml --port 9080
+restate-szamlazz --config restate-szamlazz.toml --bind 0.0.0.0 --port 9080
 ```
 
-`--config` and `--port` also read `CONFIG_FILE` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). The endpoint binds `0.0.0.0:{port}` (`--port 0` takes an ephemeral one; the start-up log names the bound address) and speaks HTTP/2 only, as every Restate SDK endpoint does.
+`--config`, `--bind` and `--port` also read `CONFIG_FILE`, `BIND_ADDR` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). The endpoint binds `{bind}:{port}` — `0.0.0.0:9080` by default; `--bind 127.0.0.1` keeps it off the network, `--port 0` takes an ephemeral port; the start-up log names the bound address — and speaks HTTP/2 only, as every Restate SDK endpoint does. `--check-config` validates and exits instead (see [Configuration](#configuration)).
 
 Register it with a Restate server:
 
