@@ -68,8 +68,8 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
   - Every `Found` document is validated before it is trusted, against the pins of the invocation's resolved
     `Account`: `rendelesszam == order ∧ tipus ∈ kind-set ∧ teszt == account.mode ∧ (account.supplier_id unset ∨
     szallito/id == account.supplier_id)`; anything else → `conflict{external_id_collision}`. `mode` defaults to
-    `live` and is always checked; `supplier_id` is optional in the single-account shape and required in the
-    multi-account shape (§9). The account pins (`teszt`, `szallito/id`) are checked on **every** found document, by
+    `live` and is always checked; `supplier_id` — `szallito/id`, the id of the account's seller record on every
+    document it issues — is an optional pin in both configuration shapes (§9). The account pins (`teszt`, `szallito/id`) are checked on **every** found document, by
     external id or by number: `Szamlazz.Order`'s verifies (a storno's or a corrective's invoice, the proforma of
     `options.proforma: {number}`) and `Szamlazz.Agent.query` / `storno` raise `TerminalError{account_mismatch}` on a
     document that fails them (§4, §5, §6), so a misconfigured account fails on its first found document on any
@@ -594,9 +594,13 @@ all-digit agent key keeps its leading zeros; figment's own environment provider 
 mutually exclusive (both present is a load error) and there is no default account. Each account is reachable under
 its scope only (`/restate/scope/{scope}/call/…`); an unscoped request is `unknown_account`, as a scoped request is on
 the single-account shape. Load-time validation enforces the checkable half of the resolver's safety contract — one
-szamlazz.hu account under exactly one scope, no fan-in: `supplier_id` required on every account (the only
-server-side account identity), unique supplier ids, unique `(endpoint, agent_key)` pairs, unique ids (the credential
-reference). Scope keys are `[a-z0-9_]`, 1–36 bytes: a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`,
+szamlazz.hu account under exactly one scope, no fan-in: unique `(endpoint, agent_key)` pairs, unique ids (the
+credential reference), and unique `supplier_id`s among the accounts that pin one. The pin is optional in this shape
+too: `szallito/id` is the id of the account's seller record as printed on every document it issues — a proxy for the
+account that szamlazz.hu documents nowhere and the worker cannot verify (no operation answers "which account am I?";
+`check_account` finds no document) — so requiring it would make onboarding depend on an operator-recorded number
+without adding a server-verified fact; set, it catches a key configured under the wrong scope on the first found
+document, which `mode` alone cannot. Scope keys are `[a-z0-9_]`, 1–36 bytes: a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`,
 non-empty, at most 36 characters — ASCII, so bytes; a dashed UUID is exactly 36) chosen so that environment overrides can address them
 (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the documented constraint
 on the account identifiers a caller uses as scopes with the static resolver. The namespace is one per deployment and
@@ -608,12 +612,11 @@ namespace = "acct"
 [accounts.acme]
 id = "acme"
 agent_key = "acme-key"        # distinct per account: a shared (endpoint, agent_key) pair is refused at load
-supplier_id = 972720          # required
+supplier_id = 972720          # optional pin, as in [account]; two accounts pinning the same id are refused at load
 
 [accounts.beta_events]
 id = "beta"
 agent_key = "beta-key"
-supplier_id = 972721
 ```
 
 **Single → multi flag day** (no data migration; the namespace stays, so the first scoped create for an

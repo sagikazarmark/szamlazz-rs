@@ -64,9 +64,11 @@ teszt == account.mode ∧ (account.supplier_id unset ∨ szallito/id == supplier
 `conflict{external_id_collision}` (`InvoiceDocumentExt::is_ours`). External ids are not unique server-side (verified),
 so this is the only protection against adopting a stranger's document. *Amended (ADR 0006):* `account` is the
 invocation's journaled `Account`, resolved from the scope — the pins are per account, not per deployment; `mode`
-defaults to `live` and is always checked, and `supplier_id` (the only server-side account identity a found document
-exposes) is optional in the single-account shape and required in the multi-account shape, where it also enforces
-"one szamlazz.hu account under exactly one scope" at load time.
+defaults to `live` and is always checked, and `supplier_id` — `szallito/id`, the id of the account's seller record on
+every document it issues, a proxy for the account the worker cannot verify against the server — is an optional pin in
+both configuration shapes (ADR 0006, XPRB amendment); set, two accounts pinning the same id are refused at load. The
+non-uniqueness of external ids was re-confirmed on 2026-09-06 (same kind, across kinds, original vs. its storno, and
+reusable after a reversal — the *Reissue* path end to end).
 
 **Retry identity is Restate's ingress `Idempotency-Key`**, supplied by the caller. The service does not know
 whether one was used and never relies on it for safety: the external-id query inside the create step — the first

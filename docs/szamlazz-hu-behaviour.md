@@ -9,8 +9,10 @@ enabled (`<eszamla>1</eszamla>`), every document marked `<teszt>true</teszt>`, a
 part of this repository; `P48-P0`…`P48-P7` are the storno-date probes of issue #48 (supplier id 972720,
 13 documents `CTEST-2026-82`…`91`, `D-CTEST-17`); `P60-H1`…`H5`, `P60-E1`…`E3`, `P60-V1`/`V2` are the line-item
 rounding probes of issue #60 (2026-09-06, same account: `CTEST-2026-92`…`99`, each stornoed as
-`E-CTEST-2026-1`…`8`; `CTEST-2026-92`…`97` in one run, `98`/`99` in a follow-up). Restate runtime facts live in
-ADRs 0001, 0002, 0004 and 0005, not here.
+`E-CTEST-2026-1`…`8`; `CTEST-2026-92`…`97` in one run, `98`/`99` in a follow-up); `XPRB-P1`…`P6` are the
+external-id uniqueness re-check of 2026-09-06 (same account: `CTEST-2026-102`…`111`, `D-CTEST-18`; every
+invoice stornoed, the proforma deleted; a scratch harness on the `szamlazz-agent` crate, outside the
+repository). Restate runtime facts live in ADRs 0001, 0002, 0004 and 0005, not here.
 
 Treat these as facts about *that* account. Some may depend on account settings (e-invoice, cash
 accounting), and szamlazz.hu may change any of them without notice; the go-live checklist at the end
@@ -49,13 +51,14 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| **Not unique**: two `SZ` under different orders with the same external id → both issued, no warning. | A3-create1/2 | Validate every `Found` document (`rendelesszam`, `tipus`, `teszt`, `szallito/id` when pinned), else `conflict{external_id_collision}`. |
-| Query and PDF by a shared external id return the **latest** holder (last-writer-wins): 50 over 49; 74 over 72. | A3-query-ext, A3-pdf-ext, A5-q-ext | The newest holder is exactly the document a create asks about, so `{namespace}:{order}:{kind}` needs no generation suffix; a reissue becomes the newest holder and the stornoed original stays reachable by number and via the storno's `hivszamlaszam`. |
+| **Not unique**: two `SZ` under different orders with the same external id → both issued, no warning. Re-checked three days later, with the same result, and extended: the same id on a `D` and then an `SZ` under two other orders → both issued (not unique **across kinds** either); the same id on an `SZ` and, in the storno request, on its own `SS` → the `SS` is issued carrying it (not unique between an original and its reversal). szamlazz.hu's documentation describes `szamlaKulsoAzon` only as "the invoice can be identified with this key by the third party system … later the invoice can be queried with this key"; it names no uniqueness rule and no duplicate code — unlike the order number, which has the account toggle and 71/152. | A3-create1/2; XPRB-P1 (`102`, `103`), XPRB-P3 (`D-CTEST-18`, `104`), XPRB-P4 (`105` → `SS` `106`) | Validate every `Found` document (`rendelesszam`, `tipus`, `teszt`, `szallito/id` when pinned), else `conflict{external_id_collision}`. The id is a tag, never a key: nothing about `{namespace}:{order}:{kind}` may assume the server refuses a second holder. |
+| Query and PDF by a shared external id return the **latest** holder (last-writer-wins): 50 over 49; 74 over 72; `103` over `102`; the `SZ` `104` over the `D`; the `SS` `106` over its original `105`. | A3-query-ext, A3-pdf-ext, A5-q-ext; XPRB-P1/P3/P4 | The newest holder is exactly the document a create asks about, so `{namespace}:{order}:{kind}` needs no generation suffix; a reissue becomes the newest holder and the stornoed original stays reachable by number and via the storno's `hivszamlaszam`. |
+| An external id is **reusable after its holder is reversed**: `SZ` `102` (order A, id *shared*) stornoed → a new `SZ` `108` under the same order A with the same id was issued; query by the id and by order A → `108`. | XPRB-P6 | The *Reissue* path end to end: the lookup step sees the reversed holder, the create step sends with the same id, the new document becomes the newest holder. No new id, no suffix. |
 | Read-your-writes lag **≈ 0**: query by external id succeeded 771 ms after the create returned, and at +2 s, +10 s, +60 s; `pdf --external-id` works. | A1-q0/q2/q10/q60, A1-pdf | The 2-minute re-check gap is justified by in-flight requests (see Latency), not by lag. |
 | A 110-character id containing `: . _ -` and a unicode id were accepted and queryable. | A2-create-long, A2-create-uni | `{namespace}:{order}:{kind}`, `…:corrective:{correction_id}` and `…:storno:{number}` fit without hashing. |
 | **Never echoed**: the query XML has `<rendelesszam>` but no external-id element; create responses carry none either. | A1-q-raw; every query in A–D | The id → number mapping is readable only by querying *with* the id, which is why the id must be derivable from the key alone. |
 | Attaches **only on the call that creates**: a replayed create with another id (A4a), a repeat storno with a new id (B4x), a padded replay (C4) stored nothing — query by those ids → 7. | A4a-2, B4x-query-new-extid, C4 `prb-c-case-3` | A first send that lands as a replay of a pre-existing identical document is invisible by external id; only the order-number hint finds it (`conflict{foreign}`). |
-| On `xmlszamlast` the external id **attaches to the `SS`**: the storno document is queryable by the storno request's id (`tipus=SS`, `hivszamlaszam` = original); the original keeps its own id. | B6-storno-with-extid, B6-query-storno-extid, B6-query-orig-extid | Storno gets a query-first guard under `{namespace}:{order}:storno:{original_number}`. |
+| On `xmlszamlast` the external id **attaches to the `SS`**: the storno document is queryable by the storno request's id (`tipus=SS`, `hivszamlaszam` = original); the original keeps its own id. When the storno request carries the *original's* id, the `SS` takes it too and becomes the newest holder — a query by the original's id then returns the `SS`, and the original is reachable only by number (with `sztornozott=true`). | B6-storno-with-extid, B6-query-storno-extid, B6-query-orig-extid; XPRB-P4 | Storno gets a query-first guard under `{namespace}:{order}:storno:{original_number}` — its **own** id, never the original's, or the order's `…:{kind}` id would resolve to the `SS` (`tipus` mismatch → `conflict{external_id_collision}` instead of `reversed`). |
 | The external id of a deleted or converted proforma → 7. | D1-query-extid, D4-query-proforma-extid, C2-5 | A proforma 7 by id means deleted *or* consumed; `get` disambiguates via the invoice's or prepayment's `hivdijbekszam`. |
 
 ## Reversal signals
@@ -127,7 +130,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Header presence is **per operation**: create (152, 73), storno (14, 221, 352) and delete-proforma (335) set `szlahu_error_code` + `szlahu_error`; query (7) and credit (463) are **body-only**. | A6, B3/B5/B7, C6, D1, D8 | The crate must always parse `<hibakod>`; never detect errors from headers alone. |
 | Code 7's text — "Hiányzó adat: számla xml (ismeretlen számlaszám, rendelésszám vagy külső azonosító)." — covers unknown number, order number *or* external id, and also a consumed proforma. | D1-query-*, C2-5 | 7 is "not on the query surface", not "never existed". |
 | Codes 14, 73, 221, 352, 463 were not named in the crate at probe time (parsed as `Unknown`). | error.rs review | Type them; none is retryable. The classification a document-issuing caller acts on is `ErrorCode::outcome_class()` (#13): `Unknown` = 1, 55, 56 without a number and every code the crate does not know — a new code may be a refusal or a new "issued, but…" code, so the worker re-queries and, with nothing under the external id, faults `outcome_unknown` rather than answer `rejected`; typing the code is what settles it as a refusal. `DuplicateOrderNumber` = 71/152, `NotFound` = 7, `Rejected` = the rest (the credential codes included). |
-| The `szlahu_id` header is the **document id** (= `alap/id` = `gazdEsemAzon`), different for every document. The supplier id is `szallito/id` (972720 on this account, identical on 10/10 queries) and appears **only in query bodies** — create responses have no `<szallito>`. | C3, D9 | The account's `supplier_id` pin (optional in the single-account shape, required in the multi-account shape — it is the only server-side account identity) is checked against `szallito/id` on every document found under our external ids; a not-found probe (`check_account`) cannot cross-check it; any text calling `szlahu_id` the supplier id is wrong. |
+| The `szlahu_id` header is the **document id** (= `alap/id` = `gazdEsemAzon`), different for every document. `szallito/id` is the id of the **seller record** — the `<szallito>` block is the seller as printed on the document (`nev` "TESZT - Cloud Community Hungary Kft.", address, tax number, bank), and `<id>` is szamlazz.hu's row id for it: 972720 on this account, identical on 10/10 queries on 2026-09-03 and 12/12 on 2026-09-06 (`SZ`, `SS`, `D`), and it appears **only in query bodies** — create responses have no `<szallito>`. szamlazz.hu documents the element nowhere (the XSD has it `int`, mandatory, unannotated; the Adatkapcsolat sample comments every neighbour and leaves it blank); the same `szallitoTipus` names the third-party vendor on an incoming invoice, so it is a party-record id, not an account id. One account is one company (an agent key belongs to the account; a multi-account user is 164), which is what makes it a usable **proxy** for the account. | C3, D9; XPRB-P1…P6 (every query) | The account's `supplier_id` pin — optional in both configuration shapes — is checked against `szallito/id` on every document found under our external ids or by number; when set it catches a key/scope swap on the first found document, which `teszt` alone cannot. A not-found probe (`check_account`) cannot cross-check it; the worker has no way to verify the configured value (there is no "whoami" operation), so it is an operator-recorded fact, not a server-verified one. Any text calling `szlahu_id` the supplier id, or `szallito/id` "the only server-side account identity", is wrong. |
 | Success headers on create/storno/credit: `szlahu_szamlaszam`, `szlahu_id`, `szlahu_kintlevoseg`, `szlahu_vevoifiokurl`, …; delete success sets none. | A1, D1, D3 | — |
 
 ## Latency
@@ -151,8 +154,8 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Caveat | Why it matters |
 |---|---|
-| Everything above is one TEST account, two days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents and the 8 `P60-*` invoices with their 8 stornos). | Nothing here is a documented guarantee. |
-| Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | The account's `mode` (default `live`) is validated against `<teszt>` on every document found under our external ids; the live account has a different supplier id and `teszt=false`. In multi-account mode each account carries its own `mode` and `supplier_id`. |
+| Everything above is one TEST account, two days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents, the 8 `P60-*` invoices with their 8 stornos, and the 6 `XPRB-*` documents with their 5 stornos). | Nothing here is a documented guarantee. |
+| Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | The account's `mode` (default `live`) is validated against `<teszt>` on every document found under our external ids; a live account has `teszt=false` and its own seller-record id. In multi-account mode each account carries its own `mode` and, optionally, `supplier_id`. |
 | E-invoicing is enabled (`<eszamla>1</eszamla>` on all but `D`/`SL`). | 352 (kelt must be today) on storno may be an e-invoice rule; behavior on paper-invoice accounts is unknown. The same may hold for an explicit storno `teljesitesDatum`, accepted here (P48). |
 | The test account did not produce 56 for bad addresses. | Either test accounts do not send mail or 56 is raised only on synchronous hand-off failures. |
 | Other probes were issuing concurrently, so `CTEST-2026-*` numbers are not contiguous. | Irrelevant to the facts; noted so the raw logs are not misread. |
@@ -169,7 +172,18 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   `SZ`-vs-`SZ`, `SL`-vs-`SL` and `SZ`-from-`D` were exercised). Moderate for correctives; the
   external-id query inside the create step is the working guard.
 - Due date, fulfillment date, item fields, address, currency in the replay fingerprint; the "2 days"
-  window. Low: the replay is no longer the primary guard.
+  window. Partly settled by szamlazz.hu's own documentation (*Order number and duplicate checking*,
+  2026-09-06): the replay requires the buyer name, the gross total, `keltDatum`, `fizetesiHataridoDatum`
+  and `teljesitesDatum` to match, and the earlier invoice to be at most 2 days old — so the three dates
+  are in the fingerprint and the window is 2 days. Not observed here; and the documented `keltDatum`
+  clause sits oddly beside A4b (a ±1-day `keltDatum` replayed), which the P48-P5 replacement of the sent
+  date by today explains. Low: the replay is no longer the primary guard.
+- Whether `szallito/id` is **stable across edits of the seller data** (company name, address, bank
+  account in Settings): if szamlazz.hu snapshots a new seller record per edit, documents issued before
+  and after an edit would carry different ids on the same account and a pinned `supplier_id` would
+  `account_mismatch` on one side. Cheap to settle on the test account (edit the seller address, issue
+  one document, compare to 972720). Moderate for a deployment that pins it; none for one that does not
+  (the pin is optional in both shapes).
 - 352 on **create** does not exist on this account (P48-P5: the date is silently replaced by today);
   whether a live or non-e-invoice account rejects, replaces or *keeps* a non-today `keltDatum` is
   unverified. Low–moderate: the service does not pin `issue_date` unless the caller supplies it, and a
@@ -236,7 +250,7 @@ before starting.
 
 | Step | Probe | Expect | Feeds |
 |---|---|---|---|
-| 1 | A1 — create with an external id, query by it at +0/+2/+10/+60 s | Hit every time; `<teszt>false</teszt>`; note `szallito/id` | The account's `supplier_id` and `mode = live` (per account in multi-account mode), lag ≈ 0 |
+| 1 | A1 — create with an external id, query by it at +0/+2/+10/+60 s | Hit every time; `<teszt>false</teszt>`; note `szallito/id` | `mode = live` (per account in multi-account mode) and, if the deployment pins it, the account's `supplier_id`; lag ≈ 0 |
 | 2 | A4-base — byte-identical resend of a create | Same number, byte-identical response | Toggle ON confirmed; replay guard works |
 | 3 | A4c — resend with the buyer name changed only in case/trailing space | 152 naming the trimmed order number | Fingerprint is byte-exact on the buyer name; 152 header shape |
 | 4 | A5 — create → storno → byte-identical resend | A **new** invoice; order number reusable | Replay ends at storno (ADR 0003 hazard is real here too) |

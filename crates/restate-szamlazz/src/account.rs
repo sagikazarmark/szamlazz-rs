@@ -66,8 +66,11 @@ pub struct Account {
     /// `teszt` on every document found under our external ids. Default live.
     #[serde(default)]
     pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`). Optional pin; when set it is
-    /// validated against every document found under our external ids.
+    /// The account's supplier id (`szállító/id`): szamlazz.hu's id for the
+    /// seller record printed on every document the account issues, a proxy
+    /// for the account. Optional pin in every configuration shape; when set it
+    /// is validated against every document found, under our external ids or
+    /// by number.
     #[serde(default)]
     pub supplier_id: Option<u64>,
     /// The Számla Agent endpoint. Default: production.

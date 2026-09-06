@@ -26,12 +26,11 @@
 //! [accounts.acme]
 //! id = "acme"
 //! agent_key = "..."
-//! supplier_id = 972720                           # required here
+//! supplier_id = 972720                           # optional here too
 //!
 //! [accounts.beta_events]
 //! id = "beta"
 //! agent_key = "..."
-//! supplier_id = 972721
 //! ```
 //!
 //! Both present is a load error; there is no default account. The scope keys
@@ -44,11 +43,16 @@
 //! chooses the file format and environment merging. [`StaticResolver`] is
 //! built from a parsed [`StaticConfig`] with `TryFrom`, which validates what
 //! `Deserialize` cannot — including the checkable half of the resolver's
-//! safety contract in the multi-account shape: a supplier id on every
-//! account, unique supplier ids, unique `(endpoint, agent_key)` pairs and
-//! unique ids, so that no szamlazz.hu account is reachable under two scopes.
-//! It implements both [`AccountResolver`] and [`CredentialStore`]: the agent
-//! key is inline and the credential reference is the account id.
+//! safety contract in the multi-account shape: unique ids, unique
+//! `(endpoint, agent_key)` pairs and, where set, unique supplier ids, so that
+//! no szamlazz.hu account is knowingly reachable under two scopes. The
+//! supplier id is optional in both shapes: it is the id of the account's
+//! seller record as szamlazz.hu prints it on every document (`szallito/id`),
+//! a proxy for the account that the worker cannot verify against the server
+//! (no operation answers "which account am I?"), so it is a pin the operator
+//! records, not an identity the worker establishes. It implements both
+//! [`AccountResolver`] and [`CredentialStore`]: the agent key is inline and
+//! the credential reference is the account id.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -97,8 +101,10 @@ pub struct StaticAccount {
     /// validated against `teszt`.
     #[serde(default)]
     pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`), an ownership pin: optional
-    /// in the single-account shape, required in the multi-account shape.
+    /// The account's supplier id (`szállító/id`, the seller record's id), an
+    /// optional ownership pin in both shapes. When set it is validated
+    /// against every found document and catches a key configured under the
+    /// wrong scope on the first one; `teszt` alone cannot.
     #[serde(default)]
     pub supplier_id: Option<u64>,
     /// Document defaults that per-call overrides may change.
@@ -182,15 +188,6 @@ pub enum StaticConfigError {
         /// Why the endpoint is invalid.
         source: InvalidEndpoint,
     },
-    /// An account of the multi-account shape has no `supplier_id`, which is
-    /// the only server-side identity the worker can validate against.
-    #[error("{table}.supplier_id is required in the multi-account shape (account {id})")]
-    MissingSupplierId {
-        /// The account's table.
-        table: AccountTable,
-        /// The account.
-        id: AccountId,
-    },
     /// Two accounts share an `id`, which is also their credential reference.
     #[error("{first} and {second} share the id {id}")]
     DuplicateId {
@@ -201,8 +198,9 @@ pub enum StaticConfigError {
         /// The second account's table.
         second: AccountTable,
     },
-    /// Two accounts share a `supplier_id`: one szamlazz.hu account would be
-    /// reachable under two scopes.
+    /// Two accounts pin the same `supplier_id`: one szamlazz.hu account would
+    /// be reachable under two scopes. Only accounts that set the pin take
+    /// part; an unset pin claims nothing.
     #[error("{first} and {second} share the supplier id {supplier_id}")]
     DuplicateSupplierId {
         /// The shared supplier id.
@@ -268,7 +266,7 @@ struct Entry {
 
 impl Entry {
     /// Validates one account and builds its [`Account`]; the shape-level
-    /// rules (supplier id, uniqueness) are the caller's.
+    /// rules (uniqueness) are the caller's.
     fn build(table: &AccountTable, config: StaticAccount) -> Result<Self, StaticConfigError> {
         let StaticAccount {
             id,
@@ -358,8 +356,8 @@ impl StaticResolver {
 
     /// Builds the multi-account shape, enforcing the checkable half of the
     /// safety contract in one pass: every account is built, then its id,
-    /// supplier id and `(endpoint, agent key)` are claimed against the
-    /// accounts before it.
+    /// `(endpoint, agent key)` and — when it sets one — supplier id are
+    /// claimed against the accounts before it.
     fn multi(accounts: BTreeMap<String, StaticAccount>) -> Result<Self, StaticConfigError> {
         let mut entries = BTreeMap::new();
         let mut ids: BTreeMap<String, AccountTable> = BTreeMap::new();
@@ -373,12 +371,6 @@ impl StaticResolver {
             let table = AccountTable::Scoped(scope.clone());
             let agent_key = account.agent_key.expose().to_owned();
             let entry = Entry::build(&table, account)?;
-            let Some(supplier_id) = entry.account.supplier_id else {
-                return Err(StaticConfigError::MissingSupplierId {
-                    table,
-                    id: entry.account.id,
-                });
-            };
             if let Some(first) = ids.insert(entry.account.id.to_string(), table.clone()) {
                 return Err(StaticConfigError::DuplicateId {
                     id: entry.account.id,
@@ -386,7 +378,9 @@ impl StaticResolver {
                     second: table,
                 });
             }
-            if let Some(first) = suppliers.insert(supplier_id, table.clone()) {
+            if let Some(supplier_id) = entry.account.supplier_id
+                && let Some(first) = suppliers.insert(supplier_id, table.clone())
+            {
                 return Err(StaticConfigError::DuplicateSupplierId {
                     supplier_id,
                     first,
@@ -413,8 +407,8 @@ impl TryFrom<StaticConfig> for StaticResolver {
 
     /// Validates the configuration: exactly one shape; per account a
     /// non-blank id and agent key and an http(s) endpoint; and in the
-    /// multi-account shape valid scope keys, a supplier id on every account,
-    /// and unique ids, supplier ids and `(endpoint, agent_key)` pairs.
+    /// multi-account shape valid scope keys and unique ids, `(endpoint,
+    /// agent_key)` pairs and — among the accounts that set one — supplier ids.
     fn try_from(config: StaticConfig) -> Result<Self, Self::Error> {
         match (config.account, config.accounts) {
             (Some(_), accounts) if !accounts.is_empty() => Err(StaticConfigError::BothShapes),
@@ -735,23 +729,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multi_account_shape_requires_a_supplier_id_on_every_account() {
+    /// The supplier id is optional in the multi-account shape too: an account
+    /// without one resolves with `supplier_id = None`, and two such accounts
+    /// do not collide on it — an unset pin claims nothing.
+    #[tokio::test]
+    async fn multi_account_shape_accepts_accounts_without_a_supplier_id() {
         let mut config = multi();
         config["accounts"]["beta_events"]
             .as_object_mut()
             .expect("object")
             .remove("supplier_id");
-        let error = resolver(config).expect_err("missing supplier id");
-        assert!(matches!(
-            &error,
-            StaticConfigError::MissingSupplierId { table, id }
-                if *table == AccountTable::Scoped("beta_events".to_owned()) && id.as_str() == "beta"
-        ));
-        assert_eq!(
-            error.to_string(),
-            "accounts.beta_events.supplier_id is required in the multi-account shape (account beta)"
-        );
+        let pinned_once = resolver(config).expect("one unpinned account");
+        let beta = pinned_once
+            .resolve(Some("beta_events"))
+            .await
+            .expect("beta");
+        assert_eq!(beta.supplier_id, None);
+        let acme = pinned_once.resolve(Some("acme")).await.expect("acme");
+        assert_eq!(acme.supplier_id, Some(972_720), "the other keeps its pin");
+
+        let mut config = multi();
+        for scope in ["acme", "beta_events"] {
+            config["accounts"][scope]
+                .as_object_mut()
+                .expect("object")
+                .remove("supplier_id");
+        }
+        resolver(config).expect("two unpinned accounts do not share a supplier id");
     }
 
     #[test]
