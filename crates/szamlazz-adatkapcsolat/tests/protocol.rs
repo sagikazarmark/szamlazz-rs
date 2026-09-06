@@ -8,8 +8,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt as _;
 use rust_decimal::dec;
+use std::convert::Infallible;
 use std::future::ready;
 use std::sync::{Arc, Mutex};
+use szamlazz_adatkapcsolat::axum::BodyLimit;
 use szamlazz_adatkapcsolat::{
     Ack, BankTransaction, Document, Handler, InvoiceAck, InvoiceAppearance, InvoiceDocument,
     KEY_HEADER, MaybeSend, ReceiptBatch, TransactionDirection, VatRate,
@@ -272,7 +274,9 @@ fn rejects_invalid_structural_inputs() {
     assert!(Document::parse(b"<szamla>\xff</szamla>").is_err());
 }
 
-#[derive(Clone)]
+/// Accepts everything by default; `fail` answers every invoice with an error,
+/// `invalid_ack` with a registration number that cannot be rendered.
+#[derive(Clone, Default)]
 struct TestHandler {
     fail: bool,
     invalid_ack: bool,
@@ -341,13 +345,15 @@ async fn call_at(path: &str, key: Option<&str>, body: &[u8], fail: bool) -> (Sta
         "secret-key",
         TestHandler {
             fail,
-            invalid_ack: false,
+            ..TestHandler::default()
         },
     );
-    let response = app
-        .oneshot(request_at(path, key, body))
-        .await
-        .expect("response");
+    send(app, request_at(path, key, body)).await
+}
+
+/// Runs one request through `app` and returns the status with the body as text.
+async fn send(app: Router, request: Request<Body>) -> (StatusCode, String) {
+    let response = app.oneshot(request).await.expect("response");
     let status = response.status();
     let bytes = response
         .into_body()
@@ -451,6 +457,44 @@ async fn missing_key_answers_retryable_non_200() {
     assert!(!body.contains("KEY_ERR"));
 }
 
+// An unauthenticated client must not be able to make the receiver inspect a
+// body: the header is checked first, so an invalid body without the header is
+// 401, not 400.
+#[tokio::test]
+async fn missing_key_is_401_before_the_body_is_inspected() {
+    for body in [
+        b"<whatever/>".as_slice(),
+        b"<szamla>\xff</szamla>".as_slice(),
+        b"".as_slice(),
+    ] {
+        let (status, response) = call(None, body, false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
+        assert!(!response.contains("KEY_ERR"));
+    }
+}
+
+// Only the root element is inspected before the key check — enough to shape a
+// KEY_ERR Ack — while the per-element namespace pass runs for authenticated
+// pushes only. A child in the wrong namespace is therefore KEY_ERR under a
+// wrong key and 400 under the right one.
+#[tokio::test]
+async fn namespace_validation_runs_only_after_the_key_is_accepted() {
+    let body = std::str::from_utf8(OUTGOING_INVOICE)
+        .expect("fixture UTF-8")
+        .replacen("<szallito>", "<szallito xmlns=\"\">", 1);
+
+    let (status, response) = call(Some("not-the-key"), body.as_bytes(), false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        response.contains("<hibakod>KEY_ERR</hibakod>"),
+        "{response}"
+    );
+
+    let (status, response) = call(Some("secret-key"), body.as_bytes(), false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(response.contains("wrong namespace"), "{response}");
+}
+
 #[tokio::test]
 async fn handler_error_becomes_500() {
     let (status, body) = call(Some("secret-key"), OUTGOING_INVOICE, true).await;
@@ -500,11 +544,8 @@ async fn invalid_or_unknown_documents_are_never_acknowledged() {
 async fn configurable_body_limit_is_applied_at_construction() {
     let low = szamlazz_adatkapcsolat::axum::router_with_body_limit(
         "secret-key",
-        TestHandler {
-            fail: false,
-            invalid_ack: false,
-        },
-        OUTGOING_INVOICE.len() - 1,
+        TestHandler::default(),
+        BodyLimit::Max(OUTGOING_INVOICE.len() - 1),
     );
     let response = low
         .oneshot(request(Some("secret-key"), OUTGOING_INVOICE))
@@ -514,11 +555,8 @@ async fn configurable_body_limit_is_applied_at_construction() {
 
     let high = szamlazz_adatkapcsolat::axum::router_with_body_limit(
         "secret-key",
-        TestHandler {
-            fail: false,
-            invalid_ack: false,
-        },
-        OUTGOING_INVOICE.len(),
+        TestHandler::default(),
+        BodyLimit::Max(OUTGOING_INVOICE.len()),
     );
     let response = high
         .oneshot(request(Some("secret-key"), OUTGOING_INVOICE))
@@ -527,25 +565,71 @@ async fn configurable_body_limit_is_applied_at_construction() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn default_router_does_not_reject_bodies_over_32_mib() {
-    let mut body = Vec::with_capacity(33 * 1024 * 1024);
-    body.extend_from_slice(b"<whatever xmlns=\"https://wrong.example\"><!--");
-    body.resize(33 * 1024 * 1024, b'x');
-    body.extend_from_slice(b"--></whatever>");
+/// A well-formed-looking body of `size` bytes that no parse accepts.
+fn oversized_body(size: usize) -> Vec<u8> {
+    let mut body = Vec::with_capacity(size + 64);
+    body.extend_from_slice(b"<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\"><!--");
+    body.resize(size, b'x');
+    body.extend_from_slice(b"--></banktranz>");
+    body
+}
 
-    let app = szamlazz_adatkapcsolat::axum::router(
+// Számlázz.hu publishes no maximum size, but the receiver sits on the public
+// internet: the default is a generous, documented cap, and lifting it is an
+// explicit choice — never what a caller gets by not thinking about it.
+#[tokio::test]
+async fn default_body_limit_is_64_mib_and_unlimited_is_explicit() {
+    assert_eq!(BodyLimit::default(), BodyLimit::Max(64 * 1024 * 1024));
+    let over = oversized_body(64 * 1024 * 1024 + 1);
+
+    let fixed = szamlazz_adatkapcsolat::axum::router("secret-key", TestHandler::default());
+    let response = fixed
+        .oneshot(request(Some("secret-key"), &over))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let resolved = szamlazz_adatkapcsolat::axum::router_with_resolver(UnavailableResolver);
+    let response = resolved
+        .oneshot(request(Some("secret-key"), &over))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Explicitly unlimited: the body is buffered and read — refused by the
+    // typed parse (an empty transaction), not by the limit.
+    let unlimited = szamlazz_adatkapcsolat::axum::router_with_body_limit(
         "secret-key",
-        TestHandler {
-            fail: false,
-            invalid_ack: false,
-        },
+        TestHandler::default(),
+        BodyLimit::Unlimited,
     );
-    let response = app
-        .oneshot(request(Some("secret-key"), &body))
+    let response = unlimited
+        .oneshot(request(Some("secret-key"), &over))
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let unlimited = szamlazz_adatkapcsolat::axum::router_with_resolver_and_body_limit(
+        UnavailableResolver,
+        BodyLimit::Unlimited,
+    );
+    let response = unlimited
+        .oneshot(request(Some("secret-key"), &over))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// The cap is enforced before the key is checked, and only for requests that
+// carry the header — an unauthenticated client never gets the body buffered.
+#[tokio::test]
+async fn body_limit_applies_after_the_header_check_and_before_the_key_check() {
+    let over = oversized_body(64 * 1024 * 1024 + 1);
+    let (status, _) = call(Some("not-the-key"), &over, false).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let (status, _) = call(None, &over, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -554,13 +638,7 @@ async fn nested_push_accepts_paths_with_and_without_trailing_slash() {
         let app = szamlazz_adatkapcsolat::axum::nest_at(
             Router::new(),
             "/push",
-            szamlazz_adatkapcsolat::axum::router(
-                "secret-key",
-                TestHandler {
-                    fail: false,
-                    invalid_ack: false,
-                },
-            ),
+            szamlazz_adatkapcsolat::axum::router("secret-key", TestHandler::default()),
         );
         let response = app
             .oneshot(request_at(path, Some("secret-key"), OUTGOING_INVOICE))
@@ -576,13 +654,7 @@ async fn nested_push_accepts_key_appended_to_url() {
     let app = szamlazz_adatkapcsolat::axum::nest_at(
         Router::new(),
         "/push",
-        szamlazz_adatkapcsolat::axum::router(
-            "secret-key",
-            TestHandler {
-                fail: false,
-                invalid_ack: false,
-            },
-        ),
+        szamlazz_adatkapcsolat::axum::router("secret-key", TestHandler::default()),
     );
     let response = app
         .oneshot(request_at(
@@ -650,22 +722,9 @@ struct Tenants {
     second: TenantHandler,
 }
 
-impl szamlazz_adatkapcsolat::axum::KeyResolver for Tenants {
-    type Handler = TenantHandler;
-
-    fn resolve(&self, key: &str) -> Option<&Self::Handler> {
-        match key {
-            "first-key" => Some(&self.first),
-            "second-key" => Some(&self.second),
-            _ => None,
-        }
-    }
-}
-
-#[tokio::test]
-async fn resolver_selects_business_context_for_each_key() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let app = szamlazz_adatkapcsolat::axum::router_with_resolver(Tenants {
+/// Two tenants, `first-key` and `second-key`, recording which one was called.
+fn tenants(calls: &Arc<Mutex<Vec<&'static str>>>) -> Tenants {
+    Tenants {
         first: TenantHandler {
             tenant: "first",
             calls: calls.clone(),
@@ -674,7 +733,98 @@ async fn resolver_selects_business_context_for_each_key() {
             tenant: "second",
             calls: calls.clone(),
         },
-    });
+    }
+}
+
+impl szamlazz_adatkapcsolat::axum::KeyResolver for Tenants {
+    type Handler = TenantHandler;
+    type Error = Infallible;
+
+    fn resolve(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<&Self::Handler>, Infallible>> + MaybeSend {
+        ready(Ok(match key {
+            "first-key" => Some(&self.first),
+            "second-key" => Some(&self.second),
+            _ => None,
+        }))
+    }
+}
+
+/// A database-shaped resolver whose lookup is down: it cannot tell a wrong key
+/// from a right one, so it must not answer either way. Written as an
+/// `async fn` that awaits, the way a real lookup would.
+struct UnavailableResolver;
+
+impl szamlazz_adatkapcsolat::axum::KeyResolver for UnavailableResolver {
+    type Handler = TestHandler;
+    type Error = String;
+
+    async fn resolve(&self, _key: &str) -> Result<Option<&Self::Handler>, String> {
+        tokio::task::yield_now().await;
+        Err("key store timed out".to_owned())
+    }
+}
+
+fn incoming_invoice() -> Vec<u8> {
+    std::str::from_utf8(OUTGOING_INVOICE)
+        .expect("fixture UTF-8")
+        .replace(
+            "http://www.szamlazz.hu/szamla",
+            "http://www.szamlazz.hu/szamlabe",
+        )
+        .replace("<szamla xmlns=", "<szamlabe xmlns=")
+        .replace("</szamla>", "</szamlabe>")
+        .into_bytes()
+}
+
+// KEY_ERR is "your key is wrong": szamlazz.hu never resends a bank
+// transaction or receipt answered with it, and an invoice only when it next
+// changes. A resolver that could not check must therefore answer a non-200
+// with no Ack, so the record stays in the 72-hour retry window.
+#[tokio::test]
+async fn unavailable_resolver_answers_503_without_an_ack_for_every_root() {
+    let incoming = incoming_invoice();
+    for (name, body) in [
+        ("szamla", OUTGOING_INVOICE),
+        ("szamlabe", incoming.as_slice()),
+        ("banktranz", BANK_TRANSACTION.as_bytes()),
+        ("xmlnyugtaarchiv", RECEIPT_BATCH.as_bytes()),
+    ] {
+        let app = szamlazz_adatkapcsolat::axum::router_with_resolver(UnavailableResolver);
+        let (status, text) = send(app, request(Some("any-key"), body)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "root {name}");
+        assert!(!text.contains("KEY_ERR"), "root {name}: {text}");
+        assert!(!text.contains("valasz"), "root {name}: {text}");
+        // The resolver's error is internal detail; it is not echoed.
+        assert!(!text.contains("timed out"), "root {name}: {text}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_key_answers_key_err_of_the_pushed_kind_for_every_root() {
+    let incoming = incoming_invoice();
+    for (body, ack_root) in [
+        (OUTGOING_INVOICE, "<szamlavalasz"),
+        (incoming.as_slice(), "<szamlabevalasz"),
+        (BANK_TRANSACTION.as_bytes(), "<banktranzvalasz"),
+        (RECEIPT_BATCH.as_bytes(), "<nyugtavalasz"),
+    ] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let app = szamlazz_adatkapcsolat::axum::router_with_resolver(tenants(&calls));
+        let (status, text) = send(app, request(Some("third-key"), body)).await;
+        assert_eq!(status, StatusCode::OK, "{ack_root}");
+        assert!(text.contains(ack_root), "{text}");
+        assert!(text.contains("<hibakod>KEY_ERR</hibakod>"), "{text}");
+        assert!(calls.lock().expect("calls").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn resolver_selects_business_context_for_each_key() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = szamlazz_adatkapcsolat::axum::router_with_resolver(tenants(&calls));
 
     for key in ["first-key", "second-key"] {
         let response = app

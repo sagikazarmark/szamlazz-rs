@@ -27,7 +27,7 @@ szamlazz listen --adatkapcsolat-key KEY
 
 Számla Agent commands support `--json` for machine-readable output. The `listen` command does not: it pretty-prints received messages for interactive development.
 
-`szamlazz listen` serves IPN at `POST /ipn`. When an Adatkapcsolat key is configured, it also serves `POST /adatkapcsolat`. Point a tunnel such as `cloudflared` at the listener to inspect real deliveries during integration work.
+`szamlazz listen` serves IPN at `POST /ipn`. When an Adatkapcsolat key is configured, it also serves `POST /adatkapcsolat`. Point a tunnel such as `cloudflared` at the listener to inspect real deliveries during integration work. The Adatkapcsolat endpoint answers a wrong key with `KEY_ERR`, after which szamlazz.hu never resends that bank transaction or receipt — configure the key of the registration you point at it. Bodies over 64 MiB are answered `413` (the `szamlazz-adatkapcsolat` router's default cap).
 
 The command remains named `payment register` for shell ergonomics; it registers a credit entry against an invoice through the Számla Agent.
 

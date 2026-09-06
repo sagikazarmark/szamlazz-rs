@@ -45,22 +45,25 @@ impl Document {
     /// Returns an error for invalid UTF-8 or XML, an unknown root or wrong
     /// namespace, invalid embedded data, or missing required structure.
     pub fn parse(body: &[u8]) -> Result<Self, ParseError> {
-        let root = Self::preflight(body)?;
-        Self::parse_preflighted(body, root)
+        let root = Self::identify(body)?;
+        Self::parse_identified(body, root)
     }
 
-    /// Validates UTF-8, XML well-formedness, the root, and every element's
-    /// namespace without deserializing embedded payloads such as PDFs.
-    pub(crate) fn preflight(body: &[u8]) -> Result<RootKind, ParseError> {
+    /// Validates UTF-8 and identifies the root element, verifying its own
+    /// namespace. The XML is read only up to the first start tag (the UTF-8
+    /// check covers the whole body), so the receiver can shape a `KEY_ERR`
+    /// Ack for a push it has not yet authenticated without parsing it.
+    pub(crate) fn identify(body: &[u8]) -> Result<RootKind, ParseError> {
         let text = std::str::from_utf8(body)?;
-        let root = root_kind(text)?;
+
+        root_kind(text)
+    }
+
+    /// The full parse of an identified body: every element's namespace, then
+    /// typed deserialization (including embedded payloads such as PDFs).
+    pub(crate) fn parse_identified(body: &[u8], root: RootKind) -> Result<Self, ParseError> {
+        let text = std::str::from_utf8(body)?;
         validate_element_namespaces(text, root)?;
-
-        Ok(root)
-    }
-
-    pub(crate) fn parse_preflighted(body: &[u8], root: RootKind) -> Result<Self, ParseError> {
-        let text = std::str::from_utf8(body)?;
         let raw_xml: Arc<str> = Arc::from(text);
 
         match root {

@@ -10,7 +10,10 @@
 //!
 //! `KEY_ERR` / `KEY_DEL` are *deliberate protocol speech*, not errors: they
 //! tell szamlazz.hu the key is wrong (stop sending until it changes) or that
-//! the connection should be severed. Express them via the ack constructors.
+//! the connection should be severed. A bank transaction or receipt answered
+//! `KEY_ERR` is never resent, an invoice only when it next changes — so they
+//! are for a *definite* verdict, and anything uncertain is a non-200 that
+//! keeps the retry window alive. Express them via the ack constructors.
 //!
 //! The core is framework-free and `wasm32`-clean: [`Document::parse`] takes
 //! raw body bytes, ack types render response bodies. Implement [`Handler`]
@@ -45,8 +48,9 @@
 //! and fan-out on native and `wasm32-unknown-unknown` targets.
 //!
 //! - `axum` adds router wiring for authentication, parsing, dispatch, and Ack
-//!   rendering. It supports native servers and single-threaded wasm runtimes;
-//!   wasm handler futures are protected by `send_wrapper` thread checks.
+//!   rendering, with a 64 MiB request-body cap by default. It supports native
+//!   servers and single-threaded wasm runtimes; wasm handler futures are
+//!   protected by `send_wrapper` thread checks.
 //! - `opendal` adds the archival handler and JSON persistence. Applications
 //!   enable the required storage services on their own `opendal` dependency.
 //!   The selected service determines platform support; timestamped archive
