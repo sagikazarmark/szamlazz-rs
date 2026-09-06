@@ -26,13 +26,15 @@ pub use document::{
     PostalAddressInput, TaxpayerStatus,
 };
 pub use request::{
-    CorrectRequest, CreateOptions, CreateRequest, DeleteProformaRequest, PaymentEntry,
-    ProformaLink, QueryRequest, Selector, SetPaymentsRequest, StornoRequest,
+    CorrectRequest, CreateOptions, CreateRequest, DeleteProformaRequest, InvalidTaxNumber,
+    PaymentEntry, ProformaLink, QueryRequest, QueryTaxpayerRequest, Selector, SetPaymentsRequest,
+    StornoRequest,
 };
 pub use response::{
     CheckAccountResponse, CheckedAccount, ConflictReason, CreateResponse, CredentialsCheck,
     DeleteProformaResponse, DocumentState, DocumentStatus, OrderStatus, Outcome, PaymentRecord,
-    QueryResponse, SetPaymentsResponse, StornoOutcome, StornoResponse, Warning,
+    QueryResponse, QueryTaxpayerResponse, SetPaymentsResponse, StornoOutcome, StornoResponse,
+    TaxpayerAddress, Warning,
 };
 
 /// The caller-supplied identity of one corrective invoice.
@@ -544,6 +546,10 @@ mod tests {
             ),
             ("QueryRequest", schemars::schema_for!(QueryRequest)),
             (
+                "QueryTaxpayerRequest",
+                schemars::schema_for!(QueryTaxpayerRequest),
+            ),
+            (
                 "SetPaymentsRequest",
                 schemars::schema_for!(SetPaymentsRequest),
             ),
@@ -589,6 +595,7 @@ mod tests {
             schemars::schema_for!(QueryResponse),
             schemars::schema_for!(OrderStatus),
             schemars::schema_for!(CheckAccountResponse),
+            schemars::schema_for!(QueryTaxpayerResponse),
         ] {
             let json = serde_json::to_value(&schema).expect("serialize");
             for (title, object) in objects(&json) {

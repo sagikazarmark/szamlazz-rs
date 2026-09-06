@@ -13,8 +13,10 @@ crashes, concurrent callers and reversals — with a JSON API that is a *project
 constants moved to the resolved account, deployment constants to config, line totals computed, one handler per
 document kind, no PDF.
 
-Non-goals: PDF download, receipts, taxpayer query, IPN / Adatkapcsolat ingestion, the proforma → payment → invoice
-lifecycle workflow, Kafka ingress (untested in multi-account mode — §4).
+Non-goals: PDF download, receipts, IPN / Adatkapcsolat ingestion, the proforma → payment → invoice lifecycle
+workflow, Kafka ingress (untested in multi-account mode — §4). The NAV taxpayer lookup (`xmltaxpayer`) *is* in scope
+since #49 — not because it issues anything, but because it is a per-account read that needs the account's agent
+key, and the worker is the one place that holds one (§4, `Szamlazz.Agent.query_taxpayer`).
 
 ## 2. Crates
 
@@ -73,7 +75,7 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
     document that fails them (§4, §5, §6), so a misconfigured account fails on its first found document on any
     handler. `Szamlazz.Order`'s verifies also require the found document to carry this order's number
     (`conflict{not_managed}` otherwise), so no handler can act on — or link into this order's invoice — a document
-    another order manages. `set_payments` finds no document and is the one exemption (§4).
+    another order manages. `set_payments` and `query_taxpayer` find no document and are the two exemptions (§4).
 - **Retry identity** is Restate's ingress `Idempotency-Key` (caller-side, recommended; see §8). The service does not
   know whether one was used, so it never relies on it for safety.
 - **Buyer name is serialised byte-identically on every attempt**: normalised once (trim + NFC) at validation. The
@@ -161,7 +163,8 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 |---|---|---|
 | `check_account` | `()` → `CheckAccountResponse { scope, account: { id, mode, supplier_id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue as every handler, then one step (`probe`) — a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries (two segments; every issued id has three or more) — expecting code 7, under the read policy (§9); `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**: reporting it is the probe's purpose); an exchange that produced no answer is the read's `Unanswered`, re-executed by the read policy, and `TerminalError{unavailable}` when it is exhausted. `scope` is what the SDK saw — `null` under a scoped call means the server did not forward the scope (protocol v7 off). Credential acceptance is the only szamlazz.hu-verified fact it returns — the account fields echo the *configured* account, since the supplier id appears only in found-document bodies. Issues nothing. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works. `max_attempts = 3, kill`; `journal_retention = "1d"` (explicit, so the leak assertion can scan it) |
 | `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling the document as found (the same `QueryOutcome` a verify writes); a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; another code → 422 pass-through; 3/135/136/164 → `credentials_rejected`; a query szamlazz.hu never answered through the read policy → `unavailable`; `journal_retention = "1d"` |
-| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately the one handler with no account check**: a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; run `max_attempts(1)` — a write with no retry of its own, so a lost reply is `outcome_unknown`; 3/135/136/164 → `credentials_rejected`. **`additive: true` is at-least-once**: every send that reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request, so the `outcome_unknown` message is conditional on `additive` — "query the invoice before re-sending" rather than "call set_payments again" — and the handler's retry policy is explicit, `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default) so that it cannot re-send while the first send is still in flight. `inactivity_timeout = 2m, abort_timeout = 2m` (one send) |
+| `query_taxpayer` | `QueryTaxpayerRequest { tax_number }` → `QueryTaxpayerResponse { valid, name?, tax_number?, vat_code?, addresses[] }` | the NAV taxpayer lookup (`xmltaxpayer`) on the account the scope resolves to, so an embedder needs no second credential path for this one read. `tax_number` is the bare eight-digit stem (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`), nothing else — no whitespace, no other separator; the handler derives the prefix, and a number in neither form is `TerminalError{invalid_input}` naming the input and the accepted forms, refused **before the prologue** like a malformed body (nothing journaled, nothing sent). Then the prologue as every handler and one step, `taxpayer-{prefix}` — the prefix, not the number as sent, so the stem and the full number name the same entry — under the read policy (§9), journaling the crate-owned projection (`TaxpayerOutcome::Found(QueryTaxpayerResponse)`), never the agent crate's `TaxpayerInfo`. **Every answer is data**: `valid: false` (NAV knows no taxpayer under the prefix) is a normal 200; 3/135/136/164 → `credentials_rejected`; any other `funcCode ≠ OK` — szamlazz.hu's own code or NAV's relayed `errorCode` — is an *answer*, passed through as 422 like `query`'s and never retried, so a NAV outage surfaces as a terminal 422 the caller may retry with a new `Idempotency-Key`; an exchange that produced no answer is the read's `Unanswered`, re-executed, `unavailable` on exhaustion. **No account check** — with `set_payments` one of the two handlers exempt from it: it finds no document, and a taxpayer record is NAV's, not the account's, so it carries no pins. No caching in the worker (ADR 0005: nothing to store that szamlazz.hu does not answer); the caller caches, with a TTL on the order of a day. `max_attempts = 3, kill`; `journal_retention = "1d"` |
+| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately without an account check** (with `query_taxpayer`, one of the two handlers exempt from it): a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; run `max_attempts(1)` — a write with no retry of its own, so a lost reply is `outcome_unknown`; 3/135/136/164 → `credentials_rejected`. **`additive: true` is at-least-once**: every send that reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request, so the `outcome_unknown` message is conditional on `additive` — "query the invoice before re-sending" rather than "call set_payments again" — and the handler's retry policy is explicit, `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default) so that it cannot re-send while the first send is still in flight. `inactivity_timeout = 2m, abort_timeout = 2m` (one send) |
 | `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-{number}`, under the read policy); then, **before anything else is said about the document**, `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled — the document is in hand, and another account's order number must not be echoed, nor the "fails loudly on its first found document" guarantee delayed by a call; then document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document); else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the lookup under the read policy, exhaustion → `unavailable`; the storno step under the issue policy, exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected`. `max_attempts = 2, kill`; `inactivity_timeout = 4m, abort_timeout = 3m` — the storno step is the same closure `Szamlazz.Order` runs (query, send, re-query at 60 s each; ADR 0004), and anything shorter suspends a slow storno mid-step |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
@@ -355,7 +358,9 @@ another code on any query → `TerminalError{unavailable}`; 3/135/136/164 on any
 
 Domain outcomes are **data** (HTTP 200 through the ingress, typed in the OpenAPI export). `TerminalError` is reserved
 for faults: the six codes of `TerminalCode` below, which every handler may raise, plus the by-number 404 `not_found`
-and 422 pass-through of `Szamlazz.Agent.query` / `set_payments` / `storno` (§4). No response names the account: `external_id` (with its namespace) is the only deployment
+and 422 pass-through of `Szamlazz.Agent.query` / `set_payments` / `storno`, and `query_taxpayer`'s 422 pass-through of
+any `funcCode ≠ OK` — szamlazz.hu's own code or NAV's relayed one — never a 404 (NAV knowing no taxpayer is
+`valid: false`, a 200) (§4). No response names the account: `external_id` (with its namespace) is the only deployment
 marker a response carries, and `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under
 the scope the call was made under.
 
@@ -375,10 +380,11 @@ TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatc
                    | credentials_rejected (503) | unknown_account (400)
 ```
 
-`invalid_input`: the caller's request, which the same request never gets past — a 400 and "fix the request". Two
+`invalid_input`: the caller's request, which the same request never gets past — a 400 and "fix the request". Three
 sources. A **malformed body**: every request type and every object it nests (`CreateRequest`, `CreateOptions`,
 `DocumentInput`, `BuyerInput`, `PostalAddressInput`, `LineItemInput`, `DocumentOverrides`, `ExchangeRateInput`,
-`CorrectRequest`, `StornoRequest`, `DeleteProformaRequest`, `QueryRequest`, `SetPaymentsRequest`, `PaymentEntry`) is
+`CorrectRequest`, `StornoRequest`, `DeleteProformaRequest`, `QueryRequest`, `QueryTaxpayerRequest`,
+`SetPaymentsRequest`, `PaymentEntry`) is
 closed — `#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the discovery schema — so a field the
 contract does not know is refused, never dropped: `{"options": {"resissue": true}}` is not `reissue: false` (which
 would answer `reversed` on a document the caller asked to reissue), `{"aditive": true}` is not `additive: false`
@@ -392,10 +398,14 @@ field, invalid JSON — is therefore the same `{ "code": "invalid_input", "messa
 with serde's message, naming the field when there is one (``unknown field `resissue`, expected `reissue` or `proforma` ``, ``missing
 field `entries` ``, `invalid type: string "yes", expected a boolean`), and never the SDK's plain-text `Cannot decode
 input payload: …`, which no handler of either service can return. Nothing is journaled and nothing is sent. The
-second source is a request that **names a document szamlazz.hu does not know** — a corrective's base or a storno
-target answered with code 7 — or one the operation cannot take: `options.proforma` on any kind but `create_invoice`,
-a `{number}` proforma link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3).
-These are raised after the prologue, by the handler's own validation or verify.
+second source is a **well-formed body with a value the handler cannot take before it has anything to journal**: a
+`query_taxpayer` tax number in neither accepted form (the bare eight-digit stem or the full `NNNNNNNN-N-NN`), an
+untrimmed Virtual Object key (§3) — refused at the same point as a malformed body, before the prologue, with the same
+consequences (nothing journaled, nothing sent), by the handler's own check rather than serde's. The third source is
+a request that **names a document szamlazz.hu does not know** — a corrective's base or a storno target answered with
+code 7 — or one the operation cannot take: `options.proforma` on any kind but `create_invoice`, a `{number}` proforma
+link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3). These are raised after
+the prologue, by the handler's own validation or verify.
 
 `unknown_account`: the request names no account of this deployment — it arrived unscoped where accounts are reachable
 by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
@@ -424,7 +434,7 @@ id. The same pins failing on a document found under one of our external ids are 
 (§3). The message names the document and the observed and expected pins, never the key (no document carries it). It
 is the worker's configuration or the caller's scope, not a transient: nothing was sent by the execution that raised
 it, and the same request repeats it until `mode` / `supplier_id` (or the scope) is fixed. `set_payments` sends without
-a query and cannot raise it (§4). What it cannot detect: a wrong-scope request naming an invoice number that also
+a query and `query_taxpayer` finds no document (a taxpayer record carries no pins): neither can raise it (§4). What it cannot detect: a wrong-scope request naming an invoice number that also
 exists on the resolved account — that document legitimately matches the account's pins; only safety-contract rule 5
 (the caller records the scope as used; ADR 0006) prevents the case (behaviour notes).
 
@@ -467,7 +477,7 @@ factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound (the attempt count is not durable across replays — ADR 0004)
 
-[read]       # the read policy: the run retry policy of every read-only step (lookups, verifies, hints, `get`, `Szamlazz.Agent.query`, the probe); shapes no journal entry
+[read]       # the read policy: the run retry policy of every read-only step (lookups, verifies, hints, `get`, `Szamlazz.Agent.query`, `query_taxpayer`, the probe); shapes no journal entry
 max_attempts = 3              # executions of the step, including the first
 initial_delay = "5s"
 factor = 2.0
@@ -592,18 +602,24 @@ functions they are extracted into.
   71/152 → `Rejected`), storno validation incl. the D/SL no-op, the zero-gross storno as `Reversed`, 335, 7, and the
   credential codes 3/135/136/164 as `CredentialsRejected` on
   every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query,
-  probe); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `probe`) answering a 500, an empty body
-  or `szlahu_down` as `Err(Unanswered)` — the step's retryable error, never data — and another API code as `Ok(Api)`
-  data (the probe: `Accepted`); the probe as exactly one query of the sentinel id and nothing else, with a wrong key
-  as data; the gateway validates found documents against the account it was opened for.
+  taxpayer query, probe); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
+  `probe`) answering a 500, an empty body or `szlahu_down` as `Err(Unanswered)` — the step's retryable error, never
+  data — and another API code as `Ok(Api)` data (the probe: `Accepted`); the probe as exactly one query of the
+  sentinel id and nothing else, with a wrong key as data; the taxpayer query as exactly one `xmltaxpayer` request of
+  the prefix, a known prefix `Found` with NAV's registered data, an unknown one `Found{valid: false}`, NAV's relayed
+  `funcCode ERROR` and a szamlazz.hu header code both `Api`; the gateway validates found documents against the
+  account it was opened for.
 - `contract`: every request type and every object it nests refuses one unknown top-level and one unknown nested field
   with serde's error naming the field, the externally tagged enums refuse a second key, and every documented body —
   the endpoint README's curl example, the e2e scenarios' literal bodies — still deserializes; under `schemars`, every
   request schema and each of its `$defs` objects carries `additionalProperties: false` while the response schemas
   carry none.
 - `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
-  `journal_retention`, no input — and attributes: `Szamlazz.Agent.storno`'s `4m` / `3m` timeouts and
-  `set_payments`'s explicit `initial_interval = 2m`), an endpoint build smoke test, two integration tests of the
+  `journal_retention`, no input — and `query_taxpayer` with `query`'s read-only attributes, and attributes:
+  `Szamlazz.Agent.storno`'s `4m` / `3m` timeouts and `set_payments`'s explicit `initial_interval = 2m`), the
+  taxpayer decisions (the stem and the full number name one `taxpayer-{prefix}` step; a number in neither form is the
+  400 `invalid_input` fault naming it and the accepted forms; an exhausted read is `unavailable` naming the step), an
+  endpoint build smoke test, two integration tests of the
   endpoint binary (spawned on an ephemeral port with an environment-only configuration, `SIGTERM` and `SIGINT` each
   end it with status 0 within seconds, the start-up log names both and honours `--bind`; `--check-config` on each
   fixture exits 0 with the start-up summary and without listening, and on an unknown key — in the file and in the
@@ -700,8 +716,8 @@ functions they are extracted into.
   The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH
-  /invocations/{id}/purge`). `get`, `Szamlazz.Agent.query` and `Szamlazz.Agent.check_account` set
-  `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
+  /invocations/{id}/purge`). `get`, `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and
+  `Szamlazz.Agent.check_account` set `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)

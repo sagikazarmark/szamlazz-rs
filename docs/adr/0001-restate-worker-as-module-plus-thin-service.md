@@ -6,13 +6,15 @@ that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
 `restate_szamlazz::gateway::Gateway` is a plain Rust module: a struct holding the client
 and the account it speaks for, with async functions `lookup`, `create`, `storno`, `delete_proforma`,
-`set_payments` and `query` — one per durable step. It has no Restate context, returns every expected
+`set_payments`, `query`, `query_taxpayer` and `probe` — one per durable step. It has no Restate context, returns every expected
 szamlazz.hu outcome as data (never `Err` for a rejection, a duplicate or a "not found"; the create
 step's `Err(Unconfirmed)` is reserved for an answer that is *not* known and is what the run retry
 policy re-executes), and is unit-testable with wiremock. The `Order` Virtual Object (key = order
 number) calls these functions **inside its own `ctx.run` closures**. A thin, stateless
-`Szamlazz.Agent` Restate service exposes `query`,
-`set_payments` and `storno` for by-number operations over the same module. No Restate
+`Szamlazz.Agent` Restate service exposes `query`, `set_payments` and `storno` for by-number
+operations, `query_taxpayer` for the NAV taxpayer lookup by tax number (#49 — a per-account read
+that is not about a document but needs the account's agent key, which the worker is the one place
+to hold), and the `check_account` probe, all over the same module. No Restate
 service calls another, and `Order` never invokes a handler on its own key. The dependency direction
 the owner asked for — `Order` depends on the gateway, nothing depends on `Order` — is a compile-time
 fact: `Szamlazz.Order → gateway ← Szamlazz.Agent`. Everything the services know about the account

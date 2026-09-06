@@ -10,6 +10,7 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, RecordedPayment};
+use szamlazz_agent::ops::taxpayer::{TaxpayerAddress as AgentTaxpayerAddress, TaxpayerInfo};
 
 use super::IssuedKind;
 use crate::account::Account;
@@ -805,6 +806,114 @@ pub enum CredentialsCheck {
     },
 }
 
+/// Output of `Szamlazz.Agent.query_taxpayer`: a taxpayer as NAV registers
+/// it, looked up through szamlazz.hu's `xmltaxpayer` operation.
+///
+/// `valid: false` is a normal answer — NAV knows no taxpayer under the
+/// prefix — not a fault; the optional fields are then absent.
+///
+/// A crate-owned projection of [`TaxpayerInfo`], not the agent type as it
+/// is: it is what the handler's read step journals, so its layout is
+/// **additive-only** — a field may be added with a default; nothing is
+/// renamed, removed or retyped — and the agent crate's serde layout never
+/// rides in the journal. Not cached by the worker (ADR 0005: szamlazz.hu is
+/// the source of truth); a caller that looks a buyer up repeatedly caches
+/// this response itself, with a TTL on the order of a day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct QueryTaxpayerResponse {
+    /// Whether NAV says the prefix belongs to a valid taxpayer
+    /// (`taxpayerValidity`).
+    pub valid: bool,
+    /// The registered name (`taxpayerName`), when valid.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The eight-digit tax number stem (`taxpayerId`), when provided.
+    #[serde(default)]
+    pub tax_number: Option<String>,
+    /// The VAT code digit (`vatCode`), when provided.
+    #[serde(default)]
+    pub vat_code: Option<String>,
+    /// The registered addresses (`taxpayerAddressItem` entries).
+    #[serde(default)]
+    pub addresses: Vec<TaxpayerAddress>,
+}
+
+impl From<TaxpayerInfo> for QueryTaxpayerResponse {
+    fn from(info: TaxpayerInfo) -> Self {
+        Self {
+            valid: info.valid,
+            name: info.name,
+            tax_number: info.tax_number,
+            vat_code: info.vat_code,
+            addresses: info.addresses.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// A registered address of a taxpayer (`taxpayerAddressItem`), as NAV
+/// structures it. Every field is optional: NAV's detailed addresses fill the
+/// structured fields, its simple addresses only `additional_address_detail`.
+///
+/// Additive-only, like [`QueryTaxpayerResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(default)]
+#[non_exhaustive]
+pub struct TaxpayerAddress {
+    /// The address type (`taxpayerAddressType`), e.g. `HQ` or `SITE`.
+    pub kind: Option<String>,
+    /// Country code (`countryCode`).
+    pub country_code: Option<String>,
+    /// Region (`region`).
+    pub region: Option<String>,
+    /// Postal code (`postalCode`).
+    pub postal_code: Option<String>,
+    /// City (`city`).
+    pub city: Option<String>,
+    /// Street name (`streetName`).
+    pub street_name: Option<String>,
+    /// The public place category (`publicPlaceCategory`), e.g. `UTCA`.
+    pub public_place_category: Option<String>,
+    /// House number (`number`).
+    pub number: Option<String>,
+    /// Building (`building`).
+    pub building: Option<String>,
+    /// Staircase (`staircase`).
+    pub staircase: Option<String>,
+    /// Floor (`floor`).
+    pub floor: Option<String>,
+    /// Door (`door`).
+    pub door: Option<String>,
+    /// Lot number (`lotNumber`).
+    pub lot_number: Option<String>,
+    /// The free-form detail of a simple address
+    /// (`additionalAddressDetail`).
+    pub additional_address_detail: Option<String>,
+}
+
+impl From<AgentTaxpayerAddress> for TaxpayerAddress {
+    fn from(address: AgentTaxpayerAddress) -> Self {
+        Self {
+            kind: address.kind,
+            country_code: address.country_code,
+            region: address.region,
+            postal_code: address.postal_code,
+            city: address.city,
+            street_name: address.street_name,
+            public_place_category: address.public_place_category,
+            number: address.number,
+            building: address.building,
+            staircase: address.staircase,
+            floor: address.floor,
+            door: address.door,
+            lot_number: address.lot_number,
+            additional_address_detail: address.additional_address_detail,
+        }
+    }
+}
+
 /// `gross − Σ payments`, when the gross total is known.
 pub(crate) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
     gross.map(|gross| gross - payments.iter().copied().sum::<Decimal>())
@@ -1150,5 +1259,69 @@ mod tests {
             json["credentials"],
             json!({ "state": "rejected", "code": "3", "message": "Sikertelen bejelentkezés." })
         );
+    }
+
+    /// The taxpayer response is a projection of the agent crate's
+    /// `TaxpayerInfo`, field for field, and it is additive-only on the wire:
+    /// a document journaled before a field existed still decodes (every
+    /// optional field and the address list default).
+    #[test]
+    fn query_taxpayer_response_projects_the_agent_info_and_decodes_additively() {
+        use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
+        use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+
+        let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
+            <taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerName>SYNTHETIC SOFTWARE KFT.</taxpayerName>
+            <taxNumberDetail><taxpayerId>12345678</taxpayerId><vatCode>2</vatCode></taxNumberDetail>
+            <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>SITE</taxpayerAddressType><taxpayerAddress>
+            <countryCode>HU</countryCode><region>Pest</region><postalCode>1111</postalCode>
+            <city>Budapest</city><streetName>Fo</streetName><publicPlaceCategory>UTCA</publicPlaceCategory>
+            <number>1</number><building>A</building><staircase>2</staircase><floor>3</floor>
+            <door>4</door><lotNumber>123/4</lotNumber><additionalAddressDetail>Main road 1.</additionalAddressDetail>
+            </taxpayerAddress></taxpayerAddressItem></taxpayerAddressList></taxpayerData>
+            </QueryTaxpayerResponse>"#;
+        let info = QueryTaxpayer::new("12345678")
+            .expect("prefix")
+            .parse(&RawResponse::new::<&str, &str>([], body.to_vec()))
+            .expect("parse");
+        let response = QueryTaxpayerResponse::from(info);
+
+        let json = round_trip(&response);
+        assert_eq!(
+            json,
+            json!({
+                "valid": true,
+                "name": "SYNTHETIC SOFTWARE KFT.",
+                "tax_number": "12345678",
+                "vat_code": "2",
+                "addresses": [{
+                    "kind": "SITE",
+                    "country_code": "HU",
+                    "region": "Pest",
+                    "postal_code": "1111",
+                    "city": "Budapest",
+                    "street_name": "Fo",
+                    "public_place_category": "UTCA",
+                    "number": "1",
+                    "building": "A",
+                    "staircase": "2",
+                    "floor": "3",
+                    "door": "4",
+                    "lot_number": "123/4",
+                    "additional_address_detail": "Main road 1.",
+                }],
+            })
+        );
+
+        // The minimal shape — what an earlier version of the type, or NAV's
+        // `valid: false`, journals — still decodes.
+        let minimal: QueryTaxpayerResponse =
+            serde_json::from_value(json!({"valid": false})).expect("deserialize");
+        assert!(!minimal.valid);
+        assert_eq!(minimal.name, None);
+        assert!(minimal.addresses.is_empty());
+        let bare_address: QueryTaxpayerResponse =
+            serde_json::from_value(json!({"valid": true, "addresses": [{}]})).expect("deserialize");
+        assert_eq!(bare_address.addresses, [TaxpayerAddress::default()]);
     }
 }

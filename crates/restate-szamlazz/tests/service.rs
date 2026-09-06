@@ -247,6 +247,43 @@ fn probe_with_key(agent_key: &str) -> MockBuilder {
     external_id_query(PROBE_ID).and(body_string_contains(agent_key_tag(agent_key)))
 }
 
+/// The taxpayer query (`xmltaxpayer`) of `prefix` carrying `agent_key`:
+/// which account's key NAV was asked with.
+fn taxpayer_query_with_key(prefix: &str, agent_key: &str) -> MockBuilder {
+    op("action-szamla_agent_taxpayer")
+        .and(body_string_contains(format!(
+            "<torzsszam>{prefix}</torzsszam>"
+        )))
+        .and(body_string_contains(agent_key_tag(agent_key)))
+}
+
+/// NAV's answer for a known taxpayer (the agent crate's synthetic fixture).
+fn taxpayer_known() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns:d="http://schemas.nav.gov.hu/OSA/2.0/data">
+  <result><funcCode>OK</funcCode></result><taxpayerValidity>true</taxpayerValidity>
+  <taxpayerData><taxpayerName>SYNTHETIC SOFTWARE KFT.</taxpayerName>
+    <taxNumberDetail><d:taxpayerId>12345678</d:taxpayerId><d:vatCode>2</d:vatCode></taxNumberDetail>
+    <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>HQ</taxpayerAddressType><taxpayerAddress>
+      <d:countryCode>HU</d:countryCode><d:postalCode>1111</d:postalCode><d:city>TESTVAROS</d:city>
+      <d:streetName>MINTA</d:streetName><d:publicPlaceCategory>UTCA</d:publicPlaceCategory><d:number>1.</d:number>
+    </taxpayerAddress></taxpayerAddressItem></taxpayerAddressList>
+  </taxpayerData>
+</QueryTaxpayerResponse>"#,
+        "application/xml",
+    )
+}
+
+/// NAV's answer for a prefix it knows no taxpayer under.
+fn taxpayer_unknown() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result><taxpayerValidity>false</taxpayerValidity></QueryTaxpayerResponse>"#,
+        "application/xml",
+    )
+}
+
 fn document(unit_price: Decimal) -> DocumentInput {
     DocumentInput::new(
         BuyerInput::new("Kovács Bt.", "2030", "Érd", "Tárnoki út 23."),
@@ -1329,6 +1366,7 @@ async fn e2e_order_protocol() {
     purged_order_is_stornoed_and_reissued(&h).await;
     agent_storno_checks_the_found_document_against_the_account(&h).await;
     agent_query_checks_the_found_document_against_the_account(&h).await;
+    agent_query_taxpayer_runs_on_the_scoped_account(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
     no_agent_key_in_any_journal_of_the_run(&h).await;
@@ -3659,6 +3697,96 @@ async fn agent_query_checks_the_found_document_against_the_account(h: &Harness) 
     assert_eq!(reply.fault().code, "not_found", "{}", reply.body);
     eprintln!(
         "(xviii-c) Szamlazz.Agent.query: mismatched pins → account_mismatch; own pins → the projection; 7 → not_found: pass"
+    );
+}
+
+/// (xviii-d) `Szamlazz.Agent.query_taxpayer` under a scope asks NAV through
+/// that scope's account: the `xmltaxpayer` request on the wire carries that
+/// account's key and nothing else reaches szamlazz.hu; the full tax number
+/// and its bare stem are one step, `taxpayer-{prefix}`; `valid: false` is
+/// data; a malformed tax number is `invalid_input` before the prologue —
+/// nothing journaled, nothing sent. The run-wide leak scan (xxi) covers
+/// these invocations too.
+async fn agent_query_taxpayer_runs_on_the_scoped_account(h: &Harness) {
+    let request = |tax_number: &str| json!({ "tax_number": tax_number });
+
+    // `acme` with its key, the full tax number; `beta` with its key, the
+    // bare stem — the same prefix, the same step name on both.
+    h.reset().await;
+    taxpayer_query_with_key("12345678", AGENT_KEY)
+        .respond_with(taxpayer_known())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    taxpayer_query_with_key("12345678", KEY_B)
+        .respond_with(taxpayer_unknown())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let reply = h
+        .call_agent_scoped("acme", "query_taxpayer", &request("12345678-2-42"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["valid"], true, "{}", reply.body);
+    assert_eq!(
+        reply.body["name"], "SYNTHETIC SOFTWARE KFT.",
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.body["tax_number"], "12345678", "{}", reply.body);
+    assert_eq!(reply.body["vat_code"], "2", "{}", reply.body);
+    assert_eq!(reply.body["addresses"][0]["kind"], "HQ", "{}", reply.body);
+    assert_eq!(
+        reply.body["addresses"][0]["city"], "TESTVAROS",
+        "{}",
+        reply.body
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "taxpayer-12345678"]
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
+    assert_eq!(invocation.handler, "query_taxpayer");
+
+    let reply = h
+        .call_agent_scoped("beta", "query_taxpayer", &request("12345678"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.body,
+        json!({ "valid": false, "name": null, "tax_number": null, "vat_code": null, "addresses": [] }),
+        "valid: false is data"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "taxpayer-12345678"]
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        2,
+        "one taxpayer query per account, each with its own key, nothing else"
+    );
+
+    // A malformed tax number: refused before the prologue.
+    h.reset().await;
+    let reply = h
+        .call_agent_scoped("acme", "query_taxpayer", &request("12345678-2"))
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(fault.message.contains("\"12345678-2\""), "{fault:?}");
+    assert!(fault.message.contains("12345678-2-42"), "{fault:?}");
+    assert!(
+        h.runs(reply.invocation_id()).await.is_empty(),
+        "nothing journaled before the refusal"
+    );
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+
+    eprintln!(
+        "(xviii-d) Szamlazz.Agent.query_taxpayer under acme and beta → each asks NAV with its own key, one step taxpayer-{{prefix}} for the full number and the stem, valid: false as data; malformed → invalid_input before the prologue: pass"
     );
 }
 

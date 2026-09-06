@@ -23,12 +23,15 @@
 //! data.
 //!
 //! The outcome types derive `serde` so that the Restate services can journal
-//! them as the result of a `ctx.run`. They carry the agent crate's response
-//! types as they are — [`InvoiceDocument`], [`InvoiceCreationResult`],
-//! [`CreatedInvoice`] — which round-trip through JSON; a journaled document
-//! therefore includes the buyer block szamlazz.hu returned with it.
-//! [`InvoiceDocumentExt`] adds the checks the services make on a queried
-//! document before trusting or acting on it.
+//! them as the result of a `ctx.run`. The document outcomes carry the agent
+//! crate's response types as they are — [`InvoiceDocument`],
+//! [`InvoiceCreationResult`], [`CreatedInvoice`] — which round-trip through
+//! JSON; a journaled document therefore includes the buyer block szamlazz.hu
+//! returned with it. [`TaxpayerOutcome`] carries the crate-owned
+//! [`QueryTaxpayerResponse`] instead — a projection that is additive-only by
+//! contract, so a change in the agent crate cannot make a journaled taxpayer
+//! answer undecodable. [`InvoiceDocumentExt`] adds the checks the services
+//! make on a queried document before trusting or acting on it.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -41,11 +44,12 @@ use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
+use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{ApiError, Client, ClientError, Credentials, ErrorCode, InvoiceNumber};
 use tracing::Instrument as _;
 
 use crate::account::Account;
-use crate::contract::{DocumentKind, IssuedKind, PaymentEntry, Selector};
+use crate::contract::{DocumentKind, IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
@@ -258,8 +262,8 @@ pub enum Unconfirmed {
 
 /// A read-only step got no answer from szamlazz.hu: the read policy
 /// re-executes it. The error of every read fn of the gateway — [`lookup`],
-/// [`verify`], [`query`], [`hint`], [`lookup_storno`], [`probe`] — and never
-/// of a write.
+/// [`verify`], [`query`], [`hint`], [`lookup_storno`], [`query_taxpayer`],
+/// [`probe`] — and never of a write.
 ///
 /// Every szamlazz.hu *answer* — a document, code 7, rejected credentials,
 /// another API code — is the read's data; this is only the exchange that
@@ -272,6 +276,7 @@ pub enum Unconfirmed {
 /// [`query`]: Gateway::query
 /// [`hint`]: Gateway::hint
 /// [`lookup_storno`]: Gateway::lookup_storno
+/// [`query_taxpayer`]: Gateway::query_taxpayer
 /// [`probe`]: Gateway::probe
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -429,6 +434,40 @@ pub enum ProbeOutcome {
         /// The szamlazz.hu code.
         code: String,
         /// The szamlazz.hu message.
+        message: String,
+    },
+}
+
+/// What the taxpayer query of `Szamlazz.Agent.query_taxpayer` learned from
+/// one `xmltaxpayer` exchange ([`Gateway::query_taxpayer`]).
+///
+/// Every szamlazz.hu answer is data: NAV's verdict on the prefix — valid or
+/// not — is [`TaxpayerOutcome::Found`], a credential code is
+/// [`TaxpayerOutcome::CredentialsRejected`], any other `funcCode ≠ OK` (a
+/// NAV-side failure szamlazz.hu relays, a szamlazz.hu code of its own) is
+/// [`TaxpayerOutcome::Api`]. An exchange that produced no answer is
+/// [`Unanswered`], never an outcome. Journaled as the read step's result, so
+/// additive-only; it carries the crate-owned [`QueryTaxpayerResponse`], never
+/// the agent crate's `TaxpayerInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum TaxpayerOutcome {
+    /// NAV answered: the taxpayer as registered, or `valid: false`.
+    Found(QueryTaxpayerResponse),
+    /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
+    /// [`is_credentials_rejected`].
+    CredentialsRejected {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
+    /// szamlazz.hu answered with another code — its own, or NAV's
+    /// `errorCode` relayed under `funcCode ERROR`.
+    Api {
+        /// The code.
+        code: String,
+        /// The message.
         message: String,
     },
 }
@@ -1152,6 +1191,44 @@ impl Gateway {
                     Ok(ProbeOutcome::CredentialsRejected { code, message })
                 }
             },
+        }
+    }
+
+    /// The taxpayer lookup of `Szamlazz.Agent.query_taxpayer`: one
+    /// `xmltaxpayer` query of the eight-digit `prefix`, read-only. NAV's
+    /// verdict — the registered taxpayer, or `valid: false` — is
+    /// [`TaxpayerOutcome::Found`]; rejected credentials are
+    /// [`TaxpayerOutcome::CredentialsRejected`]; any other code, szamlazz.hu's
+    /// or NAV's relayed one, is [`TaxpayerOutcome::Api`]. Finds no document,
+    /// so there are no account pins to check. Issues nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the exchange produced no answer (transport, parse,
+    /// `szlahu_down`); the caller's read policy re-executes the step.
+    pub async fn query_taxpayer(
+        &self,
+        prefix: &TaxpayerPrefix,
+    ) -> Result<TaxpayerOutcome, Unanswered> {
+        let span = tracing::info_span!("gateway.query_taxpayer", prefix = %prefix.as_str());
+        let request = QueryTaxpayer::from(prefix.clone());
+        match self.client.send(&request).instrument(span).await {
+            Ok(info) => {
+                tracing::debug!(prefix = %prefix.as_str(), valid = info.valid, "taxpayer answered");
+                Ok(TaxpayerOutcome::Found(QueryTaxpayerResponse::from(info)))
+            }
+            Err(ClientError::Api(api)) if is_credentials_rejected(&api.code) => {
+                Ok(TaxpayerOutcome::CredentialsRejected {
+                    code: api.code.code().to_owned(),
+                    message: api.message,
+                })
+            }
+            Err(ClientError::Api(api)) => Ok(TaxpayerOutcome::Api {
+                code: api.code.code().to_owned(),
+                message: api.message,
+            }),
+            Err(ClientError::ServiceUnavailable(message)) => Err(Unanswered::Unavailable(message)),
+            Err(error) => Err(Unanswered::Transport(error.to_string())),
         }
     }
 

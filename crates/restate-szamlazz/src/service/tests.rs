@@ -172,7 +172,7 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
 }
 
 #[test]
-fn agent_discovers_as_a_service_with_four_handlers() {
+fn agent_discovers_as_a_service_with_five_handlers() {
     let discovery = <Agent as Discoverable>::discover();
     assert_eq!(discovery.name.as_str(), "Szamlazz.Agent");
     assert_eq!(discovery.ty, ServiceType::Service);
@@ -183,7 +183,16 @@ fn agent_discovers_as_a_service_with_four_handlers() {
         .map(|handler| handler.name.as_str())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["check_account", "query", "set_payments", "storno"]);
+    assert_eq!(
+        names,
+        [
+            "check_account",
+            "query",
+            "query_taxpayer",
+            "set_payments",
+            "storno"
+        ]
+    );
 
     for handler in &discovery.handlers {
         let name = handler.name.as_str();
@@ -193,7 +202,7 @@ fn agent_discovers_as_a_service_with_four_handlers() {
             Some(RetryPolicyOnMaxAttempts::Kill),
             "{name}"
         );
-        if name == "query" || name == "check_account" {
+        if name == "query" || name == "query_taxpayer" || name == "check_account" {
             // Read-only: a short 10s → 1m back-off, three attempts, no
             // idempotency retention (nothing to replay); an explicit journal
             // retention so the journal is inspectable — and, for the probe,
@@ -359,8 +368,8 @@ fn body_discovers_exactly_as_json() {
 
     use super::Body;
     use crate::contract::{
-        CorrectRequest, CreateRequest, DeleteProformaRequest, QueryRequest, SetPaymentsRequest,
-        StornoRequest,
+        CorrectRequest, CreateRequest, DeleteProformaRequest, QueryRequest, QueryTaxpayerRequest,
+        SetPaymentsRequest, StornoRequest,
     };
 
     macro_rules! same_as_json {
@@ -383,6 +392,7 @@ fn body_discovers_exactly_as_json() {
         StornoRequest,
         DeleteProformaRequest,
         QueryRequest,
+        QueryTaxpayerRequest,
         SetPaymentsRequest,
     );
 

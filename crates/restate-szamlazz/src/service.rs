@@ -21,8 +21,9 @@
 //!
 //! - [`Order`] — keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.
-//! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`) and
-//!   the read-only `check_account` probe, registered as `Szamlazz.Agent`.
+//! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`), the
+//!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
+//!   probe, registered as `Szamlazz.Agent`.
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};

@@ -11,6 +11,7 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::credit_entry::CreditEntry;
+use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::CorrectionId;
 use super::document::{DocumentInput, PaymentMethod};
@@ -155,6 +156,65 @@ pub enum Selector {
     /// writer wins.
     ExternalId(String),
 }
+
+/// Input of `Szamlazz.Agent.query_taxpayer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct QueryTaxpayerRequest {
+    /// The Hungarian tax number to look up: the bare eight-digit stem
+    /// (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`).
+    /// Nothing else — no whitespace, no other separator — is accepted; the
+    /// handler refuses anything else as `invalid_input`.
+    pub tax_number: String,
+}
+
+impl QueryTaxpayerRequest {
+    /// A request for `tax_number`, in either accepted form.
+    pub fn new(tax_number: impl Into<String>) -> Self {
+        Self {
+            tax_number: tax_number.into(),
+        }
+    }
+
+    /// The eight-digit prefix (törzsszám) NAV is asked about, derived from
+    /// either accepted form of `tax_number`.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidTaxNumber`] when `tax_number` is neither the bare eight-digit
+    /// stem nor the full `NNNNNNNN-N-NN` form; the message names the input
+    /// and the accepted forms.
+    pub fn prefix(&self) -> Result<TaxpayerPrefix, InvalidTaxNumber> {
+        let invalid = || InvalidTaxNumber(self.tax_number.clone());
+        let digits = |value: &str, len: usize| {
+            value.len() == len && value.bytes().all(|byte| byte.is_ascii_digit())
+        };
+        // The stem is whatever precedes the first `-`; `TaxpayerPrefix` is
+        // the one judge of the stem (eight ASCII digits). The rest, when
+        // present, must be exactly `-N-NN`: the VAT code and the area code.
+        let (stem, suffix) = match self.tax_number.split_once('-') {
+            None => (self.tax_number.as_str(), None),
+            Some((stem, rest)) => (stem, Some(rest)),
+        };
+        if let Some(rest) = suffix
+            && !rest
+                .split_once('-')
+                .is_some_and(|(vat, area)| digits(vat, 1) && digits(area, 2))
+        {
+            return Err(invalid());
+        }
+        stem.parse().map_err(|_| invalid())
+    }
+}
+
+/// A tax number that is neither the eight-digit stem nor the full
+/// `NNNNNNNN-N-NN` form.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "invalid tax number {0:?}: expected the eight-digit stem (12345678) or the full Hungarian tax number (12345678-2-42)"
+)]
+pub struct InvalidTaxNumber(String);
 
 /// Input of `Szamlazz.Agent.set_payments`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,6 +450,11 @@ mod tests {
             "invoice_number",
         );
 
+        refuses_unknown_field::<QueryTaxpayerRequest>(
+            json!({"tax_number": "12345678", "tax_numer": "12345678"}),
+            "tax_numer",
+        );
+
         refuses_unknown_field::<SetPaymentsRequest>(
             json!({"invoice_number": "SZ-1", "entries": [entry], "aditive": true}),
             "aditive",
@@ -458,6 +523,63 @@ mod tests {
         serde_json::from_value::<QueryRequest>(json!({"selector": {"invoice_number": "SZ-12"}}))
             .expect("a query body");
         serde_json::from_value::<DeleteProformaRequest>(json!({})).expect("an empty delete body");
+        // crates/restate-szamlazz-endpoint/README.md's handler table and the
+        // e2e taxpayer scenario: the full tax number and the bare stem.
+        for tax_number in ["12345678-2-42", "12345678"] {
+            let request =
+                serde_json::from_value::<QueryTaxpayerRequest>(json!({"tax_number": tax_number}))
+                    .expect("a taxpayer body");
+            assert_eq!(request.prefix().expect("prefix").as_str(), "12345678");
+        }
+    }
+
+    /// The bare eight-digit stem and the full `NNNNNNNN-N-NN` tax number
+    /// derive the same prefix: the caller sends whatever it has.
+    #[test]
+    fn query_taxpayer_request_derives_the_prefix_from_either_form() {
+        for tax_number in ["12345678", "12345678-2-42"] {
+            let request = QueryTaxpayerRequest::new(tax_number);
+            let prefix = request.prefix().expect(tax_number);
+            assert_eq!(prefix.as_str(), "12345678", "{tax_number}");
+            let json = round_trip(&request);
+            assert_eq!(json, json!({"tax_number": tax_number}));
+        }
+    }
+
+    /// Exactly two forms are accepted; the handler is not lenient, or an
+    /// agent implementing a caller would invent its own leniency. Every
+    /// refusal names the input and the accepted forms.
+    #[test]
+    fn query_taxpayer_request_refuses_every_other_form() {
+        for tax_number in [
+            "",
+            "1234567",
+            "123456789",
+            " 12345678",
+            "12345678 ",
+            "12345678-2",
+            "12345678-2-4",
+            "12345678-2-423",
+            "12345678-24-2",
+            "12345678_2_42",
+            "1234567a",
+            "12345678-a-42",
+            "１２３４５６７８",
+            "12 345 678",
+        ] {
+            let error = QueryTaxpayerRequest::new(tax_number)
+                .prefix()
+                .expect_err(tax_number);
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("{tax_number:?}")),
+                "{tax_number:?}: {message}"
+            );
+            assert!(
+                message.contains("12345678-2-42"),
+                "{tax_number:?} names the accepted forms: {message}"
+            );
+        }
     }
 
     #[test]
