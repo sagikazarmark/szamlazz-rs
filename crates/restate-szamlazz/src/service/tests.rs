@@ -747,6 +747,58 @@ fn an_exhausted_read_is_a_structured_unavailable() {
     assert!(error.message().contains("409"), "{}", error.message());
 }
 
+/// The Virtual Object key must arrive trimmed (design §3): Restate's per-key
+/// lock is on the *raw* key, so `ORD-1` and ` ORD-1` would be two instances
+/// with two locks mapping to one szamlazz.hu order and identical external ids
+/// — two concurrent creates under them would both pass their lookup and both
+/// send. The handler refuses a key whose trimmed form differs from the raw
+/// one as `invalid_input` naming the rule; [`OrderKey::parse`] itself stays
+/// lenient for the places that parse an order number rather than a key.
+#[test]
+fn the_order_key_must_arrive_trimmed() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::order_key;
+    use crate::identity::OrderKey;
+
+    let key = order_key("ORD-1").expect("a trimmed key");
+    assert_eq!(key.as_str(), "ORD-1");
+    let key = order_key("rendelés #42").expect("inner single spaces are fine");
+    assert_eq!(key.as_str(), "rendelés #42");
+
+    for raw in [" ORD-1", "ORD-1 ", "\tORD-1", "ORD-1\n", "\u{a0}ORD-1"] {
+        assert_eq!(
+            OrderKey::parse(raw).expect("the type trims").as_str(),
+            "ORD-1",
+            "{raw:?}: OrderKey::parse stays lenient"
+        );
+        let fault = order_key(raw).expect_err("refused");
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 400, "{raw:?}");
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "invalid_input", "{raw:?}");
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("must not have leading or trailing whitespace"),
+            "{raw:?}: names the rule: {message}"
+        );
+        assert_eq!(body.get("order"), None, "{raw:?}: no order identity yet");
+    }
+
+    // The type's own rules still apply to a trimmed key, with its message.
+    let fault = order_key("a  b").expect_err("a whitespace run");
+    let body: serde_json::Value =
+        serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
+    assert_eq!(body["code"], "invalid_input");
+    assert!(
+        body["message"]
+            .as_str()
+            .expect("message")
+            .contains("consecutive whitespace"),
+        "{body}"
+    );
+}
+
 /// Every handler that finds a document checks it against the account the
 /// invocation resolved to (design §3): `teszt` must equal the account's mode
 /// and, when the account pins a supplier id, `szallito/id` must match it. A

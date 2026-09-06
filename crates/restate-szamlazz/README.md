@@ -159,8 +159,9 @@ activation details.
   `base_reversed`, `not_managed`.
 - `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
   `unavailable` (503; also the prologue's own faults: the resolve policy exhausted, the credential store gone or
-  unavailable), `account_mismatch` (409: a document found by number — on `Szamlazz.Order`'s verifies,
-  `Szamlazz.Agent.query` or `storno` — belongs to another szamlazz.hu account than the resolved one; `set_payments`
+  unavailable), `account_mismatch` (409: a document found by number — on `Szamlazz.Order`'s verifies, including
+  the proforma of `options.proforma: {number}`, or on `Szamlazz.Agent.query` / `storno` — belongs to another
+  szamlazz.hu account than the resolved one; `set_payments`
   finds none and is exempt), `invalid_input` (400), `credentials_rejected`
   (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the execution that
   raised it issued nothing) and `unknown_account` (400: the request names no account of this deployment).
@@ -178,7 +179,9 @@ activation details.
 - `CorrectionId`: the caller-supplied identity of one corrective invoice,
   `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; embedded in the corrective's external id.
 - `OrderKey`: the `Order` key — the order number trimmed of leading and trailing whitespace, case preserved,
-  validated (1–64 bytes, no control characters, no internal whitespace runs).
+  validated (1–64 bytes, no control characters, no internal whitespace runs). The type trims; the `Order` handlers
+  do not: a Virtual Object key with leading or trailing whitespace is refused as `invalid_input` naming the rule
+  (see "Identity Model").
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document — `for_kind`, `for_corrective`,
   `for_storno`, `for_unmanaged_storno` — and `for_probe`, the two-segment `{namespace}:check-account` sentinel
   that nothing the service issues carries.
@@ -222,7 +225,11 @@ Three identities work together ([ADR 0002](../../docs/adr/0002-order-keyed-idemp
 [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md)):
 
 - The **order key** decides which `Order` instance runs; same-key handlers run one at a time, which is what
-  serializes issuing per order. The object holds no state.
+  serializes issuing per order. The object holds no state. The key is the order number **trimmed by the caller**:
+  Restate's per-key lock is on the raw key, so `ORD-1` and ` ORD-1` would be two instances with two locks mapping
+  to one szamlazz.hu order and identical external ids, and two concurrent creates under them would both pass their
+  lookup and both send. A key with leading or trailing whitespace is therefore refused as `invalid_input` before
+  anything is journaled or sent.
 - The **external id** identifies a document to szamlazz.hu and is derived from the key alone under the
   deployment's namespace:
 
@@ -299,9 +306,9 @@ plain-text `Cannot decode input payload`:
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field; refused before anything is journaled or sent — or it names a document szamlazz.hu does not know, or an option the handler does not take. | Fix the request. |
+| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field, or its `Order` key has leading or trailing whitespace; refused before anything is journaled or sent — or it names a document szamlazz.hu does not know, or an option the handler does not take. | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
-| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
+| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued. | Rule 2. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
@@ -354,7 +361,8 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   schemars`, every request schema closed with `additionalProperties: false` and the response schemas open), the
   discovery and binding tests of the adapters (with `Body<T>` turning a malformed body — an unknown field, a wrong
   type, a missing field, invalid JSON — into the 400 `invalid_input` fault while discovering exactly as `Json<T>`,
-  the account pins of a document found by number and the sentinels that the agent key reaches neither the
+  the account pins of a document found by number, the `Order` handlers' key parsing refusing an untrimmed key as
+  `invalid_input` while `OrderKey::parse` still trims, and the sentinels that the agent key reaches neither the
   `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch` fault), and the
   wiremock tests of the gateway against synthetic szamlazz.hu responses
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
@@ -370,8 +378,13 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
   for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued, `Idempotency-Key`
   replay, 152 → reconciled, storno → reversed → stale create → `reissue`, `reissue` on live → `conflict{live}`, an
-  external reversal, proforma auto-link and `consumed` in `get`, a create with a misspelt `options.reissue` answered
-  400 `invalid_input` naming the field with nothing journaled and zero szamlazz.hu requests, an exhausted create step answering a structured
+  external reversal, proforma auto-link and `consumed` in `get`, `options.proforma: {number}` checked like every
+  found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
+  the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
+  order's → `issued` with `dijbekeroSzamlaszam` on the wire), a create with a misspelt `options.reissue` answered
+  400 `invalid_input` naming the field with nothing journaled and zero szamlazz.hu requests, a create under an
+  untrimmed key (a `%20` before or after the order number) answered 400 `invalid_input` naming the rule with nothing
+  journaled and zero szamlazz.hu requests, an exhausted create step answering a structured
   `outcome_unknown` within the run policy's delays with the run's retries visible on `sys_invocation` while it is in
   flight, a lookup whose reply is lost once retried under the read policy and completing `issued` in one invocation
   with exactly one create on the wire, a lookup that never answers as a structured `unavailable` naming the order,

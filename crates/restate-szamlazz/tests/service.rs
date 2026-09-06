@@ -1304,10 +1304,12 @@ async fn e2e_order_protocol() {
     external_reversal_detected(&h).await;
     reversal_between_executions_is_reversed_not_reissued(&h).await;
     proforma_auto_link_and_consumed(&h).await;
+    proforma_by_number_is_checked_like_every_found_document(&h).await;
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
     a_malformed_body_is_a_structured_invalid_input(&h).await;
+    an_untrimmed_order_key_is_refused(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     exhausted_lookup_read_is_a_structured_unavailable(&h).await;
@@ -1822,6 +1824,141 @@ async fn proforma_auto_link_and_consumed(h: &Harness) {
     eprintln!("(vii) proforma → invoice (auto link) → get shows consumed: pass");
 }
 
+/// (vii-b) `options.proforma: {number}` validates the named proforma like
+/// every other document found by number (design §3, §5 step 2): a proforma
+/// whose `teszt` is not the resolved account's mode is `account_mismatch`
+/// (409) after the verify alone — nothing sent, the fault names the observed
+/// pin and never the key; a proforma carrying another order's number, or
+/// none, is `conflict{not_managed, existing_number}` — another order's live
+/// proforma cannot be linked into this order's invoice; a proforma of this
+/// order proceeds as before and the create carries `dijbekeroSzamlaszam`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the three answers of the named proforma's check"
+)]
+async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
+    let body = |number: &str| {
+        json!({
+            "document": document(dec!(1000)),
+            "options": { "proforma": { "number": number } },
+        })
+    };
+
+    // A live-account proforma of this order, on the test account.
+    h.reset().await;
+    h.absent("E2E-30", &["prepayment"]).await;
+    number_query("D-30")
+        .respond_with(
+            Doc {
+                test: false,
+                ..Doc::new("D-30", "D", "E2E-30")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-30", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-30", "create_invoice", &body("D-30"), "e2e-30-k1")
+        .await;
+    reply.assert_account_mismatch("D-30", "teszt = false");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "verify-proforma-D-30"
+        ],
+        "the verify is the last step journaled"
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        2,
+        "the exclusivity lookup and the verify, nothing else"
+    );
+
+    // Another order's proforma, and one carrying no order number at all.
+    for (number, order) in [("D-31", Some("E2E-31")), ("D-32", None)] {
+        h.reset().await;
+        h.absent("E2E-30", &["prepayment"]).await;
+        number_query(number)
+            .respond_with(
+                Doc {
+                    order,
+                    ..Doc::unmanaged(number, "D")
+                }
+                .response(),
+            )
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        create()
+            .respond_with(created("SZ-30", "1000", "1270"))
+            .expect(0)
+            .mount(&h.mock)
+            .await;
+        let response = h
+            .ok(
+                "E2E-30",
+                "create_invoice",
+                &body(number),
+                &format!("e2e-30-{number}"),
+            )
+            .await;
+        assert_eq!(response["outcome"], "conflict", "{number}: {response}");
+        assert_eq!(
+            response["conflict_reason"], "not_managed",
+            "{number}: {response}"
+        );
+        assert_eq!(response["existing_number"], number, "{number}: {response}");
+        assert_eq!(response["kind"], "invoice", "{number}: {response}");
+        assert_eq!(
+            response["external_id"], "acct:E2E-30:invoice",
+            "{number}: {response}"
+        );
+        assert_eq!(
+            h.requests_seen().await,
+            2,
+            "{number}: the exclusivity lookup and the verify, nothing else"
+        );
+    }
+
+    // A proforma of this order: the create proceeds and carries
+    // `dijbekeroSzamlaszam`.
+    h.reset().await;
+    h.absent("E2E-30", &["prepayment", "invoice"]).await;
+    number_query("D-33")
+        .respond_with(Doc::new("D-33", "D", "E2E-30").response())
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-30")
+        .respond_with(Doc::new("D-33", "D", "E2E-30").response())
+        .mount(&h.mock)
+        .await;
+    create()
+        .and(body_string_contains(
+            "<dijbekeroSzamlaszam>D-33</dijbekeroSzamlaszam>",
+        ))
+        .respond_with(created("SZ-30", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let invoice = h
+        .ok("E2E-30", "create_invoice", &body("D-33"), "e2e-30-k4")
+        .await;
+    assert_eq!(invoice["outcome"], "issued", "{invoice}");
+    assert_eq!(invoice["invoice_number"], "SZ-30");
+    eprintln!(
+        "(vii-b) proforma by number: teszt mismatch → account_mismatch with nothing sent; another order's or an order-less proforma → conflict{{not_managed}}; this order's → issued with dijbekeroSzamlaszam: pass"
+    );
+}
+
 /// (viii) the `get` live view after (iv)/(v).
 async fn status_shape(h: &Harness) {
     h.reset().await;
@@ -2018,6 +2155,69 @@ async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) {
         "nothing reached szamlazz.hu"
     );
     eprintln!("(x-b) malformed body → structured invalid_input, nothing issued: pass");
+}
+
+/// (x-c) a Virtual Object key that is not trimmed — `%20E2E-10c`, which the
+/// ingress decodes to ` E2E-10c` — is refused as `invalid_input` naming the
+/// rule. Restate's per-key lock is on the *raw* key, so ` E2E-10c` and
+/// `E2E-10c` would be two instances with two locks mapping to one szamlazz.hu
+/// order and identical external ids, and two concurrent creates under them
+/// would both pass their lookup and both send; the caller trims (design §3).
+/// Refused after the body decode and before the prologue: nothing journaled,
+/// nothing sent, the create mock `expect(0)`. A trailing space is the same
+/// fault; the trimmed key is accepted as before.
+async fn an_untrimmed_order_key_is_refused(h: &Harness) {
+    h.reset().await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let before = h.requests_seen().await;
+    for (i, key) in ["%20E2E-10c", "E2E-10c%20", "%20E2E-10c%20"]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = h
+            .call(
+                key,
+                "create_invoice",
+                &create_body(dec!(1000), false),
+                &format!("e2e-10c-k{i}"),
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{key}: {}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, "invalid_input", "{key}: {fault:?}");
+        assert!(
+            fault
+                .message
+                .contains("must not have leading or trailing whitespace"),
+            "{key}: names the rule: {fault:?}"
+        );
+        assert_eq!(fault.order, None, "{key}: {fault:?}");
+        assert!(
+            h.runs(reply.invocation_id()).await.is_empty(),
+            "{key}: refused before the prologue: nothing journaled"
+        );
+        let invocation = h.invocation(reply.invocation_id()).await;
+        assert_eq!(invocation.handler, "create_invoice");
+        assert!(
+            invocation
+                .completion_failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("invalid_input")),
+            "{key}: {invocation:?}"
+        );
+    }
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+    eprintln!(
+        "(x-c) untrimmed order key → invalid_input naming the rule, nothing journaled or issued: pass"
+    );
 }
 
 /// (xi) every execution of the create step loses its reply and the re-query

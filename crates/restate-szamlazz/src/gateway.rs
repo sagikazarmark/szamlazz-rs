@@ -309,13 +309,19 @@ pub trait InvoiceDocumentExt {
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.
     fn payment_amounts(&self) -> Vec<Decimal>;
 
+    /// Whether the document carries `order` as its order number
+    /// (`rendelesszam`, trimmed as szamlazz.hu matches it). What makes a
+    /// document found by number this order's to act on or link (design §3).
+    fn carries_order(&self, order: &OrderKey) -> bool;
+
     /// Whether the document belongs to the resolved account: it carries the
     /// account's `teszt` flag and — when both are known — the account's
     /// supplier id.
     fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool;
 
-    /// Whether the document is ours (design §3): it carries `order`, the
-    /// `tipus` of `kind` and [belongs to the account](Self::account_matches).
+    /// Whether the document is ours (design §3): it [carries
+    /// `order`](Self::carries_order), the `tipus` of `kind` and [belongs to
+    /// the account](Self::account_matches).
     fn is_ours(
         &self,
         order: &OrderKey,
@@ -355,6 +361,10 @@ impl InvoiceDocumentExt for InvoiceDocument {
         self.payments.iter().map(|payment| payment.amount).collect()
     }
 
+    fn carries_order(&self, order: &OrderKey) -> bool {
+        self.info.order_number.as_deref().map(str::trim) == Some(order.as_str())
+    }
+
     fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool {
         self.info.test == expect_test
             && match (expect_supplier_id, self.supplier.id) {
@@ -370,7 +380,7 @@ impl InvoiceDocumentExt for InvoiceDocument {
         expect_test: bool,
         expect_supplier_id: Option<u64>,
     ) -> bool {
-        self.info.order_number.as_deref().map(str::trim) == Some(order.as_str())
+        self.carries_order(order)
             && self.info.document_type == document_type_of(kind)
             && self.account_matches(expect_test, expect_supplier_id)
     }
@@ -1644,6 +1654,15 @@ mod tests {
         assert!(live.account_matches(true, None));
         assert!(!live.account_matches(false, Some(972_720)));
         assert!(!live.account_matches(true, Some(1)));
+        assert!(live.carries_order(&order));
+        assert!(
+            !live.carries_order(&OrderKey::parse("ORD-2").expect("order")),
+            "another order's number"
+        );
+        assert!(
+            !live.carries_order(&OrderKey::parse("ord-1").expect("order")),
+            "case is significant, as on the server"
+        );
         assert!(live.is_ours(&order, IssuedKind::Invoice, true, Some(972_720)));
         assert!(!live.is_ours(&order, IssuedKind::Proforma, true, Some(972_720)));
         assert!(!live.is_ours(&order, IssuedKind::Invoice, false, None));

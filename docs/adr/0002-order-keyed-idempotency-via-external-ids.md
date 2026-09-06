@@ -1,7 +1,11 @@
 # `Order` is keyed by the order number and identifies documents by a deterministic external id
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
-amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) (the account namespace, below).
+amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) (the account namespace, below) and by #40
+(the caller trims the key: a Virtual Object key with leading or trailing whitespace is refused as `invalid_input`
+rather than trimmed by the handler, because Restate's per-key lock is on the raw key and a padded key would be a
+second instance of the same order with its own lock and the same external ids; the `OrderKey` type itself still
+trims).
 Still holds: the key rule (trimmed, case preserved, validated), the deterministic external id, the query-first
 create inside a single `ctx.run` — now the create *step* under the issue policy's run retry policy (ADR 0004,
 amended by #22) rather than one `max_attempts(1)` run per attempt — the `Found`-validation rule, the 2 m

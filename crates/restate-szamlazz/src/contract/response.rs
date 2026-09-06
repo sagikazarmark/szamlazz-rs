@@ -71,8 +71,11 @@ pub enum ConflictReason {
     PrepaymentReversed,
     /// `correct_invoice` on a reversed invoice.
     BaseReversed,
-    /// The document does not carry this order's number; use
-    /// `Szamlazz.Agent.storno` or the managing order.
+    /// The document named by number — the invoice to reverse or correct, or
+    /// the proforma of `options.proforma: {number}` — does not carry this
+    /// order's number (`existing_number` on a create, `invoice_number` on a
+    /// storno). Use the managing order, or `Szamlazz.Agent.storno` for an
+    /// unmanaged invoice.
     NotManaged,
 }
 

@@ -163,7 +163,21 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
 }
 
 /// Parses the Virtual Object key as an [`OrderKey`].
+///
+/// The key must arrive trimmed (design §3). Restate's per-key lock is on the
+/// *raw* key, so `ORD-1` and ` ORD-1` would be two instances with two locks
+/// that map to one szamlazz.hu order and identical external ids — two
+/// concurrent creates under them would both pass their lookup and both send,
+/// leaving szamlazz.hu's order-number-repetition toggle as the only guard. A
+/// key whose trimmed form differs from the raw one is therefore refused as
+/// `invalid_input` naming the rule; [`OrderKey::parse`] itself stays lenient
+/// for the places that parse an order number rather than a key.
 pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
+    if key.trim() != key {
+        return Err(Fault::invalid_input(format!(
+            "invalid order key {key:?}: the order key must not have leading or trailing whitespace — Restate locks on the raw key, so trim it before calling"
+        )));
+    }
     OrderKey::parse(key)
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
 }

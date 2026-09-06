@@ -8,7 +8,7 @@ use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
-use super::support::{Fault, Lookup, StornoIntent, check_pins, order_key, storno_response};
+use super::support::{Fault, Lookup, StornoIntent, check_pins, storno_response};
 use super::support::{object, shared};
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
@@ -22,12 +22,13 @@ use crate::identity::{ExternalId, OrderKey};
 impl Execution {
     // ----- storno_invoice (§6) ---------------------------------------------
 
+    /// `storno_invoice`, on the `order` the handler parsed from its key.
     pub(super) async fn storno(
         &self,
         ctx: &ObjectContext<'_>,
+        order: OrderKey,
         request: StornoRequest,
     ) -> Result<StornoResponse, HandlerError> {
-        let order = order_key(ctx.key())?;
         let StornoRequest {
             invoice_number: number,
             comment,
@@ -128,7 +129,7 @@ impl Execution {
             }
             QueryOutcome::Found(found) => found,
         };
-        if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
+        if !found.carries_order(order) {
             return Ok(ControlFlow::Break(
                 StornoResponse::new(StornoOutcome::Conflict, number)
                     .with_conflict_reason(ConflictReason::NotManaged),
@@ -152,12 +153,13 @@ impl Execution {
 
     // ----- delete_proforma (§6 tail) ---------------------------------------
 
+    /// `delete_proforma`, on the `order` the handler parsed from its key.
     pub(super) async fn delete(
         &self,
         ctx: &ObjectContext<'_>,
+        order: OrderKey,
         request: DeleteProformaRequest,
     ) -> Result<DeleteProformaResponse, HandlerError> {
-        let order = order_key(ctx.key())?;
         let kind = DocumentKind::Proforma;
         let proforma_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
         let found = match object::lookup(
@@ -214,15 +216,16 @@ impl Execution {
     // ----- get -------------------------------------------------------------
 
     /// The live view: what szamlazz.hu holds under the order's four external
-    /// ids right now (design §6), four read-only steps under the read policy.
+    /// ids right now (design §6), four read-only steps under the read policy,
+    /// on the `order` the handler parsed from its key.
     ///
     /// A collision under an id leaves its slot `None`: a read must not fail
     /// on an answer, and the issuing handlers are the ones that refuse it.
     pub(super) async fn status(
         &self,
         ctx: &SharedObjectContext<'_>,
+        order: OrderKey,
     ) -> Result<OrderStatus, HandlerError> {
-        let order = order_key(ctx.key())?;
         let mut status = OrderStatus::default();
         for kind in DocumentKind::ALL {
             let external_id = ExternalId::for_kind(&self.config.namespace, &order, kind);

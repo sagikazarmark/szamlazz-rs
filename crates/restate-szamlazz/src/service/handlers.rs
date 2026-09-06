@@ -12,6 +12,7 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
+use super::support::order_key;
 use super::{Agent, Body, Order};
 use crate::contract::{
     CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
@@ -26,14 +27,15 @@ use crate::contract::{
 /// deterministic external ids. The retry identity of a request is Restate's
 /// ingress `Idempotency-Key`. Every handler with an input takes it as a
 /// [`Body`] and decodes it first — a malformed body is the `invalid_input`
-/// fault before anything is journaled — then runs the prologue — pin the
-/// namespace, resolve the request's scope to its account (journaled once per
-/// invocation), fetch the credentials for this execution, open the gateway —
-/// and then its operation. Issuing is two durable steps — a read-only lookup
-/// and a query-first create under the issue policy's run retry policy (design
-/// §5) — and every handler that calls szamlazz.hu kills the invocation after
-/// five attempts (ADR 0004); the external-id query inside the create step is
-/// what makes both safe.
+/// fault before anything is journaled — then parses its key (an invalid or
+/// untrimmed key is `invalid_input` likewise, before the prologue), then runs
+/// the prologue — pin the namespace, resolve the request's scope to its
+/// account (journaled once per invocation), fetch the credentials for this
+/// execution, open the gateway — and then its operation. Issuing is two
+/// durable steps — a read-only lookup and a query-first create under the
+/// issue policy's run retry policy (design §5) — and every handler that calls
+/// szamlazz.hu kills the invocation after five attempts (ADR 0004); the
+/// external-id query inside the create step is what makes both safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -56,8 +58,9 @@ impl Order {
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Proforma, request))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Proforma, request))
             .await
             .map(Json)
     }
@@ -83,8 +86,9 @@ impl Order {
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Invoice, request))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Invoice, request))
             .await
             .map(Json)
     }
@@ -118,8 +122,9 @@ impl Order {
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Prepayment, request))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Prepayment, request))
             .await
             .map(Json)
     }
@@ -145,8 +150,9 @@ impl Order {
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Final, request))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Final, request))
             .await
             .map(Json)
     }
@@ -172,8 +178,11 @@ impl Order {
         request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.correct(&ctx, request)).await.map(Json)
+        Box::pin(execution.correct(&ctx, order, request))
+            .await
+            .map(Json)
     }
 
     /// Reverses (`sztornó`) an invoice of this order; idempotent.
@@ -196,8 +205,11 @@ impl Order {
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.storno(&ctx, request)).await.map(Json)
+        Box::pin(execution.storno(&ctx, order, request))
+            .await
+            .map(Json)
     }
 
     /// Deletes the order's proforma.
@@ -220,8 +232,11 @@ impl Order {
         request: Body<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
         let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.delete(&ctx, request)).await.map(Json)
+        Box::pin(execution.delete(&ctx, order, request))
+            .await
+            .map(Json)
     }
 
     /// What szamlazz.hu holds under the order's external ids right now: four
@@ -233,8 +248,9 @@ impl Order {
         journal_retention = "1d"
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
+        let order = order_key(ctx.key())?;
         let execution = self.prologue_shared(&ctx).await?;
-        execution.status(&ctx).await.map(Json)
+        execution.status(&ctx, order).await.map(Json)
     }
 }
 

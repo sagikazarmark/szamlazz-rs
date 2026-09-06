@@ -20,7 +20,7 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
-use super::support::{Fault, Lookup, check_pins, order_key};
+use super::support::{Fault, Lookup, check_pins};
 use crate::config::Namespace;
 use crate::contract::response::outstanding;
 use crate::contract::{
@@ -188,15 +188,16 @@ impl Execution {
     // ----- entry points ----------------------------------------------------
 
     /// `create_proforma` / `create_invoice` / `create_prepayment` /
-    /// `create_final`.
+    /// `create_final`, on the `order` the handler parsed from its key.
     pub(super) async fn issue_kind(
         &self,
         ctx: &ObjectContext<'_>,
+        order: OrderKey,
         kind: DocumentKind,
         request: CreateRequest,
     ) -> Result<CreateResponse, HandlerError> {
         // Step 0: validate (pure).
-        let prepared = self.prepare(ctx.key(), kind, request)?;
+        let prepared = self.prepare(order, kind, request)?;
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
         let mut refs = Refs::default();
 
@@ -262,13 +263,13 @@ impl Execution {
         self.issue(ctx, &prepared.order, intent).await
     }
 
-    /// `correct_invoice`.
+    /// `correct_invoice`, on the `order` the handler parsed from its key.
     pub(super) async fn correct(
         &self,
         ctx: &ObjectContext<'_>,
+        order: OrderKey,
         request: CorrectRequest,
     ) -> Result<CreateResponse, HandlerError> {
-        let order = order_key(ctx.key())?;
         let CorrectRequest {
             invoice_number: number,
             correction_id,
@@ -305,7 +306,7 @@ impl Execution {
                 .into());
             }
             QueryOutcome::Found(found) => {
-                if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
+                if !found.carries_order(&order) {
                     return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
                 }
                 check_pins(self.gateway.account(), &found)?;
@@ -338,11 +339,10 @@ impl Execution {
 
     fn prepare(
         &self,
-        key: &str,
+        order: OrderKey,
         kind: DocumentKind,
         request: CreateRequest,
     ) -> Result<Prepared, Fault> {
-        let order = order_key(key)?;
         let CreateRequest { document, options } = request;
         if options.proforma != ProformaLink::Auto && kind != DocumentKind::Invoice {
             return Err(Fault::invalid_input(format!(
@@ -475,6 +475,12 @@ impl Execution {
     /// Under `auto` and `none` a document under `…:proforma` that fails
     /// validation is `conflict{external_id_collision}` — see
     /// [`Self::exclusivity`] for why a collision is never treated as absent.
+    ///
+    /// Under `{number}` the named document is verified and checked like every
+    /// other document found by number (design §3): another order's number, or
+    /// none, is `conflict{not_managed, existing_number}`; a pin that is not
+    /// the resolved account's is the `account_mismatch` fault; a document
+    /// that is not a proforma is `invalid_input`.
     async fn proforma_link(
         &self,
         ctx: &ObjectContext<'_>,
@@ -539,14 +545,26 @@ impl Execution {
                     QueryOutcome::NotFound => Ok(Some(
                         identity.conflict_about(ConflictReason::ProformaMissing, number.clone()),
                     )),
-                    QueryOutcome::Found(found) if found.info.document_type != "D" => {
-                        Err(Fault::invalid_input(format!(
-                            "{number} is not a proforma (tipus {})",
-                            found.info.document_type
-                        ))
-                        .into())
-                    }
+                    // Checked like every other document found by number
+                    // (design §3), in the order the other verifies use: this
+                    // order's number, then the account pins, then the kind.
+                    // Without the first two a caller could link another
+                    // order's — or another account's — live proforma into
+                    // this order's invoice.
                     QueryOutcome::Found(found) => {
+                        if !found.carries_order(&prepared.order) {
+                            return Ok(Some(
+                                identity.conflict_about(ConflictReason::NotManaged, number.clone()),
+                            ));
+                        }
+                        check_pins(self.gateway.account(), &found)?;
+                        if found.info.document_type != "D" {
+                            return Err(Fault::invalid_input(format!(
+                                "{number} is not a proforma (tipus {})",
+                                found.info.document_type
+                            ))
+                            .into());
+                        }
                         refs.our_numbers.push(found.number().to_owned());
                         refs.proforma = Some(number.clone());
                         Ok(None)
@@ -731,6 +749,10 @@ mod tests {
         body["message"].as_str().expect("message").to_owned()
     }
 
+    fn ord_1() -> OrderKey {
+        OrderKey::parse("ORD-1").expect("order")
+    }
+
     /// `options.proforma` is an invoice option: the Agent cannot carry
     /// `dijbekeroSzamlaszam` on a prepayment invoice, and the other kinds
     /// have nothing to convert.
@@ -739,7 +761,7 @@ mod tests {
         let order = order();
         for link in [ProformaLink::None, ProformaLink::Number("D-1".to_owned())] {
             let prepared = order
-                .prepare("ORD-1", DocumentKind::Invoice, request(link.clone()))
+                .prepare(ord_1(), DocumentKind::Invoice, request(link.clone()))
                 .expect("create_invoice accepts options.proforma");
             assert_eq!(prepared.proforma, link);
 
@@ -749,7 +771,7 @@ mod tests {
                 DocumentKind::Final,
             ] {
                 let fault = order
-                    .prepare("ORD-1", kind, request(link.clone()))
+                    .prepare(ord_1(), kind, request(link.clone()))
                     .err()
                     .unwrap_or_else(|| panic!("create_{kind} must refuse {link:?}"));
                 let message = invalid_input(fault);
@@ -762,7 +784,7 @@ mod tests {
 
         for kind in DocumentKind::ALL {
             let prepared = order
-                .prepare("ORD-1", kind, request(ProformaLink::Auto))
+                .prepare(ord_1(), kind, request(ProformaLink::Auto))
                 .unwrap_or_else(|error| panic!("create_{kind} accepts auto: {error:?}"));
             assert_eq!(prepared.proforma, ProformaLink::Auto);
         }

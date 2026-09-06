@@ -74,9 +74,11 @@ pub enum ProformaLink {
     /// live proforma of ours exists, because szamlazz.hu links by shared order
     /// number regardless.
     None,
-    /// Reference a proforma by number. `conflict{proforma_missing}` when
-    /// szamlazz.hu does not know it, `invalid_input` when it is not a
-    /// proforma.
+    /// Reference a proforma by number. Checked like every document found by
+    /// number: `conflict{proforma_missing}` when szamlazz.hu does not know
+    /// it, `conflict{not_managed}` when it does not carry this order's
+    /// number, the `account_mismatch` fault when it belongs to another
+    /// szamlazz.hu account, `invalid_input` when it is not a proforma.
     Number(String),
 }
 

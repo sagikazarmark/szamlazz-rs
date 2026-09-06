@@ -43,8 +43,15 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
 
 - **VO key** = the order number, trimmed of leading/trailing whitespace, case preserved (the server trims and is
   case-sensitive — verified). Validation: 1–64 bytes after trim, no control characters, no whitespace runs →
-  `invalid_input`. The key carries no account marker: Restate namespaces it per **scope** (ADR 0006), so the same
-  order number under two scopes is two `Szamlazz.Order` instances with two locks.
+  `invalid_input`. The caller trims: a key whose trimmed form differs from the raw key is refused as `invalid_input`
+  naming the rule, before the prologue, because Restate's per-key lock is on the *raw* key — `ORD-1` and ` ORD-1`
+  would be two instances with two locks mapping to one szamlazz.hu order and identical external ids, and two
+  concurrent creates under them would both pass their lookup and both send, leaving the order-number-repetition
+  toggle as the only guard. The order-key *type* stays lenient (it trims) for the places that parse an order number
+  rather than a Virtual Object key — its `FromStr`, `TryFrom<String>` and serde implementations, which a caller
+  building keys from its own order numbers uses. The key carries no account marker: Restate
+  namespaces it per **scope** (ADR 0006), so the same order number under two scopes is two `Szamlazz.Order`
+  instances with two locks.
 - **External id** (`szamlaKulsoAzon`), deterministic from the key under the deployment's **namespace** (chosen by the
   operator, opaque to szamlazz.hu, permanent; 1–16 bytes of `[a-z0-9-]`, `:` excluded as the separator; one per
   deployment, shared by every account), so *any* invocation can find what an earlier one issued:
@@ -61,9 +68,12 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
     szallito/id == account.supplier_id)`; anything else → `conflict{external_id_collision}`. `mode` defaults to
     `live` and is always checked; `supplier_id` is optional in the single-account shape and required in the
     multi-account shape (§9). The account pins (`teszt`, `szallito/id`) are checked on **every** found document, by
-    external id or by number: `Szamlazz.Order`'s verifies and `Szamlazz.Agent.query` / `storno` raise
-    `TerminalError{account_mismatch}` on a document that fails them (§4, §6), so a misconfigured account fails on
-    its first found document on any handler. `set_payments` finds no document and is the one exemption (§4).
+    external id or by number: `Szamlazz.Order`'s verifies (a storno's or a corrective's invoice, the proforma of
+    `options.proforma: {number}`) and `Szamlazz.Agent.query` / `storno` raise `TerminalError{account_mismatch}` on a
+    document that fails them (§4, §5, §6), so a misconfigured account fails on its first found document on any
+    handler. `Szamlazz.Order`'s verifies also require the found document to carry this order's number
+    (`conflict{not_managed}` otherwise), so no handler can act on — or link into this order's invoice — a document
+    another order manages. `set_payments` finds no document and is the one exemption (§4).
 - **Retry identity** is Restate's ingress `Idempotency-Key` (caller-side, recommended; see §8). The service does not
   know whether one was used, so it never relies on it for safety.
 - **Buyer name is serialised byte-identically on every attempt**: normalised once (trim + NFC) at validation. The
@@ -177,7 +187,11 @@ gateway opened for this execution.
    - `auto` (default): `ctx.run(query "{namespace}:{order}:proforma")` → live `D` → pass `dijbekeroSzamlaszam`; 7 → none.
    - `none`: same query; live `D` → `conflict{proforma_live, existing_number}` (the server links by shared order
      number regardless — verified — so refusing is the only honest answer).
-   - `{number}`: `ctx.run(verify number)`; 7 → `conflict{proforma_missing}`; `tipus ≠ D` → `invalid_input`.
+   - `{number}`: `ctx.run(verify number)`; 7 → `conflict{proforma_missing}`; then the found document is checked like
+     every other document found by number (§3), in the order the other verifies use: `rendelesszam ≠ order` (or
+     absent) → `conflict{not_managed, existing_number}` — another order's live proforma cannot be linked into this
+     order's invoice; `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}`
+     with nothing sent and the verify the last step journaled; `tipus ≠ D` → `invalid_input`.
    Under `auto` and `none`, a document under `…:proforma` that fails validation → `conflict{external_id_collision,
    number}` (as in step 1).
    Collect the numbers seen in steps 1–2 as `our_numbers` (for foreign detection).
@@ -393,7 +407,8 @@ have landed with a lost reply, which is why it is a fault under the "every error
 occurrence is logged at `warn` with the namespace and the code (never the key).
 
 `account_mismatch`: a document found **by number** — `Szamlazz.Order`'s verifies (`storno_invoice`, the corrective's
-base), `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` — belongs to another szamlazz.hu account than the one the
+base, the proforma of `create_invoice`'s `options.proforma: {number}`), `Szamlazz.Agent.query` and
+`Szamlazz.Agent.storno` — belongs to another szamlazz.hu account than the one the
 invocation resolved to: its `teszt` is not the account's mode, or its `szallito/id` is not the account's set supplier
 id. The same pins failing on a document found under one of our external ids are `conflict{external_id_collision}`
 (§3). The message names the document and the observed and expected pins, never the key (no document carries it). It
@@ -555,19 +570,27 @@ scripts.
   read → `unavailable{step, last failure}` about the document, `Lookup::classify` on `Api`, the probe outcome →
   `credentials` mapping, the account pins of a
   document found by number (`teszt` and supplier mismatch → `account_mismatch` naming the observed and expected pins,
-  an unset supplier pin unchecked, the order number not a pin), and two sentinel tests that the agent key reaches
+  an unset supplier pin unchecked, the order number not a pin), the handler's key parsing refusing a key with leading
+  or trailing whitespace (`" ORD-1"`, `"ORD-1 "`, `"\tORD-1"`) as `invalid_input` naming the rule while
+  `OrderKey::parse` itself still trims, and two sentinel tests that the agent key reaches
   neither the `credentials_rejected` warning nor the fault body of `credentials_rejected` or `account_mismatch`.
 - End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
   152 → reconciled; storno → reversed; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
   live → `conflict{live}`; `sztornozott` → reversed; a document reversed in the UI between two executions of the
-  create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; proforma auto-link and `consumed` in `get`; `get` shape; a
+  create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; proforma auto-link and `consumed` in `get`;
+  `options.proforma: {number}` checked like every found document — a proforma of this order with `teszt = false` →
+  409 `account_mismatch` naming the observed pin with `verify-proforma-{number}` the last step journaled and the
+  create mock `expect(0)`, another order's proforma and one carrying no order number → `conflict{not_managed}`
+  naming it with nothing sent, this order's → `issued` with `dijbekeroSzamlaszam` on the wire; `get` shape; a
   collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
   `expect(0)` and the slot absent in `get`; `create_prepayment` refusing `options.proforma` and issuing without a
   proforma lookup; a create whose body carries `options.resissue` — and one with `buyer.tax_numer`, and a
   `delete_proforma` with `force: "yes"` — answered 400 with the structured `invalid_input` fault naming the field,
-  the create mock `expect(0)`, zero szamlazz.hu requests and no run journaled (refused before the prologue); an
+  the create mock `expect(0)`, zero szamlazz.hu requests and no run journaled (refused before the prologue); a create
+  under an untrimmed key — a leading, a trailing and both `%20` around the order number — → 400 `invalid_input`
+  naming the trimming rule with nothing journaled and zero szamlazz.hu requests; an
   exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
   500 within the run policy's delays, not the handler's, with `sys_invocation.retry_count = 1` and
   `last_failure_related_command_name = create-invoice` observed **while in flight** (attempt state is cleared on
