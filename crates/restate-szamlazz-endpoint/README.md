@@ -23,6 +23,8 @@ docker run --rm -p 9080:9080 \
   ghcr.io/sagikazarmark/restate-szamlazz:latest
 ```
 
+The image runs the binary as the non-root user `nonroot` (uid and gid 65532; numeric in the image, so Kubernetes' `runAsNonRoot` verifies it), with no writable filesystem needed. A mounted configuration file must be readable by that uid — world-readable is fine once the agent key comes from the environment, as above. It stops cleanly on `docker stop` (see [Stopping](#stopping)).
+
 ## Prerequisite
 
 The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON** on every account the deployment issues for. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id query inside every execution of the create step is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
@@ -185,7 +187,7 @@ The mapping is append-only: moving traffic to another szamlazz.hu account means 
 restate-szamlazz --config restate-szamlazz.toml --port 9080
 ```
 
-`--config` and `--port` also read `CONFIG_FILE` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). The endpoint binds `0.0.0.0:{port}` and speaks HTTP/2 only, as every Restate SDK endpoint does.
+`--config` and `--port` also read `CONFIG_FILE` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). The endpoint binds `0.0.0.0:{port}` (`--port 0` takes an ephemeral one; the start-up log names the bound address) and speaks HTTP/2 only, as every Restate SDK endpoint does.
 
 Register it with a Restate server:
 
@@ -194,6 +196,16 @@ restate deployments register http://host:9080
 ```
 
 For local development the repository root has a `compose.yaml` with a Restate server; `docker compose up -d` starts it, `restate deployments register http://host.docker.internal:9080` registers an endpoint running on the host.
+
+### Stopping
+
+`SIGTERM` or `SIGINT` — `docker stop`, a Kubernetes rollout, `kill`, Ctrl-C — stops the process cleanly: it stops accepting connections, gives the open ones up to 10 s to finish (the Rust SDK's connection drain; the bound is the SDK's, not configurable here) and exits 0. The start-up log names the signals (`stop_on="SIGTERM, SIGINT"`) and a stop logs which one arrived (`signal="SIGTERM"`). With nothing in flight the process is gone within milliseconds. The container image runs the binary as PID 1 with `STOPSIGNAL SIGTERM`, so `docker stop` and the kubelet reach it directly.
+
+**In-flight invocations.** An invocation whose connection the stop cuts — one still running when the connection drain ends — is neither lost nor duplicated. Restate keeps it and re-dispatches it after the handler's retry interval (`initial_interval`: 2 m on every `Szamlazz.Order` handler but `get`, 10 s on `Szamlazz.Agent.query` and `check_account`, the server's ~500 ms default on `get`, `set_payments` and `storno`); the re-execution replays the journal up to the open step and runs that step again. For a cut create step this is exactly what the query-first closure exists for: the re-execution queries the external id before sending and finds what the cut execution sent — `issued`, never a second document ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md); design §5). The cost is the delay and one of the invocation's attempts (five on the 2 m handlers; the last kills it). The create step is also the longest thing a stop can cut — a query, a send and a re-query at up to 60 s each, ~180 s in the worst case, well past the connection drain — so a rollout while orders are issuing will cut some of them; letting them finish would take a longer drain than the SDK offers.
+
+**Grace period.** Give the process the whole connection drain plus a margin, so it is never `SIGKILL`ed mid-drain: at least 15 s. Kubernetes' default `terminationGracePeriodSeconds: 30` is fine; Docker's default `docker stop -t 10` is the bare bound, so pass `-t 15` (or `stop_grace_period: 15s` in Compose) where the endpoint carries traffic. A longer grace period buys nothing: the connection drain ends at 10 s regardless.
+
+**Rolling updates.** To roll without cutting anything, empty the server side first — steps 1 and 2 of the [flag-day script](#single--multi-flag-day): make both services private and poll the `sys_invocation` query until nothing is in flight — then stop the old revision, register the new one and make the services public again. Without it a rollout is correct but stalls every in-flight order for the retry interval and spends one of its attempts.
 
 ## Services
 

@@ -515,10 +515,16 @@ Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `
 `restate-szamlazz --config <file> --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting
 (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY`;
 `RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY` in the multi-account shape); `identity_keys`; tracing;
-container image on `v*` tags. The start-up log names the namespace, whether the deployment is scoped, and per
-account its scope (or `<unscoped>`), id, mode, endpoint and supplier id — never the key. The endpoint README carries
-the caller guidance with the Pretix integration as the worked example (ADR 0006), the deploy checklist around
-`check_account`, and the flag-day and drain–switch–resume scripts.
+container image on `v*` tags, running as a non-root user (uid 65532) with `STOPSIGNAL SIGTERM`. The start-up log
+names the namespace, whether the deployment is scoped, and per account its scope (or `<unscoped>`), id, mode,
+endpoint and supplier id — never the key — then the bound address and the signals that stop the process. `SIGTERM`
+or `SIGINT` stops it cleanly through the SDK's `serve_with_cancel` (the SDK's own `serve` waits for `SIGINT` alone,
+and an unhandled `SIGTERM` would end PID 1 on the spot): accepting stops, open connections get the SDK's 10 s connection
+drain, the process exits 0. An invocation the drain cuts resumes on Restate's next dispatch after the handler's retry
+interval, query-first (ADR 0004); the README's Running section gives the grace-period recommendation and the
+drain-first rolling update. The endpoint README also carries the caller guidance with the Pretix integration as the
+worked example (ADR 0006), the deploy checklist around `check_account`, and the flag-day and drain–switch–resume
+scripts.
 
 ## 11. Testing
 
@@ -538,7 +544,9 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   request schema and each of its `$defs` objects carries `additionalProperties: false` while the response schemas
   carry none.
 - `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
-  `journal_retention`, no input — and attributes), an endpoint build smoke test, `Body<T>` — a well-formed body
+  `journal_retention`, no input — and attributes), an endpoint build smoke test, an integration test of the endpoint
+  binary (spawned on an ephemeral port with an environment-only configuration, `SIGTERM` and `SIGINT` each end it
+  with status 0 within seconds, and the start-up log names both), `Body<T>` — a well-formed body
   decodes, a misspelt option / a wrong type / a missing field / an empty body each leave the handler as the 400
   `invalid_input` fault naming the field, and its schema and input metadata are `Json<T>`'s, in the discovery
   manifest too — `prepare` refusing
