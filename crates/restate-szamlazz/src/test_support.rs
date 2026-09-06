@@ -1,10 +1,12 @@
-//! The one test-side way to make a [`InvoiceDocument`]: render szamlazz.hu's
-//! `<szamla>` response XML from a [`Doc`] and parse it the way the gateway
-//! parses a query answer. The Számla Agent crate's response types are
-//! `#[non_exhaustive]` on purpose, so a unit test cannot construct one
-//! directly; the XML is the seam, and it is what szamlazz.hu actually says
-//! (design §11 — tests state the answer szamlazz.hu gives, not a second model
-//! of it).
+//! The unit tests' fixture for a queried document: render szamlazz.hu's
+//! `<szamla>` response XML from a [`Doc`] and parse it into an
+//! [`InvoiceDocument`] the way the gateway parses a query answer. The Számla
+//! Agent crate's response types are `#[non_exhaustive]` on purpose, so a
+//! unit test cannot construct one directly; the XML is the seam, and it is
+//! what szamlazz.hu actually says (design §11 — tests state the answer
+//! szamlazz.hu gives, not a second model of it). Every unit test that needs a
+//! found document builds it here (#18); the two renderers below are the
+//! deliberate exceptions.
 //!
 //! The wiremock integration tests (`tests/gateway.rs`, `tests/service.rs`)
 //! carry their own `Doc` and do not share this one: a `#[cfg(test)]` module is
@@ -14,7 +16,7 @@
 //! `all-features`, and a public feature is semver surface). The e2e `Doc`
 //! also carries a harness-only `external_id` selector that is not part of any
 //! document body. Two small renderers of one verified XML shape were judged
-//! cheaper than that surface (#18).
+//! cheaper than that surface.
 //!
 //! `service::journal`'s `document()` is not a fixture of this kind and stays
 //! where it is: it renders *every* element the `szamla` XML can carry, so
