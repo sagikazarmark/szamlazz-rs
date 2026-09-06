@@ -1346,16 +1346,16 @@ impl Gateway {
         }
 
         // Step 2: send.
-        let mut storno = StornoInvoice::new(request.invoice_number);
-        storno.e_invoice = request.e_invoice;
-        storno.external_id = Some(request.external_id.as_str().to_owned());
-        storno.comment = request.comment.map(str::to_owned);
-        storno
-            .aggregator
-            .clone_from(&self.account.defaults.aggregator);
-        storno.guardian = self.account.defaults.guardian;
-        storno.issue_date = None;
-        storno.fulfillment_date = Some(request.fulfillment_date);
+        let storno = StornoInvoice {
+            e_invoice: request.e_invoice,
+            external_id: Some(request.external_id.as_str().to_owned()),
+            comment: request.comment.map(str::to_owned),
+            aggregator: self.account.defaults.aggregator.clone(),
+            guardian: self.account.defaults.guardian,
+            issue_date: None,
+            fulfillment_date: Some(request.fulfillment_date),
+            ..StornoInvoice::new(request.invoice_number)
+        };
 
         match self.client.send(&storno).await {
             Ok(created) if created.reverses(&storno.invoice_number) => {
@@ -1498,12 +1498,12 @@ impl Gateway {
                 };
             }
         };
-        let mut request = RegisterCreditEntry::new(number);
-        request.additive = additive;
-        request.entries = credit_entries;
-        request
-            .aggregator
-            .clone_from(&self.account.defaults.aggregator);
+        let request = RegisterCreditEntry {
+            additive,
+            entries: credit_entries,
+            aggregator: self.account.defaults.aggregator.clone(),
+            ..RegisterCreditEntry::new(number)
+        };
 
         match self.client.send(&request).await {
             Ok(result) => {

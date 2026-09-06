@@ -63,7 +63,6 @@ impl InvoiceKind {
 /// Exchange rate information, required on non-HUF documents.
 #[doc(alias = "árfolyam")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ExchangeRate {
     /// The quoting bank (`arfolyamBank`), e.g. `MNB`.
     pub bank: String,
@@ -130,7 +129,6 @@ impl InvoiceTemplate {
 
 /// Buyer general-ledger metadata (`vevoFokonyv`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct BuyerLedger {
     /// Accounting date (`konyvelesDatum`).
     pub accounting_date: Option<Date>,
@@ -148,7 +146,6 @@ pub struct BuyerLedger {
 
 /// Trans-O-Flex carrier data (`fuvarlevel` / `tof`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct TransOFlex {
     /// Carrier-provided five-digit identifier (`azonosito`).
     pub id: Option<String>,
@@ -166,7 +163,6 @@ pub struct TransOFlex {
 
 /// Pick Pack Pont carrier data (`fuvarlevel` / `ppp`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct PickPackPoint {
     /// Barcode prefix (`vonalkodPrefix`).
     pub barcode_prefix: Option<String>,
@@ -176,7 +172,6 @@ pub struct PickPackPoint {
 
 /// Sprinter carrier data (`fuvarlevel` / `sprinter`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct Sprinter {
     /// Agreed carrier identifier (`azonosito`).
     pub id: Option<String>,
@@ -194,7 +189,6 @@ pub struct Sprinter {
 
 /// MPL carrier data (`fuvarlevel` / `mpl`).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct Mpl {
     /// MPL customer code (`vevokod`).
     pub customer_code: String,
@@ -227,7 +221,6 @@ impl Mpl {
 
 /// Optional carrier waybill block (`fuvarlevel`).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct Waybill {
     /// Legacy destination (`uticel`).
     pub destination: Option<String>,
@@ -250,7 +243,6 @@ pub struct Waybill {
 /// Invoice header (`fejlec`): dates, payment terms, and identifiers.
 #[doc(alias = "fejléc")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct InvoiceHeader {
     /// Issue date (`keltDatum`). `None` lets szamlazz.hu use today.
     ///
@@ -338,7 +330,6 @@ impl InvoiceHeader {
 /// is used where fields are absent.
 #[doc(alias = "eladó")]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct Seller {
     /// Bank name (`bank`).
     pub bank: Option<String>,
@@ -352,7 +343,6 @@ pub struct Seller {
 
 /// Settings for the notification email szamlazz.hu sends to the buyer.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct SellerEmail {
     /// Reply-to address (`emailReplyto`).
     pub reply_to: Option<String>,
@@ -365,7 +355,6 @@ pub struct SellerEmail {
 /// Postal/delivery address of the buyer (`postazasi*` fields).
 #[doc(alias = "postázási cím")]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct PostalAddress {
     /// Recipient name (`postazasiNev`).
     pub name: Option<String>,
@@ -382,7 +371,6 @@ pub struct PostalAddress {
 /// Buyer (`vevo`) details.
 #[doc(alias = "vevő")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct Buyer {
     /// Name (`nev`).
     pub name: String,
@@ -458,7 +446,6 @@ impl Buyer {
 
 /// A file attached to the buyer email sent for a created invoice.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct EmailAttachment {
     /// Filename shown to the recipient.
     pub filename: String,
@@ -575,7 +562,6 @@ pub enum AttachmentError {
 #[doc(alias = "xmlszamla")]
 #[doc(alias = "számla készítés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct CreateInvoice {
     /// The document kind to issue.
     pub kind: InvoiceKind,
@@ -619,7 +605,23 @@ pub struct CreateInvoice {
 impl CreateInvoice {
     /// An invoice-creation request with the required blocks; optional fields
     /// (`e_invoice`, `download_pdf`, `external_id`, `seller`) default to
-    /// absent and can be set on the returned value.
+    /// absent. Set them on the returned value, or override them with
+    /// functional update:
+    ///
+    /// ```
+    /// # use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
+    /// # use szamlazz_agent::{Currency, Language, PaymentMethod};
+    /// # let header = InvoiceHeader::new(
+    /// #     "2026-07-04".parse().expect("date"), "2026-07-12".parse().expect("date"),
+    /// #     PaymentMethod::Transfer, Currency::HUF, Language::Hungarian,
+    /// # );
+    /// # let buyer = Buyer::new("Example Kft.", "1111", "Budapest", "Example utca 1.");
+    /// let request = CreateInvoice {
+    ///     external_id: Some("shop:ORD-1:invoice".to_owned()),
+    ///     ..CreateInvoice::new(InvoiceKind::invoice(), header, buyer, Vec::new())
+    /// };
+    /// # assert_eq!(request.external_id.as_deref(), Some("shop:ORD-1:invoice"));
+    /// ```
     #[must_use]
     pub fn new(
         kind: InvoiceKind,

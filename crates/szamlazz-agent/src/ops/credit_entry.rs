@@ -14,7 +14,6 @@ use crate::xml;
 /// One payment recorded against the invoice (a `kifizetes` block).
 #[doc(alias = "kifizetés")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct CreditEntry {
     /// Payment date (`datum`).
     pub date: Date,
@@ -110,7 +109,6 @@ pub enum CreditEntriesError {
 #[doc(alias = "xmlszamlakifiz")]
 #[doc(alias = "jóváírás")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct RegisterCreditEntry {
     /// The invoice to register credit entries against (`szamlaszam`).
     #[doc(alias = "számlaszám")]

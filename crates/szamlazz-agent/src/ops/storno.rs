@@ -48,7 +48,6 @@ use crate::xml;
 #[doc(alias = "sztornó")]
 #[doc(alias = "számla sztornózás")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct StornoInvoice {
     /// The invoice to reverse (`fejlec`/`szamlaszam`).
     #[doc(alias = "számlaszám")]

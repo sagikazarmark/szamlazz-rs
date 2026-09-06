@@ -11,25 +11,33 @@
 //!
 //! # Quick start
 //!
-//! Build a complete HTTP request with the framework-free core:
+//! Build a complete HTTP request body with the framework-free core:
 //!
 //! ```
 //! use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
-//! use szamlazz_agent::wire::{AgentRequest, ENDPOINT};
+//! use szamlazz_agent::wire::AgentRequest;
 //! use szamlazz_agent::Credentials;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let request = QueryTaxpayer::new("12345678")?;
 //! let wire = request.to_wire(&Credentials::agent_key("your-agent-key"))?;
 //!
-//! assert_eq!(wire.url, ENDPOINT);
 //! assert!(wire.content_type.starts_with("multipart/form-data"));
+//! assert!(!wire.body.is_empty());
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Send the URL, content type, and body through your HTTP stack, then pass its
-//! headers and body to [`AgentRequest::parse`](wire::AgentRequest::parse).
+//! POST the body with that content type to [`wire::ENDPOINT`] through your
+//! HTTP stack, then pass the response's headers and body to
+//! [`RawResponse::new`](wire::RawResponse::new) and
+//! [`AgentRequest::parse`](wire::AgentRequest::parse). The README shows the
+//! full round trip with a non-reqwest client.
+//!
+//! Request types are plain data: build them as struct literals, or extend a
+//! constructor's result with functional update
+//! (`CreateInvoice { external_id: Some(..), ..CreateInvoice::new(..) }`).
+//! Response types are `#[non_exhaustive]`, since szamlazz.hu grows them.
 //!
 //! # Features
 //!
@@ -57,6 +65,12 @@ mod xml;
 
 #[cfg(feature = "client-reqwest")]
 pub use client::{Client, ClientError};
+
+/// The README's examples, compiled as doctests: the quick start needs
+/// `client-reqwest`, the sans-IO round trip only the `ureq` dev-dependency.
+#[cfg(all(doctest, feature = "client-reqwest"))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 pub use credentials::{AgentKey, Credentials};
 pub use error::{

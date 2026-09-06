@@ -1,7 +1,10 @@
 //! Ready-made async client built on [`reqwest`] (feature `client-reqwest`).
 //!
 //! A thin shell around the sans-IO core: every operation goes through
-//! [`Client::send`], which works with any [`AgentRequest`] type.
+//! [`Client::send`], which works with any [`AgentRequest`] type. The client
+//! owns what the core leaves to the transport — the endpoint URL, the
+//! `JSESSIONID` session (through reqwest's cookie store), timeouts, TLS, and
+//! the redirect policy.
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -188,12 +191,11 @@ impl Client {
     /// fails, szamlazz.hu reports an error or unavailability, or the response
     /// cannot be parsed.
     pub async fn send<R: AgentRequest>(&self, request: &R) -> Result<R::Response, ClientError> {
-        let mut wire = request.to_wire(&self.credentials)?;
-        wire.url = self.endpoint.clone();
+        let wire = request.to_wire(&self.credentials)?;
 
         let response = self
             .http
-            .post(&wire.url)
+            .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, wire.content_type)
             .body(wire.body)
             .send()

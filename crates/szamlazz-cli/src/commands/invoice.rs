@@ -207,9 +207,11 @@ pub async fn run(cli: &crate::Cli, command: &InvoiceCommand) -> anyhow::Result<(
             Ok(())
         }
         InvoiceCommand::Storno(args) => {
-            let mut request = StornoInvoice::new(args.number.as_str());
-            request.download_pdf = args.pdf.is_some();
-            request.comment = args.comment.clone();
+            let request = StornoInvoice {
+                download_pdf: args.pdf.is_some(),
+                comment: args.comment.clone(),
+                ..StornoInvoice::new(args.number.as_str())
+            };
             let created = client.send(&request).await?;
             output::warn_missing_pdf(args.pdf.is_some(), created.pdf.is_some());
             let pdf_on_stdout = args.pdf.as_deref().is_some_and(output::is_stdout);

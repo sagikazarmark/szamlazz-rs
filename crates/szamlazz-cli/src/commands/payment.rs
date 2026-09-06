@@ -54,17 +54,20 @@ pub async fn run(cli: &crate::Cli, command: &PaymentCommand) -> anyhow::Result<(
         (None, Some(date)) => {
             let method = args.method.clone().expect("clap requires --method");
             let amount = args.amount.expect("clap requires --amount");
-            let mut entry = CreditEntry::new(date, PaymentMethod::from(method), amount);
-            entry.description.clone_from(&args.description);
-            vec![entry]
+            vec![CreditEntry {
+                description: args.description.clone(),
+                ..CreditEntry::new(date, PaymentMethod::from(method), amount)
+            }]
         }
         (None, None) => anyhow::bail!("pass -f entries.json or --date/--method/--amount"),
     };
 
-    let mut request = RegisterCreditEntry::new(args.number.as_str());
-    request.issuer_tax_number = args.tax_number.clone();
-    request.additive = args.additive;
-    request.entries = CreditEntries::try_from(entries)?;
+    let request = RegisterCreditEntry {
+        issuer_tax_number: args.tax_number.clone(),
+        additive: args.additive,
+        entries: CreditEntries::try_from(entries)?,
+        ..RegisterCreditEntry::new(args.number.as_str())
+    };
     let client = crate::client(cli)?;
     let result = client.send(&request).await?;
 

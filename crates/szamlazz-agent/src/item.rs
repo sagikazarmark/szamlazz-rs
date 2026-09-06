@@ -50,7 +50,6 @@ impl Rounding {
 /// Receipt creation supports only `revenue_account` and `vat_account`; the
 /// economic-event and settlement fields are invoice-only protocol fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct LineItemLedger {
     /// Economic-event code (`gazdasagiEsem`).
     pub economic_event: Option<String>,
@@ -76,7 +75,6 @@ pub struct LineItemLedger {
 /// when your system already computed them and must match.
 #[doc(alias = "tétel")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct LineItem {
     /// Item name (`megnevezes`).
     pub name: String,

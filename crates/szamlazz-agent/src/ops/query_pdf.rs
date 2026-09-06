@@ -39,7 +39,6 @@ pub enum InvoiceSelector {
 #[doc(alias = "xmlszamlapdf")]
 #[doc(alias = "számla pdf lekérdezés")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct QueryInvoicePdf {
     /// Which invoice to fetch.
     pub selector: InvoiceSelector,
