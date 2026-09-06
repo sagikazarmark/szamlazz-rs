@@ -295,8 +295,10 @@ pub enum TerminalCode {
     /// may or may not have been issued; the next call's external-id query
     /// finds whatever landed.
     OutcomeUnknown,
-    /// szamlazz.hu could not be reached for a check that must succeed before
-    /// anything is issued.
+    /// szamlazz.hu did not answer a read-only step through every execution
+    /// the read policy allows (or answered it with a code nothing can be
+    /// concluded from), or the account resolver or credential store could not
+    /// answer. Nothing was sent by the execution that raised it.
     Unavailable,
     /// A document found by number belongs to a different szamlazz.hu account
     /// than the one the invocation resolved to: its `teszt` is not the

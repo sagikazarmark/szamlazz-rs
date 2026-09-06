@@ -1,14 +1,15 @@
 //! The create protocol (design §5) for the four document kinds and for
 //! correctives, in the order the steps appear in the design.
 //!
-//! The handlers keep no state. After validation and the reference checks,
-//! issuing is two durable steps: a read-only **lookup** (`lookup-{kind}`) that
-//! settles every case needing no create, and a **create** (`create-{kind}`)
-//! under the issue policy's run retry policy, query-first on every execution
-//! — the external-id query inside the create closure is what finds a document
-//! an earlier execution issued. Domain outcomes are data and faults are
-//! `TerminalError`s; a create step that ends without a settled outcome is
-//! `outcome_unknown`.
+//! The handlers keep no state. After validation and the reference checks
+//! (read-only steps under the read policy), issuing is two durable steps: a
+//! read-only **lookup** (`lookup-{kind}`) under the read policy that settles
+//! every case needing no create, and a **create** (`create-{kind}`) under the
+//! issue policy's run retry policy, query-first on every execution — the
+//! external-id query inside the create closure is what finds a document an
+//! earlier execution issued. Domain outcomes are data and faults are
+//! `TerminalError`s; a read that szamlazz.hu never answered is `unavailable`,
+//! a create step that ends without a settled outcome is `outcome_unknown`.
 
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use szamlazz_agent::ops::invoice::CreateInvoice;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
-use super::support::object::{lookup, run_once, run_retrying, verify};
+use super::support::object::{lookup, run_reading, run_retrying, verify};
 use super::support::{Fault, Lookup, check_pins, order_key};
 use crate::config::Namespace;
 use crate::contract::response::outstanding;
@@ -280,14 +281,22 @@ impl Execution {
         };
 
         // The base must be a live invoice carrying this order's number.
-        match verify(ctx, &self.gateway, format!("verify-base-{number}"), &number).await? {
-            QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+        let about =
+            |fault: Fault| fault.about(&order, Some(identity.kind), identity.external_id.as_str());
+        match verify(ctx, self, format!("verify-base-{number}"), &number)
+            .await
+            .map_err(about)?
+        {
+            QueryOutcome::Api { code, message } => {
+                return Err(about(Fault::inconclusive_answer(code, message)).into());
+            }
             QueryOutcome::CredentialsRejected { code, message } => {
-                return Err(
-                    Fault::credentials_rejected(&self.config.namespace, code, message)
-                        .about(&order, Some(identity.kind), identity.external_id.as_str())
-                        .into(),
-                );
+                return Err(about(Fault::credentials_rejected(
+                    &self.config.namespace,
+                    code,
+                    message,
+                ))
+                .into());
             }
             QueryOutcome::NotFound => {
                 return Err(Fault::invalid_input(format!(
@@ -406,8 +415,7 @@ impl Execution {
         let other_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, other);
         let found = lookup(
             ctx,
-            &self.gateway,
-            &self.config.namespace,
+            self,
             format!("exclusivity-{other}"),
             &other_id,
             &prepared.order,
@@ -437,8 +445,7 @@ impl Execution {
         let prepayment_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, kind);
         let found = lookup(
             ctx,
-            &self.gateway,
-            &self.config.namespace,
+            self,
             "prepayment-for-final",
             &prepayment_id,
             &prepared.order,
@@ -482,8 +489,7 @@ impl Execution {
                     ExternalId::for_kind(&self.config.namespace, &prepared.order, kind);
                 let found = lookup(
                     ctx,
-                    &self.gateway,
-                    &self.config.namespace,
+                    self,
                     "proforma-link",
                     &proforma_id,
                     &prepared.order,
@@ -512,24 +518,24 @@ impl Execution {
                 Ok(None)
             }
             ProformaLink::Number(number) => {
-                match verify(
-                    ctx,
-                    &self.gateway,
-                    format!("verify-proforma-{number}"),
-                    number,
-                )
-                .await?
+                let about = |fault: Fault| {
+                    fault.about(
+                        &prepared.order,
+                        Some(identity.kind),
+                        identity.external_id.as_str(),
+                    )
+                };
+                match verify(ctx, self, format!("verify-proforma-{number}"), number)
+                    .await
+                    .map_err(about)?
                 {
-                    QueryOutcome::Transport(message) => Err(Fault::unavailable(message).into()),
-                    QueryOutcome::CredentialsRejected { code, message } => Err(
-                        Fault::credentials_rejected(&self.config.namespace, code, message)
-                            .about(
-                                &prepared.order,
-                                Some(identity.kind),
-                                identity.external_id.as_str(),
-                            )
-                            .into(),
-                    ),
+                    QueryOutcome::Api { code, message } => {
+                        Err(about(Fault::inconclusive_answer(code, message)).into())
+                    }
+                    QueryOutcome::CredentialsRejected { code, message } => Err(about(
+                        Fault::credentials_rejected(&self.config.namespace, code, message),
+                    )
+                    .into()),
                     QueryOutcome::NotFound => Ok(Some(
                         identity.conflict_about(ConflictReason::ProformaMissing, number.clone()),
                     )),
@@ -562,16 +568,21 @@ impl Execution {
         intent: Intent,
     ) -> Result<CreateResponse, HandlerError> {
         let identity = &intent.identity;
+        let about =
+            |fault: Fault| fault.about(order, Some(identity.kind), identity.external_id.as_str());
 
         // Step 3: lookup.
-        let reversed = match self.lookup_step(ctx, order, &intent).await? {
-            LookupOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+        let reversed = match self.lookup_step(ctx, order, &intent).await.map_err(about)? {
+            LookupOutcome::Api { code, message } => {
+                return Err(about(Fault::inconclusive_answer(code, message)).into());
+            }
             LookupOutcome::CredentialsRejected { code, message } => {
-                return Err(
-                    Fault::credentials_rejected(&self.config.namespace, code, message)
-                        .about(order, Some(identity.kind), identity.external_id.as_str())
-                        .into(),
-                );
+                return Err(about(Fault::credentials_rejected(
+                    &self.config.namespace,
+                    code,
+                    message,
+                ))
+                .into());
             }
             LookupOutcome::Live(found) if intent.reissue => {
                 return Ok(identity.conflict_about(ConflictReason::Live, found.number()));
@@ -603,25 +614,25 @@ impl Execution {
         // Step 5: branch on data.
         Ok(identity
             .respond_to(outcome, &self.config.namespace)
-            .map_err(|fault| {
-                fault.about(order, Some(identity.kind), identity.external_id.as_str())
-            })?)
+            .map_err(about)?)
     }
 
-    /// Step 3: one read-only durable step — the external id and, for every
-    /// kind but correctives, the order-number hint.
+    /// Step 3: one read-only durable step under the read policy — the
+    /// external id and, for every kind but correctives, the order-number
+    /// hint. A lookup szamlazz.hu never answered is `unavailable`; the caller
+    /// attaches the document.
     async fn lookup_step(
         &self,
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
         intent: &Intent,
-    ) -> Result<LookupOutcome, HandlerError> {
+    ) -> Result<LookupOutcome, Fault> {
         let gateway = Arc::clone(&self.gateway);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
-        run_once(ctx, format!("lookup-{kind}"), move || async move {
+        run_reading(ctx, format!("lookup-{kind}"), self, move || async move {
             gateway
                 .lookup(LookupRequest {
                     external_id: &external_id,

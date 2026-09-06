@@ -1,7 +1,7 @@
 # Exhausted retries kill the invocation instead of pausing it
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
-amended by #22 (the create step under a run retry policy, below).
+amended by #22 (the create step under a run retry policy), #30 (the storno step) and #37 (the read policy), below.
 Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the retry policy and timeout
 values, the verified Restate facts, and the operational alerts. Superseded: the `pending` slot as what makes
 kill safe (there is no state; the external-id query inside the create step is), the runbook and caller
@@ -104,6 +104,45 @@ the retry envelope of every szamlazz.hu write, and the resolve policy (#25) that
 The one in-process retry left is the prologue's credential fetch — three fetches 200 ms apart, outside
 the journal, then a terminal `unavailable` — which is deliberately not a Restate retry (design §4;
 [ADR 0006](0006-account-selection-via-restate-scopes.md) records why terminal was chosen over retryable).
+
+## Amended (#37): the read policy is the retry envelope of every szamlazz.hu read
+
+Until #37 every read-only step — the lookup step, the exclusivity, proforma-link and `get` lookups, the
+verifies, the order-number hint, the storno lookup, `Szamlazz.Agent.query`, the `check_account` probe —
+ran once (`max_attempts(1)`), journaled a transport failure as a `Transport` outcome, and every handler
+mapped that data to the **terminal** `unavailable`. One network blip on any of `create_invoice`'s up to
+four reads was a 503 the caller is told to page on, and nothing retried it. There is no safety reason
+a read must not be retried: it writes nothing, and a re-executed closure's answer is exactly as fresh
+as a first answer (the create step re-queries inside its own closure regardless).
+
+Every read now runs under a third deployment-level run retry policy, the **read policy** (`[read]`,
+`RunRetryPolicy::new()` field for field like the issue policy; defaults `max_attempts = 3`,
+`5s → 30s`, factor 2, `max_duration = 2m`). The gateway's read fns return `Err(Unanswered)` — a plain
+`std::error::Error`, retryable to the SDK, the read-side twin of `Unconfirmed` — when szamlazz.hu did
+not answer (a transport or parse failure, `szlahu_down`), and every *answer* — a document, code 7,
+3/135/136/164, another API code — as `Ok` data; the `Transport` variants of the journaled outcome
+types are gone, and another API code on a read is the new data variant `Api{code, message}` (still
+`unavailable` in the handlers that could not conclude from it, except `Szamlazz.Agent.query`'s 422
+pass-through and the probe's `Accepted`, which were already data). Exhaustion of the read policy — or
+a cancel mid-read (409) — is the `unavailable` fault, naming the step and the last `Unanswered`,
+about the document when the step knows one (`{order, kind, external_id}` on the lookup step). The
+storno-number hint after a verify that found the document already reversed stays best effort: a hint
+the read policy could not get answered reports the reversal without the storno number rather than
+failing a handler whose answer is already known.
+
+The three policies are now the complete retry envelope of the worker: the issue policy for every
+szamlazz.hu write, the read policy for every szamlazz.hu read, the resolve policy for the `account`
+step; the credential fetch keeps its in-process retry. The handler timeouts do not change: a retryable
+run failure is returned to the server with `next_retry_delay` and the invocation yields (the SDK does
+not sleep in-process — `restate-sdk-shared-core` 7.0.3, `vm/transitions/journal.rs`), so a read's
+retry delays are spent between executions and a failed read ends the execution it fails in; the
+per-execution worst case — one read of at most two 60 s calls, or the create closure's three — is the
+one `inactivity_timeout = 4m` / `abort_timeout = 3m` were sized for. Verified end to end: a lookup that
+loses its reply once is re-executed under a 1 s test read policy and the create completes `issued` in
+one invocation with one create on the wire and `last_failure_related_command_name = lookup-invoice`
+while in flight; a lookup that never answers is a 503 `unavailable{order, kind, external_id}` with
+zero creates. The accepted risk of #22 applies unchanged: the attempt count is not durable across every
+replay, `max_duration` is the bound.
 
 ## Consequences
 

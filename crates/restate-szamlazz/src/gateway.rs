@@ -2,9 +2,10 @@
 //! async fn per `ctx.run`, over the [`szamlazz_agent::Client`], returning
 //! every expected szamlazz.hu outcome **as data** — a rejection, a duplicate
 //! order number, a not-found or a no-op storno is a value, never an `Err`.
-//! The one exception is deliberate: the create and storno steps return
-//! [`Unconfirmed`] when szamlazz.hu's answer is *not* known, so that the
-//! type says what the run retry policy may re-execute.
+//! The `Err`s are deliberate and say what a run retry policy may re-execute:
+//! the read-only steps return [`Unanswered`] when szamlazz.hu did not answer
+//! (a transport or parse failure, `szlahu_down`), and the create and storno
+//! steps return [`Unconfirmed`] when szamlazz.hu's answer is *not* known.
 //!
 //! [`Gateway`] owns the client and the [`Account`] it speaks for; it is not a
 //! second client — the Számla Agent `Client` is the transport it wraps.
@@ -84,7 +85,8 @@ pub struct LookupRequest<'a> {
 
 /// What the lookup step found. Every case that needs no create is settled
 /// here; [`LookupOutcome::Absent`] and [`LookupOutcome::Reversed`] proceed to
-/// the create step.
+/// the create step. A lookup szamlazz.hu did not answer is [`Unanswered`],
+/// never an outcome.
 ///
 /// Documents are boxed: a queried [`InvoiceDocument`] is large next to the
 /// unit variants.
@@ -122,9 +124,16 @@ pub enum LookupOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
-    /// A query failed (transport, parse, unavailability or another
-    /// szamlazz.hu error); nothing may be concluded.
-    Transport(String),
+    /// szamlazz.hu answered the external-id query with another code: an
+    /// answer the step cannot conclude from, and nothing will be created. (On
+    /// the hint the same answer says nothing about foreign documents and the
+    /// lookup continues.)
+    Api {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
 }
 
 /// The create step (design §5 step 4): query the external id, then send the
@@ -253,6 +262,34 @@ pub enum Unconfirmed {
     },
 }
 
+/// A read-only step got no answer from szamlazz.hu: the read policy
+/// re-executes it. The error of every read fn of the gateway — [`lookup`],
+/// [`verify`], [`query`], [`hint`], [`lookup_storno`], [`probe`] — and never
+/// of a write.
+///
+/// Every szamlazz.hu *answer* — a document, code 7, rejected credentials,
+/// another API code — is the read's data; this is only the exchange that
+/// produced none. A read writes nothing, so re-executing it is safe and a
+/// re-executed closure's answer is exactly as fresh as a first one; its
+/// exhaustion is the handler's `unavailable` fault.
+///
+/// [`lookup`]: Gateway::lookup
+/// [`verify`]: Gateway::verify
+/// [`query`]: Gateway::query
+/// [`hint`]: Gateway::hint
+/// [`lookup_storno`]: Gateway::lookup_storno
+/// [`probe`]: Gateway::probe
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Unanswered {
+    /// The HTTP exchange or the response parse failed.
+    #[error("transport failure: {0}")]
+    Transport(String),
+    /// szamlazz.hu reported unavailability (`szlahu_down`).
+    #[error("szamlazz.hu is unavailable: {0}")]
+    Unavailable(String),
+}
+
 /// The checks the services make on a queried document before trusting or
 /// acting on it (design §3).
 pub trait InvoiceDocumentExt {
@@ -339,7 +376,9 @@ impl InvoiceDocumentExt for InvoiceDocument {
     }
 }
 
-/// The result of a query that only needs to know whether a document exists.
+/// The answered result of a query by number, external id or order number
+/// ([`Gateway::verify`], [`Gateway::query`], [`Gateway::hint`]). A query
+/// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QueryOutcome {
     /// The document.
@@ -355,9 +394,14 @@ pub enum QueryOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
-    /// The check itself failed (transport, parse, unavailability or another
-    /// szamlazz.hu error); nothing may be concluded.
-    Transport(String),
+    /// szamlazz.hu answered with another code: an answer the caller cannot
+    /// conclude a document from.
+    Api {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
 }
 
 /// What the account probe of `Szamlazz.Agent.check_account` learned from one
@@ -367,7 +411,8 @@ pub enum QueryOutcome {
 /// the credential codes before it looks at the request, so any other answer
 /// — code 7 above all, since nothing the service issues carries the sentinel
 /// id — means the key works. The supplier id appears only in found-document
-/// bodies, so a not-found probe cannot cross-check it.
+/// bodies, so a not-found probe cannot cross-check it. An exchange that
+/// produced no answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ProbeOutcome {
@@ -382,12 +427,12 @@ pub enum ProbeOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
-    /// The exchange itself failed (transport, parse or `szlahu_down`) and
-    /// szamlazz.hu's verdict on the credentials is not known.
-    Transport(String),
 }
 
-/// Why [`Gateway::query_document`] returned no document.
+/// Why a raw query returned no document: szamlazz.hu's answers as the
+/// gateway classifies them internally, before each read fn splits them into
+/// its outcome (the answers: 7, a credential code, another code) and
+/// [`Unanswered`] (the rest).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum QueryError {
@@ -418,7 +463,37 @@ pub enum QueryError {
     Transport(String),
 }
 
-/// What the storno lookup step found (design §6 step 2), read-only.
+/// What szamlazz.hu answered a query with, when it answered without a
+/// document: the data side of [`QueryError::answered`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Answer {
+    /// Code 7.
+    NotFound,
+    /// A credential code (3, 135, 136, 164).
+    CredentialsRejected { code: String, message: String },
+    /// Any other code.
+    Api { code: String, message: String },
+}
+
+impl QueryError {
+    /// Splits the error into what szamlazz.hu answered and what it did not:
+    /// `Ok` is an [`Answer`] for the read fn to turn into its outcome, `Err`
+    /// the [`Unanswered`] exchange the read policy re-executes.
+    fn answered(self) -> Result<Answer, Unanswered> {
+        match self {
+            Self::NotFound => Ok(Answer::NotFound),
+            Self::CredentialsRejected { code, message } => {
+                Ok(Answer::CredentialsRejected { code, message })
+            }
+            Self::Api { code, message } => Ok(Answer::Api { code, message }),
+            Self::Unavailable(message) => Err(Unanswered::Unavailable(message)),
+            Self::Transport(message) => Err(Unanswered::Transport(message)),
+        }
+    }
+}
+
+/// What the storno lookup step found (design §6 step 2), read-only. A query
+/// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum StornoLookupOutcome {
@@ -441,9 +516,14 @@ pub enum StornoLookupOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
-    /// The query failed (transport, parse, unavailability or another
-    /// szamlazz.hu error); nothing may be concluded.
-    Transport(String),
+    /// szamlazz.hu answered with another code: an answer the step cannot
+    /// conclude from, and nothing will be sent.
+    Api {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
 }
 
 /// The storno step (design §6 step 3): what identifies the storno to send.
@@ -652,16 +732,21 @@ impl Gateway {
     ///    [`LookupOutcome::Live`] (the hint is not taken); an invalid hit is
     ///    [`LookupOutcome::Collision`]; code 7 and a validated reversed hit
     ///    continue; rejected credentials are
-    ///    [`LookupOutcome::CredentialsRejected`]; any other failure is
-    ///    [`LookupOutcome::Transport`].
+    ///    [`LookupOutcome::CredentialsRejected`]; another szamlazz.hu code is
+    ///    [`LookupOutcome::Api`].
     /// 2. The order-number hint, for every kind but correctives: a live
     ///    `SZ | ES | VS` that is neither among `our_numbers` nor the document
     ///    seen in step 1 is [`LookupOutcome::Foreign`]. Rejected credentials
-    ///    are [`LookupOutcome::CredentialsRejected`]; the hint's own failure
-    ///    is otherwise not conclusive and continues.
+    ///    are [`LookupOutcome::CredentialsRejected`]; a miss or another code
+    ///    is not conclusive and continues.
     /// 3. Otherwise [`LookupOutcome::Absent`], or [`LookupOutcome::Reversed`]
     ///    with the storno number when the hint is the `SS` reversing it.
-    pub async fn lookup(&self, request: LookupRequest<'_>) -> LookupOutcome {
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when either query got no answer (transport, parse,
+    /// `szlahu_down`); the caller's read policy re-executes the step.
+    pub async fn lookup(&self, request: LookupRequest<'_>) -> Result<LookupOutcome, Unanswered> {
         let span = tracing::info_span!(
             "gateway.lookup",
             external_id = %request.external_id,
@@ -670,20 +755,28 @@ impl Gateway {
         self.lookup_inner(&request).instrument(span).await
     }
 
-    async fn lookup_inner(&self, request: &LookupRequest<'_>) -> LookupOutcome {
+    async fn lookup_inner(&self, request: &LookupRequest<'_>) -> Result<LookupOutcome, Unanswered> {
         // Step 1: the external id.
         let reversed = match self
             .seen(request.external_id, request.order, request.kind)
             .await
         {
-            Ok(Seen::Absent) => None,
-            Ok(Seen::Collision(found)) => return LookupOutcome::Collision(found),
-            Ok(Seen::Live(found)) => return LookupOutcome::Live(found),
+            Ok(Seen::Collision(found)) => return Ok(LookupOutcome::Collision(found)),
+            Ok(Seen::Live(found)) => return Ok(LookupOutcome::Live(found)),
             Ok(Seen::Reversed(found)) => Some(found),
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                return LookupOutcome::CredentialsRejected { code, message };
-            }
-            Err(error) => return LookupOutcome::Transport(error.to_string()),
+            Ok(Seen::Absent) => None,
+            Err(error) => match error.answered()? {
+                // `seen` maps code 7 to `Seen::Absent`; the arm keeps the
+                // match exhaustive.
+                Answer::NotFound => None,
+                Answer::CredentialsRejected { code, message } => {
+                    return Ok(LookupOutcome::CredentialsRejected { code, message });
+                }
+                Answer::Api { code, message } => {
+                    tracing::warn!(code = %code, "the external-id query was answered with another code");
+                    return Ok(LookupOutcome::Api { code, message });
+                }
+            },
         };
 
         // Step 2: the order-number hint; correctives are exempt.
@@ -698,7 +791,7 @@ impl Gateway {
                             tipus = %hint.info.document_type,
                             "foreign document under the order"
                         );
-                        return LookupOutcome::Foreign(Box::new(hint));
+                        return Ok(LookupOutcome::Foreign(Box::new(hint)));
                     }
                     if let Some(reversed) = &reversed
                         && hint.is_storno_of(reversed.number())
@@ -706,22 +799,24 @@ impl Gateway {
                         storno_number = Some(hint.number().to_owned());
                     }
                 }
-                Err(QueryError::CredentialsRejected { code, message }) => {
-                    return LookupOutcome::CredentialsRejected { code, message };
-                }
-                // A miss or an API error says nothing about foreign documents.
-                Err(QueryError::NotFound | QueryError::Api { .. }) => {}
-                Err(error) => return LookupOutcome::Transport(error.to_string()),
+                Err(error) => match error.answered()? {
+                    Answer::CredentialsRejected { code, message } => {
+                        return Ok(LookupOutcome::CredentialsRejected { code, message });
+                    }
+                    // A miss or another code says nothing about foreign
+                    // documents.
+                    Answer::NotFound | Answer::Api { .. } => {}
+                },
             }
         }
 
-        match reversed {
+        Ok(match reversed {
             Some(document) => LookupOutcome::Reversed {
                 document,
                 storno_number,
             },
             None => LookupOutcome::Absent,
-        }
+        })
     }
 
     /// The create step (design §5 step 4), query-first on every execution.
@@ -970,32 +1065,38 @@ impl Gateway {
     }
 
     /// Queries the document `number` to verify a recorded document.
-    pub async fn verify(&self, number: &str) -> QueryOutcome {
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the query got no answer; the caller's read policy
+    /// re-executes the step.
+    pub async fn verify(&self, number: &str) -> Result<QueryOutcome, Unanswered> {
         outcome(
             self.query_raw(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(number)))
                 .await,
         )
     }
 
-    /// Queries by any selector.
-    pub async fn query(&self, selector: &Selector) -> QueryOutcome {
+    /// Queries by any selector (also the `Szamlazz.Agent.query` handler's
+    /// one step).
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the query got no answer; the caller's read policy
+    /// re-executes the step.
+    pub async fn query(&self, selector: &Selector) -> Result<QueryOutcome, Unanswered> {
         outcome(self.query_raw(invoice_selector(selector)).await)
     }
 
     /// The order-number hint: the most recently issued document of any kind
     /// carrying the order number.
-    pub async fn hint(&self, order: &OrderKey) -> QueryOutcome {
-        outcome(self.hint_raw(order).await)
-    }
-
-    /// Queries by any selector and returns the full document (for the public
-    /// `Szamlazz.Agent.query` handler).
     ///
     /// # Errors
     ///
-    /// See [`QueryError`].
-    pub async fn query_document(&self, selector: &Selector) -> Result<InvoiceDocument, QueryError> {
-        self.query_raw(invoice_selector(selector)).await
+    /// [`Unanswered`] when the query got no answer; the caller's read policy
+    /// re-executes the step.
+    pub async fn hint(&self, order: &OrderKey) -> Result<QueryOutcome, Unanswered> {
+        outcome(self.hint_raw(order).await)
     }
 
     /// The account probe of `Szamlazz.Agent.check_account`: one query of the
@@ -1004,9 +1105,14 @@ impl Gateway {
     /// [`ProbeOutcome::Accepted`] — the credential codes come before anything
     /// else, so any other code means the key was accepted; a document under
     /// the sentinel id, which nothing the service issues carries, is logged
-    /// and accepted as well. Only a failed exchange (transport, parse,
-    /// `szlahu_down`) settles nothing. Issues nothing.
-    pub async fn probe(&self, external_id: &ExternalId) -> ProbeOutcome {
+    /// and accepted as well. Issues nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the exchange produced no answer (transport, parse,
+    /// `szlahu_down`): szamlazz.hu's verdict on the credentials is not known,
+    /// and the caller's read policy re-executes the step.
+    pub async fn probe(&self, external_id: &ExternalId) -> Result<ProbeOutcome, Unanswered> {
         let span = tracing::info_span!("gateway.probe", external_id = %external_id);
         match self
             .query_raw(InvoiceSelector::ExternalId(external_id.as_str().to_owned()))
@@ -1019,18 +1125,18 @@ impl Gateway {
                     number = %found.number(),
                     "a document carries the probe's sentinel external id; it was not issued by this service"
                 );
-                ProbeOutcome::Accepted
+                Ok(ProbeOutcome::Accepted)
             }
-            Err(QueryError::NotFound) => ProbeOutcome::Accepted,
-            Err(QueryError::Api { code, .. }) => {
-                tracing::debug!(code, "the probe was answered with a non-credential code");
-                ProbeOutcome::Accepted
-            }
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                ProbeOutcome::CredentialsRejected { code, message }
-            }
-            Err(error @ QueryError::Unavailable(_)) => ProbeOutcome::Transport(error.to_string()),
-            Err(QueryError::Transport(message)) => ProbeOutcome::Transport(message),
+            Err(error) => match error.answered()? {
+                Answer::NotFound => Ok(ProbeOutcome::Accepted),
+                Answer::Api { code, .. } => {
+                    tracing::debug!(code, "the probe was answered with a non-credential code");
+                    Ok(ProbeOutcome::Accepted)
+                }
+                Answer::CredentialsRejected { code, message } => {
+                    Ok(ProbeOutcome::CredentialsRejected { code, message })
+                }
+            },
         }
     }
 
@@ -1038,13 +1144,18 @@ impl Gateway {
     /// external id is queried and the `SS` reversing `invoice_number` is
     /// [`StornoLookupOutcome::AlreadyReversed`]; code 7 or another holder is
     /// [`StornoLookupOutcome::Absent`]; rejected credentials are
-    /// [`StornoLookupOutcome::CredentialsRejected`]; any other failure is
-    /// [`StornoLookupOutcome::Transport`].
+    /// [`StornoLookupOutcome::CredentialsRejected`]; another szamlazz.hu code
+    /// is [`StornoLookupOutcome::Api`].
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the query got no answer; the caller's read policy
+    /// re-executes the step.
     pub async fn lookup_storno(
         &self,
         external_id: &ExternalId,
         invoice_number: &str,
-    ) -> StornoLookupOutcome {
+    ) -> Result<StornoLookupOutcome, Unanswered> {
         let span = tracing::info_span!(
             "gateway.lookup_storno",
             number = %invoice_number,
@@ -1055,12 +1166,20 @@ impl Gateway {
             .instrument(span)
             .await
         {
-            Ok(Some(storno_number)) => StornoLookupOutcome::AlreadyReversed { storno_number },
-            Ok(None) => StornoLookupOutcome::Absent,
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                StornoLookupOutcome::CredentialsRejected { code, message }
-            }
-            Err(error) => StornoLookupOutcome::Transport(error.to_string()),
+            Ok(Some(storno_number)) => Ok(StornoLookupOutcome::AlreadyReversed { storno_number }),
+            Ok(None) => Ok(StornoLookupOutcome::Absent),
+            Err(error) => match error.answered()? {
+                // `storno_seen` maps code 7 to `None`; the arm keeps the
+                // match exhaustive.
+                Answer::NotFound => Ok(StornoLookupOutcome::Absent),
+                Answer::CredentialsRejected { code, message } => {
+                    Ok(StornoLookupOutcome::CredentialsRejected { code, message })
+                }
+                Answer::Api { code, message } => {
+                    tracing::warn!(code = %code, "the storno lookup was answered with another code");
+                    Ok(StornoLookupOutcome::Api { code, message })
+                }
+            },
         }
     }
 
@@ -1450,14 +1569,18 @@ fn is_foreign(found: &InvoiceDocument, our_numbers: &[String], seen: Option<&str
         && !our_numbers.iter().any(|known| known == found.number())
 }
 
-fn outcome(result: Result<InvoiceDocument, QueryError>) -> QueryOutcome {
+/// A raw query result as the read's outcome: every answer is data, no answer
+/// is [`Unanswered`].
+fn outcome(result: Result<InvoiceDocument, QueryError>) -> Result<QueryOutcome, Unanswered> {
     match result {
-        Ok(document) => QueryOutcome::Found(Box::new(document)),
-        Err(QueryError::NotFound) => QueryOutcome::NotFound,
-        Err(QueryError::CredentialsRejected { code, message }) => {
-            QueryOutcome::CredentialsRejected { code, message }
-        }
-        Err(error) => QueryOutcome::Transport(error.to_string()),
+        Ok(document) => Ok(QueryOutcome::Found(Box::new(document))),
+        Err(error) => Ok(match error.answered()? {
+            Answer::NotFound => QueryOutcome::NotFound,
+            Answer::CredentialsRejected { code, message } => {
+                QueryOutcome::CredentialsRejected { code, message }
+            }
+            Answer::Api { code, message } => QueryOutcome::Api { code, message },
+        }),
     }
 }
 

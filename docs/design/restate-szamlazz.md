@@ -95,6 +95,13 @@ inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   id
 
 `get`: default retry policy, `max_attempts = 3`, `kill`, `journal_retention = "1d"` (inspectable, nothing to replay).
 
+The timeouts bound one handler execution, not an invocation: a run retry policy's delay — the issue policy's, the
+read policy's (§9) or the resolve policy's — is returned to the server with the retryable failure and the invocation
+yields (the SDK sleeps nowhere in-process), so a failed step ends the execution it fails in and the delays are spent
+between executions. The per-execution worst case is therefore one read step of at most two 60 s calls (the lookup's
+external-id query and hint) or the create step's three (ADR 0004), well inside `inactivity_timeout`; the read policy
+(#37) changed neither budget.
+
 ### The prologue (every handler of both services)
 
 After parsing its key, every handler runs the same four steps before its operation; the handler body then runs on
@@ -141,24 +148,28 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 
 | Handler | Input → Output | Notes |
 |---|---|---|
-| `check_account` | `()` → `CheckAccountResponse { scope, account: { id, mode, supplier_id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue as every handler, then one step (`probe`) — a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries (two segments; every issued id has three or more) — expecting code 7; `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**: reporting it is the probe's purpose); a failed exchange is `TerminalError{unavailable}`. `scope` is what the SDK saw — `null` under a scoped call means the server did not forward the scope (protocol v7 off). Credential acceptance is the only szamlazz.hu-verified fact it returns — the account fields echo the *configured* account, since the supplier id appears only in found-document bodies. Issues nothing. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works. `max_attempts = 3, kill`; `journal_retention = "1d"` (explicit, so the leak assertion can scan it) |
-| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) journaling the document as found; a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; 3/135/136/164 → `credentials_rejected`; `journal_retention = "1d"` |
-| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately the one handler with no account check**: a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; `max_attempts = 2, kill`; run `max_attempts(1)`; 3/135/136/164 → `credentials_rejected` |
-| `storno` | `StornoRequest` → `StornoResponse` | verify first; document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document — it checks the pins itself); else `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the storno step under the issue policy; exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
+| `check_account` | `()` → `CheckAccountResponse { scope, account: { id, mode, supplier_id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue as every handler, then one step (`probe`) — a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries (two segments; every issued id has three or more) — expecting code 7, under the read policy (§9); `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**: reporting it is the probe's purpose); an exchange that produced no answer is the read's `Unanswered`, re-executed by the read policy, and `TerminalError{unavailable}` when it is exhausted. `scope` is what the SDK saw — `null` under a scoped call means the server did not forward the scope (protocol v7 off). Credential acceptance is the only szamlazz.hu-verified fact it returns — the account fields echo the *configured* account, since the supplier id appears only in found-document bodies. Issues nothing. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works. `max_attempts = 3, kill`; `journal_retention = "1d"` (explicit, so the leak assertion can scan it) |
+| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling the document as found (the same `QueryOutcome` a verify writes); a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; another code → 422 pass-through; 3/135/136/164 → `credentials_rejected`; a query szamlazz.hu never answered through the read policy → `unavailable`; `journal_retention = "1d"` |
+| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately the one handler with no account check**: a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; `max_attempts = 2, kill`; run `max_attempts(1)` — a write with no retry of its own, so a lost reply is `outcome_unknown`; 3/135/136/164 → `credentials_rejected` |
+| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-{number}`, under the read policy); document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document — it checks the pins itself); else `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled; else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` (the lookup under the read policy, exhaustion → `unavailable`; the storno step under the issue policy, exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected` |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
-The numbered steps 0–2 and the lookup are `ctx.run`s with `RunRetryPolicy::max_attempts(1)` whose expected outcomes
-are data. The create step is the one `ctx.run` under a retry policy — the **issue policy** (§9) — because it is the
-one step whose outcome can be *unknown*. The storno step (§6) is the other write step and runs under the same policy.
-Every step runs on the account the prologue resolved (§4), through the gateway opened for this execution.
+The reads of steps 1–3 are `ctx.run`s under the **read policy** (§9): every szamlazz.hu *answer* is data, and a query
+szamlazz.hu did not answer — a transport or parse failure, `szlahu_down` — is the closure's retryable error
+`Unanswered`, re-executed by the policy and `TerminalError{unavailable}` when it is exhausted (a read writes nothing,
+so a re-executed closure's answer is exactly as fresh as a first one). The create step is the `ctx.run` under the
+**issue policy** (§9) because it is the one step whose outcome can be *unknown*. The storno step (§6) is the other
+write step and runs under the same policy. Every step runs on the account the prologue resolved (§4), through the
+gateway opened for this execution.
 
 0. **Validate (pure).** Order key from `ctx.key()`. Validate buyer, items (≥ 1), dates. Normalise `buyer.name`.
    Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
    defaults and seller block (read through the gateway) + per-call overrides,
    `external_id = "{namespace}:{order}:invoice"`, `download_pdf = false`.
 1. **Exclusivity.** `ctx.run(query "{namespace}:{order}:prepayment")`: live `ES` → `conflict{prepaid_chain, existing_number}`.
-   (`create_prepayment` mirrors this against `…:invoice`.) `Transport` → `TerminalError{unavailable}`. A document under
+   (`create_prepayment` mirrors this against `…:invoice`.) Another szamlazz.hu code (`Api`) → `TerminalError{unavailable}`
+   (an answer nothing can be concluded from); no answer → `Unanswered`, retried by the read policy. A document under
    the secondary id that fails validation → `conflict{external_id_collision, number}`: the query returns the newest
    holder, so a foreign document may hide a live document of ours behind it, and refusing is the only safe answer.
 2. **Proforma link** (`options.proforma`; `create_invoice` only — see kind specifics):
@@ -169,24 +180,28 @@ Every step runs on the account the prologue resolved (§4), through the gateway 
    Under `auto` and `none`, a document under `…:proforma` that fails validation → `conflict{external_id_collision,
    number}` (as in step 1).
    Collect the numbers seen in steps 1–2 as `our_numbers` (for foreign detection).
-3. **Lookup** — one read-only durable step, `ctx.run("lookup-{kind}", || gateway.lookup(LookupRequest{ external_id,
-   kind, order, our_numbers }))`. The gateway validates every found document against its own account (`teszt`,
-   supplier pin); the request carries only what identifies the document. In one closure:
+3. **Lookup** — one read-only durable step under the read policy, `ctx.run("lookup-{kind}", || gateway.lookup(LookupRequest{
+   external_id, kind, order, our_numbers }))` → `Result<LookupOutcome, Unanswered>`. The gateway validates every found
+   document against its own account (`teszt`, supplier pin); the request carries only what identifies the document.
+   In one closure:
    - `QueryInvoiceXml(ExternalId)` → `Ok(doc)`: validate → `Collision(doc)` on mismatch; live → `Live(doc)` (no
      hint: nothing will be created); reversed (`sztornozott == Some(true)`) → remember it and continue. 7 → continue.
-     3/135/136/164 → `CredentialsRejected{code, message}`. Transport → `Transport`.
+     3/135/136/164 → `CredentialsRejected{code, message}`; another code → `Api{code, message}`. No answer →
+     `Err(Unanswered)`.
    - The order-number hint, on every lookup **except for correctives**: `QueryInvoiceXml(OrderNumber)` → a live
      `SZ|ES|VS` whose number ∉ `our_numbers` and ≠ the document seen under our ext id → `Foreign(doc)` — also when
      our own document under the id is reversed, since no create may proceed past it; a miss (7) or another API error
      says nothing about foreign documents and continues; 3/135/136/164 → `CredentialsRejected` (conclusive: nothing
-     proceeds); the hint's transport failure → `Transport` (nothing may be concluded).
+     proceeds); a hint szamlazz.hu did not answer → `Err(Unanswered)` (nothing may be concluded; the whole step is
+     re-executed).
    - Otherwise `Absent`, or `Reversed{doc, storno_number?}` with the storno number when the hint is the `SS` whose
      `hivszamlaszam` is the reversed document (absent otherwise, and for correctives).
    It settles every case that needs no create: `Live` → `reissue ? conflict{live, number} : already_issued{number,
    totals}`; `Reversed` → `reissue ? proceed, remembering the number : outcome: reversed{number, storno_number?}`;
    `Collision` → `conflict{external_id_collision, number}`; `Foreign` → `conflict{foreign, existing_number}`;
-   `Transport` → `TerminalError{unavailable}`; `CredentialsRejected` → `TerminalError{credentials_rejected}` (§7);
-   `Absent` → proceed.
+   `Api` → `TerminalError{unavailable}`; `CredentialsRejected` → `TerminalError{credentials_rejected}` (§7);
+   `Absent` → proceed. The run's own `Err` — the read policy exhausted (500, the last `Unanswered`) or a cancel (409)
+   — is `TerminalError{unavailable, json{order, kind, external_id}}` naming the step and the last failure.
 4. **Create** — one durable step under the issue policy, `ctx.run("create-{kind}", || gateway.create(CreateStepRequest{
    external_id, kind, order, create, reversed }))` with `RunRetryPolicy::new().initial_delay(2m)
    .exponentiation_factor(2.0).max_delay(10m).max_attempts(5).max_duration(1h)` (§9). **Every execution is
@@ -243,7 +258,7 @@ derives `consumed` from the `ES`. `create_final` — `ctx.run(query "…:prepaym
 `conflict{prepayment_missing}`, reversed → `conflict{prepayment_reversed}`, fails validation →
 `conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server
 enforces one final per prepayment (73 → `rejected`); the server does not net the prepayment into the final's totals.
-`correct_invoice` — `ctx.run(verify invoice_number)`: 7 → `invalid_input`, reversed → `conflict{base_reversed}`,
+`correct_invoice` — `ctx.run(verify invoice_number)` under the read policy: 7 → `invalid_input`, reversed → `conflict{base_reversed}`,
 `rendelesszam ≠ key` → `conflict{not_managed}`, `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; ext id `…:corrective:{correction_id}`; the same lookup and create
 steps with the corrective exemption (verified): no order-number hint — the live base invoice under the order is
 expected — and a 71/152 the re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new
@@ -257,15 +272,19 @@ step and one write step under the issue policy, query-first on every execution �
 resolved for this invocation; a storno request under the wrong scope finds nothing under the number (what szamlazz.hu
 answers when one account names another's invoice number is unverified — behaviour notes) or fails the account pins.
 
-1. **Verify.** `ctx.run(verify number)`: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
+1. **Verify.** `ctx.run(verify number)` under the read policy: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
    `Szamlazz.Agent.storno`); `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}`; `sztornozott ==
    Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno number via the hint when the newest document
-   is the matching `SS`); `tipus ∉ {SZ, ES, VS, HS}` → `rejected{not_stornoable}`.
-2. **Lookup** — one read-only durable step, `ctx.run("lookup-storno-{number}", || gateway.lookup_storno(external_id,
-   number))` with `external_id = "{namespace}:{order}:storno:{number}"`: query by the storno ext id → `SS` with
-   `hivszamlaszam == number` → `AlreadyReversed{storno_number}` → `outcome: reversed{storno_number}`; 7 or another
-   holder → `Absent` → proceed (a storno is idempotent server-side, so a stray holder is not a stop); 3/135/136/164 →
-   `TerminalError{credentials_rejected}`; transport → `TerminalError{unavailable}`.
+   is the matching `SS` — best effort: a hint the read policy could not get answered reports the reversal without the
+   number rather than failing a handler whose answer is already known); `tipus ∉ {SZ, ES, VS, HS}` →
+   `rejected{not_stornoable}`.
+2. **Lookup** — one read-only durable step under the read policy, `ctx.run("lookup-storno-{number}", ||
+   gateway.lookup_storno(external_id, number))` with `external_id = "{namespace}:{order}:storno:{number}"`: query by the
+   storno ext id → `SS` with `hivszamlaszam == number` → `AlreadyReversed{storno_number}` → `outcome:
+   reversed{storno_number}`; 7 or another holder → `Absent` → proceed (a storno is idempotent server-side, so a stray
+   holder is not a stop); 3/135/136/164 → `TerminalError{credentials_rejected}`; another code (`Api`) →
+   `TerminalError{unavailable}`; no answer → `Err(Unanswered)`, retried by the read policy, exhaustion →
+   `TerminalError{unavailable, json{order, kind, external_id}}`.
 3. **Storno** — one durable step under the issue policy (§9), `ctx.run("storno-{number}", || gateway.storno(StornoStepRequest{
    number, external_id, comment, e_invoice }))`. **Every execution is query-first, inside the closure** (the rule of §5
    step 4): the gateway returns `Ok(StornoOutcome)` for every known answer and `Err(Unconfirmed)` — retryable to the
@@ -291,20 +310,21 @@ answers when one account names another's invoice number is unverified — behavi
 `Szamlazz.Agent.storno` runs the same lookup and storno steps under `"{namespace}:by-number:{number}:storno"` after its
 own verify (§4), which — once the document is not an `Order`'s — applies the same account-pin check as step 1.
 
-`delete_proforma({force})`: `ctx.run(query "…:proforma")`: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
+`delete_proforma({force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
 live `D` with payments ∧ `!force` → `rejected{proforma_paid}` (the server has no guard — verified);
 `ctx.run(DeleteProforma{InvoiceNumber})` (`max_attempts(1)`): success | 335 → `{deleted: true}`; 3/135/136/164 →
 `TerminalError{credentials_rejected}`; other → `rejected{code}`; `Transport` → `TerminalError{outcome_unknown}`.
 
-`get`: four `ctx.run` queries (`…:proforma|invoice|prepayment|final`) → `OrderStatus { proforma?, invoice?,
+`get`: four `ctx.run` queries under the read policy (`get-{kind}`, `…:proforma|invoice|prepayment|final`) → `OrderStatus { proforma?, invoice?,
 prepayment?, final?: DocumentStatus }` where `DocumentStatus { number, state: live | reversed | consumed{by},
 gross, net, payments: [amounts], referenced_proforma?, e_invoice? }`. `get` does not look up the storno number (that
 would need the order-number hint, which only shows the newest document); the create and storno handlers report it
 when the hint yields it. A proforma that is absent while the invoice references it (`hivdijbekszam`) is reported as
 `proforma: { state: consumed, by: invoice_number }`. A document under an id that fails validation leaves its slot
-absent — a read must not fail; the issuing handlers are the ones that refuse it as `conflict{external_id_collision}`.
-`Transport` on any query → `TerminalError{unavailable}`; 3/135/136/164 on any query → `TerminalError{credentials_rejected}`.
+absent — a read must not fail on an answer; the issuing handlers are the ones that refuse it as
+`conflict{external_id_collision}`. A query szamlazz.hu never answered through the read policy → `TerminalError{unavailable}`;
+another code on any query → `TerminalError{unavailable}`; 3/135/136/164 on any query → `TerminalError{credentials_rejected}`.
 
 ## 7. Outcome contract
 
@@ -333,9 +353,12 @@ TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatc
 `unknown_account`: the request names no account of this deployment — it arrived unscoped where accounts are reachable
 by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
 prologue's `account` step before anything is issued; the same request never succeeds, so it is a 400 and the caller
-fixes the scope rather than retrying. `unavailable` also covers the prologue's own faults: the resolve policy
-exhausted, the credential store gone or unavailable through the in-process retry — and the probe of
-`check_account` when its exchange settled nothing.
+fixes the scope rather than retrying. `unavailable` is the answer to an *exhausted read policy* (§9) — szamlazz.hu did
+not answer a read through every execution the policy allows, or the invocation was cancelled mid-read — naming the
+step and the last failure, about the document when the step knows one; a szamlazz.hu code a read cannot conclude
+from (`Api`) is the same fault without a retry. It also covers the prologue's own faults: the resolve policy
+exhausted, the credential store gone or unavailable through the in-process retry. Like every fault it means
+"outcome unknown": a read that fails may sit before a create that an earlier execution already landed.
 
 `credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
 or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request —
@@ -378,7 +401,7 @@ exists on the resolved account — that document legitimately matches the accoun
 ## 9. Configuration (deployment-constant; never in payloads)
 
 Two configuration types, both serde-`Deserialize` only (the host chooses the format). `WorkerConfig` is the
-deployment-level part the services hold; `StaticConfig` is the static resolver's account, and everything
+deployment-level part the services hold — the namespace and the three run retry policies; `StaticConfig` is the static resolver's account, and everything
 account-shaped — credentials, mode, supplier pin, endpoint, document defaults, seller block — lives on the `Account`
 it produces (read by the services through `Gateway::account()`). The endpoint binary flattens both into one file:
 
@@ -391,6 +414,13 @@ initial_delay = "2m"          # before the first re-execution; > client timeout 
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound (the attempt count is not durable across replays — ADR 0004)
+
+[read]       # the read policy: the run retry policy of every read-only step (lookups, verifies, hints, `get`, `Szamlazz.Agent.query`, the probe); shapes no journal entry
+max_attempts = 3              # executions of the step, including the first
+initial_delay = "5s"
+factor = 2.0
+max_delay = "30s"
+max_duration = "2m"           # the hard bound; sized to ride out szamlazz.hu's observed minute-long stalls
 
 [resolve]    # the resolve policy: the run retry policy of the prologue's `account` step; no attempt cap — the duration is the bound
 initial_delay = "1s"
@@ -409,9 +439,10 @@ supplier_id = 972720          # optional; when set, validated against szallito/i
 [account.seller]     # as v1
 ```
 
-Both policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
+All three policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
 server would spend the handler's `invocation_retry_policy` instead. `WorkerConfig::validate` checks the cross-field
-invariants (`max_attempts ≥ 1`, `initial_delay ≤ max_delay`, `factor ≥ 1` on both policies);
+invariants (`max_attempts ≥ 1` on the issue and read policies, `initial_delay ≤ max_delay` and `factor ≥ 1` on all
+three);
 `StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint). The pre-release layout
 (`account.slug`, top-level `[defaults]` / `[seller]`) is refused by name — the crate has never been released, there
 is no compatibility shim.
@@ -474,12 +505,16 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   landed, the 71/152 matrix incl. `existing_number` and the contradiction, the corrective's 71/152 → `Rejected`),
   storno validation incl. the D/SL no-op, 335, 7, and the credential codes 3/135/136/164 as `CredentialsRejected` on
   every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query,
-  probe); the probe as exactly one query of the sentinel id and nothing else, with a wrong key as data;
-  the gateway validates found documents against the account it was opened for.
+  probe); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `probe`) answering a 500, an empty body
+  or `szlahu_down` as `Err(Unanswered)` — the step's retryable error, never data — and another API code as `Ok(Api)`
+  data (the probe: `Accepted`); the probe as exactly one query of the sentinel id and nothing else, with a wrong key
+  as data; the gateway validates found documents against the account it was opened for.
 - `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
   `journal_retention`, no input — and attributes), an endpoint build smoke test, `prepare` refusing
-  `options.proforma` on every kind but `create_invoice`, the issue policy's field-for-field mapping onto
-  `RunRetryPolicy`, the fault → status mapping, the probe outcome → `credentials` mapping, the account pins of a
+  `options.proforma` on every kind but `create_invoice`, the issue and read policies' field-for-field mapping onto
+  `RunRetryPolicy` and `WorkerConfig::validate` on all three tables, the fault → status mapping incl. the exhausted
+  read → `unavailable{step, last failure}` about the document, `Lookup::classify` on `Api`, the probe outcome →
+  `credentials` mapping, the account pins of a
   document found by number (`teszt` and supplier mismatch → `account_mismatch` naming the observed and expected pins,
   an unset supplier pin unchecked, the order number not a pin), and two sentinel tests that the agent key reaches
   neither the `credentials_rejected` warning nor the fault body of `credentials_rejected` or `account_mismatch`.
@@ -494,7 +529,12 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   proforma lookup; an exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
   500 within the run policy's delays, not the handler's, with `sys_invocation.retry_count = 1` and
   `last_failure_related_command_name = create-invoice` observed **while in flight** (attempt state is cleared on
-  completion); a scoped `Szamlazz.Agent.query` and a scoped `Szamlazz.Order` call reaching the handlers with the
+  completion); the read policy (a 1 s test policy of three executions): a lookup whose external-id query answers 500
+  once → `issued` in one invocation with `last_failure_related_command_name = lookup-invoice` in flight, one journal
+  entry per step and exactly one create on the wire; a lookup that never answers → a structured `unavailable` 503
+  naming the order, kind and external id within the read policy's delays, `lookup-invoice` journaled, `create-invoice`
+  not, zero creates; `get` with one of its four reads answering 500 once → the status, with `get-proforma` the
+  failing command in flight; a scoped `Szamlazz.Agent.query` and a scoped `Szamlazz.Order` call reaching the handlers with the
   scope on `sys_invocation`; a purged `get` invocation querying szamlazz.hu again; and the leak check's positive
   control — a sentinel in a szamlazz.hu rejection found in the hex-decoded `raw` of the create run's
   `Notification: Run` row (under journal v2 the `Command: Run` row carries only the name; the result is in the

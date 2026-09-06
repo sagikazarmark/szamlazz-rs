@@ -422,7 +422,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
     let gateway = Gateway::open(account, credentials).expect("gateway");
     let outcome = gateway.verify("SZ-1").await;
-    let QueryOutcome::CredentialsRejected { code, message } = outcome.clone() else {
+    let Ok(QueryOutcome::CredentialsRejected { code, message }) = outcome.clone() else {
         panic!("expected CredentialsRejected, got {outcome:?}");
     };
     assert_eq!(code, "3");
@@ -483,7 +483,7 @@ async fn account_mismatch_never_leaks_the_agent_key() {
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
     let gateway = Gateway::open(account, credentials).expect("gateway");
     let verified = gateway.verify("SZ-2").await;
-    let QueryOutcome::Found(found) = verified.clone() else {
+    let Ok(QueryOutcome::Found(found)) = verified.clone() else {
         panic!("expected Found, got {verified:?}");
     };
     let mismatch = TerminalError::from(check_pins(gateway.account(), &found).expect_err("a fault"));
@@ -545,7 +545,23 @@ fn lookup_classifies_query_outcomes() {
         let lookup = classify(QueryOutcome::Found(other.clone()), Some(SUPPLIER)).expect(label);
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
     }
-    assert!(classify(QueryOutcome::Transport("down".to_owned()), None).is_err());
+    // Another szamlazz.hu code is an answer the handler cannot conclude from:
+    // the `unavailable` fault naming the code, as before the read policy.
+    let fault = classify(
+        QueryOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        },
+        None,
+    )
+    .expect_err("a fault");
+    let error = restate_sdk::errors::TerminalError::from(fault);
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("57"), "{message}");
+    assert!(message.contains("Ismeretlen hiba"), "{message}");
 
     // Rejected credentials are a fault of their own, not `unavailable`.
     let fault = classify(
@@ -560,6 +576,51 @@ fn lookup_classifies_query_outcomes() {
     assert_eq!(error.code(), 503);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "credentials_rejected");
+}
+
+/// A read step that ended without an answer — the read policy exhausted
+/// (500 carrying the last `Unanswered`) or the invocation cancelled (409) —
+/// is the `unavailable` fault naming the step and the last failure, about
+/// the document when the caller attaches one.
+#[test]
+fn an_exhausted_read_is_a_structured_unavailable() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::read_exhausted;
+    use crate::contract::IssuedKind;
+    use crate::identity::OrderKey;
+
+    let last = TerminalError::new_with_code(
+        500,
+        "transport failure: error decoding response body: empty response",
+    );
+    let fault = read_exhausted("lookup-invoice", &last);
+    let error = TerminalError::from(fault.clone());
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("lookup-invoice"), "{message}");
+    assert!(
+        message.contains("empty response"),
+        "names the last failure: {message}"
+    );
+    assert!(message.contains("500"), "{message}");
+    assert!(message.contains("Idempotency-Key"), "{message}");
+    assert_eq!(body.get("order"), None, "nothing attached yet");
+
+    let order = OrderKey::parse("ORD-1").expect("order");
+    let about = fault.about(&order, Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
+    let error = TerminalError::from(about);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["order"], "ORD-1");
+    assert_eq!(body["kind"], "invoice");
+    assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+
+    let cancelled = TerminalError::new_with_code(409, "cancelled");
+    let error = TerminalError::from(read_exhausted("get-proforma", &cancelled));
+    assert_eq!(error.code(), 503, "a cancellation is the same fault");
+    assert!(error.message().contains("409"), "{}", error.message());
 }
 
 /// Every handler that finds a document checks it against the account the

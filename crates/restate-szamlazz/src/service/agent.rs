@@ -3,75 +3,37 @@
 //!
 //! `query` and `storno` check the document they find against the account the
 //! invocation resolved to (`support::check_pins`) before they answer or
-//! send; `set_payments` finds no document and is exempt.
+//! send; `set_payments` finds no document and is exempt. Every read — the
+//! probe, `query`, the verify and the storno lookup — runs under the read
+//! policy; `set_payments` is a write without a retry of its own.
 
 use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::Context;
-use serde::{Deserialize, Serialize};
-use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
-use super::support::service::{lookup_storno, run_once, storno_step};
+use super::support::service::{lookup_storno, run_once, run_reading, storno_step};
 use super::support::{Fault, StornoIntent, check_pins, storno_response, terminal};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     SetPaymentsRequest, SetPaymentsResponse, StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    InvoiceDocumentExt as _, ProbeOutcome, QueryError, QueryOutcome, SetPaymentsOutcome,
-    StornoLookupOutcome,
+    InvoiceDocumentExt as _, ProbeOutcome, QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome,
 };
 use crate::identity::ExternalId;
 
-/// What the probe step settled, as `check_account`'s `credentials` — or the
-/// one answer that settles nothing.
-///
-/// # Errors
-///
-/// The `unavailable` fault of a probe whose exchange failed: szamlazz.hu's
-/// verdict on the credentials is not known, so the handler reports neither
-/// `ok` nor `rejected`.
-pub(super) fn credentials_check(outcome: ProbeOutcome) -> Result<CredentialsCheck, Fault> {
+/// What the probe step settled, as `check_account`'s `credentials`. Every
+/// probe outcome is data: a wrong key is `rejected`, reporting it is the
+/// probe's purpose. (An exchange that settled nothing never reaches here — it
+/// is the read's `Unanswered`, retried by the read policy and `unavailable`
+/// on exhaustion.)
+pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
     match outcome {
-        ProbeOutcome::Accepted => Ok(CredentialsCheck::Ok),
+        ProbeOutcome::Accepted => CredentialsCheck::Ok,
         ProbeOutcome::CredentialsRejected { code, message } => {
-            Ok(CredentialsCheck::Rejected { code, message })
-        }
-        ProbeOutcome::Transport(message) => Err(Fault::unavailable(format!(
-            "the account probe's exchange with szamlazz.hu failed ({message}): the credentials were neither accepted nor rejected; call check_account again"
-        ))),
-    }
-}
-
-/// The journaled result of the `query` handler's run: the document as found,
-/// checked against the account and projected after the journal — the same
-/// entry `verify` writes, so the check reads one shape everywhere. (Before
-/// #32 the entry was the projection; a `query` in flight across that deploy
-/// replays an undecodable entry and is killed — accepted for a one-step
-/// read-only handler with a one-day journal retention.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum QueryRun {
-    Found(Box<InvoiceDocument>),
-    NotFound,
-    CredentialsRejected { code: String, message: String },
-    Api { code: String, message: String },
-    Unavailable(String),
-    Transport(String),
-}
-
-impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
-    fn from(result: Result<InvoiceDocument, QueryError>) -> Self {
-        match result {
-            Ok(document) => Self::Found(Box::new(document)),
-            Err(QueryError::NotFound) => Self::NotFound,
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                Self::CredentialsRejected { code, message }
-            }
-            Err(QueryError::Api { code, message }) => Self::Api { code, message },
-            Err(QueryError::Unavailable(message)) => Self::Unavailable(message),
-            Err(QueryError::Transport(message)) => Self::Transport(message),
+            CredentialsCheck::Rejected { code, message }
         }
     }
 }
@@ -79,12 +41,12 @@ impl From<Result<InvoiceDocument, QueryError>> for QueryRun {
 impl Execution {
     /// The `check_account` probe: the prologue has resolved whatever scope
     /// the SDK saw to an account (or refused the request as
-    /// `unknown_account`); this runs one durable step (`probe`) — a query of
-    /// the sentinel external id — and reports that scope, the configured
-    /// account, the pinned namespace and szamlazz.hu's verdict on the
-    /// credentials. `scope` is what the SDK saw, not what the caller sent:
-    /// `None` under a scoped call means the server did not forward the
-    /// scope. Issues nothing.
+    /// `unknown_account`); this runs one durable step (`probe`) under the
+    /// read policy — a query of the sentinel external id — and reports that
+    /// scope, the configured account, the pinned namespace and szamlazz.hu's
+    /// verdict on the credentials. `scope` is what the SDK saw, not what the
+    /// caller sent: `None` under a scoped call means the server did not
+    /// forward the scope. Issues nothing.
     pub(super) async fn check_account_request(
         &self,
         ctx: &Context<'_>,
@@ -92,27 +54,27 @@ impl Execution {
         let outcome = {
             let gateway = Arc::clone(&self.gateway);
             let external_id = ExternalId::for_probe(&self.config.namespace);
-            run_once(ctx, "probe", move || async move {
+            run_reading(ctx, "probe", self, move || async move {
                 gateway.probe(&external_id).await
             })
             .await?
         };
-        let credentials = credentials_check(outcome)?;
         Ok(CheckAccountResponse::new(
             ctx.scope().map(str::to_owned),
             CheckedAccount::from(self.gateway.account()),
             self.config.namespace.as_str(),
-            credentials,
+            credentials_check(outcome),
         ))
     }
 
-    /// The `query` handler: one durable step (`query`) — the document as
-    /// szamlazz.hu returned it — then the account check every handler that
-    /// finds a document runs, and the projection. A document that is not the
-    /// resolved account's is `account_mismatch`, not a projection that looks
-    /// fine: on a freshly onboarded account the first found document is most
-    /// likely a read, and a 409 naming the observed `teszt` and supplier id is
-    /// the louder signal.
+    /// The `query` handler: one durable step (`query`) under the read policy
+    /// — the document as szamlazz.hu returned it, the same entry `verify`
+    /// writes — then the account check every handler that finds a document
+    /// runs, and the projection. A document that is not the resolved
+    /// account's is `account_mismatch`, not a projection that looks fine: on
+    /// a freshly onboarded account the first found document is most likely a
+    /// read, and a 409 naming the observed `teszt` and supplier id is the
+    /// louder signal.
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
@@ -120,31 +82,28 @@ impl Execution {
     ) -> Result<QueryResponse, HandlerError> {
         let gateway = Arc::clone(&self.gateway);
         let selector = request.selector;
-        let run = run_once(ctx, "query", move || async move {
-            QueryRun::from(gateway.query_document(&selector).await)
+        let outcome = run_reading(ctx, "query", self, move || async move {
+            gateway.query(&selector).await
         })
         .await?;
-        match run {
-            QueryRun::Found(found) => {
+        match outcome {
+            QueryOutcome::Found(found) => {
                 check_pins(self.gateway.account(), &found)?;
                 Ok(QueryResponse::from(&*found))
             }
-            QueryRun::NotFound => Err(terminal(
+            QueryOutcome::NotFound => Err(terminal(
                 404,
                 "not_found",
                 "szamlazz.hu does not know the document (code 7)",
             )),
-            QueryRun::CredentialsRejected { code, message } => {
+            QueryOutcome::CredentialsRejected { code, message } => {
                 Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
             }
-            QueryRun::Api { code, message } => Err(terminal(
+            QueryOutcome::Api { code, message } => Err(terminal(
                 422,
                 &code,
                 format!("szamlazz.hu error {code}: {message}"),
             )),
-            QueryRun::Unavailable(message) | QueryRun::Transport(message) => {
-                Err(Fault::unavailable(message).into())
-            }
         }
     }
 
@@ -213,7 +172,7 @@ impl Execution {
         let found = {
             let gateway = Arc::clone(&self.gateway);
             let number = number.clone();
-            run_once(ctx, format!("verify-{number}"), move || async move {
+            run_reading(ctx, format!("verify-{number}"), self, move || async move {
                 gateway.verify(&number).await
             })
             .await?
@@ -227,7 +186,9 @@ impl Execution {
                     format!("szamlazz.hu does not know invoice {number} (code 7)"),
                 ));
             }
-            QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
+            QueryOutcome::Api { code, message } => {
+                return Err(Fault::inconclusive_answer(code, message).into());
+            }
             QueryOutcome::CredentialsRejected { code, message } => {
                 return Err(
                     Fault::credentials_rejected(&self.config.namespace, code, message).into(),
@@ -263,7 +224,7 @@ impl Execution {
         };
 
         // The lookup step: a storno of ours already under the id.
-        match lookup_storno(ctx, &self.gateway, &intent).await? {
+        match lookup_storno(ctx, self, &intent).await? {
             StornoLookupOutcome::Absent => {}
             StornoLookupOutcome::AlreadyReversed { storno_number } => {
                 return Ok(StornoResponse::new(StornoOutcome::Reversed, number)
@@ -274,22 +235,15 @@ impl Execution {
                     Fault::credentials_rejected(&self.config.namespace, code, message).into(),
                 );
             }
-            StornoLookupOutcome::Transport(message) => {
-                return Err(Fault::unavailable(message).into());
+            StornoLookupOutcome::Api { code, message } => {
+                return Err(Fault::inconclusive_answer(code, message).into());
             }
         }
 
         // The storno step, under the issue policy: query-first on every
         // execution; any `Err` from the run — exhaustion or cancellation — is
         // `outcome_unknown`, and the next call's lookup finds whatever landed.
-        let outcome = storno_step(
-            ctx,
-            &self.gateway,
-            self.config.issue.run_retry_policy(),
-            &intent,
-        )
-        .await
-        .map_err(|error| {
+        let outcome = storno_step(ctx, self, &intent).await.map_err(|error| {
             Fault::outcome_unknown(format!(
                 "the storno step ended without a confirmed outcome ({}): {}; call storno again",
                 error.code(),
@@ -304,42 +258,27 @@ impl Execution {
 
 #[cfg(test)]
 mod tests {
-    use restate_sdk::errors::TerminalError;
-
     use super::*;
 
-    /// A wrong key is `credentials: rejected` — data — not a fault; only an
-    /// exchange that settled nothing is one.
+    /// Every probe outcome is data: a wrong key is `credentials: rejected`,
+    /// not a fault. (An exchange that settled nothing is not an outcome at
+    /// all — it is the read's `Unanswered`, retried by the read policy and
+    /// `unavailable` on exhaustion.)
     #[test]
-    fn the_probe_outcome_is_data_unless_nothing_was_settled() {
+    fn the_probe_outcome_is_data() {
         assert_eq!(
-            credentials_check(ProbeOutcome::Accepted).expect("data"),
+            credentials_check(ProbeOutcome::Accepted),
             CredentialsCheck::Ok
         );
         assert_eq!(
             credentials_check(ProbeOutcome::CredentialsRejected {
                 code: "3".to_owned(),
                 message: "Sikertelen bejelentkezés.".to_owned(),
-            })
-            .expect("data"),
+            }),
             CredentialsCheck::Rejected {
                 code: "3".to_owned(),
                 message: "Sikertelen bejelentkezés.".to_owned(),
             }
-        );
-        let error = TerminalError::from(
-            credentials_check(ProbeOutcome::Transport("connection reset".to_owned()))
-                .expect_err("fault"),
-        );
-        assert_eq!(error.code(), 503);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-        assert_eq!(body["code"], "unavailable");
-        assert!(
-            body["message"]
-                .as_str()
-                .expect("message")
-                .contains("check_account again"),
-            "{body}"
         );
     }
 }

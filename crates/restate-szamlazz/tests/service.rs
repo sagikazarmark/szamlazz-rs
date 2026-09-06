@@ -626,8 +626,9 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
 /// The deployment-level settings of both phases — the flag day keeps the
 /// namespace — with short policies: two executions of the create step one
 /// second apart, so exhaustion and re-execution are observable within the
-/// test, and a one-second resolve policy so a scripted outage is retried
-/// within it.
+/// test; three executions of a read step one second apart, so a retried and
+/// an exhausted read are observable within the `watch` window; and a
+/// one-second resolve policy so a scripted outage is retried within it.
 fn worker_config() -> WorkerConfig {
     let worker: WorkerConfig = serde_json::from_value(json!({
         "namespace": "acct",
@@ -637,6 +638,13 @@ fn worker_config() -> WorkerConfig {
             "factor": 2.0,
             "max_delay": "2s",
             "max_duration": "1m",
+        },
+        "read": {
+            "max_attempts": 3,
+            "initial_delay": "1s",
+            "factor": 1.0,
+            "max_delay": "1s",
+            "max_duration": "30s",
         },
     }))
     .expect("config");
@@ -1020,15 +1028,19 @@ impl Harness {
 
     /// `Szamlazz.Order.get`: no input, no idempotency key.
     async fn get(&self, key: &str) -> Value {
-        let reply = self
-            .invoke(
-                &format!("/restate/call/Szamlazz.Order/{key}/get"),
-                None,
-                None,
-            )
-            .await;
+        let reply = self.get_reply(key).await;
         assert_eq!(reply.status, 200, "get on {key}: {}", reply.body);
         reply.body
+    }
+
+    /// `Szamlazz.Order.get` as the raw reply, for the invocation id.
+    async fn get_reply(&self, key: &str) -> Reply {
+        self.invoke(
+            &format!("/restate/call/Szamlazz.Order/{key}/get"),
+            None,
+            None,
+        )
+        .await
     }
 
     /// `Szamlazz.Order.get` under `scope`.
@@ -1296,6 +1308,9 @@ async fn e2e_order_protocol() {
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
+    flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
+    exhausted_lookup_read_is_a_structured_unavailable(&h).await;
+    flaky_get_read_is_retried_by_the_read_policy(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
     check_account_names_the_account_and_reports_the_credentials(&h).await;
     purged_invocation_queries_szamlazz_again(&h).await;
@@ -2014,6 +2029,225 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
         "the two steps are journaled by name: {runs:?}"
     );
     eprintln!("(xi) exhausted create step → structured outcome_unknown; run retries visible: pass");
+}
+
+/// (xi-b) a read that szamlazz.hu fails to answer once is retried by the
+/// **read policy**, not failed terminally: the lookup step's external-id
+/// query answers 500 to its first execution and code 7 afterwards; the create
+/// completes `issued` in one invocation, the `lookup-invoice` run is what
+/// retried (`last_failure_related_command_name` while in flight), and the
+/// create mock sees exactly one request.
+async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-27", &["prepayment", "proforma"]).await;
+    order_query("E2E-27")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The first execution of the lookup step loses its reply; the second,
+    // and the create step's own leading query, miss cleanly.
+    external_id_query("acct:E2E-27:invoice")
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-27:invoice")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-27", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let started = Instant::now();
+    let watch = h.watch("E2E-27");
+    let reply = h
+        .call(
+            "E2E-27",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-27-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-27");
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "the read policy's delay was honoured, not the handler's: {elapsed:?}"
+    );
+
+    // The run, not the handler, is what retried — and it was the lookup.
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["lookup-invoice"],
+        "the lookup step is the failing command: {retries:?}"
+    );
+    assert!(
+        retries
+            .failures
+            .iter()
+            .all(|failure| failure.contains("transport failure")),
+        "the last failure is the Unanswered message: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.completion_failure, None, "{invocation:?}");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ],
+        "one journal entry per step; the retried read is one entry: {runs:?}"
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+    eprintln!("(xi-b) flaky lookup read → retried by the read policy, issued once: pass");
+}
+
+/// (xi-c) a read that szamlazz.hu never answers is, after the read policy
+/// is exhausted, a structured `unavailable` (503) naming the order, kind and
+/// external id — within the read policy's delays — and the create mock sees
+/// zero requests.
+async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-28", &["prepayment", "proforma"]).await;
+    order_query("E2E-28")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-28:invoice")
+        .respond_with(ResponseTemplate::new(500))
+        .expect(3)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-28", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+
+    let started = Instant::now();
+    let watch = h.watch("E2E-28");
+    let reply = h
+        .call(
+            "E2E-28",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-28-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "three executions one second apart, not the handler's policy: {elapsed:?}"
+    );
+
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-28"));
+    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-28:invoice"));
+    assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
+    assert!(fault.message.contains("transport failure"), "{fault:?}");
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["lookup-invoice"],
+        "the lookup step is the failing command: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("unavailable")),
+        "{invocation:?}"
+    );
+    let runs = h.runs(reply.invocation_id()).await;
+    assert!(
+        runs.contains(&"lookup-invoice".to_owned()),
+        "the lookup is journaled by name: {runs:?}"
+    );
+    assert!(
+        !runs.contains(&"create-invoice".to_owned()),
+        "the create step never ran: {runs:?}"
+    );
+    assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
+    eprintln!("(xi-c) exhausted lookup read → structured unavailable, nothing created: pass");
+}
+
+/// (xi-d) `get` under the same fault injection: one of its four reads loses
+/// its reply once, the read policy re-executes it, and the status completes
+/// with what szamlazz.hu holds.
+async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-29", &["prepayment", "final"]).await;
+    external_id_query("acct:E2E-29:invoice")
+        .respond_with(Doc::new("SZ-29", "SZ", "E2E-29").response())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-29:proforma")
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-29:proforma")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+
+    let watch = h.watch("E2E-29");
+    let reply = h.get_reply("E2E-29").await;
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let status = &reply.body;
+    assert_eq!(status["invoice"]["number"], "SZ-29", "{status}");
+    assert_eq!(status["invoice"]["state"], "live");
+    assert_eq!(status["proforma"], Value::Null);
+    assert_eq!(status["prepayment"], Value::Null);
+    assert_eq!(status["final"], Value::Null);
+
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["get-proforma"],
+        "the proforma read is the failing command: {retries:?}"
+    );
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "get-proforma",
+            "get-invoice",
+            "get-prepayment",
+            "get-final",
+        ],
+        "{runs:?}"
+    );
+    eprintln!("(xi-d) flaky get read → retried by the read policy, status complete: pass");
 }
 
 /// (xii) the harness capabilities of #29 that the multi-account tickets

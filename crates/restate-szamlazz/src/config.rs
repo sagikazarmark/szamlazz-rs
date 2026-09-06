@@ -16,6 +16,13 @@
 //! max_delay = "10m"
 //! max_duration = "1h"
 //!
+//! [read]                        # the run retry policy of every read-only step
+//! max_attempts = 3
+//! initial_delay = "5s"
+//! factor = 2.0
+//! max_delay = "30s"
+//! max_duration = "2m"
+//!
 //! [resolve]                     # the run retry policy of the `account` step
 //! initial_delay = "1s"
 //! factor = 2.0
@@ -46,10 +53,11 @@ use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 /// account-shaped and therefore does not route through the gateway.
 ///
 /// The namespace prefixes every external id the deployment issues; the issue
-/// policy is the run retry policy of the create and storno steps; the resolve
-/// policy is the run retry policy of the `account` step. Both policies
-/// default when absent. Call [`validate`](Self::validate) after parsing for
-/// the cross-field invariants `Deserialize` cannot express.
+/// policy is the run retry policy of the create and storno steps; the read
+/// policy is the run retry policy of every read-only step; the resolve policy
+/// is the run retry policy of the `account` step. All three policies default
+/// when absent. Call [`validate`](Self::validate) after parsing for the
+/// cross-field invariants `Deserialize` cannot express.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct WorkerConfig {
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
@@ -57,19 +65,23 @@ pub struct WorkerConfig {
     /// The issue policy: the run retry policy of the create and storno steps.
     #[serde(default)]
     pub issue: IssueConfig,
+    /// The read policy: the run retry policy of every read-only step.
+    #[serde(default)]
+    pub read: ReadConfig,
     /// The resolve policy: the run retry policy of the `account` step.
     #[serde(default)]
     pub resolve: ResolveConfig,
 }
 
 impl WorkerConfig {
-    /// The settings for `namespace` with the default issue and resolve
+    /// The settings for `namespace` with the default issue, read and resolve
     /// policies.
     #[must_use]
     pub fn new(namespace: Namespace) -> Self {
         Self {
             namespace,
             issue: IssueConfig::default(),
+            read: ReadConfig::default(),
             resolve: ResolveConfig::default(),
         }
     }
@@ -80,12 +92,17 @@ impl WorkerConfig {
     ///
     /// # Errors
     ///
-    /// Returns the first violated invariant: `issue.max_attempts == 0`, an
-    /// `initial_delay` greater than the `max_delay` of the same policy, or a
-    /// `factor` below 1 on either policy.
+    /// Returns the first violated invariant: a `max_attempts` of zero on the
+    /// issue or read policy, an `initial_delay` greater than the `max_delay`
+    /// of the same policy, or a `factor` below 1 on any policy.
     pub fn validate(&self) -> Result<(), WorkerConfigError> {
-        if self.issue.max_attempts == 0 {
-            return Err(WorkerConfigError::ZeroMaxAttempts);
+        for (policy, max_attempts) in [
+            (Policy::Issue, self.issue.max_attempts),
+            (Policy::Read, self.read.max_attempts),
+        ] {
+            if max_attempts == 0 {
+                return Err(WorkerConfigError::ZeroMaxAttempts { policy });
+            }
         }
         for (policy, initial, max, factor) in [
             (
@@ -93,6 +110,12 @@ impl WorkerConfig {
                 self.issue.initial_delay,
                 self.issue.max_delay,
                 self.issue.factor,
+            ),
+            (
+                Policy::Read,
+                self.read.initial_delay,
+                self.read.max_delay,
+                self.read.factor,
             ),
             (
                 Policy::Resolve,
@@ -120,9 +143,12 @@ impl WorkerConfig {
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum WorkerConfigError {
-    /// `issue.max_attempts` is zero.
-    #[error("issue.max_attempts must be at least 1")]
-    ZeroMaxAttempts,
+    /// A policy's `max_attempts` is zero.
+    #[error("{policy}.max_attempts must be at least 1")]
+    ZeroMaxAttempts {
+        /// The policy.
+        policy: Policy,
+    },
     /// A policy's `initial_delay` exceeds its `max_delay`.
     #[error("{policy}.initial_delay ({initial:?}) must not exceed {policy}.max_delay ({max:?})")]
     DelayOrder {
@@ -144,12 +170,14 @@ pub enum WorkerConfigError {
     },
 }
 
-/// One of the two run retry policies of a [`WorkerConfig`]; names the
+/// One of the three run retry policies of a [`WorkerConfig`]; names the
 /// configuration table in a [`WorkerConfigError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Policy {
     /// `[issue]`, the [`IssueConfig`].
     Issue,
+    /// `[read]`, the [`ReadConfig`].
+    Read,
     /// `[resolve]`, the [`ResolveConfig`].
     Resolve,
 }
@@ -158,6 +186,7 @@ impl fmt::Display for Policy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Issue => "issue",
+            Self::Read => "read",
             Self::Resolve => "resolve",
         })
     }
@@ -507,6 +536,70 @@ impl IssueConfig {
     }
 }
 
+/// The read policy: the run retry policy of every read-only durable step of
+/// both services — the lookup step and the exclusivity, proforma-link and
+/// `get` lookups, the verifies, the order-number hint, the storno lookup,
+/// `Szamlazz.Agent.query` and the `check_account` probe. A read that
+/// szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`)
+/// is the step's retryable error, re-executed after `initial_delay`, the
+/// delay multiplied by `factor` up to `max_delay`, until `max_attempts`
+/// executions or `max_duration` — then the step fails and the handler reports
+/// `unavailable`. Every szamlazz.hu *answer* is data and never retried. The
+/// policy shapes no journal entry.
+///
+/// A read may be retried freely: it writes nothing, and a re-executed
+/// closure's answer is exactly as fresh as a first answer. The defaults are
+/// short — szamlazz.hu is observed to stall for a minute at a time, and three
+/// executions over about two minutes ride out such a stall without holding
+/// the caller much longer than the create step's own client timeout would.
+///
+/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a plain number of
+/// seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReadConfig {
+    /// Executions of the step, including the first. Default `3`.
+    pub max_attempts: u32,
+    /// Delay before the first re-execution. Default `5s`.
+    #[serde(with = "duration_str")]
+    pub initial_delay: Duration,
+    /// Multiplier of the delay after each re-execution. Default `2.0`.
+    pub factor: f32,
+    /// Cap of the delay. Default `30s`.
+    #[serde(with = "duration_str")]
+    pub max_delay: Duration,
+    /// Hard bound on the time spent re-executing the step. Default `2m`.
+    #[serde(with = "duration_str")]
+    pub max_duration: Duration,
+}
+
+impl Default for ReadConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_delay: Duration::from_secs(5),
+            factor: 2.0,
+            max_delay: Duration::from_secs(30),
+            max_duration: Duration::from_mins(2),
+        }
+    }
+}
+
+impl ReadConfig {
+    /// The policy as the SDK's run retry policy, every field set from this
+    /// configuration — built on [`RunRetryPolicy::new`] for the same reason
+    /// as [`IssueConfig::run_retry_policy`].
+    #[must_use]
+    pub fn run_retry_policy(&self) -> RunRetryPolicy {
+        RunRetryPolicy::new()
+            .initial_delay(self.initial_delay)
+            .exponentiation_factor(self.factor)
+            .max_delay(self.max_delay)
+            .max_attempts(self.max_attempts)
+            .max_duration(self.max_duration)
+    }
+}
+
 /// The resolve policy: the run retry policy of the `account` step of every
 /// handler (design §4), which asks the account resolver for the request's
 /// account. An unavailable resolver is retried under it — `initial_delay`
@@ -782,6 +875,115 @@ mod tests {
         );
     }
 
+    /// The read policy is the run retry policy of every read-only step —
+    /// the lookups, verifies, hints, `get`'s queries, `Szamlazz.Agent.query`
+    /// and the probe — every field set, like the issue policy.
+    #[test]
+    fn read_policy_maps_to_the_run_retry_policy_field_for_field() {
+        assert_eq!(
+            format!("{:?}", ReadConfig::default().run_retry_policy()),
+            "RunRetryPolicy { initial_delay: 5s, factor: 2.0, max_delay: Some(30s), \
+             max_attempts: Some(3), max_duration: Some(120s) }"
+        );
+        let short = ReadConfig {
+            max_attempts: 2,
+            initial_delay: Duration::from_secs(1),
+            factor: 1.0,
+            max_delay: Duration::from_secs(1),
+            max_duration: Duration::from_secs(10),
+        };
+        assert_eq!(
+            format!("{:?}", short.run_retry_policy()),
+            "RunRetryPolicy { initial_delay: 1s, factor: 1.0, max_delay: Some(1s), \
+             max_attempts: Some(2), max_duration: Some(10s) }"
+        );
+    }
+
+    /// `[read]` parses beside `[issue]` and `[resolve]` and defaults when
+    /// absent.
+    #[test]
+    fn read_policy_parses_and_defaults() {
+        let config: WorkerConfig = serde_json::from_value(json!({
+            "namespace": "acct",
+            "read": {
+                "max_attempts": 4,
+                "initial_delay": "2s",
+                "factor": 1.5,
+                "max_delay": "20s",
+                "max_duration": "3m",
+            },
+        }))
+        .expect("parse");
+        assert_eq!(config.read.max_attempts, 4);
+        assert_eq!(config.read.initial_delay, Duration::from_secs(2));
+        assert_eq!(config.read.factor.to_bits(), 1.5f32.to_bits());
+        assert_eq!(config.read.max_delay, Duration::from_secs(20));
+        assert_eq!(config.read.max_duration, Duration::from_secs(180));
+        config.validate().expect("valid");
+
+        let minimal: WorkerConfig =
+            serde_json::from_value(json!({ "namespace": "acct" })).expect("parse");
+        assert_eq!(minimal.read, ReadConfig::default());
+        assert_eq!(minimal.read.max_attempts, 3);
+        assert_eq!(minimal.read.initial_delay, Duration::from_secs(5));
+        assert_eq!(minimal.read.factor.to_bits(), 2.0f32.to_bits());
+        assert_eq!(minimal.read.max_delay, Duration::from_secs(30));
+        assert_eq!(minimal.read.max_duration, Duration::from_secs(120));
+        assert_eq!(
+            minimal,
+            WorkerConfig::new("acct".parse().expect("namespace")),
+            "`new` carries the default read policy too"
+        );
+    }
+
+    /// `[read]` is held to the same invariants as `[issue]`, and the error
+    /// names its table.
+    #[test]
+    fn validate_reports_invariants_of_the_read_policy() {
+        fn config(read: &serde_json::Value) -> WorkerConfig {
+            serde_json::from_value(json!({ "namespace": "acct", "read": read })).expect("parse")
+        }
+
+        assert_eq!(
+            config(&json!({"max_attempts": 0})).validate(),
+            Err(WorkerConfigError::ZeroMaxAttempts {
+                policy: Policy::Read
+            })
+        );
+        assert_eq!(
+            config(&json!({"max_attempts": 0}))
+                .validate()
+                .expect_err("error")
+                .to_string(),
+            "read.max_attempts must be at least 1"
+        );
+        assert_eq!(
+            config(&json!({"initial_delay": "31s"})).validate(),
+            Err(WorkerConfigError::DelayOrder {
+                policy: Policy::Read,
+                initial: Duration::from_secs(31),
+                max: Duration::from_secs(30),
+            })
+        );
+        assert_eq!(config(&json!({"initial_delay": "30s"})).validate(), Ok(()));
+        assert_eq!(
+            config(&json!({"factor": 0.5})).validate(),
+            Err(WorkerConfigError::InvalidFactor {
+                policy: Policy::Read,
+                factor: 0.5
+            })
+        );
+        assert_eq!(config(&json!({"factor": 1.0})).validate(), Ok(()));
+        assert_eq!(
+            config(&json!({"initial_delay": "31s"}))
+                .validate()
+                .expect_err("error")
+                .to_string(),
+            "read.initial_delay (31s) must not exceed read.max_delay (30s)",
+            "the error names the table"
+        );
+    }
+
     #[test]
     fn validate_reports_invariants_of_both_policies() {
         fn config(issue: &serde_json::Value, resolve: &serde_json::Value) -> WorkerConfig {
@@ -796,7 +998,16 @@ mod tests {
 
         assert_eq!(
             config(&json!({"max_attempts": 0}), &none).validate(),
-            Err(WorkerConfigError::ZeroMaxAttempts)
+            Err(WorkerConfigError::ZeroMaxAttempts {
+                policy: Policy::Issue
+            })
+        );
+        assert_eq!(
+            config(&json!({"max_attempts": 0}), &none)
+                .validate()
+                .expect_err("error")
+                .to_string(),
+            "issue.max_attempts must be at least 1"
         );
         assert_eq!(
             config(&json!({"initial_delay": "11m"}), &none).validate(),

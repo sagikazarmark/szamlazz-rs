@@ -58,7 +58,10 @@ impl Execution {
         let about = |fault: Fault| fault.about(&order, kind, intent.storno_id.as_str());
 
         // Step 2: lookup — a storno of ours already under the id.
-        match object::lookup_storno(ctx, gateway, &intent).await? {
+        match object::lookup_storno(ctx, self, &intent)
+            .await
+            .map_err(about)?
+        {
             StornoLookupOutcome::Absent => {}
             StornoLookupOutcome::AlreadyReversed { storno_number } => {
                 return Ok(StornoResponse::new(StornoOutcome::Reversed, number)
@@ -67,8 +70,8 @@ impl Execution {
             StornoLookupOutcome::CredentialsRejected { code, message } => {
                 return Err(about(Fault::credentials_rejected(namespace, code, message)).into());
             }
-            StornoLookupOutcome::Transport(message) => {
-                return Err(about(Fault::unavailable(message)).into());
+            StornoLookupOutcome::Api { code, message } => {
+                return Err(about(Fault::inconclusive_answer(code, message)).into());
             }
         }
 
@@ -76,20 +79,15 @@ impl Execution {
         // run — exhaustion (500) or cancellation (409) — is `outcome_unknown`
         // about this storno: nothing is recorded, the next invocation's
         // verify and lookup find whatever landed.
-        let outcome = object::storno_step(
-            ctx,
-            gateway,
-            self.config.issue.run_retry_policy(),
-            &intent,
-        )
-        .await
-        .map_err(|error| {
-            about(Fault::outcome_unknown(format!(
-                "the storno step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
-                error.code(),
-                error.message()
-            )))
-        })?;
+        let outcome = object::storno_step(ctx, self, &intent)
+            .await
+            .map_err(|error| {
+                about(Fault::outcome_unknown(format!(
+                    "the storno step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
+                    error.code(),
+                    error.message()
+                )))
+            })?;
 
         // Step 4: branch on data.
         storno_response(outcome, number).map_err(|(code, message)| {
@@ -111,22 +109,25 @@ impl Execution {
     ) -> Result<ControlFlow<StornoResponse, Box<InvoiceDocument>>, HandlerError> {
         let gateway = &self.gateway;
         let namespace = &self.config.namespace;
-        let found =
-            match object::verify(ctx, gateway, format!("verify-storno-{number}"), number).await? {
-                QueryOutcome::Transport(message) => return Err(Fault::unavailable(message).into()),
-                QueryOutcome::CredentialsRejected { code, message } => {
-                    return Err(Fault::credentials_rejected(namespace, code, message)
-                        .about(order, None, storno_id.as_str())
-                        .into());
-                }
-                QueryOutcome::NotFound => {
-                    return Err(Fault::invalid_input(format!(
-                        "invoice {number} is not known to szamlazz.hu (not_found)"
-                    ))
-                    .into());
-                }
-                QueryOutcome::Found(found) => found,
-            };
+        let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
+        let found = match object::verify(ctx, self, format!("verify-storno-{number}"), number)
+            .await
+            .map_err(about)?
+        {
+            QueryOutcome::Api { code, message } => {
+                return Err(about(Fault::inconclusive_answer(code, message)).into());
+            }
+            QueryOutcome::CredentialsRejected { code, message } => {
+                return Err(about(Fault::credentials_rejected(namespace, code, message)).into());
+            }
+            QueryOutcome::NotFound => {
+                return Err(Fault::invalid_input(format!(
+                    "invoice {number} is not known to szamlazz.hu (not_found)"
+                ))
+                .into());
+            }
+            QueryOutcome::Found(found) => found,
+        };
         if found.info.order_number.as_deref().map(str::trim) != Some(order.as_str()) {
             return Ok(ControlFlow::Break(
                 StornoResponse::new(StornoOutcome::Conflict, number)
@@ -136,8 +137,9 @@ impl Execution {
         check_pins(gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
             // Idempotent: already reversed by anyone.
-            let storno_number =
-                object::storno_number_of(ctx, gateway, namespace, order, number).await?;
+            let storno_number = object::storno_number_of(ctx, self, order, number)
+                .await
+                .map_err(about)?;
             let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
             response.storno_number = storno_number;
             return Ok(ControlFlow::Break(response));
@@ -160,8 +162,7 @@ impl Execution {
         let proforma_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
         let found = match object::lookup(
             ctx,
-            &self.gateway,
-            &self.config.namespace,
+            self,
             "proforma-for-delete",
             &proforma_id,
             &order,
@@ -213,10 +214,10 @@ impl Execution {
     // ----- get -------------------------------------------------------------
 
     /// The live view: what szamlazz.hu holds under the order's four external
-    /// ids right now (design §6).
+    /// ids right now (design §6), four read-only steps under the read policy.
     ///
-    /// A collision under an id leaves its slot `None`: a read must not fail,
-    /// and the issuing handlers are the ones that refuse it.
+    /// A collision under an id leaves its slot `None`: a read must not fail
+    /// on an answer, and the issuing handlers are the ones that refuse it.
     pub(super) async fn status(
         &self,
         ctx: &SharedObjectContext<'_>,
@@ -227,8 +228,7 @@ impl Execution {
             let external_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
             let found = shared::lookup(
                 ctx,
-                &self.gateway,
-                &self.config.namespace,
+                self,
                 format!("get-{kind}"),
                 &external_id,
                 &order,

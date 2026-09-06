@@ -276,6 +276,6 @@ mod tests {
             .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
             .await;
 
-        assert_eq!(outcome, QueryOutcome::NotFound);
+        assert_eq!(outcome, Ok(QueryOutcome::NotFound));
     }
 }

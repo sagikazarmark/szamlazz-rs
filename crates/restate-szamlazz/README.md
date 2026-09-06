@@ -42,7 +42,7 @@ async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<d
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (the endpoint binary uses figment). `WorkerConfig` is the deployment-level part — the `namespace` of the external
-ids, the `[issue]` and `[resolve]` policies; call `validate()` after parsing. `StaticConfig` is the static
+ids and the three run retry policies, `[issue]`, `[read]` and `[resolve]`; call `validate()` after parsing. `StaticConfig` is the static
 resolver's configuration in one of two mutually exclusive shapes — a single `[account]`, served unscoped, or a table
 of `[accounts.<scope>]`, each served under its scope only (`/restate/scope/{scope}/call/…`) — and
 `StaticResolver::try_from` validates it and implements both the account resolver and the credential store;
@@ -178,9 +178,11 @@ activation details.
   that nothing the service issues carries.
 - `WorkerConfig`: the deployment-level configuration the services hold — `namespace` (the `config::Namespace`, the
   external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`, permanent), `[issue]` (the issue policy:
-  `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`) and `[resolve]` (the resolve policy:
-  the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m` by default). `IssueConfig::run_retry_policy`
-  is the `RunRetryPolicy` of the create and storno steps, `ResolveConfig::run_retry_policy` that of the `account`
+  `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`; `5` executions, `2m` → `10m`, bounded by
+  `1h` by default), `[read]` (the read policy: the same fields; `3` executions, `5s` → `30s`, bounded by `2m` by
+  default) and `[resolve]` (the resolve policy: the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m`
+  by default). `IssueConfig::run_retry_policy` is the `RunRetryPolicy` of the create and storno steps,
+  `ReadConfig::run_retry_policy` that of every read-only step, `ResolveConfig::run_retry_policy` that of the `account`
   step. `validate()` checks the cross-field invariants. Nothing account-shaped is in it: document defaults and the
   seller block belong to the `Account` — their value types (`config::Defaults`, `config::SellerConfig`,
   `config::AccountMode`, and `config::Secret`, whose `Debug` output is redacted) live in `config` so that any
@@ -194,10 +196,11 @@ activation details.
   validates it, and `Accounts::from` bundles it as resolver and store.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
-  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome
-  as data; `create` and `storno` alone return `Err(Unconfirmed)` for an outcome that is *not* known, which is what
-  their run retry policy re-executes. It is not a second client: the Számla Agent `Client` is the transport it
-  wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
+  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `probe`), each returning every expected szamlazz.hu
+  outcome as data. Two `Err`s say what a run retry policy may re-execute: the read fns (`lookup`, `verify`, `query`,
+  `hint`, `lookup_storno`, `probe`) return `Err(Unanswered)` when szamlazz.hu did not answer — a transport or parse
+  failure, `szlahu_down` — and `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known.
+  It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
   per handler execution by the prologue (`Gateway::open`) and never outlives it. `Szamlazz.Order` calls it inside
   `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate service calls
   another.
@@ -289,7 +292,7 @@ answer a by-number miss as 404 `not_found` and pass a szamlazz.hu error through 
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued. | Rule 2. |
-| `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent — or the account resolver or credential store could not answer. | Rule 2, later. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
 
 A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
@@ -310,7 +313,15 @@ external-id query inside the create step is what makes that safe.
 Inside a handler, issuing is two durable steps. The **lookup** (`lookup-{kind}`) is read-only and settles every
 case that needs no create: a live document of ours is `already_issued` (or `conflict{live}` with `reissue`), a
 reversed one is `reversed` (or proceeds with `reissue`), an invalid holder is `conflict{external_id_collision}`, a
-live invoice under the order that is not ours is `conflict{foreign}`. The **create** (`create-{kind}`) runs under
+live invoice under the order that is not ours is `conflict{foreign}`. Like every read-only step of both services —
+the exclusivity and proforma-link lookups before it, the verifies, the order-number hint, the storno lookup, `get`'s
+four queries, `Szamlazz.Agent.query`, the `check_account` probe — it runs under the **read policy** (`[read]`: `3`
+executions `5s` → `30s`, bounded by `2m` by default): every szamlazz.hu *answer* is journaled data, and a query
+szamlazz.hu did not answer — a transport or parse failure, `szlahu_down` — is the step's retryable error
+(`Unanswered`), re-executed after the policy's delay; a read writes nothing, so re-executing it is safe and its
+answer is as fresh as a first one. When the read policy is exhausted the handler fails with
+`TerminalError{unavailable}` naming the step, the last failure and — where the step knows it — the order, kind and
+external id. The **create** (`create-{kind}`) runs under
 the issue policy — `[issue]`: `max_attempts` executions, `initial_delay` growing by `factor` to `max_delay`,
 bounded by `max_duration` — and every execution is query-first: it sends only when the external id holds
 **nothing**, or **exactly the document the lookup step saw reversed**; a live document an earlier execution issued
@@ -332,11 +343,13 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   reaches neither the `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch`
   fault), and the wiremock tests of the gateway against synthetic szamlazz.hu responses
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
-  exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
-  `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — the storno lookup and step — `AlreadyReversed`
-  on a re-executed step, a lost reply re-queried once, `Unconfirmed` when nothing landed — plus storno validation
-  including the proforma / delivery-note no-op, 335, 7, the credential codes 3/135/136/164 on every operation, and
-  the `check_account` probe as exactly one query of the sentinel id with a wrong key as data).
+  exemption from the hint, `Unanswered` on a lost reply and `Api` on another code — and the create step — `Issued`,
+  `Found` on a re-executed step, the open codes and `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 →
+  `Rejected` — the storno lookup and step — `AlreadyReversed` on a re-executed step, a lost reply re-queried once,
+  `Unconfirmed` when nothing landed — plus storno validation including the proforma / delivery-note no-op, 335, 7,
+  the credential codes 3/135/136/164 on every operation, every read fn answering a 500, an empty body or
+  `szlahu_down` as `Err(Unanswered)` rather than data, and the `check_account` probe as exactly one query of the
+  sentinel id with a wrong key as data).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
@@ -344,7 +357,10 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   replay, 152 → reconciled, storno → reversed → stale create → `reissue`, `reissue` on live → `conflict{live}`, an
   external reversal, proforma auto-link and `consumed` in `get`, an exhausted create step answering a structured
   `outcome_unknown` within the run policy's delays with the run's retries visible on `sys_invocation` while it is in
-  flight, a scoped call answered `unknown_account` with zero szamlazz.hu requests, `check_account` unscoped answering
+  flight, a lookup whose reply is lost once retried under the read policy and completing `issued` in one invocation
+  with exactly one create on the wire, a lookup that never answers as a structured `unavailable` naming the order,
+  kind and external id with zero creates, `get` completing after one of its reads is retried, a scoped call answered
+  `unknown_account` with zero szamlazz.hu requests, `check_account` unscoped answering
   the account with `credentials: ok` after one sentinel query (and `rejected` as data on code 3), a purged invocation querying
   szamlazz.hu again, a flaky resolver retried under the resolve policy, a failing credential store as a terminal
   `unavailable`, and a positive control for the journal-leak check (a sentinel in a szamlazz.hu rejection is found in
