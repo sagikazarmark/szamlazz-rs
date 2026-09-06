@@ -219,14 +219,22 @@ activation details.
   `DocumentState` flattened as `{state: live}`, `{state: reversed, storno_number?}` or, for a consumed
   proforma, `{state: consumed, by}`.
 - `CorrectionId`: the caller-supplied identity of one corrective invoice,
-  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; embedded in the corrective's external id.
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$` and not one of the external-id tokens (`ExternalId::TOKENS`, in any letter
+  case); embedded in the corrective's external id.
+- `contract::InvoiceNumber`: an invoice number as the by-number requests take it (`StornoRequest`, `CorrectRequest`,
+  `SetPaymentsRequest`, `Selector::InvoiceNumber`, `ProformaLink::Number`) — 1–40 bytes, no whitespace, no control
+  character, no `:`; refused by its `Deserialize`, so a bad number is a malformed body (`invalid_input` before the
+  prologue). It flows into step names and the storno external ids, hence the bound. Distinct from
+  `szamlazz_agent::InvoiceNumber`, the unvalidated wire type; responses echo numbers as plain strings.
 - `OrderKey`: the `Order` key — the order number trimmed of leading and trailing whitespace, case preserved,
-  validated (1–64 bytes, no control characters, no internal whitespace runs). The type trims; the `Order` handlers
-  do not: a Virtual Object key with leading or trailing whitespace is refused as `invalid_input` naming the rule
-  (see "Identity Model").
+  validated (1–40 bytes, no control characters, no internal whitespace of any kind, no `:`, Unicode NFC — nothing is
+  collapsed or normalised). The type trims; the `Order` handlers do not: a Virtual Object key with leading or trailing
+  whitespace is refused as `invalid_input` naming the rule (see "Identity Model").
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document — `for_kind`, `for_corrective`,
   `for_storno`, `for_unmanaged_storno` — and `for_probe`, the two-segment `{namespace}:check-account` sentinel
-  that nothing the service issues carries.
+  that nothing the service issues carries. Every composition is at most `ExternalId::MAX_LEN` = 110 bytes (the
+  length verified accepted and queryable) because its parts are bounded — namespace 16, order key, correction id and
+  invoice number 40 each — which `const` assertions prove for the longest shape of each (109 for the corrective).
 - `WorkerConfig`: the deployment-level configuration the services hold — `namespace` (the `config::Namespace`, the
   external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`, permanent), `[issue]` (the issue policy:
   `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`; `5` executions, `2m` → `10m`, bounded by
@@ -292,6 +300,11 @@ Three identities work together ([ADR 0002](../../docs/adr/0002-order-keyed-idemp
   | corrective | `{namespace}:{order}:corrective:{correction_id}` |
   | storno of an order's invoice | `{namespace}:{order}:storno:{original_number}` |
   | storno via `Szamlazz.Agent` (no order) | `{namespace}:by-number:{number}:storno` |
+
+  Every id is at most **110 bytes** — the length verified accepted and queryable on szamlazz.hu, which documents
+  no limit — because its parts are bounded: the namespace at 16, the order key, the `correction_id` and the
+  caller's invoice number at 40 each (a dashed UUID fits every one). `:` is the separator and is excluded from
+  every part; a `correction_id` equal to one of the tokens (`invoice`, `storno`, `check-account`, …) is refused.
 
   It is queried by the lookup step and again by every execution of the create step, inside the create's own
   `ctx.run` closure, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
@@ -373,7 +386,7 @@ serde's message, naming the field when there is one — never the SDK's plain-te
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field, or its `Order` key has leading or trailing whitespace; refused before anything is journaled or sent — or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_payments` (the wire contract takes five; nothing is sent). | Fix the request. |
+| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent — or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_payments` (the wire contract takes five; nothing is sent), a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and `query_taxpayer` finds no document (a taxpayer record carries no pins): the two handlers that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |

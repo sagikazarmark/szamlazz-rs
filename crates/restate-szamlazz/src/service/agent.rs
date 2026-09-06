@@ -248,6 +248,7 @@ impl Execution {
             entries,
             additive,
         } = request;
+        let invoice_number = String::from(invoice_number);
         let gateway = Arc::clone(&self.gateway);
         let number = invoice_number.clone();
         let outcome = run_once(
@@ -274,6 +275,7 @@ impl Execution {
             invoice_number: number,
             comment,
         } = request;
+        let number = String::from(number);
 
         // Query first: everything below is about the document as found.
         let found = {

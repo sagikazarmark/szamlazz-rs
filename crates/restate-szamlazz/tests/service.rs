@@ -1568,6 +1568,7 @@ async fn e2e_order_protocol() {
     a_live_final_closes_the_order_to_the_other_creates(&h).await;
     a_malformed_body_is_a_structured_invalid_input(&h).await;
     an_untrimmed_order_key_is_refused(&h).await;
+    bounded_inputs_are_refused_and_disturb_no_other_invocation(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     exhausted_lookup_read_is_a_structured_unavailable(&h).await;
@@ -3022,6 +3023,151 @@ async fn an_untrimmed_order_key_is_refused(h: &Harness) {
     );
     eprintln!(
         "(x-c) untrimmed order key → invalid_input naming the rule, nothing journaled or issued: pass"
+    );
+}
+
+/// (x-e) bounded inputs (#64). An order key outside the alphabet — an
+/// internal space (`E2E%2010d`, which the ingress decodes to `E2E 10d`), a
+/// `:`, 41 bytes — and an `invoice_number` over 40 bytes are refused as
+/// `invalid_input` naming the rule before the prologue: nothing journaled,
+/// nothing sent. A body whose line-item arithmetic overflows a decimal is the
+/// same fault from the handler's own validation — after the prologue's two
+/// entries (`namespace`, `account`), which the check needs for the account's
+/// currency defaults, and before any read — never a panic: the request is
+/// sent beside a healthy create on another order against the same endpoint,
+/// and that create is `issued` without a retry; exactly one create reaches
+/// szamlazz.hu, the healthy order's.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the three bounds, then the overflow beside a healthy create"
+)]
+async fn bounded_inputs_are_refused_and_disturb_no_other_invocation(h: &Harness) {
+    h.reset().await;
+    let before = h.requests_seen().await;
+
+    // The order-key alphabet, at the handler's key check.
+    let too_long = "x".repeat(41);
+    for (i, (key, rule)) in [
+        ("E2E%2010d", "must not contain whitespace"),
+        ("E2E:10d", "must not contain ':'"),
+        (too_long.as_str(), "at most 40 are allowed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reply = h
+            .call(
+                key,
+                "create_invoice",
+                &create_body(dec!(1000), false),
+                &format!("e2e-10d-k{i}"),
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{key}: {}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, "invalid_input", "{key}: {fault:?}");
+        assert!(
+            fault.message.contains(rule),
+            "{key}: names the rule: {fault:?}"
+        );
+        assert_eq!(fault.order, None, "{key}: {fault:?}");
+        assert!(
+            h.runs(reply.invocation_id()).await.is_empty(),
+            "{key}: refused before the prologue: nothing journaled"
+        );
+    }
+
+    // The invoice-number bound, at the body decode (a malformed body).
+    let reply = h
+        .call(
+            "E2E-10d",
+            "storno_invoice",
+            &json!({ "invoice_number": too_long }),
+            "e2e-10d-k3",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(
+        fault
+            .message
+            .contains("invoice number is 41 bytes long, at most 40 are allowed"),
+        "names the rule: {fault:?}"
+    );
+    assert!(
+        h.runs(reply.invocation_id()).await.is_empty(),
+        "refused before the prologue: nothing journaled"
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+
+    // The overflow, beside a healthy create on another order.
+    h.absent("E2E-10e", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-10e")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    h.holds_after_misses(
+        2,
+        &Doc {
+            external_id: Some("acct:E2E-10e:invoice"),
+            ..Doc::new("SZ-10e", "SZ", "E2E-10e")
+        },
+    )
+    .await;
+    create()
+        .respond_with(created("SZ-10e", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let mut overflowing = document(Decimal::MAX);
+    overflowing.items[0].quantity = dec!(10);
+    let overflowing = json!({ "document": overflowing, "options": {} });
+
+    let healthy_body = create_body(dec!(1000), false);
+    let started = Instant::now();
+    let (healthy, refused) = tokio::join!(
+        h.call("E2E-10e", "create_invoice", &healthy_body, "e2e-10e-k1"),
+        h.call("E2E-10d", "create_invoice", &overflowing, "e2e-10d-k4"),
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    let fault = refused.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(
+        fault.message.contains("items[0]") && fault.message.contains("overflows a decimal"),
+        "names the item and the rule: {fault:?}"
+    );
+    assert_eq!(
+        h.runs(refused.invocation_id()).await,
+        ["namespace", "account"],
+        "the prologue ran (the check needs the account), no read did"
+    );
+
+    assert_eq!(healthy.status, 200, "{}", healthy.body);
+    assert_eq!(healthy.body["outcome"], "issued", "{}", healthy.body);
+    assert_eq!(healthy.body["invoice_number"], "SZ-10e");
+    let creates = h.create_bodies().await;
+    assert_eq!(creates.len(), 1, "exactly one create on the wire");
+    assert!(
+        creates[0].contains("<rendelesSzam>E2E-10e</rendelesSzam>"),
+        "the healthy order's: {}",
+        creates[0]
+    );
+    // A torn-down connection would have the healthy create retried no sooner
+    // than the handler's two-minute `initial_interval`; it answered at once.
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "the healthy create was not retried: {elapsed:?}"
+    );
+    eprintln!(
+        "(x-e) bounded inputs → invalid_input naming the rule; an overflowing body beside a healthy create issues nothing and disturbs nothing: pass"
     );
 }
 

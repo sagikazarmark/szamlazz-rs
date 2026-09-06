@@ -305,6 +305,7 @@ impl Execution {
             correction_id,
             document,
         } = request;
+        let number = String::from(number);
         self.validate_document(IssuedKind::Corrective, &document, &order)?;
         let identity = Identity {
             kind: IssuedKind::Corrective,
@@ -535,6 +536,7 @@ impl Execution {
                 Ok(None)
             }
             ProformaLink::Number(number) => {
+                let number = number.as_str();
                 let about = |fault: Fault| {
                     fault.about(
                         &prepared.order,
@@ -554,7 +556,7 @@ impl Execution {
                     )
                     .into()),
                     QueryOutcome::NotFound => Ok(Some(
-                        identity.conflict_about(ConflictReason::ProformaMissing, number.clone()),
+                        identity.conflict_about(ConflictReason::ProformaMissing, number),
                     )),
                     // Checked like every other document found by number
                     // (design §3), in the order the other verifies use: this
@@ -565,7 +567,7 @@ impl Execution {
                     QueryOutcome::Found(found) => {
                         if !found.carries_order(&prepared.order) {
                             return Ok(Some(
-                                identity.conflict_about(ConflictReason::NotManaged, number.clone()),
+                                identity.conflict_about(ConflictReason::NotManaged, number),
                             ));
                         }
                         check_pins(self.gateway.account(), &found)?;
@@ -577,7 +579,7 @@ impl Execution {
                             .into());
                         }
                         refs.our_numbers.push(found.number().to_owned());
-                        refs.proforma = Some(number.clone());
+                        refs.proforma = Some(number.to_owned());
                         Ok(None)
                     }
                 }
@@ -805,7 +807,10 @@ mod tests {
     #[test]
     fn options_proforma_applies_to_create_invoice_only() {
         let order = order();
-        for link in [ProformaLink::None, ProformaLink::Number("D-1".to_owned())] {
+        for link in [
+            ProformaLink::None,
+            ProformaLink::Number("D-1".parse().expect("valid number")),
+        ] {
             let prepared = order
                 .prepare(ord_1(), DocumentKind::Invoice, request(link.clone()))
                 .expect("create_invoice accepts options.proforma");
@@ -834,6 +839,52 @@ mod tests {
                 .unwrap_or_else(|error| panic!("create_{kind} accepts auto: {error:?}"));
             assert_eq!(prepared.proforma, ProformaLink::Auto);
         }
+    }
+
+    /// Step 0 (J8, #64): a body whose line-item arithmetic overflows a
+    /// decimal is the `invalid_input` fault naming the item, raised by the
+    /// handler's own validation before any read — never a panic, which on
+    /// the SDK's connection task would take every in-flight invocation down
+    /// with it. Runs after the Prologue (the check needs the account's
+    /// currency defaults), so `namespace` and `account` are journaled; nothing
+    /// is sent.
+    #[test]
+    fn an_overflowing_line_item_is_invalid_input_not_a_panic() {
+        use crate::contract::LineItemInput;
+        use rust_decimal::{Decimal, dec};
+
+        let order = order();
+        for kind in DocumentKind::ALL {
+            let mut request = request(ProformaLink::Auto);
+            request.document.items.push(LineItemInput::new(
+                "adversarial",
+                dec!(10),
+                "db",
+                Decimal::MAX,
+                "27",
+            ));
+            let fault = order
+                .prepare(ord_1(), kind, request)
+                .err()
+                .unwrap_or_else(|| panic!("create_{kind}: overflow is refused"));
+            let message = invalid_input(fault);
+            assert!(
+                message.contains("items[1]") && message.contains("overflows a decimal"),
+                "create_{kind}: names the item and the rule: {message}"
+            );
+        }
+
+        let mut correct = CorrectRequest {
+            invoice_number: "SZ-1".parse().expect("valid number"),
+            correction_id: "c-1".parse().expect("valid id"),
+            document: sample_document(),
+        };
+        correct.document.items[0].quantity = Decimal::MAX;
+        correct.document.items[0].unit_price = dec!(10);
+        let fault = order
+            .validate_document(IssuedKind::Corrective, &correct.document, &ord_1())
+            .expect_err("overflow is refused on a corrective too");
+        assert!(invalid_input(fault).contains("items[0]"));
     }
 
     /// Step 5 (design §5): every settled create outcome as the caller's

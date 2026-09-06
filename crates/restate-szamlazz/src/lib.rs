@@ -193,7 +193,7 @@ pub use szamlazz_agent::{AgentKey, Credentials};
 
 pub use account::{Account, AccountResolver, Accounts, CredentialStore};
 pub use config::WorkerConfig;
-pub use contract::{CorrectionId, CreateRequest, CreateResponse, DocumentKind};
+pub use contract::{CorrectionId, CreateRequest, CreateResponse, DocumentKind, InvoiceNumber};
 pub use gateway::Gateway;
 pub use identity::{ExternalId, OrderKey};
 pub use service::{Agent, AgentClient, Order, OrderClient};

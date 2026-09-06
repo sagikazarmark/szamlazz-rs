@@ -129,8 +129,9 @@ line of the closure on every execution — is the guard, the key is deduplicatio
   `conflict{foreign}`); nothing is recorded.
 - **Consumed proformas** are derived live in `get`: proforma absent under its id while the invoice or prepayment
   carries `hivdijbekszam` → `{state: consumed, by}`.
-- `CorrectionId` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) replaces the corrective counter and the
-  `request_id ↔ cseq` map; it is the caller's per-corrective identity and part of the external id.
+- `CorrectionId` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$` since #64 — first `{0,63}` — and not one of the external-id
+  tokens) replaces the corrective counter and the `request_id ↔ cseq` map; it is the caller's per-corrective
+  identity and part of the external id (ADR 0002, "Bounded inputs").
 - ADR 0002's `{gen}` suffix, `request_id` and "written to state before the first call", ADR 0003's `request_id`
   and flag-free service-side reissue, and ADR 0004's `pending` slot, operator runbook and
   `idempotency_retention = 7d` (now `30d`) are superseded; the rest of each still holds.
