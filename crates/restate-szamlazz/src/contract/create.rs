@@ -127,13 +127,15 @@ pub enum Outcome {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ConflictReason {
-    /// A live prepayment invoice (or, for `create_prepayment`, a live invoice)
-    /// exists for the order: the two chains are exclusive.
+    /// A live prepayment invoice or final invoice (or, for `create_prepayment`,
+    /// a live invoice or final invoice) of ours exists for the order (see
+    /// `existing_number`): the two chains are exclusive, and the final invoice
+    /// keeps the prepayment chain closed after its prepayment is reversed.
     PrepaidChain,
-    /// `create_proforma` while the order's invoice or prepayment invoice of
-    /// ours is live (see `existing_number`): a proforma after the invoice
-    /// makes no sense. Not [`Foreign`](Self::Foreign) — the document is this
-    /// order's, issued by this service.
+    /// `create_proforma` while the order's invoice, prepayment invoice or
+    /// final invoice of ours is live (see `existing_number`): a proforma after
+    /// the invoice makes no sense. Not [`Foreign`](Self::Foreign) — the
+    /// document is this order's, issued by this service.
     OrderInvoiced,
     /// `reissue: true` while the document is live.
     Live,
