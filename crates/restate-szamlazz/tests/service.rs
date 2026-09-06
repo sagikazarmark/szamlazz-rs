@@ -2,11 +2,14 @@
 //! `Szamlazz.Agent` service against a real Restate server (docker) with
 //! wiremock standing in for szamlazz.hu.
 //!
-//! Ignored by default: `cargo test -p restate-szamlazz --test service -- --ignored`.
-//! Skips (with a message) when the docker daemon is not reachable. Set
+//! The end-to-end test is ignored by default:
+//! `cargo test -p restate-szamlazz --test service -- --ignored`.
+//! It skips (with a message) when the docker daemon is not reachable. Set
 //! `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server
 //! instead of starting a container; it must run with the three experimental
-//! flags ([`SERVER_FLAGS`]) — `compose.yaml` sets them.
+//! flags ([`SERVER_FLAGS`]) — `compose.yaml` sets them. The tests of the
+//! harness's own document helpers at the end of the file need only wiremock
+//! and run un-ignored.
 //!
 //! The run has two phases on one Restate server. The first registers a
 //! **single-account** deployment (the static resolver's `[account]` behind a
@@ -26,7 +29,9 @@
 //! `/restate/scope/{scope}/call/…` ingress paths, reports the invocation id
 //! (`x-restate-id`) and parses fault bodies, and reads `sys_journal` /
 //! `sys_invocation` through the SQL introspection API — `raw` hex-decoded to
-//! bytes, since run results are stored as bytes.
+//! bytes, since run results are stored as bytes. What szamlazz.hu holds is
+//! stated per document ([`Harness::holds`] and its siblings), so one `<szamla>`
+//! body answers every selector the document is reachable by (design §11).
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -53,7 +58,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use szamlazz_agent::Credentials;
 use wiremock::matchers::{body_string_contains, method};
-use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockBuilder, MockServer, Request, ResponseTemplate};
 
 /// The supplier id of the test account — and, after the flag day, of the
 /// `acme` account, which is the same szamlazz.hu account.
@@ -90,6 +95,10 @@ struct Doc<'a> {
     test: bool,
     /// `szallito/id` — the document's supplier id, the other account pin.
     supplier_id: u64,
+    /// The external id the document sits under, when the test states it:
+    /// szamlazz.hu never echoes it, so it is not in the body, but it is a
+    /// selector the document is reachable by ([`holds`]).
+    external_id: Option<&'a str>,
 }
 
 impl<'a> Doc<'a> {
@@ -113,6 +122,7 @@ impl<'a> Doc<'a> {
             referenced_proforma: None,
             test: true,
             supplier_id: SUPPLIER,
+            external_id: None,
         }
     }
 
@@ -283,6 +293,80 @@ fn taxpayer_unknown() -> ResponseTemplate {
         "application/xml",
     )
 }
+
+// ----- what szamlazz.hu holds: one document, every selector ------------------
+
+/// szamlazz.hu holds `doc`: one body on every selector the document is
+/// reachable by — its number, its order number when it carries one, its
+/// external id when the test states one — so the stubs cannot disagree.
+async fn holds(mock: &MockServer, doc: &Doc<'_>) {
+    let selectors = [
+        Some(number_query(doc.number)),
+        doc.order.map(order_query),
+        doc.external_id.map(external_id_query),
+    ];
+    for selector in selectors.into_iter().flatten() {
+        selector.respond_with(doc.response()).mount(mock).await;
+    }
+}
+
+/// szamlazz.hu holds `doc` under its external id from the `misses + 1`th
+/// query on: code 7 for `misses` queries, the document afterwards. The number
+/// and order selectors are not mounted — the document is absent before the
+/// misses and nothing reads it by number or order after. `doc` must state its
+/// external id.
+async fn holds_after_misses(mock: &MockServer, misses: u64, doc: &Doc<'_>) {
+    let id = doc
+        .external_id
+        .expect("holds_after_misses needs the document's external id");
+    external_id_query(id)
+        .respond_with(not_found())
+        .up_to_n_times(misses)
+        .mount(mock)
+        .await;
+    external_id_query(id)
+        .respond_with(doc.response())
+        .mount(mock)
+        .await;
+}
+
+/// The create lands on szamlazz.hu but its reply is lost (design §5 step 4,
+/// ADR 0003): `create()` answers 500, `expect(1)`, and `doc` is the holder of
+/// its external id from the moment the create request is received — code 7
+/// before, the document after. The transition is the create stub being
+/// matched (one flag, flipped by the create's responder and read by the
+/// external id's), so how many queries precede the send is not the test's to
+/// know. Failure-injection sequencing, not a model of szamlazz.hu: one flag
+/// for one document. `doc` must state its external id; the number and order
+/// selectors are not mounted.
+async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>) {
+    let id = doc
+        .external_id
+        .expect("create_lands_but_reply_lost needs the document's external id");
+    let landed = Arc::new(AtomicBool::new(false));
+    let flip = Arc::clone(&landed);
+    create()
+        .respond_with(move |_: &Request| {
+            flip.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(500)
+        })
+        .expect(1)
+        .mount(mock)
+        .await;
+    let document = doc.response();
+    external_id_query(id)
+        .respond_with(move |_: &Request| {
+            if landed.load(Ordering::SeqCst) {
+                document.clone()
+            } else {
+                not_found()
+            }
+        })
+        .mount(mock)
+        .await;
+}
+
+// ----- request bodies ----------------------------------------------------------
 
 fn document(unit_price: Decimal) -> DocumentInput {
     DocumentInput::new(
@@ -823,6 +907,36 @@ async fn multi_account_services(endpoint: &str) -> (Arc<MutableAccounts>, Order,
     (mutable, order, agent)
 }
 
+/// The Restate server, the wiremock standing in for szamlazz.hu, and the
+/// ingress, SQL and stub helpers the scenarios drive them through.
+///
+/// A scenario states what szamlazz.hu holds through the document-centric
+/// helpers — one call per document, the same body on every selector the
+/// document is reachable by, so the stubs cannot disagree — and through the
+/// raw selector builders where it is about a specific wire sequence:
+///
+/// - [`Harness::absent`]: code 7 on the external ids of `kinds` under `order`.
+/// - [`Harness::holds`]: `doc` on `number_query`, on `order_query` when it
+///   carries an order, on `external_id_query` when it states an external id.
+///   When two held documents carry one order, the one held first answers the
+///   order query (wiremock answers with the first mounted match) — a scenario
+///   whose order's newest document is not the one it holds keeps the raw
+///   `order_query` builder.
+/// - [`Harness::holds_after_misses`]: the external-id selector alone, code 7
+///   for `misses` queries, then `doc` — the document appearing after a
+///   hand-counted number of queries (the lookup step's, the create step's
+///   leading query and re-query).
+/// - [`Harness::create_lands_but_reply_lost`]: `create()` answers 500,
+///   `expect(1)`, and `doc` holds its external id from the moment the create
+///   request is received — the transition is the create stub being matched,
+///   not a query count. Code 7 on the external id before.
+/// - The raw builders (`number_query`, `order_query`, `external_id_query`,
+///   `create`, `storno`), `expect(n)` and `up_to_n_times(n)`: a stub the
+///   scenario asserts on (`expect`), a non-document answer (7, 500, an API
+///   code) or an ordering-dependent shape stays explicit, byte for byte.
+///
+/// The three document helpers are checked against wiremock alone by the
+/// non-ignored tests at the end of this file.
 struct Harness {
     restate: Restate,
     mock: MockServer,
@@ -1319,6 +1433,23 @@ impl Harness {
                 .await;
         }
     }
+
+    /// szamlazz.hu holds `doc`: see [`holds`].
+    async fn holds(&self, doc: &Doc<'_>) {
+        holds(&self.mock, doc).await;
+    }
+
+    /// szamlazz.hu holds `doc` under its external id after `misses` code-7
+    /// answers: see [`holds_after_misses`].
+    async fn holds_after_misses(&self, misses: u64, doc: &Doc<'_>) {
+        holds_after_misses(&self.mock, misses, doc).await;
+    }
+
+    /// The create lands but its reply is lost, and `doc` is the holder of its
+    /// external id from that moment on: see [`create_lands_but_reply_lost`].
+    async fn create_lands_but_reply_lost(&self, doc: &Doc<'_>) {
+        create_lands_but_reply_lost(&self.mock, doc).await;
+    }
 }
 
 // ----- scenarios ---------------------------------------------------------------
@@ -1340,6 +1471,7 @@ async fn e2e_order_protocol() {
     reissue_on_live_is_a_conflict(&h).await;
     external_reversal_detected(&h).await;
     reversal_between_executions_is_reversed_not_reissued(&h).await;
+    lost_create_reply_is_settled_by_the_immediate_requery(&h).await;
     proforma_auto_link_and_consumed(&h).await;
     proforma_by_number_is_checked_like_every_found_document(&h).await;
     status_shape(&h).await;
@@ -1383,15 +1515,14 @@ async fn issued_then_already_issued(h: &Harness) {
         .await;
     // The lookup step and the create step's own leading query both miss;
     // the second call's lookup finds the document.
-    external_id_query("acct:E2E-1:invoice")
-        .respond_with(not_found())
-        .up_to_n_times(2)
-        .mount(&h.mock)
-        .await;
-    external_id_query("acct:E2E-1:invoice")
-        .respond_with(Doc::new("SZ-1", "SZ", "E2E-1").response())
-        .mount(&h.mock)
-        .await;
+    h.holds_after_misses(
+        2,
+        &Doc {
+            external_id: Some("acct:E2E-1:invoice"),
+            ..Doc::new("SZ-1", "SZ", "E2E-1")
+        },
+    )
+    .await;
     create()
         .respond_with(created("SZ-1", "1000", "1270"))
         .expect(1)
@@ -1495,15 +1626,14 @@ async fn duplicate_order_number_reconciles(h: &Harness) {
         .await;
     // Lookup and the create step's leading query miss; the re-query after
     // the 152 finds the document.
-    external_id_query("acct:E2E-3:invoice")
-        .respond_with(not_found())
-        .up_to_n_times(2)
-        .mount(&h.mock)
-        .await;
-    external_id_query("acct:E2E-3:invoice")
-        .respond_with(Doc::new("SZ-3", "SZ", "E2E-3").response())
-        .mount(&h.mock)
-        .await;
+    h.holds_after_misses(
+        2,
+        &Doc {
+            external_id: Some("acct:E2E-3:invoice"),
+            ..Doc::new("SZ-3", "SZ", "E2E-3")
+        },
+    )
+    .await;
     create()
         .respond_with(api_error("152", "duplicate"))
         .expect(1)
@@ -1555,10 +1685,11 @@ async fn mount_reversed_sz1(h: &Harness) {
 /// with `reissue` ⇒ `issued` as the newest holder of the same external id.
 async fn storno_then_stale_create_then_reissue(h: &Harness) {
     h.reset().await;
-    number_query("SZ-1")
-        .respond_with(Doc::new("SZ-1", "SZ", "E2E-1").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-1:invoice"),
+        ..Doc::new("SZ-1", "SZ", "E2E-1")
+    })
+    .await;
     external_id_query("acct:E2E-1:storno:SZ-1")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -1626,10 +1757,11 @@ async fn storno_then_stale_create_then_reissue(h: &Harness) {
 async fn reissue_on_live_is_a_conflict(h: &Harness) {
     h.reset().await;
     h.absent("E2E-1", &["prepayment", "proforma"]).await;
-    external_id_query("acct:E2E-1:invoice")
-        .respond_with(Doc::new("SZ-2", "SZ", "E2E-1").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-1:invoice"),
+        ..Doc::new("SZ-2", "SZ", "E2E-1")
+    })
+    .await;
     create()
         .respond_with(created("SZ-X", "1000", "1270"))
         .expect(0)
@@ -1725,21 +1857,15 @@ async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
     // The lookup step, the first execution's leading query and its re-query
     // miss; the second execution's leading query finds the document
     // reversed.
-    external_id_query("acct:E2E-6B:invoice")
-        .respond_with(not_found())
-        .up_to_n_times(3)
-        .mount(&h.mock)
-        .await;
-    external_id_query("acct:E2E-6B:invoice")
-        .respond_with(
-            Doc {
-                reversed: true,
-                ..Doc::new("SZ-6B", "SZ", "E2E-6B")
-            }
-            .response(),
-        )
-        .mount(&h.mock)
-        .await;
+    h.holds_after_misses(
+        3,
+        &Doc {
+            external_id: Some("acct:E2E-6B:invoice"),
+            reversed: true,
+            ..Doc::new("SZ-6B", "SZ", "E2E-6B")
+        },
+    )
+    .await;
     create()
         .respond_with(ResponseTemplate::new(500))
         .expect(1)
@@ -1779,6 +1905,64 @@ async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
     );
 }
 
+/// (vi-c) the create lands but its reply is lost (design §5 step 4): the
+/// create step's immediate re-query finds the document under the external
+/// id and settles the step as `issued` **within the same execution** — no
+/// run retry, exactly one create on the wire, one create step entry. The
+/// harness drives the transition from the create request itself: how many
+/// queries precede the send is the protocol's, not the test's, to know.
+async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-6C", &["prepayment", "proforma"]).await;
+    order_query("E2E-6C")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    h.create_lands_but_reply_lost(&Doc {
+        external_id: Some("acct:E2E-6C:invoice"),
+        ..Doc::new("SZ-6C", "SZ", "E2E-6C")
+    })
+    .await;
+
+    let watch = h.watch("E2E-6C");
+    let reply = h
+        .call(
+            "E2E-6C",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-6c-k1",
+        )
+        .await;
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let response = &reply.body;
+    assert_eq!(response["outcome"], "issued", "{response}");
+    assert_eq!(response["invoice_number"], "SZ-6C");
+    assert_eq!(response["external_id"], "acct:E2E-6C:invoice");
+    assert_eq!(response["gross_total"], "1270");
+
+    // Settled inside the one execution: no run failed, so no failure and no
+    // failing command were recorded, and `retry_count` stayed at the first
+    // execution's 1 (the server's count includes it — (xiv) observed
+    // failures + 1).
+    assert!(retries.max_retry_count <= 1, "{retries:?}");
+    assert!(retries.failures.is_empty(), "{retries:?}");
+    assert!(retries.failing_commands.is_empty(), "{retries:?}");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.completion_failure, None, "{invocation:?}");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs.iter().filter(|name| *name == "create-invoice").count(),
+        1,
+        "one create step entry: {runs:?}"
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+    eprintln!(
+        "(vi-c) create landed, reply lost, immediate re-query finds it → issued in one execution, one create on the wire: pass"
+    );
+}
+
 /// (vii) a proforma, then an invoice with the default `proforma: auto` ⇒ the
 /// create carries `dijbekeroSzamlaszam`; `get` then reports the proforma
 /// `consumed` by the invoice.
@@ -1812,14 +1996,11 @@ async fn proforma_auto_link_and_consumed(h: &Harness) {
 
     h.reset().await;
     h.absent("E2E-7", &["prepayment", "invoice"]).await;
-    external_id_query("acct:E2E-7:proforma")
-        .respond_with(Doc::new("D-7", "D", "E2E-7").response())
-        .mount(&h.mock)
-        .await;
-    order_query("E2E-7")
-        .respond_with(Doc::new("D-7", "D", "E2E-7").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-7:proforma"),
+        ..Doc::new("D-7", "D", "E2E-7")
+    })
+    .await;
     create()
         .and(body_string_contains(
             "<dijbekeroSzamlaszam>D-7</dijbekeroSzamlaszam>",
@@ -1845,16 +2026,12 @@ async fn proforma_auto_link_and_consumed(h: &Harness) {
     h.reset().await;
     h.absent("E2E-7", &["proforma", "prepayment", "final"])
         .await;
-    external_id_query("acct:E2E-7:invoice")
-        .respond_with(
-            Doc {
-                referenced_proforma: Some("D-7"),
-                ..Doc::new("SZ-7", "SZ", "E2E-7")
-            }
-            .response(),
-        )
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-7:invoice"),
+        referenced_proforma: Some("D-7"),
+        ..Doc::new("SZ-7", "SZ", "E2E-7")
+    })
+    .await;
     let status = h.get("E2E-7").await;
     assert_eq!(status["proforma"]["state"], "consumed", "{status}");
     assert_eq!(status["proforma"]["by"], "SZ-7");
@@ -1974,14 +2151,7 @@ async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
     // `dijbekeroSzamlaszam`.
     h.reset().await;
     h.absent("E2E-30", &["prepayment", "invoice"]).await;
-    number_query("D-33")
-        .respond_with(Doc::new("D-33", "D", "E2E-30").response())
-        .mount(&h.mock)
-        .await;
-    order_query("E2E-30")
-        .respond_with(Doc::new("D-33", "D", "E2E-30").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc::new("D-33", "D", "E2E-30")).await;
     create()
         .and(body_string_contains(
             "<dijbekeroSzamlaszam>D-33</dijbekeroSzamlaszam>",
@@ -2005,10 +2175,11 @@ async fn status_shape(h: &Harness) {
     h.reset().await;
     h.absent("E2E-1", &["proforma", "prepayment", "final"])
         .await;
-    external_id_query("acct:E2E-1:invoice")
-        .respond_with(Doc::new("SZ-2", "SZ", "E2E-1").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-1:invoice"),
+        ..Doc::new("SZ-2", "SZ", "E2E-1")
+    })
+    .await;
     let status = h.get("E2E-1").await;
     assert_eq!(status["invoice"]["number"], "SZ-2", "{status}");
     assert_eq!(status["invoice"]["state"], "live");
@@ -2035,10 +2206,12 @@ async fn status_shape(h: &Harness) {
 async fn secondary_lookup_collision_refuses_to_create(h: &Harness) {
     h.reset().await;
     h.absent("E2E-9", &["proforma", "invoice", "final"]).await;
-    external_id_query("acct:E2E-9:prepayment")
-        .respond_with(Doc::new("ES-X", "ES", "OTHER-ORDER").response())
-        .mount(&h.mock)
-        .await;
+    // Another order's prepayment invoice under our prepayment id.
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-9:prepayment"),
+        ..Doc::new("ES-X", "ES", "OTHER-ORDER")
+    })
+    .await;
     order_query("E2E-9")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -2088,15 +2261,18 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
     assert_eq!(h.requests_seen().await, before, "refused before any call");
 
     h.absent("E2E-10", &["invoice", "prepayment"]).await;
+    // The order's live proforma, reachable by number and order; its external
+    // id is guarded, not held: under `auto` the prepayment runs no proforma
+    // lookup, so the selector must never be queried (a hit would find the
+    // proforma and link it — the guard's answer is what a lookup would see).
+    // Mounted before `holds`, so a stated external id could never shadow it.
+    let proforma = Doc::new("D-10", "D", "E2E-10");
     external_id_query("acct:E2E-10:proforma")
-        .respond_with(Doc::new("D-10", "D", "E2E-10").response())
+        .respond_with(proforma.response())
         .expect(0)
         .mount(&h.mock)
         .await;
-    order_query("E2E-10")
-        .respond_with(Doc::new("D-10", "D", "E2E-10").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&proforma).await;
     create()
         .and(body_string_contains("<elolegszamla>true</elolegszamla>"))
         .respond_with(created("ES-10", "1000", "1270"))
@@ -2134,14 +2310,11 @@ async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Har
     ] {
         h.reset().await;
         h.absent("E2E-33", &[other, "proforma"]).await;
-        external_id_query(&format!("acct:E2E-33:{ours}"))
-            .respond_with(Doc::new(number, tipus, "E2E-33").response())
-            .mount(&h.mock)
-            .await;
-        order_query("E2E-33")
-            .respond_with(Doc::new(number, tipus, "E2E-33").response())
-            .mount(&h.mock)
-            .await;
+        h.holds(&Doc {
+            external_id: Some(&format!("acct:E2E-33:{ours}")),
+            ..Doc::new(number, tipus, "E2E-33")
+        })
+        .await;
         create()
             .respond_with(created("D-33", "1000", "1270"))
             .expect(0)
@@ -2169,10 +2342,7 @@ async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Har
     h.reset().await;
     h.absent("E2E-33", &["invoice", "prepayment", "proforma"])
         .await;
-    order_query("E2E-33")
-        .respond_with(Doc::new("SZ-FOREIGN", "SZ", "E2E-33").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc::new("SZ-FOREIGN", "SZ", "E2E-33")).await;
     create()
         .respond_with(created("D-33", "1000", "1270"))
         .expect(0)
@@ -2596,10 +2766,11 @@ async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
 async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
     h.reset().await;
     h.absent("E2E-29", &["prepayment", "final"]).await;
-    external_id_query("acct:E2E-29:invoice")
-        .respond_with(Doc::new("SZ-29", "SZ", "E2E-29").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-29:invoice"),
+        ..Doc::new("SZ-29", "SZ", "E2E-29")
+    })
+    .await;
     external_id_query("acct:E2E-29:proforma")
         .respond_with(ResponseTemplate::new(500))
         .up_to_n_times(1)
@@ -3051,10 +3222,11 @@ async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness
     // The document issued unscoped in phase 1 (E2E-1 → SZ-2) is found by the
     // first scoped create under `acme`: the external id did not change.
     h.absent("E2E-1", &["prepayment", "proforma"]).await;
-    external_id_query("acct:E2E-1:invoice")
-        .respond_with(Doc::new("SZ-2", "SZ", "E2E-1").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-1:invoice"),
+        ..Doc::new("SZ-2", "SZ", "E2E-1")
+    })
+    .await;
     create()
         .respond_with(created("SZ-X", "1000", "1270"))
         .expect(0)
@@ -3372,10 +3544,11 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
 
     // Storno: the invoice is verified by number and reversed.
     h.reset().await;
-    number_query("SZ-18")
-        .respond_with(Doc::new("SZ-18", "SZ", "E2E-18").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-18:invoice"),
+        ..Doc::new("SZ-18", "SZ", "E2E-18")
+    })
+    .await;
     external_id_query("acct:E2E-18:storno:SZ-18")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -3452,10 +3625,11 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     h.reset().await;
     h.absent("E2E-18", &["proforma", "prepayment", "final"])
         .await;
-    external_id_query("acct:E2E-18:invoice")
-        .respond_with(Doc::new("SZ-18B", "SZ", "E2E-18").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-18:invoice"),
+        ..Doc::new("SZ-18B", "SZ", "E2E-18")
+    })
+    .await;
     let status = h.get_scoped("acme", "E2E-18").await;
     assert_eq!(status["invoice"]["number"], "SZ-18B", "{status}");
     assert_eq!(status["invoice"]["state"], "live");
@@ -3528,16 +3702,11 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
     h.reset().await;
     h.multi()
         .update("acme", |account| account.supplier_id = None);
-    number_query("SZ-22")
-        .respond_with(
-            Doc {
-                supplier_id: SUPPLIER_B,
-                ..Doc::unmanaged("SZ-22", "SZ")
-            }
-            .response(),
-        )
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc {
+        supplier_id: SUPPLIER_B,
+        ..Doc::unmanaged("SZ-22", "SZ")
+    })
+    .await;
     external_id_query("acct:by-number:SZ-22:storno")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -3559,10 +3728,7 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
 
     // A document of `acme`'s own pins: reversed, as before.
     h.reset().await;
-    number_query("SZ-23")
-        .respond_with(Doc::unmanaged("SZ-23", "SZ").response())
-        .mount(&h.mock)
-        .await;
+    h.holds(&Doc::unmanaged("SZ-23", "SZ")).await;
     external_id_query("acct:by-number:SZ-23:storno")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -4032,4 +4198,170 @@ async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
         "(xxi) no agent key in {entries} journal entries of {} invocations ({scoped} scoped); positive control found: pass",
         invocations.len()
     );
+}
+
+// ----- the harness's stub helpers, against wiremock alone -----------------------
+
+/// A query as the Számla Agent client puts it on the wire, reduced to what
+/// the selector matchers read: the operation's field name and the one
+/// selector element.
+async fn query_by(mock: &MockServer, selector: &str) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(mock.uri())
+        .body(format!("name=\"action-szamla_agent_xml\"\n{selector}"))
+        .send()
+        .await
+        .expect("query");
+    let status = response.status().as_u16();
+    (status, response.text().await.expect("body"))
+}
+
+/// `holds` mounts one body on every selector the document is reachable by and
+/// nothing else: with an order and an external id three stubs, without an
+/// order two, without either one — an unmounted selector is wiremock's 404.
+#[tokio::test]
+async fn holds_answers_every_selector_the_document_is_reachable_by_with_one_body() {
+    let mock = MockServer::start().await;
+    holds(
+        &mock,
+        &Doc {
+            external_id: Some("acct:ORD-1:invoice"),
+            ..Doc::new("SZ-1", "SZ", "ORD-1")
+        },
+    )
+    .await;
+    holds(&mock, &Doc::new("SZ-2", "SZ", "ORD-2")).await;
+    holds(&mock, &Doc::unmanaged("SZ-3", "SZ")).await;
+
+    let mut bodies = Vec::new();
+    for selector in [
+        "<szamlaszam>SZ-1</szamlaszam>",
+        "<rendelesSzam>ORD-1</rendelesSzam>",
+        "<szamlaKulsoAzon>acct:ORD-1:invoice</szamlaKulsoAzon>",
+    ] {
+        let (status, body) = query_by(&mock, selector).await;
+        assert_eq!(status, 200, "{selector}");
+        assert!(
+            body.contains("<szamlaszam>SZ-1</szamlaszam>"),
+            "{selector}: {body}"
+        );
+        bodies.push(body);
+    }
+    assert!(
+        bodies.iter().all(|body| body == &bodies[0]),
+        "the three selectors answer one body"
+    );
+
+    for selector in [
+        "<szamlaszam>SZ-2</szamlaszam>",
+        "<rendelesSzam>ORD-2</rendelesSzam>",
+    ] {
+        let (status, body) = query_by(&mock, selector).await;
+        assert_eq!(status, 200, "{selector}");
+        assert!(
+            body.contains("<szamlaszam>SZ-2</szamlaszam>"),
+            "{selector}: {body}"
+        );
+    }
+    let (status, _) = query_by(
+        &mock,
+        "<szamlaKulsoAzon>acct:ORD-2:invoice</szamlaKulsoAzon>",
+    )
+    .await;
+    assert_eq!(status, 404, "no external id was stated: no stub");
+
+    let (status, body) = query_by(&mock, "<szamlaszam>SZ-3</szamlaszam>").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("<szamlaszam>SZ-3</szamlaszam>"), "{body}");
+    let (status, _) = query_by(&mock, "<rendelesSzam>ORD-3</rendelesSzam>").await;
+    assert_eq!(
+        status, 404,
+        "an unmanaged document is reachable by number only"
+    );
+}
+
+/// `holds_after_misses(n, doc)` answers the document's external id with code
+/// 7 exactly `n` times and the document from then on; the number and order
+/// selectors are not mounted — the document is absent before the misses.
+#[tokio::test]
+async fn holds_after_misses_answers_code_7_n_times_then_the_document() {
+    let mock = MockServer::start().await;
+    holds_after_misses(
+        &mock,
+        2,
+        &Doc {
+            external_id: Some("acct:ORD-4:invoice"),
+            reversed: true,
+            ..Doc::new("SZ-4", "SZ", "ORD-4")
+        },
+    )
+    .await;
+
+    let by_id = "<szamlaKulsoAzon>acct:ORD-4:invoice</szamlaKulsoAzon>";
+    for miss in 1..=2 {
+        let (status, body) = query_by(&mock, by_id).await;
+        assert_eq!(status, 200, "miss {miss}");
+        assert!(
+            body.contains("<hibakod><![CDATA[7]]></hibakod>"),
+            "miss {miss}: {body}"
+        );
+    }
+    for hit in 1..=2 {
+        let (status, body) = query_by(&mock, by_id).await;
+        assert_eq!(status, 200, "hit {hit}");
+        assert!(
+            body.contains("<szamlaszam>SZ-4</szamlaszam>"),
+            "hit {hit}: {body}"
+        );
+        assert!(
+            body.contains("<sztornozott>true</sztornozott>"),
+            "hit {hit}: {body}"
+        );
+    }
+    let (status, _) = query_by(&mock, "<szamlaszam>SZ-4</szamlaszam>").await;
+    assert_eq!(status, 404, "the number selector is not mounted");
+    let (status, _) = query_by(&mock, "<rendelesSzam>ORD-4</rendelesSzam>").await;
+    assert_eq!(status, 404, "the order selector is not mounted");
+}
+
+/// `create_lands_but_reply_lost(doc)` answers the document's external id with
+/// code 7 until the create request is received — however many queries precede
+/// it — and with the document from that moment on; the create itself is a
+/// 500. The transition is the create stub being matched, not a query count.
+#[tokio::test]
+async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create_hit() {
+    let mock = MockServer::start().await;
+    create_lands_but_reply_lost(
+        &mock,
+        &Doc {
+            external_id: Some("acct:ORD-5:invoice"),
+            ..Doc::new("SZ-5", "SZ", "ORD-5")
+        },
+    )
+    .await;
+
+    let by_id = "<szamlaKulsoAzon>acct:ORD-5:invoice</szamlaKulsoAzon>";
+    for query in 1..=5 {
+        let (status, body) = query_by(&mock, by_id).await;
+        assert_eq!(status, 200, "query {query} before the create");
+        assert!(
+            body.contains("<hibakod><![CDATA[7]]></hibakod>"),
+            "query {query} before the create: {body}"
+        );
+    }
+    let response = reqwest::Client::new()
+        .post(mock.uri())
+        .body("name=\"action-xmlagentxmlfile\"\n<xmlszamla/>")
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status().as_u16(), 500, "the reply is lost");
+    for query in 1..=2 {
+        let (status, body) = query_by(&mock, by_id).await;
+        assert_eq!(status, 200, "query {query} after the create");
+        assert!(
+            body.contains("<szamlaszam>SZ-5</szamlaszam>"),
+            "query {query} after the create: {body}"
+        );
+    }
 }

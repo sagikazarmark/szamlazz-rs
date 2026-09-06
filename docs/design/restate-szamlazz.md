@@ -588,8 +588,16 @@ byte, so a test is reviewable against the verified facts in `docs/szamlazz-hu-be
 second model of the server that could be wrong while every test passes. What the protocol's hard cases need — a lost
 reply, `szlahu_down`, a specific code, "exactly n creates on the wire", "this account's key on this request" — is
 what canned responses and `expect(n)` do natively. The cost is that the stubs of one scenario must agree with each
-other by hand (a document is reachable by number, order number and external id with one body), which #51 puts behind
-a consistency layer in the harness. A stateful fake would be reconsidered for one capability only: property tests of
+other (a document is reachable by number, order number and external id with one body). The e2e harness keeps that
+behind a thin consistency layer over wiremock. A scenario states what szamlazz.hu *holds* per document:
+`holds(doc)` mounts the one body on every selector the document is reachable by — its number, its order number when
+it carries one, the external id when the test states it — so the stubs cannot disagree; `holds_after_misses(n, doc)`
+is the document appearing under its external id after `n` code-7 answers. The one failure the create protocol is
+designed around — the create lands, the reply is lost — is `create_lands_but_reply_lost(doc)`: its transition is
+driven by the create request being received, not by a hand-counted number of queries (one flag for one document,
+flipped by the create stub's responder and read by the external id's). Raw selector stubs, `expect(n)` and
+`up_to_n_times(n)` stay where a scenario is about a specific wire sequence. The layer holds no state beyond that flag
+and does not grow into a fake. A stateful fake would be reconsidered for one capability only: property tests of
 the exactly-once invariant (random handler sequences under two scopes, "at most one live document per kind per
 order, the newest holder under every external id"), which no stub can express. Neither approach exercises a handler
 without Restate — the SDK has no `ObjectContext` harness — so handler decisions are tested end to end or as the pure
@@ -648,7 +656,9 @@ functions they are extracted into.
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
   152 → reconciled; storno → reversed; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
   live → `conflict{live}`; `sztornozott` → reversed; a document reversed in the UI between two executions of the
-  create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; proforma auto-link and `consumed` in `get`;
+  create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; a
+  create whose reply is lost and whose immediate re-query finds the document → `issued` within the one execution,
+  no run failure recorded, exactly one create on the wire; proforma auto-link and `consumed` in `get`;
   `options.proforma: {number}` checked like every found document — a proforma of this order with `teszt = false` →
   409 `account_mismatch` naming the observed pin with `verify-proforma-{number}` the last step journaled and the
   create mock `expect(0)`, another order's proforma and one carrying no order number → `conflict{not_managed}`
