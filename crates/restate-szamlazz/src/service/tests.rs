@@ -36,7 +36,7 @@ fn namespace() -> Namespace {
 }
 
 /// The supplier id of the documents [`found`] builds.
-const SUPPLIER: u64 = 972_720;
+pub(super) const SUPPLIER: u64 = 972_720;
 
 /// szamlazz.hu's `<szamla>` XML of a live `SZ-1` of `ORD-1` from a test
 /// account with `supplier_id`, with the given `alap` elements overridden.
@@ -70,7 +70,7 @@ fn szamla_xml(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> String {
 }
 
 /// The document of [`szamla_xml`], parsed as a query answer.
-fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
+pub(super) fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
     use szamlazz_agent::InvoiceNumber;
     use szamlazz_agent::ops::query_pdf::InvoiceSelector;
     use szamlazz_agent::ops::query_xml::QueryInvoiceXml;

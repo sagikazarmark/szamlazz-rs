@@ -312,8 +312,12 @@ case that needs no create: a live document of ours is `already_issued` (or `conf
 reversed one is `reversed` (or proceeds with `reissue`), an invalid holder is `conflict{external_id_collision}`, a
 live invoice under the order that is not ours is `conflict{foreign}`. The **create** (`create-{kind}`) runs under
 the issue policy — `[issue]`: `max_attempts` executions, `initial_delay` growing by `factor` to `max_delay`,
-bounded by `max_duration` — and every execution is query-first: it finds what an earlier execution issued and
-sends nothing. A lost reply is re-queried once, immediately; when nothing landed the step is *unconfirmed* and
+bounded by `max_duration` — and every execution is query-first: it sends only when the external id holds
+**nothing**, or **exactly the document the lookup step saw reversed**; a live document an earlier execution issued
+is answered `issued` without sending, a document reversed since the lookup is answered `reversed` without sending
+(a new document needs an explicit `reissue`, [ADR 0003](../../docs/adr/0003-explicit-reissue-after-external-reversal.md)),
+and the lookup's reversed document reported live is `conflict{live}`. A lost reply is re-queried once, immediately;
+when nothing landed the step is *unconfirmed* and
 Restate re-executes it after the delay. When the policy is exhausted (or the invocation is cancelled mid-create)
 the handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next
 invocation's lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number

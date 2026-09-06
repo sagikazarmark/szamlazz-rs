@@ -82,6 +82,77 @@ impl Identity {
         response.storno_number = storno_number;
         response
     }
+
+    /// Step 5 of the create protocol (design §5): the settled create step as
+    /// the caller's response. Pure — every szamlazz.hu answer is data.
+    ///
+    /// # Errors
+    ///
+    /// The two faults a settled step can still be: rejected credentials, and
+    /// an `Issued` without a number (a gateway bug, answered as
+    /// `outcome_unknown`). The caller attaches the document's identity.
+    fn respond_to(
+        &self,
+        outcome: CreateOutcome,
+        namespace: &Namespace,
+    ) -> Result<CreateResponse, Fault> {
+        Ok(match outcome {
+            CreateOutcome::Issued(issued) => {
+                // The gateway reports `Issued` only with a number; a bare
+                // result here would be a bug, answered as a fault.
+                let Some(number) = issued.invoice_number else {
+                    return Err(Fault::outcome_unknown(
+                        "issued without a document number; retry with a new Idempotency-Key",
+                    ));
+                };
+                let mut response = self
+                    .respond(Outcome::Issued)
+                    .with_invoice_number(number.as_str());
+                response.net_total = issued.net_total;
+                response.gross_total = issued.gross_total;
+                response.outstanding = issued.outstanding;
+                response.customer_account_url = issued.customer_account_url;
+                if issued.notification_delivery_failed {
+                    response = response.with_warning(Warning::NotificationDeliveryFailed);
+                }
+                response
+            }
+            // An earlier execution of the step created it (ADR 0003): the
+            // caller asked for this document and has it.
+            CreateOutcome::Found(found) => self.found(Outcome::Issued, &found),
+            // Issued and reversed since the lookup — by an earlier execution
+            // of the step and anyone's storno. As if the lookup had seen it:
+            // `reversed`, and a new document needs an explicit `reissue`
+            // (ADR 0003). The storno number is not looked up here; the next
+            // call's lookup reports it.
+            CreateOutcome::Reversed(found) => self.reversed(found.number(), None),
+            // The document the lookup saw reversed is reported live: what
+            // the lookup would have answered under `reissue`.
+            CreateOutcome::LiveAgain(found) => {
+                self.conflict_about(ConflictReason::Live, found.number())
+            }
+            CreateOutcome::Reconciled(found) => self.found(Outcome::Reconciled, &found),
+            CreateOutcome::Collision(found) => {
+                self.conflict_about(ConflictReason::ExternalIdCollision, found.number())
+            }
+            CreateOutcome::DuplicateOrderNumber {
+                code,
+                message,
+                existing_number,
+            } => {
+                let mut response = self
+                    .conflict(ConflictReason::DuplicateOrderNumber)
+                    .with_code(code)
+                    .with_message(message);
+                response.existing_number = existing_number;
+                response
+            }
+            CreateOutcome::Rejected { code, message } => self.rejected(code, message),
+            CreateOutcome::CredentialsRejected { code, message } => {
+                return Err(Fault::credentials_rejected(namespace, code, message));
+            }
+        })
+    }
 }
 
 /// The validated input of a create request (step 0).
@@ -530,57 +601,11 @@ impl Execution {
         let outcome = self.create_step(ctx, order, &intent, reversed).await?;
 
         // Step 5: branch on data.
-        Ok(match outcome {
-            CreateOutcome::Issued(issued) => {
-                // The gateway reports `Issued` only with a number; a bare
-                // result here would be a bug, answered as a fault.
-                let Some(number) = issued.invoice_number else {
-                    return Err(Fault::outcome_unknown(
-                        "issued without a document number; retry with a new Idempotency-Key",
-                    )
-                    .about(order, Some(identity.kind), identity.external_id.as_str())
-                    .into());
-                };
-                let mut response = identity
-                    .respond(Outcome::Issued)
-                    .with_invoice_number(number.as_str());
-                response.net_total = issued.net_total;
-                response.gross_total = issued.gross_total;
-                response.outstanding = issued.outstanding;
-                response.customer_account_url = issued.customer_account_url;
-                if issued.notification_delivery_failed {
-                    response = response.with_warning(Warning::NotificationDeliveryFailed);
-                }
-                response
-            }
-            // An earlier execution of the step created it (ADR 0003): the
-            // caller asked for this document and has it.
-            CreateOutcome::Found(found) => identity.found(Outcome::Issued, &found),
-            CreateOutcome::Reconciled(found) => identity.found(Outcome::Reconciled, &found),
-            CreateOutcome::Collision(found) => {
-                identity.conflict_about(ConflictReason::ExternalIdCollision, found.number())
-            }
-            CreateOutcome::DuplicateOrderNumber {
-                code,
-                message,
-                existing_number,
-            } => {
-                let mut response = identity
-                    .conflict(ConflictReason::DuplicateOrderNumber)
-                    .with_code(code)
-                    .with_message(message);
-                response.existing_number = existing_number;
-                response
-            }
-            CreateOutcome::Rejected { code, message } => identity.rejected(code, message),
-            CreateOutcome::CredentialsRejected { code, message } => {
-                return Err(
-                    Fault::credentials_rejected(&self.config.namespace, code, message)
-                        .about(order, Some(identity.kind), identity.external_id.as_str())
-                        .into(),
-                );
-            }
-        })
+        Ok(identity
+            .respond_to(outcome, &self.config.namespace)
+            .map_err(|fault| {
+                fault.about(order, Some(identity.kind), identity.external_id.as_str())
+            })?)
     }
 
     /// Step 3: one read-only durable step — the external id and, for every
@@ -730,5 +755,84 @@ mod tests {
                 .unwrap_or_else(|error| panic!("create_{kind} accepts auto: {error:?}"));
             assert_eq!(prepared.proforma, ProformaLink::Auto);
         }
+    }
+
+    /// Step 5 (design §5): every settled create outcome as the caller's
+    /// response — in particular the two the create step settles when its
+    /// leading query or re-query finds something the lookup did not see: a
+    /// document reversed since the lookup is `reversed` (never issued past
+    /// without `reissue`, ADR 0003), and the lookup's reversed document
+    /// reported live is `conflict{live}`.
+    #[test]
+    fn a_settled_create_step_maps_onto_the_response() {
+        use crate::service::tests::{SUPPLIER, found};
+
+        let namespace: Namespace = "acct".parse().expect("namespace");
+        let order = OrderKey::parse("ORD-1").expect("order");
+        let identity = Identity::of_kind(&namespace, &order, DocumentKind::Invoice);
+        let respond = |outcome: CreateOutcome| identity.respond_to(outcome, &namespace);
+
+        let live = found(SUPPLIER, &[]);
+        let reversed = found(SUPPLIER, &[("sztornozott", "true")]);
+
+        let response = respond(CreateOutcome::Found(live.clone())).expect("data");
+        assert_eq!(response.outcome, Outcome::Issued);
+        assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
+        assert_eq!(response.external_id, "acct:ORD-1:invoice");
+
+        let response = respond(CreateOutcome::Reconciled(live.clone())).expect("data");
+        assert_eq!(response.outcome, Outcome::Reconciled);
+
+        let response = respond(CreateOutcome::Reversed(reversed)).expect("data");
+        assert_eq!(response.outcome, Outcome::Reversed);
+        assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
+        assert_eq!(
+            response.storno_number, None,
+            "the create step does not look the storno number up"
+        );
+
+        let response = respond(CreateOutcome::LiveAgain(live.clone())).expect("data");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.conflict_reason, Some(ConflictReason::Live));
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+
+        let response = respond(CreateOutcome::Collision(live)).expect("data");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::ExternalIdCollision)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+
+        let response = respond(CreateOutcome::DuplicateOrderNumber {
+            code: "152".to_owned(),
+            message: "dup".to_owned(),
+            existing_number: Some("SZ-77".to_owned()),
+        })
+        .expect("data");
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::DuplicateOrderNumber)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-77"));
+        assert_eq!(response.code.as_deref(), Some("152"));
+
+        let response = respond(CreateOutcome::Rejected {
+            code: "259".to_owned(),
+            message: "net".to_owned(),
+        })
+        .expect("data");
+        assert_eq!(response.outcome, Outcome::Rejected);
+        assert_eq!(response.code.as_deref(), Some("259"));
+
+        let fault = respond(CreateOutcome::CredentialsRejected {
+            code: "3".to_owned(),
+            message: "login".to_owned(),
+        })
+        .expect_err("a fault");
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], TerminalCode::CredentialsRejected.as_str());
     }
 }

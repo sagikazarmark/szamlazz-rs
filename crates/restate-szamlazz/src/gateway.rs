@@ -143,8 +143,10 @@ pub struct CreateStepRequest<'a> {
     /// The create request built by [`Gateway::build_create`].
     pub create: &'a CreateInvoice,
     /// The number of the reversed document the lookup step saw under the
-    /// external id (a reissue). A live document under the id that is not this
-    /// one was issued by an earlier execution of the step.
+    /// external id (a reissue). It is the one holder the step may send past;
+    /// a live document that is not this one was issued by an earlier
+    /// execution of the step, and a reversed document that is not this one
+    /// was reversed since the lookup.
     pub reversed: Option<&'a str>,
 }
 
@@ -165,6 +167,18 @@ pub enum CreateOutcome {
     /// leading query (an earlier execution of this step created it) or by the
     /// re-query after a lost reply. Nothing was sent, or what was sent landed.
     Found(Box<InvoiceDocument>),
+    /// A **reversed** document of ours that the lookup step did not see is
+    /// under the external id: an earlier execution of this step (or anyone)
+    /// issued it and it was reversed since. Nothing was sent — a reversal
+    /// the lookup did not see must be answered as `reversed`, never issued
+    /// past (ADR 0003: a new document needs an explicit `reissue`).
+    Reversed(Box<InvoiceDocument>),
+    /// The document the lookup step saw **reversed** is reported **live**
+    /// by the leading query or the re-query: the server contradicts itself.
+    /// Nothing was sent — sending is the least safe answer to an
+    /// inconsistency; the caller sees `conflict{live}` as the lookup would
+    /// have reported.
+    LiveAgain(Box<InvoiceDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found a live document of ours: an earlier send
     /// had landed.
@@ -714,11 +728,16 @@ impl Gateway {
     ///
     /// 1. Query by external id: a validated live hit that is not
     ///    `request.reversed` is [`CreateOutcome::Found`] — an earlier
-    ///    execution created it; an invalid hit is [`CreateOutcome::Collision`];
-    ///    code 7 and a reversed hit continue; rejected credentials are
+    ///    execution created it; a validated **reversed** hit that is not
+    ///    `request.reversed` is [`CreateOutcome::Reversed`] — issued and
+    ///    reversed since the lookup; `request.reversed` reported live is
+    ///    [`CreateOutcome::LiveAgain`]; an invalid hit is
+    ///    [`CreateOutcome::Collision`]; code 7 and `request.reversed` still
+    ///    reversed continue; rejected credentials are
     ///    [`CreateOutcome::CredentialsRejected`]; a failed query is
     ///    [`Unconfirmed::Transport`] — never create when the check itself
-    ///    failed.
+    ///    failed. The rule: the step sends only when the external id holds
+    ///    nothing, or exactly the document the lookup step saw reversed.
     /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
     ///    a refusal [`CreateOutcome::Rejected`], rejected credentials
     ///    [`CreateOutcome::CredentialsRejected`]. A lost reply or an open code
@@ -805,10 +824,12 @@ impl Gateway {
     }
 
     /// The re-query after 71/152: a live document of ours under the id is
-    /// [`CreateOutcome::Reconciled`]; a collision is reported as such;
-    /// otherwise the duplicate is not ours — the order-number query names it
-    /// when the newest document under the order is a live document of the
-    /// kind being issued, and its miss is a contradiction.
+    /// [`CreateOutcome::Reconciled`]; every other settled answer of the query
+    /// (a collision, a document reversed since the lookup, the lookup's
+    /// reversed document live again) is reported as such; otherwise the
+    /// duplicate is not ours — the order-number query names it when the
+    /// newest document under the order is a live document of the kind being
+    /// issued, and its miss is a contradiction.
     ///
     /// Correctives are exempt from the order-number check, so their
     /// unresolved 71/152 is an ordinary [`CreateOutcome::Rejected`], without
@@ -862,9 +883,12 @@ impl Gateway {
 
     /// The external-id query of the create step: `Some` when it settles the
     /// step — a live document of ours that is not `request.reversed`
-    /// ([`CreateOutcome::Found`]) or an invalid holder
-    /// ([`CreateOutcome::Collision`]) — `None` when nothing live of ours is
-    /// there.
+    /// ([`CreateOutcome::Found`]), a reversed document of ours that is not
+    /// `request.reversed` ([`CreateOutcome::Reversed`]), `request.reversed`
+    /// reported live ([`CreateOutcome::LiveAgain`]) or an invalid holder
+    /// ([`CreateOutcome::Collision`]) — `None` when the send may proceed:
+    /// nothing under the id, or exactly the document the lookup step saw
+    /// reversed, still reversed.
     ///
     /// Rejected credentials settle the step as
     /// [`CreateOutcome::CredentialsRejected`].
@@ -884,9 +908,28 @@ impl Gateway {
             Ok(Seen::Live(found)) if Some(found.number()) != request.reversed => {
                 Ok(Some(CreateOutcome::Found(found)))
             }
-            // Nothing (code 7), a reversed document, or the document the
-            // lookup saw reversed and the server still reports live.
-            Ok(Seen::Live(_) | Seen::Reversed(_) | Seen::Absent) => Ok(None),
+            // The document the lookup saw reversed, reported live: a server
+            // inconsistency. Never send past it.
+            Ok(Seen::Live(found)) => {
+                tracing::warn!(
+                    number = %found.number(),
+                    "the document the lookup saw reversed is reported live"
+                );
+                Ok(Some(CreateOutcome::LiveAgain(found)))
+            }
+            // A reversed document the lookup did not see: issued and
+            // reversed since. Never send past a reversal the caller has not
+            // acknowledged.
+            Ok(Seen::Reversed(found)) if Some(found.number()) != request.reversed => {
+                tracing::warn!(
+                    number = %found.number(),
+                    "a document reversed since the lookup holds the external id"
+                );
+                Ok(Some(CreateOutcome::Reversed(found)))
+            }
+            // Nothing (code 7), or the document the lookup saw reversed,
+            // still reversed.
+            Ok(Seen::Reversed(_) | Seen::Absent) => Ok(None),
             Err(QueryError::CredentialsRejected { code, message }) => {
                 Ok(Some(CreateOutcome::CredentialsRejected { code, message }))
             }

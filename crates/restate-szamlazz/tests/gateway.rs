@@ -751,6 +751,104 @@ async fn create_past_the_reversed_document_the_lookup_saw_sends_the_create() {
 }
 
 #[tokio::test]
+async fn create_never_sends_past_a_reversal_the_lookup_did_not_see() {
+    // The hole this closes: the lookup saw nothing (or X reversed), an
+    // earlier execution's send landed with a lost reply, and the document
+    // was reversed in the UI before this execution. The leading query finds
+    // a reversed document that is not the lookup's — the step settles as
+    // `Reversed` and sends nothing; a new document needs an explicit
+    // `reissue` (ADR 0003).
+    for (label, reversed) in [
+        ("lookup saw nothing", None),
+        ("reissue past X", Some("SZ-0")),
+    ] {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(Doc::reversed("SZ-1", "SZ").response())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(created("SZ-X", "1000", "1270"))
+            .expect(0)
+            .mount(&h.server)
+            .await;
+
+        match h.create(reversed).await {
+            Ok(CreateOutcome::Reversed(found)) => {
+                assert_eq!(found.number(), "SZ-1", "{label}");
+                assert!(!found.is_live(), "{label}");
+            }
+            other => panic!("{label}: expected Reversed, got {other:?}"),
+        }
+        assert_eq!(h.bodies().await.len(), 1, "{label}: the leading query only");
+    }
+}
+
+#[tokio::test]
+async fn create_never_sends_when_the_lookups_reversed_document_is_reported_live() {
+    // The lookup saw SZ-1 reversed; the leading query reports it live. The
+    // server contradicts itself, and sending is the least safe answer: the
+    // step settles as `LiveAgain` (the handler's `conflict{live}`).
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::new("SZ-1", "SZ").response())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    match h.create(Some("SZ-1")).await {
+        Ok(CreateOutcome::LiveAgain(found)) => assert_eq!(found.number(), "SZ-1"),
+        other => panic!("expected LiveAgain, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_settled() {
+    // The send lands, its reply is lost, and the document is reversed before
+    // the immediate re-query sees it. The re-query settles the step as
+    // `Reversed` — not `Unconfirmed`, which would re-execute the step into a
+    // second send.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::reversed("SZ-1", "SZ").response())
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-1"),
+        other => panic!("expected Reversed, got {other:?}"),
+    }
+    assert_eq!(
+        h.bodies().await.len(),
+        3,
+        "the leading query, the create, the re-query"
+    );
+
+    // Re-executed anyway (the run policy re-dispatching a step whose result
+    // was not journaled): the leading query settles it again, nothing sent.
+    match h.create(None).await {
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-1"),
+        other => panic!("expected Reversed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
     // A collision under the id settles the step; a failed query leaves it
     // unconfirmed. Neither sends a create.
@@ -945,6 +1043,24 @@ async fn duplicate_order_number_with_an_invalid_document_under_the_id_is_a_colli
     match h.create(None).await {
         Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number(), "SZ-9"),
         other => panic!("expected Collision, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn duplicate_order_number_with_a_reversal_the_lookup_did_not_see_is_reversed() {
+    // The re-query after 152 finds a reversed document of ours that the
+    // lookup did not see: answered as `Reversed` like the leading query
+    // would, without the order-number naming query.
+    let h = duplicate_harness(Doc::reversed("SZ-3", "SZ").response()).await;
+    order_query()
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-3"),
+        other => panic!("expected Reversed, got {other:?}"),
     }
 }
 

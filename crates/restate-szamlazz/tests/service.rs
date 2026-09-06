@@ -1290,6 +1290,7 @@ async fn e2e_order_protocol() {
     storno_then_stale_create_then_reissue(&h).await;
     reissue_on_live_is_a_conflict(&h).await;
     external_reversal_detected(&h).await;
+    reversal_between_executions_is_reversed_not_reissued(&h).await;
     proforma_auto_link_and_consumed(&h).await;
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
@@ -1649,6 +1650,76 @@ async fn external_reversal_detected(h: &Harness) {
     assert_eq!(detected["invoice_number"], "SZ-6");
     assert_eq!(detected["storno_number"], Value::Null);
     eprintln!("(vi) sztornozott on the lookup → reversed: pass");
+}
+
+/// (vi-b) the hole #36 closes, end to end: the lookup sees nothing, the
+/// first execution of the create step sends (the document lands, the reply
+/// is lost, the immediate re-query still misses), and before the run policy
+/// re-executes the step the document is reversed in the szamlazz.hu UI. The
+/// second execution's leading query finds it reversed and **does not send
+/// again**: `outcome: reversed`, exactly one create on the wire.
+async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-6B", &["prepayment", "proforma"]).await;
+    order_query("E2E-6B")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The lookup step, the first execution's leading query and its re-query
+    // miss; the second execution's leading query finds the document
+    // reversed.
+    external_id_query("acct:E2E-6B:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(3)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-6B:invoice")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::new("SZ-6B", "SZ", "E2E-6B")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let reply = h
+        .call(
+            "E2E-6B",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-6b-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let response = &reply.body;
+    assert_eq!(response["outcome"], "reversed", "{response}");
+    assert_eq!(response["invoice_number"], "SZ-6B");
+    assert_eq!(response["storno_number"], Value::Null);
+
+    // The create step was re-executed (one run retry) and journaled once.
+    let journal = h.journal(reply.invocation_id()).await;
+    let runs: Vec<_> = journal
+        .iter()
+        .filter(|entry| entry.is_run())
+        .filter_map(|entry| entry.name.as_deref())
+        .collect();
+    assert_eq!(
+        runs.iter()
+            .filter(|name| **name == "create-invoice")
+            .count(),
+        1,
+        "one create step entry: {runs:?}"
+    );
+    eprintln!(
+        "(vi-b) document reversed between two executions of the create step → reversed, one create on the wire: pass"
+    );
 }
 
 /// (vii) a proforma, then an invoice with the default `proforma: auto` ⇒ the

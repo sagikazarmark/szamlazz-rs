@@ -18,6 +18,15 @@ document the caller asked for. The two answers differ because the two queries an
 lookup asks "may this create proceed?", the create step's query asks "did my earlier execution already
 land?".
 
+*Amended (#36): a reversal the lookup did not see.* The create step sends only when its leading query finds
+**nothing** under the external id, or **exactly the document the lookup step saw reversed**, still reversed.
+A reversed document that is *not* the lookup's — an earlier execution's send landed with a lost reply and the
+document was reversed in the UI before this execution — settles the step as `outcome: reversed` and sends
+nothing, because it is a reversal the caller has not acknowledged with `reissue`; before #36 the step
+proceeded past any reversed holder and issued a second document without the flag. Symmetrically, the lookup's
+reversed document reported *live* by the create step's query is a server inconsistency and settles the step as
+`conflict{live}`; sending is the least safe answer to an inconsistency.
+
 `create_invoice` (and its proforma, prepayment, final and corrective siblings) may find that the
 document the ledger recorded for this order and kind has since been reversed by someone other than
 the service — a storno from the szamlazz.hu UI, by support, or asserted by an operator. The question

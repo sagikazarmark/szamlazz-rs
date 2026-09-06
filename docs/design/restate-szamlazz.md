@@ -195,18 +195,23 @@ Every step runs on the account the prologue resolved (§4), through the gateway 
    `Err(Unconfirmed)` (a plain `std::error::Error`, retryable to the SDK) is the one thing the policy re-executes. The
    closure never returns a `TerminalError` itself.
    - Leading query `QueryInvoiceXml(ExternalId)` → a validated live document that is not `reversed` → `Found(doc)`
-     (an earlier execution created it; **nothing is sent**); invalid → `Collision(doc)`; 7 or the reversed document →
-     send; 3/135/136/164 → `Ok(CredentialsRejected{code, message})` (settled, nothing sent); transport →
-     `Err(Transport)` (never create when the check itself failed).
+     (an earlier execution created it; **nothing is sent**); a validated **reversed** document that is not `reversed`
+     → `Reversed(doc)` (issued by an earlier execution and reversed since — a reversal the caller has not
+     acknowledged; **nothing is sent**, the handler answers `outcome: reversed`); `reversed` itself reported live →
+     `LiveAgain(doc)` (a server inconsistency; **nothing is sent**, answered `conflict{live}`); invalid →
+     `Collision(doc)`; 7 or `reversed` still reversed → send; 3/135/136/164 → `Ok(CredentialsRejected{code,
+     message})` (settled, nothing sent); transport → `Err(Transport)` (never create when the check itself failed).
+     **The rule (ADR 0003, #36): the step sends only when the external id holds nothing, or exactly the document
+     the lookup step saw reversed.**
    - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
      → `CredentialsRejected{code, message}` — settled data, **not** `Unconfirmed`: re-executing with the same key would
      only repeat the answer, so the run policy is not spent on it.
    - Transport failure or an open code (1, 55, 56 without a number, `szlahu_down`): re-query the external id once,
-     immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; collision → `Collision`; nothing →
-     `Err(Transport | Open)`. The run policy then re-executes the whole handler after the delay: the journal
+     immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; found reversed (reversed between the send
+     and the re-query) → `Reversed(doc)`; collision → `Collision`; nothing → `Err(Transport | Open)`. The run policy then re-executes the whole handler after the delay: the journal
      replays to the create step and the leading query runs again — the re-check ADR 0002 sizes the 2-minute gap for.
    - 71/152: re-query the external id → live and ours → `Reconciled(doc)`; not ours → `Collision(doc)`; reversed and
-     ours, or absent → the duplicate is not ours. For correctives that is `Rejected{code, message}` (exempt from the
+     ours but not `reversed` → `Reversed(doc)`; `reversed` still reversed, or absent → the duplicate is not ours. For correctives that is `Rejected{code, message}` (exempt from the
      order-number check — verified; no order-number query). Otherwise `QueryInvoiceXml(OrderNumber)` names it:
      the newest document under the order is a live document of our kind → `DuplicateOrderNumber{code, message,
      existing_number}`, another kind or reversed → without `existing_number`, a failed naming query → without it;
@@ -216,7 +221,9 @@ Every step runs on the account the prologue resolved (§4), through the gateway 
    mid-create therefore reports `outcome_unknown`. Nothing is recorded: the next invocation's lookup finds whatever
    landed.
 5. **Branch on data.** `Issued(r)` → `outcome: issued` (+ `warnings: [notification_delivery_failed]`); `Found(doc)`
-   → `outcome: issued{number, totals}` (the caller asked for this document and has it — ADR 0003); `Reconciled(doc)`
+   → `outcome: issued{number, totals}` (the caller asked for this document and has it — ADR 0003); `Reversed(doc)` →
+   `outcome: reversed{number}` (no storno number: the next call's lookup reports it); `LiveAgain(doc)` →
+   `conflict{live, number}`; `Reconciled(doc)`
    → `reconciled{number, totals}`; `Collision(doc)` → `conflict{external_id_collision, number}`;
    `DuplicateOrderNumber` → `conflict{duplicate_order_number, code, message, existing_number?}`; `Rejected` →
    `rejected{code, message}`; `CredentialsRejected{code}` → `TerminalError{credentials_rejected, 503, json{order, kind,
@@ -480,7 +487,8 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
   152 → reconciled; storno → reversed; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
-  live → `conflict{live}`; `sztornozott` → reversed; proforma auto-link and `consumed` in `get`; `get` shape; a
+  live → `conflict{live}`; `sztornozott` → reversed; a document reversed in the UI between two executions of the
+  create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; proforma auto-link and `consumed` in `get`; `get` shape; a
   collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
   `expect(0)` and the slot absent in `get`; `create_prepayment` refusing `options.proforma` and issuing without a
   proforma lookup; an exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
