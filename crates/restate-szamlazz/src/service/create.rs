@@ -22,10 +22,9 @@ use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
 use super::support::{Fault, Lookup, check_pins};
 use crate::config::Namespace;
-use crate::contract::response::outstanding;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
-    IssuedKind, Outcome, ProformaLink, Warning,
+    IssuedKind, Outcome, ProformaLink, Warning, outstanding,
 };
 use crate::gateway::{
     CreateOutcome, CreateStepRequest, DocumentRefs, InvoiceDocumentExt as _, LookupOutcome,

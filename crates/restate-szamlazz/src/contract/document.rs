@@ -450,6 +450,18 @@ pub(crate) mod tests {
         );
     }
 
+    /// `value` serializes to JSON and deserializes back to itself; returns
+    /// the JSON for shape assertions. Shared with the other contract tests.
+    pub(crate) fn round_trip<T>(value: &T) -> serde_json::Value
+    where
+        T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_value(value).expect("serialize");
+        let back: T = serde_json::from_value(json.clone()).expect("deserialize");
+        assert_eq!(&back, value);
+        json
+    }
+
     #[test]
     fn document_input_round_trips() {
         let document = sample_document();
