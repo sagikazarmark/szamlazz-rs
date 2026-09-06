@@ -252,6 +252,13 @@ fn create_outcome_pins() -> Pins {
                 code: CREDENTIALS.code(),
                 message: CREDENTIALS.message(),
             },
+            CreateOutcome::Api {
+                code: API.code(),
+                message: API.message(),
+            },
+            CreateOutcome::Unavailable {
+                message: DOWN.to_owned(),
+            },
         ],
         |outcome| match outcome {
             CreateOutcome::Issued(_) => "issued",
@@ -263,6 +270,8 @@ fn create_outcome_pins() -> Pins {
             CreateOutcome::DuplicateOrderNumber { .. } => "duplicate-order-number",
             CreateOutcome::Rejected { .. } => "rejected",
             CreateOutcome::CredentialsRejected { .. } => "credentials-rejected",
+            CreateOutcome::Api { .. } => "api",
+            CreateOutcome::Unavailable { .. } => "unavailable",
         },
     )
 }
@@ -312,6 +321,13 @@ fn storno_outcome_pins() -> Pins {
                 code: CREDENTIALS.code(),
                 message: CREDENTIALS.message(),
             },
+            StornoOutcome::Api {
+                code: API.code(),
+                message: API.message(),
+            },
+            StornoOutcome::Unavailable {
+                message: DOWN.to_owned(),
+            },
         ],
         |outcome| match outcome {
             StornoOutcome::Reversed(_) => "reversed",
@@ -319,6 +335,8 @@ fn storno_outcome_pins() -> Pins {
             StornoOutcome::NotStornoable => "not-stornoable",
             StornoOutcome::Rejected { .. } => "rejected",
             StornoOutcome::CredentialsRejected { .. } => "credentials-rejected",
+            StornoOutcome::Api { .. } => "api",
+            StornoOutcome::Unavailable { .. } => "unavailable",
         },
     )
 }
@@ -464,6 +482,10 @@ const NAV: Code = Code {
 /// The failure text of the `Transport` samples of the two write steps that
 /// keep one.
 const TRANSPORT: &str = "error sending request for url (https://www.szamlazz.hu/szamla/)";
+
+/// The `szlahu_down` header value of the `Unavailable` samples: szamlazz.hu's
+/// maintenance notice.
+const DOWN: &str = "Karbantartás miatt a szolgáltatás átmenetileg nem elérhető.";
 
 /// The reply of a create, with every field the `xmlszamlavalasz` body and
 /// the `szlahu_id` header can carry: `SZ-1`, its totals, the buyer's account

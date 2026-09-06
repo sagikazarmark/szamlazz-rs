@@ -215,11 +215,11 @@ impl From<ExternalId> for String {
 }
 
 /// Normalises a buyer name the way it is sent to szamlazz.hu on every
-/// attempt: trimmed and in Unicode NFC.
+/// execution: trimmed and in Unicode NFC.
 ///
 /// szamlazz.hu's replay check compares the buyer name byte-exact, so the
 /// service normalises once at validation and serialises the result
-/// identically on every attempt.
+/// identically on every execution.
 #[must_use]
 pub(crate) fn normalize_buyer_name(name: &str) -> String {
     name.trim().nfc().collect()

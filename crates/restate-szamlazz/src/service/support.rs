@@ -122,6 +122,18 @@ impl Fault {
         .answered_with(code)
     }
 
+    /// szamlazz.hu reported unavailability (`szlahu_down`) to a write step's
+    /// leading query — before anything was sent (#63). An answer, so it is
+    /// journaled and never re-executed under the issue policy, which is sized
+    /// for the post-send window; a fault, since nothing may be concluded from
+    /// it. No `szamlazz_code`: `szlahu_down` is a header, not a code.
+    pub(super) fn szlahu_down_answer(message: impl Into<String>) -> Self {
+        Self::unavailable(format!(
+            "szamlazz.hu reported unavailability (szlahu_down) to the query: {}; nothing was sent — retry with a new Idempotency-Key or read get",
+            message.into()
+        ))
+    }
+
     /// The verified original of a storno carries no `telj` (ADR 0007).
     /// szamlazz.hu's query schema has the element mandatory — the legal "no
     /// separate date" case is an equal `telj`, never an absent one — so this
@@ -151,8 +163,11 @@ impl Fault {
     /// szamlazz.hu rejected the account's agent credentials with `code`
     /// (3, 135, 136 or 164). Logs the warning that pages the operator — tagged
     /// with the namespace and the code, never the key — and builds the fault.
-    /// The attempt that observed the code issued nothing: szamlazz.hu answers
-    /// these codes before acting on a request.
+    /// The message claims the outcome is not known, nothing more: szamlazz.hu
+    /// answers these codes before acting, so the request it rejected was not
+    /// acted on, but the rejection may be a post-send re-query's after a send
+    /// with an open code, and an earlier execution's send may have landed
+    /// (#63).
     pub(super) fn credentials_rejected(
         namespace: &Namespace,
         code: impl Into<String>,
@@ -168,7 +183,7 @@ impl Fault {
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
-                "szamlazz.hu rejected the agent credentials (code {code}: {message}); this attempt issued nothing — fix the account's agent key, then retry with a new Idempotency-Key or read get"
+                "szamlazz.hu rejected the agent credentials (code {code}: {message}); the outcome is not known — fix the account's agent key, then retry with a new Idempotency-Key or read get"
             ),
         )
         .answered_with(code)
@@ -354,12 +369,19 @@ impl StornoIntent {
 }
 
 /// The settled storno step as the handlers' `StornoResponse`: reversed (now
-/// or already), not stornoable, or rejected. Rejected credentials are the
-/// caller's fault to raise, with the identity it knows.
+/// or already), not stornoable, or rejected.
+///
+/// # Errors
+///
+/// The faults a settled step can still be — rejected credentials (the
+/// warning tagged with `namespace`), and the leading query answered with
+/// another code or `szlahu_down` (`unavailable` at once; nothing was sent,
+/// #63). The caller attaches the identity it knows.
 pub(super) fn storno_response(
     outcome: GatewayStornoOutcome,
     number: String,
-) -> Result<StornoResponse, (String, String)> {
+    namespace: &Namespace,
+) -> Result<StornoResponse, Fault> {
     Ok(match outcome {
         GatewayStornoOutcome::Reversed(storno) => {
             StornoResponse::new(StornoOutcome::Reversed, number)
@@ -379,7 +401,15 @@ pub(super) fn storno_response(
                 .with_code(code)
                 .with_message(message)
         }
-        GatewayStornoOutcome::CredentialsRejected { code, message } => return Err((code, message)),
+        GatewayStornoOutcome::CredentialsRejected { code, message } => {
+            return Err(Fault::credentials_rejected(namespace, code, message));
+        }
+        GatewayStornoOutcome::Api { code, message } => {
+            return Err(Fault::inconclusive_answer(code, message));
+        }
+        GatewayStornoOutcome::Unavailable { message } => {
+            return Err(Fault::szlahu_down_answer(message));
+        }
     })
 }
 

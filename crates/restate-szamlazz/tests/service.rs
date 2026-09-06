@@ -1571,6 +1571,7 @@ async fn e2e_order_protocol() {
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     exhausted_lookup_read_is_a_structured_unavailable(&h).await;
+    answered_code_on_the_create_leading_query_is_an_immediate_unavailable(&h).await;
     flaky_get_read_is_retried_by_the_read_policy(&h).await;
     run_retries_do_not_spend_invocation_attempts(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
@@ -3278,6 +3279,91 @@ async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
     );
     assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
     eprintln!("(xi-c) exhausted lookup read → structured unavailable, nothing created: pass");
+}
+
+/// (xi-c') an *answer* to the create step's leading query that is neither 7
+/// nor a credential code — here 57 — is settled data, not `Unconfirmed`
+/// (#63): the handler answers the structured `unavailable` (503) at once with
+/// the code beside it, the `create-invoice` run is journaled as data with no
+/// failure and no failing command recorded (the issue policy is not spent on
+/// a read), and the create mock sees zero requests. The lookup step's own
+/// query misses cleanly so that the create step is reached.
+async fn answered_code_on_the_create_leading_query_is_an_immediate_unavailable(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-29", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-29")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The lookup step's query: code 7. The create step's leading query, the
+    // next query of the same id: code 57. Two queries in all.
+    external_id_query("acct:E2E-29:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-29:invoice")
+        .respond_with(api_error("57", "Hibás XML."))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-29", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+
+    let watch = h.watch("E2E-29");
+    let reply = h
+        .call(
+            "E2E-29",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-29-k1",
+        )
+        .await;
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 503, "{}", reply.body);
+
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-29"));
+    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-29:invoice"));
+    assert!(fault.message.contains("code 57"), "{fault:?}");
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+
+    // Settled inside the one execution: no run failed, so no failure and no
+    // failing command were recorded, and `retry_count` stayed at the first
+    // execution's 1 (the server's count includes it, as (vi-c) observed) —
+    // the answer was data, not `Unconfirmed`.
+    assert!(retries.max_retry_count <= 1, "{retries:?}");
+    assert!(retries.failures.is_empty(), "{retries:?}");
+    assert!(retries.failing_commands.is_empty(), "{retries:?}");
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("unavailable")),
+        "{invocation:?}"
+    );
+    let runs = h.runs(reply.invocation_id()).await;
+    assert!(
+        runs.contains(&"lookup-invoice".to_owned()) && runs.contains(&"create-invoice".to_owned()),
+        "the create step ran and journaled the answer: {runs:?}"
+    );
+    assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
+    eprintln!(
+        "(xi-c') answered code on the create step's leading query → immediate unavailable{{szamlazz_code}}, nothing created: pass"
+    );
 }
 
 /// (xi-d) `get` under the same fault injection: one of its four reads loses

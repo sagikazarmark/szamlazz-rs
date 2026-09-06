@@ -1017,6 +1017,54 @@ async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
     ));
 }
 
+/// An *answer* to the leading query that is neither 7 nor a credential code
+/// — another API code, or `szlahu_down` — is settled data, as the lookup
+/// step answers the same code: nothing was sent, so nothing is unconfirmed,
+/// and the issue policy (sized for the post-send window) is not spent on a
+/// read. The create mock sees zero requests (#63).
+#[tokio::test]
+async fn create_leading_query_answered_with_another_code_or_szlahu_down_is_settled_without_a_send()
+{
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.create(None).await,
+        Ok(CreateOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        })
+    );
+    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
+
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.create(None).await,
+        Ok(CreateOutcome::Unavailable {
+            message: "maintenance".to_owned(),
+        })
+    );
+    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
+}
+
 #[tokio::test]
 async fn create_rejection_is_settled_without_a_re_query() {
     let h = Harness::start().await;
@@ -1070,10 +1118,7 @@ async fn create_with_an_open_outcome_re_queries_once_and_is_unconfirmed_when_not
         (
             "down",
             ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
-            Unconfirmed::Open {
-                code: None,
-                message: "maintenance".to_owned(),
-            },
+            Unconfirmed::Unavailable("maintenance".to_owned()),
         ),
         (
             "no number",
@@ -1092,6 +1137,145 @@ async fn create_with_an_open_outcome_re_queries_once_and_is_unconfirmed_when_not
 
         assert_eq!(h.create(None).await, Err(expected), "{label}");
     }
+}
+
+/// What the run journals as its last failure — `Unconfirmed`'s display — names
+/// the cause it stands for: `szlahu_down` after a send is unavailability, not
+/// an "open code", and an open answer without a code is szamlazz.hu's success
+/// without a document number, never `szlahu_down` (#63).
+#[test]
+fn unconfirmed_displays_name_their_cause() {
+    let open = Unconfirmed::Open {
+        code: Some("56".to_owned()),
+        message: "signing".to_owned(),
+    }
+    .to_string();
+    assert_eq!(open, "open code 56: signing");
+
+    let no_number = Unconfirmed::Open {
+        code: None,
+        message: "create succeeded without a document number".to_owned(),
+    }
+    .to_string();
+    assert!(!no_number.contains("szlahu_down"), "{no_number}");
+    assert!(no_number.contains("document number"), "{no_number}");
+
+    let down = Unconfirmed::Unavailable("maintenance".to_owned()).to_string();
+    assert!(down.contains("szlahu_down"), "{down}");
+    assert!(down.contains("maintenance"), "{down}");
+
+    let transport = Unconfirmed::Transport("empty response".to_owned()).to_string();
+    assert_eq!(transport, "transport failure: empty response");
+}
+
+/// A post-send re-query that fails itself never hides how the send ended
+/// (#63): the step is unconfirmed with both causes named — the send's
+/// open code and the re-query's failure — whether the re-query lost its
+/// reply, was answered with another code, or met `szlahu_down`. The storno
+/// step composes the same way.
+#[tokio::test]
+async fn a_failed_post_send_re_query_names_both_the_send_and_its_own_failure() {
+    let re_query_failures: [(&str, ResponseTemplate, &str); 3] = [
+        ("lost", ResponseTemplate::new(500), "empty response"),
+        ("another code", body_error("57", "Hibás XML."), "57"),
+        (
+            "down",
+            ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
+            "maintenance",
+        ),
+    ];
+    for (label, re_query, expected_in_re_query) in re_query_failures {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(not_found())
+            .up_to_n_times(1)
+            .mount(&h.server)
+            .await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(re_query)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(api_error("56", "signing"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        let error = h.create(None).await.expect_err(label);
+        match &error {
+            Unconfirmed::ReQueryFailed { sent, re_query } => {
+                assert!(sent.contains("56"), "{label}: {sent}");
+                assert!(sent.contains("signing"), "{label}: {sent}");
+                assert!(
+                    re_query.contains(expected_in_re_query),
+                    "{label}: {re_query}"
+                );
+            }
+            other => panic!("{label}: expected ReQueryFailed, got {other:?}"),
+        }
+        let display = error.to_string();
+        assert!(display.contains("56"), "{label}: {display}");
+        assert!(display.contains(expected_in_re_query), "{label}: {display}");
+    }
+
+    // A lost reply on the send, then a lost reply on the re-query: the
+    // display says both — not just the query's.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(body_error("57", "Hibás XML."))
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+    let error = h.create(None).await.expect_err("unconfirmed");
+    assert!(
+        matches!(
+            &error,
+            Unconfirmed::ReQueryFailed { sent, re_query }
+                if sent.contains("transport failure") && re_query.contains("57")
+        ),
+        "{error:?}"
+    );
+
+    // The storno step's twin.
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query(storno_id.as_str())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(api_error("55", "signing"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    let error = h
+        .gateway
+        .storno(storno_request(&storno_id))
+        .await
+        .expect_err("unconfirmed");
+    assert!(
+        matches!(
+            &error,
+            Unconfirmed::ReQueryFailed { sent, re_query }
+                if sent.contains("55") && re_query.contains("empty response")
+        ),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]
@@ -1321,6 +1505,31 @@ async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_
             existing_number: None,
         })
     );
+}
+
+/// The 71/152 re-query is what settles whether the duplicate is ours; when it
+/// fails itself the step is unconfirmed naming both the refusal and the
+/// re-query's failure (#63), and the order-number query — which names, but
+/// cannot settle — is not taken.
+#[tokio::test]
+async fn duplicate_order_number_whose_re_query_fails_is_unconfirmed_naming_both() {
+    let h = duplicate_harness(ResponseTemplate::new(500)).await;
+    order_query()
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    let error = h.create(None).await.expect_err("unconfirmed");
+    match &error {
+        Unconfirmed::ReQueryFailed { sent, re_query } => {
+            assert!(sent.contains("152"), "{sent}");
+            assert!(sent.contains("Már létező rendelésszám"), "{sent}");
+            assert!(re_query.contains("empty response"), "{re_query}");
+        }
+        other => panic!("expected ReQueryFailed, got {other:?}"),
+    }
+    assert_eq!(h.bodies().await.len(), 3, "query, create, re-query");
 }
 
 #[tokio::test]
@@ -2019,6 +2228,54 @@ async fn storno_leading_query_hit_is_already_reversed() {
             storno_number: "SS-1".to_owned(),
         })
     );
+}
+
+/// The storno step's twin of the create step's rule (#63): an *answer* to
+/// the leading query that is neither 7 nor a credential code — another API
+/// code, or `szlahu_down` — is settled data, nothing is sent and nothing is
+/// unconfirmed.
+#[tokio::test]
+async fn storno_leading_query_answered_with_another_code_or_szlahu_down_is_settled_without_a_send()
+{
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(created("SS-1", "-1000", "-1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.storno(storno_request(&storno_id)).await,
+        Ok(StornoOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        })
+    );
+    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
+
+    let h = Harness::start().await;
+    external_id_query(storno_id.as_str())
+        .respond_with(ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(created("SS-1", "-1000", "-1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.storno(storno_request(&storno_id)).await,
+        Ok(StornoOutcome::Unavailable {
+            message: "maintenance".to_owned(),
+        })
+    );
+    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
 }
 
 #[tokio::test]

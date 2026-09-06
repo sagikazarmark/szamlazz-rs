@@ -247,20 +247,33 @@ gateway opened for this execution.
      acknowledged; **nothing is sent**, the handler answers `outcome: reversed`); `reversed` itself reported live →
      `LiveAgain(doc)` (a server inconsistency; **nothing is sent**, answered `conflict{live}`); invalid →
      `Collision(doc)`; 7 or `reversed` still reversed → send; 3/135/136/164 → `Ok(CredentialsRejected{code,
-     message})` (settled, nothing sent); transport → `Err(Transport)` (never create when the check itself failed).
-     **The rule (ADR 0003, #36): the step sends only when the external id holds nothing, or exactly the document
-     the lookup step saw reversed.**
+     message})` (settled, nothing sent); **another code → `Ok(Api{code, message})` and `szlahu_down` →
+     `Ok(Unavailable{message})`** — answers, settled with nothing sent (#63): the handler raises
+     `TerminalError{unavailable}` at once — for a code, the same fault the lookup step raises for it; for
+     `szlahu_down`, without the read policy's retries the lookup step gives it, since the issue policy this step runs
+     under is sized for the post-send window and would otherwise be spent on a read, ending `outcome_unknown` ~39
+     minutes later although nothing was ever sent; only a transport failure of the leading query → `Err(Transport)`
+     (never create when the check itself failed — an exchange without an answer). **The rule (ADR 0003, #36): the step sends only when the
+     external id holds nothing, or exactly the document the lookup step saw reversed.**
    - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
      → `CredentialsRejected{code, message}` — settled data, **not** `Unconfirmed`: re-executing with the same key would
      only repeat the answer, so the run policy is not spent on it.
-   - Transport failure or an open code (1, 55, 56 without a number, a code the agent crate does not know —
+   - Transport failure, an open code (1, 55, 56 without a number, a code the agent crate does not know —
      `szamlazz_agent::OutcomeClass::Unknown`, because it may be a refusal or a new "issued, but…" code like 55/56,
-     and `rejected` would assert that no document exists (#13) — or `szlahu_down`): re-query the external id once,
+     and `rejected` would assert that no document exists (#13) — or a success without a document number) or
+     `szlahu_down`: re-query the external id once,
      immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; found reversed (reversed between the send
-     and the re-query) → `Reversed(doc)`; collision → `Collision`; nothing → `Err(Transport | Open)`. The run policy then re-executes the whole handler after the delay: the journal
-     replays to the create step and the leading query runs again — the re-check ADR 0002 sizes the 2-minute gap for.
+     and the re-query) → `Reversed(doc)`; collision → `Collision`; nothing → `Err(Transport | Open | Unavailable)`;
+     **the re-query itself failed** (lost reply, another code, `szlahu_down`) → `Err(ReQueryFailed{sent, re_query})`,
+     naming how the send ended *and* how the re-query failed — the re-query's failure never hides that a send
+     happened (#63). Each variant's display names its own cause: `Open` without a code is the success without a
+     document number, never `szlahu_down` (#63). The run policy then re-executes the whole handler after the delay:
+     the journal replays to the create step and the leading query runs again — the re-check ADR 0002 sizes the
+     2-minute gap for.
    - 71/152: re-query the external id → live and ours → `Reconciled(doc)`; not ours → `Collision(doc)`; reversed and
-     ours but not `reversed` → `Reversed(doc)`; `reversed` still reversed, or absent → the duplicate is not ours. For correctives that is `Rejected{code, message}` (exempt from the
+     ours but not `reversed` → `Reversed(doc)`; `reversed` still reversed, or absent → the duplicate is not ours; the
+     re-query itself failed → `Err(ReQueryFailed{sent: "duplicate order number …", re_query})` (whether the duplicate
+     is ours is what it was to settle). For correctives that is `Rejected{code, message}` (exempt from the
      order-number check — verified; no order-number query). Otherwise `QueryInvoiceXml(OrderNumber)` names it:
      the newest document under the order is a live document of our kind → `DuplicateOrderNumber{code, message,
      existing_number}`, another kind or reversed → without `existing_number`, a failed naming query → without it;
@@ -277,9 +290,14 @@ gateway opened for this execution.
    `conflict{live, number}`; `Reconciled(doc)`
    → `reconciled{number, totals}`; `Collision(doc)` → `conflict{external_id_collision, number}`;
    `DuplicateOrderNumber` → `conflict{duplicate_order_number, code, message, existing_number?}`; `Rejected` →
-   `rejected{code, message}`; `CredentialsRejected{code}` → `TerminalError{credentials_rejected, 503, json{order, kind,
-   external_id}}` and a warning tagged with the namespace and the code (§7) — the execution that observed the code
-   issued nothing, an earlier one may have landed with a lost reply, which is why this is a fault and never `rejected`.
+   `rejected{code, message}`; `Api{code, message}` → `TerminalError{unavailable, 503, szamlazz_code, json{order,
+   kind, external_id}}` and `Unavailable{message}` → `TerminalError{unavailable, 503, json{order, kind, external_id}}`
+   without a `szamlazz_code` (`szlahu_down` is a header, not a code) — the leading query's answers, nothing sent (#63);
+   `CredentialsRejected{code}` → `TerminalError{credentials_rejected, 503, json{order, kind,
+   external_id}}` and a warning tagged with the namespace and the code (§7) — the request that drew the code was not
+   acted on, but the code may have come to a post-send re-query and an earlier execution may have landed with a lost
+   reply, which is why this is a fault and never `rejected`; its message says the outcome is not known, never that
+   "this attempt issued nothing" (#63).
 6. **Crash path.** A crash mid-closure leaves no journal entry; Restate re-dispatches after the handler's
    `initial_interval` (2 m > 60 s client timeout + observed stalls) with the journal; completed runs replay; the open
    `create-…` closure re-executes and begins with the external-id query, so a landed create is `Found`, not
@@ -337,8 +355,10 @@ answers when one account names another's invoice number is unverified — behavi
    step 4): the gateway returns `Ok(StornoOutcome)` for every known answer and `Err(Unconfirmed)` — retryable to the
    SDK — only when szamlazz.hu's answer is not known; the closure never returns a `TerminalError` itself.
    (a) leading query by the storno ext id → the matching `SS` → `AlreadyReversed{storno_number}` (an earlier
-   execution sent it; **nothing is sent**); 3/135/136/164 → `Ok(CredentialsRejected)`; transport → `Err(Transport)`
-   (never send when the check itself failed);
+   execution sent it; **nothing is sent**); 3/135/136/164 → `Ok(CredentialsRejected)`; another code →
+   `Ok(Api{code, message})` and `szlahu_down` → `Ok(Unavailable{message})` — answers, settled with nothing sent, the
+   twins of §5 step 4's (#63); only a transport failure → `Err(Transport)` (never send when the check itself
+   failed);
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon, teljesitesDatum}` — `teljesitesDatum` = the verified
    original's `telj`, which NAV requires the storno to repeat (ADR 0007; szamlazz.hu defaults to it when the element
    is omitted and accepts any date silently when it is not — verified — so the explicit date is what fails loudly)
@@ -348,15 +368,18 @@ answers when one account names another's invoice number is unverified — behavi
    `not_stornoable` although the storno document had landed); echo of the requested number →
    `NotStornoable`; API errors → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
    `221` = has a corrective — typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 →
-    `CredentialsRejected{code, message}`; a transport failure or an open code (1, 55, 56, a code the agent crate
-    does not know, `szlahu_down`) → re-query
+    `CredentialsRejected{code, message}`; a transport failure, an open code (1, 55, 56, a code the agent crate
+    does not know) or `szlahu_down` → re-query
    the storno ext id once, immediately → the matching `SS` → `AlreadyReversed{storno_number}` (what was sent landed);
-   nothing → `Err(Transport | Open)`, and the run policy re-executes the step after its delay, beginning again at (a).
+   nothing → `Err(Transport | Open | Unavailable)`; the re-query itself failed → `Err(ReQueryFailed{sent, re_query})`
+   naming both (#63); and the run policy re-executes the step after its delay, beginning again at (a).
    Any `Err` from the run — exhaustion (500) or cancellation (409) — is mapped to `TerminalError{outcome_unknown,
    json{order, kind, external_id}}`; nothing is recorded, the next call's steps 1–2 find the storno if it landed.
 4. **Branch on data.** `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `NotStornoable` →
-   `rejected{not_stornoable}`; `Rejected` → `outcome: rejected{code, message}`; `CredentialsRejected` →
-   `TerminalError{credentials_rejected}` (that execution issued nothing).
+   `rejected{not_stornoable}`; `Rejected` → `outcome: rejected{code, message}`; `Api{code, message}` →
+   `TerminalError{unavailable, szamlazz_code}` and `Unavailable{message}` → `TerminalError{unavailable}` (the leading
+   query's answers, nothing sent — #63); `CredentialsRejected` →
+   `TerminalError{credentials_rejected}` (the request that drew the code was not acted on; the outcome is not known).
 
 `e_invoice` for the storno: the verified document's `eszamla` when known, else the account default — an open code set
 for which the account's own default is a legitimate choice. `fulfillment_date` has no such fallback: it is a fiscal
@@ -470,7 +493,9 @@ prologue's `account` step before anything is issued; the same request never succ
 fixes the scope rather than retrying. `unavailable` is the answer to an *exhausted read policy* (§9) — szamlazz.hu did
 not answer a read through every execution the policy allows, or the invocation was cancelled mid-read — naming the
 step and the last failure, about the document when the step knows one; a szamlazz.hu code a read cannot conclude
-from (`Api`) is the same fault without a retry, and so is a verified storno original **without a `telj`** (§6 step 1,
+from (`Api`) is the same fault without a retry — so is the same code, or `szlahu_down`, answered to a write step's
+*leading* query (§5 step 4, §6 step 3: settled data, nothing sent, never `Unconfirmed` — #63) — and so is a verified
+storno original **without a `telj`** (§6 step 1,
 ADR 0007: szamlazz.hu breaking its own schema on a date the storno must repeat — nothing is sent; the message names
 the invoice, and `Szamlazz.Order.storno_invoice` attaches the order, kind and storno external id). It also covers the
 prologue's own faults: the resolve policy
@@ -480,10 +505,11 @@ exhausted, the credential store gone or unavailable through the in-process retry
 `credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
 or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request —
 the same request succeeds once the key is fixed — so it is 503, not a 4xx ("do not retry") or 401/403 ("you are
-unauthenticated"). The execution that observed the code issued nothing — szamlazz.hu answers these codes before acting
-on a request, and on the 71/152 re-query path the create was already refused as a duplicate; an earlier execution may
-have landed with a lost reply, which is why it is a fault under the "every error means outcome unknown" rule and never
-`rejected`. Every
+unauthenticated"). The request that drew the code was not acted on — szamlazz.hu answers these codes before acting
+on a request, and on the 71/152 re-query path the create was already refused as a duplicate — but the code may have
+come to the re-query after a send with an open code, and an earlier execution may have landed with a lost reply,
+which is why it is a fault under the "every error means outcome unknown" rule and never `rejected`; its message
+says the outcome is not known, never "this attempt issued nothing" (#63). Every
 occurrence is logged at `warn` with the namespace and the code (never the key).
 
 `account_mismatch`: a document found **by number** — `Szamlazz.Order`'s verifies (`storno_invoice`, the corrective's
@@ -684,7 +710,10 @@ functions they are extracted into.
 - `gateway`: wiremock tests using upstream-shaped responses — the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
   (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
-  landed — a code the agent crate does not know among them, on the create and the storno send —, the 71/152 matrix
+  landed — a code the agent crate does not know among them, on the create and the storno send —, an answered code
+  or `szlahu_down` on the leading query settled as `Api` / `Unavailable` with the create and storno mocks seeing
+  zero requests (#63), a failed post-send re-query as `ReQueryFailed` naming both causes, the `Unconfirmed`
+  displays, the 71/152 matrix
   incl. `existing_number` and the contradiction settled after one send, the corrective's
   71/152 → `Rejected`), storno validation incl. the D/SL no-op, the zero-gross storno as `Reversed`, the storno body
   carrying `<teljesitesDatum>` equal to the step request's date and no `<keltDatum>`, the two sends of a
@@ -793,7 +822,9 @@ functions they are extracted into.
   once → `issued` in one invocation with `last_failure_related_command_name = lookup-invoice` in flight, one journal
   entry per step and exactly one create on the wire; a lookup that never answers → a structured `unavailable` 503
   naming the order, kind and external id within the read policy's delays, `lookup-invoice` journaled, `create-invoice`
-  not, zero creates; `get` with one of its four reads answering 500 once → the status, with `get-proforma` the
+  not, zero creates; the create step's leading query answered with code 57 (the lookup's own query having missed
+  cleanly) → a structured `unavailable` 503 with `szamlazz_code: "57"` at once — `retry_count` at the first
+  execution's 1, no failure and no failing command recorded, `create-invoice` journaled as data, zero creates (#63); `get` with one of its four reads answering 500 once → the status, with `get-proforma` the
   failing command in flight; `get` with **all four** reads answering 500 once → the status in one invocation, with
   `sys_invocation.retry_count` observed past the handler's `max_attempts = 3` (read from discovery) — run retries
   spend no invocation attempts (ADR 0004, #87); a scoped `Szamlazz.Agent.query` and a scoped `Szamlazz.Order` call reaching the handlers with the

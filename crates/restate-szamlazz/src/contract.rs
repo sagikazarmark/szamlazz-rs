@@ -342,11 +342,11 @@ pub enum TerminalCode {
     InvalidInput,
     /// szamlazz.hu rejected the account's agent credentials (codes 3, 135,
     /// 136, 164): the worker's configuration is wrong, not the request. The
-    /// execution that observed the code issued nothing — szamlazz.hu answers
-    /// these codes before acting on a request — but an earlier execution may
-    /// have landed with a lost reply, which is why this is a fault and not a
-    /// `rejected` outcome. Fix the key, then retry with a new
-    /// `Idempotency-Key`. HTTP 503.
+    /// request that drew the code was not acted on — szamlazz.hu answers
+    /// these codes before acting — but the code may have come to a post-send
+    /// re-query, and an earlier execution may have landed with a lost reply,
+    /// which is why this is a fault and not a `rejected` outcome. Fix the
+    /// key, then retry with a new `Idempotency-Key`. HTTP 503.
     CredentialsRejected,
     /// The request names no account of this deployment: it arrived unscoped
     /// where accounts are reachable by scope only, or under a scope no account

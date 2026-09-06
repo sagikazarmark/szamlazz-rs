@@ -43,7 +43,7 @@ pub struct DocumentInput {
     pub comment: Option<String>,
     /// Issue date (`kelt`). Leave unset to let szamlazz.hu date the document
     /// at issue time; a pinned date is journaled and re-sent unchanged on
-    /// every attempt.
+    /// every execution.
     #[serde(default)]
     pub issue_date: Option<Date>,
     /// Per-call overrides of the configured defaults.
@@ -130,8 +130,8 @@ impl From<ExchangeRateInput> for ExchangeRate {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct BuyerInput {
-    /// Name (`név`). Normalised (trimmed, NFC) before issuing so every attempt
-    /// sends byte-identical bytes.
+    /// Name (`név`). Normalised (trimmed, NFC) before issuing so every
+    /// execution sends byte-identical bytes.
     pub name: String,
     /// ZIP code (`irányítószám`).
     pub zip: String,
