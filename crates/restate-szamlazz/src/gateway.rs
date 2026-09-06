@@ -71,7 +71,7 @@ use szamlazz_agent::{
 use tracing::Instrument as _;
 
 use crate::account::Account;
-use crate::contract::{DocumentKind, IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
+use crate::contract::{IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
@@ -1578,7 +1578,7 @@ pub fn is_credentials_rejected(code: &ErrorCode) -> bool {
 
 /// The `tipus` code the documents of `kind` carry.
 #[must_use]
-pub const fn document_type_of(kind: IssuedKind) -> &'static str {
+pub(crate) const fn document_type_of(kind: IssuedKind) -> &'static str {
     match kind {
         IssuedKind::Proforma => "D",
         IssuedKind::Invoice => "SZ",
@@ -1591,7 +1591,7 @@ pub const fn document_type_of(kind: IssuedKind) -> &'static str {
 /// The kind whose documents carry `tipus`, or `None` for stornos, delivery
 /// notes and unknown codes.
 #[must_use]
-pub fn issued_kind_of(tipus: &str) -> Option<IssuedKind> {
+pub(crate) fn issued_kind_of(tipus: &str) -> Option<IssuedKind> {
     match tipus {
         "D" => Some(IssuedKind::Proforma),
         "SZ" => Some(IssuedKind::Invoice),
@@ -1602,17 +1602,11 @@ pub fn issued_kind_of(tipus: &str) -> Option<IssuedKind> {
     }
 }
 
-/// Whether `tipus` is the document type of `kind` (`D`, `SZ`, `ES`, `VS`).
-#[must_use]
-pub fn is_live_kind(kind: DocumentKind, tipus: &str) -> bool {
-    tipus == document_type_of(kind.into())
-}
-
 /// Whether `tipus` is a legal invoice of the kinds an order carries: `SZ`,
 /// `ES` or `VS`. Stornos, correctives, proformas and delivery notes are
 /// not.
 #[must_use]
-pub fn is_invoice_family(tipus: &str) -> bool {
+pub(crate) fn is_invoice_family(tipus: &str) -> bool {
     matches!(tipus, "SZ" | "ES" | "VS")
 }
 

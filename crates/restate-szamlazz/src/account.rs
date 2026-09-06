@@ -271,27 +271,64 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///
 /// The worker calls [`resolve`](Self::resolve) once per invocation, inside a
 /// durable step, and journals the result: the scope is the only resolution
-/// input — never a header, a body field or the Virtual Object key.
+/// input — never a header, a body field or the Virtual Object key. Implement
+/// it over a database, a configuration service or a table in memory; the
+/// static resolver ([`StaticResolver`]) is the configuration-backed one.
 ///
 /// # Safety contract
 ///
-/// The worker cannot check these at runtime; a resolver guarantees them.
+/// The worker cannot check these at runtime; a resolver guarantees them. The
+/// static resolver enforces every checkable rule at load time
+/// ([`StaticConfigError`] names them); a resolver of your own — a
+/// database-backed one above all — guarantees them itself.
 ///
 /// - **One account under exactly one scope, no fan-in.** Unscoped counts as
 ///   a scope value. Two scopes reaching one szamlazz.hu account would split
-///   an order's per-key lock across two Virtual Objects. The static resolver
-///   satisfies this by construction with one account and checks it at load
-///   time once it holds several; a database-backed resolver must guarantee it
-///   itself — `check_account` only echoes the configuration.
+///   an order's per-key lock across two Virtual Objects. A database-backed
+///   resolver must guarantee it itself — `check_account` only echoes the
+///   configuration, and no runtime check can see two scopes at once.
 /// - **Append-only mapping.** Moving traffic to another account means a new
 ///   scope; a scope's account is never changed in place. A running
 ///   invocation stays on the account it journaled either way.
+/// - **A `supplier_id` pin on every account once there is more than one** —
+///   recommended, never required. The supplier id (`szállító/id`, the
+///   account's seller record) is the only server-side account identity a
+///   found document exposes, and the one pin that catches an agent key
+///   configured under the wrong scope — `mode` alone cannot — by turning "a
+///   document of another account under our external id" into
+///   `conflict{external_id_collision}` or `account_mismatch` instead of a
+///   document acted on. The worker cannot verify a configured value, so it
+///   stays optional; the prologue logs a `warn` once per resolution when a
+///   **scoped** request resolves to an account without one.
+/// - **Unique supplier ids among the accounts that pin one.** Two accounts
+///   with one supplier id are one szamlazz.hu account under two scopes —
+///   fan-in. An unset pin claims nothing.
+/// - **Unique `(endpoint, credentials)` pairs.** The same agent key on the
+///   same endpoint is one account, whatever its `id`.
+/// - **`mode` matching the account's `teszt`.** The mode is validated against
+///   every found document; a test account configured as live fails loudly
+///   on its first found document, on any handler, instead of issuing on the
+///   wrong account.
+/// - **A stable `credential_ref` across rotations.** Rotate the value behind
+///   the reference, never the reference: the reference is journaled with the
+///   account and an in-flight invocation fetches by it on its next
+///   execution.
+/// - **Never cache `Unscoped` or `Unknown`.** They are the *answers* the
+///   worker journals and reports to the caller as `unknown_account`; a
+///   resolver that cached them would turn the appending of a scope into a
+///   window of refusals. A resolver may cache resolved accounts internally.
 ///
 /// Unscoped and unknown are answers, not faults of the resolver: the request
 /// names no account, and the worker reports that to the caller as a terminal
 /// fault. `Unavailable` is the resolver's own fault, retryable, and journals
-/// nothing. A resolver may cache internally.
-pub trait AccountResolver: fmt::Debug + Send + Sync {
+/// nothing.
+///
+/// # Debug
+///
+/// The trait requires no `Debug`: a resolver often holds a connection pool
+/// or a key table, and the crate never formats one — [`Accounts`]' own
+/// `Debug` names the trait objects without descending into them.
+pub trait AccountResolver: Send + Sync {
     /// The account reachable under `scope`; `None` is the unscoped request.
     fn resolve<'a>(
         &'a self,
@@ -301,18 +338,36 @@ pub trait AccountResolver: fmt::Debug + Send + Sync {
 
 /// Fetches an account's credentials by its [`CredentialRef`].
 ///
+/// The return type is the Számla Agent crate's [`Credentials`] (re-exported
+/// at the crate root with [`AgentKey`](szamlazz_agent::AgentKey), so a store
+/// needs no direct dependency on that crate): build one with
+/// [`Credentials::agent_key`].
+///
 /// # Safety contract
 ///
 /// - **Fetched on every handler execution, never journaled.** The worker
 ///   calls [`fetch`](Self::fetch) outside the journal every time a handler
 ///   executes, including replays, and holds the result only for that
 ///   execution — so a rotation is picked up on the next execution of every
-///   in-flight invocation, and no agent key is written into Restate. The
-///   return type is the Számla Agent crate's [`Credentials`], which has no
-///   serde implementation: the compiler rejects any attempt to journal it.
+///   in-flight invocation, and no agent key is written into Restate.
+///   [`Credentials`] has no serde implementation: the compiler rejects any
+///   attempt to journal it.
+/// - **A stable reference across rotations.** The [`CredentialRef`] is the
+///   resolver's, journaled with the [`Account`]; a store rotates the value
+///   behind it, never the reference, so an in-flight invocation's next
+///   execution fetches the new key by the reference it journaled.
 /// - A `Gone` reference is an answer (the account's credentials were
-///   removed); `Unavailable` is a fault of the store.
-pub trait CredentialStore: fmt::Debug + Send + Sync {
+///   removed); `Unavailable` is a fault of the store. Neither display text
+///   echoes the store's own message.
+///
+/// # Debug
+///
+/// The trait requires no `Debug` — a store over a key map would print the
+/// keys — and the crate never formats one: [`Accounts`]' own `Debug` names
+/// the trait objects without descending into them. Should you derive `Debug`
+/// on a store, hold [`Credentials`] rather than raw strings: its `Debug` is
+/// redacted.
+pub trait CredentialStore: Send + Sync {
     /// The credentials under `credential_ref`.
     fn fetch<'a>(
         &'a self,
@@ -380,15 +435,37 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// Trait objects rather than type parameters, so that the services' types —
 /// and the SDK-generated clients — do not change with the deployment's
-/// choice of resolver.
-#[derive(Debug, Clone)]
+/// choice of resolver. Build it with [`Accounts::new`] over your own
+/// resolver and store, or with [`Accounts::from`] a [`StaticResolver`],
+/// which is both.
+///
+/// Its `Debug` — and so that of [`Order`](crate::Order) and
+/// [`Agent`](crate::Agent), which derive theirs over it — names the two
+/// trait objects and never descends into them: a store that derives `Debug`
+/// over a key map cannot print its keys through the services.
+#[derive(Clone)]
 pub struct Accounts {
     resolver: Arc<dyn AccountResolver>,
     store: Arc<dyn CredentialStore>,
 }
 
+impl fmt::Debug for Accounts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Accounts")
+            .field("resolver", &format_args!("dyn AccountResolver"))
+            .field("store", &format_args!("dyn CredentialStore"))
+            .finish()
+    }
+}
+
 impl Accounts {
     /// Bundles `resolver` and `store`.
+    ///
+    /// Both are `Arc<dyn …>`, and an `Arc<MyStore>` coerces at the argument
+    /// (`Accounts::new(Arc::new(resolver), Arc::new(store))`). When one value
+    /// is both, `db.clone()` coerces too, but `Arc::clone(&db)` does not: the
+    /// expected type makes it `Arc::<dyn AccountResolver>::clone`, whose
+    /// argument no longer matches. Call `.clone()` on the value.
     #[must_use]
     pub fn new(resolver: Arc<dyn AccountResolver>, store: Arc<dyn CredentialStore>) -> Self {
         Self { resolver, store }
@@ -579,10 +656,9 @@ mod tests {
     }
 
     /// A resolver and a store that a downstream build might plug in: the
-    /// traits are object-safe and the bundle routes through them. The store
-    /// holds [`Credentials`], whose `Debug` is redacted — a store that held
-    /// raw strings would print them through `Accounts`' `Debug`.
-    #[derive(Debug)]
+    /// traits are object-safe and the bundle routes through them. Neither
+    /// trait asks for `Debug`, and the bundle's own `Debug` does not descend
+    /// into them.
     struct Table {
         accounts: Vec<(Option<&'static str>, Account)>,
         keys: Vec<(&'static str, Credentials)>,
@@ -660,9 +736,12 @@ mod tests {
             Err(FetchError::Gone { credential_ref }) if credential_ref.as_str() == "beta-key"
         ));
 
+        // The bundle's `Debug` names the trait objects, not the `Table`
+        // behind them (the leak property itself is asserted in
+        // `service::tests`, with a store that does print its keys).
         let debug = format!("{accounts:?}");
-        assert!(debug.contains("Table"), "{debug}");
-        assert!(!debug.contains("key-a"), "{debug}");
+        assert!(debug.contains("dyn AccountResolver"), "{debug}");
+        assert!(!debug.contains("Table"), "{debug}");
     }
 
     /// The unavailable errors carry their cause for the operator's logs but

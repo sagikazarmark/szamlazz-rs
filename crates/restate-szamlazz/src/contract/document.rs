@@ -20,7 +20,7 @@ use szamlazz_agent::{ArithmeticError, Currency, LineItem, Rounding, VatRate};
 ///
 /// The order number is not part of the input — it is the `Order` key. Account
 /// data, the seller block and the defaults come from the configuration;
-/// [`DocumentInput::overrides`] can change a subset of them.
+/// `overrides` can change a subset of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -76,7 +76,8 @@ impl DocumentInput {
     }
 }
 
-/// Per-call overrides of the configured [`Defaults`](crate::config::Defaults).
+/// Per-call overrides of the account's configured document defaults
+/// (`config::Defaults`).
 ///
 /// Every field is optional; an absent field keeps the configured value.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -246,7 +247,8 @@ impl From<PostalAddressInput> for PostalAddress {
 
 /// The buyer's taxpayer status (`adóalany`), reported to NAV.
 ///
-/// Mirrors [`szamlazz_agent::TaxpayerStatus`] with snake-case JSON tokens.
+/// Mirrors the Számla Agent crate's `TaxpayerStatus` with snake-case JSON
+/// tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -278,10 +280,11 @@ impl From<TaxpayerStatus> for szamlazz_agent::TaxpayerStatus {
 /// One row of a document (`tétel`).
 ///
 /// Net, VAT and gross values are not part of the input: the service computes
-/// them with [`LineItem::try_calculated`], rounded to the currency's minor
-/// unit — whole forints for HUF, cents for EUR — half away from zero at each
-/// step, so that the arithmetic szamlazz.hu verifies server-side always holds
-/// and the wire carries what the printed document can state.
+/// them (the Számla Agent crate's `LineItem::try_calculated`), rounded to the
+/// currency's minor unit — whole forints for HUF, cents for EUR — half away
+/// from zero at each step, so that the arithmetic szamlazz.hu verifies
+/// server-side always holds and the wire carries what the printed document
+/// can state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]

@@ -221,7 +221,7 @@ impl From<ExternalId> for String {
 /// service normalises once at validation and serialises the result
 /// identically on every attempt.
 #[must_use]
-pub fn normalize_buyer_name(name: &str) -> String {
+pub(crate) fn normalize_buyer_name(name: &str) -> String {
     name.trim().nfc().collect()
 }
 

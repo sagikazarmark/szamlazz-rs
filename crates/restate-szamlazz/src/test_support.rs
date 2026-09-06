@@ -1,6 +1,8 @@
-//! The unit tests' fixture for a queried document: render szamlazz.hu's
-//! `<szamla>` response XML from a [`Doc`] and parse it into an
-//! [`InvoiceDocument`] the way the gateway parses a query answer. The Számla
+//! The unit tests' shared fixtures: [`Doc`], a queried document, and
+//! [`LogCapture`], a `tracing` capture.
+//!
+//! [`Doc`] renders szamlazz.hu's `<szamla>` response XML and parses it into
+//! an [`InvoiceDocument`] the way the gateway parses a query answer. The Számla
 //! Agent crate's response types are `#[non_exhaustive]` on purpose, so a
 //! unit test cannot construct one directly; the XML is the seam, and it is
 //! what szamlazz.hu actually says (design §11 — tests state the answer
@@ -23,6 +25,9 @@
 //! that a rename anywhere in the journaled types is caught, and its output is
 //! pinned as JSON under `tests/journal/` — porting it here would churn the
 //! pinned fixtures for no test.
+//!
+//! [`LogCapture`] is what the sentinel tests assert a warning through: what
+//! it says, and that no agent key is in it.
 
 use jiff::civil::{Date, date};
 use szamlazz_agent::InvoiceNumber;
@@ -213,6 +218,60 @@ impl<'a> Doc<'a> {
 impl Default for Doc<'_> {
     fn default() -> Self {
         Self::new("SZ-1", "SZ")
+    }
+}
+
+/// Captures every `tracing` event the current thread emits, formatted, so a
+/// test can assert what a warning says — and what it does not (an agent key).
+///
+/// [`LogCapture::subscribe`] installs a `TRACE`-level subscriber as the
+/// thread's default for the returned guard's lifetime. tracing caches a
+/// callsite's interest on its first hit, and a first hit from a parallel test
+/// thread — which has no subscriber — would cache it as disabled; the caller
+/// hits the callsite it is about once *after* subscribing (a warm-up event it
+/// can tell apart), then calls [`LogCapture::rebuild_interest`] so the cache
+/// is re-evaluated against this thread's subscriber.
+#[derive(Clone, Default)]
+pub(crate) struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl LogCapture {
+    /// Installs the capturing subscriber as this thread's default.
+    pub(crate) fn subscribe(&self) -> tracing::subscriber::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(self.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    /// Re-evaluates every registered callsite's interest; see the type docs.
+    pub(crate) fn rebuild_interest() {
+        tracing::callsite::rebuild_interest_cache();
+    }
+
+    /// Everything captured so far.
+    pub(crate) fn logs(&self) -> String {
+        String::from_utf8(self.0.lock().expect("capture").clone()).expect("utf-8")
+    }
+}
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
     }
 }
 

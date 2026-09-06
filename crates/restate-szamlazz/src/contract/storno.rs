@@ -26,6 +26,7 @@ pub struct StornoRequest {
 
 impl StornoRequest {
     /// A storno request without a comment.
+    #[must_use]
     pub fn new(invoice_number: impl Into<String>) -> Self {
         Self {
             invoice_number: invoice_number.into(),
@@ -61,7 +62,7 @@ pub enum StornoOutcome {
 pub struct StornoResponse {
     /// The domain outcome.
     pub outcome: StornoOutcome,
-    /// Present when `outcome` is [`StornoOutcome::Conflict`].
+    /// Present when `outcome` is `conflict`.
     #[serde(default)]
     pub conflict_reason: Option<ConflictReason>,
     /// The invoice the request was about.
@@ -69,14 +70,14 @@ pub struct StornoResponse {
     /// The storno invoice number, when known.
     #[serde(default)]
     pub storno_number: Option<String>,
-    /// The `Order` key managing the document on
-    /// [`StornoOutcome::ManagedByOrder`].
+    /// The `Order` key managing the document, when `outcome` is
+    /// `managed_by_order`.
     #[serde(default)]
     pub order_key: Option<String>,
-    /// szamlazz.hu error code on [`StornoOutcome::Rejected`].
+    /// szamlazz.hu error code on `rejected`.
     #[serde(default)]
     pub code: Option<String>,
-    /// szamlazz.hu error message on [`StornoOutcome::Rejected`].
+    /// szamlazz.hu error message on `rejected`.
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -141,6 +142,15 @@ pub struct DeleteProformaRequest {
     /// no guard of its own; without `force` a paid proforma is
     /// `rejected{proforma_paid}`.
     pub force: bool,
+}
+
+impl DeleteProformaRequest {
+    /// A delete request; `force` deletes a proforma with registered payments
+    /// too. `Default::default()` is `new(false)`.
+    #[must_use]
+    pub const fn new(force: bool) -> Self {
+        Self { force }
+    }
 }
 
 /// Output of `Szamlazz.Order.delete_proforma`.

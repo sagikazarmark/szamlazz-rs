@@ -27,6 +27,14 @@ pub struct QueryRequest {
     pub selector: Selector,
 }
 
+impl QueryRequest {
+    /// A query by `selector`.
+    #[must_use]
+    pub const fn new(selector: Selector) -> Self {
+        Self { selector }
+    }
+}
+
 /// A document selector for the query operation.
 ///
 /// Serialises as `{"invoice_number": "…"}`, `{"order_number": "…"}` or
@@ -225,6 +233,7 @@ pub struct QueryTaxpayerRequest {
 
 impl QueryTaxpayerRequest {
     /// A request for `tax_number`, in either accepted form.
+    #[must_use]
     pub fn new(tax_number: impl Into<String>) -> Self {
         Self {
             tax_number: tax_number.into(),
@@ -276,7 +285,8 @@ pub struct InvalidTaxNumber(String);
 /// `valid: false` is a normal answer — NAV knows no taxpayer under the
 /// prefix — not a fault; the optional fields are then absent.
 ///
-/// A crate-owned projection of [`TaxpayerInfo`], not the agent type as it
+/// A crate-owned projection of the Számla Agent crate's `TaxpayerInfo`, not
+/// the agent type as it
 /// is: it is what the handler's read step journals, so its layout is
 /// **additive-only** — a field may be added with a default; nothing is
 /// renamed, removed or retyped — and the agent crate's serde layout never
@@ -320,7 +330,7 @@ impl From<TaxpayerInfo> for QueryTaxpayerResponse {
 /// structures it. Every field is optional: NAV's detailed addresses fill the
 /// structured fields, its simple addresses only `additional_address_detail`.
 ///
-/// Additive-only, like [`QueryTaxpayerResponse`].
+/// Additive-only, like `QueryTaxpayerResponse`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default)]
@@ -400,6 +410,19 @@ pub struct SetPaymentsRequest {
     pub additive: bool,
 }
 
+impl SetPaymentsRequest {
+    /// A replacing request: `entries` become the invoice's credit entries.
+    /// Set [`additive`](Self::additive) to append instead.
+    #[must_use]
+    pub fn new(invoice_number: impl Into<String>, entries: Vec<PaymentEntry>) -> Self {
+        Self {
+            invoice_number: invoice_number.into(),
+            entries,
+            additive: false,
+        }
+    }
+}
+
 /// One credit entry (`jóváírás`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -414,6 +437,20 @@ pub struct PaymentEntry {
     /// Free-text description.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+impl PaymentEntry {
+    /// An entry of `amount` paid by `method` on `date`, without a
+    /// description.
+    #[must_use]
+    pub const fn new(date: Date, method: PaymentMethod, amount: Decimal) -> Self {
+        Self {
+            date,
+            method,
+            amount,
+            description: None,
+        }
+    }
 }
 
 impl From<&PaymentEntry> for CreditEntry {
@@ -441,6 +478,7 @@ pub struct SetPaymentsResponse {
 
 impl SetPaymentsResponse {
     /// A response for `invoice_number` without totals.
+    #[must_use]
     pub fn new(invoice_number: impl Into<String>) -> Self {
         Self {
             invoice_number: invoice_number.into(),

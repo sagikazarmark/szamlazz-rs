@@ -504,7 +504,10 @@ macro_rules! journal_helpers {
                         "account",
                         config.resolve.run_retry_policy(),
                         move || async move {
-                            decisions::resolution(accounts.resolve(scope.as_deref()).await)
+                            decisions::resolution(
+                                scope.as_deref(),
+                                accounts.resolve(scope.as_deref()).await,
+                            )
                         },
                     )
                     .await
