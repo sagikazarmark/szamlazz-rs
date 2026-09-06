@@ -2,9 +2,10 @@
 //!
 //! Spawns `restate-szamlazz` on an ephemeral port (`--port 0`) with a
 //! minimal environment-only configuration, waits for its start-up log line,
-//! sends the signal and asserts a prompt exit with status 0 — what
-//! `docker stop`, a Kubernetes rollout or `kill -TERM` expect. Unix only:
-//! the signals are.
+//! sends the signal — from this process, with `kill(2)`, so the test does not
+//! depend on a `kill` executable the test image may not ship — and asserts a
+//! prompt exit with status 0 — what `docker stop`, a Kubernetes rollout or
+//! `kill -TERM` expect. Unix only: the signals are.
 
 #![cfg(unix)]
 
@@ -13,6 +14,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_restate-szamlazz");
 
@@ -31,7 +35,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
 fn sigterm_stops_the_endpoint_with_status_0() {
-    let stopped = Endpoint::start(ANY).stop("TERM");
+    let stopped = Endpoint::start(ANY).stop(Signal::SIGTERM);
 
     stopped.assert_status_0();
     assert!(
@@ -43,7 +47,7 @@ fn sigterm_stops_the_endpoint_with_status_0() {
 
 #[test]
 fn sigint_stops_the_endpoint_with_status_0() {
-    let stopped = Endpoint::start(ANY).stop("INT");
+    let stopped = Endpoint::start(ANY).stop(Signal::SIGINT);
 
     stopped.assert_status_0();
     assert!(
@@ -67,7 +71,7 @@ fn the_start_up_log_names_the_bound_address_and_the_stop_signals() {
         "the start-up line should name the stop signals: {line}"
     );
 
-    endpoint.stop("TERM").assert_status_0();
+    endpoint.stop(Signal::SIGTERM).assert_status_0();
 }
 
 /// `--bind` replaces the default `0.0.0.0`: the start-up line names the
@@ -79,7 +83,7 @@ fn bind_selects_the_address() {
 
     assert_ne!(endpoint.port(), 0, "bound on 127.0.0.1: {line}");
 
-    endpoint.stop("TERM").assert_status_0();
+    endpoint.stop(Signal::SIGTERM).assert_status_0();
 }
 
 /// A running endpoint: the address it was asked to bind, the child, its
@@ -181,14 +185,14 @@ impl Endpoint {
             .unwrap_or_else(|| panic!("the bound address should end in a port: {line}"))
     }
 
-    /// Sends `SIG{signal}` and returns the exit status and the whole log once
-    /// the process has exited; fails when [`STOP_TIMEOUT`] passes first.
-    fn stop(mut self, signal: &str) -> Stopped {
-        let status = Command::new("kill")
-            .args(["-s", signal, &self.child.id().to_string()])
-            .status()
-            .expect("`kill` should run");
-        assert!(status.success(), "`kill -s {signal}` should succeed");
+    /// Sends `signal` and returns the exit status and the whole log once the
+    /// process has exited; fails when [`STOP_TIMEOUT`] passes first.
+    fn stop(mut self, signal: Signal) -> Stopped {
+        let pid = Pid::from_raw(
+            i32::try_from(self.child.id()).expect("a pid fits in the type `kill(2)` takes"),
+        );
+        kill(pid, signal)
+            .unwrap_or_else(|error| panic!("sending {signal} should succeed: {error}"));
 
         let deadline = Instant::now() + STOP_TIMEOUT;
         let status = loop {
@@ -200,7 +204,7 @@ impl Endpoint {
                 let _ = self.child.wait();
                 self.log.extend(self.lines.iter());
                 panic!(
-                    "the endpoint did not exit within {STOP_TIMEOUT:?} of SIG{signal}\n{}",
+                    "the endpoint did not exit within {STOP_TIMEOUT:?} of {signal}\n{}",
                     self.log.join("\n")
                 );
             }
