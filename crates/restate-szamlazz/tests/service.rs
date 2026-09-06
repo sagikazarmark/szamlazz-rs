@@ -550,6 +550,8 @@ struct Fault {
     code: String,
     message: String,
     #[serde(default)]
+    szamlazz_code: Option<String>,
+    #[serde(default)]
     order: Option<String>,
     #[serde(default)]
     kind: Option<String>,
@@ -1543,6 +1545,7 @@ async fn e2e_order_protocol() {
     purged_order_is_stornoed_and_reissued(&h).await;
     agent_storno_checks_the_found_document_against_the_account(&h).await;
     agent_query_checks_the_found_document_against_the_account(&h).await;
+    every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(&h).await;
     agent_query_taxpayer_runs_on_the_scoped_account(&h).await;
     agent_storno_repeats_the_originals_fulfillment_date_or_refuses(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
@@ -4343,6 +4346,123 @@ async fn agent_query_checks_the_found_document_against_the_account(h: &Harness) 
     assert_eq!(reply.fault().code, "not_found", "{}", reply.body);
     eprintln!(
         "(xviii-c) Szamlazz.Agent.query: mismatched pins → account_mismatch; own pins → the projection; 7 → not_found: pass"
+    );
+}
+
+/// (xviii-c') Every fault either service raises carries a `TerminalCode` token
+/// in `code`, and a szamlazz.hu code travels in `szamlazz_code` beside it,
+/// never in `code` (#67). Pinned at the ingress, on both services: a
+/// szamlazz.hu code on `Szamlazz.Agent.query` is 422 `szamlazz_error` with
+/// `szamlazz_code`; a sixth credit entry on `set_payments` never reaches
+/// szamlazz.hu and is 400 `invalid_input` without a `szamlazz_code`; a
+/// credit entry szamlazz.hu refuses is 422 `szamlazz_error` naming the
+/// invoice; an unknown invoice on `Szamlazz.Order.storno_invoice` is 404
+/// `not_found` — the same token `Szamlazz.Agent` answers — attaching the
+/// order, kind and storno external id.
+async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(h: &Harness) {
+    let credit_entry = json!({ "date": "2026-09-05", "method": "transfer", "amount": "1270" });
+    let set_payments_of = |number: &str, entries: usize| {
+        json!({
+            "invoice_number": number,
+            "entries": vec![credit_entry.clone(); entries],
+        })
+    };
+
+    // A szamlazz.hu code on `query`: the pass-through.
+    h.reset().await;
+    number_query("SZ-28")
+        .respond_with(api_error("57", "Hibás számlaszám."))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped(
+            "acme",
+            "query",
+            &json!({ "selector": { "invoice_number": "SZ-28" } }),
+        )
+        .await;
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "szamlazz_error", "{fault:?}");
+    assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
+    assert!(fault.message.contains("Hibás számlaszám."), "{fault:?}");
+    assert_eq!(fault.order, None, "{fault:?}");
+
+    // A sixth credit entry: the caller's request, nothing sent.
+    h.reset().await;
+    op("action-szamla_agent_kifiz")
+        .respond_with(api_error("999", "never"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "set_payments", &set_payments_of("SZ-29", 6))
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.szamlazz_code, None, "{fault:?}");
+    assert!(fault.message.contains("at most five"), "{fault:?}");
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+
+    // A refused credit entry: szamlazz.hu's answer, passed through.
+    h.reset().await;
+    op("action-szamla_agent_kifiz")
+        .and(body_string_contains("SZ-30"))
+        .respond_with(api_error(
+            "463",
+            "Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ.",
+        ))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "set_payments", &set_payments_of("SZ-30", 1))
+        .await;
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "szamlazz_error", "{fault:?}");
+    assert_eq!(fault.szamlazz_code.as_deref(), Some("463"), "{fault:?}");
+    assert!(fault.message.contains("SZ-30"), "{fault:?}");
+    assert!(fault.message.contains("Sztornózó"), "{fault:?}");
+
+    // An unknown invoice on the order's storno: `not_found`, like the agent's.
+    h.reset().await;
+    number_query("SZ-34")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_scoped(
+            "acme",
+            "E2E-34",
+            "storno_invoice",
+            &storno_of("SZ-34"),
+            "e2e-34-s1",
+        )
+        .await;
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "not_found", "{fault:?}");
+    assert_eq!(fault.szamlazz_code, None, "{fault:?}");
+    assert!(fault.message.contains("SZ-34"), "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-34"), "{fault:?}");
+    assert_eq!(fault.kind, None, "{fault:?}");
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-34:storno:SZ-34"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "verify-storno-SZ-34"],
+        "the verify is the only step journaled"
+    );
+    eprintln!(
+        "(xviii-c') faults: query Api → 422 szamlazz_error{{szamlazz_code}}; sixth entry → 400 invalid_input, nothing sent; refused entry → 422; order storno on 7 → 404 not_found with identity: pass"
     );
 }
 

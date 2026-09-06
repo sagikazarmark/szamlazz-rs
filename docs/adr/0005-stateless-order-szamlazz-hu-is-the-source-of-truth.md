@@ -113,8 +113,9 @@ line of the closure on every execution — is the guard, the key is deduplicatio
 - **Caller contract** (design §8, in the crate READMEs): (1) send an `Idempotency-Key` per logical request;
   (2) any error from an issuing or storno handler means "outcome unknown — retry with a **new** key" (Restate
   replays a failed invocation's stored completion for `idempotency_retention`, verified) — the retry reconciles by
-  external id and is safe; never read an error as "no document exists"; (3) after any reversal a create returns
-  `reversed`; send `reissue: true` with a new key when a new invoice is wanted.
+  external id and is safe; never read an error as "no document exists" (#67 later scoped this to the three
+  "outcome unknown" codes — `outcome_unknown`, `unavailable`, `credentials_rejected`; design §7); (3) after any
+  reversal a create returns `reversed`; send `reissue: true` with a new key when a new invoice is wanted.
 - **Still required**: the toggle ON (the server-side guard against a second live document of the same kind);
   the byte-stable buyer name (the replay guard); the 2-minute gap before a re-check — the handlers'
   `initial_interval` for a crash, the issue policy's `initial_delay` for a lost reply — which must wait out a

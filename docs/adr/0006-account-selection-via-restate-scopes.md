@@ -350,10 +350,12 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   id (verified: `flag_day_keeps_the_documents_and_refuses_unscoped_calls`). The same drain–switch–resume
   applies to any change of mapping (rule 2). Scripted in the endpoint README.
 - Two new terminal codes: `unknown_account` (400), raised by the prologue before anything is issued, and
-  `credentials_rejected` (503), whose raising execution issued nothing. `contract::TerminalCode` has six codes
-  in all — the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` keep their
-  by-number 404 `not_found` and 422 pass-through of szamlazz.hu's own code (design §4) beside them. The
-  caller-contract sentence is unchanged.
+  `credentials_rejected` (503), whose raising execution issued nothing. `contract::TerminalCode` had six codes
+  at this point — the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` kept
+  their by-number 404 `not_found` and 422 pass-through of szamlazz.hu's own code beside them, built outside
+  `TerminalCode`. (#67 later folded both into it as `not_found` and `szamlazz_error`, the szamlazz.hu code moving
+  to the fault's own `szamlazz_code` field, and rescoped caller-contract rule 2 to the three "outcome unknown"
+  codes — design §7 and §8 are current.) This decision left the caller-contract sentence unchanged.
 - `account_mismatch` is raised on **every** document a handler finds by number, not only on `Szamlazz.Order`'s
   verifies: `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` check the found document's `teszt` and
   `szallito/id` against the resolved account before they answer or send (#32). A wrong-scope by-number request

@@ -162,10 +162,10 @@ are pure functions with unit tests (`service::prologue`) and the durable behavio
 | Handler | Input → Output | Notes |
 |---|---|---|
 | `check_account` | `()` → `CheckAccountResponse { scope, account: { id, mode, supplier_id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue as every handler, then one step (`probe`) — a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries (two segments; every issued id has three or more) — expecting code 7, under the read policy (§9); `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**: reporting it is the probe's purpose); an exchange that produced no answer is the read's `Unanswered`, re-executed by the read policy, and `TerminalError{unavailable}` when it is exhausted. `scope` is what the SDK saw — `null` under a scoped call means the server did not forward the scope (protocol v7 off). Credential acceptance is the only szamlazz.hu-verified fact it returns — the account fields echo the *configured* account, since the supplier id appears only in found-document bodies. Issues nothing. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works. `max_attempts = 3, kill`; `journal_retention = "1d"` (explicit, so the leak assertion can scan it) |
-| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling the document as found (the same `QueryOutcome` a verify writes); a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError` 404 `not_found`; another code → 422 pass-through; 3/135/136/164 → `credentials_rejected`; a query szamlazz.hu never answered through the read policy → `unavailable`; `journal_retention = "1d"` |
-| `query_taxpayer` | `QueryTaxpayerRequest { tax_number }` → `QueryTaxpayerResponse { valid, name?, tax_number?, vat_code?, addresses[] }` | the NAV taxpayer lookup (`xmltaxpayer`) on the account the scope resolves to, so an embedder needs no second credential path for this one read. `tax_number` is the bare eight-digit stem (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`), nothing else — no whitespace, no other separator; the handler derives the prefix, and a number in neither form is `TerminalError{invalid_input}` naming the input and the accepted forms, refused **before the prologue** like a malformed body (nothing journaled, nothing sent). Then the prologue as every handler and one step, `taxpayer-{prefix}` — the prefix, not the number as sent, so the stem and the full number name the same entry — under the read policy (§9), journaling the crate-owned projection (`TaxpayerOutcome::Found(QueryTaxpayerResponse)`), never the agent crate's `TaxpayerInfo`. **Every answer is data**: `valid: false` (NAV knows no taxpayer under the prefix) is a normal 200; 3/135/136/164 → `credentials_rejected`; any other `funcCode ≠ OK` — szamlazz.hu's own code or NAV's relayed `errorCode` — is an *answer*, passed through as 422 like `query`'s and never retried, so a NAV outage surfaces as a terminal 422 the caller may retry with a new `Idempotency-Key`; an exchange that produced no answer is the read's `Unanswered`, re-executed, `unavailable` on exhaustion. **No account check** — with `set_payments` one of the two handlers exempt from it: it finds no document, and a taxpayer record is NAV's, not the account's, so it carries no pins. No caching in the worker (ADR 0005: nothing to store that szamlazz.hu does not answer); the caller caches, with a TTL on the order of a day. `max_attempts = 3, kill`; `journal_retention = "1d"` |
-| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately without an account check** (with `query_taxpayer`, one of the two handlers exempt from it): a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; run `max_attempts(1)` — a write with no retry of its own, so a lost reply is `outcome_unknown`; 3/135/136/164 → `credentials_rejected`. **`additive: true` is at-least-once**: every send that reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request, so the `outcome_unknown` message is conditional on `additive` — "query the invoice before re-sending" rather than "call set_payments again" — and the handler's retry policy is explicit, `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default) so that it cannot re-send while the first send is still in flight. `inactivity_timeout = 2m, abort_timeout = 2m` (one send) |
-| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-{number}`, under the read policy); then, **before anything else is said about the document**, `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled — the document is in hand, and another account's order number must not be echoed, nor the "fails loudly on its first found document" guarantee delayed by a call; then document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document); `sztornozott` → `outcome: reversed` (no storno number: this handler takes no hint); then a document without a `telj` → `TerminalError{unavailable}` naming the invoice, without `order` / `kind` / `external_id` like this handler's other faults (ADR 0007 — the storno must repeat that date, so nothing is sent; no document-type pre-check here, the echo tells); else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` with `teljesitesDatum` = the original's `telj` (the lookup under the read policy, exhaustion → `unavailable`; the storno step under the issue policy, exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected`. `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default), so its leading query cannot look before a cut send has landed; `inactivity_timeout = 4m, abort_timeout = 3m` — the storno step is the same closure `Szamlazz.Order` runs (query, send, re-query at 60 s each; ADR 0004), and anything shorter suspends a slow storno mid-step |
+| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling the document as found (the same `QueryOutcome` a verify writes); a document whose `teszt` is not the resolved account's mode or whose `szallito/id` is not its set supplier id → `TerminalError{account_mismatch}` naming the observed pins (read-only, but the likeliest first found document of a freshly onboarded account, and a 409 is a louder signal than a projection that looks fine); else the projection of `InvoiceDocument`; 7 → `TerminalError{not_found}` (404); another code → `TerminalError{szamlazz_error}` (422), the code in `szamlazz_code`; 3/135/136/164 → `credentials_rejected`; a query szamlazz.hu never answered through the read policy → `unavailable`; `journal_retention = "1d"` |
+| `query_taxpayer` | `QueryTaxpayerRequest { tax_number }` → `QueryTaxpayerResponse { valid, name?, tax_number?, vat_code?, addresses[] }` | the NAV taxpayer lookup (`xmltaxpayer`) on the account the scope resolves to, so an embedder needs no second credential path for this one read. `tax_number` is the bare eight-digit stem (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`), nothing else — no whitespace, no other separator; the handler derives the prefix, and a number in neither form is `TerminalError{invalid_input}` naming the input and the accepted forms, refused **before the prologue** like a malformed body (nothing journaled, nothing sent). Then the prologue as every handler and one step, `taxpayer-{prefix}` — the prefix, not the number as sent, so the stem and the full number name the same entry — under the read policy (§9), journaling the crate-owned projection (`TaxpayerOutcome::Found(QueryTaxpayerResponse)`), never the agent crate's `TaxpayerInfo`. **Every answer is data**: `valid: false` (NAV knows no taxpayer under the prefix) is a normal 200; 3/135/136/164 → `credentials_rejected`; any other `funcCode ≠ OK` — szamlazz.hu's own code or NAV's relayed `errorCode` — is an *answer*, passed through as `TerminalError{szamlazz_error}` (422, the code in `szamlazz_code`) like `query`'s and never retried, so a NAV outage surfaces as a terminal 422 the caller may retry with a new `Idempotency-Key`; an exchange that produced no answer is the read's `Unanswered`, re-executed, `unavailable` on exhaustion. **No account check** — with `set_payments` one of the two handlers exempt from it: it finds no document, and a taxpayer record is NAV's, not the account's, so it carries no pins. No caching in the worker (ADR 0005: nothing to store that szamlazz.hu does not answer); the caller caches, with a TTL on the order of a day. `max_attempts = 3, kill`; `journal_retention = "1d"` |
+| `set_payments` | `SetPaymentsRequest { invoice_number, entries[≤5], additive }` → `SetPaymentsResponse` | `RegisterCreditEntry` without a preceding query — **deliberately without an account check** (with `query_taxpayer`, one of the two handlers exempt from it): a verify round trip (about a second per credit entry) to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document; run `max_attempts(1)` — a write with no retry of its own, so a lost reply is `outcome_unknown`; a sixth entry never reaches szamlazz.hu (the wire contract takes five) and is `TerminalError{invalid_input}`, the caller's request; szamlazz.hu refusing the entries → `TerminalError{szamlazz_error}` (422), the code in `szamlazz_code`; 3/135/136/164 → `credentials_rejected`. **`additive: true` is at-least-once**: every send that reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request, so the `outcome_unknown` message is conditional on `additive` — "query the invoice before re-sending" rather than "call set_payments again" — and the handler's retry policy is explicit, `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default) so that it cannot re-send while the first send is still in flight. `inactivity_timeout = 2m, abort_timeout = 2m` (one send) |
+| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-{number}`, under the read policy; 7 → `TerminalError{not_found}` (404) naming the invoice); then, **before anything else is said about the document**, `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}` with nothing sent and only the verify journaled — the document is in hand, and another account's order number must not be echoed, nor the "fails loudly on its first found document" guarantee delayed by a call; then document carries `rendelesszam` → `outcome: managed_by_order{key}` (an `Order`'s document); `sztornozott` → `outcome: reversed` (no storno number: this handler takes no hint); then a document without a `telj` → `TerminalError{unavailable}` naming the invoice, without `order` / `kind` / `external_id` like this handler's other faults (ADR 0007 — the storno must repeat that date, so nothing is sent; no document-type pre-check here, the echo tells); else the lookup and storno steps of §6 under ext id `"{namespace}:by-number:{number}:storno"` with `teljesitesDatum` = the original's `telj` (the lookup under the read policy, exhaustion → `unavailable`; the storno step under the issue policy, exhaustion → `outcome_unknown`); 3/135/136/164 → `credentials_rejected`. `initial_interval = 2m, max_attempts = 2, kill`: the one retry after a crash waits out the 60 s client timeout (never the server's ~500 ms default), so its leading query cannot look before a cut send has landed; `inactivity_timeout = 4m, abort_timeout = 3m` — the storno step is the same closure `Szamlazz.Order` runs (query, send, re-query at 60 s each; ADR 0004), and anything shorter suspends a slow storno mid-step |
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)
 
@@ -292,7 +292,7 @@ its own (a live `SZ` cannot coexist with the live `ES` it requires); `ctx.run(qu
 `ES` (7 → `conflict{prepayment_missing}`, reversed → `conflict{prepayment_reversed}`, fails validation →
 `conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server enforces one final per prepayment (73 →
 `rejected`); the server does not net the prepayment into the final's totals.
-`correct_invoice` — `ctx.run(verify invoice_number)` under the read policy: 7 → `invalid_input`, reversed → `conflict{base_reversed}`,
+`correct_invoice` — `ctx.run(verify invoice_number)` under the read policy: 7 → `TerminalError{not_found}`, reversed → `conflict{base_reversed}`,
 `rendelesszam ≠ key` → `conflict{not_managed}`, `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; ext id `…:corrective:{correction_id}`; the same lookup and create
 steps with the corrective exemption (verified): no order-number hint — the live base invoice under the order is
 expected — and a 71/152 the re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new
@@ -306,7 +306,7 @@ step and one write step under the issue policy, query-first on every execution �
 resolved for this invocation; a storno request under the wrong scope finds nothing under the number (what szamlazz.hu
 answers when one account names another's invoice number is unverified — behaviour notes) or fails the account pins.
 
-1. **Verify.** `ctx.run(verify number)` under the read policy: 7 → `invalid_input{not_found}`; `rendelesszam ≠ key` → `conflict{not_managed}` (use
+1. **Verify.** `ctx.run(verify number)` under the read policy: 7 → `TerminalError{not_found}` (404, with the order, kind and storno external id attached); `rendelesszam ≠ key` → `conflict{not_managed}` (use
    `Szamlazz.Agent.storno`); `teszt` / supplier pin of the resolved account mismatch → `TerminalError{account_mismatch}`; `sztornozott ==
    Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno number via the hint when the newest document
    is the matching `SS` — best effort: a hint the read policy could not get answered reports the reversal without the
@@ -386,10 +386,13 @@ another code on any query → `TerminalError{unavailable}`; 3/135/136/164 on any
 ## 7. Outcome contract
 
 Domain outcomes are **data** (HTTP 200 through the ingress, typed in the OpenAPI export). `TerminalError` is reserved
-for faults: the six codes of `TerminalCode` below, which every handler may raise, plus the by-number 404 `not_found`
-and 422 pass-through of `Szamlazz.Agent.query` / `set_payments` / `storno`, and `query_taxpayer`'s 422 pass-through of
-any `funcCode ≠ OK` — szamlazz.hu's own code or NAV's relayed one — never a 404 (NAV knowing no taxpayer is
-`valid: false`, a 200) (§4). No response names the account: `external_id` (with its namespace) is the only deployment
+for faults: the eight codes of `TerminalCode` below, and nothing else — every fault either service raises carries one
+of them in `code`, with the status `TerminalCode::status` pins; a szamlazz.hu code never travels in `code` but in the
+fault's own `szamlazz_code` field, present on every fault a szamlazz.hu answer caused (`szamlazz_error`,
+`credentials_rejected`, `unavailable` on an inconclusive code). Three of the codes mean "outcome unknown"
+(`outcome_unknown`, `unavailable`, `credentials_rejected`); the rest are settled — the same request never succeeds
+(`invalid_input`, `unknown_account`, `not_found`, `account_mismatch`) or szamlazz.hu's answer is passed through
+(`szamlazz_error`) (§4). No response names the account: `external_id` (with its namespace) is the only deployment
 marker a response carries, and `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under
 the scope the call was made under.
 
@@ -405,8 +408,9 @@ StornoResponse { outcome ∈ reversed | rejected | conflict | managed_by_order, 
                  invoice_number, storno_number?, order_key?, code?, message? }
 DeleteProformaResponse { deleted, reason? }
 OrderStatus — see §6
-TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatch (409) | invalid_input (400)
-                   | credentials_rejected (503) | unknown_account (400)
+TerminalError { code, message, szamlazz_code?, order?, kind?, external_id? }
+TerminalError codes: invalid_input (400) | unknown_account (400) | not_found (404) | account_mismatch (409)
+                   | szamlazz_error (422) | outcome_unknown (500) | unavailable (503) | credentials_rejected (503)
 ```
 
 `invalid_input`: the caller's request, which the same request never gets past — a 400 and "fix the request". Three
@@ -431,10 +435,29 @@ second source is a **well-formed body with a value the handler cannot take befor
 `query_taxpayer` tax number in neither accepted form (the bare eight-digit stem or the full `NNNNNNNN-N-NN`), an
 untrimmed Virtual Object key (§3) — refused at the same point as a malformed body, before the prologue, with the same
 consequences (nothing journaled, nothing sent), by the handler's own check rather than serde's. The third source is
-a request that **names a document szamlazz.hu does not know** — a corrective's base or a storno target answered with
-code 7 — or one the operation cannot take: `options.proforma` on any kind but `create_invoice`, a `{number}` proforma
-link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3). These are raised after
-the prologue, by the handler's own validation or verify.
+a request **the operation cannot take**: `options.proforma` on any kind but `create_invoice`, a `{number}` proforma
+link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3), a sixth credit entry on
+`set_payments` (the Számla Agent wire contract takes five, so the gateway refuses it before anything is sent — the
+`request` pseudo-code of its `Rejected` outcome, which the handler maps here rather than to `szamlazz_error`, since
+szamlazz.hu answered nothing). These are raised after the prologue, by the handler's own validation or the gateway's.
+
+`not_found`: the request names a document **by number** that szamlazz.hu does not know — code 7 on
+`Szamlazz.Agent.query`'s selector, on the invoice of `Szamlazz.Agent.storno` or `Szamlazz.Order.storno_invoice`, on the
+base of `correct_invoice`. A 404, settled: nothing was sent and the same request never succeeds; the caller fixes the
+number. One vocabulary across both services — `Szamlazz.Order` attaches the order, kind and external id it was working
+under, `Szamlazz.Agent` carries none (a by-number fault). Not the answer to a missing proforma named by
+`options.proforma: {number}`, which is the create's own outcome `conflict{proforma_missing}` (§5 step 2), nor to
+`query_taxpayer` (NAV knowing no taxpayer is `valid: false`, a 200).
+
+`szamlazz_error`: szamlazz.hu answered with an error code of its own that the handler **passes through** rather than
+concludes from — `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any
+`funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed `errorCode`), `set_payments` on szamlazz.hu refusing the credit
+entries. A 422 whose `code` is the symbolic token and whose `szamlazz_code` is szamlazz.hu's — a caller branching on
+`code` never meets a numeric code there — with szamlazz.hu's message. An answer, so it is journaled and never retried
+by a read policy; settled from the worker's side, although a NAV outage relayed through `query_taxpayer` is one the
+caller retries with a new `Idempotency-Key`. The handlers that *can* conclude from a szamlazz.hu code do not use it:
+a code on a verify or lookup is `unavailable` (nothing may be concluded, and the step's caller had a write in view),
+a code on a create or storno send is the `rejected` outcome.
 
 `unknown_account`: the request names no account of this deployment — it arrived unscoped where accounts are reachable
 by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
@@ -474,11 +497,16 @@ exists on the resolved account — that document legitimately matches the accoun
 
 1. Send an `Idempotency-Key` per logical request; Restate dedupes retries and attaches concurrent duplicates to the
    in-flight invocation. Deduplication is per scope: the same key under two scopes is two invocations.
-2. **Any error** from an issuing or storno handler means "outcome unknown — retry with a **new** key" (the stored
-   completion of a failed invocation is replayed for the retention period — verified); the handler reconciles by
-   external id, so the retry is safe. Never interpret an error as "no document exists". The one exception is
+2. An **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler means
+   "outcome unknown — retry with a **new** key" (the stored completion of a failed invocation is replayed for the
+   retention period — verified); the handler reconciles by external id, so the retry is safe. Never interpret one of
+   these as "no document exists". The one exception is
    `Szamlazz.Agent.set_payments` with `additive: true`, which has nothing to reconcile by: every send that reached
-   szamlazz.hu appended the entries, so query the invoice before re-sending (the fault's message says so).
+   szamlazz.hu appended the entries, so query the invoice before re-sending (the fault's message says so). The other
+   faults are settled (§7) — nothing landed: `invalid_input`, `unknown_account`, `not_found` and `account_mismatch`
+   are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or
+   refusing the credit entries it was sent). Retrying as is repeats the answer: the caller fixes the request, the
+   number, the scope or the account — or, for a `szamlazz_error` relaying a NAV outage, retries later with a new key.
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true`
    (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the
    flag can never cause a duplicate.

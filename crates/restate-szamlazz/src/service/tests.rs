@@ -423,6 +423,8 @@ fn faults_serialise_their_code_and_status() {
             "credentials_rejected",
         ),
         (Fault::unknown_account("x"), 400, "unknown_account"),
+        (Fault::not_found("x"), 404, "not_found"),
+        (Fault::szamlazz_error("152", "x"), 422, "szamlazz_error"),
     ];
     for (fault, status, code) in cases {
         let error = TerminalError::from(fault);
@@ -430,6 +432,57 @@ fn faults_serialise_their_code_and_status() {
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], code);
         assert_eq!(body.get("order"), None);
+    }
+}
+
+/// A szamlazz.hu code never travels in `code` — that field carries a
+/// `TerminalCode` token — but in `szamlazz_code`, beside it: on the 422
+/// pass-through, whose message is szamlazz.hu's own; on a credential
+/// rejection; on an inconclusive answer to a read. Faults that no szamlazz.hu
+/// answer caused carry no `szamlazz_code` at all.
+#[test]
+fn a_szamlazz_code_travels_in_its_own_field() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::Fault;
+
+    let error = TerminalError::from(Fault::szamlazz_error(
+        "152",
+        "Már létezik ilyen rendelésszámú számla.",
+    ));
+    assert_eq!(error.code(), 422);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "szamlazz_error");
+    assert_eq!(body["szamlazz_code"], "152");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("152"), "{message}");
+    assert!(
+        message.contains("Már létezik ilyen rendelésszámú számla."),
+        "{message}"
+    );
+
+    let error = TerminalError::from(Fault::credentials_rejected(&namespace(), "3", "x"));
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "credentials_rejected");
+    assert_eq!(body["szamlazz_code"], "3");
+
+    let error = TerminalError::from(Fault::inconclusive_answer("57", "x"));
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(body["szamlazz_code"], "57");
+
+    for fault in [
+        Fault::invalid_input("x"),
+        Fault::not_found("x"),
+        Fault::unavailable("x"),
+        Fault::outcome_unknown("x"),
+        Fault::account_mismatch("x"),
+        Fault::unknown_account("x"),
+        Fault::missing_fulfillment_date("SZ-1"),
+    ] {
+        let error = TerminalError::from(fault);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body.get("szamlazz_code"), None, "{body}");
     }
 }
 

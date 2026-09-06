@@ -12,8 +12,8 @@ use restate_szamlazz::contract::{
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
     InvoiceDocumentExt as _, LookupOutcome, LookupRequest, ProbeOutcome, QueryOutcome,
-    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest, TaxpayerOutcome,
-    Unanswered, Unconfirmed,
+    REQUEST_CODE, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest,
+    TaxpayerOutcome, Unanswered, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -2316,7 +2316,7 @@ async fn set_payments_outcomes() {
     let six = vec![entry; 6];
     assert!(matches!(
         h.gateway.set_payments("SZ-9", &six, false).await,
-        SetPaymentsOutcome::Rejected { code, .. } if code == "request"
+        SetPaymentsOutcome::Rejected { code, .. } if code == REQUEST_CODE
     ));
     assert_eq!(
         h.bodies().await.len(),

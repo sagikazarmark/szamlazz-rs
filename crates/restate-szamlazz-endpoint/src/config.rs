@@ -312,6 +312,43 @@ mod tests {
         }
     }
 
+    /// The fault table of the endpoint README and design §7 lists every
+    /// `TerminalCode` with its status — a README row `` | `code` | status | ``,
+    /// the design's `code (status)` — so the caller-facing table cannot drift
+    /// from the codes the worker raises. (The library README's table is held
+    /// to the same by the library's own test; this one reaches the documents
+    /// outside that package.)
+    #[test]
+    fn every_terminal_code_is_in_every_fault_table() {
+        use restate_szamlazz::contract::TerminalCode;
+
+        let documents = [
+            (
+                "endpoint README",
+                include_str!("../README.md"),
+                "| `{code}` | {status} |",
+            ),
+            (
+                "design document",
+                include_str!("../../../docs/design/restate-szamlazz.md"),
+                "{code} ({status})",
+            ),
+        ];
+        for (name, document, shape) in documents {
+            for code in TerminalCode::ALL {
+                let entry = shape
+                    .replace("{code}", code.as_str())
+                    .replace("{status}", &code.status().to_string());
+                assert!(
+                    document.contains(&entry),
+                    "{name} lists `{}` with status {}",
+                    code.as_str(),
+                    code.status()
+                );
+            }
+        }
+    }
+
     #[test]
     fn parses_the_spec_example() {
         let config = load(SPEC_EXAMPLE).expect("configuration should load");

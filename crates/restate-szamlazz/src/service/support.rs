@@ -47,11 +47,16 @@ impl Journaled for TaxpayerOutcome {}
 /// A fault raised as a `TerminalError` (design §7): never a domain outcome.
 ///
 /// Serialised as the error message so that the ingress body carries the
-/// [`TerminalCode`] token and the identity of the document it is about.
+/// [`TerminalCode`] token, the szamlazz.hu code when szamlazz.hu's answer is
+/// what the fault is about, and the identity of the document it is about.
+/// `code` is always a `TerminalCode` token; a szamlazz.hu code never travels
+/// in it.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct Fault {
     code: TerminalCode,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    szamlazz_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     order: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,14 +70,39 @@ impl Fault {
         Self {
             code,
             message: message.into(),
+            szamlazz_code: None,
             order: None,
             kind: None,
             external_id: None,
         }
     }
 
+    /// The same fault carrying the szamlazz.hu code its answer had.
+    fn answered_with(mut self, szamlazz_code: impl Into<String>) -> Self {
+        self.szamlazz_code = Some(szamlazz_code.into());
+        self
+    }
+
     pub(super) fn invalid_input(message: impl Into<String>) -> Self {
         Self::new(TerminalCode::InvalidInput, message)
+    }
+
+    /// The document the request names by number is not known to szamlazz.hu
+    /// (code 7). Nothing was sent.
+    pub(super) fn not_found(message: impl Into<String>) -> Self {
+        Self::new(TerminalCode::NotFound, message)
+    }
+
+    /// szamlazz.hu answered with an error code the handler passes through
+    /// rather than concludes from: the `szamlazz_error` fault (422) with the
+    /// code in `szamlazz_code` and a message that repeats szamlazz.hu's.
+    pub(super) fn szamlazz_error(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        Self::new(
+            TerminalCode::SzamlazzError,
+            format!("szamlazz.hu error {code}: {}", message.into()),
+        )
+        .answered_with(code)
     }
 
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
@@ -84,11 +114,12 @@ impl Fault {
     /// journaled and never retried by the read policy; still a fault, since
     /// nothing may be concluded from it.
     pub(super) fn inconclusive_answer(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
         Self::unavailable(format!(
-            "szamlazz.hu answered the query with code {}: {}; nothing may be concluded — retry with a new Idempotency-Key or read get",
-            code.into(),
+            "szamlazz.hu answered the query with code {code}: {}; nothing may be concluded — retry with a new Idempotency-Key or read get",
             message.into()
         ))
+        .answered_with(code)
     }
 
     /// The verified original of a storno carries no `telj` (ADR 0007).
@@ -140,6 +171,7 @@ impl Fault {
                 "szamlazz.hu rejected the agent credentials (code {code}: {message}); this attempt issued nothing — fix the account's agent key, then retry with a new Idempotency-Key or read get"
             ),
         )
+        .answered_with(code)
     }
 
     /// Attaches the identity of the document the fault is about.
@@ -155,18 +187,9 @@ impl Fault {
         self
     }
 
-    /// The HTTP status the ingress reports for the fault.
+    /// The HTTP status the ingress reports for the fault: the code's.
     const fn status(&self) -> u16 {
-        match self.code {
-            // The caller's request: the same request never succeeds.
-            TerminalCode::InvalidInput | TerminalCode::UnknownAccount => 400,
-            TerminalCode::AccountMismatch => 409,
-            TerminalCode::OutcomeUnknown => 500,
-            // The worker's misconfiguration, not the caller's request: the
-            // same request succeeds once the key is fixed, so neither a 4xx
-            // ("do not retry") nor 401/403 ("you are unauthenticated") fits.
-            TerminalCode::Unavailable | TerminalCode::CredentialsRejected => 503,
-        }
+        self.code.status()
     }
 }
 
@@ -182,13 +205,6 @@ impl From<Fault> for HandlerError {
     fn from(fault: Fault) -> Self {
         TerminalError::from(fault).into()
     }
-}
-
-/// A `TerminalError` with a plain HTTP status and message (the `Szamlazz.Agent`
-/// service's not-found and rejection errors).
-pub(super) fn terminal(status: u16, code: &str, message: impl Into<String>) -> HandlerError {
-    let body = serde_json::json!({ "code": code, "message": message.into() });
-    TerminalError::new_with_code(status, body.to_string()).into()
 }
 
 /// The fault of a read step that ended without an answer: the read policy is
@@ -221,6 +237,33 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
     }
     OrderKey::parse(key)
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
+}
+
+/// The document a verify by number found, or the fault for anything else:
+/// 404 `not_found` naming the invoice on code 7, `unavailable` on a code the
+/// verify cannot conclude from (`Fault::inconclusive_answer`), a credential
+/// code as `credentials_rejected`. Shared by every verify — `Szamlazz.Order`'s
+/// attach the order identity to the fault ([`Fault::about`]),
+/// `Szamlazz.Agent.storno`'s carries none.
+///
+/// # Errors
+///
+/// The fault for every outcome but `Found`.
+pub(super) fn verified_document(
+    outcome: QueryOutcome,
+    number: &str,
+    namespace: &Namespace,
+) -> Result<Box<InvoiceDocument>, Fault> {
+    match outcome {
+        QueryOutcome::Found(found) => Ok(found),
+        QueryOutcome::NotFound => Err(Fault::not_found(format!(
+            "invoice {number} is not known to szamlazz.hu (code 7)"
+        ))),
+        QueryOutcome::Api { code, message } => Err(Fault::inconclusive_answer(code, message)),
+        QueryOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+    }
 }
 
 /// The account pins of a document found by number: it must belong to the

@@ -200,7 +200,9 @@ the e2e suite's 1 s policies are built in Rust, handed to `from_parts` and never
   never "no document exists". A call that timed out on the client side may still run once the key
   frees; `get` is the way to learn its outcome. Callers should not long-poll an exclusive handler;
   `get` is the non-blocking status check. The same key would replay the stored
-  `TerminalError{outcome_unknown}` for `idempotency_retention` (30 days).
+  `TerminalError{outcome_unknown}` for `idempotency_retention` (30 days). (#67 later scoped the
+  rule to `outcome_unknown`, `unavailable` and `credentials_rejected`; the settled 4xx/422 faults
+  are not "outcome unknown" — design §7.)
 - Operations: alert on `sys_invocation` failed completions and on invocations in `backing-off` for
   more than 5 minutes; `idempotency_retention = 30d` keeps failed completions visible. Verify the
   effective policy with `GET /services/{name}`. The SDK endpoint speaks HTTP/2 only.

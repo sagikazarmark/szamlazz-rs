@@ -18,14 +18,17 @@ use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
 use super::support::service::{lookup_storno, run_once, run_reading, storno_step};
-use super::support::{Fault, StornoIntent, check_pins, storno_response, terminal};
+use super::support::{Fault, StornoIntent, check_pins, storno_response, verified_document};
+use crate::account::Account;
+use crate::config::Namespace;
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
     StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    ProbeOutcome, QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, TaxpayerOutcome,
+    ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome, StornoLookupOutcome,
+    TaxpayerOutcome,
 };
 use crate::identity::ExternalId;
 
@@ -72,6 +75,84 @@ fn set_payments_unknown(additive: bool, message: &str) -> Fault {
     Fault::outcome_unknown(format!(
         "credit entry registration outcome unknown: {message}; {next}"
     ))
+}
+
+/// What `query` answers from what its one step settled: the projection of a
+/// document that is the resolved account's; the `account_mismatch` fault for
+/// one that is not; 404 `not_found` on code 7; a credential code as
+/// `credentials_rejected`; any other szamlazz.hu code passed through as
+/// `szamlazz_error` (422), the code in `szamlazz_code`.
+fn query_response(
+    outcome: QueryOutcome,
+    account: &Account,
+    namespace: &Namespace,
+) -> Result<QueryResponse, Fault> {
+    match outcome {
+        QueryOutcome::Found(found) => {
+            check_pins(account, &found)?;
+            Ok(QueryResponse::from(&*found))
+        }
+        QueryOutcome::NotFound => Err(Fault::not_found(
+            "szamlazz.hu does not know the document (code 7)",
+        )),
+        QueryOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+        QueryOutcome::Api { code, message } => Err(Fault::szamlazz_error(code, message)),
+    }
+}
+
+/// What `query_taxpayer` answers from what its one step settled: NAV's record
+/// as data (`valid: false` included); a credential code as
+/// `credentials_rejected`; any other `funcCode ≠ OK` — szamlazz.hu's own or
+/// NAV's relayed one — passed through as `szamlazz_error` (422).
+fn taxpayer_response(
+    outcome: TaxpayerOutcome,
+    namespace: &Namespace,
+) -> Result<QueryTaxpayerResponse, Fault> {
+    match outcome {
+        TaxpayerOutcome::Found(taxpayer) => Ok(taxpayer),
+        TaxpayerOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+        TaxpayerOutcome::Api { code, message } => Err(Fault::szamlazz_error(code, message)),
+    }
+}
+
+/// What `set_payments` answers from what its one step settled: the totals on
+/// success; a rejection that never reached szamlazz.hu — the wire contract
+/// takes at most five entries ([`REQUEST_CODE`]) — as `invalid_input`, the
+/// caller's request; szamlazz.hu refusing the entries passed through as
+/// `szamlazz_error` (422) naming the invoice; a credential code as
+/// `credentials_rejected`; a lost reply as `outcome_unknown`, conditional on
+/// `additive`.
+fn set_payments_response(
+    outcome: SetPaymentsOutcome,
+    invoice_number: String,
+    additive: bool,
+    namespace: &Namespace,
+) -> Result<SetPaymentsResponse, Fault> {
+    match outcome {
+        SetPaymentsOutcome::Done { outstanding, gross } => {
+            let mut response = SetPaymentsResponse::new(invoice_number);
+            response.outstanding = outstanding;
+            response.gross_total = gross;
+            Ok(response)
+        }
+        SetPaymentsOutcome::Rejected { code, message } if code == REQUEST_CODE => {
+            Err(Fault::invalid_input(format!(
+                "the credit entries cannot be sent: {message}; nothing was sent"
+            )))
+        }
+        SetPaymentsOutcome::Rejected { code, message } => Err(Fault::szamlazz_error(
+            code,
+            format!("the credit entries on invoice {invoice_number} were refused: {message}"),
+        )),
+        SetPaymentsOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+        SetPaymentsOutcome::Transport(message) => Err(set_payments_unknown(additive, &message)),
+    }
 }
 
 impl Execution {
@@ -122,25 +203,8 @@ impl Execution {
             gateway.query(&selector).await
         })
         .await?;
-        match outcome {
-            QueryOutcome::Found(found) => {
-                check_pins(self.gateway.account(), &found)?;
-                Ok(QueryResponse::from(&*found))
-            }
-            QueryOutcome::NotFound => Err(terminal(
-                404,
-                "not_found",
-                "szamlazz.hu does not know the document (code 7)",
-            )),
-            QueryOutcome::CredentialsRejected { code, message } => {
-                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
-            }
-            QueryOutcome::Api { code, message } => Err(terminal(
-                422,
-                &code,
-                format!("szamlazz.hu error {code}: {message}"),
-            )),
-        }
+        query_response(outcome, self.gateway.account(), &self.config.namespace)
+            .map_err(HandlerError::from)
     }
 
     /// The `query_taxpayer` handler: one durable step (`taxpayer-{prefix}`)
@@ -150,8 +214,9 @@ impl Execution {
     /// `set_payments` it runs no account check: a taxpayer record is NAV's,
     /// not the account's, and carries no pins. Any other `funcCode ≠ OK` —
     /// szamlazz.hu's code or NAV's relayed one — is an answer: passed through
-    /// as 422 like `query`'s, never retried; a NAV outage therefore surfaces
-    /// as a terminal 422 the caller may retry with a new `Idempotency-Key`.
+    /// as `szamlazz_error` (422, the code in `szamlazz_code`) like `query`'s,
+    /// never retried; a NAV outage therefore surfaces as a terminal 422 the
+    /// caller may retry with a new `Idempotency-Key`.
     pub(super) async fn query_taxpayer_request(
         &self,
         ctx: &Context<'_>,
@@ -163,17 +228,7 @@ impl Execution {
             gateway.query_taxpayer(&prefix).await
         })
         .await?;
-        match outcome {
-            TaxpayerOutcome::Found(taxpayer) => Ok(taxpayer),
-            TaxpayerOutcome::CredentialsRejected { code, message } => {
-                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
-            }
-            TaxpayerOutcome::Api { code, message } => Err(terminal(
-                422,
-                &code,
-                format!("szamlazz.hu error {code}: {message}"),
-            )),
-        }
+        taxpayer_response(outcome, &self.config.namespace).map_err(HandlerError::from)
     }
 
     /// The `set_payments` handler: one durable step (`set-payments-{number}`)
@@ -201,25 +256,8 @@ impl Execution {
             move || async move { gateway.set_payments(&number, &entries, additive).await },
         )
         .await?;
-        match outcome {
-            SetPaymentsOutcome::Done { outstanding, gross } => {
-                let mut response = SetPaymentsResponse::new(invoice_number);
-                response.outstanding = outstanding;
-                response.gross_total = gross;
-                Ok(response)
-            }
-            SetPaymentsOutcome::Rejected { code, message } => Err(terminal(
-                422,
-                &code,
-                format!("szamlazz.hu refused the credit entries ({code}): {message}"),
-            )),
-            SetPaymentsOutcome::CredentialsRejected { code, message } => {
-                Err(Fault::credentials_rejected(&self.config.namespace, code, message).into())
-            }
-            SetPaymentsOutcome::Transport(message) => {
-                Err(set_payments_unknown(additive, &message).into())
-            }
-        }
+        set_payments_response(outcome, invoice_number, additive, &self.config.namespace)
+            .map_err(HandlerError::from)
     }
 
     /// The `storno` handler: verify by number and check the found document
@@ -246,24 +284,7 @@ impl Execution {
             })
             .await?
         };
-        let found = match found {
-            QueryOutcome::Found(found) => found,
-            QueryOutcome::NotFound => {
-                return Err(terminal(
-                    404,
-                    "not_found",
-                    format!("szamlazz.hu does not know invoice {number} (code 7)"),
-                ));
-            }
-            QueryOutcome::Api { code, message } => {
-                return Err(Fault::inconclusive_answer(code, message).into());
-            }
-            QueryOutcome::CredentialsRejected { code, message } => {
-                return Err(
-                    Fault::credentials_rejected(&self.config.namespace, code, message).into(),
-                );
-            }
-        };
+        let found = verified_document(found, &number, &self.config.namespace)?;
         // This is the handler that issues a legal document by number: the
         // document must be the resolved account's before anything is said or
         // sent about it — even "it is an order's": the document is in hand,
@@ -333,6 +354,133 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
+    use crate::account::{Account, AccountId, CredentialRef};
+    use crate::config::Namespace;
+
+    fn namespace() -> Namespace {
+        "acct".parse().expect("namespace")
+    }
+
+    fn account() -> Account {
+        Account::new(AccountId::from("acct"), CredentialRef::from("acct"))
+    }
+
+    fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
+        let error = TerminalError::from(fault);
+        let body = serde_json::from_str(error.message()).expect("json body");
+        (error.code(), body)
+    }
+
+    /// A sixth credit entry never reaches szamlazz.hu — the wire contract
+    /// takes at most five — and is the caller's request: `invalid_input`
+    /// (400) naming the limit, with no szamlazz.hu code to carry. Not a
+    /// pass-through: szamlazz.hu answered nothing.
+    #[test]
+    fn a_sixth_credit_entry_is_invalid_input() {
+        let outcome = SetPaymentsOutcome::Rejected {
+            code: crate::gateway::REQUEST_CODE.to_owned(),
+            message: "a credit-entry request can contain at most five entries".to_owned(),
+        };
+        let fault = set_payments_response(outcome, "SZ-1".to_owned(), false, &namespace())
+            .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], "invalid_input", "{body}");
+        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("at most five entries"), "{message}");
+    }
+
+    /// szamlazz.hu refusing the credit entries is its answer, passed through:
+    /// `szamlazz_error` (422) with the szamlazz.hu code in `szamlazz_code`
+    /// — never in `code`, which is the symbolic token — and its message.
+    #[test]
+    fn a_refused_credit_entry_is_a_szamlazz_error_carrying_the_code() {
+        let outcome = SetPaymentsOutcome::Rejected {
+            code: "259".to_owned(),
+            message: "A számla nem található.".to_owned(),
+        };
+        let fault = set_payments_response(outcome, "SZ-1".to_owned(), false, &namespace())
+            .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["code"], "szamlazz_error", "{body}");
+        assert_eq!(body["szamlazz_code"], "259", "{body}");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("259"), "{message}");
+        assert!(message.contains("A számla nem található."), "{message}");
+        assert!(message.contains("SZ-1"), "names the invoice: {message}");
+    }
+
+    /// `query`: code 7 is 404 `not_found`; another szamlazz.hu code is the
+    /// 422 pass-through with the code in `szamlazz_code`; a credential code
+    /// is `credentials_rejected`.
+    #[test]
+    fn query_answers_a_miss_as_not_found_and_passes_another_code_through() {
+        let (status, body) = fault_body(
+            query_response(QueryOutcome::NotFound, &account(), &namespace()).expect_err("a fault"),
+        );
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(body["code"], "not_found", "{body}");
+        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+
+        let outcome = QueryOutcome::Api {
+            code: "57".to_owned(),
+            message: "Hibás számlaszám.".to_owned(),
+        };
+        let (status, body) =
+            fault_body(query_response(outcome, &account(), &namespace()).expect_err("a fault"));
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["code"], "szamlazz_error", "{body}");
+        assert_eq!(body["szamlazz_code"], "57", "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message")
+                .contains("Hibás számlaszám."),
+            "{body}"
+        );
+
+        let outcome = QueryOutcome::CredentialsRejected {
+            code: "3".to_owned(),
+            message: "Sikertelen bejelentkezés.".to_owned(),
+        };
+        let (status, body) =
+            fault_body(query_response(outcome, &account(), &namespace()).expect_err("a fault"));
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["code"], "credentials_rejected", "{body}");
+        assert_eq!(body["szamlazz_code"], "3", "{body}");
+    }
+
+    /// `query_taxpayer`: any `funcCode ≠ OK` — szamlazz.hu's or NAV's relayed
+    /// one — is the same 422 pass-through, the code in `szamlazz_code`.
+    #[test]
+    fn query_taxpayer_passes_a_nav_code_through() {
+        let outcome = TaxpayerOutcome::Api {
+            code: "NAV_ERROR".to_owned(),
+            message: "A NAV szolgáltatás nem elérhető.".to_owned(),
+        };
+        let (status, body) =
+            fault_body(taxpayer_response(outcome, &namespace()).expect_err("a fault"));
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["code"], "szamlazz_error", "{body}");
+        assert_eq!(body["szamlazz_code"], "NAV_ERROR", "{body}");
+    }
+
+    /// `storno`'s verify: code 7 is 404 `not_found` naming the invoice.
+    #[test]
+    fn storno_answers_an_unknown_invoice_as_not_found() {
+        let (status, body) = fault_body(
+            verified_document(QueryOutcome::NotFound, "SZ-9", &namespace()).expect_err("a fault"),
+        );
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(body["code"], "not_found", "{body}");
+        assert!(
+            body["message"].as_str().expect("message").contains("SZ-9"),
+            "{body}"
+        );
+        assert_eq!(body.get("order"), None, "a by-number fault: {body}");
+    }
 
     /// `set_payments` with `additive: true` is at-least-once: a lost reply
     /// may have appended the entries, so the fault tells the caller to query
