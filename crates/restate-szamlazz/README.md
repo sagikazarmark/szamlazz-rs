@@ -164,14 +164,17 @@ activation details.
   under none of the order's external ids — another channel's), `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
   `base_reversed`, `not_managed`.
-- `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
-  `unavailable` (503; also the prologue's own faults: the resolve policy exhausted, the credential store gone or
-  unavailable), `account_mismatch` (409: a document found by number — on `Szamlazz.Order`'s verifies, including
-  the proforma of `options.proforma: {number}`, or on `Szamlazz.Agent.query` / `storno` — belongs to another
-  szamlazz.hu account than the resolved one; `set_payments` and `query_taxpayer`
-  find none and are exempt), `invalid_input` (400), `credentials_rejected`
-  (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the execution that
-  raised it issued nothing) and `unknown_account` (400: the request names no account of this deployment).
+- `contract::TerminalCode`: the eight fault codes a `TerminalError` carries, each with its HTTP status
+  (`TerminalCode::status`; `TerminalCode::ALL` lists them in the order of the fault table below) — `invalid_input`
+  (400), `unknown_account` (400: the request names no account of this deployment), `not_found` (404: the document the
+  request names by number is not known to szamlazz.hu — code 7), `account_mismatch` (409: a document found by number —
+  on `Szamlazz.Order`'s verifies, including the proforma of `options.proforma: {number}`, or on `Szamlazz.Agent.query`
+  / `storno` — belongs to another szamlazz.hu account than the resolved one; `set_payments` and `query_taxpayer` find
+  none and are exempt), `szamlazz_error` (422: szamlazz.hu answered with an error code of its own that the handler
+  passes through, the code in the fault's `szamlazz_code` field), `outcome_unknown` (500), `unavailable` (503; also
+  the prologue's own faults: the resolve policy exhausted, the credential store gone or unavailable) and
+  `credentials_rejected` (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the
+  request; the execution that raised it issued nothing).
 - `contract::CheckAccountResponse` (`CheckedAccount`, `CredentialsCheck`): the output of
   `Szamlazz.Agent.check_account` — `scope`, `account: {id, mode, supplier_id}`, `namespace` and
   `credentials: {state: ok} | {state: rejected, code, message}`; credential acceptance is its only szamlazz.hu-verified
@@ -290,11 +293,15 @@ worker; callers authenticate to Restate ingress separately.
 
 1. Send an **`Idempotency-Key`** per logical request. Restate dedupes retries and attaches concurrent duplicates
    to the in-flight invocation.
-2. **Any error** from an issuing or storno handler means "outcome unknown — retry with a **new** key, or read
-   `Szamlazz.Order.get`", never "no document exists". Restate replays a failed invocation's stored completion
-   under the same key for the retention period, so the same key would repeat the failure; the retry with a new
-   key reconciles by external id and is safe. A call that timed out on the client side may still run once the
-   key frees; `get` is the way to learn its outcome.
+2. An **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler means
+   "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`", never "no document exists". Restate
+   replays a failed invocation's stored completion under the same key for the retention period, so the same key
+   would repeat the failure; the retry with a new key reconciles by external id and is safe. A call that timed out on
+   the client side may still run once the key frees; `get` is the way to learn its outcome. The other faults are
+   settled — nothing landed: `invalid_input`, `unknown_account`, `not_found` and `account_mismatch` are raised before
+   anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit
+   entries it was sent). Retrying as is repeats the answer: fix the request, the number, the scope or the account —
+   or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send
    `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document is
    `conflict{live}`, so the flag can never cause a duplicate.
@@ -311,25 +318,25 @@ worker; callers authenticate to Restate ingress separately.
    storno response is meaningful only under the same scope; `external_id` is the only namespace marker in any
    response, and no response names the account.
 
-Faults are `TerminalError`s with a JSON body `{ "code", "message", "order"?, "kind"?, "external_id"? }`; the
-ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. These are the six codes of
-`contract::TerminalCode`, which every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` also
-answer a by-number miss as 404 `not_found` and pass a szamlazz.hu error through as 422 with its own code, and
-`query_taxpayer` passes any `funcCode ≠ OK` — szamlazz.hu's own or NAV's relayed one — through as 422 the same way
-(so a NAV outage is a terminal 422 the caller may retry with a new `Idempotency-Key`; `valid: false` is a 200). A malformed
-body is the same shape: every handler decodes its own body (`service::Body<T>`, not the SDK's `Json<T>`), so an
-unknown field, a wrong type, a missing required field or invalid JSON is `{ "code": "invalid_input", "message":
-"malformed request body: …" }` with serde's message, naming the field when there is one — never the SDK's
-plain-text `Cannot decode input payload`:
+Faults are `TerminalError`s with a JSON body `{ "code", "message", "szamlazz_code"?, "order"?, "kind"?,
+"external_id"? }`; the ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. `code`
+is always one of the eight tokens of `contract::TerminalCode` — a szamlazz.hu code never travels in it, but in
+`szamlazz_code` beside it, present on every fault a szamlazz.hu answer caused: the `szamlazz_error` pass-through,
+`credentials_rejected`, and `unavailable` on a code a read cannot conclude from. A malformed body is the same shape:
+every handler decodes its own body (`service::Body<T>`, not the SDK's `Json<T>`), so an unknown field, a wrong type, a
+missing required field or invalid JSON is `{ "code": "invalid_input", "message": "malformed request body: …" }` with
+serde's message, naming the field when there is one — never the SDK's plain-text `Cannot decode input payload`:
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field, or its `Order` key has leading or trailing whitespace; refused before anything is journaled or sent — or it names a document szamlazz.hu does not know, or an option the handler does not take. | Fix the request. |
+| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field, or its `Order` key has leading or trailing whitespace; refused before anything is journaled or sent — or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_payments` (the wire contract takes five; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
+| `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and `query_taxpayer` finds no document (a taxpayer record carries no pins): the two handlers that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
+| `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from — `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_payments` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued — or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` — **at-least-once**: every send that reached szamlazz.hu appended the entries — query the invoice before re-sending; a replacing call is repeated as is. |
-| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from, or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so it is not sent ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)) — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
-| `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so it is not sent ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)) — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
+| `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
 A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
 down. Restate's HTTP invocation docs say to treat `invocation` errors as non-retryable and to auto-retry a 5xx only

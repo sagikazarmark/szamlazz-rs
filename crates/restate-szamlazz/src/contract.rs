@@ -303,11 +303,15 @@ impl fmt::Display for IssuedKind {
 
 /// The code of a `TerminalError` any handler of either service may raise.
 ///
-/// Every one of them means "outcome unknown — retry with a new
-/// `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no document
-/// exists". The by-number `Szamlazz.Agent` handlers additionally answer a
-/// miss as 404 `not_found` and pass a szamlazz.hu error through as 422 with
-/// its own code; those are not `TerminalCode`s.
+/// Every fault either service raises carries one of these tokens in `code`,
+/// with the HTTP status of [`status`](Self::status). Three of them mean
+/// "outcome unknown — retry with a new `Idempotency-Key`, or read
+/// `Szamlazz.Order.get`": `outcome_unknown`, `unavailable` and
+/// `credentials_rejected`. The rest are settled: the same request never
+/// succeeds (`invalid_input`, `unknown_account`, `not_found`,
+/// `account_mismatch`) or szamlazz.hu's own answer is passed through
+/// (`szamlazz_error`, whose szamlazz.hu code travels in the fault's separate
+/// `szamlazz_code` field — `code` is always one of these tokens).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -315,22 +319,25 @@ impl fmt::Display for IssuedKind {
 pub enum TerminalCode {
     /// The create or storno step ran out of the issue policy while a document
     /// may or may not have been issued; the next call's external-id query
-    /// finds whatever landed.
+    /// finds whatever landed. HTTP 500.
     OutcomeUnknown,
     /// szamlazz.hu did not answer a read-only step through every execution
     /// the read policy allows (or answered it with a code nothing can be
     /// concluded from), or the account resolver or credential store could not
-    /// answer. Nothing was sent by the execution that raised it.
+    /// answer. Nothing was sent by the execution that raised it. HTTP 503.
     Unavailable,
     /// A document found by number belongs to a different szamlazz.hu account
     /// than the one the invocation resolved to: its `teszt` is not the
     /// account's mode, or its `szallito/id` is not the account's supplier id.
     /// Raised by every handler that finds a document — `Szamlazz.Order` on a
     /// verify, `Szamlazz.Agent.query` and `storno` on what they find — before
-    /// it is acted on; `set_payments` finds none and is exempt.
+    /// it is acted on; `set_payments` and `query_taxpayer` find none and are
+    /// exempt. HTTP 409.
     AccountMismatch,
-    /// The request is malformed or names a document szamlazz.hu does not
-    /// know.
+    /// The caller's request: a malformed body, an untrimmed order key, a tax
+    /// number in neither accepted form, an option the handler does not take,
+    /// or a request the wire contract cannot carry (a sixth credit entry).
+    /// The same request never succeeds. HTTP 400.
     InvalidInput,
     /// szamlazz.hu rejected the account's agent credentials (codes 3, 135,
     /// 136, 164): the worker's configuration is wrong, not the request. The
@@ -345,9 +352,35 @@ pub enum TerminalCode {
     /// is reachable by. Raised before anything is issued; the same request
     /// never succeeds, so the caller must fix the scope, not retry. HTTP 400.
     UnknownAccount,
+    /// The document the request names by number is not known to szamlazz.hu
+    /// (code 7): `Szamlazz.Agent.query`'s selector, the invoice of
+    /// `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of
+    /// `correct_invoice`. Nothing was sent; the same request never succeeds.
+    /// HTTP 404.
+    NotFound,
+    /// szamlazz.hu answered the request with an error code of its own that
+    /// the handler passes through rather than concludes from — on
+    /// `Szamlazz.Agent.query`, `query_taxpayer` (szamlazz.hu's code or NAV's
+    /// relayed one) and `set_payments` (the credit entries refused). The
+    /// szamlazz.hu code is in the fault's `szamlazz_code`, the message is
+    /// szamlazz.hu's. HTTP 422.
+    SzamlazzError,
 }
 
 impl TerminalCode {
+    /// Every code, in the order of the fault tables the READMEs and design §7
+    /// carry.
+    pub const ALL: [Self; 8] = [
+        Self::InvalidInput,
+        Self::UnknownAccount,
+        Self::NotFound,
+        Self::AccountMismatch,
+        Self::SzamlazzError,
+        Self::OutcomeUnknown,
+        Self::Unavailable,
+        Self::CredentialsRejected,
+    ];
+
     /// The snake-case token carried in the error.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -358,6 +391,27 @@ impl TerminalCode {
             Self::InvalidInput => "invalid_input",
             Self::CredentialsRejected => "credentials_rejected",
             Self::UnknownAccount => "unknown_account",
+            Self::NotFound => "not_found",
+            Self::SzamlazzError => "szamlazz_error",
+        }
+    }
+
+    /// The HTTP status the ingress reports for a fault with this code.
+    #[must_use]
+    pub const fn status(self) -> u16 {
+        match self {
+            // The caller's request: the same request never succeeds.
+            Self::InvalidInput | Self::UnknownAccount => 400,
+            Self::NotFound => 404,
+            Self::AccountMismatch => 409,
+            // szamlazz.hu's own answer, passed through.
+            Self::SzamlazzError => 422,
+            Self::OutcomeUnknown => 500,
+            // The worker's misconfiguration or szamlazz.hu not answering, not
+            // the caller's request: the same request succeeds once the key
+            // is fixed or szamlazz.hu answers, so neither a 4xx ("do not
+            // retry") nor 401/403 ("you are unauthenticated") fits.
+            Self::Unavailable | Self::CredentialsRejected => 503,
         }
     }
 }
@@ -471,24 +525,54 @@ mod tests {
         assert_eq!(IssuedKind::Corrective.document_kind(), None);
     }
 
+    /// Every fault either service raises is one of these eight codes, each
+    /// with the HTTP status the ingress reports for it; the token is the
+    /// snake-case variant name and round-trips through serde.
     #[test]
     fn terminal_code_tokens() {
-        assert_eq!(
-            TerminalCode::CredentialsRejected.as_str(),
-            "credentials_rejected"
-        );
-        for code in [
-            TerminalCode::OutcomeUnknown,
-            TerminalCode::Unavailable,
-            TerminalCode::AccountMismatch,
-            TerminalCode::InvalidInput,
-            TerminalCode::CredentialsRejected,
-        ] {
+        let expected = [
+            (TerminalCode::OutcomeUnknown, "outcome_unknown", 500),
+            (TerminalCode::Unavailable, "unavailable", 503),
+            (TerminalCode::AccountMismatch, "account_mismatch", 409),
+            (TerminalCode::InvalidInput, "invalid_input", 400),
+            (
+                TerminalCode::CredentialsRejected,
+                "credentials_rejected",
+                503,
+            ),
+            (TerminalCode::UnknownAccount, "unknown_account", 400),
+            (TerminalCode::NotFound, "not_found", 404),
+            (TerminalCode::SzamlazzError, "szamlazz_error", 422),
+        ];
+        assert_eq!(TerminalCode::ALL.len(), expected.len());
+        for (code, token, status) in expected {
+            assert!(TerminalCode::ALL.contains(&code), "{token} is in ALL");
+            assert_eq!(code.as_str(), token);
+            assert_eq!(code.status(), status, "{token}");
             let json = serde_json::to_string(&code).expect("serialize");
-            assert_eq!(json, format!("\"{}\"", code.as_str()));
+            assert_eq!(json, format!("\"{token}\""));
             assert_eq!(
                 serde_json::from_str::<TerminalCode>(&json).expect("deserialize"),
                 code
+            );
+        }
+    }
+
+    /// The crate README's fault table lists every code with its status, as a
+    /// row `` | `code` | status | ``. A new variant fails here until the
+    /// table carries it. (The endpoint README and design §7 carry the same
+    /// table; the endpoint crate's `config` tests hold them to it — they
+    /// live outside this package, which `cargo package` cannot include.)
+    #[test]
+    fn every_terminal_code_is_in_the_fault_table() {
+        let readme = include_str!("../README.md");
+        for code in TerminalCode::ALL {
+            let row = format!("| `{}` | {} |", code.as_str(), code.status());
+            assert!(
+                readme.contains(&row),
+                "README.md lists `{}` with status {}",
+                code.as_str(),
+                code.status()
             );
         }
     }

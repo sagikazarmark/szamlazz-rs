@@ -8,15 +8,13 @@ use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
-use super::support::{Fault, Lookup, StornoIntent, check_pins, storno_response};
+use super::support::{Fault, Lookup, StornoIntent, check_pins, storno_response, verified_document};
 use super::support::{object, shared};
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
     DocumentStatus, IssuedKind, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
-use crate::gateway::{
-    DeleteOutcome, InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome, issued_kind_of,
-};
+use crate::gateway::{DeleteOutcome, InvoiceDocumentExt as _, StornoLookupOutcome, issued_kind_of};
 use crate::identity::{ExternalId, OrderKey};
 
 impl Execution {
@@ -113,24 +111,10 @@ impl Execution {
         let gateway = &self.gateway;
         let namespace = &self.config.namespace;
         let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
-        let found = match object::verify(ctx, self, format!("verify-storno-{number}"), number)
+        let found = object::verify(ctx, self, format!("verify-storno-{number}"), number)
             .await
-            .map_err(about)?
-        {
-            QueryOutcome::Api { code, message } => {
-                return Err(about(Fault::inconclusive_answer(code, message)).into());
-            }
-            QueryOutcome::CredentialsRejected { code, message } => {
-                return Err(about(Fault::credentials_rejected(namespace, code, message)).into());
-            }
-            QueryOutcome::NotFound => {
-                return Err(Fault::invalid_input(format!(
-                    "invoice {number} is not known to szamlazz.hu (not_found)"
-                ))
-                .into());
-            }
-            QueryOutcome::Found(found) => found,
-        };
+            .map_err(about)?;
+        let found = verified_document(found, number, namespace).map_err(about)?;
         if !found.carries_order(order) {
             return Ok(ControlFlow::Break(
                 StornoResponse::new(StornoOutcome::Conflict, number)

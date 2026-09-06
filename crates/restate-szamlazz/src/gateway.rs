@@ -76,6 +76,15 @@ pub mod build;
 
 pub use build::{DocumentRefs, InputError, gross_total};
 
+/// The pseudo-code of a rejection that never reached szamlazz.hu: the request
+/// violates the Számla Agent wire contract (a sixth credit entry, a document
+/// without line items). Stands beside szamlazz.hu's numeric codes in the
+/// `Rejected { code }` outcomes. On a create or storno it is the `rejected`
+/// outcome like any other code; `Szamlazz.Agent.set_payments` tells it apart
+/// and answers the caller's request as `invalid_input`, since szamlazz.hu
+/// answered nothing to pass through.
+pub const REQUEST_CODE: &str = "request";
+
 /// The module that speaks to szamlazz.hu for one account: the Számla Agent
 /// client plus the [`Account`] it is opened for.
 ///
@@ -709,7 +718,8 @@ pub enum SetPaymentsOutcome {
     },
     /// szamlazz.hu (or the wire contract: more than five entries) refused.
     Rejected {
-        /// The szamlazz.hu code, or `request` for a wire-contract violation.
+        /// The szamlazz.hu code, or [`REQUEST_CODE`] for a wire-contract
+        /// violation that never reached szamlazz.hu.
         code: String,
         /// The message.
         message: String,
@@ -1493,7 +1503,7 @@ impl Gateway {
             Ok(entries) => entries,
             Err(error) => {
                 return SetPaymentsOutcome::Rejected {
-                    code: "request".to_owned(),
+                    code: REQUEST_CODE.to_owned(),
                     message: error.to_string(),
                 };
             }
@@ -1512,7 +1522,7 @@ impl Gateway {
             }
             Err(ClientError::Api(api)) => SetPaymentsOutcome::from(api),
             Err(ClientError::Request(error)) => SetPaymentsOutcome::Rejected {
-                code: "request".to_owned(),
+                code: REQUEST_CODE.to_owned(),
                 message: error.to_string(),
             },
             Err(error) => SetPaymentsOutcome::Transport(error.to_string()),
@@ -1672,7 +1682,7 @@ fn classify_failure(error: ClientError) -> Failure {
             message,
         },
         ClientError::Request(error) => Failure::Rejected {
-            code: "request".to_owned(),
+            code: REQUEST_CODE.to_owned(),
             message: error.to_string(),
         },
         other => Failure::Transport(other.to_string()),

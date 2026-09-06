@@ -20,7 +20,7 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
-use super::support::{Fault, Lookup, check_pins};
+use super::support::{Fault, Lookup, check_pins, verified_document};
 use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
@@ -303,36 +303,16 @@ impl Execution {
         // The base must be a live invoice carrying this order's number.
         let about =
             |fault: Fault| fault.about(&order, Some(identity.kind), identity.external_id.as_str());
-        match verify(ctx, self, format!("verify-base-{number}"), &number)
+        let found = verify(ctx, self, format!("verify-base-{number}"), &number)
             .await
-            .map_err(about)?
-        {
-            QueryOutcome::Api { code, message } => {
-                return Err(about(Fault::inconclusive_answer(code, message)).into());
-            }
-            QueryOutcome::CredentialsRejected { code, message } => {
-                return Err(about(Fault::credentials_rejected(
-                    &self.config.namespace,
-                    code,
-                    message,
-                ))
-                .into());
-            }
-            QueryOutcome::NotFound => {
-                return Err(Fault::invalid_input(format!(
-                    "invoice {number} is not known to szamlazz.hu (not_found)"
-                ))
-                .into());
-            }
-            QueryOutcome::Found(found) => {
-                if !found.carries_order(&order) {
-                    return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
-                }
-                check_pins(self.gateway.account(), &found)?;
-                if found.info.reversed == Some(true) {
-                    return Ok(identity.conflict_about(ConflictReason::BaseReversed, number));
-                }
-            }
+            .map_err(about)?;
+        let found = verified_document(found, &number, &self.config.namespace).map_err(about)?;
+        if !found.carries_order(&order) {
+            return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
+        }
+        check_pins(self.gateway.account(), &found)?;
+        if found.info.reversed == Some(true) {
+            return Ok(identity.conflict_about(ConflictReason::BaseReversed, number));
         }
 
         let create = self.build(
