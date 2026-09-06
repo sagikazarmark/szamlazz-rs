@@ -201,11 +201,11 @@ mod tests {
         max_duration = "1h"
 
         [read]
-        max_attempts = 3
+        max_attempts = 5
         initial_delay = "5s"
         factor = 2.0
-        max_delay = "30s"
-        max_duration = "2m"
+        max_delay = "60s"
+        max_duration = "5m"
 
         [resolve]
         initial_delay = "1s"
@@ -359,11 +359,11 @@ mod tests {
         assert_eq!(config.worker.issue.factor.to_bits(), 2.0f32.to_bits());
         assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
         assert_eq!(config.worker.issue.max_duration, Duration::from_secs(3600));
-        assert_eq!(config.worker.read.max_attempts, 3);
+        assert_eq!(config.worker.read.max_attempts, 5);
         assert_eq!(config.worker.read.initial_delay, Duration::from_secs(5));
         assert_eq!(config.worker.read.factor.to_bits(), 2.0f32.to_bits());
-        assert_eq!(config.worker.read.max_delay, Duration::from_secs(30));
-        assert_eq!(config.worker.read.max_duration, Duration::from_secs(120));
+        assert_eq!(config.worker.read.max_delay, Duration::from_secs(60));
+        assert_eq!(config.worker.read.max_duration, Duration::from_secs(300));
         assert_eq!(config.worker.resolve.initial_delay, Duration::from_secs(1));
         assert_eq!(config.worker.resolve.max_delay, Duration::from_secs(10));
         assert_eq!(config.worker.resolve.max_duration, Duration::from_secs(60));
@@ -475,7 +475,7 @@ mod tests {
             assert_eq!(account.id.as_str(), "acme");
             assert_eq!(account.defaults.language, "hu");
             assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
-            assert_eq!(config.worker.read.max_delay, Duration::from_secs(30));
+            assert_eq!(config.worker.read.max_delay, Duration::from_secs(60));
             Ok(())
         });
     }

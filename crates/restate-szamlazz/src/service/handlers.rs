@@ -375,14 +375,19 @@ impl Agent {
 
     /// Reverses an invoice that no `Order` manages. The storno step is the
     /// same closure `Szamlazz.Order` runs (query, send, re-query at 60 s
-    /// each), so the timeouts are the same (ADR 0004) — and so is the retry
-    /// interval: the one retry after a crash waits out the 60 s client
-    /// timeout (never the server's ~500 ms default), so that its leading
-    /// query cannot look before a cut send has landed.
+    /// each), so the retry policy and the timeouts are `Szamlazz.Order`'s
+    /// (ADR 0004): invocation attempts are spent only on worker-side failures
+    /// — a crash, a rollout cutting the connection — and every re-dispatch is
+    /// query-first, so nothing about an unmanaged storno justifies a shorter
+    /// budget; the retry interval waits out the 60 s client timeout (never
+    /// the server's ~500 ms default), so that the leading query cannot look
+    /// before a cut send has landed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
-            max_attempts = 2,
+            factor = 2.0,
+            max_interval = "10m",
+            max_attempts = 5,
             on_max_attempts = "kill"
         ),
         inactivity_timeout = "4m",

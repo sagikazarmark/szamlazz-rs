@@ -9,11 +9,11 @@ max_delay = "10m"
 max_duration = "1h"           # the hard bound on re-executing the step
 
 [read]                        # optional; the read policy: the run retry policy of every read-only step (lookups, verifies, hints, get, query, check_account)
-max_attempts = 3              # executions of the step, including the first
+max_attempts = 5              # executions of the step, including the first
 initial_delay = "5s"          # before the first re-execution
 factor = 2.0
-max_delay = "30s"
-max_duration = "2m"           # the hard bound; sized to ride out szamlazz.hu's observed minute-long stalls
+max_delay = "60s"
+max_duration = "5m"           # the hard bound; a szamlazz.hu outage is tolerated for this long, not for the handlers' attempts
 
 [resolve]                     # optional; the resolve policy: the run retry policy of the `account` step (no attempt cap)
 initial_delay = "1s"
