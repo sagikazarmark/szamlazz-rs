@@ -925,5 +925,18 @@ mod tests {
             format!("{error:#}").contains("read.max_attempts must be at least 1"),
             "{error:#}"
         );
+
+        // An issue delay under the floor (the client timeout plus a margin)
+        // would re-execute the create or storno step while its send may still
+        // be in flight: the endpoint does not start. The full wording is
+        // pinned where the error is defined; here, the table and the floor.
+        let error = load(&format!("{}\n[issue]\ninitial_delay = \"5s\"", minimal()))
+            .expect_err("an issue delay below the floor must not load");
+        let message = format!("{error:#}");
+        assert!(message.contains("invalid configuration"), "{message}");
+        assert!(
+            message.contains("issue.initial_delay (5s) must be at least 90s"),
+            "{message}"
+        );
     }
 }

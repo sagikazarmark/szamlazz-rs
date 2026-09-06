@@ -776,6 +776,12 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
 /// test; three executions of a read step one second apart, so a retried and
 /// an exhausted read are observable within the `watch` window; and a
 /// one-second resolve policy so a scripted outage is retried within it.
+///
+/// Built in Rust and handed to `from_parts`, never through
+/// `WorkerConfig::validate`: the 1 s issue delay is under the floor `validate`
+/// holds a deployment to (`IssueConfig::MIN_INITIAL_DELAY`, the client timeout
+/// plus a margin), which the endpoint's loader enforces and this suite — whose
+/// szamlazz.hu is a scripted mock that answers at once — has no use for.
 fn worker_config() -> WorkerConfig {
     let worker: WorkerConfig = serde_json::from_value(json!({
         "namespace": "acct",

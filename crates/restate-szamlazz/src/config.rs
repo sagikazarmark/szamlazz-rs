@@ -93,8 +93,9 @@ impl WorkerConfig {
     /// # Errors
     ///
     /// Returns the first violated invariant: a `max_attempts` of zero on the
-    /// issue or read policy, an `initial_delay` greater than the `max_delay`
-    /// of the same policy, or a `factor` below 1 on any policy.
+    /// issue or read policy, an issue `initial_delay` below
+    /// [`IssueConfig::MIN_INITIAL_DELAY`], an `initial_delay` greater than the
+    /// `max_delay` of the same policy, or a `factor` below 1 on any policy.
     pub fn validate(&self) -> Result<(), WorkerConfigError> {
         for (policy, max_attempts) in [
             (Policy::Issue, self.issue.max_attempts),
@@ -103,6 +104,12 @@ impl WorkerConfig {
             if max_attempts == 0 {
                 return Err(WorkerConfigError::ZeroMaxAttempts { policy });
             }
+        }
+        if self.issue.initial_delay < IssueConfig::MIN_INITIAL_DELAY {
+            return Err(WorkerConfigError::IssueDelayBelowFloor {
+                initial: self.issue.initial_delay,
+                floor: IssueConfig::MIN_INITIAL_DELAY,
+            });
         }
         for (policy, initial, max, factor) in [
             (
@@ -148,6 +155,22 @@ pub enum WorkerConfigError {
     ZeroMaxAttempts {
         /// The policy.
         policy: Policy,
+    },
+    /// The issue policy's `initial_delay` is below
+    /// [`IssueConfig::MIN_INITIAL_DELAY`], which documents the rule.
+    #[error(
+        "issue.initial_delay ({initial:?}) must be at least {floor:?} — the Számla Agent client's \
+         {timeout:?} request timeout plus a {margin:?} margin: szamlazz.hu has been seen to stall \
+         that long and still issue, so the create and storno steps are never re-executed while \
+         their send may still be in flight",
+        timeout = szamlazz_agent::client::REQUEST_TIMEOUT,
+        margin = IssueConfig::RE_CHECK_MARGIN
+    )]
+    IssueDelayBelowFloor {
+        /// The configured initial delay.
+        initial: Duration,
+        /// The floor, [`IssueConfig::MIN_INITIAL_DELAY`].
+        floor: Duration,
     },
     /// A policy's `initial_delay` exceeds its `max_delay`.
     #[error("{policy}.initial_delay ({initial:?}) must not exceed {policy}.max_delay ({max:?})")]
@@ -486,6 +509,9 @@ impl SellerEmailConfig {
 /// `max_attempts` executions or `max_duration` — then the step fails and the
 /// handler reports `outcome_unknown`. The policy shapes no journal entry.
 ///
+/// `initial_delay` has a floor, [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY),
+/// which [`WorkerConfig::validate`] enforces.
+///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
 /// integer read as seconds (`90`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -493,9 +519,8 @@ impl SellerEmailConfig {
 pub struct IssueConfig {
     /// Executions of the step, including the first. Default `5`.
     pub max_attempts: u32,
-    /// Delay before the first re-execution. Default `2m`: longer than the
-    /// client timeout plus the longest observed server stall, so a request
-    /// still in flight has resolved by the time the re-check runs.
+    /// Delay before the first re-execution. Default `2m`; at least
+    /// [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY).
     #[serde(with = "duration_str")]
     pub initial_delay: Duration,
     /// Multiplier of the delay after each re-execution. Default `2.0`.
@@ -521,6 +546,27 @@ impl Default for IssueConfig {
 }
 
 impl IssueConfig {
+    /// The margin [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY) keeps beyond
+    /// the client timeout.
+    pub const RE_CHECK_MARGIN: Duration = Duration::from_secs(30);
+
+    /// The least `initial_delay` a deployment may run with: the Számla Agent
+    /// client's [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT)
+    /// plus [`RE_CHECK_MARGIN`](Self::RE_CHECK_MARGIN) — 90 s at today's
+    /// values, derived rather than copied so that a change to the timeout
+    /// moves the floor with it.
+    ///
+    /// Every re-execution of the create or storno step begins with a query
+    /// for what the cut execution sent, and that query is conclusive only
+    /// once the send can no longer be in flight: the client gives up on a
+    /// reply at the timeout, but szamlazz.hu has been seen to stall that long
+    /// and still issue. The same rule sizes every write handler's
+    /// `initial_interval` (`2m`). The read and resolve policies have no floor
+    /// — a read writes nothing, and the resolve policy never reaches
+    /// szamlazz.hu.
+    pub const MIN_INITIAL_DELAY: Duration =
+        szamlazz_agent::client::REQUEST_TIMEOUT.saturating_add(Self::RE_CHECK_MARGIN);
+
     /// The policy as the SDK's run retry policy, every field set from this
     /// configuration. Built on [`RunRetryPolicy::new`], whose factor is 1.0
     /// and which caps nothing — not on `default()`, which caps the delay at
@@ -1088,6 +1134,75 @@ mod tests {
             "resolve.initial_delay (11s) must not exceed resolve.max_delay (10s)",
             "the error names the table"
         );
+    }
+
+    /// `issue.initial_delay` is floored at [`IssueConfig::MIN_INITIAL_DELAY`]
+    /// — the Számla Agent client's timeout plus a margin, derived, not copied.
+    /// The other two policies have no floor.
+    #[test]
+    fn validate_floors_the_issue_initial_delay_at_the_client_timeout_plus_a_margin() {
+        fn config(issue: &serde_json::Value) -> WorkerConfig {
+            serde_json::from_value(json!({ "namespace": "acct", "issue": issue })).expect("parse")
+        }
+
+        assert_eq!(
+            IssueConfig::MIN_INITIAL_DELAY,
+            szamlazz_agent::client::REQUEST_TIMEOUT + IssueConfig::RE_CHECK_MARGIN,
+            "the floor is derived from the client's timeout"
+        );
+        assert_eq!(IssueConfig::MIN_INITIAL_DELAY, Duration::from_secs(90));
+        assert!(
+            IssueConfig::default().initial_delay >= IssueConfig::MIN_INITIAL_DELAY,
+            "the default clears its own floor"
+        );
+
+        // The boundary: 90 s is accepted, 89 s is not.
+        assert_eq!(config(&json!({"initial_delay": "90s"})).validate(), Ok(()));
+        assert_eq!(
+            config(&json!({"initial_delay": "89s"})).validate(),
+            Err(WorkerConfigError::IssueDelayBelowFloor {
+                initial: Duration::from_secs(89),
+                floor: Duration::from_secs(90),
+            })
+        );
+        assert_eq!(
+            config(&json!({"initial_delay": "5s"})).validate(),
+            Err(WorkerConfigError::IssueDelayBelowFloor {
+                initial: Duration::from_secs(5),
+                floor: Duration::from_secs(90),
+            })
+        );
+        assert_eq!(
+            config(&json!({"initial_delay": "5s"}))
+                .validate()
+                .expect_err("error")
+                .to_string(),
+            "issue.initial_delay (5s) must be at least 90s — the Számla Agent client's 60s request \
+             timeout plus a 30s margin: szamlazz.hu has been seen to stall that long and still \
+             issue, so the create and storno steps are never re-executed while their send may \
+             still be in flight",
+            "the error names the rule"
+        );
+
+        // The floor is checked before the order of the delays: it is the
+        // safety rule, the order a consistency rule.
+        assert_eq!(
+            config(&json!({"initial_delay": "5s", "max_delay": "4s"})).validate(),
+            Err(WorkerConfigError::IssueDelayBelowFloor {
+                initial: Duration::from_secs(5),
+                floor: Duration::from_secs(90),
+            })
+        );
+
+        // No floor on the read or resolve policy: a 1 s delay is fine (the
+        // e2e suite runs on exactly that).
+        let short: WorkerConfig = serde_json::from_value(json!({
+            "namespace": "acct",
+            "read": { "initial_delay": "1s", "max_delay": "1s" },
+            "resolve": { "initial_delay": "1s", "max_delay": "1s" },
+        }))
+        .expect("parse");
+        assert_eq!(short.validate(), Ok(()));
     }
 
     #[test]

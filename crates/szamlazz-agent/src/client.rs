@@ -123,19 +123,30 @@ pub enum BuildError {
     Http(#[from] reqwest::Error),
 }
 
+/// How long the default HTTP client waits for one request before giving up
+/// (native targets; on wasm the runtime owns timeouts).
+///
+/// szamlazz.hu has been observed to stall for about a minute and still issue
+/// the document, so a caller that re-checks or re-sends after a timeout must
+/// wait at least this long after the send — the request may still be in
+/// flight server-side. Exported so that such a floor can be derived from the
+/// timeout rather than copied. A client built with
+/// [`ClientBuilder::http_client`] carries its own timeout instead.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
+
 /// On native targets the client keeps the `JSESSIONID` session cookie via
 /// reqwest's cookie store, skipping re-authentication (sessions live 90
-/// minutes), bounds each request to 60 seconds so a stalled server cannot
-/// hang the call forever, and does not follow redirects: the endpoint never
-/// redirects, and following one would silently convert the multipart POST
-/// into a body-less GET. On wasm the browser/runtime owns cookies and
+/// minutes), bounds each request to [`REQUEST_TIMEOUT`] so a stalled server
+/// cannot hang the call forever, and does not follow redirects: the endpoint
+/// never redirects, and following one would silently convert the multipart
+/// POST into a body-less GET. On wasm the browser/runtime owns cookies and
 /// redirect handling.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         reqwest::Client::builder()
             .cookie_store(true)
-            .timeout(std::time::Duration::from_mins(1))
+            .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
     }
