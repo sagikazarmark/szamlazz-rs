@@ -59,7 +59,10 @@ repetition" is ON**; it is the second guard, not the first.
   at +2, +10, +60 s). The 2-minute gap — the handler's `initial_interval` and the issue policy's
   `initial_delay` alike — is therefore not for lag but for a first request that is still in flight
   server-side: one create stalled ≥ 57 s with no response against a 60 s client timeout. The gap
-  must exceed timeout plus stall; 2 min keeps a margin — never below ~90 s.
+  must exceed timeout plus stall; 2 min keeps a margin — never below ~90 s. In code since #61:
+  `WorkerConfig::validate` floors `issue.initial_delay` at the client's exported `REQUEST_TIMEOUT`
+  plus a 30 s margin, and every write handler's `initial_interval` is pinned at 2 m by the discovery
+  test (ADR 0004, #61 amendment).
 - External ids are **not unique** server-side (two invoices under different orders with the same id
   were both issued, no warning) and a query by a shared id returns the newest holder (last-writer-
   wins) — verified. Every `Found` document is therefore validated before adoption:

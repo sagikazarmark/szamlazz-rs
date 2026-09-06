@@ -39,8 +39,8 @@
 //!
 //! - `client-reqwest` adds the ready-made async `Client`. It supports native
 //!   and browser wasm targets. On native targets it manages the session cookie,
-//!   timeout, TLS, and redirect policy; on wasm the browser controls cookies
-//!   and redirects.
+//!   timeout (`client::REQUEST_TIMEOUT`), TLS, and redirect policy; on wasm the
+//!   browser controls cookies and redirects.
 // docs.rs builds with all features on nightly and sets `--cfg docsrs`;
 // current rustdoc's doc_cfg automatically annotates feature- and target gates.
 #![cfg_attr(docsrs, feature(doc_cfg))]

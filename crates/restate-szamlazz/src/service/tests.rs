@@ -13,8 +13,13 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
-use crate::config::{Namespace, WorkerConfig};
+use crate::config::{IssueConfig, Namespace, WorkerConfig};
 use crate::gateway::Gateway;
+
+/// [`IssueConfig::MIN_INITIAL_DELAY`] in the unit discovery reports
+/// (milliseconds): the floor the write handlers' `initial_interval` clears.
+#[allow(clippy::cast_possible_truncation)]
+const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as u64;
 
 /// The `Accounts` bundle of a test account at `endpoint` with `agent_key`,
 /// through the static resolver — what the endpoint binary builds.
@@ -151,11 +156,17 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
         assert_eq!(handler.ty, None, "{name}");
         assert!(handler.input.is_some(), "{name} takes an input");
         // ADR 0004: every handler that calls szamlazz.hu kills after 5
-        // attempts with a 2m → 10m back-off and bounded timeouts.
+        // attempts with a 2m → 10m back-off and bounded timeouts. The 2m is
+        // the same rule as the issue policy's floor: the retry after a crash
+        // waits out the client timeout plus a margin.
         assert_eq!(
             handler.retry_policy_initial_interval,
             Some(120_000),
             "{name}"
+        );
+        assert!(
+            handler.retry_policy_initial_interval >= Some(MIN_INITIAL_DELAY_MS),
+            "{name}: initial_interval under IssueConfig::MIN_INITIAL_DELAY"
         );
         assert_eq!(handler.retry_policy_max_interval, Some(600_000), "{name}");
         assert_eq!(
@@ -255,6 +266,22 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 Some(30 * 24 * 3_600_000),
                 "{name}"
             );
+            // Both writes wait out the 60 s client timeout before the one
+            // retry after a crash — never the server's ~500 ms default — so
+            // that the re-execution cannot run while the first send is still
+            // in flight: `set_payments` because an additive send is
+            // at-least-once, `storno` because its re-execution's leading query
+            // would otherwise look before the cut send has landed (ADR 0004).
+            // The same rule floors the issue policy's `initial_delay`.
+            assert_eq!(
+                handler.retry_policy_initial_interval,
+                Some(120_000),
+                "{name}"
+            );
+            assert!(
+                handler.retry_policy_initial_interval >= Some(MIN_INITIAL_DELAY_MS),
+                "{name}: initial_interval under IssueConfig::MIN_INITIAL_DELAY"
+            );
             if name == "storno" {
                 // The storno step is the same closure `Szamlazz.Order` sizes
                 // at 4m/3m (query, send, re-query at 60 s each — ADR 0004):
@@ -265,15 +292,6 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 assert_eq!(name, "set_payments");
                 assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
                 assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
-                // `additive: true` is at-least-once: the retry after a crash
-                // re-sends, so it must wait out the 60 s client timeout —
-                // never the server's ~500 ms default — so that it cannot
-                // re-send while the first send is still in flight.
-                assert_eq!(
-                    handler.retry_policy_initial_interval,
-                    Some(120_000),
-                    "{name}"
-                );
             }
         }
     }

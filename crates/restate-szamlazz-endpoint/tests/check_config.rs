@@ -117,6 +117,39 @@ fn an_unknown_key_exits_non_zero_with_the_error() {
     assert!(!output.stdout.contains(VALID), "{output}");
 }
 
+/// An issue policy whose `initial_delay` is under the floor — the Számla Agent
+/// client's timeout plus a margin, so that a create or storno step is never
+/// re-executed while its send may still be in flight — is refused before the
+/// endpoint starts: the file parses; it is the invariant that fails, and the
+/// error names the table and the floor.
+#[test]
+fn an_issue_delay_below_the_floor_exits_non_zero_with_the_rule() {
+    let file = temp_file(
+        "issue-delay-floor.toml",
+        r#"
+        namespace = "acct"
+
+        [issue]
+        initial_delay = "5s"
+
+        [account]
+        id = "acme"
+        agent_key = "k"
+        "#,
+    );
+
+    let output = check_config(&file, &[]);
+
+    assert_ne!(output.status.code(), Some(0), "{output}");
+    assert!(
+        output
+            .stderr
+            .contains("issue.initial_delay (5s) must be at least 90s"),
+        "{output}"
+    );
+    assert!(!output.stdout.contains(VALID), "{output}");
+}
+
 /// The endpoint is built too, so an account or identity-key error the loader
 /// cannot see surfaces here rather than at start-up.
 #[test]

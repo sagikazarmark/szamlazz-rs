@@ -203,7 +203,10 @@ activation details.
   default) and `[resolve]` (the resolve policy: the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m`
   by default). `IssueConfig::run_retry_policy` is the `RunRetryPolicy` of the create and storno steps,
   `ReadConfig::run_retry_policy` that of every read-only step, `ResolveConfig::run_retry_policy` that of the `account`
-  step. `validate()` checks the cross-field invariants. Nothing account-shaped is in it: document defaults and the
+  step. `validate()` checks the cross-field invariants — `max_attempts ≥ 1`, `initial_delay ≤ max_delay`, `factor ≥ 1`
+  — and one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
+  `REQUEST_TIMEOUT` (60 s) plus a 30 s margin (90 s), because a create or storno step re-executed sooner would re-check while
+  its send may still be in flight; the error names the rule. Nothing account-shaped is in it: document defaults and the
   seller block belong to the `Account` — their value types (`config::Defaults`, `config::SellerConfig`,
   `config::AccountMode`, and `config::Secret`, whose `Debug` output is redacted) live in `config` so that any
   resolver's configuration can reuse them.
@@ -336,10 +339,11 @@ Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
 `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m`, `abort_timeout = 3m`,
 `journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3` and
-`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.storno` uses two attempts with
-`Szamlazz.Order`'s timeouts (its storno step is the same closure); `set_payments` two attempts with an explicit
-`initial_interval = 2m` — longer than the 60 s client timeout, so the retry after a crash cannot re-send while the
-first send is still in flight, which matters because an additive send is at-least-once; `query`, `query_taxpayer`
+`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.storno` and `set_payments` use two attempts with an
+explicit `initial_interval = 2m` — longer than the 60 s client timeout, so the retry after a crash cannot run while the
+first send is still in flight: for `set_payments` because an additive send is at-least-once, for `storno` because its
+re-execution's leading query would otherwise look before a cut send has landed; `storno` carries `Szamlazz.Order`'s
+timeouts (its storno step is the same closure), `set_payments` `2m` / `2m` (one send); `query`, `query_taxpayer`
 and `check_account` three with the same one-day journal retention. Kill, not pause: a paused invocation
 holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
 external-id query inside the create step is what makes that safe.

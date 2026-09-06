@@ -1,8 +1,8 @@
 # Exhausted retries kill the invocation instead of pausing it
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
-amended by #22 (the create step under a run retry policy), #30 (the storno step), #37 (the read policy) and #41
-(the `Szamlazz.Agent` writes' timeouts and retry interval), below.
+amended by #22 (the create step under a run retry policy), #30 (the storno step), #37 (the read policy), #41
+(the `Szamlazz.Agent` writes' timeouts and retry interval) and #61 (the ≥ 90 s re-check rule in code), below.
 Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the retry policy and timeout
 values, the verified Restate facts, and the operational alerts. Superseded: the `pending` slot as what makes
 kill safe (there is no state; the external-id query inside the create step is), the runbook and caller
@@ -21,8 +21,8 @@ Every handler that calls szamlazz.hu sets `on_max_attempts = "kill"`. On `Szamla
 correcting, storno and delete handlers carry `invocation_retry_policy(initial_interval = "2m",
 factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "kill")` with
 `inactivity_timeout = "4m"` and `abort_timeout = "3m"` (the create closure may take up to 180 s:
-the leading external-id query, the create, a re-query, 60 s each). `Szamlazz.Agent.set_payments` and `storno` use `max_attempts = 2,
-kill` (their timeouts and `set_payments`'s retry interval: #41, below); read-only handlers (`Szamlazz.Order.get` with `verify`, `Szamlazz.Agent.query`) may retry more freely
+the leading external-id query, the create, a re-query, 60 s each). `Szamlazz.Agent.set_payments` and `storno` use `initial_interval = "2m",
+max_attempts = 2, kill` (their timeouts and retry interval: #41 and #61, below); read-only handlers (`Szamlazz.Order.get` with `verify`, `Szamlazz.Agent.query`) may retry more freely
 because queries are safe to repeat, but they kill too. The external-id query inside the create step
 is what makes kill safe; kill is what keeps the key reachable.
 
@@ -165,6 +165,30 @@ Amended #41 also settled the 71/152 contradiction (design §5 step 4): a duplica
 under the order was `Err(Unconfirmed::Contradiction)` and re-sent the create for up to five executions; it is now
 `conflict{duplicate_order_number}` without `existing_number` on the first occurrence, logged at `warn` — the
 refusal is an answer szamlazz.hu already gave.
+
+## Amended (#61): the ≥ 90 s re-check rule lives in code
+
+Every value above rests on one timing rule: nothing re-checks or re-sends within ~90 s of a send, because the
+Számla Agent client gives up on a reply at 60 s and szamlazz.hu has been seen to stall for about a minute while
+still issuing (behaviour notes; [ADR 0002](0002-order-keyed-idempotency-via-external-ids.md) states the "never below
+~90 s" bound). Until #61 the rule held by convention, with two gaps.
+
+`Szamlazz.Agent.storno` had `max_attempts = 2, kill` with no `initial_interval` — the same omission #41 closed on
+`set_payments` — so the one retry after a crash (a rollout cutting the connection mid-storno) was re-dispatched at the
+server's ~500 ms default while the first `xmlszamlast` could still be in flight; its re-execution's leading query
+would then find nothing and send a second storno. Not lossy — szamlazz.hu answers a repeated storno with the existing
+storno number — but a second send the rule forbids, and the endpoint README documented the 500 ms as the behaviour. It
+now carries `initial_interval = "2m"` like every other write handler of both services, and the discovery test pins the
+interval on both `Szamlazz.Agent` writes.
+
+`WorkerConfig::validate` checked `max_attempts ≠ 0`, `initial ≤ max` and `factor ≥ 1`, so an operator could write
+`issue.initial_delay = "5s"` and the endpoint started; the create step's lost-reply re-execution would then have raced
+the original send. The issue policy's `initial_delay` now has a floor, `IssueConfig::MIN_INITIAL_DELAY` = the agent
+crate's newly exported `client::REQUEST_TIMEOUT` (60 s) + `IssueConfig::RE_CHECK_MARGIN` (30 s) = 90 s, derived from
+the client's constant rather than a second copy of "60 s"; a shorter delay is `WorkerConfigError::IssueDelayBelowFloor`,
+whose message names the rule, and `--check-config` fails with it. The floor is on the issue policy only — a read
+writes nothing and the resolve policy never reaches szamlazz.hu — and bites where the endpoint loads configuration:
+the e2e suite's 1 s policies are built in Rust, handed to `from_parts` and never pass through `validate`.
 
 ## Consequences
 
