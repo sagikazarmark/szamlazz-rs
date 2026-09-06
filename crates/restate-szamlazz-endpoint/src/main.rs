@@ -6,6 +6,9 @@
 
 mod config;
 
+use std::future::Future;
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
@@ -17,6 +20,7 @@ use restate_sdk::http_server::HttpServer;
 use restate_sdk::service::Discoverable;
 use restate_szamlazz::account::StaticResolver;
 use restate_szamlazz::{Accounts, Agent, Order};
+use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::EndpointConfig;
@@ -24,6 +28,13 @@ use crate::config::EndpointConfig;
 /// The environment prefix of configuration overrides; `__` nests
 /// (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` → `account.agent_key`).
 const ENV_PREFIX: &str = "RESTATE_SZAMLAZZ_";
+
+/// The signals that stop the process, as the start-up log names them.
+#[cfg(unix)]
+const STOP_SIGNALS: &str = "SIGTERM, SIGINT";
+/// The signals that stop the process, as the start-up log names them.
+#[cfg(windows)]
+const STOP_SIGNALS: &str = "Ctrl-C";
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -69,15 +80,66 @@ async fn main() -> Result<()> {
 
     let config = cli.load_config()?;
     let endpoint = build_endpoint(config)?;
-    let bind_addr = format!("0.0.0.0:{}", cli.port);
 
-    tracing::info!(%bind_addr, "starting Restate szamlazz.hu endpoint");
+    // The signal handlers go in before the port opens: from the moment a
+    // Restate server can reach the endpoint, a stop is honoured rather than
+    // fatal.
+    let stop = stop_signal().context("failed to install the stop signal handlers")?;
+    let bind_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cli.port));
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .with_context(|| format!("failed to bind {bind_addr}"))?;
+    let local_addr = listener
+        .local_addr()
+        .context("failed to read the bound address")?;
+
+    tracing::info!(
+        addr = %local_addr,
+        stop_on = STOP_SIGNALS,
+        "starting Restate szamlazz.hu endpoint"
+    );
 
     HttpServer::new(endpoint)
-        .listen_and_serve(bind_addr.parse()?)
+        .serve_with_cancel(listener, stop)
         .await;
 
+    tracing::info!("stopped Restate szamlazz.hu endpoint");
+
     Ok(())
+}
+
+/// A future that completes on the first stop signal — `SIGTERM` (what
+/// `docker stop`, a Kubernetes rollout and `kill` send) or `SIGINT`
+/// (Ctrl-C) — and logs which one arrived. The signal handlers are installed
+/// when this is called, so call it before anything a stop should interrupt:
+/// the SDK's `serve` waits for `SIGINT` alone, and a `SIGTERM` nobody handles
+/// ends the process on the spot, without the SDK's graceful drain.
+#[cfg(unix)]
+fn stop_signal() -> io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+
+    Ok(async move {
+        let arrived = tokio::select! {
+            _ = terminate.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        };
+        tracing::info!(signal = arrived, "stopping: draining open connections");
+    })
+}
+
+/// A future that completes on Ctrl-C, the one stop signal Windows has; the
+/// handler is installed when this is called, as in the Unix variant.
+#[cfg(windows)]
+fn stop_signal() -> io::Result<impl Future<Output = ()>> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+
+    Ok(async move {
+        ctrl_c.recv().await;
+        tracing::info!(signal = "Ctrl-C", "stopping: draining open connections");
+    })
 }
 
 /// Wires the configuration into the two services and binds them to one
@@ -276,6 +338,6 @@ mod tests {
             .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
             .await;
 
-        assert_eq!(outcome, QueryOutcome::NotFound);
+        assert_eq!(outcome, Ok(QueryOutcome::NotFound));
     }
 }

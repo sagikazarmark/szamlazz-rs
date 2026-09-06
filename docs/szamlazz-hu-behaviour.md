@@ -19,7 +19,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| With the toggle ON, a second document of the same kind under an order number with different content is rejected with 152 "Már létező rendelésszám: {order}. …". The message names the order number only, never the existing invoice number; HTTP 200; headers `szlahu_error_code`/`szlahu_error` set, no `szlahu_szamlaszam`/`szlahu_id`. | A4c-2, A4d-alt, A5-price2000, A6; C1-7 | 71/152 → re-query by external id: a live document of ours → `reconciled`; not ours → `conflict{external_id_collision}`; reversed and ours, or absent → the duplicate is not ours and the order-number query names it → `conflict{duplicate_order_number}` with `existing_number` when the newest document under the order is a live document of our kind, without it otherwise; nothing under the order at all is a contradiction the create step retries. Never `rejected` (except for correctives), never a new document. |
+| With the toggle ON, a second document of the same kind under an order number with different content is rejected with 152 "Már létező rendelésszám: {order}. …". The message names the order number only, never the existing invoice number; HTTP 200; headers `szlahu_error_code`/`szlahu_error` set, no `szlahu_szamlaszam`/`szlahu_id`. | A4c-2, A4d-alt, A5-price2000, A6; C1-7 | 71/152 → re-query by external id: a live document of ours → `reconciled`; not ours → `conflict{external_id_collision}`; reversed and ours, or absent → the duplicate is not ours and the order-number query names it → `conflict{duplicate_order_number}` with `existing_number` when the newest document under the order is a live document of our kind, without it otherwise; nothing under the order at all is a contradiction, logged at `warn` and settled the same way without `existing_number` — a refusal the server already gave is not re-sent for. Never `rejected` (except for correctives), never a new document. |
 | The check is **per document kind**: `SZ`, `D`, `ES`, `VS`, `SL`, `HS` each accepted the same order number in sequence; a second `SL` (different price) → 152. `SZ`-vs-`SZ` → 152. | C1-1…C1-7, D4-create-sz | Cross-kind exclusivity (plain invoice vs prepayment chain) is the service's own check (`conflict{prepaid_chain}`); 71/152 is intra-kind only. |
 | Correctives are exempt: an `HS` was accepted under an order already carried by its base and by five other kinds. `HS`-vs-`HS` not tested. | B7-create-corrective, C1-6 | `correct_invoice` takes no order-number hint (the live base under the order is expected) and a 71/152 its re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new `HS` by contract; the external-id query is the only guard. |
 | Create **trims** leading/trailing whitespace from the order number: `" PRB-C-Case "` and `"PRB-C-Case "` replayed the existing invoice; with a different price → 152 naming the *trimmed* value. | C4-3, C4-4, C4-5 | VO key and every `rendelesszam` are derived from the trimmed bytes. |
@@ -60,7 +60,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 |---|---|---|
 | `<sztornozott>` is **absent** (not `false`) before a storno; afterwards the original's `<alap>` gains exactly `<sztornozott>true</sztornozott>` (after `<teszt>`). The `SS` never carries it. Also visible when the original is fetched by its external id. | B1 diff, A5-q-72/73, B6-query-orig-extid | The lookup step detects a UI storno without any state or operator: `sztornozott == Some(true)` → `outcome: reversed`. The agent crate exposes `Option<bool>`; `None` ⇒ live. |
 | The `SS` inherits `<rendelesszam>` and carries `<hivszamlaszam>` = original. `<gazdEsemAzon>` of an `SS`/`HS` equals the original's `<id>`; a converted `SZ` inherits the `D`'s id. | B1, A5-q-73, B7-query-corrective, D4-query-sz | The `storno_number` on `outcome: reversed` comes from the hint when the newest document under the order is the matching `SS`, else it is absent. `gazdEsemAzon == original.id` is an optional consistency check. |
-| A storno negates the **quantity** (−1), not the unit price; `SS` totals are negative (`szamlabrutto=-1270`, `kintlevoseg=-1270`). | B1 | Storno response validation: `gross_total < 0`. |
+| A storno negates the **quantity** (−1), not the unit price; `SS` totals are negative (`szamlabrutto=-1270`, `kintlevoseg=-1270`). | B1 | Storno response validation: `invoice_number ≠ requested ∧ gross_total ≤ 0` — `≤`, not `<`, so that the storno of a 0-HUF invoice (a free ticket; a new number with a gross of `0`, the negation of nothing) is a reversal and not `not_stornoable` (the pre-release audit's finding 7; the zero-total shape itself is unverified — below). |
 | A storno **wipes `<kifizetesek>`** from the original (body shrank; `payments=[]`); the `SS`'s `kintlevoseg` is the full negative gross, prior credits not netted. The query XML has no `kintlevoseg` element at all. | B8 | The service does not snapshot payments; a caller that needs them queries before stornoing (`Szamlazz.Agent.query`) and re-registers on the new invoice via `set_payments`. Outstanding is observable only via response headers. |
 
 ## Storno semantics
@@ -68,7 +68,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
 | **Repeat storno** of a stornoed invoice → `sikeres=true` echoing the **existing** `SS` (same number, same `szlahu_id`, −1270); no error code; no second `SS`; 741 ms vs 2352 ms for the real storno. | B4-repeat-storno, B4-query-order-after-repeat | Storno is idempotent per original number: re-sending is safe; the storno step is query-first on every execution under the issue policy. A re-executed step whose leading query finds the `SS` sends nothing; one that re-sends gets the echo, not a duplicate. |
-| Storno of a **proforma** or a **delivery note** → `sikeres=true` echoing the *requested* number with **positive** totals; the document is unchanged (no `<sztornozott>`, no `SS`). | B5-storno-proforma, B5-storno-delivery-note | Success-shaped no-op. Validate: `invoice_number ≠ requested ∧ gross_total < 0`, else `NotStornoable` → `rejected{not_stornoable}`. `tipus` is not in the storno response — confirm `SS` in a follow-up query. |
+| Storno of a **proforma** or a **delivery note** → `sikeres=true` echoing the *requested* number with **positive** totals; the document is unchanged (no `<sztornozott>`, no `SS`). | B5-storno-proforma, B5-storno-delivery-note | Success-shaped no-op. Validate: `invoice_number ≠ requested ∧ gross_total ≤ 0`, else `NotStornoable` → `rejected{not_stornoable}` (the echo keeps the requested number, so a zero-gross echo of a 0-HUF proforma is still the no-op). `tipus` is not in the storno response — confirm `SS` in a follow-up query. |
 | Storno of an **`SS`** → 14 "Sztornó és jóváíró számlát nem lehet sem sztornózni, sem jóváírni." | B5-storno-SS | Type 14 in the crate; `rejected{14}`. |
 | Storno of an invoice that **has a corrective** → 221 "Ez a számla nem sztornózható (van helyesbítő számlája)." | B7-storno-corrected-orig | The server is the guard: `rejected{221}`; type 221. |
 | Storno `keltDatum` other than today → 352 "A számla kelte csak a mai nap lehet: 2026.09.03.." | B3-storno-earlier-kelt | Never send `keltDatum` on a storno; type 352. (352 on *create* is untested.) |
@@ -106,7 +106,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| **Replace** semantics by default: 100 then 200 leaves `[200]`; `additiv=true` appends (`[200, 50]`, outstanding 1020). `szlahu_kintlevoseg` header and `<kintlevoseg>` body agree and equal gross − Σ. | D7 | `set_payments` default is replace; never auto-retried (`max_attempts(1)` run). |
+| **Replace** semantics by default: 100 then 200 leaves `[200]`; `additiv=true` appends (`[200, 50]`, outstanding 1020). `szlahu_kintlevoseg` header and `<kintlevoseg>` body agree and equal gross − Σ. | D7 | `set_payments` default is replace; never auto-retried by the run (`max_attempts(1)`). `additive: true` is **at-least-once**: a lost reply is `outcome_unknown` telling the caller to query the invoice before re-sending, and the handler's one crash retry waits `initial_interval = 2m` (past the 60 s client timeout) so it cannot re-send while the first send is in flight. |
 | Five entries accepted; the query returns them in **non-submission order** (`20,40,10,30,50`). A sixth is refused by the crate before sending (server code unknown). | D7-credit-5amounts | `<kifizetesek>` order is not meaningful. |
 | Credit on a **reversed** invoice → 463 "Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ." — body only, no headers. | D8-credit-on-reversed | Type 463; the wording implies the same code for a credit on the `SS` (untested). |
 
@@ -140,6 +140,10 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 ## Still unverified
 
+- The storno of a **0-HUF invoice** (every item free): expected a new `SS` with `szamlabrutto=0`, which
+  is what `gross_total ≤ 0` accepts; only negative-total stornos (B1) and positive-total echoes (B5)
+  were observed. Low: a zero-gross reply that echoed the *requested* number would still be
+  `not_stornoable`, and the next call's verify sees `sztornozott` either way.
 - Code 56 shape (with/without a number; header form). Low: 56-with-number is a warning; without →
   `Unknown` → re-query.
 - `HS`-vs-`HS` under the toggle; whether the replay applies to `HS`, `D`, `ES`, `VS` at all (only
@@ -156,8 +160,9 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   `storno_invoice` accepts `ES`/`VS`/`HS`, and `create_final` with `reissue: true` after a reversed
   `VS` sends a new one; the `SZ`-beside-`ES` case is refused by the service (`conflict{prepaid_chain}`)
   before sending.
-- A second `D` after a consumed `D` (152 expected). Low: the order-number hint in the lookup step sees
-  the converting invoice or prepayment first → `conflict{foreign}`.
+- A second `D` after a consumed `D` (152 expected). Low: `create_proforma` looks up `…:invoice` and
+  `…:prepayment` first → `conflict{order_invoiced, existing_number}` when the converting document is ours;
+  when it is another channel's the order-number hint in the lookup step sees it → `conflict{foreign}`.
 - Whether a UI-converted `SZ` carries `rendelesszam`/`hivdijbekszam`; which e-mails a UI or Agent
   storno sends. Moderate for foreign detection (an `SZ` without `rendelesszam` is invisible to the
   hint) and the customer-facing narrative; not a safety issue.

@@ -36,7 +36,7 @@ fn namespace() -> Namespace {
 }
 
 /// The supplier id of the documents [`found`] builds.
-const SUPPLIER: u64 = 972_720;
+pub(super) const SUPPLIER: u64 = 972_720;
 
 /// szamlazz.hu's `<szamla>` XML of a live `SZ-1` of `ORD-1` from a test
 /// account with `supplier_id`, with the given `alap` elements overridden.
@@ -70,7 +70,7 @@ fn szamla_xml(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> String {
 }
 
 /// The document of [`szamla_xml`], parsed as a query answer.
-fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
+pub(super) fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
     use szamlazz_agent::InvoiceNumber;
     use szamlazz_agent::ops::query_pdf::InvoiceSelector;
     use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
@@ -225,9 +225,9 @@ fn agent_discovers_as_a_service_with_four_handlers() {
             }
             assert!(handler.output.is_some(), "{name} returns an output");
         } else {
+            // The two writes: two attempts, kill; the journal and the
+            // idempotency completion retained like `Szamlazz.Order`'s.
             assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
-            assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
-            assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
             assert_eq!(
                 handler.journal_retention,
                 Some(3 * 24 * 3_600_000),
@@ -238,6 +238,26 @@ fn agent_discovers_as_a_service_with_four_handlers() {
                 Some(30 * 24 * 3_600_000),
                 "{name}"
             );
+            if name == "storno" {
+                // The storno step is the same closure `Szamlazz.Order` sizes
+                // at 4m/3m (query, send, re-query at 60 s each — ADR 0004):
+                // anything shorter suspends a slow storno mid-step.
+                assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
+                assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
+            } else {
+                assert_eq!(name, "set_payments");
+                assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
+                assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
+                // `additive: true` is at-least-once: the retry after a crash
+                // re-sends, so it must wait out the 60 s client timeout —
+                // never the server's ~500 ms default — so that it cannot
+                // re-send while the first send is still in flight.
+                assert_eq!(
+                    handler.retry_policy_initial_interval,
+                    Some(120_000),
+                    "{name}"
+                );
+            }
         }
     }
 }
@@ -265,6 +285,130 @@ async fn services_bind_to_an_endpoint() {
         "a single-account deployment knows no scope"
     );
     let _endpoint = Endpoint::builder().bind(order).bind(agent).build();
+}
+
+/// A handler's body is decoded by the handler, not the SDK: `Body<T>`'s SDK
+/// `Deserialize` never fails — it keeps the verdict — so a malformed body
+/// reaches the handler and leaves it as the structured `invalid_input` fault
+/// (400, `{code, message}`) with serde's message, naming the field when there
+/// is one — never the SDK's plain-text `Cannot decode input payload`.
+#[test]
+fn a_malformed_body_is_a_structured_invalid_input() {
+    use bytes::Bytes;
+    use restate_sdk::errors::TerminalError;
+    use restate_sdk::serde::Deserialize as _;
+
+    use super::Body;
+    use crate::contract::document::tests::sample_document;
+    use crate::contract::{CreateRequest, DeleteProformaRequest, SetPaymentsRequest};
+
+    /// What the SDK hands the handler for `bytes`: the decode never fails.
+    fn body<T: for<'de> serde::Deserialize<'de>>(bytes: impl Into<Bytes>) -> Body<T> {
+        Body::<T>::deserialize(&mut bytes.into()).expect("never fails")
+    }
+
+    /// The message of the `invalid_input` fault (400) `bytes` is refused with.
+    fn refused<T>(bytes: impl Into<Bytes>) -> String
+    where
+        T: for<'de> serde::Deserialize<'de> + std::fmt::Debug,
+    {
+        let error = TerminalError::from(body::<T>(bytes).into_request().expect_err("refused"));
+        assert_eq!(error.code(), 400);
+        let fault: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(fault["code"], "invalid_input");
+        assert_eq!(fault.get("order"), None);
+        fault["message"].as_str().expect("message").to_owned()
+    }
+
+    let document = serde_json::to_value(sample_document()).expect("serialize");
+
+    // A well-formed body decodes to the request.
+    let request = body::<CreateRequest>(json!({"document": document}).to_string())
+        .into_request()
+        .expect("a well-formed body");
+    assert_eq!(request.document, sample_document());
+    assert!(!request.options.reissue);
+
+    // A misspelt option: refused, naming the field and the known ones.
+    let message = refused::<CreateRequest>(
+        json!({"document": document, "options": {"resissue": true}}).to_string(),
+    );
+    assert!(message.starts_with("malformed request body: "), "{message}");
+    assert!(message.contains("unknown field `resissue`"), "{message}");
+    assert!(message.contains("`reissue`"), "{message}");
+
+    // A wrong type, a missing required field and invalid JSON are the same
+    // fault; serde's message says what it can.
+    let message = refused::<DeleteProformaRequest>(json!({"force": "yes"}).to_string());
+    assert!(message.contains("expected a boolean"), "{message}");
+    let message = refused::<SetPaymentsRequest>(json!({"invoice_number": "SZ-1"}).to_string());
+    assert!(message.contains("missing field `entries`"), "{message}");
+    let message = refused::<CreateRequest>("not json");
+    assert!(message.contains("expected"), "{message}");
+    refused::<CreateRequest>(Bytes::new());
+}
+
+/// `Body<T>` changes how a body is decoded, not what the discovery manifest
+/// says about it: its schema and input metadata are `Json<T>`'s, so the
+/// `OpenAPI` export is unchanged and still carries `additionalProperties: false`
+/// for the request types.
+#[test]
+fn body_discovers_exactly_as_json() {
+    use restate_sdk::discovery::InputPayload;
+    use restate_sdk::serde::{Json, PayloadMetadata as _};
+
+    use super::Body;
+    use crate::contract::{
+        CorrectRequest, CreateRequest, DeleteProformaRequest, QueryRequest, SetPaymentsRequest,
+        StornoRequest,
+    };
+
+    macro_rules! same_as_json {
+        ($($request:ty),* $(,)?) => {$(
+            assert_eq!(
+                <Body<$request>>::json_schema(),
+                <Json<$request>>::json_schema(),
+                stringify!($request)
+            );
+            let body = InputPayload::from_metadata::<Body<$request>>();
+            let json = InputPayload::from_metadata::<Json<$request>>();
+            assert_eq!(body.content_type, json.content_type, stringify!($request));
+            assert_eq!(body.required, json.required, stringify!($request));
+            assert_eq!(body.json_schema, json.json_schema, stringify!($request));
+        )*};
+    }
+    same_as_json!(
+        CreateRequest,
+        CorrectRequest,
+        StornoRequest,
+        DeleteProformaRequest,
+        QueryRequest,
+        SetPaymentsRequest,
+    );
+
+    #[cfg(feature = "schemars")]
+    {
+        let schema = <Body<CreateRequest>>::json_schema().expect("a schema");
+        assert_eq!(schema["title"], "CreateRequest");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["$defs"]["CreateOptions"]["additionalProperties"],
+            false
+        );
+    }
+
+    // The discovery manifest of the services carries it: every handler with
+    // an input has a JSON input with the request's schema.
+    let discovery = <Order as Discoverable>::discover();
+    let create = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.as_str() == "create_invoice")
+        .expect("create_invoice");
+    let input = create.input.as_ref().expect("an input");
+    assert_eq!(input.content_type.as_deref(), Some("application/json"));
+    assert_eq!(input.required, Some(true));
+    assert_eq!(input.json_schema, <Json<CreateRequest>>::json_schema());
 }
 
 #[test]
@@ -422,7 +566,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
     let gateway = Gateway::open(account, credentials).expect("gateway");
     let outcome = gateway.verify("SZ-1").await;
-    let QueryOutcome::CredentialsRejected { code, message } = outcome.clone() else {
+    let Ok(QueryOutcome::CredentialsRejected { code, message }) = outcome.clone() else {
         panic!("expected CredentialsRejected, got {outcome:?}");
     };
     assert_eq!(code, "3");
@@ -483,7 +627,7 @@ async fn account_mismatch_never_leaks_the_agent_key() {
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
     let gateway = Gateway::open(account, credentials).expect("gateway");
     let verified = gateway.verify("SZ-2").await;
-    let QueryOutcome::Found(found) = verified.clone() else {
+    let Ok(QueryOutcome::Found(found)) = verified.clone() else {
         panic!("expected Found, got {verified:?}");
     };
     let mismatch = TerminalError::from(check_pins(gateway.account(), &found).expect_err("a fault"));
@@ -545,7 +689,23 @@ fn lookup_classifies_query_outcomes() {
         let lookup = classify(QueryOutcome::Found(other.clone()), Some(SUPPLIER)).expect(label);
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
     }
-    assert!(classify(QueryOutcome::Transport("down".to_owned()), None).is_err());
+    // Another szamlazz.hu code is an answer the handler cannot conclude from:
+    // the `unavailable` fault naming the code, as before the read policy.
+    let fault = classify(
+        QueryOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        },
+        None,
+    )
+    .expect_err("a fault");
+    let error = restate_sdk::errors::TerminalError::from(fault);
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("57"), "{message}");
+    assert!(message.contains("Ismeretlen hiba"), "{message}");
 
     // Rejected credentials are a fault of their own, not `unavailable`.
     let fault = classify(
@@ -560,6 +720,103 @@ fn lookup_classifies_query_outcomes() {
     assert_eq!(error.code(), 503);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "credentials_rejected");
+}
+
+/// A read step that ended without an answer — the read policy exhausted
+/// (500 carrying the last `Unanswered`) or the invocation cancelled (409) —
+/// is the `unavailable` fault naming the step and the last failure, about
+/// the document when the caller attaches one.
+#[test]
+fn an_exhausted_read_is_a_structured_unavailable() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::read_exhausted;
+    use crate::contract::IssuedKind;
+    use crate::identity::OrderKey;
+
+    let last = TerminalError::new_with_code(
+        500,
+        "transport failure: error decoding response body: empty response",
+    );
+    let fault = read_exhausted("lookup-invoice", &last);
+    let error = TerminalError::from(fault.clone());
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("lookup-invoice"), "{message}");
+    assert!(
+        message.contains("empty response"),
+        "names the last failure: {message}"
+    );
+    assert!(message.contains("500"), "{message}");
+    assert!(message.contains("Idempotency-Key"), "{message}");
+    assert_eq!(body.get("order"), None, "nothing attached yet");
+
+    let order = OrderKey::parse("ORD-1").expect("order");
+    let about = fault.about(&order, Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
+    let error = TerminalError::from(about);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["order"], "ORD-1");
+    assert_eq!(body["kind"], "invoice");
+    assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+
+    let cancelled = TerminalError::new_with_code(409, "cancelled");
+    let error = TerminalError::from(read_exhausted("get-proforma", &cancelled));
+    assert_eq!(error.code(), 503, "a cancellation is the same fault");
+    assert!(error.message().contains("409"), "{}", error.message());
+}
+
+/// The Virtual Object key must arrive trimmed (design §3): Restate's per-key
+/// lock is on the *raw* key, so `ORD-1` and ` ORD-1` would be two instances
+/// with two locks mapping to one szamlazz.hu order and identical external ids
+/// — two concurrent creates under them would both pass their lookup and both
+/// send. The handler refuses a key whose trimmed form differs from the raw
+/// one as `invalid_input` naming the rule; [`OrderKey::parse`] itself stays
+/// lenient for the places that parse an order number rather than a key.
+#[test]
+fn the_order_key_must_arrive_trimmed() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::order_key;
+    use crate::identity::OrderKey;
+
+    let key = order_key("ORD-1").expect("a trimmed key");
+    assert_eq!(key.as_str(), "ORD-1");
+    let key = order_key("rendelés #42").expect("inner single spaces are fine");
+    assert_eq!(key.as_str(), "rendelés #42");
+
+    for raw in [" ORD-1", "ORD-1 ", "\tORD-1", "ORD-1\n", "\u{a0}ORD-1"] {
+        assert_eq!(
+            OrderKey::parse(raw).expect("the type trims").as_str(),
+            "ORD-1",
+            "{raw:?}: OrderKey::parse stays lenient"
+        );
+        let fault = order_key(raw).expect_err("refused");
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 400, "{raw:?}");
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "invalid_input", "{raw:?}");
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("must not have leading or trailing whitespace"),
+            "{raw:?}: names the rule: {message}"
+        );
+        assert_eq!(body.get("order"), None, "{raw:?}: no order identity yet");
+    }
+
+    // The type's own rules still apply to a trimmed key, with its message.
+    let fault = order_key("a  b").expect_err("a whitespace run");
+    let body: serde_json::Value =
+        serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
+    assert_eq!(body["code"], "invalid_input");
+    assert!(
+        body["message"]
+            .as_str()
+            .expect("message")
+            .contains("consecutive whitespace"),
+        "{body}"
+    );
 }
 
 /// Every handler that finds a document checks it against the account the

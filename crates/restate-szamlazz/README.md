@@ -42,7 +42,7 @@ async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<d
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (the endpoint binary uses figment). `WorkerConfig` is the deployment-level part — the `namespace` of the external
-ids, the `[issue]` and `[resolve]` policies; call `validate()` after parsing. `StaticConfig` is the static
+ids and the three run retry policies, `[issue]`, `[read]` and `[resolve]`; call `validate()` after parsing. `StaticConfig` is the static
 resolver's configuration in one of two mutually exclusive shapes — a single `[account]`, served unscoped, or a table
 of `[accounts.<scope>]`, each served under its scope only (`/restate/scope/{scope}/call/…`) — and
 `StaticResolver::try_from` validates it and implements both the account resolver and the credential store;
@@ -146,15 +146,24 @@ activation details.
   carries the `DocumentInput` (buyer, line items, dates, payment method, per-call overrides) and `CreateOptions`
   (`reissue`, `proforma: auto | none | {number}`); the response carries the `Outcome`, the identity (`kind`,
   `external_id`), the numbers and totals, and `warnings`. `CorrectRequest` (`invoice_number`, `correction_id`,
-  `document`) is the input of `correct_invoice` and shares the response.
+  `document`) is the input of `correct_invoice` and shares the response. Every request type — and every object it
+  nests — is closed (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the schema): a field the
+  contract does not know is refused as `invalid_input` naming the field, never silently dropped. Response types stay
+  open.
+- `service::Body<T>`: how every handler takes its input — a `Json<T>` whose decode runs in the handler, so a
+  malformed body is the structured `invalid_input` fault instead of the SDK's plain-text 400. Same discovery
+  schema as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
 - `contract::Outcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
-  `conflict` with a reason — `prepaid_chain`, `live`, `foreign`, `duplicate_order_number`,
+  `conflict` with a reason — `prepaid_chain`, `order_invoiced` (a proforma after the order's own live invoice or
+  prepayment invoice), `live`, `foreign` (a live invoice under the order number that is under none of the order's
+  external ids — another channel's), `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
   `base_reversed`, `not_managed`.
 - `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),
   `unavailable` (503; also the prologue's own faults: the resolve policy exhausted, the credential store gone or
-  unavailable), `account_mismatch` (409: a document found by number — on `Szamlazz.Order`'s verifies,
-  `Szamlazz.Agent.query` or `storno` — belongs to another szamlazz.hu account than the resolved one; `set_payments`
+  unavailable), `account_mismatch` (409: a document found by number — on `Szamlazz.Order`'s verifies, including
+  the proforma of `options.proforma: {number}`, or on `Szamlazz.Agent.query` / `storno` — belongs to another
+  szamlazz.hu account than the resolved one; `set_payments`
   finds none and is exempt), `invalid_input` (400), `credentials_rejected`
   (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the request; the execution that
   raised it issued nothing) and `unknown_account` (400: the request names no account of this deployment).
@@ -172,15 +181,19 @@ activation details.
 - `CorrectionId`: the caller-supplied identity of one corrective invoice,
   `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; embedded in the corrective's external id.
 - `OrderKey`: the `Order` key — the order number trimmed of leading and trailing whitespace, case preserved,
-  validated (1–64 bytes, no control characters, no internal whitespace runs).
+  validated (1–64 bytes, no control characters, no internal whitespace runs). The type trims; the `Order` handlers
+  do not: a Virtual Object key with leading or trailing whitespace is refused as `invalid_input` naming the rule
+  (see "Identity Model").
 - `ExternalId`: the deterministic `szamlaKulsoAzon` of a document — `for_kind`, `for_corrective`,
   `for_storno`, `for_unmanaged_storno` — and `for_probe`, the two-segment `{namespace}:check-account` sentinel
   that nothing the service issues carries.
 - `WorkerConfig`: the deployment-level configuration the services hold — `namespace` (the `config::Namespace`, the
   external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`, permanent), `[issue]` (the issue policy:
-  `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`) and `[resolve]` (the resolve policy:
-  the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m` by default). `IssueConfig::run_retry_policy`
-  is the `RunRetryPolicy` of the create and storno steps, `ResolveConfig::run_retry_policy` that of the `account`
+  `max_attempts`, `initial_delay`, `factor`, `max_delay`, `max_duration`; `5` executions, `2m` → `10m`, bounded by
+  `1h` by default), `[read]` (the read policy: the same fields; `3` executions, `5s` → `30s`, bounded by `2m` by
+  default) and `[resolve]` (the resolve policy: the same fields without `max_attempts`; `1s` → `10s`, bounded by `1m`
+  by default). `IssueConfig::run_retry_policy` is the `RunRetryPolicy` of the create and storno steps,
+  `ReadConfig::run_retry_policy` that of every read-only step, `ResolveConfig::run_retry_policy` that of the `account`
   step. `validate()` checks the cross-field invariants. Nothing account-shaped is in it: document defaults and the
   seller block belong to the `Account` — their value types (`config::Defaults`, `config::SellerConfig`,
   `config::AccountMode`, and `config::Secret`, whose `Debug` output is redacted) live in `config` so that any
@@ -194,16 +207,18 @@ activation details.
   validates it, and `Accounts::from` bundles it as resolver and store.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
-  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`), each returning every expected szamlazz.hu outcome
-  as data; `create` and `storno` alone return `Err(Unconfirmed)` for an outcome that is *not* known, which is what
-  their run retry policy re-executes. It is not a second client: the Számla Agent `Client` is the transport it
-  wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
+  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `probe`), each returning every expected szamlazz.hu
+  outcome as data. Two `Err`s say what a run retry policy may re-execute: the read fns (`lookup`, `verify`, `query`,
+  `hint`, `lookup_storno`, `probe`) return `Err(Unanswered)` when szamlazz.hu did not answer — a transport or parse
+  failure, `szlahu_down` — and `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known.
+  It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
   per handler execution by the prologue (`Gateway::open`) and never outlives it. `Szamlazz.Order` calls it inside
   `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate service calls
   another.
 - `Order` / `Agent`: the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
   registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
-  handlers. Both are built `from_parts(Accounts, WorkerConfig)`; every handler runs the prologue — pin the
+  handlers. Both are built `from_parts(Accounts, WorkerConfig)`; every handler decodes its body (`Body<T>` — a
+  malformed one is `invalid_input` before anything is journaled) and runs the prologue — pin the
   namespace, resolve the account (`account` step), fetch the credentials, open the gateway — before its operation.
 
 ## Identity Model
@@ -212,7 +227,11 @@ Three identities work together ([ADR 0002](../../docs/adr/0002-order-keyed-idemp
 [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md)):
 
 - The **order key** decides which `Order` instance runs; same-key handlers run one at a time, which is what
-  serializes issuing per order. The object holds no state.
+  serializes issuing per order. The object holds no state. The key is the order number **trimmed by the caller**:
+  Restate's per-key lock is on the raw key, so `ORD-1` and ` ORD-1` would be two instances with two locks mapping
+  to one szamlazz.hu order and identical external ids, and two concurrent creates under them would both pass their
+  lookup and both send. A key with leading or trailing whitespace is therefore refused as `invalid_input` before
+  anything is journaled or sent.
 - The **external id** identifies a document to szamlazz.hu and is derived from the key alone under the
   deployment's namespace:
 
@@ -281,15 +300,19 @@ worker; callers authenticate to Restate ingress separately.
 Faults are `TerminalError`s with a JSON body `{ "code", "message", "order"?, "kind"?, "external_id"? }`; the
 ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. These are the six codes of
 `contract::TerminalCode`, which every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` also
-answer a by-number miss as 404 `not_found` and pass a szamlazz.hu error through as 422 with its own code:
+answer a by-number miss as 404 `not_found` and pass a szamlazz.hu error through as 422 with its own code. A malformed
+body is the same shape: every handler decodes its own body (`service::Body<T>`, not the SDK's `Json<T>`), so an
+unknown field, a wrong type, a missing required field or invalid JSON is `{ "code": "invalid_input", "message":
+"malformed request body: …" }` with serde's message, naming the field when there is one — never the SDK's
+plain-text `Cannot decode input payload`:
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `invalid_input` | 400 | The request is malformed or names a document szamlazz.hu does not know. | Fix the request. |
+| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type or a missing required field, or its `Order` key has leading or trailing whitespace; refused before anything is journaled or sent — or it names a document szamlazz.hu does not know, or an option the handler does not take. | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
-| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
-| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued. | Rule 2. |
-| `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent — or the account resolver or credential store could not answer. | Rule 2, later. |
+| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and is the one handler that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
+| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued — or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` — **at-least-once**: every send that reached szamlazz.hu appended the entries — query the invoice before re-sending; a replacing call is repeated as is. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4). | Page the operator; then rule 2. |
 
 A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
@@ -302,18 +325,33 @@ Retry policy ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries
 szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2, `max_interval = 10m`,
 `max_attempts = 5`, `on_max_attempts = kill`, with `inactivity_timeout = 4m`, `abort_timeout = 3m`,
 `journal_retention = 3d` and `idempotency_retention = 30d`; `get` uses `max_attempts = 3` and
-`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.set_payments` and `storno` use two
-attempts, `query` and `check_account` three with the same one-day journal retention. Kill, not pause: a paused invocation
+`journal_retention = 1d` (inspectable, nothing to replay). `Szamlazz.Agent.storno` uses two attempts with
+`Szamlazz.Order`'s timeouts (its storno step is the same closure); `set_payments` two attempts with an explicit
+`initial_interval = 2m` — longer than the 60 s client timeout, so the retry after a crash cannot re-send while the
+first send is still in flight, which matters because an additive send is at-least-once; `query` and `check_account`
+three with the same one-day journal retention. Kill, not pause: a paused invocation
 holds the order's key and blocks the very handler that would reconcile it. Kill releases the key, and the
 external-id query inside the create step is what makes that safe.
 
 Inside a handler, issuing is two durable steps. The **lookup** (`lookup-{kind}`) is read-only and settles every
 case that needs no create: a live document of ours is `already_issued` (or `conflict{live}` with `reissue`), a
 reversed one is `reversed` (or proceeds with `reissue`), an invalid holder is `conflict{external_id_collision}`, a
-live invoice under the order that is not ours is `conflict{foreign}`. The **create** (`create-{kind}`) runs under
+live invoice under the order that is not ours is `conflict{foreign}`. Like every read-only step of both services —
+the exclusivity and proforma-link lookups before it, the verifies, the order-number hint, the storno lookup, `get`'s
+four queries, `Szamlazz.Agent.query`, the `check_account` probe — it runs under the **read policy** (`[read]`: `3`
+executions `5s` → `30s`, bounded by `2m` by default): every szamlazz.hu *answer* is journaled data, and a query
+szamlazz.hu did not answer — a transport or parse failure, `szlahu_down` — is the step's retryable error
+(`Unanswered`), re-executed after the policy's delay; a read writes nothing, so re-executing it is safe and its
+answer is as fresh as a first one. When the read policy is exhausted the handler fails with
+`TerminalError{unavailable}` naming the step, the last failure and — where the step knows it — the order, kind and
+external id. The **create** (`create-{kind}`) runs under
 the issue policy — `[issue]`: `max_attempts` executions, `initial_delay` growing by `factor` to `max_delay`,
-bounded by `max_duration` — and every execution is query-first: it finds what an earlier execution issued and
-sends nothing. A lost reply is re-queried once, immediately; when nothing landed the step is *unconfirmed* and
+bounded by `max_duration` — and every execution is query-first: it sends only when the external id holds
+**nothing**, or **exactly the document the lookup step saw reversed**; a live document an earlier execution issued
+is answered `issued` without sending, a document reversed since the lookup is answered `reversed` without sending
+(a new document needs an explicit `reissue`, [ADR 0003](../../docs/adr/0003-explicit-reissue-after-external-reversal.md)),
+and the lookup's reversed document reported live is `conflict{live}`. A lost reply is re-queried once, immediately;
+when nothing landed the step is *unconfirmed* and
 Restate re-executes it after the delay. When the policy is exhausted (or the invocation is cancelled mid-create)
 the handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next
 invocation's lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number
@@ -323,24 +361,40 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
 
 ## Testing
 
-- `cargo test -p restate-szamlazz` runs the contract, config and identity unit tests, the discovery and binding
-  tests of the adapters (with the account pins of a document found by number and the sentinels that the agent key
-  reaches neither the `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch`
-  fault), and the wiremock tests of the gateway against synthetic szamlazz.hu responses
+- `cargo test -p restate-szamlazz` runs the contract, config and identity unit tests (every request type refusing an
+  unknown top-level and nested field by name while the documented bodies still deserialize; with `--features
+  schemars`, every request schema closed with `additionalProperties: false` and the response schemas open), the
+  discovery and binding tests of the adapters (with `Body<T>` turning a malformed body — an unknown field, a wrong
+  type, a missing field, invalid JSON — into the 400 `invalid_input` fault while discovering exactly as `Json<T>`,
+  the account pins of a document found by number, the `Order` handlers' key parsing refusing an untrimmed key as
+  `invalid_input` while `OrderKey::parse` still trims, and the sentinels that the agent key reaches neither the
+  `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch` fault), and the
+  wiremock tests of the gateway against synthetic szamlazz.hu responses
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
-  exemption from the hint — and the create step — `Issued`, `Found` on a re-executed step, the open codes and
-  `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 → `Rejected` — the storno lookup and step — `AlreadyReversed`
-  on a re-executed step, a lost reply re-queried once, `Unconfirmed` when nothing landed — plus storno validation
-  including the proforma / delivery-note no-op, 335, 7, the credential codes 3/135/136/164 on every operation, and
-  the `check_account` probe as exactly one query of the sentinel id with a wrong key as data).
+  exemption from the hint, `Unanswered` on a lost reply and `Api` on another code — and the create step — `Issued`,
+  `Found` on a re-executed step, the open codes and `Unconfirmed`, the 71/152 matrix, the corrective's 71/152 →
+  `Rejected` — the storno lookup and step — `AlreadyReversed` on a re-executed step, a lost reply re-queried once,
+  `Unconfirmed` when nothing landed — plus storno validation including the proforma / delivery-note no-op, 335, 7,
+  the credential codes 3/135/136/164 on every operation, every read fn answering a 500, an empty body or
+  `szlahu_down` as `Err(Unanswered)` rather than data, and the `check_account` probe as exactly one query of the
+  sentinel id with a wrong key as data).
 - `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
   and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
   `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
   for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued, `Idempotency-Key`
   replay, 152 → reconciled, storno → reversed → stale create → `reissue`, `reissue` on live → `conflict{live}`, an
-  external reversal, proforma auto-link and `consumed` in `get`, an exhausted create step answering a structured
+  external reversal, proforma auto-link and `consumed` in `get`, `options.proforma: {number}` checked like every
+  found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
+  the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
+  order's → `issued` with `dijbekeroSzamlaszam` on the wire), a create with a misspelt `options.reissue` answered
+  400 `invalid_input` naming the field with nothing journaled and zero szamlazz.hu requests, a create under an
+  untrimmed key (a `%20` before or after the order number) answered 400 `invalid_input` naming the rule with nothing
+  journaled and zero szamlazz.hu requests, an exhausted create step answering a structured
   `outcome_unknown` within the run policy's delays with the run's retries visible on `sys_invocation` while it is in
-  flight, a scoped call answered `unknown_account` with zero szamlazz.hu requests, `check_account` unscoped answering
+  flight, a lookup whose reply is lost once retried under the read policy and completing `issued` in one invocation
+  with exactly one create on the wire, a lookup that never answers as a structured `unavailable` naming the order,
+  kind and external id with zero creates, `get` completing after one of its reads is retried, a scoped call answered
+  `unknown_account` with zero szamlazz.hu requests, `check_account` unscoped answering
   the account with `credentials: ok` after one sentinel query (and `rejected` as data on code 3), a purged invocation querying
   szamlazz.hu again, a flaky resolver retried under the resolve policy, a failing credential store as a terminal
   `unavailable`, and a positive control for the journal-leak check (a sentinel in a szamlazz.hu rejection is found in
@@ -353,7 +407,8 @@ on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Age
   order whose invocations were purged stornoed and reissued; `Szamlazz.Agent.storno` refusing a document whose
   `teszt` or `szallito/id` is not the resolved account's as `account_mismatch` after the verify alone (storno mock
   `expect(0)`), not checking the supplier id when the account pins none, reversing a document of the account's own
-  pins, and answering an order-bearing document `managed_by_order` before any pin is looked at; `Szamlazz.Agent.query`
+  pins, and checking an order-bearing document's pins before answering it — mismatched pins `account_mismatch`
+  without echoing the other account's order number, the account's own pins `managed_by_order`; `Szamlazz.Agent.query`
   answering a mismatched document `account_mismatch`, a matching one as the projection and code 7 as `not_found`; an account
   change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
   rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that

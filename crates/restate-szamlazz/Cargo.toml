@@ -18,6 +18,7 @@ schemars = ["dep:schemars", "restate-sdk/schemars"]
 [dependencies]
 szamlazz-agent = { workspace = true, features = ["client-reqwest"] }
 
+bytes = { workspace = true }
 http = { workspace = true }
 jiff = { workspace = true }
 restate-sdk = { workspace = true }

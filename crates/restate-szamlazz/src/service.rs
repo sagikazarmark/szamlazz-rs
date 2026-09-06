@@ -31,12 +31,14 @@ use crate::account::Accounts;
 use crate::config::WorkerConfig;
 
 mod agent;
+mod body;
 mod create;
 mod handlers;
 mod prologue;
 mod storno;
 mod support;
 
+pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
 
 use prologue::Execution;

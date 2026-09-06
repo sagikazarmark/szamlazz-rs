@@ -2384,6 +2384,7 @@ dependencies = [
 name = "restate-szamlazz"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "http",
  "jiff",
  "reqwest",

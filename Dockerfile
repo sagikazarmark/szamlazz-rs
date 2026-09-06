@@ -31,10 +31,25 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# The binary needs no writable filesystem and no privilege: run it as a
+# dedicated system user. The uid is fixed so a mounted config file can be made
+# readable for it.
+RUN groupadd --system --gid 65532 nonroot && \
+    useradd --system --uid 65532 --gid nonroot --no-create-home --home-dir /nonexistent \
+    --shell /usr/sbin/nologin nonroot
+
 COPY --from=builder /usr/local/bin/restate-szamlazz /usr/local/bin/
 
 ENV RUST_LOG=info
 
 EXPOSE 9080
+
+# Numeric, so Kubernetes' `runAsNonRoot` can verify it without resolving the
+# name inside the image.
+USER 65532:65532
+
+# The default, made explicit: the binary drains open connections and exits 0 on
+# SIGTERM (and SIGINT).
+STOPSIGNAL SIGTERM
 
 CMD ["restate-szamlazz"]

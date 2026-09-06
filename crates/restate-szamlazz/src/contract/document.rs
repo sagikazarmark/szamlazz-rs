@@ -5,7 +5,10 @@
 //! constants live on the resolved [`Account`](crate::account::Account) (its
 //! [`Defaults`](crate::config::Defaults) and seller block), line totals are
 //! computed here, and the payment method is an English enum. Each type
-//! converts into its `szamlazz_agent` counterpart.
+//! converts into its `szamlazz_agent` counterpart. Like every request type,
+//! each refuses a field it does not know (`#[serde(deny_unknown_fields)]`):
+//! a misspelt `buyer.tax_number` is an error naming the field, not an invoice
+//! without the buyer's tax number.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -20,6 +23,7 @@ use szamlazz_agent::{Currency, LineItem, VatRate};
 /// [`DocumentInput::overrides`] can change a subset of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct DocumentInput {
     /// The buyer (`vevő`).
     pub buyer: BuyerInput,
@@ -77,7 +81,7 @@ impl DocumentInput {
 /// Every field is optional; an absent field keeps the configured value.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DocumentOverrides {
     /// Document language as a szamlazz.hu code (`hu`, `en`, `de`, …).
     pub language: Option<String>,
@@ -101,6 +105,7 @@ pub struct DocumentOverrides {
 /// Exchange rate information (`árfolyam`) for non-HUF documents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ExchangeRateInput {
     /// The quoting bank (`árfolyam bank`), e.g. `MNB`.
     pub bank: String,
@@ -124,6 +129,7 @@ impl From<ExchangeRateInput> for ExchangeRate {
 /// The buyer (`vevő`) of a document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct BuyerInput {
     /// Name (`név`). Normalised (trimmed, NFC) before issuing so every attempt
     /// sends byte-identical bytes.
@@ -213,7 +219,7 @@ impl From<BuyerInput> for Buyer {
 /// Postal/delivery address of the buyer (`postázási cím`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PostalAddressInput {
     /// Recipient name.
     pub name: Option<String>,
@@ -277,6 +283,7 @@ impl From<TaxpayerStatus> for szamlazz_agent::TaxpayerStatus {
 /// szamlazz.hu verifies server-side always holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct LineItemInput {
     /// Item name (`megnevezés`).
     pub name: String,
@@ -428,6 +435,21 @@ pub(crate) mod tests {
         document
     }
 
+    /// Deserializing `body` as `T` is refused with serde's unknown-field
+    /// error naming `field` — what reaches the caller in the `invalid_input`
+    /// fault's message. Shared with the request types' tests.
+    pub(crate) fn refuses_unknown_field<T>(body: serde_json::Value, field: &str)
+    where
+        T: for<'de> serde::Deserialize<'de> + std::fmt::Debug,
+    {
+        let error = serde_json::from_value::<T>(body).expect_err("an unknown field is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("unknown field `{field}`")),
+            "{message}"
+        );
+    }
+
     #[test]
     fn document_input_round_trips() {
         let document = sample_document();
@@ -456,6 +478,59 @@ pub(crate) mod tests {
             PaymentMethod::Other("Bitcoin".to_owned())
         );
         assert_eq!(document.items[0].vat_rate(), VatRate::Aam);
+    }
+
+    /// A misspelt field anywhere in the document is refused, never dropped: a
+    /// `buyer.tax_numer` would otherwise issue an invoice without the buyer's
+    /// tax number.
+    #[test]
+    fn document_input_refuses_unknown_fields() {
+        let document = serde_json::to_value(sample_document()).expect("serialize");
+        // The sample document with `field` set to `value` at the JSON pointer
+        // `at` (`""` is the root).
+        let with = |at: &str, field: &str, value: serde_json::Value| {
+            let mut body = document.clone();
+            body.pointer_mut(at).expect("a path into the sample")[field] = value;
+            body
+        };
+
+        refuses_unknown_field::<DocumentInput>(
+            with("", "order_number", json!("ORD-1")),
+            "order_number",
+        );
+        refuses_unknown_field::<DocumentInput>(
+            with("/buyer", "tax_numer", json!("1-2-3")),
+            "tax_numer",
+        );
+        refuses_unknown_field::<DocumentInput>(
+            with("/items/0", "unit_pirce", json!("1")),
+            "unit_pirce",
+        );
+        refuses_unknown_field::<DocumentInput>(
+            with("/overrides", "langauge", json!("en")),
+            "langauge",
+        );
+
+        refuses_unknown_field::<BuyerInput>(
+            json!({
+                "name": "A", "zip": "1", "city": "B", "address": "C",
+                "postal_address": {"name": "A", "citty": "B"},
+            }),
+            "citty",
+        );
+        refuses_unknown_field::<PostalAddressInput>(json!({"street": "x"}), "street");
+        refuses_unknown_field::<LineItemInput>(
+            json!({"name": "x", "quantity": "1", "unit": "db", "unit_price": "100", "vat_rate": "27", "net": "100"}),
+            "net",
+        );
+        refuses_unknown_field::<DocumentOverrides>(
+            json!({"exchange_rate": {"bank": "MNB", "rat": "400"}}),
+            "rat",
+        );
+        refuses_unknown_field::<ExchangeRateInput>(
+            json!({"bank": "MNB", "currency": "EUR"}),
+            "currency",
+        );
     }
 
     #[test]

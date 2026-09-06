@@ -295,8 +295,10 @@ pub enum TerminalCode {
     /// may or may not have been issued; the next call's external-id query
     /// finds whatever landed.
     OutcomeUnknown,
-    /// szamlazz.hu could not be reached for a check that must succeed before
-    /// anything is issued.
+    /// szamlazz.hu did not answer a read-only step through every execution
+    /// the read policy allows (or answered it with a code nothing can be
+    /// concluded from), or the account resolver or credential store could not
+    /// answer. Nothing was sent by the execution that raised it.
     Unavailable,
     /// A document found by number belongs to a different szamlazz.hu account
     /// than the one the invocation resolved to: its `teszt` is not the
@@ -492,5 +494,110 @@ mod tests {
         let status = serde_json::to_value(schemars::schema_for!(OrderStatus)).expect("serialize");
         assert!(status["properties"]["final"].is_object());
         assert!(status["$defs"]["DocumentStatus"].is_object());
+    }
+
+    /// Every request type's schema — and every object it nests, the object
+    /// variants of its enums included — is closed (`additionalProperties:
+    /// false`), so the `OpenAPI` export tightens with the code. Response
+    /// schemas stay open: a client must tolerate fields added later.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn request_schemas_are_closed_and_response_schemas_are_open() {
+        /// Every object schema under `schema` — the root, each `$defs` entry
+        /// and each object variant of a `oneOf` — as `(title, schema)`.
+        fn objects(schema: &serde_json::Value) -> Vec<(String, &serde_json::Value)> {
+            fn is_object(schema: &serde_json::Value) -> bool {
+                schema["type"] == "object" || schema["properties"].is_object()
+            }
+            fn collect<'a>(
+                title: &str,
+                schema: &'a serde_json::Value,
+                found: &mut Vec<(String, &'a serde_json::Value)>,
+            ) {
+                if is_object(schema) {
+                    found.push((title.to_owned(), schema));
+                }
+                if let Some(variants) = schema["oneOf"].as_array() {
+                    for (index, variant) in variants.iter().enumerate() {
+                        collect(&format!("{title}/oneOf/{index}"), variant, found);
+                    }
+                }
+            }
+            let title = schema["title"].as_str().unwrap_or("<root>");
+            let mut found = Vec::new();
+            collect(title, schema, &mut found);
+            if let Some(defs) = schema["$defs"].as_object() {
+                for (name, def) in defs {
+                    collect(name, def, &mut found);
+                }
+            }
+            found
+        }
+
+        let requests = [
+            ("CreateRequest", schemars::schema_for!(CreateRequest)),
+            ("CorrectRequest", schemars::schema_for!(CorrectRequest)),
+            ("StornoRequest", schemars::schema_for!(StornoRequest)),
+            (
+                "DeleteProformaRequest",
+                schemars::schema_for!(DeleteProformaRequest),
+            ),
+            ("QueryRequest", schemars::schema_for!(QueryRequest)),
+            (
+                "SetPaymentsRequest",
+                schemars::schema_for!(SetPaymentsRequest),
+            ),
+        ];
+        let mut nested = std::collections::BTreeSet::new();
+        for (name, schema) in &requests {
+            let json = serde_json::to_value(schema).expect("serialize");
+            assert_eq!(json["title"], *name);
+            for (title, object) in objects(&json) {
+                assert_eq!(
+                    object["additionalProperties"],
+                    serde_json::Value::Bool(false),
+                    "{name}: {title} must refuse unknown fields: {object}"
+                );
+                nested.insert(title);
+            }
+        }
+        // The nested request objects are all there — none slipped through as
+        // a bare `properties` map without the guard — and so are the object
+        // variants of the request enums (`{"number": …}`, `{"other": …}`,
+        // the selectors).
+        for expected in [
+            "CreateOptions",
+            "DocumentInput",
+            "BuyerInput",
+            "PostalAddressInput",
+            "LineItemInput",
+            "DocumentOverrides",
+            "ExchangeRateInput",
+            "PaymentEntry",
+            "ProformaLink/oneOf/2",
+            "PaymentMethod/oneOf/7",
+            "Selector/oneOf/0",
+            "Selector/oneOf/1",
+            "Selector/oneOf/2",
+        ] {
+            assert!(nested.contains(expected), "{expected} not in {nested:?}");
+        }
+
+        for schema in [
+            schemars::schema_for!(CreateResponse),
+            schemars::schema_for!(StornoResponse),
+            schemars::schema_for!(QueryResponse),
+            schemars::schema_for!(OrderStatus),
+            schemars::schema_for!(CheckAccountResponse),
+        ] {
+            let json = serde_json::to_value(&schema).expect("serialize");
+            for (title, object) in objects(&json) {
+                assert_eq!(
+                    object.get("additionalProperties"),
+                    None,
+                    "{title} is a response and stays open: {object}"
+                );
+            }
+        }
     }
 }

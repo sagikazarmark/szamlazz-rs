@@ -626,8 +626,9 @@ fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
 /// The deployment-level settings of both phases — the flag day keeps the
 /// namespace — with short policies: two executions of the create step one
 /// second apart, so exhaustion and re-execution are observable within the
-/// test, and a one-second resolve policy so a scripted outage is retried
-/// within it.
+/// test; three executions of a read step one second apart, so a retried and
+/// an exhausted read are observable within the `watch` window; and a
+/// one-second resolve policy so a scripted outage is retried within it.
 fn worker_config() -> WorkerConfig {
     let worker: WorkerConfig = serde_json::from_value(json!({
         "namespace": "acct",
@@ -637,6 +638,13 @@ fn worker_config() -> WorkerConfig {
             "factor": 2.0,
             "max_delay": "2s",
             "max_duration": "1m",
+        },
+        "read": {
+            "max_attempts": 3,
+            "initial_delay": "1s",
+            "factor": 1.0,
+            "max_delay": "1s",
+            "max_duration": "30s",
         },
     }))
     .expect("config");
@@ -1020,15 +1028,19 @@ impl Harness {
 
     /// `Szamlazz.Order.get`: no input, no idempotency key.
     async fn get(&self, key: &str) -> Value {
-        let reply = self
-            .invoke(
-                &format!("/restate/call/Szamlazz.Order/{key}/get"),
-                None,
-                None,
-            )
-            .await;
+        let reply = self.get_reply(key).await;
         assert_eq!(reply.status, 200, "get on {key}: {}", reply.body);
         reply.body
+    }
+
+    /// `Szamlazz.Order.get` as the raw reply, for the invocation id.
+    async fn get_reply(&self, key: &str) -> Reply {
+        self.invoke(
+            &format!("/restate/call/Szamlazz.Order/{key}/get"),
+            None,
+            None,
+        )
+        .await
     }
 
     /// `Szamlazz.Order.get` under `scope`.
@@ -1290,11 +1302,19 @@ async fn e2e_order_protocol() {
     storno_then_stale_create_then_reissue(&h).await;
     reissue_on_live_is_a_conflict(&h).await;
     external_reversal_detected(&h).await;
+    reversal_between_executions_is_reversed_not_reissued(&h).await;
     proforma_auto_link_and_consumed(&h).await;
+    proforma_by_number_is_checked_like_every_found_document(&h).await;
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
+    proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(&h).await;
+    a_malformed_body_is_a_structured_invalid_input(&h).await;
+    an_untrimmed_order_key_is_refused(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
+    flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
+    exhausted_lookup_read_is_a_structured_unavailable(&h).await;
+    flaky_get_read_is_retried_by_the_read_policy(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
     check_account_names_the_account_and_reports_the_credentials(&h).await;
     purged_invocation_queries_szamlazz_again(&h).await;
@@ -1651,12 +1671,84 @@ async fn external_reversal_detected(h: &Harness) {
     eprintln!("(vi) sztornozott on the lookup → reversed: pass");
 }
 
+/// (vi-b) the hole #36 closes, end to end: the lookup sees nothing, the
+/// first execution of the create step sends (the document lands, the reply
+/// is lost, the immediate re-query still misses), and before the run policy
+/// re-executes the step the document is reversed in the szamlazz.hu UI. The
+/// second execution's leading query finds it reversed and **does not send
+/// again**: `outcome: reversed`, exactly one create on the wire.
+async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-6B", &["prepayment", "proforma"]).await;
+    order_query("E2E-6B")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The lookup step, the first execution's leading query and its re-query
+    // miss; the second execution's leading query finds the document
+    // reversed.
+    external_id_query("acct:E2E-6B:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(3)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-6B:invoice")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::new("SZ-6B", "SZ", "E2E-6B")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let reply = h
+        .call(
+            "E2E-6B",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-6b-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let response = &reply.body;
+    assert_eq!(response["outcome"], "reversed", "{response}");
+    assert_eq!(response["invoice_number"], "SZ-6B");
+    assert_eq!(response["storno_number"], Value::Null);
+
+    // The create step was re-executed (one run retry) and journaled once.
+    let journal = h.journal(reply.invocation_id()).await;
+    let runs: Vec<_> = journal
+        .iter()
+        .filter(|entry| entry.is_run())
+        .filter_map(|entry| entry.name.as_deref())
+        .collect();
+    assert_eq!(
+        runs.iter()
+            .filter(|name| **name == "create-invoice")
+            .count(),
+        1,
+        "one create step entry: {runs:?}"
+    );
+    eprintln!(
+        "(vi-b) document reversed between two executions of the create step → reversed, one create on the wire: pass"
+    );
+}
+
 /// (vii) a proforma, then an invoice with the default `proforma: auto` ⇒ the
 /// create carries `dijbekeroSzamlaszam`; `get` then reports the proforma
 /// `consumed` by the invoice.
 async fn proforma_auto_link_and_consumed(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-7", &["proforma"]).await;
+    // The proforma create checks that the order is not invoiced yet.
+    h.absent("E2E-7", &["invoice", "prepayment", "proforma"])
+        .await;
     order_query("E2E-7")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -1733,6 +1825,141 @@ async fn proforma_auto_link_and_consumed(h: &Harness) {
     assert_eq!(status["invoice"]["number"], "SZ-7");
     assert_eq!(status["invoice"]["referenced_proforma"], "D-7");
     eprintln!("(vii) proforma → invoice (auto link) → get shows consumed: pass");
+}
+
+/// (vii-b) `options.proforma: {number}` validates the named proforma like
+/// every other document found by number (design §3, §5 step 2): a proforma
+/// whose `teszt` is not the resolved account's mode is `account_mismatch`
+/// (409) after the verify alone — nothing sent, the fault names the observed
+/// pin and never the key; a proforma carrying another order's number, or
+/// none, is `conflict{not_managed, existing_number}` — another order's live
+/// proforma cannot be linked into this order's invoice; a proforma of this
+/// order proceeds as before and the create carries `dijbekeroSzamlaszam`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the three answers of the named proforma's check"
+)]
+async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
+    let body = |number: &str| {
+        json!({
+            "document": document(dec!(1000)),
+            "options": { "proforma": { "number": number } },
+        })
+    };
+
+    // A live-account proforma of this order, on the test account.
+    h.reset().await;
+    h.absent("E2E-30", &["prepayment"]).await;
+    number_query("D-30")
+        .respond_with(
+            Doc {
+                test: false,
+                ..Doc::new("D-30", "D", "E2E-30")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-30", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-30", "create_invoice", &body("D-30"), "e2e-30-k1")
+        .await;
+    reply.assert_account_mismatch("D-30", "teszt = false");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "verify-proforma-D-30"
+        ],
+        "the verify is the last step journaled"
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        2,
+        "the exclusivity lookup and the verify, nothing else"
+    );
+
+    // Another order's proforma, and one carrying no order number at all.
+    for (number, order) in [("D-31", Some("E2E-31")), ("D-32", None)] {
+        h.reset().await;
+        h.absent("E2E-30", &["prepayment"]).await;
+        number_query(number)
+            .respond_with(
+                Doc {
+                    order,
+                    ..Doc::unmanaged(number, "D")
+                }
+                .response(),
+            )
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        create()
+            .respond_with(created("SZ-30", "1000", "1270"))
+            .expect(0)
+            .mount(&h.mock)
+            .await;
+        let response = h
+            .ok(
+                "E2E-30",
+                "create_invoice",
+                &body(number),
+                &format!("e2e-30-{number}"),
+            )
+            .await;
+        assert_eq!(response["outcome"], "conflict", "{number}: {response}");
+        assert_eq!(
+            response["conflict_reason"], "not_managed",
+            "{number}: {response}"
+        );
+        assert_eq!(response["existing_number"], number, "{number}: {response}");
+        assert_eq!(response["kind"], "invoice", "{number}: {response}");
+        assert_eq!(
+            response["external_id"], "acct:E2E-30:invoice",
+            "{number}: {response}"
+        );
+        assert_eq!(
+            h.requests_seen().await,
+            2,
+            "{number}: the exclusivity lookup and the verify, nothing else"
+        );
+    }
+
+    // A proforma of this order: the create proceeds and carries
+    // `dijbekeroSzamlaszam`.
+    h.reset().await;
+    h.absent("E2E-30", &["prepayment", "invoice"]).await;
+    number_query("D-33")
+        .respond_with(Doc::new("D-33", "D", "E2E-30").response())
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-30")
+        .respond_with(Doc::new("D-33", "D", "E2E-30").response())
+        .mount(&h.mock)
+        .await;
+    create()
+        .and(body_string_contains(
+            "<dijbekeroSzamlaszam>D-33</dijbekeroSzamlaszam>",
+        ))
+        .respond_with(created("SZ-30", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let invoice = h
+        .ok("E2E-30", "create_invoice", &body("D-33"), "e2e-30-k4")
+        .await;
+    assert_eq!(invoice["outcome"], "issued", "{invoice}");
+    assert_eq!(invoice["invoice_number"], "SZ-30");
+    eprintln!(
+        "(vii-b) proforma by number: teszt mismatch → account_mismatch with nothing sent; another order's or an order-less proforma → conflict{{not_managed}}; this order's → issued with dijbekeroSzamlaszam: pass"
+    );
 }
 
 /// (viii) the `get` live view after (iv)/(v).
@@ -1853,6 +2080,220 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
     eprintln!("(x) create_prepayment: proforma option refused, no proforma lookup: pass");
 }
 
+/// (x-a) `create_proforma` on an order whose invoice or prepayment invoice is
+/// live: our own document (under `…:invoice` / `…:prepayment`) is
+/// `conflict{order_invoiced, existing_number}` — a proforma after the invoice
+/// makes no sense, but the invoice is ours, not another channel's — while a
+/// live invoice under the order number that is under none of our ids stays
+/// `conflict{foreign}`. Nothing is created either way.
+async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Harness) {
+    let body = json!({ "document": document(dec!(1000)) });
+
+    // Our own live invoice, then our own live prepayment invoice.
+    for (ours, other, number, tipus) in [
+        ("invoice", "prepayment", "SZ-33", "SZ"),
+        ("prepayment", "invoice", "ES-33", "ES"),
+    ] {
+        h.reset().await;
+        h.absent("E2E-33", &[other, "proforma"]).await;
+        external_id_query(&format!("acct:E2E-33:{ours}"))
+            .respond_with(Doc::new(number, tipus, "E2E-33").response())
+            .mount(&h.mock)
+            .await;
+        order_query("E2E-33")
+            .respond_with(Doc::new(number, tipus, "E2E-33").response())
+            .mount(&h.mock)
+            .await;
+        create()
+            .respond_with(created("D-33", "1000", "1270"))
+            .expect(0)
+            .mount(&h.mock)
+            .await;
+        let conflict = h
+            .ok(
+                "E2E-33",
+                "create_proforma",
+                &body,
+                &format!("e2e-33-p-{ours}"),
+            )
+            .await;
+        assert_eq!(conflict["outcome"], "conflict", "{ours}: {conflict}");
+        assert_eq!(
+            conflict["conflict_reason"], "order_invoiced",
+            "{ours}: {conflict}"
+        );
+        assert_eq!(conflict["existing_number"], number, "{ours}");
+        assert_eq!(conflict["kind"], "proforma");
+        assert_eq!(conflict["external_id"], "acct:E2E-33:proforma");
+    }
+
+    // A live invoice under the order number that is under none of our ids.
+    h.reset().await;
+    h.absent("E2E-33", &["invoice", "prepayment", "proforma"])
+        .await;
+    order_query("E2E-33")
+        .respond_with(Doc::new("SZ-FOREIGN", "SZ", "E2E-33").response())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("D-33", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let conflict = h
+        .ok("E2E-33", "create_proforma", &body, "e2e-33-p-foreign")
+        .await;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(conflict["conflict_reason"], "foreign", "{conflict}");
+    assert_eq!(conflict["existing_number"], "SZ-FOREIGN");
+    eprintln!(
+        "(x-a) create_proforma after our invoice → conflict{{order_invoiced}}; after a foreign one → conflict{{foreign}}: pass"
+    );
+}
+
+/// (x-b) a malformed body — one carrying a field the contract does not
+/// know, a misspelt `reissue` — is refused as the structured `invalid_input`
+/// fault (400, `{code, message}` naming the field), not accepted as
+/// `reissue: false` and not the SDK's plain-text `Cannot decode input
+/// payload`. Refused before the prologue: nothing journaled, nothing sent,
+/// the create mock `expect(0)`. A nested misspelling and a wrong type are
+/// the same fault.
+async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) {
+    h.reset().await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let before = h.requests_seen().await;
+    let reply = h
+        .call(
+            "E2E-10b",
+            "create_invoice",
+            &json!({ "document": document(dec!(1000)), "options": { "resissue": true } }),
+            "e2e-10b-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(
+        fault.message.contains("unknown field `resissue`"),
+        "names the field: {fault:?}"
+    );
+    assert_eq!(fault.order, None, "{fault:?}");
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+    assert!(
+        h.runs(reply.invocation_id()).await.is_empty(),
+        "refused before the prologue: nothing journaled"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("invalid_input")),
+        "{invocation:?}"
+    );
+
+    // A nested one — `buyer.tax_numer` — and a wrong type are the same
+    // fault; the caller never gets an invoice without the tax number.
+    let mut body = json!({ "document": document(dec!(1000)) });
+    body["document"]["buyer"]["tax_numer"] = json!("12345678-2-42");
+    let reply = h
+        .call("E2E-10b", "create_invoice", &body, "e2e-10b-k2")
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(fault.message.contains("`tax_numer`"), "{fault:?}");
+
+    let reply = h
+        .call(
+            "E2E-10b",
+            "delete_proforma",
+            &json!({ "force": "yes" }),
+            "e2e-10b-k3",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(reply.fault().code, "invalid_input", "{}", reply.body);
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+    eprintln!("(x-b) malformed body → structured invalid_input, nothing issued: pass");
+}
+
+/// (x-c) a Virtual Object key that is not trimmed — `%20E2E-10c`, which the
+/// ingress decodes to ` E2E-10c` — is refused as `invalid_input` naming the
+/// rule. Restate's per-key lock is on the *raw* key, so ` E2E-10c` and
+/// `E2E-10c` would be two instances with two locks mapping to one szamlazz.hu
+/// order and identical external ids, and two concurrent creates under them
+/// would both pass their lookup and both send; the caller trims (design §3).
+/// Refused after the body decode and before the prologue: nothing journaled,
+/// nothing sent, the create mock `expect(0)`. A trailing space is the same
+/// fault; the trimmed key is accepted as before.
+async fn an_untrimmed_order_key_is_refused(h: &Harness) {
+    h.reset().await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let before = h.requests_seen().await;
+    for (i, key) in ["%20E2E-10c", "E2E-10c%20", "%20E2E-10c%20"]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = h
+            .call(
+                key,
+                "create_invoice",
+                &create_body(dec!(1000), false),
+                &format!("e2e-10c-k{i}"),
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{key}: {}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, "invalid_input", "{key}: {fault:?}");
+        assert!(
+            fault
+                .message
+                .contains("must not have leading or trailing whitespace"),
+            "{key}: names the rule: {fault:?}"
+        );
+        assert_eq!(fault.order, None, "{key}: {fault:?}");
+        assert!(
+            h.runs(reply.invocation_id()).await.is_empty(),
+            "{key}: refused before the prologue: nothing journaled"
+        );
+        let invocation = h.invocation(reply.invocation_id()).await;
+        assert_eq!(invocation.handler, "create_invoice");
+        assert!(
+            invocation
+                .completion_failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("invalid_input")),
+            "{key}: {invocation:?}"
+        );
+    }
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+    eprintln!(
+        "(x-c) untrimmed order key → invalid_input naming the rule, nothing journaled or issued: pass"
+    );
+}
+
 /// (xi) every execution of the create step loses its reply and the re-query
 /// finds nothing ⇒ the run retry policy re-executes the step (one second
 /// later under the test policy — not the handler's two-minute
@@ -1943,6 +2384,225 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
         "the two steps are journaled by name: {runs:?}"
     );
     eprintln!("(xi) exhausted create step → structured outcome_unknown; run retries visible: pass");
+}
+
+/// (xi-b) a read that szamlazz.hu fails to answer once is retried by the
+/// **read policy**, not failed terminally: the lookup step's external-id
+/// query answers 500 to its first execution and code 7 afterwards; the create
+/// completes `issued` in one invocation, the `lookup-invoice` run is what
+/// retried (`last_failure_related_command_name` while in flight), and the
+/// create mock sees exactly one request.
+async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-27", &["prepayment", "proforma"]).await;
+    order_query("E2E-27")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The first execution of the lookup step loses its reply; the second,
+    // and the create step's own leading query, miss cleanly.
+    external_id_query("acct:E2E-27:invoice")
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-27:invoice")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-27", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let started = Instant::now();
+    let watch = h.watch("E2E-27");
+    let reply = h
+        .call(
+            "E2E-27",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-27-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-27");
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "the read policy's delay was honoured, not the handler's: {elapsed:?}"
+    );
+
+    // The run, not the handler, is what retried — and it was the lookup.
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["lookup-invoice"],
+        "the lookup step is the failing command: {retries:?}"
+    );
+    assert!(
+        retries
+            .failures
+            .iter()
+            .all(|failure| failure.contains("transport failure")),
+        "the last failure is the Unanswered message: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.completion_failure, None, "{invocation:?}");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ],
+        "one journal entry per step; the retried read is one entry: {runs:?}"
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+    eprintln!("(xi-b) flaky lookup read → retried by the read policy, issued once: pass");
+}
+
+/// (xi-c) a read that szamlazz.hu never answers is, after the read policy
+/// is exhausted, a structured `unavailable` (503) naming the order, kind and
+/// external id — within the read policy's delays — and the create mock sees
+/// zero requests.
+async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-28", &["prepayment", "proforma"]).await;
+    order_query("E2E-28")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-28:invoice")
+        .respond_with(ResponseTemplate::new(500))
+        .expect(3)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-28", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+
+    let started = Instant::now();
+    let watch = h.watch("E2E-28");
+    let reply = h
+        .call(
+            "E2E-28",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-28-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "three executions one second apart, not the handler's policy: {elapsed:?}"
+    );
+
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-28"));
+    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-28:invoice"));
+    assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
+    assert!(fault.message.contains("transport failure"), "{fault:?}");
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["lookup-invoice"],
+        "the lookup step is the failing command: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("unavailable")),
+        "{invocation:?}"
+    );
+    let runs = h.runs(reply.invocation_id()).await;
+    assert!(
+        runs.contains(&"lookup-invoice".to_owned()),
+        "the lookup is journaled by name: {runs:?}"
+    );
+    assert!(
+        !runs.contains(&"create-invoice".to_owned()),
+        "the create step never ran: {runs:?}"
+    );
+    assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
+    eprintln!("(xi-c) exhausted lookup read → structured unavailable, nothing created: pass");
+}
+
+/// (xi-d) `get` under the same fault injection: one of its four reads loses
+/// its reply once, the read policy re-executes it, and the status completes
+/// with what szamlazz.hu holds.
+async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-29", &["prepayment", "final"]).await;
+    external_id_query("acct:E2E-29:invoice")
+        .respond_with(Doc::new("SZ-29", "SZ", "E2E-29").response())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-29:proforma")
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-29:proforma")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+
+    let watch = h.watch("E2E-29");
+    let reply = h.get_reply("E2E-29").await;
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let status = &reply.body;
+    assert_eq!(status["invoice"]["number"], "SZ-29", "{status}");
+    assert_eq!(status["invoice"]["state"], "live");
+    assert_eq!(status["proforma"], Value::Null);
+    assert_eq!(status["prepayment"], Value::Null);
+    assert_eq!(status["final"], Value::Null);
+
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["get-proforma"],
+        "the proforma read is the failing command: {retries:?}"
+    );
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "get-proforma",
+            "get-invoice",
+            "get-prepayment",
+            "get-final",
+        ],
+        "{runs:?}"
+    );
+    eprintln!("(xi-d) flaky get read → retried by the read policy, status complete: pass");
 }
 
 /// (xii) the harness capabilities of #29 that the multi-account tickets
@@ -2770,12 +3430,12 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
 /// `account_mismatch` (409) after the verify alone — nothing is sent, the
 /// fault names the observed pins and never the key. Without a supplier pin the
 /// supplier id is not checked; a document of the account's own pins is
-/// reversed as before; and a document carrying an order number is
-/// `managed_by_order` before any pin is looked at — it is `Szamlazz.Order`'s,
-/// which checks them itself.
+/// reversed as before; and a document carrying an order number is checked
+/// like any other before it is answered as `managed_by_order` — the document
+/// is in hand, and another account's order number is not echoed.
 #[allow(
     clippy::too_many_lines,
-    reason = "one scenario: the five answers of the verify's account check"
+    reason = "one scenario: the six answers of the verify's account check"
 )]
 async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness) {
     let storno_of = |number: &str| json!({ "invoice_number": number });
@@ -2892,8 +3552,10 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
         ]
     );
 
-    // A document carrying an order number is `Szamlazz.Order`'s, whatever
-    // its pins: `managed_by_order`, no check, nothing sent.
+    // A document carrying an order number is checked against the account
+    // first — the document is in hand, and another account's order number
+    // must not be echoed: mismatched pins are `account_mismatch`; the
+    // account's own pins are `managed_by_order`, nothing sent either way.
     h.reset().await;
     number_query("SZ-24")
         .respond_with(
@@ -2911,12 +3573,30 @@ async fn agent_storno_checks_the_found_document_against_the_account(h: &Harness)
     let reply = h
         .call_agent_scoped("acme", "storno", &storno_of("SZ-24"))
         .await;
+    reply.assert_account_mismatch("SZ-24", "teszt = false");
+    assert!(
+        !reply.body.to_string().contains("E2E-24"),
+        "another account's order number is not echoed: {}",
+        reply.body
+    );
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    h.reset().await;
+    number_query("SZ-25")
+        .respond_with(Doc::new("SZ-25", "SZ", "E2E-25").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-25"))
+        .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "managed_by_order", "{}", reply.body);
-    assert_eq!(reply.body["order_key"], "E2E-24", "{}", reply.body);
+    assert_eq!(reply.body["order_key"], "E2E-25", "{}", reply.body);
     assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
     eprintln!(
-        "(xviii-b) Szamlazz.Agent.storno: teszt / supplier mismatch → account_mismatch with nothing sent; unpinned supplier not checked; own pins → reversed; order-bearing → managed_by_order: pass"
+        "(xviii-b) Szamlazz.Agent.storno: teszt / supplier mismatch → account_mismatch with nothing sent; unpinned supplier not checked; own pins → reversed; order-bearing → pins first, then managed_by_order: pass"
     );
 }
 

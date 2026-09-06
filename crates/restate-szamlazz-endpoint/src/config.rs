@@ -1,6 +1,6 @@
 //! Endpoint configuration: the deployment-level
 //! [`WorkerConfig`](restate_szamlazz::WorkerConfig) (`namespace`, `[issue]`,
-//! `[resolve]`), the static resolver's accounts
+//! `[read]`, `[resolve]`), the static resolver's accounts
 //! ([`StaticConfig`](restate_szamlazz::account::StaticConfig): `[account]` or
 //! `[accounts.<scope>]`) and what only the hosting process cares about
 //! (request identity keys).
@@ -14,7 +14,7 @@ use serde::Deserialize;
 /// The complete endpoint configuration.
 ///
 /// Both library configurations are flattened, so the file layout is
-/// `namespace`, `[issue]`, `[resolve]`, either `[account]` or a table of
+/// `namespace`, `[issue]`, `[read]`, `[resolve]`, either `[account]` or a table of
 /// `[accounts.<scope>]` (each with its `defaults` and `seller`), plus
 /// `identity_keys`, all at the top level. Load it with
 /// [`EndpointConfig::load`]; the shape's own rules (exactly one shape, the
@@ -127,7 +127,7 @@ mod tests {
     use figment::Jail;
     use figment::providers::{Env, Format, Toml};
     use restate_szamlazz::account::StaticResolver;
-    use restate_szamlazz::config::{AccountMode, IssueConfig, ResolveConfig};
+    use restate_szamlazz::config::{AccountMode, IssueConfig, ReadConfig, ResolveConfig};
 
     use super::*;
 
@@ -142,6 +142,13 @@ mod tests {
         factor = 2.0
         max_delay = "10m"
         max_duration = "1h"
+
+        [read]
+        max_attempts = 3
+        initial_delay = "5s"
+        factor = 2.0
+        max_delay = "30s"
+        max_duration = "2m"
 
         [resolve]
         initial_delay = "1s"
@@ -202,6 +209,11 @@ mod tests {
         assert_eq!(config.worker.issue.factor.to_bits(), 2.0f32.to_bits());
         assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
         assert_eq!(config.worker.issue.max_duration, Duration::from_secs(3600));
+        assert_eq!(config.worker.read.max_attempts, 3);
+        assert_eq!(config.worker.read.initial_delay, Duration::from_secs(5));
+        assert_eq!(config.worker.read.factor.to_bits(), 2.0f32.to_bits());
+        assert_eq!(config.worker.read.max_delay, Duration::from_secs(30));
+        assert_eq!(config.worker.read.max_duration, Duration::from_secs(120));
         assert_eq!(config.worker.resolve.initial_delay, Duration::from_secs(1));
         assert_eq!(config.worker.resolve.max_delay, Duration::from_secs(10));
         assert_eq!(config.worker.resolve.max_duration, Duration::from_secs(60));
@@ -254,6 +266,7 @@ mod tests {
 
         assert_eq!(config.worker.namespace.as_str(), "acct");
         assert_eq!(config.worker.issue, IssueConfig::default());
+        assert_eq!(config.worker.read, ReadConfig::default());
         assert_eq!(config.worker.resolve, ResolveConfig::default());
         let account = config
             .accounts
@@ -271,7 +284,8 @@ mod tests {
 
     /// Environment overrides address every level with `__`: the agent key
     /// and the mode under `[account]`, a document default under
-    /// `[account.defaults]`, an issue-policy field and the namespace itself.
+    /// `[account.defaults]`, an issue-policy field, a read-policy field and
+    /// the namespace itself.
     #[test]
     fn environment_overrides_nest_with_double_underscores() {
         Jail::expect_with(|jail| {
@@ -279,6 +293,7 @@ mod tests {
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__MODE", "test");
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY", "EUR");
             jail.set_env("RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS", "3");
+            jail.set_env("RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS", "4");
             jail.set_env("RESTATE_SZAMLAZZ_NAMESPACE", "from-env");
 
             let config = EndpointConfig::load(
@@ -296,11 +311,13 @@ mod tests {
             assert_eq!(account.mode, AccountMode::Test);
             assert_eq!(account.defaults.currency, "EUR");
             assert_eq!(config.worker.issue.max_attempts, 3);
+            assert_eq!(config.worker.read.max_attempts, 4);
             assert_eq!(config.worker.namespace.as_str(), "from-env");
             // Untouched values survive the merge.
             assert_eq!(account.id.as_str(), "acme");
             assert_eq!(account.defaults.language, "hu");
             assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
+            assert_eq!(config.worker.read.max_delay, Duration::from_secs(30));
             Ok(())
         });
     }
@@ -498,6 +515,13 @@ mod tests {
             .expect_err("a shrinking resolve factor must not load");
         assert!(
             format!("{error:#}").contains("resolve.factor (0.5)"),
+            "{error:#}"
+        );
+
+        let error = load(&format!("{}\n[read]\nmax_attempts = 0", minimal()))
+            .expect_err("a read policy without an execution must not load");
+        assert!(
+            format!("{error:#}").contains("read.max_attempts must be at least 1"),
             "{error:#}"
         );
     }

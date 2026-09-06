@@ -17,6 +17,12 @@ use crate::contract::{CorrectionId, DocumentKind};
 /// The key of an `Order` Virtual Object: the order number (`rendelésszám`)
 /// trimmed of leading and trailing whitespace, case preserved — exactly what
 /// szamlazz.hu matches on.
+///
+/// [`parse`](Self::parse) trims, so the type accepts an order number however
+/// it is written. The `Order` handlers do not: a Virtual Object key that is
+/// not already trimmed is refused as `invalid_input`, because Restate's
+/// per-key lock is on the raw key and ` ORD-1` would be a second instance of
+/// `ORD-1`'s order (design §3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OrderKey(String);
 

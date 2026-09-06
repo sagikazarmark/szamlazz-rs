@@ -12,7 +12,8 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
-use super::{Agent, Order};
+use super::support::order_key;
+use super::{Agent, Body, Order};
 use crate::contract::{
     CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
     DeleteProformaResponse, DocumentKind, OrderStatus, QueryRequest, QueryResponse,
@@ -24,14 +25,17 @@ use crate::contract::{
 ///
 /// Keeps no state: every handler answers from szamlazz.hu through the order's
 /// deterministic external ids. The retry identity of a request is Restate's
-/// ingress `Idempotency-Key`. Every handler first runs the prologue — pin the
-/// namespace, resolve the request's scope to its account (journaled once per
-/// invocation), fetch the credentials for this execution, open the gateway —
-/// and then its operation. Issuing is two durable steps — a read-only lookup
-/// and a query-first create under the issue policy's run retry policy (design
-/// §5) — and every handler that calls szamlazz.hu kills the invocation after
-/// five attempts (ADR 0004); the external-id query inside the create step is
-/// what makes both safe.
+/// ingress `Idempotency-Key`. Every handler with an input takes it as a
+/// [`Body`] and decodes it first — a malformed body is the `invalid_input`
+/// fault before anything is journaled — then parses its key (an invalid or
+/// untrimmed key is `invalid_input` likewise, before the prologue), then runs
+/// the prologue — pin the namespace, resolve the request's scope to its
+/// account (journaled once per invocation), fetch the credentials for this
+/// execution, open the gateway — and then its operation. Issuing is two
+/// durable steps — a read-only lookup and a query-first create under the
+/// issue policy's run retry policy (design §5) — and every handler that calls
+/// szamlazz.hu kills the invocation after five attempts (ADR 0004); the
+/// external-id query inside the create step is what makes both safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -51,10 +55,12 @@ impl Order {
     async fn create_proforma(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Proforma, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Proforma, request))
             .await
             .map(Json)
     }
@@ -77,10 +83,12 @@ impl Order {
     async fn create_invoice(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Invoice, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Invoice, request))
             .await
             .map(Json)
     }
@@ -111,10 +119,12 @@ impl Order {
     async fn create_prepayment(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Prepayment, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Prepayment, request))
             .await
             .map(Json)
     }
@@ -137,10 +147,12 @@ impl Order {
     async fn create_final(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Final, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Final, request))
             .await
             .map(Json)
     }
@@ -163,10 +175,12 @@ impl Order {
     async fn correct_invoice(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CorrectRequest>,
+        request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.correct(&ctx, request.into_inner()))
+        Box::pin(execution.correct(&ctx, order, request))
             .await
             .map(Json)
     }
@@ -188,10 +202,12 @@ impl Order {
     async fn storno_invoice(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<StornoRequest>,
+        request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.storno(&ctx, request.into_inner()))
+        Box::pin(execution.storno(&ctx, order, request))
             .await
             .map(Json)
     }
@@ -213,10 +229,12 @@ impl Order {
     async fn delete_proforma(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<DeleteProformaRequest>,
+        request: Body<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
+        let request = request.into_request()?;
+        let order = order_key(ctx.key())?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.delete(&ctx, request.into_inner()))
+        Box::pin(execution.delete(&ctx, order, request))
             .await
             .map(Json)
     }
@@ -230,15 +248,16 @@ impl Order {
         journal_retention = "1d"
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
+        let order = order_key(ctx.key())?;
         let execution = self.prologue_shared(&ctx).await?;
-        execution.status(&ctx).await.map(Json)
+        execution.status(&ctx, order).await.map(Json)
     }
 }
 
 /// The `Szamlazz.Agent` service: query, credit entries and storno by document
 /// number, and the `check_account` probe. Never calls into `Order`; a
 /// document that carries an order number is reported as `managed_by_order`
-/// instead.
+/// instead — after the account check every found document gets.
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the
@@ -279,18 +298,27 @@ impl Agent {
     async fn query(
         &self,
         ctx: Context<'_>,
-        request: Json<QueryRequest>,
+        request: Body<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        execution
-            .query_request(&ctx, request.into_inner())
-            .await
-            .map(Json)
+        execution.query_request(&ctx, request).await.map(Json)
     }
 
     /// Registers credit entries (`jóváírás`) on an invoice.
+    ///
+    /// With `additive: true` this is **at-least-once**: a lost reply is
+    /// `outcome_unknown`, and the one retry after a crash re-sends the same
+    /// entries, each of which appends a second copy. The retry waits out the
+    /// 60 s client timeout (never the server's ~500 ms default) so that it
+    /// cannot re-send while the first send is still in flight; a caller that
+    /// sees `outcome_unknown` queries the invoice before re-sending.
     #[handler(
-        invocation_retry_policy(max_attempts = 2, on_max_attempts = "kill"),
+        invocation_retry_policy(
+            initial_interval = "2m",
+            max_attempts = 2,
+            on_max_attempts = "kill"
+        ),
         inactivity_timeout = "2m",
         abort_timeout = "2m",
         journal_retention = "3d",
@@ -299,32 +327,33 @@ impl Agent {
     async fn set_payments(
         &self,
         ctx: Context<'_>,
-        request: Json<SetPaymentsRequest>,
+        request: Body<SetPaymentsRequest>,
     ) -> HandlerResult<Json<SetPaymentsResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
         execution
-            .set_payments_request(&ctx, request.into_inner())
+            .set_payments_request(&ctx, request)
             .await
             .map(Json)
     }
 
-    /// Reverses an invoice that no `Order` manages.
+    /// Reverses an invoice that no `Order` manages. The storno step is the
+    /// same closure `Szamlazz.Order` runs (query, send, re-query at 60 s
+    /// each), so the timeouts are the same (ADR 0004).
     #[handler(
         invocation_retry_policy(max_attempts = 2, on_max_attempts = "kill"),
-        inactivity_timeout = "2m",
-        abort_timeout = "2m",
+        inactivity_timeout = "4m",
+        abort_timeout = "3m",
         journal_retention = "3d",
         idempotency_retention = "30d"
     )]
     async fn storno(
         &self,
         ctx: Context<'_>,
-        request: Json<StornoRequest>,
+        request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        execution
-            .storno_request(&ctx, request.into_inner())
-            .await
-            .map(Json)
+        execution.storno_request(&ctx, request).await.map(Json)
     }
 }

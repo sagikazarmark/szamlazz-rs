@@ -246,7 +246,9 @@ someone else (the UI, another channel, another namespace on the same account) �
 *names* it: `conflict{duplicate_order_number, existing_number}` when the newest document under the order is
 a live document of our kind, without `existing_number` otherwise (another kind, reversed, or a failed
 naming query). The order-number query names, it never adopts (rule 7). If it returns nothing while the
-server just said "duplicate", the contradiction is `Unconfirmed` and the step re-executes. Correctives keep
+server just said "duplicate", the contradiction is logged at `warn` and settled the same way, without
+`existing_number` (#41; before it the contradiction was `Unconfirmed` and the step re-sent for a refusal the server
+had already given). Correctives keep
 their exemption: no order-number hint in lookup (the live base under the order is expected), and an
 unresolvable 71/152 is `rejected`, not a conflict. A foreign document is reported in seconds — by the
 lookup's hint or by this branch — never after a retry budget.

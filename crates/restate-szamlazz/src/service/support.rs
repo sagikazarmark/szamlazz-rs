@@ -50,6 +50,18 @@ impl Fault {
         Self::new(TerminalCode::Unavailable, message)
     }
 
+    /// szamlazz.hu answered a read with a code the handler cannot conclude a
+    /// document from (neither 7 nor a credential code). An answer, so it is
+    /// journaled and never retried by the read policy; still a fault, since
+    /// nothing may be concluded from it.
+    pub(super) fn inconclusive_answer(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::unavailable(format!(
+            "szamlazz.hu answered the query with code {}: {}; nothing may be concluded — retry with a new Idempotency-Key or read get",
+            code.into(),
+            message.into()
+        ))
+    }
+
     pub(super) fn outcome_unknown(message: impl Into<String>) -> Self {
         Self::new(TerminalCode::OutcomeUnknown, message)
     }
@@ -138,8 +150,34 @@ pub(super) fn terminal(status: u16, code: &str, message: impl Into<String>) -> H
     TerminalError::new_with_code(status, body.to_string()).into()
 }
 
+/// The fault of a read step that ended without an answer: the read policy is
+/// exhausted (500, carrying the last `Unanswered`'s message) or the
+/// invocation was cancelled (409). The caller attaches the document it was
+/// reading about when it knows one.
+pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
+    Fault::unavailable(format!(
+        "the {step} read ended without an answer from szamlazz.hu ({}): {}; retry with a new Idempotency-Key or read get",
+        error.code(),
+        error.message()
+    ))
+}
+
 /// Parses the Virtual Object key as an [`OrderKey`].
+///
+/// The key must arrive trimmed (design §3). Restate's per-key lock is on the
+/// *raw* key, so `ORD-1` and ` ORD-1` would be two instances with two locks
+/// that map to one szamlazz.hu order and identical external ids — two
+/// concurrent creates under them would both pass their lookup and both send,
+/// leaving szamlazz.hu's order-number-repetition toggle as the only guard. A
+/// key whose trimmed form differs from the raw one is therefore refused as
+/// `invalid_input` naming the rule; [`OrderKey::parse`] itself stays lenient
+/// for the places that parse an order number rather than a key.
 pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
+    if key.trim() != key {
+        return Err(Fault::invalid_input(format!(
+            "invalid order key {key:?}: the order key must not have leading or trailing whitespace — Restate locks on the raw key, so trim it before calling"
+        )));
+    }
     OrderKey::parse(key)
         .map_err(|error| Fault::invalid_input(format!("invalid order key: {error}")))
 }
@@ -239,8 +277,11 @@ pub(super) enum Lookup {
 }
 
 impl Lookup {
-    /// Classifies a query outcome; a failed check is `unavailable`, rejected
-    /// credentials are `credentials_rejected`.
+    /// Classifies an answered query: another szamlazz.hu code is
+    /// `unavailable` (nothing may be concluded), rejected credentials are
+    /// `credentials_rejected`. (A query szamlazz.hu did not answer never
+    /// reaches here: it is the read's `Unanswered`, retried by the read
+    /// policy.)
     pub(super) fn classify(
         outcome: QueryOutcome,
         namespace: &Namespace,
@@ -251,7 +292,7 @@ impl Lookup {
     ) -> Result<Self, Fault> {
         match outcome {
             QueryOutcome::NotFound => Ok(Self::Absent),
-            QueryOutcome::Transport(message) => Err(Fault::unavailable(message)),
+            QueryOutcome::Api { code, message } => Err(Fault::inconclusive_answer(code, message)),
             QueryOutcome::CredentialsRejected { code, message } => {
                 Err(Fault::credentials_rejected(namespace, code, message))
             }
@@ -293,11 +334,11 @@ macro_rules! journal_helpers {
 
             use super::{Fault, Lookup, StornoIntent};
             use crate::account::Accounts;
-            use crate::config::{Namespace, WorkerConfig};
+            use crate::config::WorkerConfig;
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{
-                Gateway, InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome,
-                StornoOutcome as GatewayStornoOutcome, StornoStepRequest,
+                InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome,
+                StornoOutcome as GatewayStornoOutcome, StornoStepRequest, Unanswered,
             };
             use crate::identity::{ExternalId, OrderKey};
             use crate::service::prologue::{self as decisions, Execution};
@@ -359,8 +400,10 @@ macro_rules! journal_helpers {
 
             /// Journals the result of `f` under `name`, executing it at most
             /// once per journal entry (`RunRetryPolicy::max_attempts(1)`):
-            /// every szamlazz.hu call returns its outcome as data, so a
-            /// closure failure is a bug, not a retry.
+            /// the pure `namespace` pin and the write steps that have no
+            /// retry of their own (`delete-proforma-*`, `set-payments-*`)
+            /// return every outcome as data, so a closure failure is a bug,
+            /// not a retry. Reads go through [`run_reading`].
             pub(in crate::service) async fn run_once<'ctx, T, F, Fut>(
                 ctx: &$ctx<'ctx>,
                 name: impl Into<String>,
@@ -410,90 +453,126 @@ macro_rules! journal_helpers {
                 Ok(value)
             }
 
-            /// Journaled query of document `number` (a verify).
+            /// A read-only durable step under the read policy: journals the
+            /// answer of `f` under `name`, re-executing it while szamlazz.hu
+            /// does not answer (`Unanswered`). Every answer is data; a read
+            /// writes nothing, so a re-executed closure's answer is exactly as
+            /// fresh as a first one.
+            ///
+            /// # Errors
+            ///
+            /// The `unavailable` fault of a read that ended without an answer
+            /// — the read policy exhausted or the invocation cancelled —
+            /// naming the step and the last failure. The caller attaches the
+            /// document when it knows one.
+            pub(in crate::service) async fn run_reading<'ctx, T, F, Fut>(
+                ctx: &$ctx<'ctx>,
+                name: impl Into<String>,
+                exec: &Execution,
+                f: F,
+            ) -> Result<T, Fault>
+            where
+                F: FnOnce() -> Fut + Send + 'ctx,
+                Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
+                T: Serialize + DeserializeOwned + Send + 'static,
+            {
+                let name = name.into();
+                run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)
+                    .await
+                    .map_err(|error| super::read_exhausted(&name, &error))
+            }
+
+            /// Journaled query of document `number` (a verify), under the read
+            /// policy.
             pub(in crate::service) async fn verify(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
+                exec: &Execution,
                 name: impl Into<String>,
                 number: &str,
-            ) -> Result<QueryOutcome, HandlerError> {
-                let gateway = Arc::clone(gateway);
+            ) -> Result<QueryOutcome, Fault> {
+                let gateway = Arc::clone(&exec.gateway);
                 let number = number.to_owned();
-                run_once(
-                    ctx,
-                    name,
-                    move || async move { gateway.verify(&number).await },
-                )
+                run_reading(ctx, name, exec, move || async move {
+                    gateway.verify(&number).await
+                })
                 .await
             }
 
-            /// Journaled query by external id.
+            /// Journaled query by external id, under the read policy.
             pub(in crate::service) async fn query_external_id(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
+                exec: &Execution,
                 name: impl Into<String>,
                 external_id: &ExternalId,
-            ) -> Result<QueryOutcome, HandlerError> {
-                let gateway = Arc::clone(gateway);
+            ) -> Result<QueryOutcome, Fault> {
+                let gateway = Arc::clone(&exec.gateway);
                 let selector = Selector::ExternalId(external_id.as_str().to_owned());
-                run_once(
-                    ctx,
-                    name,
-                    move || async move { gateway.query(&selector).await },
-                )
+                run_reading(ctx, name, exec, move || async move {
+                    gateway.query(&selector).await
+                })
                 .await
             }
 
-            /// Journaled query by one of our external ids, validated against
-            /// the identity the document should have (design §3) and the
-            /// gateway's account. A fault carries that identity.
+            /// Journaled query by one of our external ids, under the read
+            /// policy, validated against the identity the document should
+            /// have (design §3) and the gateway's account. A fault carries
+            /// that identity.
             pub(in crate::service) async fn lookup(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
-                namespace: &Namespace,
+                exec: &Execution,
                 name: impl Into<String>,
                 external_id: &ExternalId,
                 order: &OrderKey,
                 kind: IssuedKind,
-            ) -> Result<Lookup, HandlerError> {
-                let outcome = query_external_id(ctx, gateway, name, external_id).await?;
-                let account = gateway.account();
-                Ok(Lookup::classify(
+            ) -> Result<Lookup, Fault> {
+                let about = |fault: Fault| fault.about(order, Some(kind), external_id.as_str());
+                let outcome = query_external_id(ctx, exec, name, external_id)
+                    .await
+                    .map_err(about)?;
+                let account = exec.gateway.account();
+                Lookup::classify(
                     outcome,
-                    namespace,
+                    &exec.config.namespace,
                     order,
                     kind,
                     account.mode.is_test(),
                     account.supplier_id,
                 )
-                .map_err(|fault| fault.about(order, Some(kind), external_id.as_str()))?)
+                .map_err(about)
             }
 
-            /// Journaled order-number hint.
+            /// Journaled order-number hint, under the read policy.
             pub(in crate::service) async fn hint(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
+                exec: &Execution,
                 name: impl Into<String>,
                 order: &OrderKey,
-            ) -> Result<QueryOutcome, HandlerError> {
-                let gateway = Arc::clone(gateway);
+            ) -> Result<QueryOutcome, Fault> {
+                let gateway = Arc::clone(&exec.gateway);
                 let order = order.clone();
-                run_once(ctx, name, move || async move { gateway.hint(&order).await }).await
+                run_reading(ctx, name, exec, move || async move {
+                    gateway.hint(&order).await
+                })
+                .await
             }
 
             /// The storno lookup step (design §6 step 2): one read-only
-            /// journaled query of the storno external id.
+            /// journaled query of the storno external id, under the read
+            /// policy.
             pub(in crate::service) async fn lookup_storno(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
+                exec: &Execution,
                 intent: &StornoIntent,
-            ) -> Result<StornoLookupOutcome, HandlerError> {
-                let gateway = Arc::clone(gateway);
+            ) -> Result<StornoLookupOutcome, Fault> {
+                let gateway = Arc::clone(&exec.gateway);
                 let external_id = intent.storno_id.clone();
                 let number = intent.number.clone();
-                run_once(ctx, format!("lookup-storno-{number}"), move || async move {
-                    gateway.lookup_storno(&external_id, &number).await
-                })
+                run_reading(
+                    ctx,
+                    format!("lookup-storno-{number}"),
+                    exec,
+                    move || async move { gateway.lookup_storno(&external_id, &number).await },
+                )
                 .await
             }
 
@@ -510,11 +589,10 @@ macro_rules! journal_helpers {
             /// lookup finds whatever landed.
             pub(in crate::service) async fn storno_step(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
-                policy: RunRetryPolicy,
+                exec: &Execution,
                 intent: &StornoIntent,
             ) -> Result<GatewayStornoOutcome, TerminalError> {
-                let gateway = Arc::clone(gateway);
+                let gateway = Arc::clone(&exec.gateway);
                 let number = intent.number.clone();
                 let external_id = intent.storno_id.clone();
                 let comment = intent.comment.clone();
@@ -522,7 +600,7 @@ macro_rules! journal_helpers {
                 run_retrying(
                     ctx,
                     format!("storno-{}", intent.number),
-                    policy,
+                    exec.config.issue.run_retry_policy(),
                     move || async move {
                         gateway
                             .storno(StornoStepRequest {
@@ -538,28 +616,43 @@ macro_rules! journal_helpers {
             }
 
             /// The storno number of a reversed document, when the order-number
-            /// hint is the `SS` referencing it. Best effort: a failed hint is
-            /// `None` — except rejected credentials, which are a fault.
+            /// hint is the `SS` referencing it. Best effort: a hint that is
+            /// not that `SS` — or that the read policy could not get answered
+            /// — is `None`, since the handler's answer (`reversed`) is already
+            /// known; only rejected credentials are a fault.
             pub(in crate::service) async fn storno_number_of(
                 ctx: &$ctx<'_>,
-                gateway: &Arc<Gateway>,
-                namespace: &Namespace,
+                exec: &Execution,
                 order: &OrderKey,
                 number: &str,
-            ) -> Result<Option<String>, HandlerError> {
-                Ok(
-                    match hint(ctx, gateway, format!("hint-storno-{number}"), order).await? {
-                        QueryOutcome::Found(found) if found.is_storno_of(number) => {
-                            Some(found.number().to_owned())
-                        }
-                        QueryOutcome::CredentialsRejected { code, message } => {
-                            return Err(
-                                Fault::credentials_rejected(namespace, code, message).into()
-                            );
-                        }
-                        _ => None,
-                    },
-                )
+            ) -> Result<Option<String>, Fault> {
+                let outcome = match hint(ctx, exec, format!("hint-storno-{number}"), order).await
+                {
+                    Ok(outcome) => outcome,
+                    Err(fault) => {
+                        tracing::warn!(
+                            number,
+                            fault = %fault.message,
+                            "the storno number could not be read; reporting the reversal without it"
+                        );
+                        return Ok(None);
+                    }
+                };
+                Ok(match outcome {
+                    QueryOutcome::Found(found) if found.is_storno_of(number) => {
+                        Some(found.number().to_owned())
+                    }
+                    QueryOutcome::CredentialsRejected { code, message } => {
+                        return Err(Fault::credentials_rejected(
+                            &exec.config.namespace,
+                            code,
+                            message,
+                        ));
+                    }
+                    QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api { .. } => {
+                        None
+                    }
+                })
             }
         }
     };

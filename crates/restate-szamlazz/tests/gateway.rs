@@ -1,7 +1,7 @@
 //! Wiremock tests of the `gateway` module: the lookup and create steps
 //! (design §5 steps 3–4), storno validation (§6), deletion, credit entries,
-//! credential rejections and transport failures, against synthetic
-//! szamlazz.hu responses.
+//! credential rejections and failed exchanges — `Unanswered` on the reads,
+//! `Unconfirmed` on the writes — against synthetic szamlazz.hu responses.
 
 use jiff::civil::date;
 use restate_szamlazz::account::{Account, Endpoint};
@@ -11,8 +11,9 @@ use restate_szamlazz::contract::{
 };
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
-    InvoiceDocumentExt as _, LookupOutcome, LookupRequest, ProbeOutcome, QueryError, QueryOutcome,
-    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest, Unconfirmed,
+    InvoiceDocumentExt as _, LookupOutcome, LookupRequest, ProbeOutcome, QueryOutcome,
+    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest, Unanswered,
+    Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -248,9 +249,22 @@ impl Harness {
         Self { server, gateway }
     }
 
-    /// The lookup step for an invoice of `ORD-1`.
+    /// The lookup step for an invoice of `ORD-1`, answered.
     async fn lookup(&self, our_numbers: &[String]) -> LookupOutcome {
         self.lookup_kind(IssuedKind::Invoice, &external_id(), our_numbers)
+            .await
+    }
+
+    /// The lookup step for an invoice of `ORD-1`, as the run sees it:
+    /// `Err(Unanswered)` is what the read policy re-executes.
+    async fn try_lookup(&self, our_numbers: &[String]) -> Result<LookupOutcome, Unanswered> {
+        self.gateway
+            .lookup(LookupRequest {
+                external_id: &external_id(),
+                kind: IssuedKind::Invoice,
+                order: &order(),
+                our_numbers,
+            })
             .await
     }
 
@@ -268,6 +282,7 @@ impl Harness {
                 our_numbers,
             })
             .await
+            .expect("szamlazz.hu answered")
     }
 
     /// The create step for an invoice of `ORD-1`; `reversed` is the number
@@ -556,19 +571,19 @@ async fn lookup_hint_ignores_our_documents_non_invoices_and_its_own_failure() {
 }
 
 #[tokio::test]
-async fn lookup_reports_a_failed_query_as_transport() {
+async fn lookup_without_an_answer_is_unanswered_not_data() {
     // A bare 500 with an empty body parses as `UnexpectedBody` in the agent
-    // crate (a `Parse` error), which this layer reports as `Transport`. The
-    // external id first; then the hint, whose own transport failure is not
-    // conclusive either.
+    // crate (a `Parse` error): szamlazz.hu did not answer, so the step's
+    // result is its retryable error, never a journaled outcome. The external
+    // id first; then the hint, whose own failure is not conclusive either.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
         .respond_with(ResponseTemplate::new(500))
         .mount(&h.server)
         .await;
     assert!(matches!(
-        h.lookup(&[]).await,
-        LookupOutcome::Transport(message) if message.contains("empty response")
+        h.try_lookup(&[]).await,
+        Err(Unanswered::Transport(message)) if message.contains("empty response")
     ));
 
     let h = Harness::start().await;
@@ -580,7 +595,55 @@ async fn lookup_reports_a_failed_query_as_transport() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&h.server)
         .await;
-    assert!(matches!(h.lookup(&[]).await, LookupOutcome::Transport(_)));
+    assert!(matches!(
+        h.try_lookup(&[]).await,
+        Err(Unanswered::Transport(_))
+    ));
+
+    // `szlahu_down` is szamlazz.hu saying it is not answering: the same.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("szlahu_down", "maintenance")
+                .set_body_raw("", "text/plain"),
+        )
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.try_lookup(&[]).await,
+        Err(Unanswered::Unavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn lookup_answered_with_another_code_is_data() {
+    // Another szamlazz.hu code on the external-id query is an answer the
+    // handler cannot conclude from — data, not a retryable failure. On the
+    // hint it says nothing about foreign documents and the lookup continues.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.try_lookup(&[]).await,
+        Ok(LookupOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        })
+    );
+
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .mount(&h.server)
+        .await;
+    order_query()
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .mount(&h.server)
+        .await;
+    assert_eq!(h.try_lookup(&[]).await, Ok(LookupOutcome::Absent));
 }
 
 #[tokio::test]
@@ -747,6 +810,104 @@ async fn create_past_the_reversed_document_the_lookup_saw_sends_the_create() {
     match h.create(Some("SZ-1")).await {
         Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("SZ-2")),
         other => panic!("expected Issued, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_never_sends_past_a_reversal_the_lookup_did_not_see() {
+    // The hole this closes: the lookup saw nothing (or X reversed), an
+    // earlier execution's send landed with a lost reply, and the document
+    // was reversed in the UI before this execution. The leading query finds
+    // a reversed document that is not the lookup's — the step settles as
+    // `Reversed` and sends nothing; a new document needs an explicit
+    // `reissue` (ADR 0003).
+    for (label, reversed) in [
+        ("lookup saw nothing", None),
+        ("reissue past X", Some("SZ-0")),
+    ] {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(Doc::reversed("SZ-1", "SZ").response())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(created("SZ-X", "1000", "1270"))
+            .expect(0)
+            .mount(&h.server)
+            .await;
+
+        match h.create(reversed).await {
+            Ok(CreateOutcome::Reversed(found)) => {
+                assert_eq!(found.number(), "SZ-1", "{label}");
+                assert!(!found.is_live(), "{label}");
+            }
+            other => panic!("{label}: expected Reversed, got {other:?}"),
+        }
+        assert_eq!(h.bodies().await.len(), 1, "{label}: the leading query only");
+    }
+}
+
+#[tokio::test]
+async fn create_never_sends_when_the_lookups_reversed_document_is_reported_live() {
+    // The lookup saw SZ-1 reversed; the leading query reports it live. The
+    // server contradicts itself, and sending is the least safe answer: the
+    // step settles as `LiveAgain` (the handler's `conflict{live}`).
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::new("SZ-1", "SZ").response())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    match h.create(Some("SZ-1")).await {
+        Ok(CreateOutcome::LiveAgain(found)) => assert_eq!(found.number(), "SZ-1"),
+        other => panic!("expected LiveAgain, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_settled() {
+    // The send lands, its reply is lost, and the document is reversed before
+    // the immediate re-query sees it. The re-query settles the step as
+    // `Reversed` — not `Unconfirmed`, which would re-execute the step into a
+    // second send.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::reversed("SZ-1", "SZ").response())
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-1"),
+        other => panic!("expected Reversed, got {other:?}"),
+    }
+    assert_eq!(
+        h.bodies().await.len(),
+        3,
+        "the leading query, the create, the re-query"
+    );
+
+    // Re-executed anyway (the run policy re-dispatching a step whose result
+    // was not journaled): the leading query settles it again, nothing sent.
+    match h.create(None).await {
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-1"),
+        other => panic!("expected Reversed, got {other:?}"),
     }
 }
 
@@ -949,6 +1110,24 @@ async fn duplicate_order_number_with_an_invalid_document_under_the_id_is_a_colli
 }
 
 #[tokio::test]
+async fn duplicate_order_number_with_a_reversal_the_lookup_did_not_see_is_reversed() {
+    // The re-query after 152 finds a reversed document of ours that the
+    // lookup did not see: answered as `Reversed` like the leading query
+    // would, without the order-number naming query.
+    let h = duplicate_harness(Doc::reversed("SZ-3", "SZ").response()).await;
+    order_query()
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-3"),
+        other => panic!("expected Reversed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn duplicate_order_number_names_the_existing_document_when_our_kind_is_newest() {
     // Nothing under the id, or only our reversed document (a reissue): the
     // live duplicate is not ours; the order-number query names it when it is
@@ -1009,18 +1188,24 @@ async fn duplicate_order_number_has_no_existing_number_when_another_kind_is_newe
 }
 
 #[tokio::test]
-async fn duplicate_order_number_with_nothing_under_the_order_is_unconfirmed() {
+async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_a_number() {
+    // szamlazz.hu refused the order number, yet knows nothing under it: a
+    // contradiction, but still a refusal — settled on the first occurrence
+    // (the harness's create mock expects exactly one send), without a number
+    // to name.
     let h = duplicate_harness(not_found()).await;
     order_query()
         .respond_with(not_found())
+        .expect(1)
         .mount(&h.server)
         .await;
 
     assert_eq!(
         h.create(None).await,
-        Err(Unconfirmed::Contradiction {
+        Ok(CreateOutcome::DuplicateOrderNumber {
             code: "152".to_owned(),
             message: "Már létező rendelésszám".to_owned(),
+            existing_number: None,
         })
     );
 }
@@ -1219,6 +1404,10 @@ async fn verify_query_and_hint() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&h.server)
         .await;
+    number_query("SZ-57")
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .mount(&h.server)
+        .await;
     order_query()
         .respond_with(
             Doc {
@@ -1231,36 +1420,49 @@ async fn verify_query_and_hint() {
         .await;
 
     match h.gateway.verify("SZ-1").await {
-        QueryOutcome::Found(found) => {
+        Ok(QueryOutcome::Found(found)) => {
             assert_eq!(found.number(), "SZ-1");
             assert_eq!(found.payment_amounts(), vec![dec!(500), dec!(770)]);
         }
         other => panic!("expected Found, got {other:?}"),
     }
-    assert_eq!(h.gateway.verify("SZ-404").await, QueryOutcome::NotFound);
+    assert_eq!(h.gateway.verify("SZ-404").await, Ok(QueryOutcome::NotFound));
+    // A lost reply is the retryable error of the read, never data.
     assert!(matches!(
         h.gateway.verify("SZ-500").await,
-        QueryOutcome::Transport(_)
+        Err(Unanswered::Transport(_))
     ));
+    // Another szamlazz.hu code is an answer: data.
+    assert_eq!(
+        h.gateway.verify("SZ-57").await,
+        Ok(QueryOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        })
+    );
     match h.gateway.hint(&order()).await {
-        QueryOutcome::Found(found) => {
+        Ok(QueryOutcome::Found(found)) => {
             assert_eq!(found.info.document_type, "SS");
             assert!(found.is_storno_of("SZ-1"));
         }
         other => panic!("expected Found, got {other:?}"),
     }
-    let document = h
+    match h
         .gateway
-        .query_document(&Selector::InvoiceNumber("SZ-1".to_owned()))
+        .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
         .await
-        .expect("document");
-    assert_eq!(document.info.invoice_number.as_str(), "SZ-1");
-    assert_eq!(document.payments.len(), 2);
+    {
+        Ok(QueryOutcome::Found(found)) => {
+            assert_eq!(found.info.invoice_number.as_str(), "SZ-1");
+            assert_eq!(found.payments.len(), 2);
+        }
+        other => panic!("expected Found, got {other:?}"),
+    }
     assert_eq!(
         h.gateway
-            .query_document(&Selector::InvoiceNumber("SZ-404".to_owned()))
+            .query(&Selector::InvoiceNumber("SZ-404".to_owned()))
             .await,
-        Err(QueryError::NotFound)
+        Ok(QueryOutcome::NotFound)
     );
     // No mock matches the external id query: wiremock answers 404 with an
     // empty body, which the agent crate reports as a parse failure.
@@ -1268,7 +1470,18 @@ async fn verify_query_and_hint() {
         h.gateway
             .query(&Selector::ExternalId("acct:ORD-1:invoice".to_owned()))
             .await,
-        QueryOutcome::Transport(_)
+        Err(Unanswered::Transport(_))
+    ));
+
+    // The hint alone: a lost reply is its `Unanswered` too.
+    let h = Harness::start().await;
+    order_query()
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.gateway.hint(&order()).await,
+        Err(Unanswered::Transport(_))
     ));
 }
 
@@ -1283,10 +1496,10 @@ async fn credential_codes_on_a_query_are_credentials_rejected() {
             .mount(&h.server)
             .await;
 
-        let expected = QueryOutcome::CredentialsRejected {
+        let expected = Ok(QueryOutcome::CredentialsRejected {
             code: code.to_owned(),
             message: "login".to_owned(),
-        };
+        });
         assert_eq!(h.gateway.verify("SZ-1").await, expected, "verify {code}");
         assert_eq!(h.gateway.hint(&order()).await, expected, "hint {code}");
         assert_eq!(
@@ -1295,16 +1508,6 @@ async fn credential_codes_on_a_query_are_credentials_rejected() {
                 .await,
             expected,
             "query {code}"
-        );
-        assert_eq!(
-            h.gateway
-                .query_document(&Selector::InvoiceNumber("SZ-1".to_owned()))
-                .await,
-            Err(QueryError::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            }),
-            "query_document {code}"
         );
     }
 }
@@ -1328,7 +1531,10 @@ async fn probe_sends_one_query_of_the_sentinel_id_and_accepts_not_found() {
         .mount(&h.server)
         .await;
 
-    assert_eq!(h.gateway.probe(&probe_id()).await, ProbeOutcome::Accepted);
+    assert_eq!(
+        h.gateway.probe(&probe_id()).await,
+        Ok(ProbeOutcome::Accepted)
+    );
 
     let sent = h.bodies().await;
     assert_eq!(sent.len(), 1, "exactly one request: {sent:?}");
@@ -1354,7 +1560,10 @@ async fn probe_accepts_a_document_under_the_sentinel_id() {
         .expect(1)
         .mount(&h.server)
         .await;
-    assert_eq!(h.gateway.probe(&probe_id()).await, ProbeOutcome::Accepted);
+    assert_eq!(
+        h.gateway.probe(&probe_id()).await,
+        Ok(ProbeOutcome::Accepted)
+    );
     assert_eq!(h.bodies().await.len(), 1);
 }
 
@@ -1371,10 +1580,10 @@ async fn probe_reports_a_wrong_key_as_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.probe(&probe_id()).await,
-            ProbeOutcome::CredentialsRejected {
+            Ok(ProbeOutcome::CredentialsRejected {
                 code: code.to_owned(),
                 message: "Sikertelen bejelentkezés.".to_owned(),
-            },
+            }),
             "{code}"
         );
         assert_eq!(h.bodies().await.len(), 1, "{code}");
@@ -1391,14 +1600,17 @@ async fn probe_accepts_any_other_szamlazz_code() {
         .expect(1)
         .mount(&h.server)
         .await;
-    assert_eq!(h.gateway.probe(&probe_id()).await, ProbeOutcome::Accepted);
+    assert_eq!(
+        h.gateway.probe(&probe_id()).await,
+        Ok(ProbeOutcome::Accepted)
+    );
     assert_eq!(h.bodies().await.len(), 1);
 }
 
 /// A failed exchange — a transport failure, `szlahu_down` — settles nothing
-/// about the credentials.
+/// about the credentials: it is the read's retryable error, not an outcome.
 #[tokio::test]
-async fn probe_reports_a_failed_exchange_as_transport() {
+async fn probe_without_an_answer_is_unanswered() {
     let h = Harness::start().await;
     external_id_query(probe_id().as_str())
         .respond_with(ResponseTemplate::new(503))
@@ -1406,7 +1618,7 @@ async fn probe_reports_a_failed_exchange_as_transport() {
         .await;
     assert!(matches!(
         h.gateway.probe(&probe_id()).await,
-        ProbeOutcome::Transport(_)
+        Err(Unanswered::Transport(_))
     ));
 
     let h = Harness::start().await;
@@ -1416,7 +1628,7 @@ async fn probe_reports_a_failed_exchange_as_transport() {
         .await;
     assert!(matches!(
         h.gateway.probe(&probe_id()).await,
-        ProbeOutcome::Transport(_)
+        Err(Unanswered::Unavailable(message)) if message.contains("maintenance")
     ));
 }
 
@@ -1449,9 +1661,9 @@ async fn storno_lookup_finds_our_storno_under_the_id() {
 
     assert_eq!(
         h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-        StornoLookupOutcome::AlreadyReversed {
+        Ok(StornoLookupOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
-        }
+        })
     );
     assert_eq!(h.bodies().await.len(), 1, "read-only: one query");
 }
@@ -1468,7 +1680,7 @@ async fn storno_lookup_is_absent_on_a_miss_or_another_holder() {
         .await;
     assert_eq!(
         h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-        StornoLookupOutcome::Absent
+        Ok(StornoLookupOutcome::Absent)
     );
 
     let h = Harness::start().await;
@@ -1484,12 +1696,12 @@ async fn storno_lookup_is_absent_on_a_miss_or_another_holder() {
         .await;
     assert_eq!(
         h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-        StornoLookupOutcome::Absent
+        Ok(StornoLookupOutcome::Absent)
     );
 }
 
 #[tokio::test]
-async fn storno_lookup_reports_rejected_credentials_and_a_failed_query() {
+async fn storno_lookup_reports_rejected_credentials_another_code_and_no_answer() {
     for code in CREDENTIAL_CODES {
         let h = Harness::start().await;
         let storno_id = storno_id();
@@ -1499,14 +1711,29 @@ async fn storno_lookup_reports_rejected_credentials_and_a_failed_query() {
             .await;
         assert_eq!(
             h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-            StornoLookupOutcome::CredentialsRejected {
+            Ok(StornoLookupOutcome::CredentialsRejected {
                 code: code.to_owned(),
                 message: "login".to_owned(),
-            },
+            }),
             "{code}"
         );
     }
 
+    // Another szamlazz.hu code is an answer: data.
+    let h = Harness::start().await;
+    external_id_query(storno_id().as_str())
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.lookup_storno(&storno_id(), "SZ-1").await,
+        Ok(StornoLookupOutcome::Api {
+            code: "57".to_owned(),
+            message: "Ismeretlen hiba".to_owned(),
+        })
+    );
+
+    // No answer is the read's retryable error.
     let h = Harness::start().await;
     let storno_id = storno_id();
     external_id_query(storno_id.as_str())
@@ -1515,7 +1742,7 @@ async fn storno_lookup_reports_rejected_credentials_and_a_failed_query() {
         .await;
     assert!(matches!(
         h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-        StornoLookupOutcome::Transport(_)
+        Err(Unanswered::Transport(_))
     ));
 }
 
@@ -1548,6 +1775,33 @@ async fn storno_reversed_is_validated() {
     assert!(body.contains("<megjegyzes>wrong buyer</megjegyzes>"));
     assert!(body.contains("<eszamla>true</eszamla>"));
     assert!(!body.contains("<keltDatum>"), "352 otherwise");
+}
+
+#[tokio::test]
+async fn storno_of_a_zero_gross_invoice_is_reversed() {
+    // The storno of a 0-HUF invoice (a free ticket) lands as a document
+    // with a new number and a gross of 0: a reversal, not the echo of a
+    // proforma or delivery note, which keeps the requested number.
+    let h = Harness::start().await;
+    let storno_id = storno_id();
+    external_id_query(storno_id.as_str())
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(created("SS-1", "0", "0"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.gateway.storno(storno_request(&storno_id)).await {
+        Ok(StornoOutcome::Reversed(storno)) => {
+            assert_eq!(storno.invoice_number.as_str(), "SS-1");
+            assert_eq!(storno.gross_total, Some(dec!(0)));
+        }
+        other => panic!("expected Reversed, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1992,7 +2246,7 @@ async fn a_gateway_opened_from_an_account_sends_that_accounts_key() {
     let outcome = gateway
         .query(&Selector::ExternalId("acme:ORD-1:invoice".to_owned()))
         .await;
-    assert!(matches!(outcome, QueryOutcome::NotFound), "{outcome:?}");
+    assert!(matches!(outcome, Ok(QueryOutcome::NotFound)), "{outcome:?}");
 
     let sent = server.received_requests().await.expect("requests");
     assert_eq!(sent.len(), 1);
@@ -2019,15 +2273,15 @@ async fn two_gateways_opened_from_two_accounts_share_no_key_and_no_session() {
     let selector = Selector::OrderNumber("ORD-1".to_owned());
     assert!(matches!(
         acme.query(&selector).await,
-        QueryOutcome::NotFound
+        Ok(QueryOutcome::NotFound)
     ));
     assert!(matches!(
         beta.query(&selector).await,
-        QueryOutcome::NotFound
+        Ok(QueryOutcome::NotFound)
     ));
     assert!(matches!(
         acme.query(&selector).await,
-        QueryOutcome::NotFound
+        Ok(QueryOutcome::NotFound)
     ));
 
     let sent = server.received_requests().await.expect("requests");
@@ -2091,7 +2345,7 @@ async fn opened_gateway_validates_the_accounts_mode_against_teszt() {
             })
             .await;
         match outcome {
-            LookupOutcome::Collision(found) => {
+            Ok(LookupOutcome::Collision(found)) => {
                 assert_eq!(found.number(), "SZ-9", "{label}");
                 assert!(
                     !found.is_ours(

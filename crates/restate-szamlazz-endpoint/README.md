@@ -23,6 +23,8 @@ docker run --rm -p 9080:9080 \
   ghcr.io/sagikazarmark/restate-szamlazz:latest
 ```
 
+The image runs the binary as the non-root user `nonroot` (uid and gid 65532; numeric in the image, so Kubernetes' `runAsNonRoot` verifies it), with no writable filesystem needed. A mounted configuration file must be readable by that uid — world-readable is fine once the agent key comes from the environment, as above. It stops cleanly on `docker stop` (see [Stopping](#stopping)).
+
 ## Prerequisite
 
 The szamlazz.hu account setting **"Rendelésszám ismétlődés tiltása"** (Disable order number repetition) **must be ON** on every account the deployment issues for. The service keys everything by order number and relies on szamlazz.hu rejecting a second document of the same kind under one order number (71/152) as its second guard against duplicates — the external-id query inside every execution of the create step is the first; without the toggle a retry that lands after the first request can issue a second legal document. The verified behavior and the go-live checklist are in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md).
@@ -31,7 +33,7 @@ One deployment serves one szamlazz.hu account unscoped (`[account]`) **or** any 
 
 ## Configuration
 
-The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload: the deployment-level settings at the top (`namespace`, `[issue]`, `[resolve]`) and the szamlazz.hu account under `[account]` — or, in [multi-account mode](#multi-account-mode), the accounts under `[accounts.<scope>]`.
+The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload: the deployment-level settings at the top (`namespace`, `[issue]`, `[read]`, `[resolve]`) and the szamlazz.hu account under `[account]` — or, in [multi-account mode](#multi-account-mode), the accounts under `[accounts.<scope>]`.
 
 ```toml
 identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]
@@ -43,6 +45,13 @@ initial_delay = "2m"          # before the first re-execution; longer than a cli
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound on re-executing the step
+
+[read]                        # optional; the read policy: the run retry policy of every read-only step (lookups, verifies, hints, get, query, check_account)
+max_attempts = 3              # executions of the step, including the first
+initial_delay = "5s"          # before the first re-execution
+factor = 2.0
+max_delay = "30s"
+max_duration = "2m"           # the hard bound; sized to ride out szamlazz.hu's observed minute-long stalls
 
 [resolve]                     # optional; the resolve policy: the run retry policy of the `account` step (no attempt cap)
 initial_delay = "1s"
@@ -86,7 +95,7 @@ RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY="..." \
 restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). `namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, and — per account — its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`.
+Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS=5`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). `namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The configuration is validated at start-up and the process exits with the first violated invariant. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, and — per account — its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`.
 
 The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is not supported and fails to load with an error naming the moved keys.
 
@@ -137,7 +146,7 @@ curl -X POST localhost:8080/restate/scope/acme/call/Szamlazz.Agent/check_account
 | `200` with `credentials: {"state": "rejected", "code", "message"}` | Resolution is right; szamlazz.hu refused the key (3 invalid credentials, 135 browser session active, 136 login blocked, 164 multiple accounts). Fix `agent_key` or the account's state on szamlazz.hu. Data, not a fault. |
 | `200` with `"scope": null` under a **scoped** call | **Stop.** The server accepted the scoped path but did not forward the scope: `protocol_v7` is off (the ingress gates a scoped path on `vqueues` and `scoped_virtual_objects` only). On a single-account deployment every scoped request would issue on the one account. Enable `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7` and probe again before opening the services. |
 | `400 unknown_account` | The scope names no account (or the request is unscoped on a multi-account deployment). Fix the configuration or the address. |
-| `503 unavailable` | szamlazz.hu, the resolver or the credential store could not be reached; call again. |
+| `503 unavailable` | szamlazz.hu did not answer the probe through the `[read]` policy, or the resolver or the credential store could not be reached; call again. |
 
 Credential acceptance is the only szamlazz.hu-verified fact in the answer: the supplier id appears only in found-document bodies, so a not-found probe cannot cross-check `supplier_id` — it echoes the configuration. A wrong `mode` or `supplier_id` surfaces on the first document found under the account, on any handler that finds one (`account_mismatch` by number — `Szamlazz.Agent.query` is the likeliest first — `conflict{external_id_collision}` under an external id), not here. The probe is the only defence against the `protocol_v7`-off case: the worker has no per-request signal of "was this call scoped?" that it is willing to depend on (the ingress's `x-restate-ingress-path` header is undocumented and caller-overridable), so run the probe under every scope before you open the services, and after every server upgrade.
 
@@ -178,7 +187,7 @@ The mapping is append-only: moving traffic to another szamlazz.hu account means 
 restate-szamlazz --config restate-szamlazz.toml --port 9080
 ```
 
-`--config` and `--port` also read `CONFIG_FILE` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). The endpoint binds `0.0.0.0:{port}` and speaks HTTP/2 only, as every Restate SDK endpoint does.
+`--config` and `--port` also read `CONFIG_FILE` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). The endpoint binds `0.0.0.0:{port}` (`--port 0` takes an ephemeral one; the start-up log names the bound address) and speaks HTTP/2 only, as every Restate SDK endpoint does.
 
 Register it with a Restate server:
 
@@ -188,15 +197,25 @@ restate deployments register http://host:9080
 
 For local development the repository root has a `compose.yaml` with a Restate server; `docker compose up -d` starts it, `restate deployments register http://host.docker.internal:9080` registers an endpoint running on the host.
 
+### Stopping
+
+`SIGTERM` or `SIGINT` — `docker stop`, a Kubernetes rollout, `kill`, Ctrl-C — stops the process cleanly: it stops accepting connections, gives the open ones up to 10 s to finish (the Rust SDK's connection drain; the bound is the SDK's, not configurable here) and exits 0. The start-up log names the signals (`stop_on="SIGTERM, SIGINT"`) and a stop logs which one arrived (`signal="SIGTERM"`). With nothing in flight the process is gone within milliseconds. The container image runs the binary as PID 1 with `STOPSIGNAL SIGTERM`, so `docker stop` and the kubelet reach it directly.
+
+**In-flight invocations.** An invocation whose connection the stop cuts — one still running when the connection drain ends — is neither lost nor duplicated. Restate keeps it and re-dispatches it after the handler's retry interval (`initial_interval`: 2 m on every `Szamlazz.Order` handler but `get` and on `Szamlazz.Agent.set_payments` — longer than the 60 s client timeout, so an additive send cannot be repeated while the first is still in flight — 10 s on `Szamlazz.Agent.query` and `check_account`, the server's ~500 ms default on `get` and `Szamlazz.Agent.storno`); the re-execution replays the journal up to the open step and runs that step again. For a cut create step this is exactly what the query-first closure exists for: the re-execution queries the external id before sending and finds what the cut execution sent — `issued`, never a second document ([ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md); design §5). The cost is the delay and one of the invocation's attempts (five on the `Szamlazz.Order` 2 m handlers, two on `set_payments`; the last kills it). The create step is also the longest thing a stop can cut — a query, a send and a re-query at up to 60 s each, ~180 s in the worst case, well past the connection drain — so a rollout while orders are issuing will cut some of them; letting them finish would take a longer drain than the SDK offers.
+
+**Grace period.** Give the process the whole connection drain plus a margin, so it is never `SIGKILL`ed mid-drain: at least 15 s. Kubernetes' default `terminationGracePeriodSeconds: 30` is fine; Docker's default `docker stop -t 10` is the bare bound, so pass `-t 15` (or `stop_grace_period: 15s` in Compose) where the endpoint carries traffic. A longer grace period buys nothing: the connection drain ends at 10 s regardless.
+
+**Rolling updates.** To roll without cutting anything, empty the server side first — steps 1 and 2 of the [flag-day script](#single--multi-flag-day): make both services private and poll the `sys_invocation` query until nothing is in flight — then stop the old revision, register the new one and make the services public again. Without it a rollout is correct but stalls every in-flight order for the retry interval and spends one of its attempts.
+
 ## Services
 
-Every handler takes and returns JSON; the discovery manifest carries JSON Schemas for all of them, so Restate's OpenAPI export documents the full contract. Domain outcomes are data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or `conflict` with a `conflict_reason`.
+Every handler takes and returns JSON; the discovery manifest carries JSON Schemas for all of them, so Restate's OpenAPI export documents the full contract. Request bodies are **closed** (`additionalProperties: false`): a field the contract does not know — a misspelt `reissue`, `additive`, `force` or `buyer.tax_number` — is refused as a 400 `invalid_input` naming the field, never silently dropped and read as its default. Response bodies stay open; tolerate fields added later. Domain outcomes are data (HTTP 200): `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or `conflict` with a `conflict_reason`.
 
 `Szamlazz.Order` is a Virtual Object keyed by the order number (`rendelésszám`, trimmed). It keeps no state: every handler answers from szamlazz.hu through the order's deterministic external ids (`{namespace}:{order}:{kind}`, the namespace being the top-level `namespace` key), so any invocation finds what an earlier one issued. The retry identity of a request is Restate's ingress `Idempotency-Key`. Eight handlers on `Szamlazz.Order`, four on `Szamlazz.Agent`:
 
 | Handler | Description |
 |---|---|
-| `Szamlazz.Order.create_proforma` | Issues the proforma (`díjbekérő`) of the order. |
+| `Szamlazz.Order.create_proforma` | Issues the proforma (`díjbekérő`) of the order. Refused with `conflict{order_invoiced}` once the order's invoice or prepayment invoice is live. |
 | `Szamlazz.Order.create_invoice` | Issues the invoice (`számla`), converting the order's live proforma unless told otherwise (`options.proforma`: `auto`, `none` or `{"number": …}`); `options.reissue` issues a new one after a reversal. Refused with `conflict{prepaid_chain}` while a live prepayment invoice exists. |
 | `Szamlazz.Order.create_prepayment` | Issues the prepayment invoice (`előlegszámla`); one per order, exclusive with the plain invoice. Takes no `options.proforma`: szamlazz.hu converts the order's live proforma by shared order number on its own. |
 | `Szamlazz.Order.create_final` | Issues the final invoice (`végszámla`) settling the order's live prepayment invoice; the server does not net the prepayment into the totals. |
@@ -206,8 +225,8 @@ Every handler takes and returns JSON; the discovery manifest carries JSON Schema
 | `Szamlazz.Order.get` | What szamlazz.hu holds under the order's external ids right now (proforma, invoice, prepayment, final), each `live`, `reversed` or — a proforma — `consumed`. No input. Read-only, never blocks behind issuing. |
 | `Szamlazz.Agent.check_account` | The read-only probe of the [deploy checklist](#deploy-checklist): the scope the SDK saw, the configured account (`id`, `mode`, `supplier_id`), the namespace and whether szamlazz.hu accepted the credentials (`ok` / `rejected`). No input. One sentinel query; issues nothing. |
 | `Szamlazz.Agent.query` | Queries a document by invoice number, order number or external id. |
-| `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. |
-| `Szamlazz.Agent.storno` | Reverses an invoice that no `Szamlazz.Order` manages; a document carrying an order number is answered with `managed_by_order` instead. |
+| `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. **`additive: true` is at-least-once**: a lost reply is `outcome_unknown`, and the handler's one retry after a crash re-sends — each send that reaches szamlazz.hu appends the entries again. Query the invoice before re-sending an additive call that ended in `outcome_unknown`; a replacing call is repeated as is. |
+| `Szamlazz.Agent.storno` | Reverses an invoice that no `Szamlazz.Order` manages; a document carrying an order number is answered with `managed_by_order` instead — after the account check, like every document found by number. |
 
 A create request through the ingress (`/restate/call/{service}/{key}/{handler}`; on a multi-account deployment `/restate/scope/{scope}/call/{service}/{key}/{handler}`):
 
@@ -232,20 +251,20 @@ curl localhost:8080/restate/call/Szamlazz.Order/ORD-1001/create_invoice \
 2. **Any error** from an issuing or storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`" (the stored completion of a failed invocation is replayed under the same key for the retention period — verified); the handler reconciles by external id, so the retry is safe. Never interpret an error as "no document exists".
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the flag can never cause a duplicate.
 
-**Faults.** Errors are `TerminalError`s with a JSON body `{ "code", "message", "order"?, "kind"?, "external_id"? }`; the ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. Every one of them means "outcome unknown" (rule 2), never "no document exists".
+**Faults.** Errors are `TerminalError`s with a JSON body `{ "code", "message", "order"?, "kind"?, "external_id"? }`; the ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. Every one of them means "outcome unknown" (rule 2), never "no document exists". A malformed body has the same shape — the worker decodes its own request bodies, so an unknown field, a wrong type, a missing required field or invalid JSON is `{ "code": "invalid_input", "message": "malformed request body: …" }` with serde's message, naming the field when there is one (for example ``malformed request body: unknown field `resissue`, expected `reissue` or `proforma` at line 1 column …``), refused before anything is journaled or sent; you will not see the Restate SDK's plain-text `Cannot decode input payload` from these services.
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `invalid_input` | 400 | The request is malformed or names a document szamlazz.hu does not know. | Fix the request. |
+| `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know, a wrong type or a missing required field (the message names it; nothing was journaled or sent) — or it names a document szamlazz.hu does not know, or an option the handler does not take (`options.proforma` on anything but `create_invoice`). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment: it arrived unscoped on a multi-account deployment (`[accounts.<scope>]`, which serves accounts by scope only), or under a scope no account is reachable by — on a single-account deployment (`[account]`, served unscoped only), any scope. Nothing was issued. | Fix the address — `/restate/scope/{scope}/call/…` with a configured scope, or `/restate/call/…` on a single-account deployment; do not retry as is. |
 | `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order.storno_invoice` / `correct_invoice` on their verify, or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `Szamlazz.Agent.set_payments` is the one exemption: it registers the credit entry without a preceding query — a verify round trip per credit entry to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document. | Check `account.mode` / `account.supplier_id` — a test account configured as live fails on its first found document — or the scope the call was made under; do not retry blindly. |
-| `outcome_unknown` | 500 | The create or storno step ran out of its `[issue]` policy while a document may or may not have been issued. | Retry with a new `Idempotency-Key` or read `get`. |
-| `unavailable` | 503 | szamlazz.hu could not be reached for a check that must succeed before anything is sent — or the worker's own account resolver or credential store could not answer. | Retry with a new `Idempotency-Key` later. |
+| `outcome_unknown` | 500 | The create or storno step ran out of its `[issue]` policy while a document may or may not have been issued — or `Szamlazz.Agent.set_payments` lost the reply to its one send. | Retry with a new `Idempotency-Key` or read `get`. For `set_payments` with `additive: true`, query the invoice first: the lost send may have appended the entries. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the `[read]` policy (the message names the step, the last failure and — where the step knows them — the order, kind and external id), or answered it with a code nothing can be concluded from — or the worker's own account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Retry with a new `Idempotency-Key` later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (codes 3 invalid credentials, 135 browser session active, 136 login blocked, 164 multiple accounts). The execution that raised it **issued nothing** (szamlazz.hu answers these codes before acting on a request); an earlier one may have landed with a lost reply. The worker logs a `warn` with the namespace and the code. | Page the operator: fix `account.agent_key` (or the account state on szamlazz.hu). Then retry with a new `Idempotency-Key` or read `get`. |
 
 A 503 whose `x-restate-error-source` is `invocation` is **this worker's** answer — `unavailable` or `credentials_rejected` — not the Restate ingress being down. Restate's [HTTP invocation docs](https://docs.restate.dev/invoke/http#retrying-requests) say to treat `invocation` errors as non-retryable and to auto-retry a `5xx` only when its source is `ingress` (or absent); do that here as well: page on an `invocation` 503 instead of retrying into it — `credentials_rejected` in particular repeats identically until the deployment is fixed — and only then retry with a new `Idempotency-Key`.
 
-Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery. Issuing itself is a read-only lookup step and a create step whose every execution — Restate re-executes it under the `[issue]` policy while szamlazz.hu's answer is unknown — queries the external id before it sends; that query is what the next call reconciles against, and an exhausted create step is a structured `outcome_unknown` naming the order, kind and external id. Storno has the same two steps under the same policy. A killed invocation also reaches the caller as HTTP 500 with `x-restate-error-source: invocation`, carrying the last retryable error's message. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
+Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 10 m back-off) rather than pausing, so a stuck order never blocks its own recovery. Issuing itself is a read-only lookup step and a create step whose every execution — Restate re-executes it under the `[issue]` policy while szamlazz.hu's answer is unknown — queries the external id before it sends; that query is what the next call reconciles against, and an exhausted create step is a structured `outcome_unknown` naming the order, kind and external id. Storno has the same two steps under the same policy. Every read-only step — the lookups, verifies, hints, `get`'s queries, `query`, the `check_account` probe — is re-executed under the `[read]` policy while szamlazz.hu does not answer it (a transport failure, `szlahu_down`), so a single network blip on a read no longer fails the invocation; an exhausted read is a structured `unavailable`. A killed invocation also reaches the caller as HTTP 500 with `x-restate-error-source: invocation`, carrying the last retryable error's message. See [ADR 0004](../../docs/adr/0004-kill-not-pause-on-exhausted-retries.md) and [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
 
 ## Caller guidance: a Pretix integration
 

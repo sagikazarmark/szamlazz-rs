@@ -23,7 +23,7 @@ clap = { workspace = true }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
 restate-sdk = { workspace = true }
 serde = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
