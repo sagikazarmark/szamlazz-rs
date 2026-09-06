@@ -19,10 +19,11 @@ pub enum Rounding {
     Scale(u32),
     /// No rounding: exact decimal arithmetic, which can carry more decimal
     /// places than the currency has (`100.005 EUR` with a five-decimal VAT).
-    /// Whether szamlazz.hu rounds such a value for the printed document and
-    /// NAV's minor-unit reporting, or rejects it, is unverified (the
-    /// repository's behaviour notes carry the probe). Ask for this only when
-    /// your business rule requires it.
+    /// szamlazz.hu then rounds **each value to two decimals on its own** and
+    /// does not recompute the gross, so `100.004 / 27.00108 / 127.00508` is
+    /// stored as `100 / 27 / 127.01` — a document whose gross is not net + VAT
+    /// (observed on the test account, 2026-09-06). Ask for this only when your
+    /// business rule requires it and you accept that outcome.
     Exact,
 }
 
@@ -179,7 +180,9 @@ impl LineItem {
     /// Computes net, VAT, and gross using protocol currency rules: whole
     /// forints for HUF (`HUF`/`Ft`), **exact, unrounded** decimal arithmetic
     /// for every other currency — so a `100.005 EUR` net goes on the wire with
-    /// sub-cent VAT and gross values.
+    /// sub-cent VAT and gross values, which szamlazz.hu rounds to two decimals
+    /// each on its own, possibly to a gross that is not net + VAT (see
+    /// [`Rounding::Exact`]).
     ///
     /// Kept for compatibility. Prefer [`LineItem::try_calculated`] with
     /// [`Rounding::minor_unit`], which rounds every currency to its minor unit

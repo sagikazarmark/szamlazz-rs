@@ -239,11 +239,11 @@ impl VatRate {
     /// The exact wire token.
     ///
     /// A percentage is normalised — trailing zeros dropped, so `27.00`, `27.0`
-    /// and `27` all render as `27` and `5.50` as `5.5`. Request-side
-    /// `afakulcs` is an `xsd:string`, so szamlazz.hu matches it as text against
-    /// a set whose every documented member is an integer, and the integer form
-    /// is the one every fixture shows; whether `27.00` would also be accepted
-    /// is unverified. Codes render verbatim.
+    /// and `27` all render as `27` and `5.50` as `5.5`. szamlazz.hu accepts
+    /// `27.00` and `27.0` too (observed on the test account, 2026-09-06), so
+    /// this is hygiene, not a requirement: the integer form is the one every
+    /// fixture shows, and a query response renders the rate as a double
+    /// (`27.0`), which round-trips to `27` this way. Codes render verbatim.
     #[must_use]
     pub fn as_wire(&self) -> Cow<'_, str> {
         match self {

@@ -7,8 +7,10 @@ enabled (`<eszamla>1</eszamla>`), every document marked `<teszt>true</teszt>`, a
 "Disable order number repetition" ON, through the `szamlazz-agent` crate. Probe ids (`A1`, `B4`, `C2-5`,
 …) refer to the review record's probe findings A–D and their raw request/response logs, which are not
 part of this repository; `P48-P0`…`P48-P7` are the storno-date probes of issue #48 (supplier id 972720,
-13 documents `CTEST-2026-82`…`91`, `D-CTEST-17`). Restate runtime facts live in ADRs 0001, 0002, 0004
-and 0005, not here.
+13 documents `CTEST-2026-82`…`91`, `D-CTEST-17`); `P60-H1`…`H5`, `P60-E1`…`E3`, `P60-V1`/`V2` are the line-item
+rounding probes of issue #60 (2026-09-06, same account: `CTEST-2026-92`…`99`, each stornoed as
+`E-CTEST-2026-1`…`8`; `CTEST-2026-92`…`97` in one run, `98`/`99` in a follow-up). Restate runtime facts live in
+ADRs 0001, 0002, 0004 and 0005, not here.
 
 Treat these as facts about *that* account. Some may depend on account settings (e-invoice, cash
 accounting), and szamlazz.hu may change any of them without notice; the go-live checklist at the end
@@ -136,11 +138,20 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | One create **stalled ≥ 57 s** with no response and issued nothing (checked by order-number query); every other call returned within 0.7–5.5 s. Not re-sent. | A4d-2, A4d-q | The re-check must wait longer than client timeout (60 s) plus stall: the handlers' `initial_interval` (a crash) and the issue policy's `initial_delay` (a lost reply, re-executing the create step) are both `2m`, never below ~90 s. In code, not by convention (#61): every write handler of both services carries `initial_interval = 2m` (`Szamlazz.Agent.storno` included), pinned by the discovery test; and `WorkerConfig::validate` refuses an `issue.initial_delay` under `IssueConfig::MIN_INITIAL_DELAY` — the client's exported `REQUEST_TIMEOUT` (60 s) plus a 30 s margin — so such a deployment does not start. |
 | Code 56 could not be triggered: a malformed (`nem-email-cim`) and an undeliverable buyer e-mail with `sendEmail=true` both returned plain success, `notification_delivery_failed=false`; the malformed address was stored on the document. | D6 | 56-without-number leaves the create step's outcome open → an immediate external-id re-query, then `Unconfirmed` (the run policy re-executes the step) when nothing is there — safe either way. |
 
+## Line-item arithmetic and rounding
+
+| Behaviour | Verified how | Design consequence |
+|---|---|---|
+| The `nettoErtek = nettoEgysegar × mennyiseg` check (259) has a **tolerance**: on a `2 × 1234.25 = 2468.5` / `2 × 1234.5 = 2469` HUF line, a net sent as 2469 (off by 0.5), 2470 (off by 1) and 2471 (off by 2) was accepted and stored as sent; 2474 (off by 5) and 2479 (off by 10) → 259 "A tétel nettó értéke nem megfelelő; nettó érték = nettó egységár x mennyiség. Termék: {name}." with `szlahu_error_code`/`szlahu_error` headers, nothing issued. Whether the bound is absolute (2 ≤ t < 5) or relative (0.08 % ≤ t < 0.2 % of the net) was not separated. | P60-H1…H5 | `Rounding::minor_unit` — half away from zero, so the net differs from `price × qty` by at most half a minor unit — is safely inside; a `LineItem::new` with hand-computed values off by ≥ 5 is `rejected{259}`. |
+| szamlazz.hu **rounds every sent monetary value to two decimals itself, each one independently** (`100.005 → 100.01`, so at least half-up on a positive midpoint; half-even it is not), and keeps `nettoEgysegar` verbatim: an EUR line sent as `1 × 100.005` = `100.005 / 27.00135 / 127.00635` was accepted and stored as `nettoegysegar 100.005`, `netto 100.01`, `afa 27`, `brutto 127.01` (per-rate and grand totals the same; `szlahu_nettovegosszeg 100,01`). Sent as `1 × 100.004` = `100.004 / 27.00108 / 127.00508`, it stored `netto 100`, `afa 27`, **`brutto 127.01`** — a document whose stored gross ≠ net + VAT; the gross is not recomputed and 261 did not fire. | P60-E1, P60-E3 | Exact (unrounded) values are never sent by the worker: `Rounding::minor_unit` rounds the net before the VAT and derives the gross from the rounded pair, so what is sent is what is stored and the stored document is consistent. `Rounding::Exact` and `calculated_for_currency`'s non-HUF path can produce the inconsistent document above; both say so. |
+| The minor-unit-rounded EUR line (`3 × 33.335` → `100.01 / 27.00 / 127.01`, net off by 0.005 from `price × qty`) was accepted and stored as sent; its storno carried `-100.01` / `-127.01`. | P60-E2 | The worker's non-HUF wire since #60. |
+| `afakulcs` accepts `27.00` and `27.0` as well as `27`; every query response renders the rate as a double, `27.0`, whatever was sent. | P60-V1, P60-V2; every P60 query | `VatRate::as_wire`'s normalisation (`27.00` → `27`) is a nicety, not a necessity; it also makes a queried `27.0` round-trip as `27`. |
+
 ## Test-account caveats
 
 | Caveat | Why it matters |
 |---|---|
-| Everything above is one TEST account, two days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents). | Nothing here is a documented guarantee. |
+| Everything above is one TEST account, two days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents and the 8 `P60-*` invoices with their 8 stornos). | Nothing here is a documented guarantee. |
 | Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | The account's `mode` (default `live`) is validated against `<teszt>` on every document found under our external ids; the live account has a different supplier id and `teszt=false`. In multi-account mode each account carries its own `mode` and `supplier_id`. |
 | E-invoicing is enabled (`<eszamla>1</eszamla>` on all but `D`/`SL`). | 352 (kelt must be today) on storno may be an e-invoice rule; behavior on paper-invoice accounts is unknown. The same may hold for an explicit storno `teljesitesDatum`, accepted here (P48). |
 | The test account did not produce 56 for bad addresses. | Either test accounts do not send mail or 56 is raised only on synchronous hand-off failures. |
@@ -185,17 +196,12 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   hint) and the customer-facing narrative; not a safety issue.
 - Internal whitespace and NFC handling of order numbers (only edge whitespace and case tested). Low:
   rejected rather than guessed.
-- **Line-item rounding tolerance and sub-minor-unit values** (review 2026-09-06 probes 9 and 10, findings A-03,
-  A-04, A-05). The HUF path rounds the net to whole forints before szamlazz.hu's `nettoErtek = nettoEgysegar ×
-  mennyiseg` check (259); the only evidence it tolerates any discrepancy is the `#[ignore]`d
-  `tests/live.rs::invoice_lifecycle` (`2 × 1234.56 = 2469.12 → 2469`, a 0.12 difference, gross 3136 accepted on
-  2026-09-03) — the worst case, half a forint, has not been sent. What szamlazz.hu
-  does with a non-HUF value below the minor unit (`100.005 EUR` — round for print, or reject) is unobserved: the
-  worker no longer sends one (`Rounding::minor_unit` on every line since #60; the exact arithmetic is
-  `Rounding::Exact`, or the compatibility form `calculated_for_currency`, chosen explicitly). Whether `afakulcs`
-  accepts `27.00` is likewise unobserved — every fixture shows integer tokens, and `VatRate::Percent` now renders
-  them normalised — so only a caller sending `VatRate::Other("27.00")` would find out. Low: a rejection is
-  `rejected{code}` with nothing issued. Go-live steps 12 and 13 are the checks.
+- **Line-item rounding, what remains** (P60 settled the rest — see *Line-item arithmetic and rounding*): whether
+  the 259 tolerance is absolute (between 2 and 5 HUF) or relative (between 0.08 % and 0.2 % of the net) — only a
+  2469 HUF base was probed; whether szamlazz.hu rounds a **0-decimal currency other than HUF** (JPY, ISK) to 0 or
+  to 2 places, and whether it rounds a fractional **HUF** value at all (every HUF probe sent whole forints). Low:
+  the worker's discrepancy is at most half a minor unit on every currency, and a whole number is a valid
+  two-decimal value.
 - **Credential codes 3, 135, 136, 164** (invalid credentials, browser session active, login blocked,
   multiple accounts): none was observed on the probe account. The worker relies on szamlazz.hu's
   documentation that they are answered **before any write** — so the attempt that sees one has sent
@@ -241,9 +247,9 @@ before starting.
 | 9 | P48-P2 — create an invoice whose `teljesitesDatum` is in a **previous month**, storno it with `teljesitesDatum` = that date, query the `SS` by number | `sikeres=true`, no error; the `SS`'s `<telj>` equals the original's, its `<kelt>` is today | The storno date the worker sends is accepted on this account (ADR 0007); a rejection here blocks every storno |
 | 10 | Storno of a settled `ES` — create an `ES` under a fresh order, a `VS` settling it (`elolegSzamlaszam`), then storno the `ES`; query the `VS` by number | Either a refusal (221-like, `sikeres=false`, headers set) or a new `SS` with the `VS` still live, `<sztornozott>` absent | Whether the state "`VS` live, `ES` reversed" is reachable at all, and the code if it is refused (type it); the final invoice's exclusivity row (#62) is right either way |
 | 11 | `SZ` beside a live `VS` — on the step-10 order (or a fresh `ES` → `VS` pair), send a plain `SZ` under the same order number, with the toggle ON | Expected: accepted (the repetition toggle is per kind) — a live `SZ` and a live `VS` on one order; record any 71/152 instead | The server does not refuse cross-kind double billing, so `exclusivity-final` (`conflict{prepaid_chain}`) is the only guard (#62); storno the `SZ` and `VS` afterwards |
-| 12 | R-9 — one HUF line whose rounded net differs from `nettoEgysegar × mennyiseg` by 0.5 (`2 × 1234.25`, `nettoErtek=2469`); one EUR line sent via `LineItem::new` with a three-decimal net (`100.005`, `afaErtek=27.00135`), query both by number | HUF: `sikeres=true` — the tolerance of the 259–261 checks covers half a forint; EUR: record whether it is accepted, and what `<netto>`/`<afa>` the query returns (rounded for print, or verbatim), or the code | The worker sends the minor-unit rounding of `Rounding::minor_unit` on every line; a 259/260/261 on the HUF line means unit prices must be whole forints; the EUR answer is what `Rounding::Exact` callers get |
-| 13 | R-10 — create with `<afakulcs>27.00</afakulcs>` (via `VatRate::Other("27.00")`; the crate's `Percent` renders `27`), and once with `27.0` | Success, or the code | Whether the normalisation `VatRate::as_wire` performs is a nicety or a necessity — a caller sending `Other("27.00")` or an unnormalised percentage is `rejected` (nothing issued) if this fails |
+| 12 | P60-H1/E1 — one HUF line whose rounded net differs from `nettoEgysegar × mennyiseg` by 0.5 (`2 × 1234.25`, `nettoErtek=2469`); one EUR line sent via `LineItem::new` with a three-decimal net (`1 × 100.005`, `afaErtek=27.00135`, `bruttoErtek=127.00635`); query both by number | Both `sikeres=true`; the HUF line stored as sent; the EUR line stored as `netto 100.01`, `afa 27`, `brutto 127.01` with `nettoegysegar 100.005` | The 259 tolerance covers the worker's half-minor-unit discrepancy on this account (a 259 here means unit prices must be whole units); szamlazz.hu rounds each value to two decimals independently, so the worker's per-step `Rounding::minor_unit` is what keeps the stored document consistent |
+| 13 | P60-V1 — create with `<afakulcs>27.00</afakulcs>` (via `VatRate::Other("27.00")`; the crate's `Percent` renders `27`) | `sikeres=true`; the query returns `afakulcs 27.0` | `VatRate::as_wire`'s normalisation stays a nicety on this account; a rejection here means a caller sending `Other("27.00")` is `rejected` with nothing issued |
 
 Record `szallito/id`, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj`, the
-step-10/11 answers and the step-12 EUR body in the deployment notes; if any expectation fails, stop and revisit the
-corresponding ADR before go-live.
+step-10/11 answers and the step-12 stored EUR values in the deployment notes; if any expectation fails, stop and
+revisit the corresponding ADR before go-live.
