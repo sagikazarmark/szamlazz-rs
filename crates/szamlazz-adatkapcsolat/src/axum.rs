@@ -9,20 +9,21 @@
 //! (Workers, browsers); a hypothetical multi-threaded wasm runtime would
 //! panic at the wrapper's thread check instead of causing undefined behavior.
 
-use std::future::Future;
+use std::convert::Infallible;
+use std::future::{Future, ready};
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest as _, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use http::{HeaderMap, StatusCode, Uri, header};
+use http::{StatusCode, Uri, header};
 use tower::util::ServiceExt as _;
 
 use crate::KEY_HEADER;
 use crate::ack::{Ack, InvoiceAck, InvoiceDirection};
-use crate::document::Document;
+use crate::document::{Document, RootKind};
 use crate::handler::{Handler, MaybeSend, MaybeSync};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,15 +34,67 @@ type AppState<R> = send_wrapper::SendWrapper<Arc<Receiver<R>>>;
 /// Resolves a presented Adatkapcsolat key to tenant-specific business logic.
 ///
 /// The returned [`Handler`] is the authenticated tenant context, so its fields
-/// are directly available while handling the document. Returning `None`
-/// produces the protocol's matching `KEY_ERR` ack. Implementations should use
+/// are directly available while handling the document. The three answers are
+/// protocol decisions, not just lookup results:
+///
+/// - `Ok(Some(handler))` — the key is known; the push is handled.
+/// - `Ok(None)` — the key is **definitely** unknown; the router answers the
+///   protocol's `KEY_ERR` Ack, and szamlazz.hu **never resends** a bank
+///   transaction or receipt answered that way (an invoice only when it next
+///   changes). Return it only from a lookup that actually completed.
+/// - `Err(_)` — the key **could not be checked** (a database or secrets
+///   service timed out, …); the router answers `503` with no Ack, so the
+///   record stays in szamlazz.hu's 72-hour retry window. The error is not
+///   echoed to szamlazz.hu; log it yourself.
+///
+/// Resolution is async so a resolver that does I/O need not block.
+/// Implementations can be written as `async fn`; the `MaybeSend` bound keeps
+/// the trait implementable on Cloudflare Workers, where futures are `!Send`.
+/// On native targets the future borrows the returned handler, so the handler
+/// type must be `Sync` — which the router requires of it anyway. Use
 /// constant-time key comparison when keys are secrets rather than opaque IDs.
 pub trait KeyResolver {
     /// Handler/context selected for an authenticated key.
     type Handler: Handler;
 
+    /// Why a lookup could not complete. Not sent to szamlazz.hu — the `503`
+    /// alone drives the retry — so it may carry internal detail.
+    type Error: std::fmt::Display;
+
     /// Authenticates `presented_key` and returns its tenant handler/context.
-    fn resolve(&self, presented_key: &str) -> Option<&Self::Handler>;
+    fn resolve(
+        &self,
+        presented_key: &str,
+    ) -> impl Future<Output = Result<Option<&Self::Handler>, Self::Error>> + MaybeSend;
+}
+
+/// The request-body cap a receiver router applies.
+///
+/// The receiver sits on the public internet and buffers each push before it
+/// can authenticate it, so a cap is the default: [`BodyLimit::DEFAULT`] is
+/// 64 MiB — far above any observed push, where Számlázz.hu publishes no
+/// maximum. Requests over the cap are answered `413`, which szamlazz.hu
+/// retries like any non-200. Receipt batches are unbounded in principle;
+/// raise the cap, or pass [`BodyLimit::Unlimited`], as a deliberate,
+/// deployment-level choice — nothing selects it for you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BodyLimit {
+    /// Reject bodies over this many bytes with `413`.
+    Max(usize),
+    /// No cap; the whole body is buffered whatever its size.
+    Unlimited,
+}
+
+impl BodyLimit {
+    /// The cap [`router`] and [`router_with_resolver`] apply: 64 MiB.
+    pub const DEFAULT: Self = Self::Max(64 * 1024 * 1024);
+}
+
+impl Default for BodyLimit {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// A router answering the Adatkapcsolat push protocol at `/` and, when the
@@ -71,71 +124,93 @@ pub trait KeyResolver {
 /// # }
 /// ```
 ///
-/// The layer handles the protocol before your [`Handler`] runs:
-/// - requests whose `X-Szamlazzhu-Key` header does not match `key` are
-///   answered `200` + `KEY_ERR` (per protocol) without invoking the handler;
-/// - requests without the header are answered `401` instead of `KEY_ERR`:
-///   szamlazz.hu always sends it, so its absence means transport damage
-///   (e.g. a proxy stripping it), and a non-200 keeps retries alive rather
-///   than halting delivery;
-/// - unparsable bodies are answered `400` (szamlazz.hu retries, surfacing
-///   the misconfiguration in its logs);
-/// - handler errors are answered `500`, making szamlazz.hu retry for up to
-///   72 hours.
+/// # What each answer means to szamlazz.hu
 ///
-/// Számlázz.hu publishes no maximum size and receipt batches are unbounded, so
-/// this router disables axum's default body limit. Use
-/// [`router_with_body_limit`] to apply a deployment-specific cap.
+/// A push is delivered at most a bounded number of times, and szamlazz.hu
+/// reads the body of a `200` only: a `200` ends the delivery, any other status
+/// is retried for up to 72 hours whatever its body says. Two `200` bodies
+/// carry *control codes* and end more than the delivery — `KEY_ERR` ("this
+/// key is wrong") makes szamlazz.hu stop sending under the key, and **a bank
+/// transaction or receipt answered `KEY_ERR` is never resent**, an invoice
+/// only when it next changes. So the layer reserves `KEY_ERR` for a definite
+/// mismatch and answers every uncertain case with a status that keeps the
+/// retry window alive, in this order, before your [`Handler`] runs:
+///
+/// - **`401`** — no (or an undecodable) `X-Szamlazzhu-Key` header. szamlazz.hu
+///   always sends it, so its absence is transport damage (a proxy stripping
+///   it). Answered before the body is read: an unauthenticated client gets no
+///   parsing out of the receiver.
+/// - **`413`** — the body is over the [`BodyLimit`].
+/// - **`400`** — the root element is not a known document (or the body is not
+///   UTF-8 / XML at all). Only UTF-8 validity and the root element are
+///   checked at this point.
+/// - **`200` + `KEY_ERR`**, in the Ack shape of the pushed kind — the
+///   [`KeyResolver`] completed and knows no such key ([`Ok(None)`]). With
+///   `router(key, …)` that is a header not equal to `key`. Retries stop.
+/// - **`503`** — the resolver could not check the key ([`Err`]): the record
+///   stays retryable instead of being dropped.
+/// - **`400`** — an authenticated push whose body fails the full parse
+///   (element namespaces, typed structure, embedded PDF). szamlazz.hu
+///   retries, surfacing the misconfiguration in its logs.
+/// - **`500`** — the handler failed; szamlazz.hu retries for up to 72 hours.
+///
+/// Retry-keeping: `401`, `413`, `400`, `503`, `500`. Final: `200`, with or
+/// without a control code.
+///
+/// # Body limit
+///
+/// This router applies [`BodyLimit::DEFAULT`] (64 MiB). Use
+/// [`router_with_body_limit`] to raise it or — as an explicit choice — to
+/// lift it with [`BodyLimit::Unlimited`].
+///
+/// [`Ok(None)`]: KeyResolver::resolve
+/// [`Err`]: KeyResolver::resolve
 pub fn router<H>(key: impl Into<String>, handler: H) -> Router
 where
     H: Handler + MaybeSend + MaybeSync + 'static,
     H::Error: MaybeSend,
 {
-    build_router(
-        FixedKey {
-            key: key.into(),
-            handler,
-        },
-        None,
-    )
+    router_with_body_limit(key, handler, BodyLimit::DEFAULT)
 }
 
-/// Fixed-key convenience router with a caller-selected request-body limit.
-pub fn router_with_body_limit<H>(key: impl Into<String>, handler: H, body_limit: usize) -> Router
+/// Fixed-key router with a caller-selected request-body limit; see [`router`]
+/// for the protocol it answers and [`BodyLimit`] for the default it replaces.
+pub fn router_with_body_limit<H>(
+    key: impl Into<String>,
+    handler: H,
+    body_limit: BodyLimit,
+) -> Router
 where
     H: Handler + MaybeSend + MaybeSync + 'static,
     H::Error: MaybeSend,
 {
-    build_router(
+    router_with_resolver_and_body_limit(
         FixedKey {
             key: key.into(),
             handler,
         },
-        Some(body_limit),
+        body_limit,
     )
 }
 
-/// Multi-customer router without a request-body limit.
+/// Multi-customer router: the [`KeyResolver`] maps each presented key to its
+/// tenant's [`Handler`], and says when it could not ([`Err`] → `503`, never
+/// `KEY_ERR`). Applies [`BodyLimit::DEFAULT`]; see [`router`] for the protocol
+/// it answers.
+///
+/// [`Err`]: KeyResolver::resolve
 pub fn router_with_resolver<R>(resolver: R) -> Router
 where
     R: KeyResolver + MaybeSend + MaybeSync + 'static,
     R::Handler: MaybeSend + MaybeSync + 'static,
     <R::Handler as Handler>::Error: MaybeSend,
 {
-    build_router(resolver, None)
+    router_with_resolver_and_body_limit(resolver, BodyLimit::DEFAULT)
 }
 
-/// Multi-customer router with a caller-selected request-body limit.
-pub fn router_with_resolver_and_body_limit<R>(resolver: R, body_limit: usize) -> Router
-where
-    R: KeyResolver + MaybeSend + MaybeSync + 'static,
-    R::Handler: MaybeSend + MaybeSync + 'static,
-    <R::Handler as Handler>::Error: MaybeSend,
-{
-    build_router(resolver, Some(body_limit))
-}
-
-fn build_router<R>(resolver: R, body_limit: Option<usize>) -> Router
+/// Multi-customer router with a caller-selected request-body limit; see
+/// [`router_with_resolver`] and [`BodyLimit`].
+pub fn router_with_resolver_and_body_limit<R>(resolver: R, body_limit: BodyLimit) -> Router
 where
     R: KeyResolver + MaybeSend + MaybeSync + 'static,
     R::Handler: MaybeSend + MaybeSync + 'static,
@@ -152,8 +227,8 @@ where
         .with_state(state);
 
     match body_limit {
-        Some(limit) => router.layer(DefaultBodyLimit::max(limit)),
-        None => router.layer(DefaultBodyLimit::disable()),
+        BodyLimit::Max(limit) => router.layer(DefaultBodyLimit::max(limit)),
+        BodyLimit::Unlimited => router.layer(DefaultBodyLimit::disable()),
     }
 }
 
@@ -196,11 +271,17 @@ struct FixedKey<H> {
     handler: H,
 }
 
-impl<H: Handler> KeyResolver for FixedKey<H> {
+impl<H: Handler + MaybeSync> KeyResolver for FixedKey<H> {
     type Handler = H;
+    type Error = Infallible;
 
-    fn resolve(&self, presented_key: &str) -> Option<&Self::Handler> {
-        keys_match(presented_key, &self.key).then_some(&self.handler)
+    fn resolve(
+        &self,
+        presented_key: &str,
+    ) -> impl Future<Output = Result<Option<&H>, Infallible>> + MaybeSend {
+        ready(Ok(
+            keys_match(presented_key, &self.key).then_some(&self.handler)
+        ))
     }
 }
 
@@ -210,17 +291,13 @@ struct Receiver<R> {
 
 /// The axum handler: hands the `!Send`-tolerant inner future to axum, with
 /// the wasm `Send` assertion applied where needed.
-fn receive<R>(
-    state: State<AppState<R>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl Future<Output = Response> + Send
+fn receive<R>(state: State<AppState<R>>, request: Request) -> impl Future<Output = Response> + Send
 where
     R: KeyResolver + MaybeSend + MaybeSync + 'static,
     R::Handler: MaybeSend + MaybeSync + 'static,
     <R::Handler as Handler>::Error: MaybeSend,
 {
-    let future = receive_inner(state, headers, body);
+    let future = receive_inner(state, request);
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -232,49 +309,63 @@ where
     }
 }
 
-async fn receive_inner<R>(
-    State(receiver): State<AppState<R>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response
+/// The protocol in the order [`router`] documents: header, body limit, root
+/// scan, key, and — for authenticated pushes only — the full parse and the
+/// handler. Unauthenticated work stays minimal; every uncertain answer stays
+/// retryable.
+async fn receive_inner<R>(State(receiver): State<AppState<R>>, request: Request) -> Response
 where
     R: KeyResolver + MaybeSend + MaybeSync + 'static,
     R::Handler: MaybeSend + MaybeSync + 'static,
     <R::Handler as Handler>::Error: MaybeSend,
 {
-    // Identify and validate the XML envelope before authentication, but defer
-    // typed deserialization (including base64 PDF decoding) until afterwards.
-    let root = match Document::preflight(&body) {
-        Ok(root) => root,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-
     // Szamlazz.hu sends the key header with every push, so a missing (or
     // undecodable) header is transport damage — typically a proxy stripping
     // it — not an unknown key. KEY_ERR would make szamlazz.hu stop resending
     // (bank transactions and receipts permanently); a non-200 keeps the
-    // 72-hour retry window alive while the deployment is fixed.
-    let Some(presented_key) = headers.get(KEY_HEADER).and_then(|v| v.to_str().ok()) else {
+    // 72-hour retry window alive while the deployment is fixed. Answered
+    // before the body is buffered: a client without the header gets no work
+    // out of the receiver.
+    let Some(presented_key) = request
+        .headers()
+        .get(KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    else {
         return (StatusCode::UNAUTHORIZED, "missing X-Szamlazzhu-Key header").into_response();
     };
-    let Some(handler) = receiver.resolver.resolve(presented_key) else {
-        // Per protocol: answer 200 with a KEY_ERR ack matching the pushed
-        // document type, so szamlazz.hu stops sending until the key changes.
-        return match root {
-            crate::document::RootKind::OutgoingInvoice => {
-                invoice_xml_response(&InvoiceAck::key_error(), InvoiceDirection::Outgoing)
-            }
-            crate::document::RootKind::IncomingInvoice => {
-                invoice_xml_response(&InvoiceAck::key_error(), InvoiceDirection::Incoming)
-            }
-            crate::document::RootKind::BankTransaction => {
-                xml_response(Ack::key_error().to_bank_transaction_xml())
-            }
-            crate::document::RootKind::Receipts => xml_response(Ack::key_error().to_receipts_xml()),
-        };
+
+    // Buffers the body under the router's `DefaultBodyLimit` (413 over it).
+    let body = match Bytes::from_request(request, &()).await {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
     };
 
-    let document = match Document::parse_preflighted(&body, root) {
+    // Identify the root before authentication — a KEY_ERR Ack takes the shape
+    // of the pushed kind — but read no XML past its start tag.
+    let root = match Document::identify(&body) {
+        Ok(root) => root,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+
+    let handler = match receiver.resolver.resolve(&presented_key).await {
+        Ok(Some(handler)) => handler,
+        Ok(None) => {
+            // Per protocol: answer 200 with a KEY_ERR Ack matching the pushed
+            // document type, so szamlazz.hu stops sending until the key
+            // changes. Reserved for a lookup that completed and found no
+            // tenant — bank transactions and receipts answered this way are
+            // never resent.
+            return key_error_response(root);
+        }
+        // The resolver could not check the key. KEY_ERR would permanently
+        // drop the record; a non-200 keeps the 72-hour retry window alive.
+        // 503 needs no root kind — it carries no Ack.
+        Err(_) => return resolver_unavailable(),
+    };
+
+    // Authenticated: the per-element namespace pass and the typed parse.
+    let document = match Document::parse_identified(&body, root) {
         Ok(document) => document,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
@@ -314,6 +405,27 @@ fn invoice_xml_response(ack: &InvoiceAck, direction: InvoiceDirection) -> Respon
         Ok(body) => xml_response(body),
         Err(_) => handler_error(),
     }
+}
+
+/// The `KEY_ERR` Ack in the shape of the pushed document's kind.
+fn key_error_response(root: RootKind) -> Response {
+    match root {
+        RootKind::OutgoingInvoice => {
+            invoice_xml_response(&InvoiceAck::key_error(), InvoiceDirection::Outgoing)
+        }
+        RootKind::IncomingInvoice => {
+            invoice_xml_response(&InvoiceAck::key_error(), InvoiceDirection::Incoming)
+        }
+        RootKind::BankTransaction => xml_response(Ack::key_error().to_bank_transaction_xml()),
+        RootKind::Receipts => xml_response(Ack::key_error().to_receipts_xml()),
+    }
+}
+
+/// Answers a resolver that could not check the key with a bare 503. Like a
+/// handler failure, the error is not echoed — it may carry internal detail —
+/// and the status alone keeps szamlazz.hu retrying.
+fn resolver_unavailable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, "key resolver unavailable").into_response()
 }
 
 fn xml_response(body: Vec<u8>) -> Response {
