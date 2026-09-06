@@ -33,6 +33,7 @@ The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 - [`docs/design/restate-szamlazz.md`](docs/design/restate-szamlazz.md): design and implementation spec for the Restate worker.
 - [`docs/adr/`](docs/adr): architecture decision records behind it.
 - [`docs/szamlazz-hu-behaviour.md`](docs/szamlazz-hu-behaviour.md): verified Számla Agent behavior the worker relies on, with a go-live checklist.
+- [`docs/review/`](docs/review): dated whole-workspace reviews with verified findings and the live probes still open.
 
 ## Development
 
