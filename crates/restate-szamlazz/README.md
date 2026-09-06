@@ -157,9 +157,11 @@ activation details.
   malformed body is the structured `invalid_input` fault instead of the SDK's plain-text 400. Same discovery
   schema as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
 - `contract::Outcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
-  `conflict` with a reason — `prepaid_chain`, `order_invoiced` (a proforma after the order's own live invoice or
-  prepayment invoice), `live`, `foreign` (a live invoice under the order number that is under none of the order's
-  external ids — another channel's), `duplicate_order_number`,
+  `conflict` with a reason — `prepaid_chain` (a plain invoice while the order's own prepayment invoice or final
+  invoice is live, or a prepayment invoice while the order's own invoice or final invoice is: the final invoice
+  keeps the chain closed after its prepayment is reversed), `order_invoiced` (a proforma after the order's own live
+  invoice, prepayment invoice or final invoice), `live`, `foreign` (a live invoice under the order number that is
+  under none of the order's external ids — another channel's), `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
   `base_reversed`, `not_managed`.
 - `contract::TerminalCode`: the six fault codes a `TerminalError` carries — `outcome_unknown` (500),

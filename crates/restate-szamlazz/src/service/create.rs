@@ -185,18 +185,30 @@ struct Intent {
 
 /// Step 1's table: the other kinds whose live document of ours refuses a
 /// create of `kind`, with the reason. The invoice and prepayment chains are
-/// exclusive (`prepaid_chain`); a proforma after either makes no sense
-/// (`order_invoiced`) — and without those two lookups the order-number hint of
-/// step 3 would report the order's own invoice as `foreign`, which claims
-/// another channel issued it. The final invoice's check is
-/// [`Execution::prepayment_for_final`], not exclusivity.
+/// exclusive (`prepaid_chain`), and the final invoice is the prepayment
+/// chain's settled end: a live `VS` refuses a plain invoice and a new
+/// prepayment invoice the same way, even after its `ES` is reversed — without
+/// that row `ES` → `VS` → storno of the `ES` let a plain `SZ` land beside a
+/// live `VS`, the double billing the worker exists to prevent (#62). A
+/// proforma after any of the three makes no sense (`order_invoiced`) — and
+/// without these lookups the order-number hint of step 3 would report the
+/// order's own invoice as `foreign`, which claims another channel issued it.
+/// The final invoice's own check is [`Execution::prepayment_for_final`], not
+/// exclusivity: a live `SZ` cannot coexist with the live `ES` it requires.
 const fn exclusive_with(kind: DocumentKind) -> &'static [(DocumentKind, ConflictReason)] {
     match kind {
-        DocumentKind::Invoice => &[(DocumentKind::Prepayment, ConflictReason::PrepaidChain)],
-        DocumentKind::Prepayment => &[(DocumentKind::Invoice, ConflictReason::PrepaidChain)],
+        DocumentKind::Invoice => &[
+            (DocumentKind::Prepayment, ConflictReason::PrepaidChain),
+            (DocumentKind::Final, ConflictReason::PrepaidChain),
+        ],
+        DocumentKind::Prepayment => &[
+            (DocumentKind::Invoice, ConflictReason::PrepaidChain),
+            (DocumentKind::Final, ConflictReason::PrepaidChain),
+        ],
         DocumentKind::Proforma => &[
             (DocumentKind::Invoice, ConflictReason::OrderInvoiced),
             (DocumentKind::Prepayment, ConflictReason::OrderInvoiced),
+            (DocumentKind::Final, ConflictReason::OrderInvoiced),
         ],
         DocumentKind::Final => &[],
     }
@@ -762,24 +774,35 @@ mod tests {
     }
 
     /// Step 1's table: the invoice and prepayment chains refuse each other
-    /// (`prepaid_chain`); a proforma is refused by either (`order_invoiced`),
-    /// so that the order's own invoice is never met by the hint as `foreign`;
-    /// the final invoice's check is `prepayment_for_final`, not exclusivity.
+    /// (`prepaid_chain`), and the final invoice — the prepayment chain's
+    /// settled end, live after its `ES` is reversed — refuses both the same
+    /// way (#62: without that row, `ES` → `VS` → storno of the `ES` let a
+    /// plain `SZ` land beside a live `VS`); a proforma is refused by all
+    /// three (`order_invoiced`), so that the order's own invoice is never met
+    /// by the hint as `foreign`; the final invoice's own check is
+    /// `prepayment_for_final`, not exclusivity.
     #[test]
     fn exclusivity_table_names_the_other_kinds_and_their_reasons() {
         assert_eq!(
             exclusive_with(DocumentKind::Invoice),
-            [(DocumentKind::Prepayment, ConflictReason::PrepaidChain)]
+            [
+                (DocumentKind::Prepayment, ConflictReason::PrepaidChain),
+                (DocumentKind::Final, ConflictReason::PrepaidChain),
+            ]
         );
         assert_eq!(
             exclusive_with(DocumentKind::Prepayment),
-            [(DocumentKind::Invoice, ConflictReason::PrepaidChain)]
+            [
+                (DocumentKind::Invoice, ConflictReason::PrepaidChain),
+                (DocumentKind::Final, ConflictReason::PrepaidChain),
+            ]
         );
         assert_eq!(
             exclusive_with(DocumentKind::Proforma),
             [
                 (DocumentKind::Invoice, ConflictReason::OrderInvoiced),
                 (DocumentKind::Prepayment, ConflictReason::OrderInvoiced),
+                (DocumentKind::Final, ConflictReason::OrderInvoiced),
             ]
         );
         assert_eq!(exclusive_with(DocumentKind::Final), []);

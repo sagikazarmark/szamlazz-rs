@@ -170,10 +170,13 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 - Whether "last" in `query --order` is by id or by `kelt` (indistinguishable while kelt must be
   today). Low: the hint is secondary.
 - Server code for a sixth credit entry; credit on the `SS` itself (463 expected). Low.
-- Storno of `ES`/`VS`/`HS`; a new `VS` after a stornoed `VS`; an `SZ` beside a live `ES`. Moderate:
-  `storno_invoice` accepts `ES`/`VS`/`HS`, and `create_final` with `reissue: true` after a reversed
-  `VS` sends a new one; the `SZ`-beside-`ES` case is refused by the service (`conflict{prepaid_chain}`)
-  before sending.
+- Storno of `ES`/`VS`/`HS`; a new `VS` after a stornoed `VS`; an `SZ` beside a live `ES`; **a storno of a
+  settled `ES`** (one with a `VS`; a 221-like refusal is plausible) and **an `SZ` beside a live `VS`** (the
+  repetition toggle is per kind, so the server is not expected to refuse). Moderate: `storno_invoice`
+  accepts `ES`/`VS`/`HS`, and `create_final` with `reissue: true` after a reversed `VS` sends a new one;
+  the `SZ`-beside-`ES` and `SZ`-beside-`VS` cases are refused by the service before sending
+  (`conflict{prepaid_chain}` — the latter from the final invoice's exclusivity row, #62), whatever the
+  server would do. Go-live steps 10 and 11 are the checks.
 - A second `D` after a consumed `D` (152 expected). Low: `create_proforma` looks up `…:invoice` and
   `…:prepayment` first → `conflict{order_invoiced, existing_number}` when the converting document is ours;
   when it is another channel's the order-number hint in the lookup step sees it → `conflict{foreign}`.
@@ -225,6 +228,9 @@ before starting.
 | 7 | B6 — storno with an external id, query by it | Returns the `SS` (`hivszamlaszam` = original) | Storno query-first guard |
 | 8 | C4 — create with `" ORDER "`, `"ORDER "`, `"order"`; query by each | Padded → replay; lowercase → new document; padded query → 7 | Key normalization (trim, preserve case) |
 | 9 | P48-P2 — create an invoice whose `teljesitesDatum` is in a **previous month**, storno it with `teljesitesDatum` = that date, query the `SS` by number | `sikeres=true`, no error; the `SS`'s `<telj>` equals the original's, its `<kelt>` is today | The storno date the worker sends is accepted on this account (ADR 0007); a rejection here blocks every storno |
+| 10 | Storno of a settled `ES` — create an `ES` under a fresh order, a `VS` settling it (`elolegSzamlaszam`), then storno the `ES`; query the `VS` by number | Either a refusal (221-like, `sikeres=false`, headers set) or a new `SS` with the `VS` still live, `<sztornozott>` absent | Whether the state "`VS` live, `ES` reversed" is reachable at all, and the code if it is refused (type it); the final invoice's exclusivity row (#62) is right either way |
+| 11 | `SZ` beside a live `VS` — on the step-10 order (or a fresh `ES` → `VS` pair), send a plain `SZ` under the same order number, with the toggle ON | Expected: accepted (the repetition toggle is per kind) — a live `SZ` and a live `VS` on one order; record any 71/152 instead | The server does not refuse cross-kind double billing, so `exclusivity-final` (`conflict{prepaid_chain}`) is the only guard (#62); storno the `SZ` and `VS` afterwards |
 
-Record `szallito/id`, `teszt`, `eszamla`, the observed error headers per operation and the step-9 `telj` in
-the deployment notes; if any expectation fails, stop and revisit the corresponding ADR before go-live.
+Record `szallito/id`, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj` and the
+step-10/11 answers in the deployment notes; if any expectation fails, stop and revisit the corresponding ADR before
+go-live.

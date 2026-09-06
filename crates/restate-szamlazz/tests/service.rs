@@ -1522,6 +1522,7 @@ async fn e2e_order_protocol() {
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
     proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(&h).await;
+    a_live_final_closes_the_order_to_the_other_creates(&h).await;
     a_malformed_body_is_a_structured_invalid_input(&h).await;
     an_untrimmed_order_key_is_refused(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
@@ -1553,7 +1554,8 @@ async fn e2e_order_protocol() {
 /// `already_issued` from the lookup step.
 async fn issued_then_already_issued(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-1", &["prepayment", "proforma"]).await;
+    h.absent("E2E-1", &["prepayment", "final", "proforma"])
+        .await;
     order_query("E2E-1")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -1664,7 +1666,8 @@ async fn idempotency_key_replays_without_calling_szamlazz(h: &Harness) {
 /// `reconciled`.
 async fn duplicate_order_number_reconciles(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-3", &["prepayment", "proforma"]).await;
+    h.absent("E2E-3", &["prepayment", "final", "proforma"])
+        .await;
     order_query("E2E-3")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -1703,7 +1706,8 @@ async fn duplicate_order_number_reconciles(h: &Harness) {
 /// nothing under the other ids.
 async fn mount_reversed_sz1(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-1", &["prepayment", "proforma"]).await;
+    h.absent("E2E-1", &["prepayment", "final", "proforma"])
+        .await;
     external_id_query("acct:E2E-1:invoice")
         .respond_with(
             Doc {
@@ -1985,7 +1989,8 @@ async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harness) {
 /// (v) `reissue: true` while the document is live ⇒ `conflict{live}`.
 async fn reissue_on_live_is_a_conflict(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-1", &["prepayment", "proforma"]).await;
+    h.absent("E2E-1", &["prepayment", "final", "proforma"])
+        .await;
     h.holds(&Doc {
         external_id: Some("acct:E2E-1:invoice"),
         ..Doc::new("SZ-2", "SZ", "E2E-1")
@@ -2014,7 +2019,7 @@ async fn reissue_on_live_is_a_conflict(h: &Harness) {
 /// ⇒ `reversed`, storno number unknown.
 async fn external_reversal_detected(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-6", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-6", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-6")
         .respond_with(not_found())
@@ -2036,7 +2041,8 @@ async fn external_reversal_detected(h: &Harness) {
     assert_eq!(issued["outcome"], "issued", "{issued}");
 
     h.reset().await;
-    h.absent("E2E-6", &["prepayment", "proforma"]).await;
+    h.absent("E2E-6", &["prepayment", "final", "proforma"])
+        .await;
     external_id_query("acct:E2E-6:invoice")
         .respond_with(
             Doc {
@@ -2078,7 +2084,8 @@ async fn external_reversal_detected(h: &Harness) {
 /// again**: `outcome: reversed`, exactly one create on the wire.
 async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-6B", &["prepayment", "proforma"]).await;
+    h.absent("E2E-6B", &["prepayment", "final", "proforma"])
+        .await;
     order_query("E2E-6B")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -2142,7 +2149,8 @@ async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
 /// queries precede the send is the protocol's, not the test's, to know.
 async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-6C", &["prepayment", "proforma"]).await;
+    h.absent("E2E-6C", &["prepayment", "final", "proforma"])
+        .await;
     order_query("E2E-6C")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -2198,7 +2206,7 @@ async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Harness) {
 async fn proforma_auto_link_and_consumed(h: &Harness) {
     h.reset().await;
     // The proforma create checks that the order is not invoiced yet.
-    h.absent("E2E-7", &["invoice", "prepayment", "proforma"])
+    h.absent("E2E-7", &["invoice", "prepayment", "final", "proforma"])
         .await;
     order_query("E2E-7")
         .respond_with(not_found())
@@ -2224,7 +2232,7 @@ async fn proforma_auto_link_and_consumed(h: &Harness) {
     assert_eq!(proforma["external_id"], "acct:E2E-7:proforma");
 
     h.reset().await;
-    h.absent("E2E-7", &["prepayment", "invoice"]).await;
+    h.absent("E2E-7", &["prepayment", "final", "invoice"]).await;
     h.holds(&Doc {
         external_id: Some("acct:E2E-7:proforma"),
         ..Doc::new("D-7", "D", "E2E-7")
@@ -2293,7 +2301,7 @@ async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
 
     // A live-account proforma of this order, on the test account.
     h.reset().await;
-    h.absent("E2E-30", &["prepayment"]).await;
+    h.absent("E2E-30", &["prepayment", "final"]).await;
     number_query("D-30")
         .respond_with(
             Doc {
@@ -2320,20 +2328,21 @@ async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
             "namespace",
             "account",
             "exclusivity-prepayment",
+            "exclusivity-final",
             "verify-proforma-D-30"
         ],
         "the verify is the last step journaled"
     );
     assert_eq!(
         h.requests_seen().await,
-        2,
-        "the exclusivity lookup and the verify, nothing else"
+        3,
+        "the two exclusivity lookups and the verify, nothing else"
     );
 
     // Another order's proforma, and one carrying no order number at all.
     for (number, order) in [("D-31", Some("E2E-31")), ("D-32", None)] {
         h.reset().await;
-        h.absent("E2E-30", &["prepayment"]).await;
+        h.absent("E2E-30", &["prepayment", "final"]).await;
         number_query(number)
             .respond_with(
                 Doc {
@@ -2371,15 +2380,16 @@ async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
         );
         assert_eq!(
             h.requests_seen().await,
-            2,
-            "{number}: the exclusivity lookup and the verify, nothing else"
+            3,
+            "{number}: the two exclusivity lookups and the verify, nothing else"
         );
     }
 
     // A proforma of this order: the create proceeds and carries
     // `dijbekeroSzamlaszam`.
     h.reset().await;
-    h.absent("E2E-30", &["prepayment", "invoice"]).await;
+    h.absent("E2E-30", &["prepayment", "final", "invoice"])
+        .await;
     h.holds(&Doc::new("D-33", "D", "E2E-30")).await;
     create()
         .and(body_string_contains(
@@ -2489,7 +2499,8 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
     assert_eq!(reply.fault().code, "invalid_input", "{}", reply.body);
     assert_eq!(h.requests_seen().await, before, "refused before any call");
 
-    h.absent("E2E-10", &["invoice", "prepayment"]).await;
+    h.absent("E2E-10", &["invoice", "prepayment", "final"])
+        .await;
     // The order's live proforma, reachable by number and order; its external
     // id is guarded, not held: under `auto` the prepayment runs no proforma
     // lookup, so the selector must never be queried (a hit would find the
@@ -2538,7 +2549,7 @@ async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Har
         ("prepayment", "invoice", "ES-33", "ES"),
     ] {
         h.reset().await;
-        h.absent("E2E-33", &[other, "proforma"]).await;
+        h.absent("E2E-33", &[other, "final", "proforma"]).await;
         h.holds(&Doc {
             external_id: Some(&format!("acct:E2E-33:{ours}")),
             ..Doc::new(number, tipus, "E2E-33")
@@ -2569,7 +2580,7 @@ async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Har
 
     // A live invoice under the order number that is under none of our ids.
     h.reset().await;
-    h.absent("E2E-33", &["invoice", "prepayment", "proforma"])
+    h.absent("E2E-33", &["invoice", "prepayment", "final", "proforma"])
         .await;
     h.holds(&Doc::new("SZ-FOREIGN", "SZ", "E2E-33")).await;
     create()
@@ -2586,6 +2597,243 @@ async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Har
     eprintln!(
         "(x-a) create_proforma after our invoice → conflict{{order_invoiced}}; after a foreign one → conflict{{foreign}}: pass"
     );
+}
+
+/// (x-d) a live final invoice under `…:final` closes the order to every
+/// other create (#62). After `ES` → `VS` → storno of the `ES`, `…:prepayment`
+/// is reversed, `…:invoice` is absent and the newest document under the order
+/// is the `ES`'s storno — nothing the lookup step's hint would call foreign
+/// — so without a row for the final invoice a plain `SZ` (or a second `ES`
+/// under `reissue`) landed beside the live `VS`. The exclusivity step finds
+/// the `VS`: `create_invoice` and `create_prepayment`, with and without
+/// `reissue`, are `conflict{prepaid_chain, existing_number}`, `create_proforma`
+/// is `conflict{order_invoiced, existing_number}`, the refusal comes from
+/// `exclusivity-final` with no lookup step after it, and nothing is sent. A
+/// **reversed** `VS` refuses nothing: `create_invoice`, and `create_prepayment`
+/// with `reissue`, proceed to `issued`; `create_final` reports the reversed
+/// final and, with `reissue`, issues the next one under the same id — its own
+/// check, `prepayment-for-final`, is unchanged.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the five refusals, then the three creates a reversed final does not refuse"
+)]
+async fn a_live_final_closes_the_order_to_the_other_creates(h: &Harness) {
+    // ES-35 issued, VS-35 settled it, then ES-35 was reversed.
+    h.reset().await;
+    mount_prepaid_chain(h, "35", true, false).await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    for (i, (handler, kind, reissue, reason)) in [
+        ("create_invoice", "invoice", false, "prepaid_chain"),
+        ("create_invoice", "invoice", true, "prepaid_chain"),
+        ("create_prepayment", "prepayment", false, "prepaid_chain"),
+        ("create_prepayment", "prepayment", true, "prepaid_chain"),
+        ("create_proforma", "proforma", false, "order_invoiced"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reply = h
+            .call(
+                "E2E-35",
+                handler,
+                &create_body(dec!(1000), reissue),
+                &format!("e2e-35-k{i}"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{handler}: {}", reply.body);
+        let conflict = &reply.body;
+        assert_eq!(
+            conflict["outcome"], "conflict",
+            "{handler} reissue={reissue}: {conflict}"
+        );
+        assert_eq!(
+            conflict["conflict_reason"], reason,
+            "{handler} reissue={reissue}: {conflict}"
+        );
+        assert_eq!(
+            conflict["existing_number"], "VS-35",
+            "{handler} reissue={reissue}: {conflict}"
+        );
+        assert_eq!(conflict["kind"], kind, "{handler}: {conflict}");
+        assert_eq!(
+            conflict["external_id"],
+            format!("acct:E2E-35:{kind}"),
+            "{handler}: {conflict}"
+        );
+        let runs = h.runs(reply.invocation_id()).await;
+        assert_eq!(
+            runs.last().map(String::as_str),
+            Some("exclusivity-final"),
+            "{handler}: the final invoice's row is what refused: {runs:?}"
+        );
+        assert!(
+            !runs.iter().any(|name| name.starts_with("lookup-")),
+            "{handler}: no lookup step after the refusal: {runs:?}"
+        );
+    }
+    assert!(
+        h.create_bodies().await.is_empty(),
+        "nothing was sent beside the live VS-35"
+    );
+
+    // A reversed final refuses nothing: with both the `ES` and the `VS`
+    // reversed, the plain invoice proceeds and a second prepayment invoice
+    // proceeds under `reissue` — the hint's newest document is the final's
+    // storno, not foreign — and each create lands under its own external id.
+    for (handler, kind, reissue, number) in [
+        ("create_invoice", "invoice", false, "SZ-36"),
+        ("create_prepayment", "prepayment", true, "ES-36B"),
+    ] {
+        h.reset().await;
+        mount_prepaid_chain(h, "36", true, true).await;
+        create()
+            .and(body_string_contains(format!(
+                "<szamlaKulsoAzon>acct:E2E-36:{kind}</szamlaKulsoAzon>"
+            )))
+            .respond_with(created(number, "1000", "1270"))
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call(
+                "E2E-36",
+                handler,
+                &create_body(dec!(1000), reissue),
+                &format!("e2e-36-{handler}"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{handler}: {}", reply.body);
+        assert_eq!(reply.body["outcome"], "issued", "{handler}: {}", reply.body);
+        assert_eq!(reply.body["invoice_number"], number, "{handler}");
+        assert_eq!(reply.body["external_id"], format!("acct:E2E-36:{kind}"));
+        assert_eq!(
+            h.create_bodies().await.len(),
+            1,
+            "{handler}: exactly one create"
+        );
+        let runs = h.runs(reply.invocation_id()).await;
+        let mut expected = vec!["namespace", "account"];
+        expected.extend(if kind == "invoice" {
+            vec![
+                "exclusivity-prepayment",
+                "exclusivity-final",
+                "proforma-link",
+            ]
+        } else {
+            vec!["exclusivity-invoice", "exclusivity-final"]
+        });
+        let (lookup, create_step) = (format!("lookup-{kind}"), format!("create-{kind}"));
+        expected.extend([lookup.as_str(), create_step.as_str()]);
+        assert_eq!(runs, expected, "{handler}: {runs:?}");
+    }
+
+    // A new final after a reversed one stays possible: `create_final` checks
+    // its live prepayment (`prepayment-for-final`, unchanged), reports the
+    // reversed final without `reissue`, and issues the next one with it,
+    // settling the same prepayment.
+    h.reset().await;
+    mount_prepaid_chain(h, "37", false, true).await;
+    create()
+        .and(body_string_contains("<vegszamla>true</vegszamla>"))
+        .and(body_string_contains(
+            "<elolegSzamlaszam>ES-37</elolegSzamlaszam>",
+        ))
+        .respond_with(created("VS-38", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reversed = h
+        .ok(
+            "E2E-37",
+            "create_final",
+            &create_body(dec!(1000), false),
+            "e2e-37-k1",
+        )
+        .await;
+    assert_eq!(reversed["outcome"], "reversed", "{reversed}");
+    assert_eq!(reversed["invoice_number"], "VS-37");
+    assert_eq!(reversed["storno_number"], "SS-37");
+    assert!(
+        h.create_bodies().await.is_empty(),
+        "reversed is not reissue"
+    );
+    let reply = h
+        .call(
+            "E2E-37",
+            "create_final",
+            &create_body(dec!(1000), true),
+            "e2e-37-k2",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["kind"], "final");
+    assert_eq!(reply.body["invoice_number"], "VS-38");
+    assert_eq!(reply.body["external_id"], "acct:E2E-37:final");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "prepayment-for-final",
+            "lookup-final",
+            "create-final",
+        ],
+        "no exclusivity row for the final invoice itself: {runs:?}"
+    );
+    eprintln!(
+        "(x-d) live VS → create_invoice/create_prepayment conflict{{prepaid_chain}}, create_proforma conflict{{order_invoiced}}; reversed VS refuses nothing: pass"
+    );
+}
+
+/// szamlazz.hu after `ES-{n}` → `VS-{n}` on order `E2E-{n}`, with the `ES`
+/// and/or the `VS` reversed since: nothing under `…:invoice` or `…:proforma`,
+/// the `ES` under `…:prepayment`, the `VS` (`hivszamlaszam` = the `ES`) under
+/// `…:final`, and the newest document under the order the storno `SS-{n}` of
+/// the last one reversed — the `VS` itself while both are live.
+async fn mount_prepaid_chain(h: &Harness, n: &str, es_reversed: bool, vs_reversed: bool) {
+    let order = format!("E2E-{n}");
+    let (es, vs, ss) = (format!("ES-{n}"), format!("VS-{n}"), format!("SS-{n}"));
+    h.absent(&order, &["invoice", "proforma"]).await;
+    external_id_query(&format!("acct:{order}:prepayment"))
+        .respond_with(
+            Doc {
+                reversed: es_reversed,
+                ..Doc::new(&es, "ES", &order)
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    let final_invoice = Doc {
+        reversed: vs_reversed,
+        referenced_invoice: Some(&es),
+        ..Doc::new(&vs, "VS", &order)
+    };
+    external_id_query(&format!("acct:{order}:final"))
+        .respond_with(final_invoice.response())
+        .mount(&h.mock)
+        .await;
+    let newest = match (es_reversed, vs_reversed) {
+        (_, true) => Doc {
+            referenced_invoice: Some(&vs),
+            ..Doc::new(&ss, "SS", &order)
+        },
+        (true, false) => Doc {
+            referenced_invoice: Some(&es),
+            ..Doc::new(&ss, "SS", &order)
+        },
+        (false, false) => final_invoice,
+    };
+    order_query(&order)
+        .respond_with(newest.response())
+        .mount(&h.mock)
+        .await;
 }
 
 /// (x-b) a malformed body — one carrying a field the contract does not
@@ -2741,7 +2989,7 @@ async fn an_untrimmed_order_key_is_refused(h: &Harness) {
 /// of #29.
 async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-11", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-11", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-11")
         .respond_with(not_found())
@@ -2831,7 +3079,8 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
 /// create mock sees exactly one request.
 async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-27", &["prepayment", "proforma"]).await;
+    h.absent("E2E-27", &["prepayment", "final", "proforma"])
+        .await;
     order_query("E2E-27")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -2898,6 +3147,7 @@ async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
             "namespace",
             "account",
             "exclusivity-prepayment",
+            "exclusivity-final",
             "proforma-link",
             "lookup-invoice",
             "create-invoice",
@@ -2914,7 +3164,8 @@ async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
 /// zero requests.
 async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-28", &["prepayment", "proforma"]).await;
+    h.absent("E2E-28", &["prepayment", "final", "proforma"])
+        .await;
     order_query("E2E-28")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -3099,7 +3350,7 @@ async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     // Positive control: the sentinel travels through szamlazz.hu's rejection
     // message into the create run's journaled result.
     h.reset().await;
-    h.absent("E2E-12", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-12", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-12")
         .respond_with(not_found())
@@ -3272,7 +3523,7 @@ async fn purged_invocation_queries_szamlazz_again(h: &Harness) {
 /// `account` entry.
 async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-14", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-14", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-14")
         .respond_with(not_found())
@@ -3341,7 +3592,7 @@ async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness) {
 /// succeeded), nothing after it.
 async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-15", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-15", &["prepayment", "final", "proforma", "invoice"])
         .await;
     create()
         .respond_with(created("SZ-15", "1000", "1270"))
@@ -3393,7 +3644,7 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
 
     // The store is back: the same order issues on the next call.
     h.reset().await;
-    h.absent("E2E-15", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-15", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-15")
         .respond_with(not_found())
@@ -3450,7 +3701,8 @@ async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness
 
     // The document issued unscoped in phase 1 (E2E-1 → SZ-2) is found by the
     // first scoped create under `acme`: the external id did not change.
-    h.absent("E2E-1", &["prepayment", "proforma"]).await;
+    h.absent("E2E-1", &["prepayment", "final", "proforma"])
+        .await;
     h.holds(&Doc {
         external_id: Some("acct:E2E-1:invoice"),
         ..Doc::new("SZ-2", "SZ", "E2E-1")
@@ -3539,7 +3791,7 @@ async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness
 /// what identify *which account issued*.)
 async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-17", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-17", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-17")
         .respond_with(not_found())
@@ -3614,7 +3866,7 @@ async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
 /// either scope returns that scope's own stored completion without a call.
 async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-17B", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-17B", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-17B")
         .respond_with(not_found())
@@ -3747,7 +3999,7 @@ async fn check_account_under_each_scope_names_its_account(h: &Harness) {
 )]
 async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-18", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-18", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-18")
         .respond_with(not_found())
@@ -3810,7 +4062,8 @@ async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     // Reissue: the lookup sees the reversed document and its storno; the
     // create step issues the next one under the same id.
     h.reset().await;
-    h.absent("E2E-18", &["prepayment", "proforma"]).await;
+    h.absent("E2E-18", &["prepayment", "final", "proforma"])
+        .await;
     external_id_query("acct:E2E-18:invoice")
         .respond_with(
             Doc {
@@ -4328,7 +4581,7 @@ async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harn
 /// change.
 async fn account_change_between_executions_does_not_reach_the_invocation(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-19", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-19", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-19")
         .respond_with(not_found())
@@ -4391,7 +4644,7 @@ async fn account_change_between_executions_does_not_reach_the_invocation(h: &Har
 
     // A new invocation resolves the changed account.
     h.reset().await;
-    h.absent("E2E-19B", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-19B", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-19B")
         .respond_with(not_found())
@@ -4422,7 +4675,7 @@ async fn account_change_between_executions_does_not_reach_the_invocation(h: &Har
 /// entry is byte-identical before and after — credentials are never in it.
 async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
     h.reset().await;
-    h.absent("E2E-20", &["prepayment", "proforma", "invoice"])
+    h.absent("E2E-20", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-20")
         .respond_with(not_found())

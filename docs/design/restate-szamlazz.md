@@ -181,11 +181,18 @@ gateway opened for this execution.
    Compute line totals with `LineItem::calculated_for_currency`. Build `CreateInvoice` from input + the account's
    defaults and seller block (read through the gateway) + per-call overrides,
    `external_id = "{namespace}:{order}:invoice"`, `download_pdf = false`.
-1. **Exclusivity.** `ctx.run(query "{namespace}:{order}:prepayment")`: live `ES` → `conflict{prepaid_chain, existing_number}`.
-   (`create_prepayment` mirrors this against `…:invoice`; `create_proforma` runs it against **both** `…:invoice` and
-   `…:prepayment`, a live one → `conflict{order_invoiced, existing_number}` — a proforma after the invoice makes no
-   sense, and without these lookups the order-number hint of step 3 would report the order's own invoice as
-   `foreign`, which claims another channel issued it.) Another szamlazz.hu code (`Api`) → `TerminalError{unavailable}`
+1. **Exclusivity.** `ctx.run(query "{namespace}:{order}:prepayment")`: live `ES` → `conflict{prepaid_chain, existing_number}`;
+   then `ctx.run(query "{namespace}:{order}:final")`: live `VS` → the same `conflict{prepaid_chain, existing_number}`.
+   (`create_prepayment` mirrors this against `…:invoice` and `…:final`; `create_proforma` runs it against **all three**
+   of `…:invoice`, `…:prepayment` and `…:final`, a live one → `conflict{order_invoiced, existing_number}` — a proforma
+   after the invoice makes no sense, and without these lookups the order-number hint of step 3 would report the
+   order's own invoice as `foreign`, which claims another channel issued it.) The final invoice has its own row
+   because it is the prepayment chain's settled end and outlives its `ES`: after `ES` → `VS` → storno of the `ES`,
+   `…:prepayment` is reversed, `…:invoice` is absent and the newest document under the order is the `ES`'s `SS` — not
+   invoice-family, so the hint says absent — and szamlazz.hu's repetition toggle is per kind (verified), so without
+   the row a plain `SZ` (or a second `ES` under `reissue`) landed beside the live `VS` (#62). A reversed `VS` refuses
+   nothing.
+   Another szamlazz.hu code (`Api`) → `TerminalError{unavailable}`
    (an answer nothing can be concluded from); no answer → `Unanswered`, retried by the read policy. A document under
    the secondary id that fails validation → `conflict{external_id_collision, number}`: the query returns the newest
    holder, so a foreign document may hide a live document of ours behind it, and refusing is the only safe answer.
@@ -273,15 +280,16 @@ gateway opened for this execution.
    re-issued. Second guard: with the toggle ON, a byte-identical resend while the first document is live is answered
    with the same number.
 
-Kind specifics: `create_proforma` — kind `D`; exclusivity against both `…:invoice` and `…:prepayment` (a live one →
-`conflict{order_invoiced, existing_number}`, never `foreign`); `proforma` option not applicable. `create_prepayment`
-— exclusivity against `…:invoice`; `proforma` option not applicable (anything but `auto` → `invalid_input`) and **no
-step 2**: the Agent's prepayment invoice cannot carry `dijbekeroSzamlaszam`, and the server converts the order's live
-`D` by shared order number regardless (verified — an `ES` issued without the reference shows `hivdijbekszam`), so `get`
-derives `consumed` from the `ES`. `create_final` — `ctx.run(query "…:prepayment")` must be a live `ES` (7 →
-`conflict{prepayment_missing}`, reversed → `conflict{prepayment_reversed}`, fails validation →
-`conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server
-enforces one final per prepayment (73 → `rejected`); the server does not net the prepayment into the final's totals.
+Kind specifics: `create_proforma` — kind `D`; exclusivity against `…:invoice`, `…:prepayment` and `…:final` (a live
+one → `conflict{order_invoiced, existing_number}`, never `foreign`); `proforma` option not applicable.
+`create_prepayment` — exclusivity against `…:invoice` and `…:final`; `proforma` option not applicable (anything but
+`auto` → `invalid_input`) and **no step 2**: the Agent's prepayment invoice cannot carry `dijbekeroSzamlaszam`, and
+the server converts the order's live `D` by shared order number regardless (verified — an `ES` issued without the
+reference shows `hivdijbekszam`), so `get` derives `consumed` from the `ES`. `create_final` — no exclusivity row of
+its own (a live `SZ` cannot coexist with the live `ES` it requires); `ctx.run(query "…:prepayment")` must be a live
+`ES` (7 → `conflict{prepayment_missing}`, reversed → `conflict{prepayment_reversed}`, fails validation →
+`conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server enforces one final per prepayment (73 →
+`rejected`); the server does not net the prepayment into the final's totals.
 `correct_invoice` — `ctx.run(verify invoice_number)` under the read policy: 7 → `invalid_input`, reversed → `conflict{base_reversed}`,
 `rendelesszam ≠ key` → `conflict{not_managed}`, `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; ext id `…:corrective:{correction_id}`; the same lookup and create
 steps with the corrective exemption (verified): no order-number hint — the live base invoice under the order is
@@ -720,7 +728,14 @@ functions they are extracted into.
   `expect(0)` and the slot absent in `get`; `create_prepayment` refusing `options.proforma` and issuing without a
   proforma lookup; `create_proforma` on an order whose own invoice, then whose own prepayment invoice, is live under
   `…:invoice` / `…:prepayment` → `conflict{order_invoiced, existing_number}`, and on an order whose live invoice is
-  under none of our ids → `conflict{foreign}`, the create mock `expect(0)` in every case; a create whose body carries `options.resissue` — and one with `buyer.tax_numer`, and a
+  under none of our ids → `conflict{foreign}`, the create mock `expect(0)` in every case; a live `VS` under `…:final`
+  beside a reversed `ES` (its `SS` the newest document under the order) → `create_invoice` and `create_prepayment`,
+  with and without `reissue`, `conflict{prepaid_chain, existing_number}` and `create_proforma`
+  `conflict{order_invoiced, existing_number}`, each refused by `exclusivity-final` with no lookup step journaled and
+  the create mock `expect(0)`; a reversed `VS` beside a reversed `ES` → `create_invoice`, and `create_prepayment`
+  with `reissue`, `issued` under their own external ids, and `create_final` after a reversed `VS` →
+  `reversed{storno_number}` then, with `reissue`, `issued` carrying `elolegSzamlaszam` (#62); a create whose body
+  carries `options.resissue` — and one with `buyer.tax_numer`, and a
   `delete_proforma` with `force: "yes"` — answered 400 with the structured `invalid_input` fault naming the field,
   the create mock `expect(0)`, zero szamlazz.hu requests and no run journaled (refused before the prologue); a create
   under an untrimmed key — a leading, a trailing and both `%20` around the order number — → 400 `invalid_input`
