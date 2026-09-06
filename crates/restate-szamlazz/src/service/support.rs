@@ -5,15 +5,43 @@
 
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
+use super::prologue::Resolution;
 use crate::account::Account;
 use crate::config::Namespace;
 use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
-    InvoiceDocumentExt as _, QueryOutcome, StornoOutcome as GatewayStornoOutcome,
+    CreateOutcome, DeleteOutcome, InvoiceDocumentExt as _, LookupOutcome, ProbeOutcome,
+    QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
+    TaxpayerOutcome,
 };
 use crate::identity::{ExternalId, OrderKey};
+
+/// A type the services journal as the result of a `ctx.run` — the bound of
+/// `run_once`, `run_retrying` and `run_reading`, so this list is exactly what
+/// the journal can hold.
+///
+/// Implementing it is a promise that the type's serde layout is
+/// **additive-only**, as the [`gateway`](crate::gateway) module docs state
+/// (ADR 0005, journal compatibility). The promise is checked by the fixtures
+/// under `tests/journal/<type>/` (`service::journal`), one per variant: a new
+/// implementor is pinned there before it is journaled, and a new variant of
+/// one of these enums fails to compile until its sample is listed.
+pub(super) trait Journaled: Serialize + DeserializeOwned {}
+
+impl Journaled for Namespace {}
+impl Journaled for Resolution {}
+impl Journaled for QueryOutcome {}
+impl Journaled for LookupOutcome {}
+impl Journaled for CreateOutcome {}
+impl Journaled for StornoLookupOutcome {}
+impl Journaled for GatewayStornoOutcome {}
+impl Journaled for DeleteOutcome {}
+impl Journaled for SetPaymentsOutcome {}
+impl Journaled for ProbeOutcome {}
+impl Journaled for TaxpayerOutcome {}
 
 /// A fault raised as a `TerminalError` (design §7): never a domain outcome.
 ///
@@ -331,10 +359,7 @@ macro_rules! journal_helpers {
             use restate_sdk::errors::{HandlerError, TerminalError};
             use restate_sdk::prelude::$ctx;
             use restate_sdk::serde::Json;
-            use serde::Serialize;
-            use serde::de::DeserializeOwned;
-
-            use super::{Fault, Lookup, StornoIntent};
+            use super::{Fault, Journaled, Lookup, StornoIntent};
             use crate::account::Accounts;
             use crate::config::WorkerConfig;
             use crate::contract::{IssuedKind, Selector};
@@ -414,7 +439,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = T> + Send + 'ctx,
-                T: Serialize + DeserializeOwned + Send + 'static,
+                T: Journaled + Send + 'static,
             {
                 let Json(value) = ctx
                     .run(|| async move { Ok(Json(f().await)) })
@@ -444,7 +469,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, E>> + Send + 'ctx,
-                T: Serialize + DeserializeOwned + Send + 'static,
+                T: Journaled + Send + 'static,
                 E: StdError + Send + Sync + 'static,
             {
                 let Json(value) = ctx
@@ -476,7 +501,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-                T: Serialize + DeserializeOwned + Send + 'static,
+                T: Journaled + Send + 'static,
             {
                 let name = name.into();
                 run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)

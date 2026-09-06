@@ -651,6 +651,20 @@ functions they are extracted into.
   or trailing whitespace (`" ORD-1"`, `"ORD-1 "`, `"\tORD-1"`) as `invalid_input` naming the rule while
   `OrderKey::parse` itself still trims, and two sentinel tests that the agent key reaches
   neither the `credentials_rejected` warning nor the fault body of `credentials_rejected` or `account_mismatch`.
+- `service::journal` (journal compatibility, ADR 0005 #47): one pinned JSON fixture per variant of every type the
+  services journal as a `ctx.run` result — `Namespace`, `Resolution` (with an `Account` carrying every optional
+  field), `QueryOutcome`, `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`,
+  `DeleteOutcome`, `SetPaymentsOutcome`, `ProbeOutcome`, `TaxpayerOutcome` — under
+  `tests/journal/<type>/<variant>.json`, the document-carrying ones with every element the `szamla` XML can hold
+  (postal addresses, ledger blocks, a financial item, labels, two payments, a PDF) and the taxpayer one with a
+  detailed and a simple address. The generator asserts the JSON the current code writes equals the committed
+  fixture byte for byte and never writes unless `UPDATE_JOURNAL_FIXTURES=1`, which writes missing fixtures and
+  archives a differing one as `<variant>.<n>.json` before writing the new shape; the compatibility test replays
+  every fixture in every directory — current and archived — through the current types, requiring each to decode
+  and re-encode to a superset of itself, and refuses a fixture directory no journaled type claims. The `Journaled`
+  marker trait bounds the run helpers, and each enum's pins name its variants exhaustively, so a new variant
+  fails to compile until pinned. Harness tests cover the superset check and the verify / update / archive
+  behaviour on a scratch directory.
 - End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);

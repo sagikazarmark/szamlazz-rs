@@ -1,0 +1,42 @@
+{
+  "Found": {
+    "valid": true,
+    "name": "ACME KFT.",
+    "tax_number": "12345678",
+    "vat_code": "2",
+    "addresses": [
+      {
+        "kind": "HQ",
+        "country_code": "HU",
+        "region": "Budapest",
+        "postal_code": "1111",
+        "city": "BUDAPEST",
+        "street_name": "FŐ",
+        "public_place_category": "UTCA",
+        "number": "1.",
+        "building": "A",
+        "staircase": "B",
+        "floor": "3",
+        "door": "12",
+        "lot_number": "4242/1",
+        "additional_address_detail": null
+      },
+      {
+        "kind": "SITE",
+        "country_code": "HU",
+        "region": null,
+        "postal_code": "2030",
+        "city": "ÉRD",
+        "street_name": null,
+        "public_place_category": null,
+        "number": null,
+        "building": null,
+        "staircase": null,
+        "floor": null,
+        "door": null,
+        "lot_number": null,
+        "additional_address_detail": "Tárnoki út 23."
+      }
+    ]
+  }
+}

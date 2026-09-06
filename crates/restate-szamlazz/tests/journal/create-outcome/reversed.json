@@ -1,0 +1,170 @@
+{
+  "Reversed": {
+    "supplier": {
+      "id": 972720,
+      "name": "Acme Kft.",
+      "address": {
+        "country": "Magyarország",
+        "zip": "1111",
+        "city": "Budapest",
+        "address": "Fő u. 1."
+      },
+      "postal_address": {
+        "country": "Magyarország",
+        "zip": "1112",
+        "city": "Budapest",
+        "address": "Pf. 12."
+      },
+      "tax_number": "12345678-2-42",
+      "group_id": "17777777-5-44",
+      "eu_tax_number": "HU12345678",
+      "bank": {
+        "name": "Test Bank",
+        "account": "11111111-22222222-33333333"
+      }
+    },
+    "info": {
+      "id": 924307747,
+      "invoice_number": "SZ-1",
+      "economic_event_id": 924307700,
+      "source": 34,
+      "registration_number": "IKT-2026-1",
+      "document_type": "SZ",
+      "e_invoice": "2",
+      "referenced_invoice_number": "SZ-0",
+      "referenced_proforma_number": "D-1",
+      "issue_date": "2026-07-04",
+      "fulfillment_date": "2026-07-04",
+      "due_date": "2026-07-12",
+      "payment_method": "Átutalás",
+      "unified_payment_method": "transfer",
+      "cash_payment": false,
+      "order_number": "ORD-1",
+      "language": "hu",
+      "currency": "HUF",
+      "exchange_bank": "MNB",
+      "exchange_rate": "0",
+      "comment": "thanks",
+      "vat_type": "TEHK",
+      "cash_accounting": false,
+      "kata": false,
+      "kata_ledger": false,
+      "email": "buyer@example.com",
+      "test": true,
+      "reversed": true
+    },
+    "buyer": {
+      "id": 4242,
+      "name": "Kovács Bt.",
+      "identifier": "BUYER-1",
+      "address": {
+        "country": "Magyarország",
+        "zip": "2030",
+        "city": "Érd",
+        "address": "Tárnoki út 23."
+      },
+      "postal_address": {
+        "name": "Kovács Bt. (levelezés)",
+        "country": "Magyarország",
+        "zip": "2031",
+        "city": "Érd",
+        "address": "Pf. 3."
+      },
+      "email": "buyer@example.com",
+      "tax_number": "87654321-1-42",
+      "group_id": "18888888-5-44",
+      "eu_tax_number": "HU87654321",
+      "location": 1,
+      "private_person": false,
+      "ledger": {
+        "account": "311",
+        "buyer_id": "B-7",
+        "date": "2026-07-04",
+        "continuous_fulfillment": false,
+        "settlement_from": "2026-07-01",
+        "settlement_to": "2026-07-31"
+      }
+    },
+    "items": [
+      {
+        "name": "Eladó izé",
+        "id": "SKU-1",
+        "quantity": "1",
+        "unit": "db",
+        "unit_price": "10000",
+        "vat_type": "TEHK",
+        "vat_rate_code": "27",
+        "net_value": "10000",
+        "margin_vat_base": "0",
+        "vat_value": "2700",
+        "gross_value": "12700",
+        "comment": "row",
+        "ordering": 1,
+        "ledger": {
+          "revenue_account": "911",
+          "vat_account": "467",
+          "economic_event": "SALE",
+          "vat_economic_event": "VAT",
+          "settlement_from": "2026-07-01",
+          "settlement_to": "2026-07-31"
+        }
+      }
+    ],
+    "financial_items": [
+      {
+        "name": "Kezelési költség",
+        "vat_type": "TEHK",
+        "vat_rate_code": "27",
+        "net": "0",
+        "vat": "0",
+        "gross": "0",
+        "settlement_from": "2026-07-01",
+        "settlement_to": "2026-07-31",
+        "deductible_vat": 100,
+        "labels": [
+          "fee"
+        ]
+      }
+    ],
+    "labels": [
+      "webshop"
+    ],
+    "totals": {
+      "by_vat_rate": [
+        {
+          "vat_type": "TEHK",
+          "vat_rate_code": "27",
+          "net": "10000",
+          "vat": "2700",
+          "gross": "12700"
+        }
+      ],
+      "total": {
+        "net": "10000",
+        "vat": "2700",
+        "gross": "12700"
+      }
+    },
+    "payments": [
+      {
+        "date": "2026-07-04",
+        "title": "transfer",
+        "amount": "5000",
+        "comment": "first",
+        "bank_account": "11111111-22222222-33333333",
+        "bank_transaction_id": 99,
+        "exchange_rate": "1"
+      },
+      {
+        "date": "2026-07-05",
+        "title": "transfer",
+        "amount": "7700",
+        "comment": "rest",
+        "bank_account": "11111111-22222222-33333333",
+        "bank_transaction_id": 100,
+        "exchange_rate": "1"
+      }
+    ],
+    "pdf": "JVBERi0="
+  }
+}

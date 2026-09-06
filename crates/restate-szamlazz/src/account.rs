@@ -36,11 +36,14 @@ pub use static_resolver::{
 ///
 /// # Journal compatibility
 ///
-/// The type is **additive-only**: a new field gets a `#[serde(default)]`,
-/// and no field is renamed or removed, so a journaled account written by an
-/// earlier version reads back under a later one. `id` and `credential_ref`
-/// are the only required fields. The struct is `#[non_exhaustive]` for the
-/// same reason; build one with [`Account::new`] and set the rest.
+/// The type is **additive-only**, like every type the services journal (the
+/// [`gateway`](crate::gateway) module docs state the rule once): a new field
+/// gets a `#[serde(default)]`, and no field is renamed or removed, so a
+/// journaled account written by an earlier version reads back under a later
+/// one. `id` and `credential_ref` are the only required fields. The struct is
+/// `#[non_exhaustive]` for the same reason; build one with [`Account::new`]
+/// and set the rest. Its journaled shape is pinned under
+/// `tests/journal/resolution/`.
 ///
 /// # Ownership validation
 ///

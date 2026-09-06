@@ -1,0 +1,31 @@
+{
+  "Account": {
+    "id": "acme",
+    "mode": "test",
+    "supplier_id": 972720,
+    "endpoint": "https://szamlazz.example.test/szamla/",
+    "defaults": {
+      "e_invoice": true,
+      "language": "en",
+      "currency": "EUR",
+      "exchange_rate_bank": "MNB",
+      "template": "SzlaMost",
+      "send_email": false,
+      "number_prefix": "ACME",
+      "extra_logo": "logo.png",
+      "aggregator": "aggregator",
+      "guardian": true
+    },
+    "seller": {
+      "bank": "Test Bank",
+      "bank_account": "11111111-22222222-33333333",
+      "signer_name": "Signer",
+      "email": {
+        "reply_to": "billing@acme.test",
+        "subject": "Your invoice",
+        "body": "[b]Thank you[/b]"
+      }
+    },
+    "credential_ref": "acme-credentials"
+  }
+}
