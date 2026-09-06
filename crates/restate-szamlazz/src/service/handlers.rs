@@ -12,7 +12,7 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
-use super::{Agent, Order};
+use super::{Agent, Body, Order};
 use crate::contract::{
     CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
     DeleteProformaResponse, DocumentKind, OrderStatus, QueryRequest, QueryResponse,
@@ -24,7 +24,9 @@ use crate::contract::{
 ///
 /// Keeps no state: every handler answers from szamlazz.hu through the order's
 /// deterministic external ids. The retry identity of a request is Restate's
-/// ingress `Idempotency-Key`. Every handler first runs the prologue — pin the
+/// ingress `Idempotency-Key`. Every handler with an input takes it as a
+/// [`Body`] and decodes it first — a malformed body is the `invalid_input`
+/// fault before anything is journaled — then runs the prologue — pin the
 /// namespace, resolve the request's scope to its account (journaled once per
 /// invocation), fetch the credentials for this execution, open the gateway —
 /// and then its operation. Issuing is two durable steps — a read-only lookup
@@ -51,10 +53,11 @@ impl Order {
     async fn create_proforma(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Proforma, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Proforma, request))
             .await
             .map(Json)
     }
@@ -77,10 +80,11 @@ impl Order {
     async fn create_invoice(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Invoice, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Invoice, request))
             .await
             .map(Json)
     }
@@ -111,10 +115,11 @@ impl Order {
     async fn create_prepayment(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Prepayment, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Prepayment, request))
             .await
             .map(Json)
     }
@@ -137,10 +142,11 @@ impl Order {
     async fn create_final(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CreateRequest>,
+        request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, DocumentKind::Final, request.into_inner()))
+        Box::pin(execution.issue_kind(&ctx, DocumentKind::Final, request))
             .await
             .map(Json)
     }
@@ -163,12 +169,11 @@ impl Order {
     async fn correct_invoice(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<CorrectRequest>,
+        request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.correct(&ctx, request.into_inner()))
-            .await
-            .map(Json)
+        Box::pin(execution.correct(&ctx, request)).await.map(Json)
     }
 
     /// Reverses (`sztornó`) an invoice of this order; idempotent.
@@ -188,12 +193,11 @@ impl Order {
     async fn storno_invoice(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<StornoRequest>,
+        request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.storno(&ctx, request.into_inner()))
-            .await
-            .map(Json)
+        Box::pin(execution.storno(&ctx, request)).await.map(Json)
     }
 
     /// Deletes the order's proforma.
@@ -213,12 +217,11 @@ impl Order {
     async fn delete_proforma(
         &self,
         ctx: ObjectContext<'_>,
-        request: Json<DeleteProformaRequest>,
+        request: Body<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.delete(&ctx, request.into_inner()))
-            .await
-            .map(Json)
+        Box::pin(execution.delete(&ctx, request)).await.map(Json)
     }
 
     /// What szamlazz.hu holds under the order's external ids right now: four
@@ -279,13 +282,11 @@ impl Agent {
     async fn query(
         &self,
         ctx: Context<'_>,
-        request: Json<QueryRequest>,
+        request: Body<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        execution
-            .query_request(&ctx, request.into_inner())
-            .await
-            .map(Json)
+        execution.query_request(&ctx, request).await.map(Json)
     }
 
     /// Registers credit entries (`jóváírás`) on an invoice.
@@ -299,11 +300,12 @@ impl Agent {
     async fn set_payments(
         &self,
         ctx: Context<'_>,
-        request: Json<SetPaymentsRequest>,
+        request: Body<SetPaymentsRequest>,
     ) -> HandlerResult<Json<SetPaymentsResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
         execution
-            .set_payments_request(&ctx, request.into_inner())
+            .set_payments_request(&ctx, request)
             .await
             .map(Json)
     }
@@ -319,12 +321,10 @@ impl Agent {
     async fn storno(
         &self,
         ctx: Context<'_>,
-        request: Json<StornoRequest>,
+        request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
+        let request = request.into_request()?;
         let execution = self.prologue(&ctx).await?;
-        execution
-            .storno_request(&ctx, request.into_inner())
-            .await
-            .map(Json)
+        execution.storno_request(&ctx, request).await.map(Json)
     }
 }

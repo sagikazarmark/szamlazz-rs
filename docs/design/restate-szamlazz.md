@@ -104,9 +104,10 @@ external-id query and hint) or the create step's three (ADR 0004), well inside `
 
 ### The prologue (every handler of both services)
 
-After parsing its key, every handler runs the same four steps before its operation; the handler body then runs on
-the resulting *execution* — the gateway opened for this execution plus the deployment settings with the pinned
-namespace — and nothing of it (gateway, client, credentials) outlives the execution. No Virtual Object state.
+After decoding its body (`service::Body<T>` — a malformed one is `TerminalError{invalid_input}` here, before anything
+is journaled; §7) and parsing its key, every handler runs the same four steps before its operation; the handler body
+then runs on the resulting *execution* — the gateway opened for this execution plus the deployment settings with the
+pinned namespace — and nothing of it (gateway, client, credentials) outlives the execution. No Virtual Object state.
 
 1. **Pin** — `ctx.run("namespace", || namespace)`, a pure durable step: an in-place redeploy with a changed namespace
    cannot make a running invocation issue under a new id.
@@ -350,6 +351,28 @@ TerminalError codes: outcome_unknown (500) | unavailable (503) | account_mismatc
                    | credentials_rejected (503) | unknown_account (400)
 ```
 
+`invalid_input`: the caller's request, which the same request never gets past — a 400 and "fix the request". Two
+sources. A **malformed body**: every request type and every object it nests (`CreateRequest`, `CreateOptions`,
+`DocumentInput`, `BuyerInput`, `PostalAddressInput`, `LineItemInput`, `DocumentOverrides`, `ExchangeRateInput`,
+`CorrectRequest`, `StornoRequest`, `DeleteProformaRequest`, `QueryRequest`, `SetPaymentsRequest`, `PaymentEntry`) is
+closed — `#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the discovery schema — so a field the
+contract does not know is refused, never dropped: `{"options": {"resissue": true}}` is not `reissue: false` (which
+would answer `reversed` on a document the caller asked to reissue), `{"aditive": true}` is not `additive: false`
+(which would *replace* the invoice's credit entries), `{"froce": true}` is not `force: false`, a misspelt
+`buyer.tax_number` is not an invoice without the tax number. Response types stay open — a client must tolerate fields
+added later. The body is decoded **by the handler, not the SDK**: every handler with an input takes it as
+`service::Body<T>`, whose SDK `Deserialize` never fails — it keeps the verdict — and whose discovery metadata is
+exactly `Json<T>`'s, so the schemas do not change with the wrapper; the handler's first act, before the prologue, is
+to turn a refused body into this fault. Every malformed body — an unknown field, a wrong type, a missing required
+field, invalid JSON — is therefore the same `{ "code": "invalid_input", "message": "malformed request body: …" }`
+with serde's message, naming the field when there is one (``unknown field `resissue`, expected `reissue` or `proforma` ``, ``missing
+field `entries` ``, `invalid type: string "yes", expected a boolean`), and never the SDK's plain-text `Cannot decode
+input payload: …`, which no handler of either service can return. Nothing is journaled and nothing is sent. The
+second source is a request that **names a document szamlazz.hu does not know** — a corrective's base or a storno
+target answered with code 7 — or one the operation cannot take: `options.proforma` on any kind but `create_invoice`,
+a `{number}` proforma link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3).
+These are raised after the prologue, by the handler's own validation or verify.
+
 `unknown_account`: the request names no account of this deployment — it arrived unscoped where accounts are reachable
 by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
 prologue's `account` step before anything is issued; the same request never succeeds, so it is a 400 and the caller
@@ -509,8 +532,16 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   or `szlahu_down` as `Err(Unanswered)` — the step's retryable error, never data — and another API code as `Ok(Api)`
   data (the probe: `Accepted`); the probe as exactly one query of the sentinel id and nothing else, with a wrong key
   as data; the gateway validates found documents against the account it was opened for.
+- `contract`: every request type and every object it nests refuses one unknown top-level and one unknown nested field
+  with serde's error naming the field, the externally tagged enums refuse a second key, and every documented body —
+  the endpoint README's curl example, the e2e scenarios' literal bodies — still deserializes; under `schemars`, every
+  request schema and each of its `$defs` objects carries `additionalProperties: false` while the response schemas
+  carry none.
 - `service`: discovery test (names, handler set incl. `check_account` — read-only, `max_attempts = 3`, kill, explicit
-  `journal_retention`, no input — and attributes), an endpoint build smoke test, `prepare` refusing
+  `journal_retention`, no input — and attributes), an endpoint build smoke test, `Body<T>` — a well-formed body
+  decodes, a misspelt option / a wrong type / a missing field / an empty body each leave the handler as the 400
+  `invalid_input` fault naming the field, and its schema and input metadata are `Json<T>`'s, in the discovery
+  manifest too — `prepare` refusing
   `options.proforma` on every kind but `create_invoice`, the issue and read policies' field-for-field mapping onto
   `RunRetryPolicy` and `WorkerConfig::validate` on all three tables, the fault → status mapping incl. the exhausted
   read → `unavailable{step, last failure}` about the document, `Lookup::classify` on `Api`, the probe outcome →
@@ -526,7 +557,10 @@ the caller guidance with the Pretix integration as the worked example (ADR 0006)
   create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; proforma auto-link and `consumed` in `get`; `get` shape; a
   collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
   `expect(0)` and the slot absent in `get`; `create_prepayment` refusing `options.proforma` and issuing without a
-  proforma lookup; an exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
+  proforma lookup; a create whose body carries `options.resissue` — and one with `buyer.tax_numer`, and a
+  `delete_proforma` with `force: "yes"` — answered 400 with the structured `invalid_input` fault naming the field,
+  the create mock `expect(0)`, zero szamlazz.hu requests and no run journaled (refused before the prologue); an
+  exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
   500 within the run policy's delays, not the handler's, with `sys_invocation.retry_count = 1` and
   `last_failure_related_command_name = create-invoice` observed **while in flight** (attempt state is cleared on
   completion); the read policy (a 1 s test policy of three executions): a lookup whose external-id query answers 500

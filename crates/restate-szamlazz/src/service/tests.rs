@@ -267,6 +267,130 @@ async fn services_bind_to_an_endpoint() {
     let _endpoint = Endpoint::builder().bind(order).bind(agent).build();
 }
 
+/// A handler's body is decoded by the handler, not the SDK: `Body<T>`'s SDK
+/// `Deserialize` never fails — it keeps the verdict — so a malformed body
+/// reaches the handler and leaves it as the structured `invalid_input` fault
+/// (400, `{code, message}`) with serde's message, naming the field when there
+/// is one — never the SDK's plain-text `Cannot decode input payload`.
+#[test]
+fn a_malformed_body_is_a_structured_invalid_input() {
+    use bytes::Bytes;
+    use restate_sdk::errors::TerminalError;
+    use restate_sdk::serde::Deserialize as _;
+
+    use super::Body;
+    use crate::contract::document::tests::sample_document;
+    use crate::contract::{CreateRequest, DeleteProformaRequest, SetPaymentsRequest};
+
+    /// What the SDK hands the handler for `bytes`: the decode never fails.
+    fn body<T: for<'de> serde::Deserialize<'de>>(bytes: impl Into<Bytes>) -> Body<T> {
+        Body::<T>::deserialize(&mut bytes.into()).expect("never fails")
+    }
+
+    /// The message of the `invalid_input` fault (400) `bytes` is refused with.
+    fn refused<T>(bytes: impl Into<Bytes>) -> String
+    where
+        T: for<'de> serde::Deserialize<'de> + std::fmt::Debug,
+    {
+        let error = TerminalError::from(body::<T>(bytes).into_request().expect_err("refused"));
+        assert_eq!(error.code(), 400);
+        let fault: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(fault["code"], "invalid_input");
+        assert_eq!(fault.get("order"), None);
+        fault["message"].as_str().expect("message").to_owned()
+    }
+
+    let document = serde_json::to_value(sample_document()).expect("serialize");
+
+    // A well-formed body decodes to the request.
+    let request = body::<CreateRequest>(json!({"document": document}).to_string())
+        .into_request()
+        .expect("a well-formed body");
+    assert_eq!(request.document, sample_document());
+    assert!(!request.options.reissue);
+
+    // A misspelt option: refused, naming the field and the known ones.
+    let message = refused::<CreateRequest>(
+        json!({"document": document, "options": {"resissue": true}}).to_string(),
+    );
+    assert!(message.starts_with("malformed request body: "), "{message}");
+    assert!(message.contains("unknown field `resissue`"), "{message}");
+    assert!(message.contains("`reissue`"), "{message}");
+
+    // A wrong type, a missing required field and invalid JSON are the same
+    // fault; serde's message says what it can.
+    let message = refused::<DeleteProformaRequest>(json!({"force": "yes"}).to_string());
+    assert!(message.contains("expected a boolean"), "{message}");
+    let message = refused::<SetPaymentsRequest>(json!({"invoice_number": "SZ-1"}).to_string());
+    assert!(message.contains("missing field `entries`"), "{message}");
+    let message = refused::<CreateRequest>("not json");
+    assert!(message.contains("expected"), "{message}");
+    refused::<CreateRequest>(Bytes::new());
+}
+
+/// `Body<T>` changes how a body is decoded, not what the discovery manifest
+/// says about it: its schema and input metadata are `Json<T>`'s, so the
+/// `OpenAPI` export is unchanged and still carries `additionalProperties: false`
+/// for the request types.
+#[test]
+fn body_discovers_exactly_as_json() {
+    use restate_sdk::discovery::InputPayload;
+    use restate_sdk::serde::{Json, PayloadMetadata as _};
+
+    use super::Body;
+    use crate::contract::{
+        CorrectRequest, CreateRequest, DeleteProformaRequest, QueryRequest, SetPaymentsRequest,
+        StornoRequest,
+    };
+
+    macro_rules! same_as_json {
+        ($($request:ty),* $(,)?) => {$(
+            assert_eq!(
+                <Body<$request>>::json_schema(),
+                <Json<$request>>::json_schema(),
+                stringify!($request)
+            );
+            let body = InputPayload::from_metadata::<Body<$request>>();
+            let json = InputPayload::from_metadata::<Json<$request>>();
+            assert_eq!(body.content_type, json.content_type, stringify!($request));
+            assert_eq!(body.required, json.required, stringify!($request));
+            assert_eq!(body.json_schema, json.json_schema, stringify!($request));
+        )*};
+    }
+    same_as_json!(
+        CreateRequest,
+        CorrectRequest,
+        StornoRequest,
+        DeleteProformaRequest,
+        QueryRequest,
+        SetPaymentsRequest,
+    );
+
+    #[cfg(feature = "schemars")]
+    {
+        let schema = <Body<CreateRequest>>::json_schema().expect("a schema");
+        assert_eq!(schema["title"], "CreateRequest");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["$defs"]["CreateOptions"]["additionalProperties"],
+            false
+        );
+    }
+
+    // The discovery manifest of the services carries it: every handler with
+    // an input has a JSON input with the request's schema.
+    let discovery = <Order as Discoverable>::discover();
+    let create = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.as_str() == "create_invoice")
+        .expect("create_invoice");
+    let input = create.input.as_ref().expect("an input");
+    assert_eq!(input.content_type.as_deref(), Some("application/json"));
+    assert_eq!(input.required, Some(true));
+    assert_eq!(input.json_schema, <Json<CreateRequest>>::json_schema());
+}
+
 #[test]
 fn faults_serialise_their_code_and_status() {
     use restate_sdk::errors::TerminalError;

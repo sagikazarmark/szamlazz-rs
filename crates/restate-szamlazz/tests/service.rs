@@ -1307,6 +1307,7 @@ async fn e2e_order_protocol() {
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
+    a_malformed_body_is_a_structured_invalid_input(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     exhausted_lookup_read_is_a_structured_unavailable(&h).await;
@@ -1937,6 +1938,86 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
     assert_eq!(issued["invoice_number"], "ES-10");
     assert_eq!(issued["external_id"], "acct:E2E-10:prepayment");
     eprintln!("(x) create_prepayment: proforma option refused, no proforma lookup: pass");
+}
+
+/// (x-b) a malformed body — one carrying a field the contract does not
+/// know, a misspelt `reissue` — is refused as the structured `invalid_input`
+/// fault (400, `{code, message}` naming the field), not accepted as
+/// `reissue: false` and not the SDK's plain-text `Cannot decode input
+/// payload`. Refused before the prologue: nothing journaled, nothing sent,
+/// the create mock `expect(0)`. A nested misspelling and a wrong type are
+/// the same fault.
+async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) {
+    h.reset().await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let before = h.requests_seen().await;
+    let reply = h
+        .call(
+            "E2E-10b",
+            "create_invoice",
+            &json!({ "document": document(dec!(1000)), "options": { "resissue": true } }),
+            "e2e-10b-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(
+        fault.message.contains("unknown field `resissue`"),
+        "names the field: {fault:?}"
+    );
+    assert_eq!(fault.order, None, "{fault:?}");
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+    assert!(
+        h.runs(reply.invocation_id()).await.is_empty(),
+        "refused before the prologue: nothing journaled"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.handler, "create_invoice");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("invalid_input")),
+        "{invocation:?}"
+    );
+
+    // A nested one — `buyer.tax_numer` — and a wrong type are the same
+    // fault; the caller never gets an invoice without the tax number.
+    let mut body = json!({ "document": document(dec!(1000)) });
+    body["document"]["buyer"]["tax_numer"] = json!("12345678-2-42");
+    let reply = h
+        .call("E2E-10b", "create_invoice", &body, "e2e-10b-k2")
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(fault.message.contains("`tax_numer`"), "{fault:?}");
+
+    let reply = h
+        .call(
+            "E2E-10b",
+            "delete_proforma",
+            &json!({ "force": "yes" }),
+            "e2e-10b-k3",
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(reply.fault().code, "invalid_input", "{}", reply.body);
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "nothing reached szamlazz.hu"
+    );
+    eprintln!("(x-b) malformed body → structured invalid_input, nothing issued: pass");
 }
 
 /// (xi) every execution of the create step loses its reply and the re-query

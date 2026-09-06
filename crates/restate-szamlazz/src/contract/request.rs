@@ -1,5 +1,11 @@
 //! Handler inputs of the `Szamlazz.Order` Virtual Object and the
 //! `Szamlazz.Agent` service.
+//!
+//! Every request type refuses a field it does not know
+//! (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the
+//! schema): a misspelt `reissue` or `additive` is an error naming the field,
+//! never a silent default. Response types stay permissive — a client must
+//! tolerate fields added later.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -16,6 +22,7 @@ use super::document::{DocumentInput, PaymentMethod};
 /// the request carries none of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateRequest {
     /// The document to issue.
     pub document: DocumentInput,
@@ -38,7 +45,7 @@ impl CreateRequest {
 /// Options of a create request.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CreateOptions {
     /// Issue a new document after the existing one was reversed — by this
     /// service, the UI or anyone. Without it a reversed document answers
@@ -76,6 +83,7 @@ pub enum ProformaLink {
 /// Input of `Szamlazz.Order.correct_invoice`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CorrectRequest {
     /// The invoice being corrected; must carry this order's number.
     pub invoice_number: String,
@@ -89,6 +97,7 @@ pub struct CorrectRequest {
 /// Input of `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct StornoRequest {
     /// The invoice to reverse.
     pub invoice_number: String,
@@ -110,7 +119,7 @@ impl StornoRequest {
 /// Input of `Szamlazz.Order.delete_proforma`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DeleteProformaRequest {
     /// Delete even when the proforma has registered payments. szamlazz.hu has
     /// no guard of its own; without `force` a paid proforma is
@@ -121,6 +130,7 @@ pub struct DeleteProformaRequest {
 /// Input of `Szamlazz.Agent.query`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct QueryRequest {
     /// Which document to look up.
     pub selector: Selector,
@@ -147,6 +157,7 @@ pub enum Selector {
 /// Input of `Szamlazz.Agent.set_payments`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SetPaymentsRequest {
     /// The invoice to register credit entries on.
     pub invoice_number: String,
@@ -160,6 +171,7 @@ pub struct SetPaymentsRequest {
 /// One credit entry (`jóváírás`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct PaymentEntry {
     /// Payment date.
     pub date: Date,
@@ -187,7 +199,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::contract::document::tests::sample_document;
+    use crate::contract::document::tests::{refuses_unknown_field, sample_document};
 
     fn correction_id() -> CorrectionId {
         "c-1".parse().expect("valid correction id")
@@ -315,6 +327,127 @@ mod tests {
         .expect("deserialize");
         assert!(!minimal.additive);
         assert_eq!(minimal.entries[0].amount, dec!(100));
+    }
+
+    /// A misspelt field is refused, never a silent default: `resissue` read as
+    /// `reissue: false` would answer `reversed` on a document the caller asked
+    /// to reissue, `aditive` as `additive: false` would *replace* the
+    /// invoice's credit entries, `froce` as `force: false` would refuse a paid
+    /// proforma the caller meant to force.
+    #[test]
+    fn request_types_refuse_unknown_fields() {
+        let document = serde_json::to_value(sample_document()).expect("serialize");
+        let entry = json!({"date": "2026-07-10", "method": "cash", "amount": 100});
+
+        refuses_unknown_field::<CreateRequest>(
+            json!({"document": document, "optoins": {}}),
+            "optoins",
+        );
+        refuses_unknown_field::<CreateRequest>(
+            json!({"document": document, "options": {"resissue": true}}),
+            "resissue",
+        );
+        refuses_unknown_field::<CreateRequest>(
+            json!({"document": document, "options": {"reissue": true, "proforma": "auto", "x": 1}}),
+            "x",
+        );
+
+        refuses_unknown_field::<CorrectRequest>(
+            json!({
+                "invoice_number": "SZ-1",
+                "correction_id": "c-1",
+                "document": document,
+                "reissue": true,
+            }),
+            "reissue",
+        );
+        let mut corrected = document.clone();
+        corrected["buyer"]["tax_numer"] = json!("12345678-2-42");
+        refuses_unknown_field::<CorrectRequest>(
+            json!({"invoice_number": "SZ-1", "correction_id": "c-1", "document": corrected}),
+            "tax_numer",
+        );
+
+        refuses_unknown_field::<StornoRequest>(
+            json!({"invoice_number": "SZ-1", "coment": "wrong buyer"}),
+            "coment",
+        );
+
+        refuses_unknown_field::<DeleteProformaRequest>(json!({"froce": true}), "froce");
+
+        refuses_unknown_field::<QueryRequest>(
+            json!({"selector": {"invoice_number": "SZ-1"}, "invoice_number": "SZ-1"}),
+            "invoice_number",
+        );
+
+        refuses_unknown_field::<SetPaymentsRequest>(
+            json!({"invoice_number": "SZ-1", "entries": [entry], "aditive": true}),
+            "aditive",
+        );
+        refuses_unknown_field::<SetPaymentsRequest>(
+            json!({
+                "invoice_number": "SZ-1",
+                "entries": [{"date": "2026-07-10", "method": "cash", "amount": 100, "note": "x"}],
+            }),
+            "note",
+        );
+        refuses_unknown_field::<PaymentEntry>(
+            json!({"date": "2026-07-10", "method": "cash", "amount": 100, "descripton": "x"}),
+            "descripton",
+        );
+    }
+
+    /// The externally tagged enums are closed already: a second key beside the
+    /// variant is refused by serde itself.
+    #[test]
+    fn selector_refuses_a_second_key() {
+        let error = serde_json::from_value::<QueryRequest>(json!({
+            "selector": {"invoice_number": "SZ-1", "order_number": "ORD-1"},
+        }))
+        .expect_err("two selectors at once are refused");
+        assert!(error.to_string().contains("single key"), "{error}");
+        assert!(
+            serde_json::from_str::<ProformaLink>(r#"{"number": "D-1", "x": 1}"#).is_err(),
+            "a second key beside the variant is refused on the wire too"
+        );
+    }
+
+    /// The bodies the READMEs and the e2e scenarios send still deserialize:
+    /// nothing documented carries a field the contract does not know.
+    #[test]
+    fn documented_bodies_deserialize() {
+        // crates/restate-szamlazz-endpoint/README.md — the curl example.
+        let readme_curl = r#"{
+    "document": {
+      "buyer": { "name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23." },
+      "items": [{ "name": "Consulting", "quantity": "1", "unit": "db", "unit_price": "1000", "vat_rate": "27" }],
+      "fulfillment_date": "2026-09-03",
+      "due_date": "2026-09-11",
+      "payment_method": "transfer"
+    }
+  }"#;
+        let request: CreateRequest =
+            serde_json::from_str(readme_curl).expect("the README curl body");
+        assert_eq!(request.options, CreateOptions::default());
+        assert_eq!(request.document.buyer.name, "Kovács Bt.");
+
+        // tests/service.rs — the literal bodies of the e2e scenarios.
+        let document = serde_json::to_value(sample_document()).expect("serialize");
+        serde_json::from_value::<CreateRequest>(json!({"document": document}))
+            .expect("a bare create body");
+        serde_json::from_value::<CreateRequest>(
+            json!({"document": document, "options": {"reissue": true}}),
+        )
+        .expect("create_body");
+        serde_json::from_value::<CreateRequest>(
+            json!({"document": document, "options": {"proforma": "none"}}),
+        )
+        .expect("the prepayment scenario's body");
+        serde_json::from_value::<StornoRequest>(json!({"invoice_number": "SZ-1"}))
+            .expect("a storno body");
+        serde_json::from_value::<QueryRequest>(json!({"selector": {"invoice_number": "SZ-12"}}))
+            .expect("a query body");
+        serde_json::from_value::<DeleteProformaRequest>(json!({})).expect("an empty delete body");
     }
 
     #[test]
