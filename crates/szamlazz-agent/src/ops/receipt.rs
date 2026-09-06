@@ -46,6 +46,11 @@ impl ReceiptTemplate {
 }
 
 /// One payment recorded on a receipt (`kifizetes`).
+///
+/// Sent in [`CreateReceipt::payments`] and read back in [`Receipt::payments`].
+/// Because szamlazz.hu may grow the block it reports, this type stays
+/// `#[non_exhaustive]` like every response type; build it with
+/// [`ReceiptPayment::new`].
 #[doc(alias = "kifizetés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -81,7 +86,6 @@ impl ReceiptPayment {
 #[doc(alias = "xmlnyugtacreate")]
 #[doc(alias = "nyugta készítés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct CreateReceipt {
     /// Unique call identifier (`hivasAzonosito`). Reusing it returns error 338,
     /// which prevents duplicate issuance but does not replay the prior result.
@@ -259,7 +263,6 @@ impl AgentRequest for CreateReceipt {
 #[doc(alias = "xmlnyugtast")]
 #[doc(alias = "nyugta sztornó")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct StornoReceipt {
     /// The receipt to cancel (`nyugtaszam`).
     pub receipt_number: ReceiptNumber,
@@ -332,7 +335,6 @@ pub enum ReceiptSelector {
 #[doc(alias = "xmlnyugtaget")]
 #[doc(alias = "nyugta lekérdezés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct QueryReceipt {
     /// Which receipt to fetch.
     pub selector: ReceiptSelector,
@@ -399,7 +401,6 @@ impl AgentRequest for QueryReceipt {
 /// was emailed.
 #[doc(alias = "email küldés")]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ReceiptEmail {
     /// Recipient address (`email`); multiple recipients may be
     /// comma-separated.
@@ -420,7 +421,6 @@ pub struct ReceiptEmail {
 #[doc(alias = "xmlnyugtasend")]
 #[doc(alias = "nyugta küldés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct SendReceipt {
     /// The receipt to email (`nyugtaszam`).
     pub receipt_number: ReceiptNumber,

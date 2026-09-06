@@ -143,16 +143,16 @@ pub async fn run(cli: &crate::Cli, command: &ReceiptCommand) -> anyhow::Result<(
                 || args.reply_to.is_some()
                 || args.subject.is_some()
                 || args.body.is_some())
-            .then(|| {
-                let mut email = ReceiptEmail::default();
-                email.to.clone_from(&args.to);
-                email.reply_to.clone_from(&args.reply_to);
-                email.subject.clone_from(&args.subject);
-                email.body.clone_from(&args.body);
-                email
+            .then(|| ReceiptEmail {
+                to: args.to.clone(),
+                reply_to: args.reply_to.clone(),
+                subject: args.subject.clone(),
+                body: args.body.clone(),
             });
-            let mut request = SendReceipt::new(args.number.as_str());
-            request.email = email;
+            let request = SendReceipt {
+                email,
+                ..SendReceipt::new(args.number.as_str())
+            };
             client.send(&request).await?;
             if cli.json {
                 output::json(&serde_json::json!({ "sent": true }))?;

@@ -117,12 +117,10 @@ pub struct ExchangeRateInput {
 
 impl From<ExchangeRateInput> for ExchangeRate {
     fn from(input: ExchangeRateInput) -> Self {
-        if let Some(rate) = input.rate {
-            return Self::new(input.bank, rate);
+        Self {
+            bank: input.bank,
+            rate: input.rate,
         }
-        let mut rate = Self::automatic_mnb();
-        rate.bank = input.bank;
-        rate
     }
 }
 
@@ -201,18 +199,19 @@ impl BuyerInput {
 
 impl From<BuyerInput> for Buyer {
     fn from(input: BuyerInput) -> Self {
-        let mut buyer = Self::new(input.name, input.zip, input.city, input.address);
-        buyer.country = input.country;
-        buyer.email = input.email;
-        buyer.tax_number = input.tax_number;
-        buyer.eu_tax_number = input.eu_tax_number;
-        buyer.group_id = input.group_id;
-        buyer.taxpayer_status = input.taxpayer_status.map(Into::into);
-        buyer.phone = input.phone;
-        buyer.comment = input.comment;
-        buyer.postal_address = input.postal_address.map(Into::into);
-        buyer.id = input.id;
-        buyer
+        Self {
+            country: input.country,
+            email: input.email,
+            tax_number: input.tax_number,
+            eu_tax_number: input.eu_tax_number,
+            group_id: input.group_id,
+            taxpayer_status: input.taxpayer_status.map(Into::into),
+            phone: input.phone,
+            comment: input.comment,
+            postal_address: input.postal_address.map(Into::into),
+            id: input.id,
+            ..Self::new(input.name, input.zip, input.city, input.address)
+        }
     }
 }
 
@@ -235,13 +234,13 @@ pub struct PostalAddressInput {
 
 impl From<PostalAddressInput> for PostalAddress {
     fn from(input: PostalAddressInput) -> Self {
-        let mut address = Self::default();
-        address.name = input.name;
-        address.country = input.country;
-        address.zip = input.zip;
-        address.city = input.city;
-        address.address = input.address;
-        address
+        Self {
+            name: input.name,
+            country: input.country,
+            zip: input.zip,
+            city: input.city,
+            address: input.address,
+        }
     }
 }
 
@@ -340,17 +339,18 @@ impl LineItemInput {
     /// [`ArithmeticError`] when a derived value overflows a [`Decimal`]; the
     /// service answers it as `invalid_input`.
     pub fn to_line_item(&self, currency: &Currency) -> Result<LineItem, ArithmeticError> {
-        let mut item = LineItem::try_calculated(
-            self.name.clone(),
-            self.quantity,
-            self.unit.clone(),
-            self.unit_price,
-            self.vat_rate(),
-            Rounding::minor_unit(currency),
-        )?;
-        item.id.clone_from(&self.id);
-        item.comment.clone_from(&self.comment);
-        Ok(item)
+        Ok(LineItem {
+            id: self.id.clone(),
+            comment: self.comment.clone(),
+            ..LineItem::try_calculated(
+                self.name.clone(),
+                self.quantity,
+                self.unit.clone(),
+                self.unit_price,
+                self.vat_rate(),
+                Rounding::minor_unit(currency),
+            )?
+        })
     }
 }
 

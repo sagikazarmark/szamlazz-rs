@@ -81,7 +81,6 @@ pub struct TaxpayerPrefixError;
 #[doc(alias = "xmltaxpayer")]
 #[doc(alias = "adószám")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct QueryTaxpayer {
     /// The törzsszám: first 8 digits of the tax number.
     #[doc(alias = "törzsszám")]

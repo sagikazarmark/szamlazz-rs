@@ -467,12 +467,12 @@ impl SellerConfig {
     /// one of its fields is set.
     #[must_use]
     pub fn to_seller(&self) -> Seller {
-        let mut seller = Seller::default();
-        seller.bank.clone_from(&self.bank);
-        seller.bank_account.clone_from(&self.bank_account);
-        seller.signer_name.clone_from(&self.signer_name);
-        seller.email = self.email.to_seller_email();
-        seller
+        Seller {
+            bank: self.bank.clone(),
+            bank_account: self.bank_account.clone(),
+            signer_name: self.signer_name.clone(),
+            email: self.email.to_seller_email(),
+        }
     }
 }
 
@@ -495,11 +495,11 @@ impl SellerEmailConfig {
         if self.reply_to.is_none() && self.subject.is_none() && self.body.is_none() {
             return None;
         }
-        let mut email = SellerEmail::default();
-        email.reply_to.clone_from(&self.reply_to);
-        email.subject.clone_from(&self.subject);
-        email.body.clone_from(&self.body);
-        Some(email)
+        Some(SellerEmail {
+            reply_to: self.reply_to.clone(),
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+        })
     }
 }
 

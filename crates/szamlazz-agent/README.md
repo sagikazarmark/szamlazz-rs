@@ -34,12 +34,16 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
         VatRate::percent(27),
         Rounding::minor_unit(&Currency::HUF),
     )?;
-    let request = CreateInvoice::new(
-        InvoiceKind::invoice(),
-        header,
-        Buyer::new("Example Kft.", "1111", "Budapest", "Example utca 1."),
-        vec![item],
-    );
+    // Constructors take the required fields; set the rest with functional update.
+    let request = CreateInvoice {
+        external_id: Some("shop:ORD-1:invoice".to_owned()),
+        ..CreateInvoice::new(
+            InvoiceKind::invoice(),
+            header,
+            Buyer::new("Example Kft.", "1111", "Budapest", "Example utca 1."),
+            vec![item],
+        )
+    };
 
     let created = client.send(&request).await?;
     println!("issued: {:?}", created.invoice_number);
@@ -47,7 +51,35 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Without `client-reqwest`, call `AgentRequest::to_wire`, send the resulting URL, content type, and body with your HTTP stack, then pass its headers and bytes to `RawResponse` and `AgentRequest::parse`.
+## Bring Your Own HTTP Client
+
+Without `client-reqwest`, `AgentRequest::to_wire` builds the request body and `RawResponse` takes whatever your HTTP client returns. The transport is yours: `POST` to `wire::ENDPOINT` with the given `Content-Type`, and hand every response to `parse` — szamlazz.hu signals errors in-band. Here with the blocking [`ureq`](https://crates.io/crates/ureq):
+
+```rust
+use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
+use szamlazz_agent::wire::{AgentRequest, ENDPOINT, RawResponse};
+use szamlazz_agent::Credentials;
+
+fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
+    let request = QueryTaxpayer::new("12345678")?;
+    let wire = request.to_wire(&Credentials::agent_key("your-agent-key"))?;
+
+    let mut response = ureq::post(ENDPOINT)
+        .content_type(&wire.content_type)
+        .send(&wire.body[..])?;
+    let body = response.body_mut().read_to_vec()?;
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.as_str(), String::from_utf8_lossy(value.as_bytes())));
+
+    let taxpayer = request.parse(&RawResponse::new(headers, body))?;
+    println!("valid: {}", taxpayer.valid);
+    Ok(())
+}
+```
+
+To skip re-authentication on consecutive calls, replay `RawResponse::session_cookie()` as the `Cookie` header of the next request; the reqwest client does this through its cookie store.
 
 ## Feature Flags
 

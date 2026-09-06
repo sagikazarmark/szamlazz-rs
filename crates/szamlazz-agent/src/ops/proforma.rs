@@ -32,7 +32,6 @@ pub enum ProformaSelector {
 #[doc(alias = "xmlszamladbkdel")]
 #[doc(alias = "díjbekérő törlése")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct DeleteProforma {
     /// Which proforma to delete.
     pub selector: ProformaSelector,

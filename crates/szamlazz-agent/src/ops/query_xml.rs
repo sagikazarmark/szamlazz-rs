@@ -25,7 +25,6 @@ use crate::xml;
 #[doc(alias = "xmlszamlaxml")]
 #[doc(alias = "számla adatainak lekérdezése")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct QueryInvoiceXml {
     /// Which invoice to fetch.
     pub selector: InvoiceSelector,

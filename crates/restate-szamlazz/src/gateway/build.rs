@@ -135,32 +135,36 @@ impl Gateway {
             },
         };
 
-        let mut header = InvoiceHeader::new(
-            document.fulfillment_date,
-            document.due_date,
-            document.payment_method.clone().into(),
-            currency.clone(),
-            language,
-        );
-        header.issue_date = document.issue_date;
-        header.comment.clone_from(&document.comment);
-        header.exchange_rate = exchange_rate;
-        header.order_number = Some(order.as_str().to_owned());
-        header.extra_logo.clone_from(&defaults.extra_logo);
-        header.number_prefix = overrides
-            .number_prefix
-            .clone()
-            .or_else(|| defaults.number_prefix.clone());
-        header.paid = document.paid;
-        header.template = overrides
-            .template
-            .as_deref()
-            .or(defaults.template.as_deref())
-            .map(template);
+        let header = InvoiceHeader {
+            issue_date: document.issue_date,
+            comment: document.comment.clone(),
+            exchange_rate,
+            order_number: Some(order.as_str().to_owned()),
+            extra_logo: defaults.extra_logo.clone(),
+            number_prefix: overrides
+                .number_prefix
+                .clone()
+                .or_else(|| defaults.number_prefix.clone()),
+            paid: document.paid,
+            template: overrides
+                .template
+                .as_deref()
+                .or(defaults.template.as_deref())
+                .map(template),
+            ..InvoiceHeader::new(
+                document.fulfillment_date,
+                document.due_date,
+                document.payment_method.clone().into(),
+                currency.clone(),
+                language,
+            )
+        };
 
-        let mut buyer = Buyer::from(document.buyer.clone());
-        buyer.name = normalize_buyer_name(&buyer.name);
-        buyer.send_email = overrides.send_email.or(defaults.send_email);
+        let buyer = Buyer {
+            name: normalize_buyer_name(&document.buyer.name),
+            send_email: overrides.send_email.or(defaults.send_email),
+            ..Buyer::from(document.buyer.clone())
+        };
 
         let items = document
             .items
@@ -172,14 +176,15 @@ impl Gateway {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut create = CreateInvoice::new(invoice_kind, header, buyer, items);
-        create.e_invoice = overrides.e_invoice.unwrap_or(defaults.e_invoice);
-        create.download_pdf = false;
-        create.aggregator.clone_from(&defaults.aggregator);
-        create.guardian = defaults.guardian;
-        create.external_id = Some(external_id.as_str().to_owned());
-        create.seller = self.account.seller.to_seller();
-        Ok(create)
+        Ok(CreateInvoice {
+            e_invoice: overrides.e_invoice.unwrap_or(defaults.e_invoice),
+            download_pdf: false,
+            aggregator: defaults.aggregator.clone(),
+            guardian: defaults.guardian,
+            external_id: Some(external_id.as_str().to_owned()),
+            seller: self.account.seller.to_seller(),
+            ..CreateInvoice::new(invoice_kind, header, buyer, items)
+        })
     }
 }
 

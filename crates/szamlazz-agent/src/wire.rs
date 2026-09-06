@@ -6,6 +6,11 @@ use crate::error::{ApiError, ErrorCode, RequestError, ResponseError};
 
 /// The single Számla Agent endpoint. Every operation POSTs here; the
 /// multipart form field name selects the operation.
+///
+/// A [`WireRequest`] does not carry the URL: the endpoint is a property of the
+/// transport, not of the operation, so the client owns it — the bundled
+/// reqwest client through its builder, a sans-IO integration by sending a
+/// `POST` to this constant (or to a mock server in tests).
 pub const ENDPOINT: &str = "https://www.szamlazz.hu/szamla/";
 
 /// Fixed multipart boundary.
@@ -15,45 +20,33 @@ pub const ENDPOINT: &str = "https://www.szamlazz.hu/szamla/";
 /// generated XML unless a caller embeds it in their own field values.
 const BASE_BOUNDARY: &str = "----szamlazz-agent-4f7d1a2b9c3e";
 
-/// A fully built HTTP request, ready for any client to send.
+/// A fully built HTTP request body, ready for any client to POST to
+/// [`ENDPOINT`].
+///
+/// Exactly what an HTTP client needs and nothing about the transport: send
+/// `body` with a `Content-Type` of `content_type`. Everything transport-side —
+/// the URL, timeouts, TLS, and the `JSESSIONID` session cookie a response
+/// sets (see [`RawResponse::session_cookie`]) — is the client's to manage.
+///
+/// Read, never constructed, outside this crate; fields may be added.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct WireRequest {
-    /// Absolute URL to POST to.
-    pub url: String,
-    /// Value for the `Content-Type` header.
+    /// Value for the `Content-Type` header: `multipart/form-data` with the
+    /// boundary used in `body`.
     pub content_type: String,
-    /// The complete request body.
+    /// The complete request body: the operation's XML document in a file
+    /// field named after the operation, plus any attachments.
     pub body: Vec<u8>,
-    /// Value for the `Cookie` header, if a session is being reused.
-    ///
-    /// Optional performance feature: replaying the `JSESSIONID` cookie from a
-    /// previous [`RawResponse::session_cookie`] skips re-authentication.
-    /// Sessions expire after 90 minutes of inactivity.
-    ///
-    /// Only meaningful for sans-IO integrations that transmit the
-    /// [`WireRequest`] themselves. The bundled reqwest client does not read
-    /// this field; it reuses the session through reqwest's cookie store.
-    pub session_cookie: Option<String>,
 }
 
 impl std::fmt::Debug for WireRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WireRequest")
-            .field("url", &self.url)
             .field("content_type", &self.content_type)
             .field("body_len", &self.body.len())
-            .field("has_session_cookie", &self.session_cookie.is_some())
             .finish()
-    }
-}
-
-impl WireRequest {
-    /// Attaches a session cookie captured from an earlier response.
-    #[must_use]
-    pub fn with_session_cookie(mut self, cookie: impl Into<String>) -> Self {
-        self.session_cookie = Some(cookie.into());
-        self
     }
 }
 
@@ -232,7 +225,13 @@ impl RawResponse {
     }
 
     /// The `JSESSIONID` session cookie set by this response, as a `Cookie`
-    /// header value for [`WireRequest::with_session_cookie`].
+    /// header value for the next request.
+    ///
+    /// Optional performance feature for integrations that transmit the
+    /// [`WireRequest`] themselves: replaying the cookie skips
+    /// re-authentication. Sessions expire after 90 minutes of inactivity. The
+    /// bundled reqwest client reuses the session through reqwest's cookie
+    /// store instead and never calls this.
     pub fn session_cookie(&self) -> Option<String> {
         let name = "set-cookie";
 
@@ -259,8 +258,8 @@ fn percent_decode(value: &str) -> String {
 /// A Számla Agent operation: serializes itself to the wire and interprets the
 /// raw response.
 ///
-/// Implemented by every request type in this crate; the shared plumbing (URL,
-/// multipart envelope, credential injection) lives in the provided
+/// Implemented by every request type in this crate; the shared plumbing
+/// (multipart envelope, credential injection) lives in the provided
 /// [`AgentRequest::to_wire`].
 pub trait AgentRequest {
     /// The multipart form field name that selects this operation, e.g.
@@ -297,7 +296,8 @@ pub trait AgentRequest {
         Vec::new()
     }
 
-    /// Builds the complete HTTP request for this operation.
+    /// Builds the complete HTTP request body for this operation, to be sent
+    /// as a `POST` to [`ENDPOINT`].
     ///
     /// # Errors
     ///
@@ -309,12 +309,7 @@ pub trait AgentRequest {
         validate_xml_10(&xml)?;
         let (content_type, body) = multipart(Self::ACTION, &xml, self.multipart_files());
 
-        Ok(WireRequest {
-            url: ENDPOINT.to_owned(),
-            content_type,
-            body,
-            session_cookie: None,
-        })
+        Ok(WireRequest { content_type, body })
     }
 }
 
@@ -343,18 +338,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_request_debug_redacts_sensitive_transport_data() {
+    fn wire_request_debug_redacts_the_body() {
         let request = WireRequest {
-            url: ENDPOINT.to_owned(),
             content_type: "multipart/form-data".to_owned(),
             body: b"<szamlaagentkulcs>secret-agent-key</szamlaagentkulcs>".to_vec(),
-            session_cookie: Some("JSESSIONID=secret-session".to_owned()),
         };
 
         let debug = format!("{request:?}");
         assert!(debug.contains("WireRequest"));
+        assert!(debug.contains("multipart/form-data"));
         assert!(!debug.contains("secret-agent-key"));
-        assert!(!debug.contains("secret-session"));
     }
 
     #[test]
