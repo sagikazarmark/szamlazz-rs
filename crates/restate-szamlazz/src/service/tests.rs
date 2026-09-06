@@ -9,12 +9,12 @@ use restate_sdk::discovery::{HandlerType, RetryPolicyOnMaxAttempts, ServiceType}
 use restate_sdk::endpoint::Endpoint;
 use restate_sdk::service::Discoverable;
 use serde_json::json;
-use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
 use crate::config::{IssueConfig, Namespace, WorkerConfig};
 use crate::gateway::Gateway;
+use crate::test_support::{Doc, ORIGINAL_TELJ, SUPPLIER};
 
 /// [`IssueConfig::MIN_INITIAL_DELAY`] in the unit discovery reports
 /// (milliseconds): the floor the write handlers' `initial_interval` clears.
@@ -38,65 +38,6 @@ fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
 
 fn namespace() -> Namespace {
     "acct".parse().expect("namespace")
-}
-
-/// The supplier id of the documents [`found`] builds.
-pub(super) const SUPPLIER: u64 = 972_720;
-
-/// The `telj` of the documents [`found`] builds: the fulfillment date a
-/// storno of them must repeat (ADR 0007). Override `telj` with `""` for a
-/// document szamlazz.hu returned without one.
-pub(super) const ORIGINAL_TELJ: jiff::civil::Date = jiff::civil::date(2026, 7, 15);
-
-/// szamlazz.hu's `<szamla>` XML of a live `SZ-1` of `ORD-1` from a test
-/// account with `supplier_id`, with the given `alap` elements overridden.
-fn szamla_xml(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> String {
-    let telj = ORIGINAL_TELJ.to_string();
-    let mut alap = vec![
-        ("szamlaszam", "SZ-1"),
-        ("tipus", "SZ"),
-        ("eszamla", "2"),
-        ("kelt", "2026-09-03"),
-        ("telj", telj.as_str()),
-        ("rendelesszam", "ORD-1"),
-        ("teszt", "true"),
-    ];
-    for &(tag, value) in alap_overrides {
-        match alap.iter_mut().find(|(name, _)| *name == tag) {
-            Some(slot) => slot.1 = value,
-            None => alap.push((tag, value)),
-        }
-    }
-    let alap = alap.iter().fold(String::new(), |mut xml, (tag, value)| {
-        use std::fmt::Write as _;
-        write!(xml, "<{tag}>{value}</{tag}>").expect("writing to a String cannot fail");
-        xml
-    });
-    format!(
-        r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
-          <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-          <alap><id>1</id>{alap}</alap>
-          <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>
-          <osszegek><totalossz><netto>0</netto><afa>0</afa><brutto>0</brutto></totalossz></osszegek>
-          </szamla>"#
-    )
-}
-
-/// The document of [`szamla_xml`], parsed as a query answer.
-pub(super) fn found(supplier_id: u64, alap_overrides: &[(&str, &str)]) -> Box<InvoiceDocument> {
-    use szamlazz_agent::InvoiceNumber;
-    use szamlazz_agent::ops::query_pdf::InvoiceSelector;
-    use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
-    use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
-
-    Box::new(
-        QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new("SZ-1")))
-            .parse(&RawResponse::new::<&str, &str>(
-                [],
-                szamla_xml(supplier_id, alap_overrides).into_bytes(),
-            ))
-            .expect("parse"),
-    )
 }
 
 #[test]
@@ -651,10 +592,17 @@ async fn account_mismatch_never_leaks_the_agent_key() {
     // A live-account document of another supplier — what a test account
     // configured as live, or the wrong account's key, finds by number.
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            szamla_xml(1, &[("szamlaszam", "SZ-2"), ("teszt", "false")]),
-            "application/xml",
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                Doc {
+                    test: false,
+                    supplier_id: 1,
+                    ..Doc::new("SZ-2", "SZ")
+                }
+                .xml(),
+                "application/xml",
+            ),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -709,19 +657,29 @@ fn lookup_classifies_query_outcomes() {
         classify(QueryOutcome::NotFound, None).expect("classified"),
         Lookup::Absent
     );
-    let ours = found(SUPPLIER, &[]);
+    let ours = Doc::default().boxed();
     let lookup = classify(QueryOutcome::Found(ours.clone()), Some(SUPPLIER)).expect("classified");
     assert_eq!(lookup, Lookup::Ours(ours));
 
-    let reversed = found(SUPPLIER, &[("sztornozott", "true")]);
+    let reversed = Doc {
+        reversed: true,
+        ..Doc::default()
+    }
+    .boxed();
     let lookup = classify(QueryOutcome::Found(reversed.clone()), None).expect("classified");
     assert_eq!(lookup, Lookup::Ours(reversed));
 
+    // Each pin of ours off by one: another order, kind, mode or supplier.
+    let doc = |edit: fn(&mut Doc<'static>)| {
+        let mut doc = Doc::default();
+        edit(&mut doc);
+        doc.boxed()
+    };
     for (label, other) in [
-        ("order", found(SUPPLIER, &[("rendelesszam", "ORD-2")])),
-        ("kind", found(SUPPLIER, &[("tipus", "D")])),
-        ("test", found(SUPPLIER, &[("teszt", "false")])),
-        ("supplier", found(1, &[])),
+        ("order", doc(|doc| doc.order = Some("ORD-2"))),
+        ("kind", doc(|doc| doc.tipus = "D")),
+        ("test", doc(|doc| doc.test = false)),
+        ("supplier", doc(|doc| doc.supplier_id = 1)),
     ] {
         let lookup = classify(QueryOutcome::Found(other.clone()), Some(SUPPLIER)).expect(label);
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
@@ -874,12 +832,24 @@ fn a_found_document_must_belong_to_the_resolved_account() {
     account.mode = AccountMode::Test;
     account.supplier_id = Some(SUPPLIER);
 
-    check_pins(&account, &found(SUPPLIER, &[])).expect("ours");
-    check_pins(&account, &found(SUPPLIER, &[("rendelesszam", "OTHER")]))
-        .expect("the order number is not a pin of the account");
+    check_pins(&account, &Doc::default().parse()).expect("ours");
+    check_pins(
+        &account,
+        &Doc {
+            order: Some("OTHER"),
+            ..Doc::default()
+        }
+        .parse(),
+    )
+    .expect("the order number is not a pin of the account");
 
     // A live document on a test account, or a test document on a live one.
-    let fault = check_pins(&account, &found(SUPPLIER, &[("teszt", "false")])).expect_err("a fault");
+    let live_document = Doc {
+        test: false,
+        ..Doc::default()
+    }
+    .parse();
+    let fault = check_pins(&account, &live_document).expect_err("a fault");
     let error = TerminalError::from(fault);
     assert_eq!(error.code(), 409);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
@@ -896,13 +866,18 @@ fn a_found_document_must_belong_to_the_resolved_account() {
 
     let mut live = account.clone();
     live.mode = AccountMode::Live;
-    let fault = check_pins(&live, &found(SUPPLIER, &[])).expect_err("a fault");
+    let fault = check_pins(&live, &Doc::default().parse()).expect_err("a fault");
     let body: serde_json::Value =
         serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
     assert_eq!(body["code"], "account_mismatch");
 
     // Another supplier, when the account pins one.
-    let fault = check_pins(&account, &found(1, &[])).expect_err("a fault");
+    let other_supplier = Doc {
+        supplier_id: 1,
+        ..Doc::default()
+    }
+    .parse();
+    let fault = check_pins(&account, &other_supplier).expect_err("a fault");
     let body: serde_json::Value =
         serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
     assert_eq!(body["code"], "account_mismatch");
@@ -916,7 +891,7 @@ fn a_found_document_must_belong_to_the_resolved_account() {
     // No supplier pin: the supplier id is not checked.
     let mut unpinned = account.clone();
     unpinned.supplier_id = None;
-    check_pins(&unpinned, &found(1, &[])).expect("unpinned");
+    check_pins(&unpinned, &other_supplier).expect("unpinned");
 }
 
 /// The storno intent both storno handlers build from the verified original
@@ -943,7 +918,7 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
 
     // `telj` present: the intent carries it; `eszamla = 2` is an e-invoice.
     let intent = StornoIntent::from_verified(
-        &found(SUPPLIER, &[]),
+        &Doc::default().parse(),
         &account,
         "SZ-1".to_owned(),
         storno_id(),
@@ -959,7 +934,11 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     // `eszamla = 1` is paper; an appearance the crate does not know (`0`,
     // what a proforma carries) falls back to the account default.
     let paper = StornoIntent::from_verified(
-        &found(SUPPLIER, &[("eszamla", "1")]),
+        &Doc {
+            eszamla: Some(1),
+            ..Doc::default()
+        }
+        .parse(),
         &account,
         "SZ-1".to_owned(),
         storno_id(),
@@ -969,7 +948,11 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     assert!(!paper.e_invoice);
     account.defaults.e_invoice = true;
     let unknown = StornoIntent::from_verified(
-        &found(SUPPLIER, &[("eszamla", "0")]),
+        &Doc {
+            eszamla: Some(0),
+            ..Doc::default()
+        }
+        .parse(),
         &account,
         "SZ-1".to_owned(),
         storno_id(),
@@ -981,7 +964,12 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     // `telj` empty (parsed as absent): the fault, 503 `unavailable`, naming
     // the invoice; `.about(..)` attaches the storno identity as every fault.
     let fault = StornoIntent::from_verified(
-        &found(SUPPLIER, &[("telj", "")]),
+        &Doc {
+            fulfillment_date: None,
+            alap_extra: "<telj></telj>",
+            ..Doc::default()
+        }
+        .parse(),
         &account,
         "SZ-1".to_owned(),
         storno_id(),

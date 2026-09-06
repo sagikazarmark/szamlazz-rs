@@ -67,6 +67,8 @@ pub mod contract;
 pub mod gateway;
 pub mod identity;
 pub mod service;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use account::{Account, AccountResolver, Accounts, CredentialStore};
 pub use config::WorkerConfig;
