@@ -1716,10 +1716,12 @@ fn invoice_selector(selector: &Selector) -> InvoiceSelector {
 
 #[cfg(test)]
 mod tests {
+    use jiff::civil::date;
     use rust_decimal::dec;
     use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 
     use super::*;
+    use crate::test_support::{CreditRecord, Doc};
 
     /// A successful `xmlszamlavalasz` body, as create, storno and credit-entry
     /// responses share it.
@@ -1733,29 +1735,17 @@ mod tests {
         RawResponse::new([("szlahu_id", "924307747")], body.as_bytes().to_vec())
     }
 
-    /// A queried document, as the `szamla` response XML: a test-account
-    /// document of `ORD-1` with two payments; proformas carry `eszamla` 0.
-    fn queried(number: &str, tipus: &str, extra: &str) -> InvoiceDocument {
-        let eszamla = if tipus == "D" { 0 } else { 2 };
-        let body = format!(
-            r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
-              <szallito><id>972720</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-              <alap><id>1</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla><rendelesszam>ORD-1</rendelesszam><teszt>true</teszt>{extra}</alap>
-              <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>
-              <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
-              <kifizetesek><kifizetes><datum>2026-07-04</datum><jogcim>transfer</jogcim><osszeg>500</osszeg></kifizetes>
-              <kifizetes><datum>2026-07-05</datum><jogcim>transfer</jogcim><osszeg>770</osszeg></kifizetes></kifizetesek>
-              </szamla>"#
-        );
-        QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(number)))
-            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
-            .expect("parse")
-    }
-
     #[test]
     fn document_ext_reads_the_checks_off_a_queried_document() {
         let order = OrderKey::parse("ORD-1").expect("order");
-        let live = queried("SZ-1", "SZ", "");
+        let live = Doc {
+            payments: &[
+                CreditRecord::new(date(2026, 7, 4), "transfer", "500"),
+                CreditRecord::new(date(2026, 7, 5), "transfer", "770"),
+            ],
+            ..Doc::new("SZ-1", "SZ")
+        }
+        .parse();
         assert_eq!(live.number(), "SZ-1");
         assert!(live.is_live());
         assert_eq!(live.e_invoice(), Some(true));
@@ -1778,16 +1768,24 @@ mod tests {
         assert!(!live.is_ours(&order, IssuedKind::Invoice, false, None));
         assert!(!live.is_storno_of("SZ-0"));
 
-        let reversed = queried("SZ-1", "SZ", "<sztornozott>true</sztornozott>");
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::new("SZ-1", "SZ")
+        }
+        .parse();
         assert!(!reversed.is_live());
         assert!(reversed.is_ours(&order, IssuedKind::Invoice, true, None));
 
-        let storno = queried("SS-1", "SS", "<hivszamlaszam>SZ-1</hivszamlaszam>");
+        let storno = Doc {
+            referenced_invoice: Some("SZ-1"),
+            ..Doc::new("SS-1", "SS")
+        }
+        .parse();
         assert!(storno.is_live(), "the storno invoice carries no marker");
         assert!(storno.is_storno_of("SZ-1"));
         assert!(!storno.is_storno_of("SZ-2"));
 
-        let proforma = queried("D-1", "D", "");
+        let proforma = Doc::new("D-1", "D").parse();
         assert_eq!(proforma.e_invoice(), None, "eszamla 0 is not an invoice");
         assert!(proforma.is_ours(&order, IssuedKind::Proforma, true, None));
     }

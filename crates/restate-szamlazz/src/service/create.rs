@@ -830,15 +830,19 @@ mod tests {
     /// reported live is `conflict{live}`.
     #[test]
     fn a_settled_create_step_maps_onto_the_response() {
-        use crate::service::tests::{SUPPLIER, found};
+        use crate::test_support::Doc;
 
         let namespace: Namespace = "acct".parse().expect("namespace");
         let order = OrderKey::parse("ORD-1").expect("order");
         let identity = Identity::of_kind(&namespace, &order, DocumentKind::Invoice);
         let respond = |outcome: CreateOutcome| identity.respond_to(outcome, &namespace);
 
-        let live = found(SUPPLIER, &[]);
-        let reversed = found(SUPPLIER, &[("sztornozott", "true")]);
+        let live = Doc::default().boxed();
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::default()
+        }
+        .boxed();
 
         let response = respond(CreateOutcome::Found(live.clone())).expect("data");
         assert_eq!(response.outcome, Outcome::Issued);

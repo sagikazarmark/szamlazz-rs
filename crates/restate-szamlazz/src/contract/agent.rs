@@ -547,13 +547,11 @@ mod tests {
     use jiff::civil::date;
     use rust_decimal::dec;
     use serde_json::json;
-    use szamlazz_agent::InvoiceNumber;
-    use szamlazz_agent::ops::query_pdf::InvoiceSelector;
-    use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
     use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 
     use super::*;
     use crate::contract::document::tests::{refuses_unknown_field, round_trip};
+    use crate::test_support::{CreditRecord, Doc};
 
     #[test]
     fn query_request_selectors() {
@@ -775,32 +773,31 @@ mod tests {
         assert_eq!(minimal, QueryResponse::new("D-1", "D"));
     }
 
-    /// A queried document, as the `szamla` response XML.
-    fn queried_document(payments: &str) -> InvoiceDocument {
-        let body = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>972720</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>SZ-1</szamlaszam><tipus>SZ</tipus><eszamla>2</eszamla><hivszamlaszam>ES-1</hivszamlaszam><hivdijbekszam>D-1</hivdijbekszam><kelt>2026-07-04</kelt><telj>2026-07-04</telj><fizh>2026-07-12</fizh><rendelesszam>ORD-1</rendelesszam><devizanem>HUF</devizanem><teszt>true</teszt></alap>
-  <vevo><nev>Buyer</nev><email>buyer@example.com</email></vevo>
-  <tetelek></tetelek>
-  <osszegek><totalossz><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></totalossz></osszegek>
-  {payments}
-</szamla>"#
-        );
-        QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new("SZ-1")))
-            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
-            .expect("parse")
-    }
-
+    /// A queried `SZ-1` of `ORD-1` that consumed proforma `D-1` and settles
+    /// prepayment `ES-1`, with a due date and a currency, owing 25400 before
+    /// its two credit entries.
     #[test]
     fn query_response_projects_a_queried_document() {
-        let document = queried_document(
-            "<kifizetesek>\
-             <kifizetes><datum>2026-07-10</datum><jogcim>átutalás</jogcim><osszeg>10000</osszeg><megjegyzes>first</megjegyzes><bankszamlaszam>1234-5678</bankszamlaszam></kifizetes>\
-             <kifizetes><datum>2026-07-11</datum><jogcim>bankkártya</jogcim><osszeg>5000</osszeg></kifizetes>\
-             </kifizetesek>",
-        );
+        let document = Doc {
+            referenced_invoice: Some("ES-1"),
+            referenced_proforma: Some("D-1"),
+            issue_date: Some(date(2026, 7, 4)),
+            fulfillment_date: Some(date(2026, 7, 4)),
+            net: "20000",
+            vat: "5400",
+            gross: "25400",
+            payments: &[
+                CreditRecord {
+                    comment: Some("first"),
+                    bank_account: Some("1234-5678"),
+                    ..CreditRecord::new(date(2026, 7, 10), "átutalás", "10000")
+                },
+                CreditRecord::new(date(2026, 7, 11), "bankkártya", "5000"),
+            ],
+            alap_extra: "<fizh>2026-07-12</fizh><devizanem>HUF</devizanem>",
+            ..Doc::default()
+        }
+        .parse();
         let response = QueryResponse::from(&document);
 
         let mut expected = QueryResponse::new("SZ-1", "SZ");
@@ -836,7 +833,14 @@ mod tests {
 
     #[test]
     fn query_response_without_payments_owes_the_gross_total() {
-        let response = QueryResponse::from(&queried_document(""));
+        let document = Doc {
+            net: "20000",
+            vat: "5400",
+            gross: "25400",
+            ..Doc::default()
+        }
+        .parse();
+        let response = QueryResponse::from(&document);
         assert!(response.payments.is_empty());
         assert_eq!(response.outstanding, Some(dec!(25400)));
     }
