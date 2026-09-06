@@ -2,39 +2,59 @@
 //! `Szamlazz.Agent` services.
 //!
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
-//! returned as values (see [`Outcome`] and [`ConflictReason`]), while the
-//! [`TerminalCode`]s are reserved for faults. The types compile without
-//! `restate-sdk`; with the `schemars` feature they also derive JSON Schemas for
-//! the `OpenAPI` export.
+//! returned as values with HTTP 200 (see [`Outcome`] and [`ConflictReason`]),
+//! while the [`TerminalCode`]s are reserved for faults and always mean
+//! "outcome unknown — retry with a new `Idempotency-Key`". The types compile
+//! without `restate-sdk`; with the `schemars` feature they also derive JSON
+//! Schemas for the `OpenAPI` export.
+//!
+//! Every request type refuses a field it does not know
+//! (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the
+//! schema): a misspelt `reissue` or `additive` is an error naming the field,
+//! never a silent default. Response types stay open — a client must tolerate
+//! fields added later.
+//!
+//! The submodules mirror the handler modules of [`service`](crate::service),
+//! one per handler family, each holding its requests beside its responses:
 //!
 //! - [`document`] — the per-call document input (buyer, line items, payment
-//!   method, overrides) and its conversion to `szamlazz_agent` types.
-//! - [`request`] — handler inputs.
-//! - [`response`] — handler outputs, including the [`OrderStatus`] live view.
+//!   method, overrides) and its conversion to `szamlazz_agent` types; shared
+//!   by every issuing handler.
+//! - [`create`] — the issuing handlers: `create_proforma`, `create_invoice`,
+//!   `create_prepayment`, `create_final` and `correct_invoice`.
+//! - [`storno`] — `storno_invoice`, `delete_proforma` and the `get` live view
+//!   ([`OrderStatus`]); the storno contract is shared with
+//!   `Szamlazz.Agent.storno`.
+//! - [`agent`] — the rest of `Szamlazz.Agent`: `query`, `query_taxpayer`,
+//!   `set_payments` and `check_account`.
 
 use std::fmt;
 use std::str::FromStr;
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+pub mod agent;
+pub mod create;
 pub mod document;
-pub mod request;
-pub mod response;
+pub mod storno;
 
+pub use agent::{
+    CheckAccountResponse, CheckedAccount, CredentialsCheck, InvalidTaxNumber, PaymentEntry,
+    PaymentRecord, QueryRequest, QueryResponse, QueryTaxpayerRequest, QueryTaxpayerResponse,
+    Selector, SetPaymentsRequest, SetPaymentsResponse, TaxpayerAddress,
+};
+pub use create::{
+    ConflictReason, CorrectRequest, CreateOptions, CreateRequest, CreateResponse, Outcome,
+    ProformaLink, Warning,
+};
 pub use document::{
     BuyerInput, DocumentInput, DocumentOverrides, ExchangeRateInput, LineItemInput, PaymentMethod,
     PostalAddressInput, TaxpayerStatus,
 };
-pub use request::{
-    CorrectRequest, CreateOptions, CreateRequest, DeleteProformaRequest, InvalidTaxNumber,
-    PaymentEntry, ProformaLink, QueryRequest, QueryTaxpayerRequest, Selector, SetPaymentsRequest,
-    StornoRequest,
-};
-pub use response::{
-    CheckAccountResponse, CheckedAccount, ConflictReason, CreateResponse, CredentialsCheck,
-    DeleteProformaResponse, DocumentState, DocumentStatus, OrderStatus, Outcome, PaymentRecord,
-    QueryResponse, QueryTaxpayerResponse, SetPaymentsResponse, StornoOutcome, StornoResponse,
-    TaxpayerAddress, Warning,
+pub use storno::{
+    DeleteProformaRequest, DeleteProformaResponse, DocumentState, DocumentStatus, OrderStatus,
+    StornoOutcome, StornoRequest, StornoResponse,
 };
 
 /// The caller-supplied identity of one corrective invoice.
@@ -348,9 +368,27 @@ impl fmt::Display for TerminalCode {
     }
 }
 
+/// `gross − Σ payments`, when the gross total is known. The one definition of
+/// the outstanding amount both `create_*` and `query` report.
+pub(crate) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
+    gross.map(|gross| gross - payments.iter().copied().sum::<Decimal>())
+}
+
 #[cfg(test)]
 mod tests {
+    use rust_decimal::dec;
+
     use super::*;
+
+    #[test]
+    fn outstanding_needs_a_gross_total() {
+        assert_eq!(outstanding(None, &[dec!(1)]), None);
+        assert_eq!(outstanding(Some(dec!(100)), &[]), Some(dec!(100)));
+        assert_eq!(
+            outstanding(Some(dec!(100)), &[dec!(30), dec!(80)]),
+            Some(dec!(-10))
+        );
+    }
 
     #[test]
     fn correction_id_accepts_valid_ids() {
