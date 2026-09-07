@@ -16,7 +16,6 @@ use szamlazz_agent::ops::taxpayer::{
 use super::document::PaymentMethod;
 use super::{InvoiceNumber, outstanding};
 use crate::account::Account;
-use crate::config::AccountMode;
 
 /// Input of `Szamlazz.Agent.query`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +149,6 @@ pub struct QueryResponse {
     /// Outstanding amount: gross total minus the sum of payments.
     #[serde(default)]
     pub outstanding: Option<Decimal>,
-    /// The issuing account's supplier id (`szállító/id`).
-    #[serde(default)]
-    pub supplier_id: Option<u64>,
     /// Issued from a test account (`teszt`).
     #[serde(default)]
     pub test: bool,
@@ -177,7 +173,6 @@ impl QueryResponse {
             gross_total: None,
             payments: Vec::new(),
             outstanding: None,
-            supplier_id: None,
             test: false,
         }
     }
@@ -213,7 +208,6 @@ impl From<&InvoiceDocument> for QueryResponse {
             .map(|payment| payment.amount)
             .collect();
         response.outstanding = outstanding(response.gross_total, &amounts);
-        response.supplier_id = document.supplier.id;
         response.test = info.test;
         response
     }
@@ -493,8 +487,13 @@ impl SetPaymentsResponse {
 /// intended account and its credentials work — without issuing anything.
 ///
 /// Credential acceptance is the only szamlazz.hu-verified fact here; the
-/// account fields echo the *configured* account (the supplier id appears only
-/// in found-document bodies, so a not-found probe cannot cross-check it).
+/// account field echoes the *configured* account's id. *Which* szamlazz.hu
+/// account the key opens — and whether it is a test account — is not in the
+/// answer and is checked nowhere in the worker (ADR 0006, account-pin
+/// amendment): a not-found probe has no document to read, and no operation
+/// answers "which account am I?". That is the operator's go-live check: query
+/// a document known to be the account's under the scope and read its `test`
+/// and seller block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -528,34 +527,25 @@ impl CheckAccountResponse {
 }
 
 /// The configured identity of the account `check_account` resolved to: the
-/// pins the worker validates found documents against, never the agent key.
+/// resolver's id, never the agent key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct CheckedAccount {
     /// The account's id as the resolver knows it.
     pub id: String,
-    /// `live` or `test`.
-    pub mode: AccountMode,
-    /// The configured supplier id pin, when set.
-    #[serde(default)]
-    pub supplier_id: Option<u64>,
 }
 
 impl CheckedAccount {
-    /// The identity `id` in `mode`, pinned to `supplier_id` when set.
-    pub fn new(id: impl Into<String>, mode: AccountMode, supplier_id: Option<u64>) -> Self {
-        Self {
-            id: id.into(),
-            mode,
-            supplier_id,
-        }
+    /// The identity `id`.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
     }
 }
 
 impl From<&Account> for CheckedAccount {
     fn from(account: &Account) -> Self {
-        Self::new(account.id.to_string(), account.mode, account.supplier_id)
+        Self::new(account.id.to_string())
     }
 }
 
@@ -798,11 +788,14 @@ mod tests {
         payment.title = Some("átutalás".to_owned());
         response.payments = vec![payment];
         response.outstanding = Some(dec!(15400));
-        response.supplier_id = Some(972_720);
         response.test = true;
         let json = round_trip(&response);
         assert_eq!(json["document_type"], "SZ");
-        assert_eq!(json["supplier_id"], 972_720);
+        assert_eq!(json["test"], true);
+        assert!(
+            json.get("supplier_id").is_none(),
+            "the seller block is not projected (ADR 0006, account-pin amendment): {json}"
+        );
         assert_eq!(json["payments"][0]["amount"], "10000");
 
         let minimal: QueryResponse =
@@ -860,7 +853,6 @@ mod tests {
         second.title = Some("bankkártya".to_owned());
         expected.payments = vec![first, second];
         expected.outstanding = Some(dec!(10400));
-        expected.supplier_id = Some(972_720);
         expected.test = true;
         assert_eq!(response, expected);
         assert_eq!(
@@ -883,14 +875,12 @@ mod tests {
         assert_eq!(response.outstanding, Some(dec!(25400)));
     }
 
-    /// `{scope, account: {id, mode, supplier_id}, namespace, credentials}`,
-    /// the credentials tagged by `state`: `ok`, or `rejected` with szamlazz.hu's
-    /// code and message.
+    /// `{scope, account: {id}, namespace, credentials}`, the credentials
+    /// tagged by `state`: `ok`, or `rejected` with szamlazz.hu's code and
+    /// message.
     #[test]
     fn check_account_response_round_trips() {
-        let mut account = Account::new("acme", "acme");
-        account.mode = AccountMode::Test;
-        account.supplier_id = Some(972_720);
+        let account = Account::new("acme", "acme");
         let mut response = CheckAccountResponse::new(
             Some("acme-events".to_owned()),
             CheckedAccount::from(&account),
@@ -902,23 +892,20 @@ mod tests {
             json,
             json!({
                 "scope": "acme-events",
-                "account": { "id": "acme", "mode": "test", "supplier_id": 972_720 },
+                "account": { "id": "acme" },
                 "namespace": "acct",
                 "credentials": { "state": "ok" },
             })
         );
 
         response.scope = None;
-        response.account.supplier_id = None;
-        response.account.mode = AccountMode::Live;
         response.credentials = CredentialsCheck::Rejected {
             code: "3".to_owned(),
             message: "Sikertelen bejelentkezés.".to_owned(),
         };
         let json = round_trip(&response);
         assert_eq!(json["scope"], serde_json::Value::Null);
-        assert_eq!(json["account"]["mode"], "live");
-        assert_eq!(json["account"]["supplier_id"], serde_json::Value::Null);
+        assert_eq!(json["account"], json!({ "id": "acme" }));
         assert_eq!(
             json["credentials"],
             json!({ "state": "rejected", "code": "3", "message": "Sikertelen bejelentkezés." })

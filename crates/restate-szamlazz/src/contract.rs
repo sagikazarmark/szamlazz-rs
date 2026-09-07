@@ -486,8 +486,8 @@ impl fmt::Display for IssuedKind {
 /// "outcome unknown — retry with a new `Idempotency-Key`, or read
 /// `Szamlazz.Order.get`": `outcome_unknown`, `unavailable` and
 /// `credentials_rejected`. The rest are settled: the same request never
-/// succeeds (`invalid_input`, `unknown_account`, `not_found`,
-/// `account_mismatch`) or szamlazz.hu's own answer is passed through
+/// succeeds (`invalid_input`, `unknown_account`, `not_found`) or
+/// szamlazz.hu's own answer is passed through
 /// (`szamlazz_error`, whose szamlazz.hu code travels in the fault's separate
 /// `szamlazz_code` field — `code` is always one of these tokens).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -504,14 +504,6 @@ pub enum TerminalCode {
     /// concluded from), or the account resolver or credential store could not
     /// answer. Nothing was sent by the execution that raised it. HTTP 503.
     Unavailable,
-    /// A document found by number belongs to a different szamlazz.hu account
-    /// than the one the invocation resolved to: its `teszt` is not the
-    /// account's mode, or its `szallito/id` is not the account's supplier id.
-    /// Raised by every handler that finds a document — `Szamlazz.Order` on a
-    /// verify, `Szamlazz.Agent.query` and `storno` on what they find — before
-    /// it is acted on; `set_payments` and `query_taxpayer` find none and are
-    /// exempt. HTTP 409.
-    AccountMismatch,
     /// The caller's request: a malformed body, an untrimmed order key, a tax
     /// number in neither accepted form, an option the handler does not take,
     /// or a request the wire contract cannot carry (a sixth credit entry).
@@ -547,12 +539,13 @@ pub enum TerminalCode {
 
 impl TerminalCode {
     /// Every code, in the order of the fault tables the READMEs and design §7
-    /// carry.
-    pub const ALL: [Self; 8] = [
+    /// carry. (`account_mismatch`, 409, was the eighth until ADR 0006's
+    /// account-pin amendment: no handler compares a found document with the
+    /// account any more, so nothing could raise it.)
+    pub const ALL: [Self; 7] = [
         Self::InvalidInput,
         Self::UnknownAccount,
         Self::NotFound,
-        Self::AccountMismatch,
         Self::SzamlazzError,
         Self::OutcomeUnknown,
         Self::Unavailable,
@@ -565,7 +558,6 @@ impl TerminalCode {
         match self {
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Unavailable => "unavailable",
-            Self::AccountMismatch => "account_mismatch",
             Self::InvalidInput => "invalid_input",
             Self::CredentialsRejected => "credentials_rejected",
             Self::UnknownAccount => "unknown_account",
@@ -581,7 +573,6 @@ impl TerminalCode {
             // The caller's request: the same request never succeeds.
             Self::InvalidInput | Self::UnknownAccount => 400,
             Self::NotFound => 404,
-            Self::AccountMismatch => 409,
             // szamlazz.hu's own answer, passed through.
             Self::SzamlazzError => 422,
             Self::OutcomeUnknown => 500,
@@ -866,7 +857,7 @@ mod tests {
         assert_eq!(IssuedKind::Corrective.document_kind(), None);
     }
 
-    /// Every fault either service raises is one of these eight codes, each
+    /// Every fault either service raises is one of these seven codes, each
     /// with the HTTP status the ingress reports for it; the token is the
     /// snake-case variant name and round-trips through serde.
     #[test]
@@ -874,7 +865,6 @@ mod tests {
         let expected = [
             (TerminalCode::OutcomeUnknown, "outcome_unknown", 500),
             (TerminalCode::Unavailable, "unavailable", 503),
-            (TerminalCode::AccountMismatch, "account_mismatch", 409),
             (TerminalCode::InvalidInput, "invalid_input", 400),
             (
                 TerminalCode::CredentialsRejected,

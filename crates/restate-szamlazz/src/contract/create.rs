@@ -78,8 +78,7 @@ pub enum ProformaLink {
     /// Reference a proforma by number. Checked like every document found by
     /// number: `conflict{proforma_missing}` when szamlazz.hu does not know
     /// it, `conflict{not_managed}` when it does not carry this order's
-    /// number, the `account_mismatch` fault when it belongs to another
-    /// szamlazz.hu account, `invalid_input` when it is not a proforma.
+    /// number, `invalid_input` when it is not a proforma.
     Number(InvoiceNumber),
 }
 
@@ -196,8 +195,8 @@ pub enum ConflictReason {
     /// szamlazz.hu refuses the order number as a duplicate (71/152) and no
     /// live document of ours can be found under our external id.
     DuplicateOrderNumber,
-    /// A document found under our external id belongs to another order,
-    /// kind, account mode or supplier.
+    /// A document found under our external id belongs to another order or
+    /// kind.
     ExternalIdCollision,
     /// `proforma: none` while a live proforma of ours exists.
     ProformaLive,

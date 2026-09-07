@@ -1,9 +1,8 @@
 //! Discovery and binding tests of the Restate adapters (design §11): the
 //! service names, the handler set with its shared flags and the per-handler
 //! retry policy, plus an `Endpoint` build — and the fault → `TerminalError`
-//! mapping the handlers share, the account pins of a found document, and the
-//! sentinels that the agent key reaches neither the `credentials_rejected`
-//! warning nor the fault body of `credentials_rejected` or `account_mismatch`.
+//! mapping the handlers share, and the sentinels that the agent key reaches
+//! neither the `credentials_rejected` warning nor its fault body.
 
 use restate_sdk::discovery::{HandlerType, RetryPolicyOnMaxAttempts, ServiceType};
 use restate_sdk::endpoint::Endpoint;
@@ -14,7 +13,7 @@ use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
 use crate::config::{IssueConfig, Namespace, WorkerConfig};
 use crate::gateway::Gateway;
-use crate::test_support::{Doc, ORIGINAL_TELJ, SUPPLIER};
+use crate::test_support::{Doc, ORIGINAL_TELJ};
 
 /// [`IssueConfig::MIN_INITIAL_DELAY`] in the unit discovery reports
 /// (milliseconds): the floor the write handlers' `initial_interval` clears.
@@ -29,7 +28,6 @@ fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
             "id": "acct",
             "agent_key": agent_key,
             "endpoint": endpoint,
-            "mode": "test",
         },
     }))
     .expect("config");
@@ -264,7 +262,6 @@ async fn services_bind_to_an_endpoint() {
     // The static resolver: the single account, unscoped, with the inline key.
     let account = order.accounts().resolve(None).await.expect("account");
     assert_eq!(account.id.as_str(), "acct");
-    assert!(account.mode.is_test());
     assert!(order.accounts().fetch(&account).await.is_ok());
     assert!(
         matches!(
@@ -499,7 +496,6 @@ fn faults_serialise_their_code_and_status() {
 
     let cases = [
         (Fault::invalid_input("x"), 400, "invalid_input"),
-        (Fault::account_mismatch("x"), 409, "account_mismatch"),
         (Fault::unavailable("x"), 503, "unavailable"),
         (Fault::missing_fulfillment_date("SZ-1"), 503, "unavailable"),
         (
@@ -562,7 +558,6 @@ fn a_szamlazz_code_travels_in_its_own_field() {
         Fault::unavailable("x"),
         Fault::szlahu_down_answer("x"),
         Fault::outcome_unknown("x"),
-        Fault::account_mismatch("x"),
         Fault::unknown_account("x"),
         Fault::missing_fulfillment_date("SZ-1"),
     ] {
@@ -684,66 +679,6 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     assert_eq!(body["code"], "credentials_rejected");
 }
 
-/// The agent key never reaches the `account_mismatch` fault body either: it is
-/// built from the pins of the found document and the resolved account, and no
-/// document carries the key. The key is demonstrably on the wire when the
-/// document is found, and demonstrably absent from what the gateway returns
-/// and what the fault says.
-#[tokio::test]
-async fn account_mismatch_never_leaks_the_agent_key() {
-    use restate_sdk::errors::TerminalError;
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    use super::support::check_pins;
-    use crate::gateway::QueryOutcome;
-
-    const KEY: &str = "sentinel-agent-key-4b8e1d";
-    let server = MockServer::start().await;
-    // A live-account document of another supplier — what a test account
-    // configured as live, or the wrong account's key, finds by number.
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(
-                Doc {
-                    test: false,
-                    supplier_id: 1,
-                    ..Doc::new("SZ-2", "SZ")
-                }
-                .xml(),
-                "application/xml",
-            ),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let order = Order::from_parts(accounts(&server.uri(), KEY), WorkerConfig::new(namespace()));
-
-    let account = order.accounts().resolve(None).await.expect("account");
-    let credentials = order.accounts().fetch(&account).await.expect("credentials");
-    let gateway = Gateway::open(account, credentials).expect("gateway");
-    let verified = gateway.verify("SZ-2").await;
-    let Ok(QueryOutcome::Found(found)) = verified.clone() else {
-        panic!("expected Found, got {verified:?}");
-    };
-    let mismatch = TerminalError::from(check_pins(gateway.account(), &found).expect_err("a fault"));
-
-    let sent = server.received_requests().await.expect("requests");
-    assert!(
-        String::from_utf8_lossy(&sent[0].body).contains(KEY),
-        "the sentinel key must have been on the wire for the test to mean anything"
-    );
-    assert!(!format!("{verified:?}").contains(KEY), "{verified:?}");
-    assert_eq!(mismatch.code(), 409);
-    assert!(!mismatch.message().contains(KEY), "{}", mismatch.message());
-    let body: serde_json::Value = serde_json::from_str(mismatch.message()).expect("json body");
-    assert_eq!(body["code"], "account_mismatch");
-    let message = body["message"].as_str().expect("message");
-    assert!(message.contains("SZ-2"), "{message}");
-    assert!(message.contains("teszt = false"), "{message}");
-    assert!(message.contains("supplier Some(1)"), "{message}");
-}
-
 /// Every handler execution runs inside one span — `execution` — carrying the
 /// scope, the order key, the invocation id and, once the prologue has resolved
 /// it, the account id (#65). Every log line under it is thereby attributable
@@ -863,23 +798,15 @@ fn lookup_classifies_query_outcomes() {
 
     let order = OrderKey::parse("ORD-1").expect("order");
     let namespace = namespace();
-    let classify = |outcome: QueryOutcome, supplier: Option<u64>| {
-        Lookup::classify(
-            outcome,
-            &namespace,
-            &order,
-            IssuedKind::Invoice,
-            true,
-            supplier,
-        )
-    };
+    let classify =
+        |outcome: QueryOutcome| Lookup::classify(outcome, &namespace, &order, IssuedKind::Invoice);
 
     assert_eq!(
-        classify(QueryOutcome::NotFound, None).expect("classified"),
+        classify(QueryOutcome::NotFound).expect("classified"),
         Lookup::Absent
     );
     let ours = Doc::default().boxed();
-    let lookup = classify(QueryOutcome::Found(ours.clone()), Some(SUPPLIER)).expect("classified");
+    let lookup = classify(QueryOutcome::Found(ours.clone())).expect("classified");
     assert_eq!(lookup, Lookup::Ours(ours));
 
     let reversed = Doc {
@@ -887,10 +814,10 @@ fn lookup_classifies_query_outcomes() {
         ..Doc::default()
     }
     .boxed();
-    let lookup = classify(QueryOutcome::Found(reversed.clone()), None).expect("classified");
+    let lookup = classify(QueryOutcome::Found(reversed.clone())).expect("classified");
     assert_eq!(lookup, Lookup::Ours(reversed));
 
-    // Each pin of ours off by one: another order, kind, mode or supplier.
+    // Each identity of ours off by one: another order or kind.
     let doc = |edit: fn(&mut Doc<'static>)| {
         let mut doc = Doc::default();
         edit(&mut doc);
@@ -899,21 +826,26 @@ fn lookup_classifies_query_outcomes() {
     for (label, other) in [
         ("order", doc(|doc| doc.order = Some("ORD-2"))),
         ("kind", doc(|doc| doc.tipus = "D")),
-        ("test", doc(|doc| doc.test = false)),
-        ("supplier", doc(|doc| doc.supplier_id = 1)),
     ] {
-        let lookup = classify(QueryOutcome::Found(other.clone()), Some(SUPPLIER)).expect(label);
+        let lookup = classify(QueryOutcome::Found(other.clone())).expect(label);
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
+    }
+    // No account pin (ADR 0006, account-pin amendment): neither `teszt` nor
+    // the seller record's id (`szallito/id`) is compared with anything — a
+    // document of this order and kind is ours whatever they say.
+    for (label, other) in [
+        ("teszt", doc(|doc| doc.test = false)),
+        ("szallito/id", doc(|doc| doc.supplier_id = 1)),
+    ] {
+        let lookup = classify(QueryOutcome::Found(other.clone())).expect(label);
+        assert_eq!(lookup, Lookup::Ours(other), "{label}");
     }
     // Another szamlazz.hu code is an answer the handler cannot conclude from:
     // the `unavailable` fault naming the code, as before the read policy.
-    let fault = classify(
-        QueryOutcome::Api {
-            code: "57".to_owned(),
-            message: "Ismeretlen hiba".to_owned(),
-        },
-        None,
-    )
+    let fault = classify(QueryOutcome::Api {
+        code: "57".to_owned(),
+        message: "Ismeretlen hiba".to_owned(),
+    })
     .expect_err("a fault");
     let error = restate_sdk::errors::TerminalError::from(fault);
     assert_eq!(error.code(), 503);
@@ -924,13 +856,10 @@ fn lookup_classifies_query_outcomes() {
     assert!(message.contains("Ismeretlen hiba"), "{message}");
 
     // Rejected credentials are a fault of their own, not `unavailable`.
-    let fault = classify(
-        QueryOutcome::CredentialsRejected {
-            code: "3".to_owned(),
-            message: "login".to_owned(),
-        },
-        None,
-    )
+    let fault = classify(QueryOutcome::CredentialsRejected {
+        code: "3".to_owned(),
+        message: "login".to_owned(),
+    })
     .expect_err("a fault");
     let error = restate_sdk::errors::TerminalError::from(fault);
     assert_eq!(error.code(), 503);
@@ -1244,86 +1173,6 @@ fn the_order_key_must_arrive_trimmed() {
     }
 }
 
-/// Every handler that finds a document checks it against the account the
-/// invocation resolved to (design §3): `teszt` must equal the account's mode
-/// and, when the account pins a supplier id, `szallito/id` must match it. A
-/// mismatch is the `account_mismatch` fault (409) naming the observed pins and
-/// the resolved account's — a test account configured as live fails loudly on
-/// its first found document.
-#[test]
-fn a_found_document_must_belong_to_the_resolved_account() {
-    use restate_sdk::errors::TerminalError;
-
-    use super::support::check_pins;
-    use crate::account::Account;
-    use crate::config::AccountMode;
-
-    let mut account = Account::new("acct", "acct");
-    account.mode = AccountMode::Test;
-    account.supplier_id = Some(SUPPLIER);
-
-    check_pins(&account, &Doc::default().parse()).expect("ours");
-    check_pins(
-        &account,
-        &Doc {
-            order: Some("OTHER"),
-            ..Doc::default()
-        }
-        .parse(),
-    )
-    .expect("the order number is not a pin of the account");
-
-    // A live document on a test account, or a test document on a live one.
-    let live_document = Doc {
-        test: false,
-        ..Doc::default()
-    }
-    .parse();
-    let fault = check_pins(&account, &live_document).expect_err("a fault");
-    let error = TerminalError::from(fault);
-    assert_eq!(error.code(), 409);
-    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-    assert_eq!(body["code"], "account_mismatch");
-    let message = body["message"].as_str().expect("message");
-    assert!(message.contains("SZ-1"), "{message}");
-    assert!(message.contains("teszt = false"), "{message}");
-    assert!(message.contains("teszt = true"), "{message}");
-    assert_eq!(
-        body.get("order"),
-        None,
-        "no order identity on a by-number check"
-    );
-
-    let mut live = account.clone();
-    live.mode = AccountMode::Live;
-    let fault = check_pins(&live, &Doc::default().parse()).expect_err("a fault");
-    let body: serde_json::Value =
-        serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
-    assert_eq!(body["code"], "account_mismatch");
-
-    // Another supplier, when the account pins one.
-    let other_supplier = Doc {
-        supplier_id: 1,
-        ..Doc::default()
-    }
-    .parse();
-    let fault = check_pins(&account, &other_supplier).expect_err("a fault");
-    let body: serde_json::Value =
-        serde_json::from_str(TerminalError::from(fault).message()).expect("json body");
-    assert_eq!(body["code"], "account_mismatch");
-    let message = body["message"].as_str().expect("message");
-    assert!(message.contains("supplier Some(1)"), "{message}");
-    assert!(
-        message.contains(&format!("supplier Some({SUPPLIER})")),
-        "{message}"
-    );
-
-    // No supplier pin: the supplier id is not checked.
-    let mut unpinned = account.clone();
-    unpinned.supplier_id = None;
-    check_pins(&unpinned, &other_supplier).expect("unpinned");
-}
-
 /// The storno intent both storno handlers build from the verified original
 /// (design §6 step 3, ADR 0007): the storno repeats the original's `telj`,
 /// lifts `eszamla` from the document with the account default as fallback,
@@ -1336,13 +1185,10 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
 
     use super::support::StornoIntent;
     use crate::account::Account;
-    use crate::config::AccountMode;
     use crate::contract::IssuedKind;
     use crate::identity::{ExternalId, OrderKey};
 
     let mut account = Account::new("acct", "acct");
-    account.mode = AccountMode::Test;
-    account.supplier_id = Some(SUPPLIER);
     account.defaults.e_invoice = false;
     let storno_id = || ExternalId::new("acct:ORD-1:storno:SZ-1");
 

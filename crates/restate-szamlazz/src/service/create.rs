@@ -20,7 +20,7 @@ use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
-use super::support::{Fault, Lookup, check_pins, verified_document};
+use super::support::{Fault, Lookup, verified_document};
 use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
@@ -334,7 +334,6 @@ impl Execution {
         if !found.carries_order(&order) {
             return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
         }
-        check_pins(self.gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
             return Ok(identity.conflict_about(ConflictReason::BaseReversed, number));
         }
@@ -503,9 +502,8 @@ impl Execution {
     ///
     /// Under `{number}` the named document is verified and checked like every
     /// other document found by number (design §3): another order's number, or
-    /// none, is `conflict{not_managed, existing_number}`; a pin that is not
-    /// the resolved account's is the `account_mismatch` fault; a document
-    /// that is not a proforma is `invalid_input`.
+    /// none, is `conflict{not_managed, existing_number}`; a document that is
+    /// not a proforma is `invalid_input`.
     async fn proforma_link(
         &self,
         ctx: &ObjectContext<'_>,
@@ -573,9 +571,8 @@ impl Execution {
                     )),
                     // Checked like every other document found by number
                     // (design §3), in the order the other verifies use: this
-                    // order's number, then the account pins, then the kind.
-                    // Without the first two a caller could link another
-                    // order's — or another account's — live proforma into
+                    // order's number, then the kind. Without the first a
+                    // caller could link another order's live proforma into
                     // this order's invoice.
                     QueryOutcome::Found(found) => {
                         if !found.carries_order(&prepared.order) {
@@ -583,7 +580,6 @@ impl Execution {
                                 identity.conflict_about(ConflictReason::NotManaged, number),
                             ));
                         }
-                        check_pins(self.gateway.account(), &found)?;
                         if found.info.document_type != "D" {
                             return Err(Fault::invalid_input(format!(
                                 "{number} is not a proforma (tipus {})",
@@ -743,7 +739,7 @@ mod tests {
 
     use super::*;
     use crate::account::{Account, Endpoint};
-    use crate::config::{AccountMode, WorkerConfig};
+    use crate::config::WorkerConfig;
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
     use crate::gateway::Gateway;
@@ -751,7 +747,6 @@ mod tests {
     /// An execution as the prologue would build it for the test account.
     fn order() -> Execution {
         let mut account = Account::new("acct", "acct");
-        account.mode = AccountMode::Test;
         account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
         Execution {
             gateway: Arc::new(

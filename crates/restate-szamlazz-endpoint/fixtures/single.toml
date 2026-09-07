@@ -25,8 +25,6 @@ max_duration = "1m"
 id = "acme"                   # the account's identifier as the worker knows it; journaled with every invocation, shown in the Restate UI
 agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
-mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
-supplier_id = 972720          # optional pin; when set, validated against szallito/id on every document found under our external ids
 
 [account.defaults]            # all optional
 e_invoice = false

@@ -113,9 +113,9 @@ impl Order {
 }
 
 /// The stateless `Szamlazz.Agent` service: by-number operations over the
-/// same accounts as [`Order`]. `query` and `storno` check the document they
-/// find against the resolved account (`account_mismatch` on a mismatch);
-/// `set_payments` finds none and is exempt.
+/// same accounts as [`Order`], the taxpayer lookup and the `check_account`
+/// probe. No handler compares what it finds with the account (ADR 0006,
+/// account-pin amendment).
 #[derive(Debug, Clone)]
 pub struct Agent {
     accounts: Accounts,

@@ -5,7 +5,6 @@
 
 use jiff::civil::{Date, date};
 use restate_szamlazz::account::{Account, Endpoint};
-use restate_szamlazz::config::AccountMode;
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
@@ -23,6 +22,8 @@ use szamlazz_agent::{Credentials, InvoiceNumber};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
+/// The `szallito/id` the rendered documents carry: wire realism; the gateway
+/// holds no account pin (ADR 0006, account-pin amendment).
 const SUPPLIER: u64 = 972_720;
 
 /// The szamlazz.hu codes that mean "the agent credentials are wrong": 3
@@ -32,12 +33,9 @@ const CREDENTIAL_CODES: [&str; 4] = ["3", "135", "136", "164"];
 
 // ----- fixtures --------------------------------------------------------------
 
-/// A gateway for a test account pinned to `SUPPLIER`, opened as the prologue
-/// would open it; every found document is validated against those two pins.
+/// A gateway for the test account, opened as the prologue would open it.
 fn gateway(server: &MockServer) -> Gateway {
     let mut account = Account::new("acct", "acct");
-    account.mode = AccountMode::Test;
-    account.supplier_id = Some(SUPPLIER);
     account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
     Gateway::open(account, Credentials::agent_key("key")).expect("gateway")
 }
@@ -468,20 +466,7 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
         ..Doc::new("SZ-9", "SZ")
     };
     let other_kind = Doc::new("D-9", "D");
-    let live_account = Doc {
-        test: false,
-        ..Doc::new("SZ-9", "SZ")
-    };
-    let other_supplier = Doc {
-        supplier_id: 1,
-        ..Doc::new("SZ-9", "SZ")
-    };
-    for (label, doc) in [
-        ("order", other_order),
-        ("kind", other_kind),
-        ("test", live_account),
-        ("supplier", other_supplier),
-    ] {
+    for (label, doc) in [("order", other_order), ("kind", other_kind)] {
         let h = Harness::start().await;
         external_id_query("acct:ORD-1:invoice")
             .respond_with(doc.response())
@@ -495,6 +480,50 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
         match h.lookup(&[]).await {
             LookupOutcome::Collision(found) => assert_eq!(found.number(), doc.number, "{label}"),
             other => panic!("{label}: expected Collision, got {other:?}"),
+        }
+    }
+}
+
+/// No account pin (ADR 0006, account-pin amendment): a document of this
+/// order and kind under our id is ours whatever its `teszt` and `szallito/id`
+/// say — live, and it settles the lookup without the hint. Both are parsed
+/// (the journaled document is whole), neither is compared with anything.
+#[tokio::test]
+async fn lookup_holds_no_account_pin() {
+    for (label, doc) in [
+        (
+            "teszt",
+            Doc {
+                test: false,
+                ..Doc::new("SZ-1", "SZ")
+            },
+        ),
+        (
+            "szallito/id",
+            Doc {
+                supplier_id: 1,
+                ..Doc::new("SZ-1", "SZ")
+            },
+        ),
+    ] {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(doc.response())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        order_query()
+            .respond_with(not_found())
+            .expect(0)
+            .mount(&h.server)
+            .await;
+        match h.lookup(&[]).await {
+            LookupOutcome::Live(found) => {
+                assert_eq!(found.number(), "SZ-1", "{label}");
+                assert_eq!(found.info.test, doc.test, "{label}: parsed");
+                assert_eq!(found.supplier.id, Some(doc.supplier_id), "{label}: parsed");
+            }
+            other => panic!("{label}: expected Live, got {other:?}"),
         }
     }
 }
@@ -2691,12 +2720,9 @@ async fn set_payments_outcomes() {
 
 // ----- Gateway::open ---------------------------------------------------------
 
-/// An [`Account`] in `mode`, pinned to `SUPPLIER`, on `server`, and the
-/// gateway opened for it with `key`.
-fn open(server: &MockServer, id: &str, key: &str, mode: AccountMode) -> Gateway {
+/// An [`Account`] on `server`, and the gateway opened for it with `key`.
+fn open(server: &MockServer, id: &str, key: &str) -> Gateway {
     let mut account = Account::new(id, id);
-    account.mode = mode;
-    account.supplier_id = Some(SUPPLIER);
     account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
     Gateway::open(account, Credentials::agent_key(key)).expect("gateway")
 }
@@ -2714,7 +2740,7 @@ async fn a_gateway_opened_from_an_account_sends_that_accounts_key() {
         .respond_with(not_found())
         .mount(&server)
         .await;
-    let gateway = open(&server, "acme", "key-acme", AccountMode::Test);
+    let gateway = open(&server, "acme", "key-acme");
 
     let outcome = gateway
         .query(&Selector::ExternalId("acme:ORD-1:invoice".to_owned()))
@@ -2740,8 +2766,8 @@ async fn two_gateways_opened_from_two_accounts_share_no_key_and_no_session() {
         .respond_with(not_found().insert_header("set-cookie", "JSESSIONID=session-of-acme; Path=/"))
         .mount(&server)
         .await;
-    let acme = open(&server, "acme", "key-acme", AccountMode::Test);
-    let beta = open(&server, "beta", "key-beta", AccountMode::Test);
+    let acme = open(&server, "acme", "key-acme");
+    let beta = open(&server, "beta", "key-beta");
 
     let selector = Selector::OrderNumber("ORD-1".to_owned());
     assert!(matches!(
@@ -2779,60 +2805,6 @@ async fn two_gateways_opened_from_two_accounts_share_no_key_and_no_session() {
         Some("JSESSIONID=session-of-acme"),
         "acme's own client keeps its own session"
     );
-}
-
-/// The account's mode is always validated: a document under our external id
-/// that says `teszt=false` is not ours on a test account (and vice versa),
-/// so the lookup step reports a collision instead of adopting it.
-#[tokio::test]
-async fn opened_gateway_validates_the_accounts_mode_against_teszt() {
-    for (mode, teszt, label) in [
-        (AccountMode::Test, false, "test account, live document"),
-        (AccountMode::Live, true, "live account, test document"),
-    ] {
-        let server = MockServer::start().await;
-        let external_id = ExternalId::new("acme:ORD-1:invoice");
-        external_id_query("acme:ORD-1:invoice")
-            .respond_with(
-                Doc {
-                    test: teszt,
-                    ..Doc::new("SZ-9", "SZ")
-                }
-                .response(),
-            )
-            .mount(&server)
-            .await;
-        order_query()
-            .respond_with(not_found())
-            .expect(0)
-            .mount(&server)
-            .await;
-        let gateway = open(&server, "acme", "key-acme", mode);
-
-        let outcome = gateway
-            .lookup(LookupRequest {
-                external_id: &external_id,
-                kind: IssuedKind::Invoice,
-                order: &order(),
-                our_numbers: &[],
-            })
-            .await;
-        match outcome {
-            Ok(LookupOutcome::Collision(found)) => {
-                assert_eq!(found.number(), "SZ-9", "{label}");
-                assert!(
-                    !found.is_ours(
-                        &order(),
-                        IssuedKind::Invoice,
-                        mode.is_test(),
-                        Some(SUPPLIER)
-                    ),
-                    "{label}"
-                );
-            }
-            other => panic!("{label}: expected Collision, got {other:?}"),
-        }
-    }
 }
 
 // ----- taxpayer (`Szamlazz.Agent.query_taxpayer`) -----------------------------

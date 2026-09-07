@@ -1,8 +1,8 @@
 //! The account model and the two pluggable traits that produce it.
 //!
 //! An [`Account`] is one szamlazz.hu account as the worker knows it — its
-//! resolver-owned id, mode, supplier pin, endpoint, document defaults, seller
-//! block and a reference to its credentials. Never the agent key: the account
+//! resolver-owned id, endpoint, document defaults, seller block and a
+//! reference to its credentials. Never the agent key: the account
 //! is resolved once per invocation and journaled, and the journal is visible in
 //! the Restate UI for the retention period.
 
@@ -16,7 +16,7 @@ use http::Uri;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
 
-use crate::config::{AccountMode, Defaults, SellerConfig};
+use crate::config::{Defaults, SellerConfig};
 
 pub mod static_resolver;
 
@@ -29,10 +29,9 @@ pub use static_resolver::{
 ///
 /// Resolved once per invocation by an account resolver and journaled, so an
 /// invocation finishes on the account it started on. Everything account-shaped
-/// the service layer reads is here: the ownership-validation pins (`mode`,
-/// `supplier_id`), the endpoint, the document defaults and the seller block.
-/// The credentials are fetched separately, by [`Account::credential_ref`],
-/// on every handler execution.
+/// the service layer reads is here: the endpoint, the document defaults and
+/// the seller block. The credentials are fetched separately, by
+/// [`Account::credential_ref`], on every handler execution.
 ///
 /// # Journal compatibility
 ///
@@ -45,34 +44,36 @@ pub use static_resolver::{
 /// and set the rest. Its journaled shape is pinned under
 /// `tests/journal/resolution/`.
 ///
-/// # Ownership validation
+/// # No account pin
 ///
-/// A document found under one of our external ids is ours only when it
-/// carries the order number, the `tipus` of the kind, `teszt` equal to
-/// [`mode`](Self::mode) and — when both are known — the account's
-/// [`supplier_id`](Self::supplier_id). The last two pins are checked on every
-/// document any handler finds, by external id or by number: a document that
-/// fails them is `conflict{external_id_collision}` under our id and the
-/// `account_mismatch` fault by number (`Szamlazz.Order`'s verifies,
-/// `Szamlazz.Agent.query` and `storno`). The mode defaults to live and is
-/// always checked: a test account configured as live fails on its first
-/// found document, on any handler, instead of issuing on the wrong account.
+/// The account carries **nothing the worker checks a found document
+/// against**. Ownership validation is about the *document*: under one of our
+/// external ids a document is ours when it carries the order number and the
+/// `tipus` of the kind, and found by number it must carry this order's number
+/// (`Szamlazz.Order`'s verifies) — nothing about the account. 0.3 pinned two
+/// fields of a queried document, `szallito/id` (`supplier_id`) and `teszt`
+/// (`mode`); ADR 0006's account-pin amendment dropped both. Neither is in a
+/// create response — a create's reply is a number and totals — so neither
+/// could fire before the first document of a fresh order was issued: a key
+/// configured under the wrong scope issued into the wrong account and answered
+/// `issued`, and the pin tripped on the *next* found document. A tripwire with
+/// that blind spot, on fields the operator had to read off the very account
+/// being checked (`szallito/id`, undocumented) or that only tell test from
+/// live (`teszt`), was not worth a fault code and a configuration field.
+///
+/// So **the right key under the right scope is the resolver's guarantee**,
+/// and the deployment's to verify: under each scope, at go-live and after
+/// every key rotation, `Szamlazz.Agent.query` a document known to be the
+/// account's and read `<teszt>` and the seller block (name, tax number) on
+/// the answer. A key pasted into the wrong scope issues that scope's
+/// documents in another company's name — or on a test account, or on a live
+/// one from staging — with nothing in the worker failing. The endpoint
+/// README's deploy checklist carries the check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Account {
     /// The resolver's identifier of the account; opaque to the worker.
     pub id: AccountId,
-    /// Whether the account is live or a test account; validated against
-    /// `teszt` on every document found under our external ids. Default live.
-    #[serde(default)]
-    pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`): szamlazz.hu's id for the
-    /// seller record printed on every document the account issues, a proxy
-    /// for the account. Optional pin in every configuration shape; when set it
-    /// is validated against every document found, under our external ids or
-    /// by number.
-    #[serde(default)]
-    pub supplier_id: Option<u64>,
     /// The Számla Agent endpoint. Default: production.
     #[serde(default)]
     pub endpoint: Endpoint,
@@ -88,13 +89,11 @@ pub struct Account {
 }
 
 impl Account {
-    /// An account with `id` and `credential_ref`, live, unpinned, on the
-    /// production endpoint, with default document settings.
+    /// An account with `id` and `credential_ref` on the production endpoint,
+    /// with default document settings.
     pub fn new(id: impl Into<AccountId>, credential_ref: impl Into<CredentialRef>) -> Self {
         Self {
             id: id.into(),
-            mode: AccountMode::default(),
-            supplier_id: None,
             endpoint: Endpoint::default(),
             defaults: Defaults::default(),
             seller: SellerConfig::default(),
@@ -331,25 +330,17 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// - **Append-only mapping.** Moving traffic to another account means a new
 ///   scope; a scope's account is never changed in place. A running
 ///   invocation stays on the account it journaled either way.
-/// - **A `supplier_id` pin on every account once there is more than one** —
-///   recommended, never required. The supplier id (`szállító/id`, the
-///   account's seller record) is the only server-side account identity a
-///   found document exposes, and the one pin that catches an agent key
-///   configured under the wrong scope — `mode` alone cannot — by turning "a
-///   document of another account under our external id" into
-///   `conflict{external_id_collision}` or `account_mismatch` instead of a
-///   document acted on. The worker cannot verify a configured value, so it
-///   stays optional; the prologue logs a `warn` once per resolution when a
-///   **scoped** request resolves to an account without one.
-/// - **Unique supplier ids among the accounts that pin one.** Two accounts
-///   with one supplier id are one szamlazz.hu account under two scopes —
-///   fan-in. An unset pin claims nothing.
 /// - **Unique `(endpoint, credentials)` pairs.** The same agent key on the
 ///   same endpoint is one account, whatever its `id`.
-/// - **`mode` matching the account's `teszt`.** The mode is validated against
-///   every found document; a test account configured as live fails loudly
-///   on its first found document, on any handler, instead of issuing on the
-///   wrong account.
+/// - **The right key under the right scope.** The worker holds no account
+///   pin — nothing on a found document is checked against the account (see
+///   [`Account`], *No account pin*) — so a key that opens another szamlazz.hu
+///   account than the scope names, or a test account where a live one is
+///   meant (and the reverse), issues there with nothing failing. The
+///   resolver guarantees it; the deployment verifies it at go-live and after
+///   every rotation by querying a known document under each scope and
+///   reading its `<teszt>` and seller block (ADR 0006, account-pin
+///   amendment).
 /// - **A stable `credential_ref` across rotations.** Rotate the value behind
 ///   the reference, never the reference: the reference is journaled with the
 ///   account and an in-flight invocation fetches by it on its next
@@ -567,8 +558,6 @@ mod tests {
                 "id": "acme",
                 "agent_key": KEY,
                 "endpoint": "http://127.0.0.1:1/",
-                "mode": "test",
-                "supplier_id": 972_720,
             },
         }))
         .expect("config");
@@ -620,16 +609,12 @@ mod tests {
     #[test]
     fn account_journals_as_json_without_a_secret_and_reads_back() {
         let mut account = Account::new("acme", "acme-key");
-        account.mode = AccountMode::Test;
-        account.supplier_id = Some(972_720);
         account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
         account.seller.bank_account = Some("11111111-22222222".to_owned());
 
         let json = serde_json::to_value(&account).expect("serialize");
         assert_eq!(json["id"], "acme");
         assert_eq!(json["credential_ref"], "acme-key");
-        assert_eq!(json["mode"], "test");
-        assert_eq!(json["supplier_id"], 972_720);
         assert_eq!(json["endpoint"], "http://127.0.0.1:1/");
         assert_eq!(json["seller"]["bank_account"], "11111111-22222222");
         assert_eq!(json["defaults"]["currency"], "HUF");
@@ -647,15 +632,13 @@ mod tests {
 
     /// Additive-only: a journaled account written before a field existed
     /// reads back with that field's default. `id` and `credential_ref` are the
-    /// only required fields; the mode is live unless said otherwise.
+    /// only required fields.
     #[test]
-    fn account_is_additive_only_with_live_mode_and_production_endpoint_by_default() {
+    fn account_is_additive_only_with_the_production_endpoint_by_default() {
         let account: Account =
             serde_json::from_value(json!({ "id": "acme", "credential_ref": "acme" }))
                 .expect("deserialize");
         assert_eq!(account, Account::new("acme", "acme"));
-        assert_eq!(account.mode, AccountMode::Live);
-        assert_eq!(account.supplier_id, None);
         assert_eq!(account.endpoint, Endpoint::production());
         assert_eq!(account.endpoint.as_str(), "https://www.szamlazz.hu/szamla/");
         assert_eq!(account.defaults, crate::config::Defaults::default());

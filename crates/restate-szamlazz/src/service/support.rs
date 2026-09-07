@@ -157,10 +157,6 @@ impl Fault {
         Self::new(TerminalCode::OutcomeUnknown, message)
     }
 
-    pub(super) fn account_mismatch(message: impl Into<String>) -> Self {
-        Self::new(TerminalCode::AccountMismatch, message)
-    }
-
     /// The request names no account of this deployment (unscoped where
     /// accounts are scoped, or an unknown scope).
     pub(super) fn unknown_account(message: impl Into<String>) -> Self {
@@ -320,40 +316,6 @@ pub(super) fn verified_document(
         QueryOutcome::CredentialsRejected { code, message } => {
             Err(Fault::credentials_rejected(namespace, code, message))
         }
-    }
-}
-
-/// The account pins of a document found by number: it must belong to the
-/// account the invocation resolved to (design §3) — `teszt` equal to the
-/// account's mode and, when the account pins a supplier id and the document
-/// carries one, `szallito/id` equal to it. Every handler that finds a document
-/// runs this check — `Szamlazz.Order` on its verifies, `Szamlazz.Agent.query`
-/// and `storno` on what they find — so a misconfigured account (a test account
-/// configured as live, a wrong supplier id) fails loudly on its first found
-/// document instead of acting on the wrong account. Two handlers are exempt:
-/// `Szamlazz.Agent.set_payments` sends without a query, and a credit entry is
-/// not a legal document; `Szamlazz.Agent.query_taxpayer` finds no document
-/// at all — a taxpayer record is NAV's, not the account's, and carries no
-/// pins. Not to be confused with the `check_account` probe, which finds
-/// nothing and echoes configuration.
-///
-/// # Errors
-///
-/// The `account_mismatch` fault (409), naming the document and the observed
-/// and expected pins. No document carries the agent key, so neither does the
-/// message.
-pub(super) fn check_pins(account: &Account, found: &InvoiceDocument) -> Result<(), Fault> {
-    if found.account_matches(account.mode.is_test(), account.supplier_id) {
-        Ok(())
-    } else {
-        Err(Fault::account_mismatch(format!(
-            "document {} belongs to another szamlazz.hu account: it carries teszt = {}, supplier {:?}; the resolved account expects teszt = {}, supplier {:?}",
-            found.number(),
-            found.info.test,
-            found.supplier.id,
-            account.mode.is_test(),
-            account.supplier_id,
-        )))
     }
 }
 
@@ -517,8 +479,8 @@ pub(super) enum Lookup {
     Absent,
     /// A document that passed validation: ours, live or reversed.
     Ours(Box<InvoiceDocument>),
-    /// A document that fails validation: another order, kind, account mode or
-    /// supplier. Never trusted.
+    /// A document that fails validation: another order or kind. Never
+    /// trusted.
     Collision(Box<InvoiceDocument>),
 }
 
@@ -533,8 +495,6 @@ impl Lookup {
         namespace: &Namespace,
         order: &OrderKey,
         kind: IssuedKind,
-        expect_test: bool,
-        expect_supplier_id: Option<u64>,
     ) -> Result<Self, Fault> {
         match outcome {
             QueryOutcome::NotFound => Ok(Self::Absent),
@@ -543,7 +503,7 @@ impl Lookup {
                 Err(Fault::credentials_rejected(namespace, code, message))
             }
             QueryOutcome::Found(found) => {
-                if found.is_ours(order, kind, expect_test, expect_supplier_id) {
+                if found.is_ours(order, kind) {
                     Ok(Self::Ours(found))
                 } else {
                     tracing::warn!(number = %found.number(), kind = %kind, "external id collision");
@@ -655,10 +615,7 @@ macro_rules! journal_helpers {
                         "account",
                         config.resolve.run_retry_policy(),
                         move || async move {
-                            decisions::resolution(
-                                scope.as_deref(),
-                                accounts.resolve(scope.as_deref()).await,
-                            )
+                            decisions::resolution(accounts.resolve(scope.as_deref()).await)
                         },
                     )
                     .await
@@ -822,8 +779,7 @@ macro_rules! journal_helpers {
 
             /// Journaled query by one of our external ids, under the read
             /// policy, validated against the identity the document should
-            /// have (design §3) and the gateway's account. A fault carries
-            /// that identity.
+            /// have (design §3). A fault carries that identity.
             pub(in crate::service) async fn lookup(
                 ctx: &$ctx<'_>,
                 exec: &Execution,
@@ -836,16 +792,7 @@ macro_rules! journal_helpers {
                 let outcome = query_external_id(ctx, exec, name, external_id)
                     .await
                     .map_err(about)?;
-                let account = exec.gateway.account();
-                Lookup::classify(
-                    outcome,
-                    &exec.config.namespace,
-                    order,
-                    kind,
-                    account.mode.is_test(),
-                    account.supplier_id,
-                )
-                .map_err(about)
+                Lookup::classify(outcome, &exec.config.namespace, order, kind).map_err(about)
             }
 
             /// The storno lookup step (design §6 step 2): one read-only

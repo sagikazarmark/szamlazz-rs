@@ -69,8 +69,9 @@ Rejected transports, each because it leaves the Restate identity shared between 
 
 Resolution is split so that the *decision* is durable and the *secret* is not.
 
-1. The `account` step journals the resolver's answer **as data**: the `Account` (`id`, `mode`,
-   `supplier_id?`, `endpoint`, `defaults`, `seller`, `credential_ref`), or `unscoped`, or `unknown{scope}`.
+1. The `account` step journals the resolver's answer **as data**: the `Account` (`id`, `endpoint`,
+   `defaults`, `seller`, `credential_ref`; `mode` and `supplier_id?` too until the account-pin amendment below
+   removed both), or `unscoped`, or `unknown{scope}`.
    Once journaled, an invocation finishes on the account it started on: a remap of the scope, a change of
    the account's bank account or defaults, or a redeploy with a new resolver reaches only new invocations
    (verified: `account_change_between_executions_does_not_reach_the_invocation`). The journaled `Account` is
@@ -101,12 +102,15 @@ while the same scan finds a sentinel deliberately journaled as a positive contro
 Seven rules, listed in full in the library README's "what it relies on" and, rule by rule, on the *Account
 resolver*, *Credential store* and *Scope* entries of `CONTEXT.md`; the traits document their own halves as a
 checklist on their rustdoc (rules 1–2 plus the load-time checks the static resolver makes — unique `(endpoint,
-credentials)` pairs, unique supplier ids among the accounts that pin one, `mode` matching `teszt` — a `supplier_id`
-pin on every account once there is more than one as a recommendation (optional in every shape, see below), a stable
-`credential_ref` across rotations and never caching `Unscoped` / `Unknown` on `AccountResolver`; the
-fetch-every-execution and stable-reference rules on `CredentialStore`; #43). The worker enforces what it can (the
-static resolver at load time; the prologue logs a `warn` when a **scoped** request resolves to an account without a
-`supplier_id`) and *relies on* the rest.
+credentials)` pairs — the right key under the right scope, a stable `credential_ref` across rotations and never
+caching `Unscoped` / `Unknown` on `AccountResolver`; the fetch-every-execution and stable-reference rules on
+`CredentialStore`; #43). The worker enforces what it can (the static resolver at load time) and *relies on* the
+rest — including, since the account-pin amendment below, that the key under a scope opens the account the scope
+names, live or test as meant: the worker holds no account pin, and the go-live check (query a document known to be
+the account's under each scope and read its `test` and seller block) is the operator's. *Amended (account-pin
+amendment, 2026-09-07):* the original text's `mode` matching `teszt`, the `supplier_id` recommendation, the
+unique-supplier-ids load-time check and the prologue's `warn` on an unpinned scoped resolution are gone with the
+pins.
 
 1. **One szamlazz.hu account is reachable under exactly one scope value.** Unscoped counts as a value.
    No fan-in: two scopes reaching one account would split an order's per-key lock across two Virtual
@@ -130,9 +134,10 @@ static resolver at load time; the prologue logs a `warn` when a **scoped** reque
 **Blast radius.** Before, whoever reached the ingress could issue on one account; now, on every account
 the deployment serves, under whichever scope they name. The gateway of rule 6 is the boundary, and it is
 the operator's, not the worker's. The static resolver's `[accounts.<scope>]` shape enforces the checkable
-half of rule 1 at load time: unique `(endpoint, agent_key)` pairs, unique ids, and unique `supplier_id`s among
-the accounts that pin one. *Amended (XPRB probe, 2026-09-06):* the pin is optional in this shape too — see the
-decision bullet below. A database-backed resolver must guarantee rules 1 and 2 itself.
+half of rule 1 at load time: unique `(endpoint, agent_key)` pairs and unique ids. *Amended (XPRB probe,
+2026-09-06; account-pin amendment, 2026-09-07):* the original text also checked unique `supplier_id`s among the
+accounts that pinned one; the pin became optional, then was dropped — see the decision bullet below. A
+database-backed resolver must guarantee rules 1 and 2 itself.
 
 ### Experimental Restate dependencies
 
@@ -213,7 +218,7 @@ all under scope `acme` with namespace `acct`:
    step sends → `issued SZ-1`. Three days later the journal is gone; thirty days later the `Idempotency-Key`
    is forgotten.
 2. *Month 4.* `storno_invoice{SZ-1}` with a new key → the prologue resolves `acme` again; verify by number:
-   `SZ-1` carries `rendelesszam = EV-1` (the key), `teszt` and `szallito/id` match the account; the storno
+   `SZ-1` carries `rendelesszam = EV-1` (the key); the storno
    lookup under `acct:EV-1:storno:SZ-1` finds nothing; the storno step sends → `SS-2` → `reversed`.
 3. *Month 4, later.* `create_invoice{reissue: true}` with a new key → lookup: the newest holder of
    `acct:EV-1:invoice` is `SZ-1` with `sztornozott = true`, the order-number hint shows `SS-2` with
@@ -261,6 +266,9 @@ unresolvable 71/152 is `rejected`, not a conflict. A foreign document is reporte
 lookup's hint or by this branch — never after a retry budget.
 
 ### `mode` is required, defaults to `live`, and is always validated
+
+*Superseded by the account-pin amendment (2026-09-07, below): `mode` is gone, with `AccountMode`, the check and
+the `account_mismatch` fault. The section stands as the record of the original decision.*
 
 PRD story 16 first read "optional; unset means unchecked". Rejected on review: an operator always knows
 whether an account is a test account, and unset-means-unchecked would have removed a default-on guard
@@ -316,18 +324,65 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   szamlazz.hu's `JSESSIONID` cookie; a shared or cached client would carry one account's session into
   another account's request. The fresh client is a *session boundary*, not a performance choice. A resolver
   may cache accounts internally.
-- **Optional `supplier_id` in both shapes.** *Amended (XPRB probe, 2026-09-06; originally mandatory in the
-  multi-account shape):* `szallito/id` is the id of the account's **seller record** — the `<szallito>` block is
-  the seller as printed on the document, and szamlazz.hu documents the `<id>` nowhere (the same `szallitoTipus`
-  names the third-party vendor on an incoming invoice). It is a usable proxy for the account because one account
-  is one company, and it was constant on 22/22 queries of the test account; but the worker cannot verify a
-  configured value (no operation answers "which account am I?", and `check_account` finds no document), so
-  requiring it made onboarding depend on an operator-recorded number while adding no server-verified fact — two
-  fabricated ids pass the load-time check as readily as two real ones. Set, it still does what it always did:
-  every found document is validated against it, so an agent key configured under the wrong scope fails on the
-  first found document (`account_mismatch` / `conflict{external_id_collision}`), which `mode` alone cannot
-  catch; and two accounts pinning the same id are refused at load. The load-time half of rule 1 rests on unique
-  `(endpoint, agent_key)` pairs and ids, as it did in substance before. The behaviour notes record the probe.
+- **No account pin.** *Amended twice. XPRB probe, 2026-09-06 — `supplier_id` from mandatory in the
+  multi-account shape to optional in both. Account-pin amendment, 2026-09-07 — `supplier_id` and `mode` both
+  dropped.* The worker had two pins on a found document: `mode` against `<teszt>` (required, default `live`),
+  and `supplier_id` against `<szallito><id>` (optional), the latter to catch an agent key configured under the
+  wrong scope, which `mode` cannot (it does not tell two live accounts apart). Three findings dropped
+  `supplier_id`, and the second of them dropped `mode` with it:
+  1. **The field has no documented meaning.** `<szallito>` is the *seller party* of a document, as szamlazz.hu's
+     own docs define it: the counterpart of `<vevo>`, the company in whose name the document is issued
+     ("Megbízó (szállító): az a cég, akinek a nevében a számlák készülnek", *Megbízott számlakibocsátás*), and
+     the same `szallitoTipus` names the third-party vendor on an incoming invoice. Its `<id>` is annotated
+     nowhere in three documentation sections. The `<szallito>` block is per-document state — the Adatkapcsolat
+     re-pushes an invoice when its `<bankszamla>` changes — so whether `<id>` is a stable party-record id or a
+     per-snapshot row is unknown; its stability across an edit of the seller data in Settings was never
+     tested (behaviour notes, *Still unverified*), nor its value on a NAV-imported (`forras = 34`) document,
+     nor on any live account. The 22/22 constant readings were one test account, two days, no edits.
+  2. **The check was a tripwire with a first-document blind spot, and its cost was asymmetric.** A create
+     response (`xmlszamlavalasz`, the `szlahu_*` headers) carries neither `<szallito>` nor `<teszt>` — both
+     are in the query body only — so the first create on a fresh order under a wrong key issued into the wrong
+     account and answered `issued`; either pin fired on the *next* found document. Were the `szallito/id`
+     premise wrong (the id drifting), a pinned deployment would `account_mismatch` every storno, corrective,
+     proforma link and query on its own documents and classify its own lookups as collisions — every order
+     stranded until configuration was edited, on the live account where it had never been observed. `mode`
+     had no false-positive risk (`teszt` is documented, REQ, an account-level flag the operator knows a
+     priori) but exactly the same blind spot, and told test from live only: a trustworthy tripwire that could
+     not stop staging from issuing its first real invoice to NAV. One clean rule — the worker compares a found
+     document with the order and kind it should have, and with nothing about the account — was preferred to a
+     half measure kept for being cheap.
+  3. **The onboarding step made the check tautological.** The README told the operator to read the value off
+     a document *through the configuration being checked* ("leave it unset until you have read it off a real
+     document"). Under a swapped key that document is the wrong account's, and pinning its id blesses the
+     misconfiguration. A fresh live account has no document to read, so the pin could not be set at go-live —
+     the moment the first-document check would matter most.
+  So both pins are gone. `Account.supplier_id` and `Account.mode` are removed from the journaled type — its
+  fixture regenerated without archiving the previous shape, the documented acknowledgement (ADR 0005,
+  `service::journal`) that no in-flight invocation of the previous deployment is kept replayable; the worker has
+  not gone live, so none exists. `AccountMode`, `StaticAccount.mode` / `supplier_id` and the endpoint's `mode` /
+  `supplier_id` configuration keys are gone (either in a deployment file is refused as an unknown key like any
+  other); `QueryResponse.supplier_id` and `CheckedAccount.mode` / `supplier_id` are gone from the responses
+  (`QueryResponse.test` stays: it is `teszt` as reported, what the go-live check reads); the `account_mismatch`
+  fault code (409) is gone — nothing can raise it — so `TerminalCode` has seven codes; ownership validation is
+  `rendelesszam == order ∧ tipus ∈ kind-set`; and the unique-supplier-ids load-time check and the prologue's
+  `warn` went with the pins. The agent crate still parses `<szallito>` and `<teszt>` in full — they are what
+  szamlazz.hu sends. What replaces the pins is a documented **go-live check**, last line of the deploy checklist:
+  under each scope, `Szamlazz.Agent.query` a document known to be the account's (a number from its szamlazz.hu
+  UI; issue one in the UI first on a fresh live account) and read `test` and the seller block — name, tax number
+  — on the answer. **The residual risk is accepted and stated** in the endpoint README (*Accounts are yours to
+  verify*), the library README, `Account`'s rustdoc and CONTEXT.md: a key pasted into the wrong scope, a live key
+  where a test one was meant or the reverse, issues there, answers `issued`, and nothing in the worker fails.
+  Considered and not taken: pinning the seller **tax number** instead of `szallito/id` (documented, legally
+  mandatory on every invoice, operator-known independently of szamlazz.hu, and what `action-agent_ceg_mb` itself
+  identifies an existing account by; compared as the normalised 8-digit stem) — the same tripwire with a
+  trustworthy field, and the same blind spot; keeping `mode` alone as cheap defence in depth — the same blind
+  spot, a narrower catch, and a fault code and a configuration field for a check that cannot prevent what it is
+  for; and a configured **canary document number** the `check_account` probe and the create step would verify
+  before a first send, which is the one shape that would turn a tripwire into a gate, for `teszt` and a seller
+  field alike. The canary is a later decision if the residual risk proves worth the machinery; it is independent
+  of dropping the two pins, neither of which could gate. The load-time half of rule 1 rests on unique `(endpoint,
+  agent_key)` pairs and ids, as it did in substance before. The behaviour notes record the XPRB probe, the
+  documentation reading and where `teszt` travels.
 - **Credential failures are faults**, never `rejected` (above).
 - **Trait objects, not generics**, for the resolver and store: a type parameter would leak into the
   SDK-generated `OrderClient` / `AgentClient`.
@@ -347,7 +402,8 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
 - **Virtual Object state per account.** Rejected: ADR 0005 — nothing to store that szamlazz.hu or the
   resolver does not already answer, and state would be per *key*, not per account.
 - **A retryable credential-fetch error.** Rejected above (kill-on-five, unstructured 500).
-- **`mode` optional, unset means unchecked.** Rejected above.
+- **`mode` optional, unset means unchecked.** Rejected above — and moot since the account-pin amendment:
+  `mode` is gone altogether.
 - **Keep the ingress-path guard.** Rejected above.
 - **Per-event throttling via scopes.** Rejected for callers: a scope is identity, and one account under two
   scopes breaks rule 1. Limit keys exist for flow control and are not part of the identity (docs: "A limit
@@ -370,11 +426,12 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   `TerminalCode`. (#67 later folded both into it as `not_found` and `szamlazz_error`, the szamlazz.hu code moving
   to the fault's own `szamlazz_code` field, and rescoped caller-contract rule 2 to the three "outcome unknown"
   codes — design §7 and §8 are current.) This decision left the caller-contract sentence unchanged.
-- `account_mismatch` is raised on **every** document a handler finds by number, not only on `Szamlazz.Order`'s
-  verifies: `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` check the found document's `teszt` and
-  `szallito/id` against the resolved account before they answer or send (#32). A wrong-scope by-number request
-  that reaches another account's document is therefore caught; one that names a number the resolved account
-  also holds is not — that document matches the pins — which is what rule 5 is for.
+- `account_mismatch` was raised on **every** document a handler found by number, not only on `Szamlazz.Order`'s
+  verifies: `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` checked the found document's `teszt` (and
+  `szallito/id`) against the resolved account before they answered or sent (#32). *Amended (account-pin
+  amendment):* gone with the pins — no handler compares a found document with the account; a wrong-scope
+  by-number request acts on whatever the resolved account's key finds, which is what rule 5 and the go-live
+  check are for.
 - The prologue adds two journal entries to every invocation (`namespace`, `account`) and one szamlazz.hu-free
   round trip to the resolver and the store per execution.
 - A caller's `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under the scope
@@ -393,17 +450,18 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
 - **ADR 0002.** Superseded: "one szamlazz.hu account per deployment means the key carries no account
   namespace; the account slug lives in the external id" → the key carries no account namespace *because the
   scope does*; the deployment's **namespace** (then called the slug) lives in the external id and is shared
-  by every account. The validation formula's `account.mode` / `supplier_id` are those of the invocation's
-  journaled `Account`. The rest that ADR 0005 left standing holds.
+  by every account. The validation formula's account terms (`account.mode`, `supplier_id`) are gone
+  (account-pin amendment): it is `rendelesszam == order ∧ tipus ∈ kind-set`. The rest that ADR 0005 left
+  standing holds.
 - **ADR 0003.** Unchanged in substance; "where live is observed" (#22) already recorded.
 - **ADR 0004.** Amended by #22 and #30 in place (the create and storno steps under the issue policy, the
   accepted retry-count risk, the run-policy facts restated above); the prologue's resolve policy and the
   in-process credential fetch are the two retry envelopes it did not have.
-- **ADR 0005.** Amended: the validation pins (`teszt == account.mode ∧ (account.supplier_id unset ∨
-  szallito/id == supplier_id)`) are read from the resolved `Account`, per invocation; "pin `supplier_id` in
-  config" means on the `Account`, and the pin is optional in both shapes (the multi-account requirement of the
-  original text was lifted by the XPRB amendment above). The order-number hint is unconditional (the
-  `detect_foreign` setting is gone). The rest holds.
+- **ADR 0005.** Amended: the validation formula's account terms are gone (account-pin amendment) — `teszt ==
+  account.mode` outright, and the `supplier_id` term — with the "pin `supplier_id` in config" of ADR 0005's
+  lost-on-purpose list — after going from mandatory (multi shape) to optional (XPRB amendment); the fields were
+  removed from the journaled `Account`, the previous journal shape not archived (pre-go-live, nothing replays
+  it). The order-number hint is unconditional (the `detect_foreign` setting is gone). The rest holds.
 
 ## Historical notes
 

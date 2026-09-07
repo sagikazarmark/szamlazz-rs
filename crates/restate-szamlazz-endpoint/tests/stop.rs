@@ -115,7 +115,6 @@ impl Endpoint {
             .env("RESTATE_SZAMLAZZ_NAMESPACE", "acct")
             .env("RESTATE_SZAMLAZZ_ACCOUNT__ID", "acme")
             .env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", "agent-key")
-            .env("RESTATE_SZAMLAZZ_ACCOUNT__MODE", "test")
             .env("RESTATE_SZAMLAZZ_ACCOUNT__ENDPOINT", "http://127.0.0.1:1/")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

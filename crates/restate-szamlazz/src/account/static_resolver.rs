@@ -9,8 +9,6 @@
 //! id = "acme"
 //! agent_key = "..."
 //! endpoint = "https://www.szamlazz.hu/szamla/"   # default
-//! mode = "live"                                  # default
-//! supplier_id = 972720                           # optional here
 //!
 //! [account.defaults]
 //! currency = "HUF"
@@ -26,7 +24,6 @@
 //! [accounts.acme]
 //! id = "acme"
 //! agent_key = "..."
-//! supplier_id = 972720                           # optional here too
 //!
 //! [accounts.beta_events]
 //! id = "beta"
@@ -43,16 +40,14 @@
 //! chooses the file format and environment merging. [`StaticResolver`] is
 //! built from a parsed [`StaticConfig`] with `TryFrom`, which validates what
 //! `Deserialize` cannot — including the checkable half of the resolver's
-//! safety contract in the multi-account shape: unique ids, unique
-//! `(endpoint, agent_key)` pairs and, where set, unique supplier ids, so that
-//! no szamlazz.hu account is knowingly reachable under two scopes. The
-//! supplier id is optional in both shapes: it is the id of the account's
-//! seller record as szamlazz.hu prints it on every document (`szallito/id`),
-//! a proxy for the account that the worker cannot verify against the server
-//! (no operation answers "which account am I?"), so it is a pin the operator
-//! records, not an identity the worker establishes. It implements both
-//! [`AccountResolver`] and [`CredentialStore`]: the agent key is inline and
-//! the credential reference is the account id.
+//! safety contract in the multi-account shape: unique ids and unique
+//! `(endpoint, agent_key)` pairs, so that no szamlazz.hu account is knowingly
+//! reachable under two scopes. Which account a key opens — and whether it is
+//! a test account — is not checkable here or anywhere in the worker (no
+//! operation answers "which account am I?"; ADR 0006, account-pin amendment),
+//! so the right key under the right scope is the operator's go-live check.
+//! It implements both [`AccountResolver`] and [`CredentialStore`]: the agent
+//! key is inline and the credential reference is the account id.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -64,7 +59,7 @@ use super::{
     Account, AccountId, AccountResolver, BoxFuture, CredentialRef, CredentialStore, Endpoint,
     FetchError, InvalidEndpoint, ResolveError,
 };
-use crate::config::{AccountMode, Defaults, Secret, SellerConfig};
+use crate::config::{Defaults, Secret, SellerConfig};
 
 /// The maximum length in bytes of an `[accounts.<scope>]` key: Restate's own
 /// limit on a scope value (a dashed UUID is exactly 36).
@@ -97,16 +92,6 @@ pub struct StaticAccount {
     /// when the resolver is built.
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Whether the account is live or a test account. Default live; always
-    /// validated against `teszt`.
-    #[serde(default)]
-    pub mode: AccountMode,
-    /// The account's supplier id (`szállító/id`, the seller record's id), an
-    /// optional ownership pin in both shapes. When set it is validated
-    /// against every found document and catches a key configured under the
-    /// wrong scope on the first one; `teszt` alone cannot.
-    #[serde(default)]
-    pub supplier_id: Option<u64>,
     /// Document defaults that per-call overrides may change.
     #[serde(default)]
     pub defaults: Defaults,
@@ -198,18 +183,6 @@ pub enum StaticConfigError {
         /// The second account's table.
         second: AccountTable,
     },
-    /// Two accounts pin the same `supplier_id`: one szamlazz.hu account would
-    /// be reachable under two scopes. Only accounts that set the pin take
-    /// part; an unset pin claims nothing.
-    #[error("{first} and {second} share the supplier id {supplier_id}")]
-    DuplicateSupplierId {
-        /// The shared supplier id.
-        supplier_id: u64,
-        /// The first account's table.
-        first: AccountTable,
-        /// The second account's table.
-        second: AccountTable,
-    },
     /// Two accounts share an `(endpoint, agent_key)` pair: one szamlazz.hu
     /// account would be reachable under two scopes. The key is not echoed.
     #[error("{first} and {second} share an endpoint and agent key")]
@@ -272,8 +245,6 @@ impl Entry {
             id,
             agent_key,
             endpoint,
-            mode,
-            supplier_id,
             defaults,
             seller,
         } = config;
@@ -299,8 +270,6 @@ impl Entry {
             None => Endpoint::production(),
         };
         let mut account = Account::new(id.clone(), CredentialRef::from(id.as_str()));
-        account.mode = mode;
-        account.supplier_id = supplier_id;
         account.endpoint = endpoint;
         account.defaults = defaults;
         account.seller = seller;
@@ -355,13 +324,11 @@ impl StaticResolver {
     }
 
     /// Builds the multi-account shape, enforcing the checkable half of the
-    /// safety contract in one pass: every account is built, then its id,
-    /// `(endpoint, agent key)` and — when it sets one — supplier id are
-    /// claimed against the accounts before it.
+    /// safety contract in one pass: every account is built, then its id and
+    /// `(endpoint, agent key)` are claimed against the accounts before it.
     fn multi(accounts: BTreeMap<String, StaticAccount>) -> Result<Self, StaticConfigError> {
         let mut entries = BTreeMap::new();
         let mut ids: BTreeMap<String, AccountTable> = BTreeMap::new();
-        let mut suppliers: BTreeMap<u64, AccountTable> = BTreeMap::new();
         let mut credentials: BTreeMap<(String, String), AccountTable> = BTreeMap::new();
         for (scope, account) in accounts {
             validate_scope(&scope).map_err(|source| StaticConfigError::InvalidScope {
@@ -374,15 +341,6 @@ impl StaticResolver {
             if let Some(first) = ids.insert(entry.account.id.to_string(), table.clone()) {
                 return Err(StaticConfigError::DuplicateId {
                     id: entry.account.id,
-                    first,
-                    second: table,
-                });
-            }
-            if let Some(supplier_id) = entry.account.supplier_id
-                && let Some(first) = suppliers.insert(supplier_id, table.clone())
-            {
-                return Err(StaticConfigError::DuplicateSupplierId {
-                    supplier_id,
                     first,
                     second: table,
                 });
@@ -407,8 +365,8 @@ impl TryFrom<StaticConfig> for StaticResolver {
 
     /// Validates the configuration: exactly one shape; per account a
     /// non-blank id and agent key and an http(s) endpoint; and in the
-    /// multi-account shape valid scope keys and unique ids, `(endpoint,
-    /// agent_key)` pairs and — among the accounts that set one — supplier ids.
+    /// multi-account shape valid scope keys and unique ids and `(endpoint,
+    /// agent_key)` pairs.
     fn try_from(config: StaticConfig) -> Result<Self, Self::Error> {
         match (config.account, config.accounts) {
             (Some(_), accounts) if !accounts.is_empty() => Err(StaticConfigError::BothShapes),
@@ -479,8 +437,6 @@ mod tests {
                 "id": "acme",
                 "agent_key": "key-acme",
                 "endpoint": "http://127.0.0.1:1/",
-                "mode": "test",
-                "supplier_id": 972_720,
                 "defaults": { "currency": "EUR", "e_invoice": true },
                 "seller": { "bank_account": "11111111-22222222" },
             },
@@ -489,7 +445,7 @@ mod tests {
     }
 
     /// The multi-account shape: two accounts on the same endpoint with
-    /// distinct keys and supplier ids.
+    /// distinct keys.
     fn multi() -> serde_json::Value {
         json!({
             "accounts": {
@@ -497,16 +453,12 @@ mod tests {
                     "id": "acme",
                     "agent_key": "key-acme",
                     "endpoint": "http://127.0.0.1:1/",
-                    "mode": "test",
-                    "supplier_id": 972_720,
                     "seller": { "bank_account": "11111111-22222222" },
                 },
                 "beta_events": {
                     "id": "beta",
                     "agent_key": "key-beta",
                     "endpoint": "http://127.0.0.1:1/",
-                    "mode": "test",
-                    "supplier_id": 972_721,
                 },
             },
         })
@@ -537,8 +489,6 @@ mod tests {
             "acme",
             "credential_ref = id"
         );
-        assert_eq!(account.mode, AccountMode::Test);
-        assert_eq!(account.supplier_id, Some(972_720));
         assert_eq!(account.endpoint.as_str(), "http://127.0.0.1:1/");
         assert_eq!(account.defaults.currency, "EUR");
         assert!(account.defaults.e_invoice);
@@ -553,17 +503,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mode_omitted_is_live_and_the_endpoint_defaults_to_production() {
+    async fn the_endpoint_defaults_to_production() {
         let config: StaticConfig =
             serde_json::from_value(json!({ "account": { "id": "acme", "agent_key": "k" } }))
                 .expect("config");
         let resolver = StaticResolver::try_from(config).expect("resolver");
         let account = resolver.resolve(None).await.expect("unscoped");
-        assert_eq!(account.mode, AccountMode::Live);
-        assert_eq!(
-            account.supplier_id, None,
-            "the supplier id is optional in the single-account shape"
-        );
         assert_eq!(account.endpoint.as_str(), "https://www.szamlazz.hu/szamla/");
     }
 
@@ -668,15 +613,13 @@ mod tests {
         let acme = resolver.resolve(Some("acme")).await.expect("acme");
         assert_eq!(acme.id.as_str(), "acme");
         assert_eq!(acme.credential_ref.as_str(), "acme", "credential_ref = id");
-        assert_eq!(acme.supplier_id, Some(972_720));
-        assert_eq!(acme.mode, AccountMode::Test);
         assert_eq!(
             acme.seller.bank_account.as_deref(),
             Some("11111111-22222222")
         );
         let beta = resolver.resolve(Some("beta_events")).await.expect("beta");
         assert_eq!(beta.id.as_str(), "beta", "the id need not equal the scope");
-        assert_eq!(beta.supplier_id, Some(972_721));
+        assert_eq!(beta.seller.bank_account, None);
 
         assert!(matches!(
             resolver.resolve(None).await,
@@ -712,7 +655,7 @@ mod tests {
         let mut both = multi();
         both["account"] = single()
             .account
-            .map(|_| json!({ "id": "solo", "agent_key": "k", "supplier_id": 1 }))
+            .map(|_| json!({ "id": "solo", "agent_key": "k" }))
             .expect("account");
         assert!(matches!(resolver(both), Err(StaticConfigError::BothShapes)));
 
@@ -726,51 +669,6 @@ mod tests {
                 Err(StaticConfigError::NoAccount)
             ),
             "an empty accounts table is no account"
-        );
-    }
-
-    /// The supplier id is optional in the multi-account shape too: an account
-    /// without one resolves with `supplier_id = None`, and two such accounts
-    /// do not collide on it — an unset pin claims nothing.
-    #[tokio::test]
-    async fn multi_account_shape_accepts_accounts_without_a_supplier_id() {
-        let mut config = multi();
-        config["accounts"]["beta_events"]
-            .as_object_mut()
-            .expect("object")
-            .remove("supplier_id");
-        let pinned_once = resolver(config).expect("one unpinned account");
-        let beta = pinned_once
-            .resolve(Some("beta_events"))
-            .await
-            .expect("beta");
-        assert_eq!(beta.supplier_id, None);
-        let acme = pinned_once.resolve(Some("acme")).await.expect("acme");
-        assert_eq!(acme.supplier_id, Some(972_720), "the other keeps its pin");
-
-        let mut config = multi();
-        for scope in ["acme", "beta_events"] {
-            config["accounts"][scope]
-                .as_object_mut()
-                .expect("object")
-                .remove("supplier_id");
-        }
-        resolver(config).expect("two unpinned accounts do not share a supplier id");
-    }
-
-    #[test]
-    fn duplicate_supplier_id_is_an_error() {
-        let mut config = multi();
-        config["accounts"]["beta_events"]["supplier_id"] = json!(972_720);
-        let error = resolver(config).expect_err("duplicate supplier id");
-        assert!(matches!(
-            &error,
-            StaticConfigError::DuplicateSupplierId { supplier_id: 972_720, first, second }
-                if *first == AccountTable::Scoped("acme".to_owned()) && *second == AccountTable::Scoped("beta_events".to_owned())
-        ));
-        assert_eq!(
-            error.to_string(),
-            "accounts.acme and accounts.beta_events share the supplier id 972720"
         );
     }
 
@@ -842,7 +740,7 @@ mod tests {
         fn with_scope(scope: &str) -> serde_json::Value {
             json!({
                 "accounts": {
-                    scope: { "id": "acme", "agent_key": "k", "supplier_id": 1 },
+                    scope: { "id": "acme", "agent_key": "k" },
                 },
             })
         }

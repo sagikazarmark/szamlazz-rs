@@ -88,14 +88,13 @@
 //!     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore,
 //!     Endpoint as AgentEndpoint, FetchError, ResolveError,
 //! };
-//! use restate_szamlazz::config::AccountMode;
 //! use restate_szamlazz::{Agent, Credentials, Order, WorkerConfig};
 //!
 //! /// Your database handle; `account_row` is its query.
 //! struct Db {
 //!     // pool: sqlx::PgPool, …
 //! }
-//! # struct Row { id: String, supplier_id: u64, test: bool, credential_ref: String }
+//! # struct Row { id: String, credential_ref: String }
 //! # impl Db {
 //! #     async fn account_row(&self, _scope: &str) -> Result<Option<Row>, std::io::Error> {
 //! #         unimplemented!()
@@ -109,14 +108,12 @@
 //!     ) -> BoxFuture<'a, Result<Account, ResolveError>> {
 //!         Box::pin(async move {
 //!             let scope = scope.ok_or(ResolveError::Unscoped)?;
-//!             // SELECT id, supplier_id, test, credential_ref FROM accounts WHERE scope = $1
+//!             // SELECT id, credential_ref FROM accounts WHERE scope = $1
 //!             let row = self.account_row(scope).await.map_err(ResolveError::unavailable)?;
 //!             let Some(row) = row else {
 //!                 return Err(ResolveError::Unknown { scope: scope.to_owned() });
 //!             };
 //!             let mut account = Account::new(row.id, row.credential_ref);
-//!             account.supplier_id = Some(row.supplier_id);
-//!             account.mode = if row.test { AccountMode::Test } else { AccountMode::Live };
 //!             account.endpoint = AgentEndpoint::production();
 //!             Ok(account)
 //!         })

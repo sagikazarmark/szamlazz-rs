@@ -78,8 +78,6 @@ pub static ACCOUNT: Table = Table(&[
     ("id", Node::Value),
     ("agent_key", Node::Value),
     ("endpoint", Node::Value),
-    ("mode", Node::Value),
-    ("supplier_id", Node::Value),
     ("defaults", Node::Table(&DEFAULTS)),
     ("seller", Node::Table(&SELLER)),
 ]);

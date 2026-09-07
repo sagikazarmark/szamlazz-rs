@@ -147,7 +147,7 @@ pub enum LookupOutcome {
         storno_number: Option<String>,
     },
     /// The external id resolves to a document that fails validation (another
-    /// order, kind, account mode or supplier).
+    /// order or kind).
     Collision(Box<InvoiceDocument>),
     /// A live invoice-kind document under the order number that is neither
     /// in `our_numbers` nor the document seen under the external id — another
@@ -232,7 +232,7 @@ pub enum CreateOutcome {
     /// had landed.
     Reconciled(Box<InvoiceDocument>),
     /// The external id resolves to a document that fails validation (another
-    /// order, kind, account mode or supplier). Nothing was created.
+    /// order or kind). Nothing was created.
     Collision(Box<InvoiceDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found no live document of ours: the duplicate is
@@ -419,21 +419,11 @@ pub trait InvoiceDocumentExt {
     /// document found by number this order's to act on or link (design §3).
     fn carries_order(&self, order: &OrderKey) -> bool;
 
-    /// Whether the document belongs to the resolved account: it carries the
-    /// account's `teszt` flag and — when both are known — the account's
-    /// supplier id.
-    fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool;
-
     /// Whether the document is ours (design §3): it [carries
-    /// `order`](Self::carries_order), the `tipus` of `kind` and [belongs to
-    /// the account](Self::account_matches).
-    fn is_ours(
-        &self,
-        order: &OrderKey,
-        kind: IssuedKind,
-        expect_test: bool,
-        expect_supplier_id: Option<u64>,
-    ) -> bool;
+    /// `order`](Self::carries_order) and the `tipus` of `kind`. Nothing about
+    /// the account: the worker holds no account pin (ADR 0006, account-pin
+    /// amendment — `teszt` and `szallito/id` are parsed, never compared).
+    fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool;
 }
 
 impl InvoiceDocumentExt for InvoiceDocument {
@@ -470,24 +460,8 @@ impl InvoiceDocumentExt for InvoiceDocument {
         self.info.order_number.as_deref().map(str::trim) == Some(order.as_str())
     }
 
-    fn account_matches(&self, expect_test: bool, expect_supplier_id: Option<u64>) -> bool {
-        self.info.test == expect_test
-            && match (expect_supplier_id, self.supplier.id) {
-                (Some(expected), Some(seen)) => expected == seen,
-                _ => true,
-            }
-    }
-
-    fn is_ours(
-        &self,
-        order: &OrderKey,
-        kind: IssuedKind,
-        expect_test: bool,
-        expect_supplier_id: Option<u64>,
-    ) -> bool {
-        self.carries_order(order)
-            && self.info.document_type == document_type_of(kind)
-            && self.account_matches(expect_test, expect_supplier_id)
+    fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool {
+        self.carries_order(order) && self.info.document_type == document_type_of(kind)
     }
 }
 
@@ -525,8 +499,9 @@ pub enum QueryOutcome {
 /// Credential acceptance is the only fact it establishes: szamlazz.hu answers
 /// the credential codes before it looks at the request, so any other answer
 /// — code 7 above all, since nothing the service issues carries the sentinel
-/// id — means the key works. The supplier id appears only in found-document
-/// bodies, so a not-found probe cannot cross-check it. An exchange that
+/// id — means the key works. *Which* account the key opens it cannot tell: a
+/// not-found probe has no document to read, and no operation answers "which
+/// account am I?" — that is the operator's go-live check. An exchange that
 /// produced no answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -886,15 +861,9 @@ impl Gateway {
         &self.account
     }
 
-    /// Whether `found` is ours (design §3) for `order` and `kind`, validated
-    /// against this gateway's account.
-    fn is_ours(&self, found: &InvoiceDocument, order: &OrderKey, kind: IssuedKind) -> bool {
-        found.is_ours(
-            order,
-            kind,
-            self.account.mode.is_test(),
-            self.account.supplier_id,
-        )
+    /// Whether `found` is ours (design §3) for `order` and `kind`.
+    fn is_ours(found: &InvoiceDocument, order: &OrderKey, kind: IssuedKind) -> bool {
+        found.is_ours(order, kind)
     }
 
     /// The lookup step (design §5 step 3), read-only.
@@ -1272,7 +1241,7 @@ impl Gateway {
     ) -> Result<Seen, QueryError> {
         let selector = InvoiceSelector::ExternalId(external_id.as_str().to_owned());
         match self.query_raw(selector).await {
-            Ok(found) if !self.is_ours(&found, order, kind) => {
+            Ok(found) if !Self::is_ours(&found, order, kind) => {
                 tracing::warn!(number = %found.number(), "external id collision");
                 Ok(Seen::Collision(Box::new(found)))
             }
@@ -1929,10 +1898,6 @@ mod tests {
         assert!(live.is_live());
         assert_eq!(live.e_invoice(), Some(true));
         assert_eq!(live.payment_amounts(), [dec!(500), dec!(770)]);
-        assert!(live.account_matches(true, Some(972_720)));
-        assert!(live.account_matches(true, None));
-        assert!(!live.account_matches(false, Some(972_720)));
-        assert!(!live.account_matches(true, Some(1)));
         assert!(live.carries_order(&order));
         assert!(
             !live.carries_order(&OrderKey::parse("ORD-2").expect("order")),
@@ -1942,9 +1907,15 @@ mod tests {
             !live.carries_order(&OrderKey::parse("ord-1").expect("order")),
             "case is significant, as on the server"
         );
-        assert!(live.is_ours(&order, IssuedKind::Invoice, true, Some(972_720)));
-        assert!(!live.is_ours(&order, IssuedKind::Proforma, true, Some(972_720)));
-        assert!(!live.is_ours(&order, IssuedKind::Invoice, false, None));
+        assert!(live.is_ours(&order, IssuedKind::Invoice));
+        assert!(!live.is_ours(&order, IssuedKind::Proforma));
+        assert!(
+            !live.is_ours(
+                &OrderKey::parse("ORD-2").expect("order"),
+                IssuedKind::Invoice
+            ),
+            "another order's"
+        );
         assert!(!live.is_storno_of("SZ-0"));
 
         let reversed = Doc {
@@ -1953,7 +1924,7 @@ mod tests {
         }
         .parse();
         assert!(!reversed.is_live());
-        assert!(reversed.is_ours(&order, IssuedKind::Invoice, true, None));
+        assert!(reversed.is_ours(&order, IssuedKind::Invoice));
 
         let storno = Doc {
             referenced_invoice: Some("SZ-1"),
@@ -1966,7 +1937,16 @@ mod tests {
 
         let proforma = Doc::new("D-1", "D").parse();
         assert_eq!(proforma.e_invoice(), None, "eszamla 0 is not an invoice");
-        assert!(proforma.is_ours(&order, IssuedKind::Proforma, true, None));
+        assert!(proforma.is_ours(&order, IssuedKind::Proforma));
+
+        // No account pin: neither `teszt` nor the seller record's id is read
+        // (ADR 0006, account-pin amendment).
+        let other_account = Doc {
+            test: false,
+            ..Doc::new("SZ-1", "SZ")
+        }
+        .parse();
+        assert!(other_account.is_ours(&order, IssuedKind::Invoice));
     }
 
     #[test]
