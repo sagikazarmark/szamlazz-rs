@@ -21,7 +21,7 @@ use restate_szamlazz::{Accounts, Agent, Order};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::EndpointConfig;
+use crate::config::{EndpointConfig, RequestIdentity};
 
 /// The signals that stop the process, as the start-up log names them.
 #[cfg(unix)]
@@ -56,6 +56,11 @@ impl Cli {
     fn load_config(&self) -> Result<EndpointConfig> {
         EndpointConfig::load(&config::figment(self.config.as_deref())?)
     }
+
+    /// The address to listen on, `{bind}:{port}`.
+    fn bind_addr(&self) -> SocketAddr {
+        SocketAddr::from((self.bind, self.port))
+    }
 }
 
 #[tokio::main]
@@ -66,7 +71,8 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = cli.load_config()?;
-    let endpoint = build_endpoint(config)?;
+    let bind_addr = cli.bind_addr();
+    let endpoint = build_endpoint(config, bind_addr)?;
 
     if cli.check_config {
         tracing::info!("configuration is valid; not listening (--check-config)");
@@ -77,7 +83,6 @@ async fn main() -> Result<()> {
     // Restate server can reach the endpoint, a stop is honoured rather than
     // fatal.
     let stop = stop_signal().context("failed to install the stop signal handlers")?;
-    let bind_addr = SocketAddr::from((cli.bind, cli.port));
     let listener = TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("failed to bind {bind_addr}"))?;
@@ -137,14 +142,17 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
 /// Wires the configuration into the two services and binds them to one
 /// endpoint: the static resolver over `[account]` or `[accounts.<scope>]` is
 /// the `Accounts` bundle both services hold beside the deployment-level
-/// `WorkerConfig`. Logs what was bound — the namespace, the shape, and each
-/// resolved account's scope, id, mode, endpoint and supplier pin — never an
-/// agent key.
-fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
+/// `WorkerConfig`. Logs what was bound — the namespace, the shape, each
+/// resolved account's scope, id, mode, endpoint and supplier pin, and whether
+/// request identity verification is on — never an agent key. `bind_addr` is
+/// the address the endpoint will listen on (or would, under
+/// `--check-config`): what the warning about accepting unsigned requests
+/// names as reachable.
+fn build_endpoint(config: EndpointConfig, bind_addr: SocketAddr) -> Result<Endpoint> {
     let EndpointConfig {
         worker,
         accounts,
-        identity_keys,
+        request_identity,
     } = config;
 
     let resolver = StaticResolver::try_from(accounts).context("invalid account configuration")?;
@@ -192,19 +200,51 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
     }
 
     let mut endpoint = Endpoint::builder().bind(order).bind(agent);
-    for identity_key in &identity_keys {
-        endpoint = endpoint
-            .identity_key(identity_key)
-            .with_context(|| format!("invalid Restate identity key `{identity_key}`"))?;
-    }
-    if !identity_keys.is_empty() {
-        tracing::info!(
-            keys = identity_keys.len(),
-            "request identity verification enabled"
-        );
+    match request_identity {
+        RequestIdentity::Verified(identity_keys) => {
+            for identity_key in &identity_keys {
+                endpoint = endpoint
+                    .identity_key(identity_key)
+                    .with_context(|| format!("invalid Restate identity key `{identity_key}`"))?;
+            }
+            tracing::info!(
+                keys = identity_keys.len(),
+                "request identity verification enabled"
+            );
+        }
+        RequestIdentity::Unsigned { deliberate: true } => {
+            tracing::info!(
+                "request identity verification disabled: accepting unsigned requests (identity_keys = [])"
+            );
+        }
+        // The scope travels inside the request, so without keys nothing
+        // stands between the port and either service on any account; the
+        // operator who did not write `identity_keys = []` may not know (#96).
+        RequestIdentity::Unsigned { deliberate: false } => {
+            let reachable = reachable_at(bind_addr);
+            tracing::warn!(
+                "request identity verification disabled: accepting unsigned requests — any client reaching {reachable} can invoke the services under any scope; set `identity_keys` to the Restate server's request identity public keys (README: Request Identity), or write `identity_keys = []` out to accept this for local development"
+            );
+        }
     }
 
     Ok(endpoint.build())
+}
+
+/// Where the unsigned-requests warning says the endpoint is reachable: the
+/// address as configured — or, under `--port 0`, the address alone, since
+/// the kernel picks the port at bind time and nothing is known of it before
+/// (nor ever under `--check-config`, which never binds); `:0` would name an
+/// address no client can reach.
+fn reachable_at(bind_addr: SocketAddr) -> String {
+    if bind_addr.port() == 0 {
+        format!(
+            "{} on the ephemeral port bound at start (--port 0; the start-up line names it)",
+            bind_addr.ip()
+        )
+    } else {
+        bind_addr.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -241,29 +281,38 @@ mod tests {
         .expect("configuration should load")
     }
 
+    /// The default bind address, as the start-up warning would name it.
+    const BIND_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9080);
+
     #[test]
     fn builds_the_endpoint_from_a_loaded_config() {
-        build_endpoint(config("", "http://127.0.0.1:1/", "agent-key"))
+        build_endpoint(config("", "http://127.0.0.1:1/", "agent-key"), BIND_ADDR)
             .expect("endpoint should build");
     }
 
     #[test]
     fn accepts_identity_keys() {
-        build_endpoint(config(
-            r#"identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f", "publickeyv1_ChjENKeMvCtRnqG2mrBK1HmPKufgFUc98K8B3ononQvp"]"#,
-            "http://127.0.0.1:1/",
-            "agent-key",
-        ))
+        build_endpoint(
+            config(
+                r#"identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f", "publickeyv1_ChjENKeMvCtRnqG2mrBK1HmPKufgFUc98K8B3ononQvp"]"#,
+                "http://127.0.0.1:1/",
+                "agent-key",
+            ),
+            BIND_ADDR,
+        )
         .expect("endpoint should build with identity keys");
     }
 
     #[test]
     fn rejects_an_invalid_identity_key() {
-        let Err(error) = build_endpoint(config(
-            r#"identity_keys = ["not-a-key"]"#,
-            "http://127.0.0.1:1/",
-            "agent-key",
-        )) else {
+        let Err(error) = build_endpoint(
+            config(
+                r#"identity_keys = ["not-a-key"]"#,
+                "http://127.0.0.1:1/",
+                "agent-key",
+            ),
+            BIND_ADDR,
+        ) else {
             panic!("an invalid identity key should fail the build");
         };
 
@@ -277,7 +326,7 @@ mod tests {
     /// when the static resolver is built, before anything is bound.
     #[test]
     fn rejects_an_invalid_account() {
-        let Err(error) = build_endpoint(config("", "http://127.0.0.1:1/", " ")) else {
+        let Err(error) = build_endpoint(config("", "http://127.0.0.1:1/", " "), BIND_ADDR) else {
             panic!("a blank agent key should fail the build");
         };
         let message = format!("{error:#}");
