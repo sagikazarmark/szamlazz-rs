@@ -669,7 +669,7 @@ curl localhost:9070/services/Szamlazz.Agent/openapi
 { "invoice_number": "E-2026-123", "outstanding": "0.00", "gross_total": "505.46" }
 ```
 
-**`QueryResponse`** — `Szamlazz.Agent.query`'s projection of the document as szamlazz.hu holds it. `document_type` is szamlazz.hu's `tipus` code — `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `SS` storno, `HS` corrective — and `referenced_invoice_number` is the invoice a storno reversed or a corrective corrected; `test` is `teszt` as szamlazz.hu reported it — what the go-live check reads off a known document, since the worker compares it with nothing; `payments` are the credit entries as recorded:
+**`QueryResponse`** — `Szamlazz.Agent.query`'s projection of the document as szamlazz.hu holds it. `document_type` is szamlazz.hu's `tipus` code — `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `SS` storno, `HS` corrective — and `referenced_invoice_number` is the invoice a storno reversed or a corrective corrected; `test` is `teszt` as szamlazz.hu reported it — what the go-live check reads off a known document, since the worker compares it with nothing; `null` is a document that does not carry the element (the schema forbids that), never a live one, so a check that reads `test` must not take `null` for `false`; `payments` are the credit entries as recorded:
 
 ```json QueryResponse
 {

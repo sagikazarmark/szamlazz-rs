@@ -1110,8 +1110,9 @@ impl AgentRequest for CreateInvoice {
 pub(crate) fn parse_creation_result(
     response: &RawResponse,
 ) -> Result<InvoiceCreationResult, ResponseError> {
-    response.check_available()?;
-    let header_error = response.header_error();
+    // The one header error a creation tolerates is 56: issued, notification
+    // not delivered. Everything else the headers or the status say is final.
+    let header_error = response.header_verdict()?;
 
     if let Some(error) = &header_error
         && error.code != crate::ErrorCode::InvoiceNotificationDeliveryFailed
@@ -1913,6 +1914,35 @@ mod tests {
         assert!(created.notification_delivery_failed);
     }
 
+    /// The create parser reads the headers on its own path (56 is an error
+    /// header on a success); a proxy's 502 with no `szlahu_*` header is
+    /// refused by status here too, while a 56 answered with a 500 is still
+    /// szamlazz.hu's answer.
+    #[test]
+    fn create_refuses_a_non_2xx_without_a_szamlazz_answer_by_status() {
+        let proxy =
+            RawResponse::new([("content-type", "text/html")], b"<html/>".to_vec()).with_status(502);
+        assert!(matches!(
+            sample().parse(&proxy),
+            Err(ResponseError::Parse(ParseError::HttpStatus {
+                status: 502,
+                ..
+            }))
+        ));
+
+        let answered = RawResponse::new(
+            [
+                ("szlahu_error_code", "56"),
+                ("szlahu_error", "notification failed"),
+                ("szlahu_szamlaszam", "E-2026-123"),
+            ],
+            b"notification failed".to_vec(),
+        )
+        .with_status(500);
+        let created = sample().parse(&answered).expect("szamlazz.hu answered");
+        assert!(created.notification_delivery_failed);
+    }
+
     #[test]
     fn notification_failure_ignores_malformed_optional_headers_after_issuance() {
         let response = RawResponse::new(
@@ -2128,6 +2158,20 @@ mod tests {
             invoice.to_wire(&Credentials::agent_key("key")),
             Err(RequestError::MissingExchangeRate)
         ));
+    }
+
+    /// The forint in any letter case is not a foreign currency: no exchange
+    /// rate is demanded, and the code is sent as the caller spelled it.
+    #[test]
+    fn lower_case_huf_needs_no_exchange_rate() {
+        let mut invoice = sample();
+        invoice.header.currency = Currency::new("huf");
+        let wire = invoice
+            .to_wire(&Credentials::agent_key("key"))
+            .expect("the forint needs no exchange rate");
+        let body = String::from_utf8(wire.body).expect("UTF-8 multipart");
+        assert!(body.contains("<penznem>huf</penznem>"), "sent as given");
+        assert!(!body.contains("<arfolyamBank>"));
     }
 
     #[test]

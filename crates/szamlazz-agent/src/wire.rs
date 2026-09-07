@@ -2,7 +2,7 @@
 //! ingestion, with no HTTP client attached.
 
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ErrorCode, RequestError, ResponseError};
+use crate::error::{ApiError, ErrorCode, ParseError, RequestError, ResponseError, body_excerpt};
 
 /// The single Számla Agent endpoint. Every operation POSTs here; the
 /// multipart form field name selects the operation.
@@ -126,32 +126,89 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// A raw HTTP response as received: status-independent, since szamlazz.hu
-/// signals errors in-band.
+/// A raw HTTP response as received.
 ///
 /// Build one from any HTTP client's response, then hand it to the request
-/// type's `parse` function.
-#[derive(Debug, Clone)]
+/// type's `parse` function. szamlazz.hu signals errors in-band — HTTP 200
+/// with `szlahu_*` headers and a `<hibakod>` body — so the parsers read the
+/// headers and the body first; the HTTP status ([`RawResponse::with_status`])
+/// only matters when neither carries a szamlazz.hu answer, where a non-2xx
+/// says the endpoint (a proxy, a CDN, a misconfigured URL) answered instead.
+///
+/// `Debug` names the response's headers but never a cookie's value: the
+/// `Set-Cookie` header carries the `JSESSIONID`, which authenticates as the
+/// account for 90 minutes. The body is printed as its length.
+#[derive(Clone)]
 pub struct RawResponse {
+    status: Option<u16>,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
+impl std::fmt::Debug for RawResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, std::borrow::Cow<'_, str>)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), redact_header(name, value)))
+            .collect();
+
+        formatter
+            .debug_struct("RawResponse")
+            .field("status", &self.status)
+            .field("headers", &headers)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
+}
+
+/// A header value as `Debug` shows it: a cookie is reduced to its name.
+fn redact_header<'v>(name: &str, value: &'v str) -> std::borrow::Cow<'v, str> {
+    if name == "set-cookie" {
+        let cookie_name = value.split(['=', ';']).next().unwrap_or_default().trim();
+        std::borrow::Cow::Owned(format!("{cookie_name}=…"))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
 impl RawResponse {
     /// Creates a raw response from header pairs and the body bytes. Header
-    /// name lookup is case-insensitive.
+    /// name lookup is case-insensitive. The HTTP status is unknown until
+    /// [`with_status`](Self::with_status) supplies it.
     pub fn new<N, V>(headers: impl IntoIterator<Item = (N, V)>, body: Vec<u8>) -> Self
     where
         N: AsRef<str>,
         V: AsRef<str>,
     {
         Self {
+            status: None,
             headers: headers
                 .into_iter()
                 .map(|(n, v)| (n.as_ref().to_ascii_lowercase(), v.as_ref().to_owned()))
                 .collect(),
             body,
         }
+    }
+
+    /// Records the HTTP status the response arrived with.
+    ///
+    /// Optional: the parsers read szamlazz.hu's in-band answer first. With
+    /// the status known, a non-2xx response that carries no `szlahu_*` header
+    /// is refused as [`ParseError::HttpStatus`] — the endpoint answered, not
+    /// szamlazz.hu — instead of being parsed as an unexpected body. The
+    /// bundled reqwest client always sets it.
+    #[must_use]
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// The HTTP status the response arrived with, when the client that built
+    /// this response supplied it.
+    #[must_use]
+    pub fn status(&self) -> Option<u16> {
+        self.status
     }
 
     /// The response body.
@@ -193,10 +250,14 @@ impl RawResponse {
     /// in the headers *and* the body; the XML query (7) and credit-entry
     /// registration (463) report in the body only. `None` here therefore does
     /// not mean success — every parser in this crate also reads the body's
-    /// `<hibakod>` / `<hibauzenet>`.
+    /// `<hibakod>` / `<hibauzenet>`. An empty header is no error either: it
+    /// is read as absent, like an empty `<hibakod>` element.
     #[must_use]
     pub fn header_error(&self) -> Option<ApiError> {
-        let code = self.header("szlahu_error_code")?;
+        let code = self
+            .header("szlahu_error_code")
+            .map(str::trim)
+            .filter(|code| !code.is_empty())?;
         let code = ErrorCode::from(code);
         let message = self.szlahu("szlahu_error").unwrap_or_default();
 
@@ -204,24 +265,45 @@ impl RawResponse {
     }
 
     /// Fails on a header-signaled error, otherwise hands back the response.
+    ///
+    /// In order: `szlahu_down`, `szlahu_error_code`, then — only when neither
+    /// carried a szamlazz.hu answer — a known non-2xx status
+    /// ([`ParseError::HttpStatus`]).
     pub(crate) fn check(&self) -> Result<&Self, ResponseError> {
-        self.check_available()?;
-
-        match self.header_error() {
+        match self.header_verdict()? {
             Some(error) => Err(error.into()),
             None => Ok(self),
         }
     }
 
-    pub(crate) fn check_available(&self) -> Result<(), ResponseError> {
+    /// What the headers and the status say before the body is read, in the
+    /// one order every parser applies: `szlahu_down` is
+    /// [`ResponseError::ServiceUnavailable`]; else the `szlahu_error_code`
+    /// error, handed back as data for the parser to judge (invoice creation
+    /// tolerates 56); else — only when neither carried a szamlazz.hu answer —
+    /// a known non-2xx status is [`ParseError::HttpStatus`], the endpoint's
+    /// answer, not szamlazz.hu's. `Ok(None)` says the body decides.
+    pub(crate) fn header_verdict(&self) -> Result<Option<ApiError>, ResponseError> {
         if let Some(message) = self
             .szlahu("szlahu_down")
             .filter(|message| !message.trim().is_empty())
         {
             return Err(ResponseError::ServiceUnavailable(message));
         }
+        if let Some(error) = self.header_error() {
+            return Ok(Some(error));
+        }
+        if let Some(status) = self.status
+            && !(200..300).contains(&status)
+        {
+            return Err(ParseError::HttpStatus {
+                status,
+                body: body_excerpt(&self.body),
+            }
+            .into());
+        }
 
-        Ok(())
+        Ok(None)
     }
 
     /// The `JSESSIONID` session cookie set by this response, as a `Cookie`
@@ -418,6 +500,20 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Unknown("FUTURE_CODE".to_owned()));
     }
 
+    /// A present-but-empty `szlahu_error_code` is no error, like an empty
+    /// `<hibakod>` element: the body decides.
+    #[test]
+    fn empty_error_code_header_is_absent() {
+        for empty in ["", "  "] {
+            let response = RawResponse::new(
+                [("szlahu_error_code", empty), ("szlahu_error", "")],
+                Vec::new(),
+            );
+            assert_eq!(response.header_error(), None, "{empty:?}");
+            assert!(response.check().is_ok(), "{empty:?}");
+        }
+    }
+
     #[test]
     fn system_down_header_is_service_unavailable() {
         let response = RawResponse::new([("szlahu_down", "maintenance+window")], Vec::new());
@@ -425,6 +521,86 @@ mod tests {
             response.check(),
             Err(ResponseError::ServiceUnavailable(message)) if message == "maintenance window"
         ));
+    }
+
+    /// A 502 HTML page from a proxy carries no szamlazz.hu answer: refused by
+    /// its status, with a bounded excerpt of the body — never the whole page
+    /// — and the length noted.
+    #[test]
+    fn non_2xx_without_a_szamlazz_header_is_refused_by_status() {
+        let page = format!("<html><body>Bad Gateway {}</body></html>", "x".repeat(2000));
+        let total = page.len();
+        let response =
+            RawResponse::new([("content-type", "text/html")], page.into_bytes()).with_status(502);
+
+        match response.check() {
+            Err(ResponseError::Parse(ParseError::HttpStatus { status, body })) => {
+                assert_eq!(status, 502);
+                assert!(body.starts_with("<html><body>Bad Gateway"), "{body}");
+                assert!(body.len() < 600, "bounded: {} bytes", body.len());
+                assert!(
+                    body.contains(&format!("{total} bytes")),
+                    "notes the length: {body}"
+                );
+            }
+            other => panic!("expected HttpStatus, got {other:?}"),
+        }
+
+        let text = response.check().expect_err("refused").to_string();
+        assert!(text.starts_with("HTTP 502"), "{text}");
+    }
+
+    /// The status is a tie-breaker, not the verdict: szamlazz.hu's in-band
+    /// headers are read first whatever the status, and an unknown status
+    /// (a sans-IO caller that did not supply one) changes nothing.
+    #[test]
+    fn in_band_headers_take_precedence_over_the_status() {
+        let error = RawResponse::new(
+            [("szlahu_error_code", "3"), ("szlahu_error", "login")],
+            Vec::new(),
+        )
+        .with_status(500);
+        assert!(
+            matches!(error.check(), Err(ResponseError::Api(api)) if api.code == ErrorCode::InvalidCredentials)
+        );
+
+        let down = RawResponse::new([("szlahu_down", "maintenance")], Vec::new()).with_status(503);
+        assert!(matches!(
+            down.check(),
+            Err(ResponseError::ServiceUnavailable(_))
+        ));
+
+        let ok = RawResponse::new::<&str, &str>([], b"<szamla/>".to_vec()).with_status(200);
+        assert!(ok.check().is_ok());
+        let unknown = RawResponse::new::<&str, &str>([], b"<html/>".to_vec());
+        assert!(unknown.check().is_ok(), "no status, no verdict");
+    }
+
+    /// A `RawResponse` is the natural thing to log on a parse failure; its
+    /// `Set-Cookie` header carries the `JSESSIONID`, which authenticates as
+    /// the account for 90 minutes. `Debug` names the cookie, never its value,
+    /// and prints the body's length rather than the body.
+    #[test]
+    fn raw_response_debug_redacts_cookies_and_the_body() {
+        let response = RawResponse::new(
+            [
+                ("Set-Cookie", "JSESSIONID=SECRET-SESSION; Path=/; HttpOnly"),
+                ("szlahu_szamlaszam", "E-TST-2026-1"),
+            ],
+            b"<szamla>body</szamla>".to_vec(),
+        )
+        .with_status(200);
+
+        let debug = format!("{response:?}");
+        assert!(debug.contains("RawResponse"), "{debug}");
+        assert!(debug.contains("200"), "{debug}");
+        assert!(debug.contains("szlahu_szamlaszam"), "{debug}");
+        assert!(debug.contains("E-TST-2026-1"), "{debug}");
+        assert!(debug.contains("set-cookie"), "names the header: {debug}");
+        assert!(debug.contains("JSESSIONID"), "names the cookie: {debug}");
+        assert!(!debug.contains("SECRET-SESSION"), "{debug}");
+        assert!(!debug.contains("<szamla>"), "{debug}");
+        assert!(debug.contains("body_len"), "{debug}");
     }
 
     #[test]

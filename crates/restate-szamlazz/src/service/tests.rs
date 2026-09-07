@@ -832,9 +832,11 @@ fn lookup_classifies_query_outcomes() {
     }
     // No account pin (ADR 0006, account-pin amendment): neither `teszt` nor
     // the seller record's id (`szallito/id`) is compared with anything — a
-    // document of this order and kind is ours whatever they say.
+    // document of this order and kind is ours whatever they say, and whether
+    // they say anything (an absent `<teszt>` is `None` since #70).
     for (label, other) in [
-        ("teszt", doc(|doc| doc.test = false)),
+        ("teszt", doc(|doc| doc.test = Some(false))),
+        ("no teszt", doc(|doc| doc.test = None)),
         ("szallito/id", doc(|doc| doc.supplier_id = 1)),
     ] {
         let lookup = classify(QueryOutcome::Found(other.clone())).expect(label);

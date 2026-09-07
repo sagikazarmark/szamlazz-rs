@@ -226,6 +226,7 @@ impl Client {
             .send()
             .await?;
 
+        let status = response.status().as_u16();
         let headers: Vec<(String, String)> = response
             .headers()
             .iter()
@@ -238,7 +239,7 @@ impl Client {
             .collect();
         let body = response.bytes().await?;
 
-        let raw = RawResponse::new(headers, body.to_vec());
+        let raw = RawResponse::new(headers, body.to_vec()).with_status(status);
 
         Ok(request.parse(&raw)?)
     }

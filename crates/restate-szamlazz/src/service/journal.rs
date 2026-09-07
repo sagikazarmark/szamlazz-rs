@@ -7,8 +7,10 @@
 //! kills the invocation once its attempts are spent, holding the order key
 //! for the duration (ADR 0005, journal compatibility). So every journaled type
 //! is **additive-only** — a new field defaults, a new variant may be added,
-//! nothing is renamed, removed or retyped — and this module makes a violation
-//! fail CI instead of a deploy:
+//! nothing is renamed, removed or retyped, save the one widening `T` →
+//! `Option<T>` whose old values all decode to `Some` and re-encode unchanged
+//! (ADR 0005, *Widening*; the compatibility test below is its proof) — and
+//! this module makes a violation fail CI instead of a deploy:
 //!
 //! - the **generator** test pins every variant of every journaled type: the
 //!   JSON the current code writes must equal `tests/journal/<type>/<variant>.json`

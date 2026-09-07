@@ -119,7 +119,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| **Replace** semantics by default: 100 then 200 leaves `[200]`; `additiv=true` appends (`[200, 50]`, outstanding 1020). `szlahu_kintlevoseg` header and `<kintlevoseg>` body agree and equal gross − Σ. | D7 | `set_payments` default is replace; never auto-retried by the run (`max_attempts(1)`). `additive: true` is **at-least-once**: a lost reply is `outcome_unknown` telling the caller to query the invoice before re-sending, and the handler's one crash retry waits `initial_interval = 2m` (past the 60 s client timeout) so it cannot re-send while the first send is in flight. |
+| **Replace** semantics by default: 100 then 200 leaves `[200]`; `additiv=true` appends (`[200, 50]`, outstanding 1020). `szlahu_kintlevoseg` header and `<kintlevoseg>` body agree and equal gross − Σ. A replace with *zero* entries was not probed. | D7 | `set_payments` default is replace; a replace with no entries is refused by the crate before the wire (it would clear the payments; #70); never auto-retried by the run (`max_attempts(1)`). `additive: true` is **at-least-once**: a lost reply is `outcome_unknown` telling the caller to query the invoice before re-sending, and the handler's one crash retry waits `initial_interval = 2m` (past the 60 s client timeout) so it cannot re-send while the first send is in flight. |
 | Five entries accepted; the query returns them in **non-submission order** (`20,40,10,30,50`). A sixth is refused by the crate before sending (server code unknown). | D7-credit-5amounts | `<kifizetesek>` order is not meaningful. |
 | Credit on a **reversed** invoice → 463 "Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ." — body only, no headers. | D8-credit-on-reversed | Type 463; the wording implies the same code for a credit on the `SS` (untested). |
 
@@ -195,6 +195,19 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 - Whether "last" in `query --order` is by id or by `kelt` (indistinguishable while kelt must be
   today). Low: the hint is secondary.
 - Server code for a sixth credit entry; credit on the `SS` itself (463 expected). Low.
+- **A replacing credit-entry request with zero entries** (`additiv=false`, no `kifizetes`): the schema allows it
+  (`xmlszamlakifiz.xsd` has `kifizetes` `minOccurs="0"`) and the replace semantics of D7 imply it clears the
+  invoice's payments, but the call was never sent. Low: the crate refuses it before the wire
+  (`RequestError::EmptyCreditEntryReplace`, #70), so "clear all credit entries" is not offered until a probe
+  says what the server does.
+- **A foreign-currency document without an exchange rate** (`penznem` ≠ HUF, no `arfolyamBank` / `arfolyam`):
+  the schema has both optional (`xmlszamla.xsd` lines 118–119; the comment ties them to the automatic MNB rate)
+  and the docs tie the rate to VAT display, so an `AAM` invoice, a proforma or a delivery note in EUR may not need
+  one for VAT purposes; whether szamlazz.hu refuses, defaults to the MNB rate or issues without a rate is unverified.
+  Low: the crate demands an `ExchangeRate` on every foreign-currency document of every kind
+  (`RequestError::MissingExchangeRate`; case-insensitive on the currency since #70) and offers
+  `ExchangeRate::automatic_mnb()` as the way through, so nothing is refused that the caller cannot send; relaxing
+  the check for `D` / `SL` waits for a probe.
 - Storno of `ES`/`VS`/`HS`; a new `VS` after a stornoed `VS`; an `SZ` beside a live `ES`; **a storno of a
   settled `ES`** (one with a `VS`; a 221-like refusal is plausible) and **an `SZ` beside a live `VS`** (the
   repetition toggle is per kind, so the server is not expected to refuse). Moderate: `storno_invoice`

@@ -86,7 +86,8 @@ struct Doc<'a> {
     reversed: bool,
     referenced_proforma: Option<&'a str>,
     referenced_invoice: Option<&'a str>,
-    test: bool,
+    /// `teszt`; `None` renders no element — szamlazz.hu breaking its schema.
+    test: Option<bool>,
     supplier_id: u64,
     payments: &'a [&'a str],
     /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
@@ -102,7 +103,7 @@ impl<'a> Doc<'a> {
             reversed: false,
             referenced_proforma: None,
             referenced_invoice: None,
-            test: true,
+            test: Some(true),
             supplier_id: SUPPLIER,
             payments: &[],
             fulfillment_date: Some(ORIGINAL_TELJ),
@@ -123,6 +124,7 @@ impl<'a> Doc<'a> {
             value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
         };
         let telj = self.fulfillment_date.map(|date| date.to_string());
+        let teszt = self.test.map(|test| test.to_string());
         let payments = if self.payments.is_empty() {
             String::new()
         } else {
@@ -141,7 +143,7 @@ impl<'a> Doc<'a> {
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
   <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><gazdEsemAzon>924307338</gazdEsemAzon><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{telj}{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
+  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><gazdEsemAzon>924307338</gazdEsemAzon><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{telj}{rendelesszam}{teszt}{sztornozott}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
@@ -154,7 +156,7 @@ impl<'a> Doc<'a> {
             hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
             telj = opt("telj", telj.as_deref()),
             rendelesszam = opt("rendelesszam", self.order),
-            test = self.test,
+            teszt = opt("teszt", teszt.as_deref()),
             sztornozott = if self.reversed {
                 "<sztornozott>true</sztornozott>"
             } else {
@@ -486,15 +488,23 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
 
 /// No account pin (ADR 0006, account-pin amendment): a document of this
 /// order and kind under our id is ours whatever its `teszt` and `szallito/id`
-/// say — live, and it settles the lookup without the hint. Both are parsed
-/// (the journaled document is whole), neither is compared with anything.
+/// say — or whether `teszt` says anything (absent is `None` since #70) — live,
+/// and it settles the lookup without the hint. Both are parsed (the journaled
+/// document is whole), neither is compared with anything.
 #[tokio::test]
 async fn lookup_holds_no_account_pin() {
     for (label, doc) in [
         (
             "teszt",
             Doc {
-                test: false,
+                test: Some(false),
+                ..Doc::new("SZ-1", "SZ")
+            },
+        ),
+        (
+            "no teszt",
+            Doc {
+                test: None,
                 ..Doc::new("SZ-1", "SZ")
             },
         ),
@@ -679,10 +689,11 @@ async fn lookup_hint_ignores_our_documents_non_invoices_and_its_own_failure() {
 
 #[tokio::test]
 async fn lookup_without_an_answer_is_unanswered_not_data() {
-    // A bare 500 with an empty body parses as `UnexpectedBody` in the agent
-    // crate (a `Parse` error): szamlazz.hu did not answer, so the step's
-    // result is its retryable error, never a journaled outcome. The external
-    // id first; then the hint, whose own failure is not conclusive either.
+    // A bare 500 with no `szlahu_*` header is refused by its status in the
+    // agent crate (`ParseError::HttpStatus`, a `Parse` error): szamlazz.hu did
+    // not answer, so the step's result is its retryable error, never a
+    // journaled outcome. The external id first; then the hint, whose own
+    // failure is not conclusive either.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
         .respond_with(ResponseTemplate::new(500))
@@ -690,7 +701,7 @@ async fn lookup_without_an_answer_is_unanswered_not_data() {
         .await;
     assert!(matches!(
         h.try_lookup(&[]).await,
-        Err(Unanswered::Transport(message)) if message.contains("empty response")
+        Err(Unanswered::Transport(message)) if message.contains("HTTP 500")
     ));
 
     let h = Harness::start().await;
@@ -1097,7 +1108,7 @@ async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
         .await;
     assert!(matches!(
         h.create(None).await,
-        Err(Unconfirmed::Transport(message)) if message.contains("empty response")
+        Err(Unconfirmed::Transport(message)) if message.contains("HTTP 500")
     ));
 }
 
@@ -1260,7 +1271,7 @@ fn unconfirmed_displays_name_their_cause() {
 #[tokio::test]
 async fn a_failed_post_send_re_query_names_both_the_send_and_its_own_failure() {
     let re_query_failures: [(&str, ResponseTemplate, &str); 3] = [
-        ("lost", ResponseTemplate::new(500), "empty response"),
+        ("lost", ResponseTemplate::new(500), "HTTP 500"),
         ("another code", body_error("57", "Hibás XML."), "57"),
         (
             "down",
@@ -1356,7 +1367,7 @@ async fn a_failed_post_send_re_query_names_both_the_send_and_its_own_failure() {
         matches!(
             &error,
             Unconfirmed::ReQueryFailed { sent, re_query }
-                if sent.contains("55") && re_query.contains("empty response")
+                if sent.contains("55") && re_query.contains("HTTP 500")
         ),
         "{error:?}"
     );
@@ -1609,7 +1620,7 @@ async fn duplicate_order_number_whose_re_query_fails_is_unconfirmed_naming_both(
         Unconfirmed::ReQueryFailed { sent, re_query } => {
             assert!(sent.contains("152"), "{sent}");
             assert!(sent.contains("Már létező rendelésszám"), "{sent}");
-            assert!(re_query.contains("empty response"), "{re_query}");
+            assert!(re_query.contains("HTTP 500"), "{re_query}");
         }
         other => panic!("expected ReQueryFailed, got {other:?}"),
     }
@@ -2711,10 +2722,19 @@ async fn set_payments_outcomes() {
         h.gateway.set_payments("SZ-9", &six, false).await,
         SetPaymentsOutcome::Rejected { code, .. } if code == REQUEST_CODE
     ));
+    // A replacing call with no entries would clear the invoice's payments:
+    // refused by the agent crate before the wire, the caller's request.
+    match h.gateway.set_payments("SZ-9", &[], false).await {
+        SetPaymentsOutcome::Rejected { code, message } => {
+            assert_eq!(code, REQUEST_CODE);
+            assert!(message.contains("at least one entry"), "{message}");
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
     assert_eq!(
         h.bodies().await.len(),
         3,
-        "six entries never reach the wire"
+        "six entries and an empty replace never reach the wire"
     );
 }
 

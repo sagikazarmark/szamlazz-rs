@@ -47,6 +47,7 @@ async fn a_blocking_client_drives_the_sans_io_core_end_to_end() {
             .content_type(&wire.content_type)
             .send(&wire.body[..])
             .expect("http");
+        let status = response.status().as_u16();
         let body = response.body_mut().read_to_vec().expect("body");
         let headers = response.headers().iter().map(|(name, value)| {
             (
@@ -54,11 +55,12 @@ async fn a_blocking_client_drives_the_sans_io_core_end_to_end() {
                 String::from_utf8_lossy(value.as_bytes()).into_owned(),
             )
         });
-        RawResponse::new(headers, body)
+        RawResponse::new(headers, body).with_status(status)
     })
     .await
     .expect("blocking task");
 
+    assert_eq!(raw.status(), Some(200));
     let taxpayer = request.parse(&raw).expect("parse");
     assert!(taxpayer.valid);
     assert_eq!(taxpayer.name.as_deref(), Some("SYNTHETIC SOFTWARE KFT."));

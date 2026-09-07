@@ -149,9 +149,15 @@ pub struct QueryResponse {
     /// Outstanding amount: gross total minus the sum of payments.
     #[serde(default)]
     pub outstanding: Option<Decimal>,
-    /// Issued from a test account (`teszt`).
+    /// Issued from a test account (`teszt`), as szamlazz.hu reported it —
+    /// what the go-live check reads off a known document, since the worker
+    /// compares it with nothing (ADR 0006, account-pin amendment). `None`
+    /// (`null`) is a document that does not say: the schema has the element
+    /// mandatory, so it is szamlazz.hu breaking its schema, never a live
+    /// document — a reader deciding "is this scope live?" must not read it as
+    /// `false` (#70).
     #[serde(default)]
-    pub test: bool,
+    pub test: Option<bool>,
 }
 
 impl QueryResponse {
@@ -173,13 +179,14 @@ impl QueryResponse {
             gross_total: None,
             payments: Vec::new(),
             outstanding: None,
-            test: false,
+            test: None,
         }
     }
 }
 
 /// The projection of a queried document: identity, references, dates,
-/// totals and payments — no buyer data. `outstanding` is `gross − Σ payments`.
+/// totals and payments — no buyer data. `outstanding` is `gross − Σ payments`;
+/// `test` is `teszt` exactly as reported, `None` included.
 impl From<&InvoiceDocument> for QueryResponse {
     fn from(document: &InvoiceDocument) -> Self {
         let info = &document.info;
@@ -389,7 +396,10 @@ impl From<AgentTaxpayerAddress> for TaxpayerAddress {
 pub struct SetPaymentsRequest {
     /// The invoice to register credit entries on.
     pub invoice_number: InvoiceNumber,
-    /// The credit entries (`jóváírások`); szamlazz.hu accepts at most five.
+    /// The credit entries (`jóváírások`); szamlazz.hu accepts at most five,
+    /// and a replacing request (`additive: false`) needs at least one — with
+    /// none it would clear the invoice's payments, and is refused as
+    /// `invalid_input` with nothing sent.
     pub entries: Vec<PaymentEntry>,
     /// Add to the existing entries instead of replacing them.
     ///
@@ -788,7 +798,7 @@ mod tests {
         payment.title = Some("átutalás".to_owned());
         response.payments = vec![payment];
         response.outstanding = Some(dec!(15400));
-        response.test = true;
+        response.test = Some(true);
         let json = round_trip(&response);
         assert_eq!(json["document_type"], "SZ");
         assert_eq!(json["test"], true);
@@ -853,7 +863,7 @@ mod tests {
         second.title = Some("bankkártya".to_owned());
         expected.payments = vec![first, second];
         expected.outstanding = Some(dec!(10400));
-        expected.test = true;
+        expected.test = Some(true);
         assert_eq!(response, expected);
         assert_eq!(
             PaymentRecord::from(&document.payments[0]),

@@ -34,7 +34,11 @@
 //! failure until its attempts are spent — holding the order key the whole time
 //! — and is killed. So every type the services journal is **additive-only**: a
 //! new field carries a serde default, a new variant may be added, and no field
-//! or variant is renamed, removed or retyped. This holds for the outcomes here
+//! or variant is renamed, removed or retyped — with one admitted widening: a
+//! field `T` may become `Option<T>` when every value the old type wrote decodes
+//! to `Some` and re-encodes byte for byte, which the compatibility test proves
+//! on the committed fixtures (`InvoiceInfo::test`, #70; ADR 0005, *Widening*).
+//! This holds for the outcomes here
 //! ([`LookupOutcome`], [`CreateOutcome`], [`QueryOutcome`],
 //! [`StornoLookupOutcome`], [`StornoOutcome`], [`DeleteOutcome`],
 //! [`SetPaymentsOutcome`], [`ProbeOutcome`], [`TaxpayerOutcome`]), for the
@@ -82,12 +86,14 @@ pub mod build;
 pub use build::{DocumentRefs, InputError, gross_total};
 
 /// The pseudo-code of a rejection that never reached szamlazz.hu: the request
-/// violates the Számla Agent wire contract (a sixth credit entry, a document
-/// without line items). Stands beside szamlazz.hu's numeric codes in the
-/// `Rejected { code }` outcomes. On a create or storno it is the `rejected`
-/// outcome like any other code; `Szamlazz.Agent.set_payments` tells it apart
-/// and answers the caller's request as `invalid_input`, since szamlazz.hu
-/// answered nothing to pass through.
+/// violates the Számla Agent wire contract (a sixth credit entry, a replacing
+/// credit-entry request with no entries — it would clear the invoice's
+/// payments — a document without line items). Stands beside szamlazz.hu's
+/// numeric codes in the `Rejected { code }` outcomes. On a create or storno
+/// it is the `rejected` outcome like any other code;
+/// `Szamlazz.Agent.set_payments` tells it apart and answers the caller's
+/// request as `invalid_input`, since szamlazz.hu answered nothing to pass
+/// through.
 pub const REQUEST_CODE: &str = "request";
 
 /// The module that speaks to szamlazz.hu for one account: the Számla Agent
@@ -1940,13 +1946,22 @@ mod tests {
         assert!(proforma.is_ours(&order, IssuedKind::Proforma));
 
         // No account pin: neither `teszt` nor the seller record's id is read
-        // (ADR 0006, account-pin amendment).
+        // (ADR 0006, account-pin amendment) — not a live marker, and not a
+        // missing one either (the agent crate reports an absent `<teszt>` as
+        // `None` since #70; the worker has nothing to compare it with).
         let other_account = Doc {
-            test: false,
+            test: Some(false),
             ..Doc::new("SZ-1", "SZ")
         }
         .parse();
         assert!(other_account.is_ours(&order, IssuedKind::Invoice));
+        let unknown_mode = Doc {
+            test: None,
+            ..Doc::new("SZ-1", "SZ")
+        }
+        .parse();
+        assert_eq!(unknown_mode.info.test, None);
+        assert!(unknown_mode.is_ours(&order, IssuedKind::Invoice));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) — the account whose
 szamlazz.hu is the source of truth is the one the invocation's scope resolved to, and the validation pins are
 read from that journaled `Account` (below); amended by #47 — every journaled type is additive-only and pinned
-by fixtures (the *Journal compatibility* section).
+by fixtures (the *Journal compatibility* section); amended by #70 — widening a field to `Option<T>` is the one
+retype the rule admits (the *Widening* paragraph).
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,
@@ -196,3 +197,14 @@ avoid stalling in-flight orders for a retry interval, but it is not what keeps t
 break a journaled shape is a deliberate act: delete the archived fixture, and drain before deploying (the
 flag-day script) so that nothing is in flight to be killed. `Journaled` is `pub(super)` to `service`; a new run
 site outside `service::support` would have to bypass the helpers to journal an unpinned type.
+
+**Widening (#70).** One retype is additive in the sense the rule cares about: a field `T` becoming `Option<T>`,
+when every value the old type ever wrote decodes to `Some` and re-encodes byte for byte. `InvoiceInfo::test`
+(`teszt`) went from `bool` to `Option<bool>` in #70 — the old code wrote `true` or `false`, the new code reads both
+as `Some`, and the ten document-carrying fixtures with `"test": true` replay through the compatibility test
+unchanged, which is the proof the rule asks for; no fixture was regenerated. What the widening adds is a value the
+old code could not write (`null`), which the *previous* deployment cannot decode — a rollback with in-flight
+invocations would kill them on that entry. The rule was always forward-only — it promises that the next deployment
+decodes what the previous one wrote, never the reverse — so nothing new is given up; but a widening is still a
+contract change to review, not a free refactor, and the compatibility test — not the type signature — is what says
+it is admitted. Narrowing (`Option<T>` → `T`) is a retype like any other.

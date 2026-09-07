@@ -246,7 +246,17 @@ pub struct InvoiceInfo {
     /// Buyer email the document was sent to (`email`).
     pub email: Option<String>,
     /// Issued from a test account (`teszt`).
-    pub test: bool,
+    ///
+    /// Mirrors the wire: the schema has the element mandatory
+    /// (`minOccurs="1"`) and every observed document carries it, so `None` —
+    /// absent or empty — is a document that does not say which account mode
+    /// issued it, not a live one. A reader that pins the account mode (the
+    /// worker's `teszt == mode` check) treats `None` as a mismatch rather
+    /// than inventing `false`.
+    ///
+    /// Breaking change in 0.x: this was a `bool` defaulting to `false` when
+    /// the element was absent or empty.
+    pub test: Option<bool>,
     /// Whether the invoice has been reversed (`sztornozott`).
     ///
     /// Mirrors the wire, where the element is optional and never spelled
@@ -612,13 +622,7 @@ fn response_root(body: &[u8]) -> Result<ResponseRoot, ParseError> {
                 return Ok(root);
             }
             quick_xml::events::Event::Eof => {
-                let text = String::from_utf8_lossy(body);
-                let text = text.trim();
-                return Err(ParseError::UnexpectedBody(if text.is_empty() {
-                    "empty response".to_owned()
-                } else {
-                    text.to_owned()
-                }));
+                return Err(ParseError::UnexpectedBody(crate::error::body_excerpt(body)));
             }
             _ => {}
         }
@@ -774,8 +778,8 @@ struct AlapXml {
     katafokonyv: bool,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     email: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
-    teszt: bool,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    teszt: Option<bool>,
     #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
     sztornozott: Option<bool>,
 }
@@ -1296,7 +1300,7 @@ mod tests {
         assert_eq!(document.info.comment, None);
         assert!(!document.info.cash_accounting);
         assert!(document.info.kata);
-        assert!(!document.info.test);
+        assert_eq!(document.info.test, Some(false));
         assert_eq!(document.info.reversed, None);
 
         assert_eq!(document.buyer.name, "Synthetic Buyer");
@@ -1603,6 +1607,38 @@ mod tests {
         }
     }
 
+    /// `<teszt>` mirrors the wire too: the schema has it mandatory, so a
+    /// document without it (or with an empty one) reports `None` — unknown,
+    /// never `false` = live — and the reader decides what an unknown mode
+    /// means (the worker treats it as another account's).
+    #[test]
+    fn test_marker_mirrors_the_wire() {
+        let live = "<szamla xmlns=\"http://www.szamlazz.hu/szamla\">\
+             <szallito><nev>Seller</nev>\
+             <cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim>\
+             </szallito>\
+             <alap><id>924307338</id><szamlaszam>CTEST-2026-40</szamlaszam>\
+             <tipus>SZ</tipus><eszamla>1</eszamla><teszt>true</teszt></alap>\
+             <vevo><nev>Buyer</nev></vevo>\
+             <tetelek></tetelek>\
+             <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>\
+             </szamla>";
+        for (element, expected) in [
+            ("<teszt>true</teszt>", Some(true)),
+            ("<teszt>1</teszt>", Some(true)),
+            ("<teszt>false</teszt>", Some(false)),
+            ("<teszt>0</teszt>", Some(false)),
+            ("<teszt></teszt>", None),
+            ("<teszt/>", None),
+            ("", None),
+        ] {
+            let body = live.replace("<teszt>true</teszt>", element);
+            let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+            let document = sample().parse(&response).expect("success");
+            assert_eq!(document.info.test, expected, "element {element:?}");
+        }
+    }
+
     /// The XML query reports an unknown number, order number, or external
     /// identifier as code 7 in the body only — no `szlahu_error_code` header.
     #[test]
@@ -1617,6 +1653,34 @@ mod tests {
             }
             other => panic!("expected api error, got {other:?}"),
         }
+    }
+
+    /// A body with no XML root at all — a proxy's text page, a stack trace —
+    /// is quoted as a bounded excerpt with the length noted, never whole; a
+    /// blank body reads as `empty response`. (The XML query has its own root
+    /// dispatch, so the bound is checked on this path too, not only through
+    /// `xml::response_text`.)
+    #[test]
+    fn unexpected_body_is_quoted_as_a_bounded_excerpt() {
+        let page = format!("Bad Gateway {}", "z".repeat(4000));
+        let response = RawResponse::new::<&str, &str>([], page.clone().into_bytes());
+        match sample().parse(&response).expect_err("error") {
+            ResponseError::Parse(ParseError::UnexpectedBody(body)) => {
+                assert!(body.starts_with("Bad Gateway zzz"), "{body}");
+                assert!(body.len() < 600, "bounded: {} bytes", body.len());
+                assert!(
+                    body.ends_with(&format!("[truncated: {} bytes]", page.len())),
+                    "notes the length: {body}"
+                );
+            }
+            other => panic!("expected unexpected body, got {other:?}"),
+        }
+
+        let blank = RawResponse::new::<&str, &str>([], b"  \n".to_vec());
+        assert!(matches!(
+            sample().parse(&blank),
+            Err(ResponseError::Parse(ParseError::UnexpectedBody(body))) if body == "empty response"
+        ));
     }
 
     #[test]

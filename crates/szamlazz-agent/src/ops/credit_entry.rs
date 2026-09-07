@@ -5,7 +5,7 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::credentials::Credentials;
-use crate::error::{ParseError, ResponseError};
+use crate::error::{ParseError, RequestError, ResponseError};
 use crate::ops::invoice::{InvoiceResponse, decimal_body_or_header};
 use crate::types::{InvoiceNumber, PaymentMethod};
 use crate::wire::{AgentRequest, RawResponse};
@@ -105,7 +105,9 @@ pub enum CreditEntriesError {
 /// Registers up to five payments against the invoice named by
 /// [`RegisterCreditEntry::invoice_number`]. Unless
 /// [`RegisterCreditEntry::additive`] is set, the entries *replace* the
-/// invoice's existing credit entries.
+/// invoice's existing credit entries — so a replacing request with no
+/// entries would clear them, and is refused by [`validate`](AgentRequest::validate)
+/// ([`RequestError::EmptyCreditEntryReplace`]).
 #[doc(alias = "xmlszamlakifiz")]
 #[doc(alias = "jóváírás")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -124,13 +126,16 @@ pub struct RegisterCreditEntry {
     pub additive: bool,
     /// Aggregator identifier (`aggregator`) for contracted integrations.
     pub aggregator: Option<String>,
-    /// The payments to record; at most five per request.
+    /// The payments to record; at most five per request, and at least one
+    /// unless [`additive`](Self::additive).
     pub entries: CreditEntries,
 }
 
 impl RegisterCreditEntry {
     /// A credit-entry request for the given invoice with no entries yet;
-    /// existing entries are replaced (`additive` is `false`).
+    /// existing entries are replaced (`additive` is `false`). Set
+    /// [`entries`](Self::entries) before sending: a replacing request with
+    /// none is refused, since it would clear the invoice's payments.
     pub fn new(invoice_number: impl Into<InvoiceNumber>) -> Self {
         Self {
             invoice_number: invoice_number.into(),
@@ -166,6 +171,14 @@ pub struct CreditEntryResult {
 impl AgentRequest for RegisterCreditEntry {
     const ACTION: &'static str = "action-szamla_agent_kifiz";
     type Response = CreditEntryResult;
+
+    fn validate(&self) -> Result<(), RequestError> {
+        if !self.additive && self.entries.as_slice().is_empty() {
+            return Err(RequestError::EmptyCreditEntryReplace);
+        }
+
+        Ok(())
+    }
 
     fn write_xml(&self, credentials: &Credentials) -> Vec<u8> {
         xml::document(
@@ -354,6 +367,27 @@ mod tests {
         }
     }
 
+    /// A body that is not szamlazz.hu's answer is quoted as a bounded
+    /// excerpt with the length noted — a proxy's page or a stack trace never
+    /// travels whole into a consumer's logs or journal.
+    #[test]
+    fn unexpected_body_is_quoted_as_a_bounded_excerpt() {
+        let page = format!("<html>{}</html>", "y".repeat(4000));
+        let response = RawResponse::new::<&str, &str>([], page.clone().into_bytes());
+        let error = sample().parse(&response).expect_err("error");
+        match error {
+            ResponseError::Parse(ParseError::UnexpectedBody(body)) => {
+                assert!(body.contains("got html: <html>yyyy"), "{body}");
+                assert!(body.len() < 600, "bounded: {} bytes", body.len());
+                assert!(
+                    body.contains(&format!("{} bytes", page.len())),
+                    "notes the length: {body}"
+                );
+            }
+            other => panic!("expected unexpected body, got {other:?}"),
+        }
+    }
+
     #[test]
     fn header_error_takes_precedence() {
         let response = RawResponse::new(
@@ -391,6 +425,31 @@ mod tests {
         assert_eq!(
             CreditEntries::try_from(entries).expect_err("too many"),
             CreditEntriesError::TooMany
+        );
+    }
+
+    /// `RegisterCreditEntry::new(n)` is one forgotten `entries = …` away
+    /// from a request that would replace the invoice's payments with nothing:
+    /// the schema allows zero `kifizetes` and replace is the default. Refused
+    /// before the wire; an empty *additive* request is a harmless no-op and a
+    /// populated replace is the normal call.
+    #[test]
+    fn an_empty_replace_never_reaches_the_wire() {
+        let credentials = Credentials::agent_key("key");
+        let empty_replace = RegisterCreditEntry::new("E-TST-2026-1");
+        assert_eq!(
+            empty_replace.to_wire(&credentials).expect_err("refused"),
+            RequestError::EmptyCreditEntryReplace
+        );
+
+        let empty_additive = RegisterCreditEntry {
+            additive: true,
+            ..RegisterCreditEntry::new("E-TST-2026-1")
+        };
+        assert!(empty_additive.to_wire(&credentials).is_ok());
+        assert!(
+            sample().to_wire(&credentials).is_ok(),
+            "a populated replace"
         );
     }
 }

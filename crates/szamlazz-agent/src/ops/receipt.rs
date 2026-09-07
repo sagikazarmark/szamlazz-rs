@@ -524,7 +524,14 @@ pub struct Receipt {
     #[doc(alias = "fokonyvVevo")]
     pub ledger_customer: Option<String>,
     /// Whether a test account issued the receipt (`teszt`).
-    pub test: bool,
+    ///
+    /// Mirrors the wire: the schema has the element mandatory, so `None` —
+    /// absent or empty — is a document that does not say, not a live one.
+    /// A reader that pins the account mode treats `None` as a mismatch.
+    ///
+    /// Breaking change in 0.x: this was a `bool` defaulting to `false` when
+    /// the element was absent.
+    pub test: Option<bool>,
     /// Order number (`rendelesSzam`).
     #[doc(alias = "rendelésszám")]
     pub order_number: Option<String>,
@@ -819,8 +826,8 @@ struct AlapXml {
         deserialize_with = "xml::de::empty_as_none"
     )]
     fokonyv_vevo: Option<String>,
-    #[serde(deserialize_with = "xml::de::flexible_bool")]
-    teszt: bool,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    teszt: Option<bool>,
     #[serde(
         default,
         rename(deserialize = "rendelesSzam"),
@@ -1029,6 +1036,16 @@ mod tests {
         ));
     }
 
+    /// The forint in any letter case is not a foreign currency on a receipt
+    /// either.
+    #[test]
+    fn lower_case_huf_receipt_needs_no_exchange_rate() {
+        let mut receipt = create_sample();
+        receipt.currency = Currency::new("ft");
+        receipt.exchange_rate = None;
+        assert!(receipt.to_wire(&Credentials::agent_key("key")).is_ok());
+    }
+
     #[test]
     fn accepts_automatic_mnb_receipt_exchange_rate() {
         let mut receipt = create_sample();
@@ -1183,7 +1200,7 @@ mod tests {
         assert_eq!(receipt.currency, Currency::EUR);
         assert_eq!(receipt.exchange_bank, None);
         assert_eq!(receipt.exchange_rate, Some(dec!(210)));
-        assert!(!receipt.test);
+        assert_eq!(receipt.test, Some(false));
         assert_eq!(receipt.items.len(), 2);
         assert_eq!(receipt.items[0].name, "Synthetic item A");
         assert_eq!(receipt.items[0].id.as_deref(), Some("ITEM-1"));
@@ -1257,6 +1274,39 @@ mod tests {
         let receipt = receipt_with_subtotals("");
         assert!(receipt.totals.by_rate.is_empty());
         assert_eq!(receipt.totals.total.gross, dec!(1270));
+    }
+
+    /// `<teszt>` mirrors the wire, as on the invoice query: mandatory in the
+    /// schema, so absent or empty is `None` — unknown, never `false` = live.
+    #[test]
+    fn test_marker_mirrors_the_wire() {
+        let receipt_with_teszt = |element: &str| {
+            let body = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <xmlnyugtavalasz xmlns=\"http://www.szamlazz.hu/xmlnyugtavalasz\"><sikeres>true</sikeres>\
+                 <nyugta><alap><id>1</id><nyugtaszam>NYGT-2026-1</nyugtaszam><tipus>NY</tipus>\
+                 <stornozott>false</stornozott><kelt>2026-07-04</kelt><fizmod>készpénz</fizmod>\
+                 <penznem>HUF</penznem>{element}</alap><tetelek></tetelek>\
+                 <osszegek>\
+                 <totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>\
+                 </nyugta></xmlnyugtavalasz>"
+            );
+            let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+            query_sample().parse(&response).expect("success").receipt
+        };
+
+        for (element, expected) in [
+            ("<teszt>true</teszt>", Some(true)),
+            ("<teszt>0</teszt>", Some(false)),
+            ("<teszt></teszt>", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                receipt_with_teszt(element).test,
+                expected,
+                "element {element:?}"
+            );
+        }
     }
 
     #[test]
