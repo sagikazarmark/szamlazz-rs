@@ -25,6 +25,10 @@ _Avoid_: response (overloaded)
 **Control code (KEY_ERR / KEY_DEL)**:
 Deliberate protocol speech in an Ack: KEY_ERR tells szamlazz.hu the key is wrong (stop sending until it changes); KEY_DEL severs the connection. Not errors — errors (non-200) mean "retry within 72 hours".
 
+**Shape vs content (Adatkapcsolat parse)**:
+The rule `Document::parse` refuses by. A push is at-most-N-times delivery — szamlazz.hu retries a non-200 identically for 72 hours and then drops the record, for a bank transaction or receipt for good — so a deterministic refusal loses data, and the parse refuses only what the receiver cannot Ack: *shape* — not UTF-8 or XML, an unknown root or namespace, a missing document id (and an invoice's `szamlaszam`), a value not of its lexical type. Everything else is *content* and reads as the wire delivers it: an element the XSD requires but the push omits is `None`, an unknown `irany` is `TransactionDirection::Other`, a `<pdf>` that does not decode is `None` with the encoded text in `raw_xml()`, an empty receipt batch has no receipts. The XSD's requirements are a **signal** — `Document::validate` (or the per-document `validate()`, `ValidationError`) — or an explicit **gate** (`Document::parse_strict`, `ParseError::Validation`), never the default. The router's authenticated `400` is for shape only. Decision: #95 (review findings B-01, B-02, J-01).
+_Avoid_: strict parsing as the default, "invalid document" for a merely incomplete one in prose (`ParseError::Validation`'s display text `invalid document structure: …` is kept verbatim from 0.3 — a `parse_strict` caller's messages did not change), required field (the XSD requires; the parse does not)
+
 ### Documents
 
 **Invoice (számla)**:

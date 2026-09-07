@@ -69,7 +69,7 @@ fn parses_outgoing_invoice_fixture() {
         panic!("expected outgoing invoice");
     };
     assert!(invoice.info.id > 0);
-    assert!(invoice.info.invoice_number.is_some());
+    assert_eq!(invoice.info.invoice_number, "2015-123");
     assert!(invoice.supplier.name.is_some());
     assert!(!invoice.items.is_empty());
     assert_eq!(invoice.info.source, Some(34));
@@ -187,9 +187,9 @@ fn parses_bank_transaction() {
         panic!("expected bank transaction");
     };
     assert_eq!(tx.id, 987);
-    assert_eq!(tx.direction, TransactionDirection::Incoming);
-    assert_eq!(tx.amount, dec!(12700.0));
-    assert!(!tx.technical);
+    assert_eq!(tx.direction, Some(TransactionDirection::Incoming));
+    assert_eq!(tx.amount, Some(dec!(12700.0)));
+    assert_eq!(tx.technical, Some(false));
     assert_eq!(
         tx.partner.as_ref().and_then(|p| p.name.as_deref()),
         Some("Kovács Bt.")
@@ -242,11 +242,11 @@ fn unknown_root_is_an_error() {
     assert!(error.to_string().contains("whatever"));
 }
 
+// `Document::parse` refuses shape only: what is not the pushed document at
+// all. Content — a missing element, an unknown token, an undecodable PDF — is
+// read leniently and is `parse_strict`'s concern (`tests/document.rs`).
 #[test]
-fn rejects_invalid_structural_inputs() {
-    let empty_receipts = br#"<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv"/>"#;
-    assert!(Document::parse(empty_receipts).is_err());
-
+fn rejects_shapes_that_are_not_the_document() {
     let truncated = &OUTGOING_INVOICE[..OUTGOING_INVOICE.len() - 20];
     assert!(Document::parse(truncated).is_err());
 
@@ -260,18 +260,23 @@ fn rejects_invalid_structural_inputs() {
         .replacen("<szallito>", "<szallito xmlns=\"\">", 1);
     assert!(Document::parse(wrong_child_namespace.as_bytes()).is_err());
 
-    let incoming_without_buyer_location = std::str::from_utf8(OUTGOING_INVOICE)
+    // The identity the receiver Acks with: the id and, for an invoice, its
+    // number.
+    let without_id = std::str::from_utf8(OUTGOING_INVOICE)
         .expect("UTF-8")
-        .replace(
-            "http://www.szamlazz.hu/szamla",
-            "http://www.szamlazz.hu/szamlabe",
-        )
-        .replace("<szamla xmlns=", "<szamlabe xmlns=")
-        .replace("</szamla>", "</szamlabe>")
-        .replace("<lokacio>1</lokacio>", "<lokacio></lokacio>");
-    assert!(Document::parse(incoming_without_buyer_location.as_bytes()).is_err());
+        .replacen("<id>123456</id>", "", 1);
+    assert!(Document::parse(without_id.as_bytes()).is_err());
+    let without_number = std::str::from_utf8(OUTGOING_INVOICE)
+        .expect("UTF-8")
+        .replacen("<szamlaszam>2015-123</szamlaszam>", "", 1);
+    assert!(Document::parse(without_number.as_bytes()).is_err());
+    let receipt_without_id = RECEIPT_BATCH.replacen("<id>1</id>", "", 1);
+    assert!(Document::parse(receipt_without_id.as_bytes()).is_err());
+    let transaction_without_id = BANK_TRANSACTION.replacen("<id>987</id>", "", 1);
+    assert!(Document::parse(transaction_without_id.as_bytes()).is_err());
 
     assert!(Document::parse(b"<szamla>\xff</szamla>").is_err());
+    assert!(Document::parse(b"not xml at all").is_err());
 }
 
 /// Accepts everything by default; `fail` answers every invoice with an error,
@@ -432,8 +437,12 @@ async fn wrong_key_answers_key_err_without_handler() {
     assert!(body.contains("<szamlavalasz"));
 }
 
+// A PDF that does not decode is a content detail of a legal record, not a
+// reason to refuse its delivery: under a wrong key the push is `KEY_ERR` as
+// any other, under the right one it is Acked (with `pdf` read as absent —
+// `tests/document.rs`).
 #[tokio::test]
-async fn wrong_key_does_not_decode_embedded_pdf() {
+async fn undecodable_pdf_does_not_fail_the_push() {
     let body = std::str::from_utf8(OUTGOING_INVOICE)
         .expect("fixture UTF-8")
         .replace("<pdf></pdf>", "<pdf>not base64!</pdf>");
@@ -442,8 +451,39 @@ async fn wrong_key_does_not_decode_embedded_pdf() {
     assert_eq!(status, StatusCode::OK);
     assert!(response.contains("KEY_ERR"));
 
-    let (status, _) = call(Some("secret-key"), body.as_bytes(), false).await;
+    let (status, response) = call(Some("secret-key"), body.as_bytes(), false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(response.contains("<szamlavalasz"), "{response}");
+    assert!(!response.contains("hibakod"), "{response}");
+}
+
+// The authenticated 400 is for a body that is not the pushed document at all
+// — szamlazz.hu would retry it identically for 72 hours and then drop it, so
+// it must never be the answer to a document that merely omits what the XSD
+// requires: that one is Acked.
+#[tokio::test]
+async fn authenticated_400_is_reserved_for_a_body_that_is_not_a_document() {
+    let truncated = &OUTGOING_INVOICE[..OUTGOING_INVOICE.len() - 20];
+    let (status, response) = call(Some("secret-key"), truncated, false).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!response.contains("valasz"), "{response}");
+
+    let without_id = std::str::from_utf8(OUTGOING_INVOICE)
+        .expect("fixture UTF-8")
+        .replacen("<id>123456</id>", "", 1);
+    let (status, _) = call(Some("secret-key"), without_id.as_bytes(), false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let identity_only = br#"<szamla xmlns="http://www.szamlazz.hu/szamla"><alap><id>42</id><szamlaszam>E-1</szamlaszam></alap></szamla>"#;
+    let (status, response) = call(Some("secret-key"), identity_only, false).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response.contains("<id>42</id>"), "{response}");
+    assert!(!response.contains("hibakod"), "{response}");
+
+    let empty_batch = br#"<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv"/>"#;
+    let (status, response) = call(Some("secret-key"), empty_batch, false).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response.contains("<nyugtavalasz"), "{response}");
 }
 
 // The docs guarantee the header accompanies every push, so a missing header
@@ -597,7 +637,7 @@ async fn default_body_limit_is_64_mib_and_unlimited_is_explicit() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
     // Explicitly unlimited: the body is buffered and read — refused by the
-    // typed parse (an empty transaction), not by the limit.
+    // typed parse (a transaction without an id), not by the limit.
     let unlimited = szamlazz_adatkapcsolat::axum::router_with_body_limit(
         "secret-key",
         TestHandler::default(),

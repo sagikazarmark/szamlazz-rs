@@ -1,7 +1,11 @@
 //! The pushed document types, deserialized leniently: unknown elements are
-//! ignored and empty elements read as absent, so schema evolution on the
-//! szamlazz.hu side does not break receivers. Date fields are the
-//! business-level civil [`Date`] type; XML Schema's optional `xs:date`
+//! ignored, empty elements read as absent, and an element the XSD requires
+//! is as optional as any other — [`Document::parse`] refuses **shape** (a body
+//! that is not the pushed document) and never **content**, because a push is
+//! at-most-N-times delivery and a refusal szamlazz.hu retries identically for
+//! 72 hours loses the record. The XSD's requirements are available as a signal
+//! through [`Document::validate`] / [`Document::parse_strict`]. Date fields are
+//! the business-level civil [`Date`] type; XML Schema's optional `xs:date`
 //! timezone suffix (`Z`/`±hh:mm`) is accepted on the wire and discarded, so
 //! a schema-valid push can never fail the whole delivery over an offset a
 //! civil date cannot represent.
@@ -16,7 +20,8 @@ use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 use rust_decimal::Decimal;
 
-use crate::error::ParseError;
+use crate::ack::InvoiceDirection;
+use crate::error::{ParseError, ValidationError};
 
 /// One pushed document, identified by the XML root element.
 #[derive(Debug)]
@@ -40,13 +45,78 @@ pub enum Document {
 impl Document {
     /// Parses a pushed request body, dispatching on the root element.
     ///
+    /// Refuses **shape**, never **content**. A push is at-most-N-times
+    /// delivery: szamlazz.hu retries a non-200 answer, identically, for up
+    /// to 72 hours and then drops the record — for a bank transaction or a
+    /// receipt that is the last time it offers it. A body this parse cannot
+    /// read is therefore lost, so it refuses only what the receiver cannot
+    /// Ack: a body that is not UTF-8 or not well-formed XML, an unknown root
+    /// or an element outside the document's namespace, an `alap/id` (or a
+    /// bank transaction `id`) that is missing or not an integer, an invoice
+    /// without its `szamlaszam`, and a value that is not of its lexical type
+    /// (a `<kelt>` that is not a date, an `<osszeg>` that is not a number, a
+    /// `<teszt>` that is not a boolean). Everything else is content and reads
+    /// as the wire delivers it: a missing element is `None`, an unknown
+    /// `<irany>` is [`TransactionDirection::Other`], a `<pdf>` that does not
+    /// decode is [`None`](InvoiceDocument::pdf) with the encoded text still
+    /// in [`raw_xml`](InvoiceDocument::raw_xml), an empty receipt batch has
+    /// no receipts.
+    ///
+    /// The line between an unknown enumeration token (content) and a
+    /// malformed lexical value (shape) is the one the crate has always drawn
+    /// with [`InvoiceAppearance::Unknown`]: an enumeration is an open set
+    /// szamlazz.hu extends — a new direction or document type is a protocol
+    /// extension the receiver must survive — while a fourth spelling of
+    /// `true` or a date that is not a date is not an extension but a value
+    /// the type cannot hold, and reading it as `None` would hide it behind
+    /// the same answer as an omission.
+    ///
+    /// The XSD's own requirements — its `minOccurs="1"` elements, its
+    /// enumerations, its non-negative VAT rates — are a **signal**, not a
+    /// gate: [`Document::validate`] reports the first one a parsed document
+    /// misses, and [`Document::parse_strict`] makes it a gate for callers
+    /// that want one.
+    ///
     /// # Errors
     ///
     /// Returns an error for invalid UTF-8 or XML, an unknown root or wrong
-    /// namespace, invalid embedded data, or missing required structure.
+    /// namespace, or a shape the typed parse cannot read.
     pub fn parse(body: &[u8]) -> Result<Self, ParseError> {
         let root = Self::identify(body)?;
         Self::parse_identified(body, root)
+    }
+
+    /// [`parse`](Self::parse), then [`validate`](Self::validate): the parse
+    /// as a gate on XSD conformance, for a receiver that would rather
+    /// refuse a non-conforming push (and have szamlazz.hu retry, then drop
+    /// it) than read it leniently.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`parse`](Self::parse) refuses, plus
+    /// [`ParseError::Validation`] for the first XSD requirement the document
+    /// misses.
+    pub fn parse_strict(body: &[u8]) -> Result<Self, ParseError> {
+        let document = Self::parse(body)?;
+        document.validate()?;
+        Ok(document)
+    }
+
+    /// Checks the document against its XSD's requirements: the
+    /// `minOccurs="1"` elements, the `irany` enumeration, non-negative VAT
+    /// rates, at least one line item / receipt / VAT total. The parse does
+    /// not need any of them; a receiver may.
+    ///
+    /// # Errors
+    ///
+    /// The first requirement the document misses.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::OutgoingInvoice(invoice) => invoice.validate(InvoiceDirection::Outgoing),
+            Self::IncomingInvoice(invoice) => invoice.validate(InvoiceDirection::Incoming),
+            Self::BankTransaction(transaction) => transaction.validate(),
+            Self::Receipts(batch) => batch.validate(),
+        }
     }
 
     /// Validates UTF-8 and identifies the root element, verifying its own
@@ -69,13 +139,11 @@ impl Document {
         match root {
             RootKind::OutgoingInvoice => {
                 let mut invoice: InvoiceDocument = quick_xml::de::from_str(text)?;
-                invoice.validate(InvoiceKind::Outgoing)?;
                 invoice.raw_xml = Some(raw_xml);
                 Ok(Self::OutgoingInvoice(invoice))
             }
             RootKind::IncomingInvoice => {
                 let mut invoice: InvoiceDocument = quick_xml::de::from_str(text)?;
-                invoice.validate(InvoiceKind::Incoming)?;
                 invoice.raw_xml = Some(raw_xml);
                 Ok(Self::IncomingInvoice(invoice))
             }
@@ -86,7 +154,6 @@ impl Document {
             }
             RootKind::Receipts => {
                 let mut batch: ReceiptBatch = quick_xml::de::from_str(text)?;
-                batch.validate()?;
                 batch.raw_xml = Some(raw_xml);
                 Ok(Self::Receipts(batch))
             }
@@ -263,7 +330,7 @@ pub enum VatRate<'a> {
     /// A NAV-defined special VAT category. This takes semantic precedence
     /// whenever `<afatipus>` is present.
     Special(&'a str),
-    /// The numeric percentage from required `<afakulcs>`.
+    /// The numeric percentage from `<afakulcs>`.
     Percentage(Decimal),
 }
 
@@ -456,10 +523,15 @@ pub struct InvoiceInfo {
     ///
     /// [`InvoiceAck`]: crate::InvoiceAck
     pub id: i32,
-    /// Invoice number (`szamlaszam`).
+    /// Invoice number (`szamlaszam`). With [`id`](Self::id) the identity of
+    /// the pushed document: the one element besides the id
+    /// [`Document::parse`] requires, so a push without it is a shape error.
+    ///
+    /// Breaking change in 0.4: this was an `Option<String>` that the parse
+    /// required to be `Some` anyway.
     #[doc(alias = "számlaszám")]
-    #[serde(default, rename(deserialize = "szamlaszam"))]
-    pub invoice_number: Option<String>,
+    #[serde(rename(deserialize = "szamlaszam"))]
+    pub invoice_number: String,
     /// Economic event identifier (`gazdEsemAzon`).
     #[serde(
         default,
@@ -661,7 +733,7 @@ pub struct InvoiceItem {
     /// Optional NAV special VAT category (`afatipus`).
     #[serde(default, rename(deserialize = "afatipus"))]
     pub vat_type: Option<String>,
-    /// Required numeric VAT percentage (`afakulcs`).
+    /// Numeric VAT percentage (`afakulcs`).
     #[doc(alias = "áfakulcs")]
     #[serde(
         default,
@@ -760,8 +832,7 @@ pub struct VatTotal {
     /// Optional NAV special VAT category (`afatipus`).
     #[serde(default, rename(deserialize = "afatipus"))]
     pub vat_type: Option<String>,
-    /// Required numeric VAT percentage (`afakulcs`). Absent only for the grand
-    /// total, whose schema does not contain a VAT key.
+    /// Numeric VAT percentage (`afakulcs`); the grand total's schema has none.
     #[serde(
         default,
         rename(deserialize = "afakulcs"),
@@ -942,16 +1013,18 @@ impl FinancialItem {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct InvoiceDocument {
-    /// The supplier (`szallito`).
+    /// The supplier (`szallito`). Empty when the push omits the block — every
+    /// field of a [`Party`] is optional, so an absent block and an empty one
+    /// read the same.
     #[doc(alias = "szállító")]
-    #[serde(rename(deserialize = "szallito"))]
+    #[serde(default, rename(deserialize = "szallito"))]
     pub supplier: Party,
     /// Identity and metadata (`alap`).
     #[serde(rename(deserialize = "alap"))]
     pub info: InvoiceInfo,
-    /// The buyer (`vevo`).
+    /// The buyer (`vevo`). Empty when the push omits the block.
     #[doc(alias = "vevő")]
-    #[serde(rename(deserialize = "vevo"))]
+    #[serde(default, rename(deserialize = "vevo"))]
     pub buyer: Party,
     /// Line items (`tetelek`).
     #[serde(
@@ -981,17 +1054,17 @@ pub struct InvoiceDocument {
     )]
     pub payments: Vec<RecordedPayment>,
     /// The invoice PDF (`pdf`), base64 on the wire, decoded here.
+    ///
+    /// `None` when the element is absent or empty — and when its content does
+    /// not decode. The decoder forgives an encoder's sloppiness (missing
+    /// padding, set trailing bits); what it still cannot read is not a reason
+    /// to refuse the invoice, so the parse degrades the PDF to `None` and
+    /// keeps the encoded text in [`raw_xml`](Self::raw_xml) for recovery.
     #[serde(default, deserialize_with = "de::base64_pdf")]
     pub pdf: Option<Pdf>,
     /// Exact UTF-8 XML request from which this document was parsed.
     #[serde(skip)]
     raw_xml: Option<Arc<str>>,
-}
-
-#[derive(Clone, Copy)]
-enum InvoiceKind {
-    Outgoing,
-    Incoming,
 }
 
 impl InvoiceDocument {
@@ -1001,11 +1074,16 @@ impl InvoiceDocument {
         self.raw_xml.as_deref()
     }
 
-    fn validate(&self, kind: InvoiceKind) -> Result<(), ParseError> {
-        required_text(
-            self.info.invoice_number.as_deref(),
-            "invoice alap/szamlaszam",
-        )?;
+    /// Checks the invoice against `szamla.xsd` (outgoing) or `szamlabe.xsd`
+    /// (incoming): every `minOccurs="1"` element, at least one `tetel` and
+    /// one `afakulcsossz`, non-negative VAT rates. The direction matters
+    /// because only an outgoing invoice's buyer carries
+    /// `privatePersonIndicator`.
+    ///
+    /// # Errors
+    ///
+    /// The first requirement the invoice misses.
+    pub fn validate(&self, direction: InvoiceDirection) -> Result<(), ValidationError> {
         required(
             self.info.economic_event_id.as_ref(),
             "invoice alap/gazdEsemAzon",
@@ -1045,7 +1123,7 @@ impl InvoiceDocument {
         )?;
         required_text(self.buyer.tax_number.as_deref(), "invoice vevo/adoszam")?;
         required(self.buyer.location.as_ref(), "invoice vevo/lokacio")?;
-        if matches!(kind, InvoiceKind::Outgoing) {
+        if matches!(direction, InvoiceDirection::Outgoing) {
             required(
                 self.buyer.private_person.as_ref(),
                 "outgoing invoice vevo/privatePersonIndicator",
@@ -1087,7 +1165,7 @@ impl InvoiceDocument {
     }
 }
 
-fn validate_totals(totals: &Totals, document: &str) -> Result<(), ParseError> {
+fn validate_totals(totals: &Totals, document: &str) -> Result<(), ValidationError> {
     if totals.per_vat_rate.is_empty() {
         return validation(format!(
             "{document} osszegek must contain at least one afakulcsossz"
@@ -1108,15 +1186,15 @@ fn validate_totals(totals: &Totals, document: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
-fn required<'a, T>(value: Option<&'a T>, field: &str) -> Result<&'a T, ParseError> {
-    value.ok_or_else(|| ParseError::Validation(format!("missing required {field}")))
+fn required<'a, T>(value: Option<&'a T>, field: &str) -> Result<&'a T, ValidationError> {
+    value.ok_or_else(|| ValidationError::new(format!("missing required {field}")))
 }
 
-fn required_text<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, ParseError> {
-    value.ok_or_else(|| ParseError::Validation(format!("missing required {field}")))
+fn required_text<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, ValidationError> {
+    value.ok_or_else(|| ValidationError::new(format!("missing required {field}")))
 }
 
-fn validate_address(address: &Address, field: &str) -> Result<(), ParseError> {
+fn validate_address(address: &Address, field: &str) -> Result<(), ValidationError> {
     required_text(address.zip.as_deref(), &format!("{field}/irsz"))?;
     required_text(address.city.as_deref(), &format!("{field}/telepules"))?;
     required_text(address.address.as_deref(), &format!("{field}/cim"))?;
@@ -1124,27 +1202,68 @@ fn validate_address(address: &Address, field: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
-fn non_negative(value: Option<Decimal>, field: &str) -> Result<(), ParseError> {
+fn non_negative(value: Option<Decimal>, field: &str) -> Result<(), ValidationError> {
     if value.is_some_and(|value| value.is_sign_negative()) {
         return validation(format!("{field} must not be negative"));
     }
     Ok(())
 }
 
-fn validation<T>(message: impl Into<String>) -> Result<T, ParseError> {
-    Err(ParseError::Validation(message.into()))
+fn validation<T>(message: impl Into<String>) -> Result<T, ValidationError> {
+    Err(ValidationError::new(message))
 }
 
 /// Direction of a bank transaction (`irany`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+///
+/// `banktranz.xsd` enumerates `BE` and `KI`; a token outside the enumeration
+/// is kept as [`Other`](Self::Other) so a protocol extension cannot fail the
+/// delivery of a transaction (the strict [`BankTransaction::validate`] flags
+/// it). Serializes as a plain string: the variant name for the two known
+/// directions, the wire token for an unknown one.
+///
+/// Breaking change in 0.4: gained `Other(String)`, so it is no longer `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
 pub enum TransactionDirection {
     /// `BE` — incoming.
-    #[serde(rename(deserialize = "BE"))]
     Incoming,
     /// `KI` — outgoing.
-    #[serde(rename(deserialize = "KI"))]
     Outgoing,
+    /// A token `banktranz.xsd` does not enumerate, kept exactly as received.
+    #[serde(untagged)]
+    Other(String),
+}
+
+impl TransactionDirection {
+    /// Reads the wire token: `BE`, `KI`, or anything else, trimmed, as
+    /// [`Other`](Self::Other).
+    fn from_code(code: &str) -> Self {
+        match code.trim() {
+            "BE" => Self::Incoming,
+            "KI" => Self::Outgoing,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    /// The wire token: `BE`, `KI`, or the unknown token as received.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Incoming => "BE",
+            Self::Outgoing => "KI",
+            Self::Other(code) => code,
+        }
+    }
+}
+
+/// Reads the wire token, like every other field of the crate's `Deserialize`
+/// implementations (`BE` / `KI`, anything else as [`Other`](Self::Other)); the
+/// `Serialize` side writes the Rust names.
+impl<'de> serde::Deserialize<'de> for TransactionDirection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        Ok(Self::from_code(&code))
+    }
 }
 
 /// The other side of a bank transaction (`partner`).
@@ -1161,14 +1280,15 @@ pub struct TransactionPartner {
 
 /// A pushed bank transaction (`<banktranz>`).
 ///
-/// The fields typed as non-`Option` (`id`, `bank_account`, `value_date`,
-/// `direction`, `amount`, `currency`) are treated as the protocol's
-/// contractually-required core: a push missing or malforming one of them fails
-/// to parse (→ HTTP 400 → szamlazz.hu retries for 72 hours). This is
-/// deliberate — these define what a transaction *is*, and szamlazz.hu cannot
-/// drop them without a breaking protocol change that would require a receiver
-/// update anyway. Optional, evolving detail (`kind`, `partner`, `memo`)
-/// degrades to absent instead.
+/// Only the `id` is required to parse — it is what identifies the record. The
+/// elements `banktranz.xsd` marks required (`bankszamla`, `erteknap`, `irany`,
+/// `technikai`, `osszeg`, `devizanem`) are read as the wire delivers them,
+/// `None` when absent or empty: a bank transaction answered non-200 is
+/// retried for 72 hours and then dropped, so an omission szamlazz.hu made
+/// must not cost the record. [`validate`](Self::validate) reports it.
+///
+/// Breaking change in 0.4: `bank_account`, `value_date`, `direction`,
+/// `technical`, `amount` and `currency` were required, non-`Option` fields.
 #[doc(alias = "banki tranzakció")]
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
@@ -1176,30 +1296,43 @@ pub struct BankTransaction {
     /// Transaction id (`id`).
     pub id: i64,
     /// The account's own bank account number (`bankszamla`).
-    #[serde(rename(deserialize = "bankszamla"))]
-    pub bank_account: String,
+    #[serde(default, rename(deserialize = "bankszamla"))]
+    pub bank_account: Option<String>,
     /// Value date (`erteknap`).
     #[doc(alias = "értéknap")]
-    #[serde(rename(deserialize = "erteknap"), deserialize_with = "de::xs_date")]
-    pub value_date: Date,
+    #[serde(
+        default,
+        rename(deserialize = "erteknap"),
+        deserialize_with = "de::opt_xs_date"
+    )]
+    pub value_date: Option<Date>,
     /// Direction (`irany`).
-    #[serde(rename(deserialize = "irany"))]
-    pub direction: TransactionDirection,
+    #[serde(
+        default,
+        rename(deserialize = "irany"),
+        deserialize_with = "de::opt_transaction_direction"
+    )]
+    pub direction: Option<TransactionDirection>,
     /// Transaction type (`tipus`).
     #[serde(default, rename(deserialize = "tipus"))]
     pub kind: Option<String>,
-    /// Required technical (non-business) transaction flag (`technikai`).
+    /// Technical (non-business) transaction flag (`technikai`).
     #[serde(
+        default,
         rename(deserialize = "technikai"),
-        deserialize_with = "de::flexible_bool"
+        deserialize_with = "de::opt_flexible_bool"
     )]
-    pub technical: bool,
+    pub technical: Option<bool>,
     /// Amount (`osszeg`).
-    #[serde(rename(deserialize = "osszeg"), deserialize_with = "de::decimal_text")]
-    pub amount: Decimal,
+    #[serde(
+        default,
+        rename(deserialize = "osszeg"),
+        deserialize_with = "de::empty_as_none"
+    )]
+    pub amount: Option<Decimal>,
     /// Currency (`devizanem`).
-    #[serde(rename(deserialize = "devizanem"))]
-    pub currency: String,
+    #[serde(default, rename(deserialize = "devizanem"))]
+    pub currency: Option<String>,
     /// The other party (`partner`).
     #[serde(default)]
     pub partner: Option<TransactionPartner>,
@@ -1217,6 +1350,28 @@ impl BankTransaction {
     #[must_use]
     pub fn raw_xml(&self) -> Option<&str> {
         self.raw_xml.as_deref()
+    }
+
+    /// Checks the transaction against `banktranz.xsd`: every `minOccurs="1"`
+    /// element and a known `irany`.
+    ///
+    /// # Errors
+    ///
+    /// The first requirement the transaction misses.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        required_text(self.bank_account.as_deref(), "bank transaction bankszamla")?;
+        required(self.value_date.as_ref(), "bank transaction erteknap")?;
+        match required(self.direction.as_ref(), "bank transaction irany")? {
+            TransactionDirection::Incoming | TransactionDirection::Outgoing => {}
+            TransactionDirection::Other(code) => {
+                return validation(format!("bank transaction irany has unknown value {code}"));
+            }
+        }
+        required(self.technical.as_ref(), "bank transaction technikai")?;
+        required(self.amount.as_ref(), "bank transaction osszeg")?;
+        required_text(self.currency.as_deref(), "bank transaction devizanem")?;
+
+        Ok(())
     }
 }
 
@@ -1329,7 +1484,7 @@ pub struct ReceiptItem {
     /// Optional NAV special VAT category (`afatipus`).
     #[serde(default, rename(deserialize = "afatipus"))]
     pub vat_type: Option<String>,
-    /// Required numeric VAT percentage (`afakulcs`).
+    /// Numeric VAT percentage (`afakulcs`).
     #[serde(
         default,
         rename(deserialize = "afakulcs"),
@@ -1445,7 +1600,16 @@ impl ReceiptBatch {
         self.raw_xml.as_deref()
     }
 
-    fn validate(&self) -> Result<(), ParseError> {
+    /// Checks the batch against `xmlnyugtaarchiv.xsd`: at least one
+    /// `nyugta`, every receipt's `minOccurs="1"` elements, at least one
+    /// `tetel` and one `afakulcsossz` per receipt, non-negative VAT rates.
+    /// `alap/adoszam` is not required although the schema says so: official
+    /// batches omit it.
+    ///
+    /// # Errors
+    ///
+    /// The first requirement the batch misses.
+    pub fn validate(&self) -> Result<(), ValidationError> {
         if self.receipts.is_empty() {
             return validation("receipt archive must contain at least one nyugta");
         }
@@ -1493,7 +1657,7 @@ impl ReceiptBatch {
 pub(crate) mod de {
     use serde::{Deserialize, Deserializer};
 
-    use super::{Date, InvoiceAppearance, Pdf};
+    use super::{Date, InvoiceAppearance, Pdf, TransactionDirection};
 
     pub fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
     where
@@ -1540,17 +1704,6 @@ pub(crate) mod de {
         text
     }
 
-    /// Deserializes a required `xs:date`, discarding any timezone suffix.
-    pub fn xs_date<'de, D>(deserializer: D) -> Result<Date, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        strip_xs_date_timezone(value.trim())
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-
     /// Deserializes an optional `xs:date`, reading empty elements as absent
     /// and discarding any timezone suffix.
     pub fn opt_xs_date<'de, D>(deserializer: D) -> Result<Option<Date>, D::Error>
@@ -1565,30 +1718,6 @@ pub(crate) mod de {
                 .parse()
                 .map(Some)
                 .map_err(serde::de::Error::custom),
-        }
-    }
-
-    /// Deserializes a required decimal from element text; `rust_decimal`'s own
-    /// `Deserialize` uses `deserialize_any`, which the XML deserializer
-    /// answers with a map.
-    pub fn decimal_text<'de, D>(deserializer: D) -> Result<rust_decimal::Decimal, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.trim().parse().map_err(serde::de::Error::custom)
-    }
-
-    pub fn flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-
-        match value.trim() {
-            "true" | "1" => Ok(true),
-            "false" | "0" => Ok(false),
-            other => Err(serde::de::Error::custom(format!("invalid bool: {other}"))),
         }
     }
 
@@ -1615,6 +1744,33 @@ pub(crate) mod de {
         empty_as_none::<D, i64>(deserializer).map(|value| value.map(InvoiceAppearance::from))
     }
 
+    /// Deserializes an optional `<irany>`, reading an empty element as absent
+    /// and any non-empty token — known or not — as a direction.
+    pub fn opt_transaction_direction<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<TransactionDirection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(empty_string_as_none(deserializer)?.map(|code| TransactionDirection::from_code(&code)))
+    }
+
+    /// The base64 decoder for a pushed `<pdf>`: the standard alphabet with
+    /// padding indifferent and trailing bits ignored, so an encoder's
+    /// sloppiness (`JVBERi0` for `JVBERi0=`, a set bit in the last symbol)
+    /// still yields the PDF. `szamla.xsd` types the element `string`;
+    /// base64 is this crate's reading of it.
+    const PDF_ENGINE: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+
+    /// Deserializes the `<pdf>` element: absent or empty is `None`, and so is
+    /// content [`PDF_ENGINE`] cannot decode — a document-content detail must
+    /// not decide the delivery of a legal record. The encoded text stays in
+    /// the document's raw XML.
     pub fn base64_pdf<'de, D>(deserializer: D) -> Result<Option<Pdf>, D::Error>
     where
         D: Deserializer<'de>,
@@ -1622,20 +1778,14 @@ pub(crate) mod de {
         use base64::Engine as _;
         let value = Option::<String>::deserialize(deserializer)?;
 
-        match value {
-            None => Ok(None),
-            Some(encoded) => {
-                let compact: String = encoded.split_whitespace().collect();
+        Ok(value.and_then(|encoded| {
+            let compact: String = encoded.split_whitespace().collect();
 
-                if compact.is_empty() {
-                    return Ok(None);
-                }
-                base64::engine::general_purpose::STANDARD
-                    .decode(compact)
-                    .map(|bytes| Some(Pdf(bytes)))
-                    .map_err(serde::de::Error::custom)
+            if compact.is_empty() {
+                return None;
             }
-        }
+            PDF_ENGINE.decode(compact).ok().map(Pdf)
+        }))
     }
 
     /// Generates a deserializer for the `<wrapper><child/>…</wrapper>` list
@@ -1709,16 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn bank_transaction_rejects_missing_technical_flag() {
-        let body = b"<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
-            <id>1</id><bankszamla>111</bankszamla><erteknap>2026-07-04</erteknap>\
-            <irany>BE</irany><osszeg>1000</osszeg><devizanem>HUF</devizanem>\
-            </banktranz>";
-        assert!(Document::parse(body).is_err());
-    }
-
-    #[test]
-    fn bank_transaction_requires_valid_technical_flag() {
+    fn technical_flag_reads_leniently_but_must_be_a_boolean() {
         for (value, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
             let body = format!(
                 "<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
@@ -1731,13 +1872,31 @@ mod tests {
             else {
                 panic!("expected bank transaction");
             };
-            assert_eq!(transaction.technical, expected);
+            assert_eq!(transaction.technical, Some(expected));
         }
 
+        // Absent or empty is content: the flag reads as absent, and only the
+        // strict parse minds.
         let body = b"<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
             <id>1</id><bankszamla>111</bankszamla><erteknap>2026-07-04</erteknap>\
             <irany>BE</irany><technikai/><osszeg>1000</osszeg><devizanem>HUF</devizanem>\
             </banktranz>";
+        let Document::BankTransaction(transaction) = Document::parse(body).expect("parses") else {
+            panic!("expected bank transaction");
+        };
+        assert_eq!(transaction.technical, None);
+        assert_eq!(
+            transaction
+                .validate()
+                .expect_err("the XSD requires it")
+                .to_string(),
+            "missing required bank transaction technikai"
+        );
+
+        // A token that is not a boolean is shape: the element is not what
+        // the document says it is.
+        let body = b"<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
+            <id>1</id><technikai>maybe</technikai></banktranz>";
         assert!(Document::parse(body).is_err());
     }
 
@@ -1762,7 +1921,7 @@ mod tests {
             else {
                 panic!("expected bank transaction");
             };
-            assert_eq!(transaction.value_date, jiff::civil::date(2026, 7, 4));
+            assert_eq!(transaction.value_date, Some(jiff::civil::date(2026, 7, 4)));
         }
 
         let body =

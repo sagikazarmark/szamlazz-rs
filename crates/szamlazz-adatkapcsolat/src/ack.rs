@@ -35,8 +35,10 @@ impl ControlCode {
     }
 }
 
-/// Which invoice stream an [`InvoiceAck`] answers; selects the response root
-/// element.
+/// Which invoice stream a pushed invoice arrived on: selects the response root
+/// element an [`InvoiceAck`] renders and the XSD
+/// [`InvoiceDocument::validate`](crate::InvoiceDocument::validate) checks
+/// against (`szamla.xsd` or `szamlabe.xsd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvoiceDirection {

@@ -310,3 +310,41 @@ async fn bank_transactions_and_receipt_batches() {
         ]
     );
 }
+
+// The parse no longer refuses an empty batch or a transaction without a
+// value date; the archiver must take both without a panic.
+#[tokio::test]
+async fn archives_content_the_parse_no_longer_refuses() {
+    let op = memory();
+    let archiver = Archiver::new(op.clone());
+
+    let Document::Receipts(empty) =
+        Document::parse(br#"<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv"/>"#)
+            .expect("parse")
+    else {
+        panic!("expected receipts");
+    };
+    let _ = archiver
+        .receipts(empty)
+        .await
+        .expect("an empty batch has nothing to archive");
+    assert!(keys(&op).await.is_empty());
+
+    let Document::BankTransaction(undated) = Document::parse(
+        br#"<banktranz xmlns="http://www.szamlazz.hu/banktranz"><id>5</id></banktranz>"#,
+    )
+    .expect("parse") else {
+        panic!("expected bank transaction");
+    };
+    let _ = archiver
+        .bank_transaction(undated)
+        .await
+        .expect("archive an undated transaction");
+    assert_eq!(
+        keys(&op).await,
+        vec![
+            "bank-transactions/undated/5.json".to_owned(),
+            "bank-transactions/undated/5.xml".to_owned(),
+        ]
+    );
+}

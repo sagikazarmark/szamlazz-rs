@@ -229,7 +229,7 @@ impl Archiver {
     ) -> Result<(), ArchiveError> {
         let kind = DocumentKind::BankTransaction;
         let name = transaction.id.to_string();
-        let date = Some(transaction.value_date);
+        let date = transaction.value_date;
 
         if self.save_xml
             && let Some(xml) = transaction.raw_xml()
@@ -267,7 +267,9 @@ impl Archiver {
     }
 
     /// Archives the exact receipt-batch delivery once. Individual receipts
-    /// still get their own typed JSON files.
+    /// still get their own typed JSON files. A batch without receipts —
+    /// which the parse accepts — has nothing to name the file by and nothing
+    /// to archive.
     async fn archive_receipt_batch(&self, batch: &ReceiptBatch) -> Result<(), ArchiveError> {
         if !self.save_xml {
             return Ok(());
@@ -275,18 +277,10 @@ impl Archiver {
         let Some(xml) = batch.raw_xml() else {
             return Ok(());
         };
-        let first_id = batch
-            .receipts
-            .iter()
-            .map(|receipt| receipt.info.id)
-            .min()
-            .expect("validated receipt batches are non-empty");
-        let last_id = batch
-            .receipts
-            .iter()
-            .map(|receipt| receipt.info.id)
-            .max()
-            .expect("validated receipt batches are non-empty");
+        let ids = batch.receipts.iter().map(|receipt| receipt.info.id);
+        let (Some(first_id), Some(last_id)) = (ids.clone().min(), ids.max()) else {
+            return Ok(());
+        };
         let date = batch
             .receipts
             .iter()
