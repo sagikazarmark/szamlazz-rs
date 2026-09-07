@@ -488,13 +488,16 @@ is `unavailable` with nothing sent, raised after the answers that need no send.
   After an additive change, regenerate with `UPDATE_JOURNAL_FIXTURES=1 cargo test -p restate-szamlazz journal` — it
   writes missing fixtures and archives a differing one beside the new shape — and review the diff as a contract
   change. Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on
-  upgrade.
-- `cargo test -p restate-szamlazz -- --ignored e2e` runs `tests/service.rs`: the `Szamlazz.Order` Virtual Object
-  and `Szamlazz.Agent` end to end against a real Restate server in docker (1.7.8, with the experimental `vqueues`,
-  `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock standing in
-  for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued, `Idempotency-Key`
-  replay, 152 → reconciled, storno → reversed (the storno mock matched on `<teljesitesDatum>` equal to the original's
-  `telj`, no `<keltDatum>`) → stale create → `reissue`, a `telj`-less original answered 503 `unavailable` naming the
+  upgrade. The same module's leak guard builds every journaled type around an account whose agent key is a
+  sentinel — the `account` entry through the static resolver, the two `Transport` write outcomes through a gateway
+  opened with the sentinel credentials — and asserts the sentinel serialises into none of them.
+- `cargo test -p restate-szamlazz --test service -- --ignored` runs `tests/service.rs`: the `Szamlazz.Order`
+  Virtual Object and `Szamlazz.Agent` end to end against a real Restate server (1.7.8, with the experimental
+  `vqueues`, `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock
+  standing in for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued,
+  `Idempotency-Key` replay, 152 → reconciled, storno → reversed (the storno mock matched on `<teljesitesDatum>`
+  equal to the original's `telj`, no `<keltDatum>`) → stale create → `reissue`, a `telj`-less original answered
+  503 `unavailable` naming the
   order, kind and storno external id with only the verify journaled and the storno mock `expect(0)` — after a
   `telj`-less document of another order → `conflict{not_managed}`, a `telj`-less proforma → `rejected{not_stornoable}`
   and a `telj`-less reversed invoice → `reversed` with its storno number — a storno whose first reply is lost
@@ -502,7 +505,9 @@ is `unavailable` with nothing sent, raised after the answers that need no send.
   external reversal, proforma auto-link and `consumed` in `get`, `options.proforma: {number}` checked like every
   found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
   the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
-  order's → `issued` with `dijbekeroSzamlaszam` on the wire), a create with a misspelt `options.reissue` answered
+  order's → `issued` with `dijbekeroSzamlaszam` on the wire), `correct_invoice` issuing a corrective under its
+  `correction_id` with the base named on the wire and finding it again, `delete_proforma` deleting the order's live
+  proforma after one send and answering `absent` once it is gone, a create with a misspelt `options.reissue` answered
   400 `invalid_input` naming the field with nothing journaled and zero szamlazz.hu requests, a create under an
   untrimmed key (a `%20` before or after the order number) answered 400 `invalid_input` naming the rule with nothing
   journaled and zero szamlazz.hu requests, an exhausted create step answering a structured
@@ -534,13 +539,33 @@ is `unavailable` with nothing sent, raised after the answers that need no send.
   `valid: false` as a 200, and a malformed tax number answered 400 `invalid_input` naming it with nothing journaled
   and zero szamlazz.hu requests; an account
   change between two executions not reaching the running invocation (the journaled `Account` wins); a credential
-  rotation between two executions picked up by the second with the `account` entry byte-identical; and, last, that
+  rotation between two executions picked up by the second with the `account` entry byte-identical; that
   no agent key of the run appears in the hex-decoded `raw` of any journal entry of any invocation, nor in any
-  `completion_failure`, while the same scan finds the positive control's sentinel. The harness calls through
+  `completion_failure`, while the same scan finds the positive control's sentinel; and, last, the **run-name pin**:
+  `RUN_NAMES` in the harness lists, per handler of both services, the ordered `ctx.run` names of every path it
+  journals, and the scenario asserts over every invocation the server holds that its run sequence is a prefix of
+  one of its handler's paths, that every handler seen is pinned and that every path was walked in full — a renamed,
+  inserted, reordered or dropped step strands every in-flight invocation on replay (ADR 0005) and fails here
+  instead. The harness calls through
   `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses fault bodies and reads
-  `sys_journal` / `sys_invocation` through the SQL introspection API. It skips with a message when the docker
-  daemon is not reachable; set `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server (which must
-  run with the three flags).
+  `sys_journal` / `sys_invocation` through the SQL introspection API.
+- The same command runs the **protocol-v7 canary** (`e2e_check_account_without_protocol_v7`), on a server of its
+  own with `protocol_v7` off: the ingress accepts the scoped path and keys the invocation by the scope, but the SDK
+  sees none — a scoped `check_account` answers `scope: null` with the account on the single-account deployment
+  and `unknown_account` on the multi-account one. What the deploy-time check in the endpoint README looks for,
+  provoked once.
+- **Where the server comes from.** The harness decides once from the environment: `RESTATE_ADMIN_URL` /
+  `RESTATE_INGRESS_URL` reuse a running server with the three flags (the main suite only); `RESTATE_SERVER_BIN`
+  names a `restate-server` binary the harness spawns on the loopback, one process per suite, on its own ports —
+  what CI uses; otherwise a docker daemon runs a container of the image, reached at `host.docker.internal`
+  (`RESTATE_ENDPOINT_HOST` overrides the host in every mode). With none of them the suite skips with a message —
+  and **fails** when `CI` is set, so a CI run never passes by skipping.
+- **What CI runs.** `dagger check` — the `Dagger` workflow on every pull request — runs the `rust` module's
+  `build`, `test` (default features), `clippy`, `doc`, `audit` and `fmt` checks and the workspace's own `ci`
+  module (`.dagger/modules/ci`): `ci:test` is `cargo test --workspace --all-features --locked` (so the `schemars`
+  contract tests and the `szamlazz-adatkapcsolat` archiver tests run), `ci:end-to-end` is the ignored suite above
+  with `restate-server` copied out of the Restate image and `CI` set. `dagger check ci:end-to-end` runs it locally
+  the same way.
 - The go-live checklist in [`docs/szamlazz-hu-behaviour.md`](../../docs/szamlazz-hu-behaviour.md)
   re-establishes the verified szamlazz.hu facts on a target account before the worker is enabled; every step
   issues real documents there.

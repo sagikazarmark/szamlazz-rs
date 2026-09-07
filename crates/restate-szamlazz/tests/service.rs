@@ -1,17 +1,20 @@
 //! End-to-end tests of the `Szamlazz.Order` Virtual Object and the
-//! `Szamlazz.Agent` service against a real Restate server (docker) with
-//! wiremock standing in for szamlazz.hu.
+//! `Szamlazz.Agent` service against a real Restate server with wiremock
+//! standing in for szamlazz.hu.
 //!
-//! The end-to-end test is ignored by default:
+//! The two end-to-end tests are ignored by default:
 //! `cargo test -p restate-szamlazz --test service -- --ignored`.
-//! It skips (with a message) when the docker daemon is not reachable. Set
-//! `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` to reuse a running server
-//! instead of starting a container; it must run with the three experimental
-//! flags ([`SERVER_FLAGS`]) — `compose.yaml` sets them. The tests of the
-//! harness's own document helpers at the end of the file need only wiremock
-//! and run un-ignored.
+//! The server comes from the environment, decided once ([`server_gate`]):
+//! `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` reuse a running server (with the
+//! three experimental flags, [`SERVER_FLAGS`] — `compose.yaml` sets them; the
+//! main suite only), `RESTATE_SERVER_BIN` names a `restate-server` binary the
+//! harness spawns on the loopback (what the Dagger check does), otherwise a
+//! docker daemon runs a container of [`IMAGE`]. With none of them the suite
+//! skips with a message — and fails when `CI` is set, since a skipped run in
+//! CI proves nothing. The tests of the harness's own helpers at the end of
+//! the file need only wiremock and run un-ignored.
 //!
-//! The run has two phases on one Restate server. The first registers a
+//! The main run has two phases on one Restate server. The first registers a
 //! **single-account** deployment (the static resolver's `[account]` behind a
 //! scripted resolver and store) and runs the order protocol unscoped. The
 //! second performs the documented single → multi **flag day** — private,
@@ -23,7 +26,9 @@
 //! invocations, credential rotation and account changes between executions,
 //! an order Restate has no memory of, and — over the hex-decoded `raw` of
 //! every journal entry of every invocation in the run — that no agent key
-//! was ever journaled.
+//! was ever journaled; and, last, that every invocation's `ctx.run` names are
+//! a prefix of its handler's pinned path ([`RUN_NAMES`]). The second test is
+//! the protocol-v7 canary on a server of its own without the flag.
 //!
 //! The harness calls through the `/restate/call/…` and
 //! `/restate/scope/{scope}/call/…` ingress paths, reports the invocation id
@@ -33,10 +38,13 @@
 //! stated per document ([`Harness::holds`] and its siblings), so one `<szamla>`
 //! body answers every selector the document is reachable by (design §11).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::fs;
 use std::net::TcpListener;
-use std::process::Command;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
@@ -80,8 +88,6 @@ const AGENT_KEYS: [&str; 3] = [AGENT_KEY, KEY_B, KEY_B_V2];
 const BANK_ACCOUNT: &str = "11111111-22222222-33333333";
 const BANK_ACCOUNT_CHANGED: &str = "44444444-55555555-66666666";
 const IMAGE: &str = "docker.restate.dev/restatedev/restate:1.7.8";
-const INGRESS_PORT: u16 = 18080;
-const ADMIN_PORT: u16 = 19070;
 
 // ----- szamlazz.hu fixtures (mirroring tests/gateway.rs) --------------------
 
@@ -439,6 +445,92 @@ fn docker_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+/// Where the suite's Restate server comes from, decided from the environment
+/// before anything starts ([`server_gate`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Launcher {
+    /// `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL`: a running server, with the
+    /// three flags on ([`SERVER_FLAGS`]); nothing is started or stopped.
+    Reuse { admin: String, ingress: String },
+    /// `RESTATE_SERVER_BIN`: a `restate-server` binary the harness spawns on
+    /// this host, on the ports the server spec names — what the Dagger check
+    /// uses, where there is no docker.
+    Binary(PathBuf),
+    /// The docker daemon: a container of [`IMAGE`].
+    Docker,
+}
+
+/// The server gate, the decision behind [`launcher_or_skip`]: `reuse` first,
+/// then `binary`, then docker (probed only when neither is given); with none
+/// of them `Ok(None)` — a skip — unless `ci` is set (non-empty), in which
+/// case the suite must not pass by skipping and the answer is the failure
+/// message, naming every way to provide a server.
+fn server_gate(
+    reuse: Option<(String, String)>,
+    binary: Option<PathBuf>,
+    docker_available: impl FnOnce() -> bool,
+    ci: Option<&OsStr>,
+) -> Result<Option<Launcher>, String> {
+    if let Some((admin, ingress)) = reuse {
+        return Ok(Some(Launcher::Reuse { admin, ingress }));
+    }
+    if let Some(binary) = binary {
+        return Ok(Some(Launcher::Binary(binary)));
+    }
+    if docker_available() {
+        return Ok(Some(Launcher::Docker));
+    }
+    if ci.is_some_and(|value| !value.is_empty()) {
+        return Err(
+            "no Restate server to run the end-to-end suite against, and CI is set: a skipped run \
+             proves nothing. Provide one by setting RESTATE_SERVER_BIN to a restate-server binary \
+             (spawned on this host), by making a docker daemon reachable (a container of the \
+             Restate image), or by setting RESTATE_ADMIN_URL and RESTATE_INGRESS_URL to a running \
+             server with the three experimental flags."
+                .to_owned(),
+        );
+    }
+    Ok(None)
+}
+
+/// Whether the suite may reuse a server from the environment: the main suite
+/// may, a suite that needs a server of its own shape (without a flag) may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reuse {
+    Allowed,
+    Never,
+}
+
+/// The launcher the environment provides, or `None` after printing why the
+/// suite skips; panics with the gate's message under `CI`.
+fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
+    let reusable = match reuse {
+        Reuse::Allowed => std::env::var("RESTATE_ADMIN_URL")
+            .ok()
+            .zip(std::env::var("RESTATE_INGRESS_URL").ok()),
+        Reuse::Never => None,
+    };
+    let binary = std::env::var_os("RESTATE_SERVER_BIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    match server_gate(
+        reusable,
+        binary,
+        docker_available,
+        std::env::var_os("CI").as_deref(),
+    ) {
+        Ok(Some(launcher)) => Some(launcher),
+        Ok(None) => {
+            eprintln!(
+                "skipping: no Restate server (no docker daemon, no RESTATE_SERVER_BIN, no \
+                 RESTATE_ADMIN_URL / RESTATE_INGRESS_URL)"
+            );
+            None
+        }
+        Err(message) => panic!("{message}"),
+    }
+}
+
 /// The `max_attempts` of `handler`'s invocation retry policy as the service
 /// discovers it — what the deployment registered with the server, read from
 /// the same source rather than copied.
@@ -452,36 +544,111 @@ fn discovered_max_attempts<S: Discoverable>(handler: &str) -> u64 {
         .unwrap_or_else(|| panic!("{handler} pins no max_attempts"))
 }
 
-/// The experimental server flags multi-account mode depends on (design §4,
-/// ADR 0006): vqueues, protocol v7 (below it the SDK sees no scope) and
-/// scoped Virtual Objects. Set on the container and expected of a server
-/// reused through the environment.
-const SERVER_FLAGS: [&str; 3] = [
-    "RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true",
-    "RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true",
-    "RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true",
+/// The three experimental server features multi-account mode depends on
+/// (design §4, ADR 0006) — vqueues, protocol v7 (below it the SDK sees no
+/// scope) and scoped Virtual Objects — as `/version` reports each, with the
+/// environment flag that enables it.
+const FEATURES: [(&str, &str); 3] = [
+    ("vqueues", "RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true"),
+    (
+        "protocol_v7",
+        "RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true",
+    ),
+    (
+        "scoped_virtual_objects",
+        "RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true",
+    ),
 ];
 
-/// A Restate server: an existing one (from the environment) or a container
-/// removed on drop.
+/// The flags of the main suite's server: all three. Set on the server the
+/// harness starts and expected of one reused through the environment.
+const SERVER_FLAGS: [&str; 3] = [FEATURES[0].1, FEATURES[1].1, FEATURES[2].1];
+
+/// The shape of a server the harness starts: its flags and the host ports of
+/// its ingress and admin APIs (and, for a spawned binary, of its node port).
+/// Two suites in one test binary run concurrently, so each has its own.
+struct ServerSpec {
+    flags: &'static [&'static str],
+    ingress_port: u16,
+    admin_port: u16,
+    node_port: u16,
+}
+
+/// The main suite's server: the three flags.
+const MAIN_SERVER: ServerSpec = ServerSpec {
+    flags: &SERVER_FLAGS,
+    ingress_port: 18080,
+    admin_port: 19070,
+    node_port: 15122,
+};
+
+/// The protocol-v7 canary's server: vqueues and scoped Virtual Objects on,
+/// protocol v7 off — a deployment that forgot the one flag the scope needs to
+/// reach the SDK. Its own ports: the two suites run concurrently.
+const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
+    flags: &[FEATURES[0].1, FEATURES[2].1],
+    ingress_port: 18081,
+    admin_port: 19071,
+    node_port: 15222,
+};
+
+/// A Restate server: an existing one (from the environment), a `restate-server`
+/// process, or a container — the last two stopped on drop.
 struct Restate {
     admin: String,
     ingress: String,
+    /// The flags the server runs with — what `/version` must report.
+    flags: &'static [&'static str],
+    /// The host name under which the server reaches this process's endpoint.
+    endpoint_host: String,
     container: Option<String>,
+    process: Option<Child>,
+    /// The spawned server's base directory, removed on drop unless the test
+    /// is failing — then it stays, with `restate-server.log` in it.
+    base_dir: Option<PathBuf>,
+}
+
+impl Launcher {
+    /// The server of `spec`'s shape: started from the binary or the image, or
+    /// the running one taken as it is (checked against `spec`'s flags like
+    /// the others — the caller reuses only where the shape is the main
+    /// suite's).
+    fn launch(self, spec: &ServerSpec) -> Restate {
+        let endpoint_host = |default: &str| {
+            std::env::var("RESTATE_ENDPOINT_HOST").unwrap_or_else(|_| default.to_owned())
+        };
+        match self {
+            Self::Reuse { admin, ingress } => {
+                let mut restate =
+                    Restate::on_host_ports(spec, endpoint_host("host.docker.internal"));
+                restate.admin = admin;
+                restate.ingress = ingress;
+                restate
+            }
+            Self::Binary(binary) => Restate::spawn(&binary, spec, endpoint_host("127.0.0.1")),
+            Self::Docker => Restate::container(spec, endpoint_host("host.docker.internal")),
+        }
+    }
 }
 
 impl Restate {
-    fn start() -> Self {
-        if let (Ok(admin), Ok(ingress)) = (
-            std::env::var("RESTATE_ADMIN_URL"),
-            std::env::var("RESTATE_INGRESS_URL"),
-        ) {
-            return Self {
-                admin,
-                ingress,
-                container: None,
-            };
+    /// A server reachable on `spec`'s host ports with `spec`'s flags, running
+    /// nothing of its own yet: what every launcher fills in.
+    fn on_host_ports(spec: &ServerSpec, endpoint_host: String) -> Self {
+        Self {
+            admin: format!("http://127.0.0.1:{}", spec.admin_port),
+            ingress: format!("http://127.0.0.1:{}", spec.ingress_port),
+            flags: spec.flags,
+            endpoint_host,
+            container: None,
+            process: None,
+            base_dir: None,
         }
+    }
+
+    /// A container of [`IMAGE`] with `spec`'s flags, its ingress and admin
+    /// ports published on `spec`'s host ports.
+    fn container(spec: &ServerSpec, endpoint_host: String) -> Self {
         let mut args = vec![
             "run".to_owned(),
             "--rm".to_owned(),
@@ -490,13 +657,13 @@ impl Restate {
             // a Linux daemon needs the alias to reach the endpoint.
             "--add-host=host.docker.internal:host-gateway".to_owned(),
             "-p".to_owned(),
-            format!("{INGRESS_PORT}:8080"),
+            format!("{}:8080", spec.ingress_port),
             "-p".to_owned(),
-            format!("{ADMIN_PORT}:9070"),
+            format!("{}:9070", spec.admin_port),
         ];
-        for flag in SERVER_FLAGS {
+        for flag in spec.flags {
             args.push("-e".to_owned());
-            args.push(flag.to_owned());
+            args.push((*flag).to_owned());
         }
         args.push(IMAGE.to_owned());
         let output = Command::new("docker")
@@ -509,11 +676,66 @@ impl Restate {
             String::from_utf8_lossy(&output.stderr)
         );
         let container = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        Self {
-            admin: format!("http://127.0.0.1:{ADMIN_PORT}"),
-            ingress: format!("http://127.0.0.1:{INGRESS_PORT}"),
-            container: Some(container),
+        let mut restate = Self::on_host_ports(spec, endpoint_host);
+        restate.container = Some(container);
+        restate
+    }
+
+    /// A `restate-server` process from `binary` with `spec`'s flags, bound to
+    /// the loopback on `spec`'s ports, its data and log under a directory of
+    /// its own in the temp dir. Configured through Restate's environment
+    /// (`RESTATE_<SECTION>__<KEY>`), so no config file is written.
+    fn spawn(binary: &PathBuf, spec: &ServerSpec, endpoint_host: String) -> Self {
+        let base_dir = std::env::temp_dir().join(format!(
+            "restate-szamlazz-e2e-{}-{}",
+            std::process::id(),
+            spec.admin_port
+        ));
+        fs::create_dir_all(&base_dir).expect("the server's base dir");
+        let log = fs::File::create(base_dir.join("restate-server.log")).expect("the server log");
+        let mut command = Command::new(binary);
+        command
+            .arg("--no-logo")
+            .env("RESTATE_BASE_DIR", &base_dir)
+            .env("RESTATE_NODE_NAME", format!("e2e-{}", spec.admin_port))
+            .env("RESTATE_LISTEN_MODE", "tcp")
+            .env(
+                "RESTATE_BIND_ADDRESS",
+                format!("127.0.0.1:{}", spec.node_port),
+            )
+            .env(
+                "RESTATE_ADVERTISED_ADDRESS",
+                format!("http://127.0.0.1:{}", spec.node_port),
+            )
+            .env(
+                "RESTATE_INGRESS__BIND_ADDRESS",
+                format!("127.0.0.1:{}", spec.ingress_port),
+            )
+            .env(
+                "RESTATE_ADMIN__BIND_ADDRESS",
+                format!("127.0.0.1:{}", spec.admin_port),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().expect("the server log")))
+            .stderr(Stdio::from(log));
+        for flag in spec.flags {
+            let (name, value) = flag.split_once('=').expect("NAME=value");
+            command.env(name, value);
         }
+        let process = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn {}: {error}", binary.display()));
+        eprintln!(
+            "restate-server (pid {}) on admin {} / ingress {}, base dir {}",
+            process.id(),
+            spec.admin_port,
+            spec.ingress_port,
+            base_dir.display()
+        );
+        let mut restate = Self::on_host_ports(spec, endpoint_host);
+        restate.process = Some(process);
+        restate.base_dir = Some(base_dir);
+        restate
     }
 }
 
@@ -523,6 +745,20 @@ impl Drop for Restate {
             let _ = Command::new("docker")
                 .args(["rm", "-f", container])
                 .output();
+        }
+        if let Some(process) = &mut self.process {
+            let _ = process.kill();
+            let _ = process.wait();
+        }
+        if let Some(base_dir) = &self.base_dir {
+            if std::thread::panicking() {
+                eprintln!(
+                    "restate-server's base dir is kept for inspection: {}",
+                    base_dir.display()
+                );
+            } else {
+                let _ = fs::remove_dir_all(base_dir);
+            }
         }
     }
 }
@@ -641,6 +877,229 @@ fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a Journal
         .find(|entry| entry.entry_type == "Notification: Run")
 }
 
+/// One pinned path of [`RUN_NAMES`]: a handler of a service and the ordered
+/// `ctx.run` names it journals on that path.
+struct RunPath {
+    service: &'static str,
+    handler: &'static str,
+    path: &'static [&'static str],
+}
+
+impl RunPath {
+    const fn new(
+        service: &'static str,
+        handler: &'static str,
+        path: &'static [&'static str],
+    ) -> Self {
+        Self {
+            service,
+            handler,
+            path,
+        }
+    }
+}
+
+/// The durable steps of every handler of both services, in order, as the
+/// `ctx.run` names they journal — the part of the journal contract the type
+/// fixtures (`tests/journal/`) do not cover. An in-flight invocation replays
+/// the *previous* deployment's entries by name and position (ADR 0005), so a
+/// renamed, inserted or reordered step strands it; this table makes that a
+/// failing test instead of a killed invocation. A `{number}` / `{prefix}`
+/// segment is a parameter ([`run_pattern`]); a handler with two rows has two
+/// paths. The pin holds when every observed sequence of a handler is a prefix
+/// of one of its paths (a handler that answers early journals the first steps
+/// only — [`is_prefix_of_path`]) and every path is observed in full at least
+/// once in the run. The parameter of a parametrized name is pinned by its
+/// prefix only: a number that itself began with a pinned stem (`storno-1`)
+/// would read as the longer pattern — none of the suite's do.
+const RUN_NAMES: &[RunPath] = &[
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_proforma",
+        &[
+            "namespace",
+            "account",
+            "exclusivity-invoice",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "lookup-proforma",
+            "create-proforma",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_invoice",
+        &[
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_invoice",
+        &[
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "verify-proforma-{number}",
+            "lookup-invoice",
+            "create-invoice",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_prepayment",
+        &[
+            "namespace",
+            "account",
+            "exclusivity-invoice",
+            "exclusivity-final",
+            "lookup-prepayment",
+            "create-prepayment",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_final",
+        &[
+            "namespace",
+            "account",
+            "prepayment-for-final",
+            "lookup-final",
+            "create-final",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "correct_invoice",
+        &[
+            "namespace",
+            "account",
+            "verify-base-{number}",
+            "lookup-corrective",
+            "create-corrective",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "storno_invoice",
+        &[
+            "namespace",
+            "account",
+            "verify-storno-{number}",
+            "lookup-storno-{number}",
+            "storno-{number}",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "storno_invoice",
+        &[
+            "namespace",
+            "account",
+            "verify-storno-{number}",
+            "hint-storno-{number}",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "delete_proforma",
+        &[
+            "namespace",
+            "account",
+            "proforma-for-delete",
+            "delete-proforma-{number}",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "get",
+        &[
+            "namespace",
+            "account",
+            "get-proforma",
+            "get-invoice",
+            "get-prepayment",
+            "get-final",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Agent",
+        "check_account",
+        &["namespace", "account", "probe"],
+    ),
+    RunPath::new(
+        "Szamlazz.Agent",
+        "query",
+        &["namespace", "account", "query"],
+    ),
+    RunPath::new(
+        "Szamlazz.Agent",
+        "query_taxpayer",
+        &["namespace", "account", "taxpayer-{prefix}"],
+    ),
+    RunPath::new(
+        "Szamlazz.Agent",
+        "set_payments",
+        &["namespace", "account", "set-payments-{number}"],
+    ),
+    RunPath::new(
+        "Szamlazz.Agent",
+        "storno",
+        &[
+            "namespace",
+            "account",
+            "verify-{number}",
+            "lookup-storno-{number}",
+            "storno-{number}",
+        ],
+    ),
+];
+
+/// The parametrized run names of [`RUN_NAMES`] — every `{…}` pattern — by
+/// the prefix that names the step, longest prefix first, so that a name is
+/// read as the most specific pattern it starts with: `verify-storno-…` is
+/// `verify-storno-{number}`, never `verify-{number}`. Derived from the table,
+/// so the two cannot disagree.
+static PARAMETRIZED_RUNS: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
+    let mut patterns: Vec<(&str, &str)> = RUN_NAMES
+        .iter()
+        .flat_map(|row| row.path.iter())
+        .filter_map(|pattern| {
+            pattern
+                .split_once('{')
+                .map(|(prefix, _)| (prefix, *pattern))
+        })
+        .collect();
+    patterns.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
+    patterns.dedup();
+    patterns
+});
+
+/// The [`RUN_NAMES`] pattern of a journaled run name: a parametrized name by
+/// its prefix ([`PARAMETRIZED_RUNS`]), any other name as it is.
+fn run_pattern(name: &str) -> String {
+    PARAMETRIZED_RUNS
+        .iter()
+        .find(|(prefix, _)| name.starts_with(prefix) && name.len() > prefix.len())
+        .map_or_else(|| name.to_owned(), |(_, pattern)| (*pattern).to_owned())
+}
+
+/// Whether `observed` (patterns, in journal order) is a prefix of `path`.
+fn is_prefix_of_path(observed: &[String], path: &[&str]) -> bool {
+    observed.len() <= path.len()
+        && observed
+            .iter()
+            .zip(path)
+            .all(|(seen, expected)| seen == expected)
+}
+
 /// What [`Harness::watch`] saw of an invocation's attempts while it ran.
 #[derive(Debug, Default)]
 struct Retries {
@@ -657,12 +1116,14 @@ struct Invocation {
     status: String,
     completion_failure: Option<String>,
     scope: Option<String>,
+    service: String,
     handler: String,
 }
 
 impl Invocation {
     /// The columns every `sys_invocation` query of the harness selects.
-    const COLUMNS: &str = "status, completion_failure, scope, target_handler_name";
+    const COLUMNS: &str =
+        "status, completion_failure, scope, target_service_name, target_handler_name";
 
     /// One `sys_invocation` row with [`Self::COLUMNS`].
     fn from_row(row: &Value) -> Self {
@@ -670,6 +1131,10 @@ impl Invocation {
             status: row["status"].as_str().unwrap_or_default().to_owned(),
             completion_failure: row["completion_failure"].as_str().map(str::to_owned),
             scope: row["scope"].as_str().map(str::to_owned),
+            service: row["target_service_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
             handler: row["target_handler_name"]
                 .as_str()
                 .unwrap_or_default()
@@ -1004,8 +1469,10 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start() -> Self {
-        let restate = Restate::start();
+    /// The harness on `restate`: waits for its admin API, checks that
+    /// `/version` reports exactly the features the server's flags enable, and
+    /// serves and registers the single-account deployment.
+    async fn start(restate: Restate) -> Self {
         let mock = MockServer::start().await;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
@@ -1027,8 +1494,9 @@ impl Harness {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // The server must run with the three experimental flags; a reused
-        // server (from the environment) is checked the same way.
+        // The server reports the features its flags enable and no other: the
+        // main suite needs all three, the protocol-v7 canary needs one off; a
+        // reused server (from the environment) is checked the same way.
         let version: Value = http
             .get(format!("{}/version", restate.admin))
             .send()
@@ -1037,11 +1505,13 @@ impl Harness {
             .json()
             .await
             .expect("version json");
-        for feature in ["vqueues", "protocol_v7", "scoped_virtual_objects"] {
+        for (feature, flag) in FEATURES {
+            let expected = restate.flags.contains(&flag);
             assert_eq!(
                 version["features"][feature],
-                Value::Bool(true),
-                "the Restate server must run with {feature} enabled: {version}"
+                Value::Bool(expected),
+                "the Restate server must run with {feature} {}: {version}",
+                if expected { "enabled" } else { "disabled" }
             );
         }
 
@@ -1072,8 +1542,10 @@ impl Harness {
                 .await;
         });
 
-        let deployment =
-            json!({ "uri": format!("http://host.docker.internal:{port}"), "force": true });
+        let deployment = json!({
+            "uri": format!("http://{}:{port}", self.restate.endpoint_host),
+            "force": true,
+        });
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let response = self
@@ -1541,13 +2013,12 @@ impl Harness {
 // ----- scenarios ---------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "needs docker"]
+#[ignore = "needs a Restate server: docker, RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
 async fn e2e_order_protocol() {
-    if !docker_available() {
-        eprintln!("skipping: docker daemon not available");
+    let Some(launcher) = launcher_or_skip(Reuse::Allowed) else {
         return;
-    }
-    let mut h = Harness::start().await;
+    };
+    let mut h = Harness::start(launcher.launch(&MAIN_SERVER)).await;
 
     // Phase 1: the single-account deployment, unscoped.
     issued_then_already_issued(&h).await;
@@ -1561,6 +2032,8 @@ async fn e2e_order_protocol() {
     lost_create_reply_is_settled_by_the_immediate_requery(&h).await;
     proforma_auto_link_and_consumed(&h).await;
     proforma_by_number_is_checked_like_every_found_document(&h).await;
+    corrective_is_issued_under_its_correction_id(&h).await;
+    proforma_is_deleted_by_the_orders_handler(&h).await;
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_takes_no_proforma_option(&h).await;
@@ -1595,6 +2068,82 @@ async fn e2e_order_protocol() {
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
     no_agent_key_in_any_journal_of_the_run(&h).await;
+    every_handler_journals_its_pinned_run_names(&h).await;
+}
+
+/// The deploy-time canary for protocol v7 (design §4, ADR 0006), provoked:
+/// on a server without `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7` the ingress
+/// accepts a scoped path — it does not refuse one for the flag — and the
+/// server keys the invocation by the scope (`sys_invocation.scope`), but the
+/// SDK sees no scope. So a scoped `check_account` reports `scope: null`: on
+/// the single-account deployment with its account and `credentials: ok` as a
+/// 200 — the signal a deploy pipeline reads, since the worker has no
+/// per-request way to tell "unscoped" from "scope not forwarded" — and on the
+/// multi-account deployment as `unknown_account` naming the unscoped case,
+/// with nothing sent: every scoped call fails closed, no account is reached
+/// under the wrong scope. A server of its own, on its own ports; never a
+/// reused one, whose flags are the main suite's.
+#[tokio::test]
+#[ignore = "needs a Restate server: docker or RESTATE_SERVER_BIN"]
+async fn e2e_check_account_without_protocol_v7() {
+    let Some(launcher) = launcher_or_skip(Reuse::Never) else {
+        return;
+    };
+    let mut h = Harness::start(launcher.launch(&WITHOUT_PROTOCOL_V7)).await;
+
+    // The single-account deployment: the scoped probe answers the account
+    // and reports the scope it saw — none.
+    probe_with_key(AGENT_KEY)
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h.check_account(Some("acme")).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.body,
+        json!({
+            "scope": null,
+            "account": { "id": "acct", "mode": "test", "supplier_id": SUPPLIER },
+            "namespace": "acct",
+            "credentials": { "state": "ok" },
+        }),
+        "the canary: a scoped call reported without its scope"
+    );
+    assert_eq!(h.requests_seen().await, 1, "one probe query, nothing else");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "probe"]
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.handler, "check_account");
+    // The hazard, in one row: the server keyed the invocation by the scope
+    // (`sys_invocation.scope`, the partition key) and the handler never saw
+    // it — the response above is the only place the discrepancy shows.
+    assert_eq!(
+        invocation.scope.as_deref(),
+        Some("acme"),
+        "the server keyed the invocation by the scope it did not forward: {invocation:?}"
+    );
+
+    // The multi-account deployment on the same server: the scope selects no
+    // account because none arrives — `unknown_account`, nothing sent.
+    h.switch_to_multi_account().await;
+    h.reset().await;
+    let reply = h.check_account(Some("acme")).await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert!(fault.message.contains("unscoped"), "{fault:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account"]
+    );
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+    eprintln!(
+        "(canary) without protocol v7: scoped check_account → scope: null on the single-account deployment, unknown_account on the multi-account one: pass"
+    );
 }
 
 /// (i) create ⇒ `issued`; a second call with a **new** key ⇒
@@ -2453,6 +3002,119 @@ async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
     assert_eq!(invoice["invoice_number"], "SZ-30");
     eprintln!(
         "(vii-b) proforma by number: teszt mismatch → account_mismatch with nothing sent; another order's or an order-less proforma → conflict{{not_managed}}; this order's → issued with dijbekeroSzamlaszam: pass"
+    );
+}
+
+/// (vii-c) `correct_invoice`: the base is verified by number — it must carry
+/// this order's number and the account's pins — then the corrective is issued
+/// under `{namespace}:{order}:corrective:{correction_id}` with the base named
+/// on the wire (`helyesbitettSzamlaszam`), through `verify-base-{number}`,
+/// `lookup-corrective` and `create-corrective`; the same `correction_id` again
+/// (new key) finds it: `already_issued`.
+async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
+    h.reset().await;
+    h.holds(&Doc::new("SZ-C1", "SZ", "E2E-C1")).await;
+    // The corrective's id: absent for the lookup step and the create step's
+    // leading query, then the issued corrective.
+    h.holds_after_misses(
+        2,
+        &Doc {
+            external_id: Some("acct:E2E-C1:corrective:fix-1"),
+            referenced_invoice: Some("SZ-C1"),
+            ..Doc::new("HS-C1", "HS", "E2E-C1")
+        },
+    )
+    .await;
+    create()
+        .and(body_string_contains(
+            "<helyesbitettSzamlaszam>SZ-C1</helyesbitettSzamlaszam>",
+        ))
+        .respond_with(created("HS-C1", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let body = json!({
+        "invoice_number": "SZ-C1",
+        "correction_id": "fix-1",
+        "document": document(dec!(-1000)),
+    });
+
+    let reply = h
+        .call("E2E-C1", "correct_invoice", &body, "e2e-c1-k1")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "HS-C1");
+    assert_eq!(reply.body["kind"], "corrective");
+    assert_eq!(reply.body["external_id"], "acct:E2E-C1:corrective:fix-1");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-base-SZ-C1",
+            "lookup-corrective",
+            "create-corrective"
+        ]
+    );
+
+    let again = h.ok("E2E-C1", "correct_invoice", &body, "e2e-c1-k2").await;
+    assert_eq!(again["outcome"], "already_issued", "{again}");
+    assert_eq!(again["invoice_number"], "HS-C1");
+    eprintln!(
+        "(vii-c) correct_invoice → issued under the correction id with the base on the wire; again → already_issued: pass"
+    );
+}
+
+/// (vii-d) `delete_proforma`: the order's live proforma is found under its
+/// external id (`proforma-for-delete`) and deleted (`delete-proforma-{number}`,
+/// one send); once gone, a second call finds nothing and answers
+/// `deleted{reason: absent}` without sending.
+async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
+    h.reset().await;
+    // Live for the first call's lookup, gone after the delete.
+    external_id_query("acct:E2E-D1:proforma")
+        .respond_with(Doc::new("D-D1", "D", "E2E-D1").response())
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-D1:proforma")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    op("action-szamla_agent_dijbekero_torlese")
+        .and(body_string_contains("<szamlaszam>D-D1</szamlaszam>"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>true</sikeres></xmlszamladbkdelvalasz>"#,
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+
+    let reply = h
+        .call("E2E-D1", "delete_proforma", &json!({}), "e2e-d1-k1")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["deleted"], true, "{}", reply.body);
+    assert!(reply.body["reason"].is_null(), "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "proforma-for-delete",
+            "delete-proforma-D-D1"
+        ]
+    );
+
+    let again = h
+        .ok("E2E-D1", "delete_proforma", &json!({}), "e2e-d1-k2")
+        .await;
+    assert_eq!(again["deleted"], true, "{again}");
+    assert_eq!(again["reason"], "absent", "{again}");
+    eprintln!(
+        "(vii-d) delete_proforma → deleted after one send; again → absent, nothing sent: pass"
     );
 }
 
@@ -5289,6 +5951,87 @@ async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
     );
 }
 
+/// (xxii) the run-name pin over the whole run ([`RUN_NAMES`]): for every
+/// invocation the server still holds, the `ctx.run` names in journal order
+/// are a prefix of one of its handler's pinned paths, every handler seen is
+/// pinned, and every pinned path was walked in full by at least one
+/// invocation — so a renamed, inserted, reordered or dropped step, on any
+/// handler of either service, fails here rather than stranding an in-flight
+/// invocation on the next deploy.
+async fn every_handler_journals_its_pinned_run_names(h: &Harness) {
+    let journals = h.all_journals().await;
+    let invocations = h.all_invocations().await;
+    let mut unpinned = BTreeSet::new();
+    let mut unexplained = Vec::new();
+    let mut walked = BTreeSet::new();
+    for (id, invocation) in &invocations {
+        let observed: Vec<String> = journals
+            .get(id)
+            .map(|journal| {
+                journal
+                    .iter()
+                    .filter(|entry| entry.is_run())
+                    .filter_map(|entry| entry.name.as_deref())
+                    .map(run_pattern)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let target = format!("{}.{}", invocation.service, invocation.handler);
+        let paths: Vec<(usize, &[&str])> = RUN_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.service == invocation.service && row.handler == invocation.handler
+            })
+            .map(|(index, row)| (index, row.path))
+            .collect();
+        if paths.is_empty() {
+            unpinned.insert(target);
+            continue;
+        }
+        if !paths
+            .iter()
+            .any(|(_, path)| is_prefix_of_path(&observed, path))
+        {
+            unexplained.push(format!("{id} {target}: {observed:?}"));
+        }
+        for (row, path) in paths {
+            if observed.len() == path.len() && is_prefix_of_path(&observed, path) {
+                walked.insert(row);
+            }
+        }
+    }
+    assert!(
+        unpinned.is_empty(),
+        "handlers with no pinned run names: {unpinned:?} — pin their steps in RUN_NAMES"
+    );
+    assert!(
+        unexplained.is_empty(),
+        "run sequences no pinned path of their handler explains:\n  {}\n\n\
+         A renamed, inserted, reordered or dropped step strands every in-flight invocation of the \
+         previous deployment on replay (ADR 0005). Keep the names and their order; a step that must \
+         change is a new row in RUN_NAMES and a deploy that drains first, never an edited row.",
+        unexplained.join("\n  ")
+    );
+    let not_walked: Vec<String> = RUN_NAMES
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| !walked.contains(row))
+        .map(|(_, row)| format!("{}.{}: {:?}", row.service, row.handler, row.path))
+        .collect();
+    assert!(
+        not_walked.is_empty(),
+        "pinned paths no invocation of the run walked in full:\n  {}\n\n\
+         Either a scenario must exercise the path or its last step was dropped from the handler.",
+        not_walked.join("\n  ")
+    );
+    eprintln!(
+        "(xxii) every run sequence of {} invocations is a prefix of its handler's pinned path; all {} paths walked in full: pass",
+        invocations.len(),
+        RUN_NAMES.len()
+    );
+}
+
 // ----- the harness's stub helpers, against wiremock alone -----------------------
 
 /// A query as the Számla Agent client puts it on the wire, reduced to what
@@ -5453,4 +6196,169 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
             "query {query} after the create: {body}"
         );
     }
+}
+
+// ----- the harness's server gate, without a server ------------------------------
+
+/// The gate reads the environment once: a reusable server wins, then a
+/// `restate-server` binary, then docker; with none of the three the suite
+/// skips on a developer machine and **fails** under `CI`, naming every way to
+/// provide a server — a suite that passes by skipping proves nothing.
+#[test]
+fn the_server_gate_prefers_a_reused_server_then_the_binary_then_docker() {
+    let reuse = Some(("http://a:9070".to_owned(), "http://a:8080".to_owned()));
+    let binary = Some(PathBuf::from("/opt/restate-server"));
+    assert_eq!(
+        server_gate(reuse.clone(), binary.clone(), || true, None),
+        Ok(Some(Launcher::Reuse {
+            admin: "http://a:9070".to_owned(),
+            ingress: "http://a:8080".to_owned(),
+        }))
+    );
+    assert_eq!(
+        server_gate(None, binary.clone(), || true, None),
+        Ok(Some(Launcher::Binary(PathBuf::from("/opt/restate-server"))))
+    );
+    assert_eq!(
+        server_gate(None, binary, || false, Some(OsStr::new("true"))),
+        Ok(Some(Launcher::Binary(PathBuf::from("/opt/restate-server")))),
+        "the binary needs no docker, under CI too"
+    );
+    assert_eq!(
+        server_gate(None, None, || true, None),
+        Ok(Some(Launcher::Docker))
+    );
+}
+
+#[test]
+fn the_server_gate_skips_without_a_server_and_fails_under_ci() {
+    assert_eq!(
+        server_gate(None, None, || false, None),
+        Ok(None),
+        "no CI: skip"
+    );
+    assert_eq!(
+        server_gate(None, None, || false, Some(OsStr::new(""))),
+        Ok(None),
+        "an empty CI is unset"
+    );
+    for ci in ["true", "1", "yes"] {
+        let message = server_gate(None, None, || false, Some(OsStr::new(ci)))
+            .expect_err("CI is set and there is no server: a failure, never a skip");
+        for named in ["CI", "docker", "RESTATE_SERVER_BIN", "RESTATE_ADMIN_URL"] {
+            assert!(message.contains(named), "CI={ci}: {message}");
+        }
+    }
+}
+
+// ----- the run-name pin's matching, without a server ----------------------------
+
+/// A parametrized run name is read as its pattern by its prefix, the longest
+/// prefix first: `verify-storno-SZ-1` is `verify-storno-{number}`, never
+/// `verify-{number}`; a fixed name is itself.
+#[test]
+fn run_patterns_read_a_parametrized_name_by_its_longest_prefix() {
+    for (name, pattern) in [
+        ("namespace", "namespace"),
+        ("lookup-invoice", "lookup-invoice"),
+        ("lookup-storno-SZ-1", "lookup-storno-{number}"),
+        ("storno-SZ-1", "storno-{number}"),
+        ("verify-SZ-1", "verify-{number}"),
+        ("verify-storno-E-TST-2026-1", "verify-storno-{number}"),
+        ("verify-proforma-D-1", "verify-proforma-{number}"),
+        ("verify-base-SZ-1", "verify-base-{number}"),
+        ("hint-storno-SZ-1", "hint-storno-{number}"),
+        ("delete-proforma-D-1", "delete-proforma-{number}"),
+        ("set-payments-SZ-30", "set-payments-{number}"),
+        ("taxpayer-12345678", "taxpayer-{prefix}"),
+        ("proforma-for-delete", "proforma-for-delete"),
+    ] {
+        assert_eq!(run_pattern(name), pattern, "{name}");
+    }
+}
+
+/// An observed sequence is explained by a path when it is a prefix of it — a
+/// handler that answers early journals the first steps only; a renamed step,
+/// an inserted one or one out of order is explained by none.
+#[test]
+fn an_observed_run_sequence_is_a_prefix_of_one_of_its_handlers_paths_or_unexplained() {
+    let paths: &[&[&str]] = &[
+        &[
+            "namespace",
+            "account",
+            "verify-storno-{number}",
+            "lookup-storno-{number}",
+            "storno-{number}",
+        ],
+        &[
+            "namespace",
+            "account",
+            "verify-storno-{number}",
+            "hint-storno-{number}",
+        ],
+    ];
+    let explained = |observed: &[&str]| {
+        paths.iter().any(|path| {
+            is_prefix_of_path(
+                &observed
+                    .iter()
+                    .map(|name| run_pattern(name))
+                    .collect::<Vec<_>>(),
+                path,
+            )
+        })
+    };
+    assert!(
+        explained(&[]),
+        "nothing journaled (refused before the prologue)"
+    );
+    assert!(explained(&["namespace", "account"]), "unknown_account");
+    assert!(
+        explained(&["namespace", "account", "verify-storno-SZ-1"]),
+        "not_managed"
+    );
+    assert!(explained(&[
+        "namespace",
+        "account",
+        "verify-storno-SZ-1",
+        "hint-storno-SZ-1"
+    ]));
+    assert!(explained(&[
+        "namespace",
+        "account",
+        "verify-storno-SZ-1",
+        "lookup-storno-SZ-1",
+        "storno-SZ-1"
+    ]));
+    assert!(
+        !explained(&["namespace", "account", "check-storno-SZ-1"]),
+        "a renamed step"
+    );
+    assert!(
+        !explained(&[
+            "namespace",
+            "account",
+            "verify-storno-SZ-1",
+            "lookup-storno-SZ-1",
+            "confirm-SZ-1",
+            "storno-SZ-1"
+        ]),
+        "an inserted step"
+    );
+    assert!(
+        !explained(&["namespace", "account", "verify-storno-SZ-1", "storno-SZ-1"]),
+        "a removed step"
+    );
+    assert!(!explained(&["account", "namespace"]), "out of order");
+    assert!(
+        !explained(&[
+            "namespace",
+            "account",
+            "verify-storno-SZ-1",
+            "lookup-storno-SZ-1",
+            "storno-SZ-1",
+            "storno-SZ-1"
+        ]),
+        "a step past the path's end"
+    );
 }

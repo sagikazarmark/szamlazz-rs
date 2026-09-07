@@ -19,6 +19,13 @@
 //!   through the current type: each must decode, and re-encode to a superset
 //!   of itself (so a renamed `Option` field that silently decodes to `None`
 //!   is caught, not only a missing required one).
+//! - the **leak guard** serialises every variant of every journaled type
+//!   built around an account whose agent key is a sentinel and asserts the
+//!   sentinel is in none of them — the cheap, server-less complement to the
+//!   e2e scan of every journal byte.
+//!
+//! The sequence of run *names* a handler journals is pinned separately, by
+//! the e2e suite's run-name pin (`tests/service.rs`, `RUN_NAMES`).
 //!
 //! # Regenerating
 //!
@@ -57,12 +64,18 @@ use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 use szamlazz_agent::{Currency, InvoiceNumber, Language, LineItem, PaymentMethod, VatRate};
 
-use crate::account::{Account, Endpoint};
+use szamlazz_agent::Credentials;
+
+use crate::account::{
+    Account, AccountResolver as _, CredentialStore as _, Endpoint, StaticConfig, StaticResolver,
+};
 use crate::config::{AccountMode, Defaults, Namespace, SellerConfig, SellerEmailConfig};
-use crate::contract::QueryTaxpayerResponse;
+use crate::contract::{
+    PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
+};
 use crate::gateway::{
-    CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome, SetPaymentsOutcome,
-    StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
+    CreateOutcome, DeleteOutcome, Gateway, LookupOutcome, ProbeOutcome, QueryOutcome,
+    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
 };
 
 use super::prologue::Resolution;
@@ -827,6 +840,109 @@ fn every_pinned_fixture_replays_through_the_current_types() {
         failures.join("\n  ")
     );
     assert!(replayed > 0, "no fixture was replayed");
+}
+
+/// The leak guard on the journaled types, without a server: every variant of
+/// every journaled type, built around an account whose agent key is a
+/// sentinel, serialises without the sentinel. The key has two ways in. The
+/// `account` step's entry is built the way the static resolver builds it from
+/// configuration carrying the key — the one path a key travels next to an
+/// `Account`. The two write outcomes that keep a transport failure's text
+/// (`DeleteOutcome::Transport`, `SetPaymentsOutcome::Transport`) are produced
+/// by a gateway opened with the sentinel credentials against an endpoint that
+/// refuses connections, so the text is a real client error's. Every other
+/// variant is built from a szamlazz.hu answer or a fixed value and has no
+/// key-adjacent input; the registry's samples are scanned so that the claim
+/// stays "every variant" when one gains an input. Complements the compile-time
+/// `assert_not_impl_any!` guard on `AgentKey` / `Credentials` (`account`
+/// tests) and the e2e scan of every journal byte, which needs a server.
+#[tokio::test]
+async fn no_journaled_type_serialises_the_agent_key() {
+    const SENTINEL: &str = "journal-sentinel-agent-key-9c4e1a";
+    let contains_sentinel = |json: &str| json.contains(SENTINEL);
+    assert!(
+        contains_sentinel(&format!("{{\"k\":\"{SENTINEL}\"}}")),
+        "the scan reads"
+    );
+
+    // The account, resolved from configuration that carries the key, with
+    // every optional field set; the endpoint refuses connections.
+    let config: StaticConfig = serde_json::from_value(serde_json::json!({
+        "account": {
+            "id": "acme",
+            "agent_key": SENTINEL,
+            "endpoint": "http://127.0.0.1:1/",
+            "mode": "test",
+            "supplier_id": 972_720,
+            "defaults": { "currency": "EUR", "language": "en", "number_prefix": "ACME", "aggregator": "aggregator" },
+            "seller": { "bank": "Test Bank", "bank_account": "11111111-22222222-33333333", "email": { "reply_to": "billing@acme.test" } },
+        },
+    }))
+    .expect("config");
+    let resolver = StaticResolver::try_from(config).expect("resolver");
+    let account = resolver.resolve(None).await.expect("account");
+    let credentials = resolver
+        .fetch(&account.credential_ref)
+        .await
+        .expect("credentials");
+    assert!(
+        matches!(&credentials, Credentials::AgentKey(key) if key.expose() == SENTINEL),
+        "the key is really in play"
+    );
+    let resolution = serde_json::to_string(&Resolution::Account(Box::new(account.clone())))
+        .expect("resolution serialises");
+    assert!(
+        resolution.contains("\"id\":\"acme\""),
+        "the entry is the account's: {resolution}"
+    );
+    assert!(
+        !contains_sentinel(&resolution),
+        "the account step's entry: {resolution}"
+    );
+
+    // The two outcomes that journal a transport failure's text, from a
+    // gateway holding the sentinel credentials.
+    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let delete = gateway.delete_proforma("D-1").await;
+    assert!(matches!(delete, DeleteOutcome::Transport(_)), "{delete:?}");
+    let entries = [PaymentEntry::new(
+        jiff::civil::date(2026, 7, 4),
+        ContractPaymentMethod::Transfer,
+        dec!(12700),
+    )];
+    let set_payments = gateway.set_payments("SZ-1", &entries, false).await;
+    assert!(
+        matches!(set_payments, SetPaymentsOutcome::Transport(_)),
+        "{set_payments:?}"
+    );
+    for (label, json) in [
+        (
+            "delete-outcome/transport",
+            serde_json::to_string(&delete).expect("serialises"),
+        ),
+        (
+            "set-payments-outcome/transport",
+            serde_json::to_string(&set_payments).expect("serialises"),
+        ),
+    ] {
+        assert!(!contains_sentinel(&json), "{label}: {json}");
+    }
+
+    // Every variant of every journaled type the registry pins.
+    let mut scanned = 0;
+    for pins in registry() {
+        for variant in &pins.variants {
+            assert!(
+                !contains_sentinel(&variant.json),
+                "{}/{}: {}",
+                pins.dir,
+                variant.stem,
+                variant.json
+            );
+            scanned += 1;
+        }
+    }
+    assert!(scanned > 0, "no variant was scanned");
 }
 
 /// How the generator runs: `Verify` never writes; `Update`
