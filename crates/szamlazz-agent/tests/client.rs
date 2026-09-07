@@ -208,6 +208,21 @@ async fn classifies_every_failure_by_outcome() {
     assert!(matches!(parse, ClientError::Parse(_)), "{parse:?}");
     assert_eq!(parse.outcome_class(), OutcomeClass::Unknown);
 
+    // The client hands the status to the response: a proxy's 502 page with no
+    // szamlazz.hu header is refused by status, not read as an odd body.
+    let proxy = send_to(
+        ResponseTemplate::new(502).set_body_raw(b"<html>Bad Gateway</html>".to_vec(), "text/html"),
+    )
+    .await;
+    assert!(
+        matches!(
+            proxy,
+            ClientError::Parse(szamlazz_agent::ParseError::HttpStatus { status: 502, .. })
+        ),
+        "{proxy:?}"
+    );
+    assert_eq!(proxy.outcome_class(), OutcomeClass::Unknown);
+
     let open = send_to(
         ResponseTemplate::new(200)
             .insert_header("szlahu_error_code", "55")

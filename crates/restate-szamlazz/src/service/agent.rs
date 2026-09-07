@@ -114,7 +114,8 @@ fn taxpayer_response(
 
 /// What `set_payments` answers from what its one step settled: the totals on
 /// success; a rejection that never reached szamlazz.hu — the wire contract
-/// takes at most five entries ([`REQUEST_CODE`]) — as `invalid_input`, the
+/// takes at most five entries, and a replacing request with none would clear
+/// the invoice's payments ([`REQUEST_CODE`]) — as `invalid_input`, the
 /// caller's request; szamlazz.hu refusing the entries passed through as
 /// `szamlazz_error` (422) naming the invoice; a credential code as
 /// `credentials_rejected`; a lost reply as `outcome_unknown`, conditional on

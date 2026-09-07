@@ -397,7 +397,24 @@ pub enum RequestError {
     /// or by the shared order number.
     #[error("a final invoice requires a prepayment invoice number or order number")]
     MissingPrepaymentReference,
+    /// A replacing credit-entry request (`additiv = false`, the default) with
+    /// no entries would replace the invoice's payments with nothing — clear
+    /// them. The schema allows it, so the crate refuses it before the wire:
+    /// a request built with `RegisterCreditEntry::new` and never given its
+    /// entries must not wipe an invoice. Clearing an invoice's credit entries
+    /// is not offered as an operation.
+    #[error(
+        "a replacing credit-entry request needs at least one entry: with none it would clear the invoice's payments"
+    )]
+    EmptyCreditEntryReplace,
     /// Foreign-currency documents require the quoting bank and exchange rate.
+    ///
+    /// Raised for every currency but the forint (`HUF` / `Ft`, any letter
+    /// case) when no `ExchangeRate` is set — on every document kind, since
+    /// whether szamlazz.hu itself accepts a foreign-currency proforma or
+    /// delivery note without one is unverified. A caller without a rate to
+    /// quote can ask for szamlazz.hu's automatic current MNB rate with
+    /// `ExchangeRate::automatic_mnb()`.
     #[error("foreign-currency documents require an exchange rate")]
     MissingExchangeRate,
     /// Exchange-rate details contain no bank, or request automatic lookup from
@@ -474,8 +491,63 @@ pub enum ParseError {
     #[error("invalid base64 payload: {0}")]
     Base64(String),
     /// The body matched none of the shapes the operation can produce.
+    ///
+    /// The body is quoted as a [bounded excerpt](body_excerpt), never whole.
     #[error("unexpected response body: {0}")]
     UnexpectedBody(String),
+    /// The endpoint answered with a non-2xx status and no `szlahu_*` header:
+    /// a proxy, a CDN or a misconfigured URL spoke, not szamlazz.hu.
+    ///
+    /// Raised only when the client supplied the status
+    /// ([`RawResponse::with_status`](crate::wire::RawResponse::with_status));
+    /// szamlazz.hu's own in-band answer — `szlahu_error_code`, `szlahu_down`
+    /// — is read first whatever the status. Like every parse failure its
+    /// [outcome class](ResponseError::outcome_class) is `Unknown`: a gateway
+    /// timeout may have cut a request the server went on to act on.
+    #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
+    HttpStatus {
+        /// The HTTP status.
+        status: u16,
+        /// A [bounded excerpt](body_excerpt) of the body.
+        body: String,
+    },
+}
+
+/// The most of a response body an error message quotes.
+///
+/// An upstream body that is not szamlazz.hu's answer — a proxy's HTML page,
+/// a stack trace — ends up in error displays, and from there in a consumer's
+/// logs, faults or journal. A bounded prefix keeps those readable and
+/// bounded; the length is noted so the truncation is visible.
+pub const BODY_EXCERPT_LEN: usize = 256;
+
+/// A bounded, lossy-UTF-8 excerpt of a response body for an error message:
+/// the whole body when it fits in [`BODY_EXCERPT_LEN`] bytes, otherwise a
+/// prefix on a character boundary with the total length noted. A blank body
+/// reads as `empty response`.
+///
+/// Every excerpt this crate's errors quote ([`ParseError::UnexpectedBody`],
+/// [`ParseError::HttpStatus`]) goes through here. Public so that a sans-IO
+/// integration logging a [`RawResponse`](crate::wire::RawResponse) body of
+/// its own — a status its parsers never saw, a body it rejected before
+/// parsing — quotes it under the same bound rather than whole.
+#[must_use]
+pub fn body_excerpt(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+
+    if text.is_empty() {
+        return "empty response".to_owned();
+    }
+    if text.len() <= BODY_EXCERPT_LEN {
+        return text.to_owned();
+    }
+    let mut cut = BODY_EXCERPT_LEN;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+
+    format!("{}… [truncated: {} bytes]", &text[..cut], body.len())
 }
 
 impl From<quick_xml::DeError> for ParseError {
@@ -581,6 +653,39 @@ mod tests {
             let numeric: u16 = code.code().parse().expect("named codes are numeric");
             assert_eq!(ErrorCode::from(numeric), code, "{code:?}");
         }
+    }
+
+    /// The excerpt keeps a short body whole, cuts a long one on a character
+    /// boundary — a multi-byte character straddling the limit is dropped, not
+    /// split — and notes the total length.
+    #[test]
+    fn body_excerpt_is_bounded_and_char_safe() {
+        assert_eq!(body_excerpt(b"  short  "), "short");
+        assert_eq!(
+            body_excerpt(&[0xff, b'x']),
+            "\u{FFFD}x",
+            "lossy, never a panic"
+        );
+
+        let ascii = "a".repeat(BODY_EXCERPT_LEN);
+        assert_eq!(
+            body_excerpt(ascii.as_bytes()),
+            ascii,
+            "exactly the limit fits"
+        );
+
+        // 255 ASCII bytes then a 2-byte `é` straddling byte 256.
+        let straddling = format!("{}é tail", "a".repeat(BODY_EXCERPT_LEN - 1));
+        let excerpt = body_excerpt(straddling.as_bytes());
+        assert!(
+            excerpt.starts_with(&"a".repeat(BODY_EXCERPT_LEN - 1)),
+            "{excerpt}"
+        );
+        assert!(!excerpt.contains('é'), "{excerpt}");
+        assert!(
+            excerpt.ends_with(&format!("… [truncated: {} bytes]", straddling.len())),
+            "{excerpt}"
+        );
     }
 
     #[test]

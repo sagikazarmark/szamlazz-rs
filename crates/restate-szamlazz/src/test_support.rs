@@ -62,8 +62,10 @@ pub(crate) struct Doc<'a> {
     pub(crate) order: Option<&'a str>,
     /// `teszt` — whether a test account issued the document. Parsed and
     /// projected by `query`, compared with nothing (ADR 0006, account-pin
-    /// amendment).
-    pub(crate) test: bool,
+    /// amendment). `None` renders no element — szamlazz.hu breaking its
+    /// schema, a document that does not say (the agent crate reports it as
+    /// `None` since #70).
+    pub(crate) test: Option<bool>,
     /// `szallito/id` — the seller record's id in the `<szallito>` block.
     /// Parsed, compared with nothing (ADR 0006, account-pin amendment).
     pub(crate) supplier_id: u64,
@@ -134,7 +136,7 @@ impl<'a> Doc<'a> {
             number,
             tipus,
             order: Some("ORD-1"),
-            test: true,
+            test: Some(true),
             supplier_id: SUPPLIER,
             reversed: false,
             referenced_invoice: None,
@@ -160,6 +162,7 @@ impl<'a> Doc<'a> {
             .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
         let kelt = self.issue_date.map(|date| date.to_string());
         let telj = self.fulfillment_date.map(|date| date.to_string());
+        let teszt = self.test.map(|test| test.to_string());
         let payments = if self.payments.is_empty() {
             String::new()
         } else {
@@ -179,7 +182,7 @@ impl<'a> Doc<'a> {
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
   <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}{kelt}{telj}{rendelesszam}<teszt>{test}</teszt>{sztornozott}{alap_extra}</alap>
+  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}{kelt}{telj}{rendelesszam}{teszt}{sztornozott}{alap_extra}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>{net}</netto><afa>{vat}</afa><brutto>{gross}</brutto></totalossz></osszegek>
@@ -193,7 +196,7 @@ impl<'a> Doc<'a> {
             kelt = opt("kelt", kelt.as_deref()),
             telj = opt("telj", telj.as_deref()),
             rendelesszam = opt("rendelesszam", self.order),
-            test = self.test,
+            teszt = opt("teszt", teszt.as_deref()),
             sztornozott = if self.reversed {
                 "<sztornozott>true</sztornozott>"
             } else {
@@ -298,7 +301,7 @@ mod tests {
         assert_eq!(document.info.invoice_number.as_str(), "SZ-1");
         assert_eq!(document.info.document_type, "SZ");
         assert_eq!(document.info.order_number.as_deref(), Some("ORD-1"));
-        assert!(document.info.test);
+        assert_eq!(document.info.test, Some(true));
         assert_eq!(document.supplier.id, Some(SUPPLIER));
         assert_eq!(document.info.fulfillment_date, Some(ORIGINAL_TELJ));
         assert_eq!(document.info.e_invoice.code(), 2);
@@ -316,7 +319,7 @@ mod tests {
     fn the_markers_render_from_their_fields() {
         let other = Doc {
             order: Some("ORD-2"),
-            test: false,
+            test: Some(false),
             supplier_id: 1,
             reversed: true,
             ..Doc::new("SZ-9", "SZ")
@@ -324,7 +327,7 @@ mod tests {
         .parse();
         assert_eq!(other.info.invoice_number.as_str(), "SZ-9");
         assert_eq!(other.info.order_number.as_deref(), Some("ORD-2"));
-        assert!(!other.info.test);
+        assert_eq!(other.info.test, Some(false));
         assert_eq!(other.supplier.id, Some(1));
         assert_eq!(other.info.reversed, Some(true));
 
@@ -334,6 +337,16 @@ mod tests {
         }
         .parse();
         assert_eq!(unmanaged.info.order_number, None);
+
+        let unknown_mode = Doc {
+            test: None,
+            ..Doc::default()
+        };
+        assert!(
+            !unknown_mode.xml().contains("<teszt>"),
+            "renders no element"
+        );
+        assert_eq!(unknown_mode.parse().info.test, None);
 
         let storno = Doc {
             referenced_invoice: Some("SZ-1"),

@@ -379,17 +379,20 @@ impl Currency {
         &self.0
     }
 
-    /// Whether this is the Hungarian forint (`HUF` or its `Ft` alias).
+    /// Whether this is the Hungarian forint (`HUF` or its `Ft` alias, in any
+    /// letter case).
     ///
-    /// Non-HUF invoices must carry an exchange rate and quoting bank.
+    /// Non-HUF invoices must carry an exchange rate and quoting bank. The
+    /// comparison ignores case so that a `huf` is not demanded one — the
+    /// code itself still goes on the wire as given.
     #[must_use]
     pub fn is_huf(&self) -> bool {
-        self.0 == "HUF" || self.0 == "Ft"
+        self.0.eq_ignore_ascii_case("HUF") || self.0.eq_ignore_ascii_case("Ft")
     }
 
     /// The number of decimal places of the currency's minor unit — the ISO
     /// 4217 exponent: 2 for most currencies, 0 for JPY or ISK, 3 for KWD or
-    /// BHD, 4 for CLF.
+    /// BHD, 4 for CLF. The code is matched in any letter case.
     ///
     /// HUF (`HUF`/`Ft`) is 0, not ISO 4217's 2: the fillér is out of
     /// circulation and szamlazz.hu works in whole forints. A code the table
@@ -399,7 +402,7 @@ impl Currency {
         if self.is_huf() {
             return 0;
         }
-        match self.0.as_ref() {
+        match self.0.to_ascii_uppercase().as_str() {
             // ISO 4217 exponent 0.
             "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF"
             | "UGX" | "UYI" | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
@@ -812,6 +815,16 @@ mod tests {
         assert!(Currency::from("Ft").is_huf());
         assert!(Currency::from(String::from("HUF")).is_huf());
         assert!(!Currency::EUR.is_huf());
+        // The code goes on the wire as given; the crate's own checks (the
+        // exchange-rate requirement, whole forints) do not depend on its case.
+        for spelling in ["huf", "Huf", "ft", "FT"] {
+            let currency = Currency::new(spelling);
+            assert!(currency.is_huf(), "{spelling}");
+            assert_eq!(currency.as_str(), spelling, "sent as given");
+            assert_eq!(currency.minor_unit_digits(), 0, "{spelling}");
+        }
+        assert_eq!(Currency::new("jpy").minor_unit_digits(), 0);
+        assert!(!Currency::new("hufx").is_huf());
     }
 
     #[test]

@@ -67,19 +67,22 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
     let mut response = ureq::post(ENDPOINT)
         .content_type(&wire.content_type)
         .send(&wire.body[..])?;
+    let status = response.status().as_u16();
     let body = response.body_mut().read_to_vec()?;
     let headers = response
         .headers()
         .iter()
         .map(|(name, value)| (name.as_str(), String::from_utf8_lossy(value.as_bytes())));
 
-    let taxpayer = request.parse(&RawResponse::new(headers, body))?;
+    let taxpayer = request.parse(&RawResponse::new(headers, body).with_status(status))?;
     println!("valid: {}", taxpayer.valid);
     Ok(())
 }
 ```
 
 To skip re-authentication on consecutive calls, replay `RawResponse::session_cookie()` as the `Cookie` header of the next request; the reqwest client does this through its cookie store.
+
+The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP 200 with `szlahu_*` headers and a `<hibakod>` body), so the parsers read those first, and the status only decides the case where neither carries an answer — a non-2xx there is `ParseError::HttpStatus`, a proxy or CDN speaking instead of szamlazz.hu, rather than a puzzling `UnexpectedBody`. Without the status that case is still an `UnexpectedBody` parse error; both are `OutcomeClass::Unknown`.
 
 ## Feature Flags
 
@@ -124,6 +127,9 @@ szamlazz.hu verifies every row's arithmetic server-side — net = unit price × 
 - **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice — by `elolegSzamlaszam` or by the shared order number — but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account — [behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices).
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client never retries automatically.
+- A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
+- Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length — a parse failure can be logged as is.
+- A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live". A reader that pins the account mode should treat `None` as a mismatch.
 
 ## License
 

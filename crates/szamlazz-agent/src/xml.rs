@@ -12,7 +12,7 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use rust_decimal::Decimal;
 
 use crate::credentials::Credentials;
-use crate::error::ParseError;
+use crate::error::{ParseError, body_excerpt};
 
 const WRITE_EXPECT: &str = "writing XML to an in-memory buffer cannot fail";
 
@@ -41,6 +41,9 @@ pub(crate) fn document(
 }
 
 /// Validates a structured Agent response envelope and returns its UTF-8 text.
+///
+/// A body that is not the expected envelope is reported with a [bounded
+/// excerpt](body_excerpt) of itself, never whole.
 pub(crate) fn response_text<'a>(
     body: &'a [u8],
     expected_root: &str,
@@ -68,18 +71,14 @@ pub(crate) fn response_text<'a>(
                     || namespace != ResolveResult::Bound(Namespace(expected_namespace))
                 {
                     return Err(ParseError::UnexpectedBody(format!(
-                        "expected {expected_root} in namespace {expected_namespace}, got {local}: {text}"
+                        "expected {expected_root} in namespace {expected_namespace}, got {local}: {}",
+                        body_excerpt(body)
                     )));
                 }
                 return Ok(text);
             }
             Event::Eof => {
-                let body = text.trim();
-                return Err(ParseError::UnexpectedBody(if body.is_empty() {
-                    "empty response".to_owned()
-                } else {
-                    body.to_owned()
-                }));
+                return Err(ParseError::UnexpectedBody(body_excerpt(body)));
             }
             _ => {}
         }
