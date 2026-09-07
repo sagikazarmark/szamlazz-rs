@@ -10,7 +10,7 @@
 //! found document builds it here (#18); the two renderers below are the
 //! deliberate exceptions.
 //!
-//! The wiremock integration tests (`tests/gateway.rs`, `tests/service.rs`)
+//! The wiremock integration tests (`tests/gateway.rs`, `tests/e2e/`)
 //! carry their own `Doc` and do not share this one: a `#[cfg(test)]` module is
 //! invisible to a `tests/` crate, and the alternative — a `test-support`
 //! cargo feature enabled by a `[dev-dependencies]` self-reference — would make

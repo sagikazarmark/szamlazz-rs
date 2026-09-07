@@ -27,7 +27,7 @@
 //!   e2e scan of every journal byte.
 //!
 //! The sequence of run *names* a handler journals is pinned separately, by
-//! the e2e suite's run-name pin (`tests/service.rs`, `RUN_NAMES`).
+//! the e2e suite's run-name pin (`tests/e2e/harness/run_names.rs`, `RUN_NAMES`).
 //!
 //! # Regenerating
 //!

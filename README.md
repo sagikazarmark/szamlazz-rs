@@ -66,7 +66,7 @@ cargo test --workspace --all-targets --all-features --locked
 cargo test --doc --workspace --all-features --locked
 cargo doc --workspace --all-features --no-deps --locked
 # the end-to-end suite of restate-szamlazz, against docker (or RESTATE_SERVER_BIN)
-cargo test -p restate-szamlazz --test service -- --ignored
+cargo test -p restate-szamlazz --test e2e -- --ignored
 ```
 
 ## License

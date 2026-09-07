@@ -310,7 +310,7 @@ for scope in acme beta_events; do
 done
 ```
 
-The mapping is append-only: moving traffic to another szamlazz.hu account means a new scope, never re-pointing an existing one (re-pointing is forbidden, not merely undrained). The same drain–switch–resume applies to any change that could put one szamlazz.hu account under two identities at once; appending an account cannot, so adding one is steps 3 and 6 alone — register the revision, probe the new scope. The end-to-end suite performs this flag day on a live Restate server (`tests/service.rs`, phase 2).
+The mapping is append-only: moving traffic to another szamlazz.hu account means a new scope, never re-pointing an existing one (re-pointing is forbidden, not merely undrained). The same drain–switch–resume applies to any change that could put one szamlazz.hu account under two identities at once; appending an account cannot, so adding one is steps 3 and 6 alone — register the revision, probe the new scope. The end-to-end suite performs this flag day on a live Restate server (`tests/e2e/multi_account.rs`, phase 2).
 
 ## Running
 
@@ -824,7 +824,7 @@ elif header x-restate-error-source == "invocation":
 else:                             restate_error = body.message                 # retry with the same key
 ```
 
-The e2e harness asserts this envelope on every fault it receives from a live Restate 1.7.8 (`crates/restate-szamlazz/tests/service.rs`, `Reply::fault`), and the examples above are held to the contract types by `tests/readme.rs`.
+The e2e harness asserts this envelope on every fault it receives from a live Restate 1.7.8 (`crates/restate-szamlazz/tests/e2e/harness/ingress.rs`, `Reply::fault`), and the examples above are held to the contract types by `tests/readme.rs`.
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|

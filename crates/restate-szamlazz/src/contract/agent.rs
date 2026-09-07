@@ -686,7 +686,7 @@ mod tests {
     /// nothing documented carries a field the contract does not know.
     #[test]
     fn documented_bodies_deserialize() {
-        // tests/service.rs — the literal bodies of the e2e scenarios.
+        // tests/e2e/ — the literal bodies of the e2e scenarios.
         serde_json::from_value::<QueryRequest>(json!({"selector": {"invoice_number": "SZ-12"}}))
             .expect("a query body");
         // crates/restate-szamlazz-endpoint/README.md's handler table and the

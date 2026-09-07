@@ -529,7 +529,7 @@ cancellation of the invocation is never swallowed.
   upgrade. The same module's leak guard builds every journaled type around an account whose agent key is a
   sentinel — the `account` entry through the static resolver, the two `Transport` write outcomes through a gateway
   opened with the sentinel credentials — and asserts the sentinel serialises into none of them.
-- `cargo test -p restate-szamlazz --test service -- --ignored` runs `tests/service.rs`: the `Szamlazz.Order`
+- `cargo test -p restate-szamlazz --test e2e -- --ignored` runs `tests/e2e/`: the `Szamlazz.Order`
   Virtual Object and `Szamlazz.Agent` end to end against a real Restate server (1.7.8, with the experimental
   `vqueues`, `protocol_v7` and `scoped_virtual_objects` flags — `compose.yaml` sets the same three) with wiremock
   standing in for szamlazz.hu, in two phases on one server. The single-account phase: issued → already_issued,
@@ -591,6 +591,17 @@ cancellation of the invocation is never swallowed.
   ingress envelope — asserting on every fault that the body is `{code: <status>, message, source: "invocation"}` under
   `x-restate-error-source: invocation` and that the worker's fault is the JSON in `message` — and reads
   `sys_journal` / `sys_invocation` through the SQL introspection API.
+- **Where the suite lives.** One integration-test binary: `tests/e2e/main.rs` holds the two tests and the order the
+  scenarios run in — one server start-up, the server gate decided once. `tests/e2e/harness/` is the harness, one module
+  per concern (`gate`: the server gate, the launcher and the server process or container; `accounts`: the scripted and
+  mutable resolver and store the two deployments run over; `szamlazz`: the document fixture, the selector matchers and
+  the stub helpers; `ingress`: a reply and its fault; `introspection`: `sys_journal` / `sys_invocation` rows;
+  `run_names`: the `RUN_NAMES` table and its matching), and the harness's own tests — the server gate, the
+  run-pattern matching, the stub helpers against wiremock alone — sit beside what they test and run un-ignored. Every
+  other file is one handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`,
+  `create_final`, `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`,
+  `faults`, `prologue`, `multi_account`, `pins`), each scenario a `pub(crate) async fn` taking the harness; a new
+  scenario goes into its handler's file and is called from `main.rs` in sequence.
 - The same command runs the **protocol-v7 canary** (`e2e_check_account_without_protocol_v7`), on a server of its
   own with `protocol_v7` off: the ingress accepts the scoped path and keys the invocation by the scope, but the SDK
   sees none — a scoped `check_account` answers `scope: null` with the account on the single-account deployment

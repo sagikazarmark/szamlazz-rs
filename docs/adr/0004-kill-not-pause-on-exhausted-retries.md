@@ -210,7 +210,7 @@ the abort timeout, a journal entry the deployment cannot decode, a non-determini
 cumulative over the invocation's life (`retry_iter.attempts()`; the re-dispatch after a scheduler retry
 `fast_forward`s it, so the arithmetic holds under the vqueues flag); only the SDK-facing
 `retry_count_since_last_stored_command` resets on progress. Asserted end to end (`(xi-e)` in
-`tests/service.rs`): `get`'s handler allows three attempts, all four of its reads lose their reply once under a 1 s
+`tests/e2e/get.rs`): `get`'s handler allows three attempts, all four of its reads lose their reply once under a 1 s
 test read policy, `sys_invocation.retry_count` — the invoker's count of starts, `start_count` in
 `crates/worker-api/src/invoker/status_handle.rs` — is observed past the handler's budget while in flight (five
 starts in the run that landed this amendment), and the invocation completes instead of being killed.

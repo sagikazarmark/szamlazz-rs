@@ -42,7 +42,7 @@ type Ci {
   }
 
   """
-  The handler layer end to end: the ignored `tests/service.rs` suite of
+  The handler layer end to end: the ignored `tests/e2e` suite of
   `restate-szamlazz` — the `Szamlazz.Order` and `Szamlazz.Agent` handlers, the
   multi-account flag day and scope isolation, the journal scan for the agent
   key, the run-name pin and the protocol-v7 canary — against `restate-server`
@@ -60,7 +60,7 @@ type Ci {
         "cargo", "test",
         "-p", "restate-szamlazz",
         "--all-features", "--locked",
-        "--test", "service",
+        "--test", "e2e",
         "--", "--ignored",
       ])
       .combinedOutput

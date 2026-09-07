@@ -226,15 +226,15 @@ corrupt.
 ### Durable step names
 
 Every `ctx.run` of both services, per handler path, in the order the handler journals them. **The authority is the
-run-name pin** — `RUN_NAMES` in the e2e harness (`tests/service.rs`), verified against a live `sys_journal` whenever
-the suite runs (§11; CI, on every pull request) — and this table follows it: a step added, renamed or reordered in the
-code fails the pin first, and the table is then brought to match, never the other way round. The names are what the
-Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and what an `unavailable` fault's
-message means by "the step". `{kind}` is the document kind the handler issues or reads — `proforma | invoice |
-prepayment | final`, and `corrective` on `correct_invoice`'s lookup and create; `{number}` is an invoice number —
-the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's (`delete_proforma`
-takes no number); `{prefix}` the eight-digit taxpayer prefix. A handler with two shapes has two rows; a handler that
-answers early (a conflict, a refusal, `unknown_account`) journals a prefix of its row.
+run-name pin** — `RUN_NAMES` in the e2e harness (`tests/e2e/harness/run_names.rs`), verified against a live
+`sys_journal` whenever the suite runs (§11; CI, on every pull request) — and this table follows it: a step added,
+renamed or reordered in the code fails the pin first, and the table is then brought to match, never the other way
+round. The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
+what an `unavailable` fault's message means by "the step". `{kind}` is the document kind the handler issues or reads —
+`proforma | invoice | prepayment | final`, and `corrective` on `correct_invoice`'s lookup and create; `{number}` is an
+invoice number — the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
+(`delete_proforma` takes no number); `{prefix}` the eight-digit taxpayer prefix. A handler with two shapes has two
+rows; a handler that answers early (a conflict, a refusal, `unknown_account`) journals a prefix of its row.
 
 | Service | Handler | Path |
 |---|---|---|
@@ -931,7 +931,7 @@ functions they are extracted into.
   opened with the sentinel credentials against an endpoint that refuses connections, the registry's samples for the
   rest — and asserts the sentinel is in none of them: the cheap complement to the `assert_not_impl_any!` guard and
   to the e2e's byte scan, which needs a server.
-- End to end (`tests/service.rs`, ignored; a Restate server from one of three sources — see "What CI runs" below):
+- End to end (`tests/e2e/`, ignored; a Restate server from one of three sources — see "What CI runs" below):
   Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts on `/version` exactly the features the server's flags enable;
   `compose.yaml` matches) + wiremock as
@@ -1078,14 +1078,23 @@ functions they are extracted into.
   invocation. The type fixtures pin what an entry holds; this pins which entries a handler writes and in what order —
   the other half of what an in-flight invocation replays across a deploy (ADR 0005). A renamed, inserted, reordered
   or dropped step fails here rather than stranding the invocation.
-  The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, submits
+  The harness (`tests/e2e/harness/`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, submits
   without waiting through `/restate/send/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, purges and kills invocations (`PATCH
   /invocations/{id}/purge`, `…/kill`), and verifies every mounted mock's `expect(n)` at the next scenario's reset
   (wiremock checks the counts on `verify`, never on `reset`). `get`, `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and
   `Szamlazz.Agent.check_account` set `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
-- The protocol-v7 canary (`tests/service.rs`, a second ignored test on a server of its own, on its own ports, with
+  The suite is one integration-test binary, `tests/e2e/main.rs`, which holds the two tests and the order the scenarios
+  run in; `harness/` is one module per concern (`gate` — the server gate and the launcher; `accounts` — the scripted
+  and mutable resolver and store; `szamlazz` — the document fixture, selector matchers and stub helpers; `ingress`;
+  `introspection`; `run_names` — the `RUN_NAMES` table and its matching), with the harness's own tests — the server
+  gate, the run-pattern matching, the stub helpers against wiremock alone — beside what they test; and every
+  other file is one handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`,
+  `create_final`, `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`,
+  `faults`, `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
+  scenario of a handler goes into that handler's file and is called from `main.rs` in sequence.
+- The protocol-v7 canary (`tests/e2e/main.rs`, a second ignored test on a server of its own, on its own ports, with
   vqueues and scoped Virtual Objects on and protocol v7 **off**): the ingress accepts a scoped path and the server
   keys the invocation by the scope (`sys_invocation.scope = acme`), but the SDK never sees it — a scoped
   `check_account` on the single-account deployment answers 200 with the account and `scope: null`, the signal a
@@ -1096,7 +1105,7 @@ functions they are extracted into.
   (default features), `clippy`, `doc`, `audit` and `fmt` checks and, from the workspace's own `ci` module
   (`.dagger/modules/ci`, wired onto `rust:container`), `ci:test` — `cargo test --workspace --all-features --locked`,
   so the `szamlazz-adatkapcsolat` archiver tests behind `opendal` and the `schemars` contract tests run — and
-  `ci:end-to-end`: the ignored `tests/service.rs` suite, both e2e tests, on every pull request. The Dagger
+  `ci:end-to-end`: the ignored `tests/e2e` suite, both e2e tests, on every pull request. The Dagger
   container has no docker daemon, and a Dagger service cannot reach back into the container that binds it, so the
   harness starts `restate-server` itself: the check copies the binary out of the Restate image and sets
   `RESTATE_SERVER_BIN`, and the harness spawns one process per suite on the loopback (bind addresses, base

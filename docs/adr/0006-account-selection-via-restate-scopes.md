@@ -7,7 +7,7 @@ Status: accepted (#20, landed through #21–#31). Amends ADRs [0001](0001-restat
 **restate-server 1.7.8** with **restate-sdk 0.12.0** (`restate-sdk-shared-core` 7.0.3); a server or SDK upgrade
 re-triggers the verification of everything marked *verified*. The szamlazz.hu facts are those of
 [`docs/szamlazz-hu-behaviour.md`](../szamlazz-hu-behaviour.md). Scenario names in parentheses are the end-to-end
-tests in `crates/restate-szamlazz/tests/service.rs` that prove the fact.
+tests in `crates/restate-szamlazz/tests/e2e/` that prove the fact.
 
 `restate-szamlazz` served exactly one szamlazz.hu account per deployment, baked into configuration. A
 second account was a second deployment — which is not even possible inside one Restate environment, since

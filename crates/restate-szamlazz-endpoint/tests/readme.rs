@@ -11,7 +11,7 @@
 //! - the fault examples are the ingress envelope with the worker's fault
 //!   inside `message`, and the envelope's `code` is the status the fault's
 //!   `TerminalCode` pins (the e2e harness's `Reply::fault` in
-//!   `crates/restate-szamlazz/tests/service.rs` asserts the same shape on a
+//!   `crates/restate-szamlazz/tests/e2e/harness/ingress.rs` asserts the same shape on a
 //!   live reply);
 //! - the `conflict_reason` table has a row per `ConflictReason`, and the
 //!   README shows a `CreateResponse` example per `Outcome` (`issued` in the
@@ -167,7 +167,7 @@ struct Envelope {
 }
 
 /// The worker's fault, as the e2e harness decodes it from the envelope's
-/// `message` (`tests/service.rs`, `Fault`) — re-declared here because the
+/// `message` (`tests/e2e/harness/ingress.rs`, `Fault`) — re-declared here because the
 /// worker's own `Fault` is `Serialize`-only and private to the service
 /// module: what a caller sees is exactly this.
 #[derive(Debug, Deserialize)]

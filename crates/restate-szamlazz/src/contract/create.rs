@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(request.options, CreateOptions::default());
         assert_eq!(request.document.buyer.name, "Kovács Bt.");
 
-        // tests/service.rs — the literal bodies of the e2e scenarios.
+        // tests/e2e/ — the literal bodies of the e2e scenarios.
         let document = serde_json::to_value(sample_document()).expect("serialize");
         serde_json::from_value::<CreateRequest>(json!({"document": document}))
             .expect("a bare create body");
