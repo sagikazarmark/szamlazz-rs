@@ -69,7 +69,7 @@ use szamlazz_agent::Credentials;
 use crate::account::{
     Account, AccountResolver as _, CredentialStore as _, Endpoint, StaticConfig, StaticResolver,
 };
-use crate::config::{AccountMode, Defaults, Namespace, SellerConfig, SellerEmailConfig};
+use crate::config::{Defaults, Namespace, SellerConfig, SellerEmailConfig};
 use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
@@ -581,8 +581,9 @@ fn reply(number: &str, net: &str, gross: &str, outstanding: &str) -> RawResponse
 
 /// A queried invoice (`SZ`) with every element szamlazz.hu's `szamla` XML can
 /// carry, so that a rename anywhere in [`InvoiceDocument`] and its nested
-/// types is caught: a test-account e-invoice of `ORD-1` from supplier 972720
-/// with postal addresses, ledger blocks, a financial item, labels, two
+/// types is caught: a test-account e-invoice of `ORD-1` whose seller block
+/// carries `szallito/id` 972720 (parsed, never read — ADR 0006, account-pin
+/// amendment), with postal addresses, ledger blocks, a financial item, labels, two
 /// payments and a PDF. Parsed the way the gateway parses a query answer, since
 /// the agent's types are `#[non_exhaustive]`. The kind does not change the
 /// shape, so one kind is enough.
@@ -644,8 +645,6 @@ fn namespace() -> Namespace {
 /// carry it.
 fn account() -> Account {
     let mut account = Account::new("acme", "acme-credentials");
-    account.mode = AccountMode::Test;
-    account.supplier_id = Some(972_720);
     account.endpoint = Endpoint::parse("https://szamlazz.example.test/szamla/").expect("endpoint");
     account.defaults = Defaults {
         e_invoice: true,
@@ -872,8 +871,6 @@ async fn no_journaled_type_serialises_the_agent_key() {
             "id": "acme",
             "agent_key": SENTINEL,
             "endpoint": "http://127.0.0.1:1/",
-            "mode": "test",
-            "supplier_id": 972_720,
             "defaults": { "currency": "EUR", "language": "en", "number_prefix": "ACME", "aggregator": "aggregator" },
             "seller": { "bank": "Test Bank", "bank_account": "11111111-22222222-33333333", "email": { "reply_to": "billing@acme.test" } },
         },

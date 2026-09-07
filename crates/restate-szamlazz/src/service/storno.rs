@@ -8,7 +8,7 @@ use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
-use super::support::{Fault, Lookup, StornoIntent, check_pins, storno_response, verified_document};
+use super::support::{Fault, Lookup, StornoIntent, storno_response, verified_document};
 use super::support::{object, shared};
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
@@ -96,8 +96,7 @@ impl Execution {
     }
 
     /// Step 1 of the storno protocol: the document must be known, carry this
-    /// order's number, belong to the gateway's account and be a live invoice
-    /// kind. `Break(response)` is the answer for anything that stops the
+    /// order's number and be a live invoice kind. `Break(response)` is the answer for anything that stops the
     /// storno before it is sent (not managed, already reversed, not
     /// stornoable) — a domain outcome, not a fault.
     async fn verify_for_storno(
@@ -107,7 +106,6 @@ impl Execution {
         number: &str,
         storno_id: &ExternalId,
     ) -> Result<ControlFlow<StornoResponse, Box<InvoiceDocument>>, HandlerError> {
-        let gateway = &self.gateway;
         let namespace = &self.config.namespace;
         let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
         let found = object::verify(ctx, self, format!("verify-storno-{number}"), number)
@@ -120,7 +118,6 @@ impl Execution {
                     .with_conflict_reason(ConflictReason::NotManaged),
             ));
         }
-        check_pins(gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
             // Idempotent: already reversed by anyone. The storno number is
             // best effort; a cancelled invocation propagates as such.

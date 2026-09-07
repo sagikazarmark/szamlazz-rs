@@ -34,11 +34,11 @@
 //! binary chooses the file format and environment merging, and merges the
 //! static resolver's account configuration
 //! ([`StaticConfig`](crate::account::StaticConfig)) beside these keys.
-//! Everything account-shaped — credentials, mode, supplier pin, endpoint,
+//! Everything account-shaped — credentials, endpoint,
 //! document defaults, seller block — is carried by the
 //! [`Account`](crate::account::Account) a resolver produces and read by the
 //! services through [`Gateway::account`](crate::gateway::Gateway::account);
-//! the value types those fields are made of ([`AccountMode`], [`Defaults`],
+//! the value types those fields are made of ([`Defaults`],
 //! [`SellerConfig`], and [`Secret`] for a key written inline) are defined
 //! here so that any resolver's configuration can reuse them. The value types
 //! also implement `Serialize`: they ride inside the journaled `Account`, so
@@ -218,26 +218,6 @@ impl fmt::Display for Policy {
             Self::Read => "read",
             Self::Resolve => "resolve",
         })
-    }
-}
-
-/// Whether the account is live or a test account.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum AccountMode {
-    /// A live account issuing legal documents.
-    #[default]
-    Live,
-    /// A szamlazz.hu test account (`teszt`).
-    Test,
-}
-
-impl AccountMode {
-    /// Whether documents of this account carry `teszt = true`.
-    #[must_use]
-    pub const fn is_test(self) -> bool {
-        matches!(self, Self::Test)
     }
 }
 

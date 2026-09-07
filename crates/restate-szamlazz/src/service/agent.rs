@@ -2,11 +2,11 @@
 //! and `storno` by document number, `query_taxpayer` by tax number, and the
 //! `check_account` probe.
 //!
-//! `query` and `storno` check the document they find against the account the
-//! invocation resolved to (`support::check_pins`) before they answer or
-//! send; `set_payments` and `query_taxpayer` find no document and are
-//! exempt. Every read — the probe, `query`, `query_taxpayer`, the verify and
-//! the storno lookup — runs under the read policy; `set_payments` is a write
+//! No handler compares the document it finds with the account the invocation
+//! resolved to: the worker holds no account pin (ADR 0006, account-pin
+//! amendment) — which account a key opens is the operator's go-live check.
+//! Every read — the probe, `query`, `query_taxpayer`, the verify and the
+//! storno lookup — runs under the read policy; `set_payments` is a write
 //! without a retry of its own, and with `additive: true` an at-least-once
 //! one (see [`SetPaymentsRequest::additive`]).
 
@@ -20,8 +20,7 @@ use super::prologue::Execution;
 use super::support::service::{
     lookup_storno, run_once, run_reading, storno_number_of_unmanaged, storno_step,
 };
-use super::support::{Fault, StornoIntent, check_pins, storno_response, verified_document};
-use crate::account::Account;
+use super::support::{Fault, StornoIntent, storno_response, verified_document};
 use crate::config::Namespace;
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
@@ -79,21 +78,13 @@ fn set_payments_unknown(additive: bool, message: &str) -> Fault {
     ))
 }
 
-/// What `query` answers from what its one step settled: the projection of a
-/// document that is the resolved account's; the `account_mismatch` fault for
-/// one that is not; 404 `not_found` on code 7; a credential code as
+/// What `query` answers from what its one step settled: the projection of
+/// the found document; 404 `not_found` on code 7; a credential code as
 /// `credentials_rejected`; any other szamlazz.hu code passed through as
 /// `szamlazz_error` (422), the code in `szamlazz_code`.
-fn query_response(
-    outcome: QueryOutcome,
-    account: &Account,
-    namespace: &Namespace,
-) -> Result<QueryResponse, Fault> {
+fn query_response(outcome: QueryOutcome, namespace: &Namespace) -> Result<QueryResponse, Fault> {
     match outcome {
-        QueryOutcome::Found(found) => {
-            check_pins(account, &found)?;
-            Ok(QueryResponse::from(&*found))
-        }
+        QueryOutcome::Found(found) => Ok(QueryResponse::from(&*found)),
         QueryOutcome::NotFound => Err(Fault::not_found(
             "szamlazz.hu does not know the document (code 7)",
         )),
@@ -188,12 +179,9 @@ impl Execution {
 
     /// The `query` handler: one durable step (`query`) under the read policy
     /// — the document as szamlazz.hu returned it, the same entry `verify`
-    /// writes — then the account check every handler that finds a document
-    /// runs, and the projection. A document that is not the resolved
-    /// account's is `account_mismatch`, not a projection that looks fine: on
-    /// a freshly onboarded account the first found document is most likely a
-    /// read, and a 409 naming the observed `teszt` and supplier id is the
-    /// louder signal.
+    /// writes — then the projection. The projection carries `test` (`teszt`)
+    /// as szamlazz.hu reported it: the go-live check reads it off a known
+    /// document here, since the worker compares it with nothing.
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
@@ -205,16 +193,13 @@ impl Execution {
             gateway.query(&selector).await
         })
         .await?;
-        query_response(outcome, self.gateway.account(), &self.config.namespace)
-            .map_err(HandlerError::from)
+        query_response(outcome, &self.config.namespace).map_err(HandlerError::from)
     }
 
     /// The `query_taxpayer` handler: one durable step (`taxpayer-{prefix}`)
     /// under the read policy — NAV's answer as szamlazz.hu relayed it,
     /// projected onto the crate-owned response — then the projection as is.
-    /// `valid: false` is the answer, not a fault. Finds no document, so like
-    /// `set_payments` it runs no account check: a taxpayer record is NAV's,
-    /// not the account's, and carries no pins. Any other `funcCode ≠ OK` —
+    /// `valid: false` is the answer, not a fault. Any other `funcCode ≠ OK` —
     /// szamlazz.hu's code or NAV's relayed one — is an answer: passed through
     /// as `szamlazz_error` (422, the code in `szamlazz_code`) like `query`'s,
     /// never retried; a NAV outage therefore surfaces as a terminal 422 the
@@ -234,12 +219,9 @@ impl Execution {
     }
 
     /// The `set_payments` handler: one durable step (`set-payments-{number}`)
-    /// that registers the credit entries without a preceding query.
-    /// Deliberately without the account check of a found document (with
-    /// `query_taxpayer`, one of the two handlers exempt from it): it finds
-    /// none — a verify round trip (about a second per credit entry) to catch
-    /// a misconfiguration every other found document already catches is not
-    /// worth it, and a credit entry is not a legal document.
+    /// that registers the credit entries without a preceding query — a verify
+    /// round trip (about a second per credit entry) would establish nothing
+    /// the send does not, and a credit entry is not a legal document.
     pub(super) async fn set_payments_request(
         &self,
         ctx: &Context<'_>,
@@ -263,14 +245,12 @@ impl Execution {
             .map_err(HandlerError::from)
     }
 
-    /// The `storno` handler: verify by number and check the found document
-    /// against the resolved account, then — for a document carrying no order
-    /// number — the lookup and storno steps of design §6 under the by-number
-    /// storno external id. A document carrying an order number is answered
-    /// as `managed_by_order` after the check, never before it; one already
-    /// reversed is `reversed` with the storno number the by-number storno
-    /// lookup names, best effort (ours when we issued the storno, unknown
-    /// otherwise).
+    /// The `storno` handler: verify by number, then — for a document carrying
+    /// no order number — the lookup and storno steps of design §6 under the
+    /// by-number storno external id. A document carrying an order number is
+    /// answered as `managed_by_order`; one already reversed is `reversed`
+    /// with the storno number the by-number storno lookup names, best effort
+    /// (ours when we issued the storno, unknown otherwise).
     pub(super) async fn storno_request(
         &self,
         ctx: &Context<'_>,
@@ -292,11 +272,6 @@ impl Execution {
             .await?
         };
         let found = verified_document(found, &number, &self.config.namespace)?;
-        // This is the handler that issues a legal document by number: the
-        // document must be the resolved account's before anything is said or
-        // sent about it — even "it is an order's": the document is in hand,
-        // and another account's order number must not be echoed.
-        check_pins(self.gateway.account(), &found)?;
         if let Some(order) = found
             .info
             .order_number
@@ -366,15 +341,10 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::account::{Account, AccountId, CredentialRef};
     use crate::config::Namespace;
 
     fn namespace() -> Namespace {
         "acct".parse().expect("namespace")
-    }
-
-    fn account() -> Account {
-        Account::new(AccountId::from("acct"), CredentialRef::from("acct"))
     }
 
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
@@ -429,9 +399,8 @@ mod tests {
     /// is `credentials_rejected`.
     #[test]
     fn query_answers_a_miss_as_not_found_and_passes_another_code_through() {
-        let (status, body) = fault_body(
-            query_response(QueryOutcome::NotFound, &account(), &namespace()).expect_err("a fault"),
-        );
+        let (status, body) =
+            fault_body(query_response(QueryOutcome::NotFound, &namespace()).expect_err("a fault"));
         assert_eq!(status, 404, "{body}");
         assert_eq!(body["code"], "not_found", "{body}");
         assert_eq!(body.get("szamlazz_code"), None, "{body}");
@@ -441,7 +410,7 @@ mod tests {
             message: "Hibás számlaszám.".to_owned(),
         };
         let (status, body) =
-            fault_body(query_response(outcome, &account(), &namespace()).expect_err("a fault"));
+            fault_body(query_response(outcome, &namespace()).expect_err("a fault"));
         assert_eq!(status, 422, "{body}");
         assert_eq!(body["code"], "szamlazz_error", "{body}");
         assert_eq!(body["szamlazz_code"], "57", "{body}");
@@ -458,7 +427,7 @@ mod tests {
             message: "Sikertelen bejelentkezés.".to_owned(),
         };
         let (status, body) =
-            fault_body(query_response(outcome, &account(), &namespace()).expect_err("a fault"));
+            fault_body(query_response(outcome, &namespace()).expect_err("a fault"));
         assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], "credentials_rejected", "{body}");
         assert_eq!(body["szamlazz_code"], "3", "{body}");

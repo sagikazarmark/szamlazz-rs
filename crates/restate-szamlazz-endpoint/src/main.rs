@@ -143,8 +143,8 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
 /// endpoint: the static resolver over `[account]` or `[accounts.<scope>]` is
 /// the `Accounts` bundle both services hold beside the deployment-level
 /// `WorkerConfig`. Logs what was bound — the namespace, the shape, each
-/// resolved account's scope, id, mode, endpoint and supplier pin, and whether
-/// request identity verification is on — never an agent key. `bind_addr` is
+/// resolved account's scope, id and endpoint, and whether request identity
+/// verification is on — never an agent key. `bind_addr` is
 /// the address the endpoint will listen on (or would, under
 /// `--check-config`): what the warning about accepting unsigned requests
 /// names as reachable.
@@ -166,9 +166,7 @@ fn build_endpoint(config: EndpointConfig, bind_addr: SocketAddr) -> Result<Endpo
         tracing::info!(
             scope = scope.unwrap_or("<unscoped>"),
             account = %account.id,
-            mode = ?account.mode,
             endpoint = %account.endpoint,
-            supplier_id = ?account.supplier_id,
             "szamlazz.hu account"
         );
         // Allowed — a mock or a proxy is a legitimate target — but the agent
@@ -274,7 +272,6 @@ mod tests {
             [account]
             id = "acme"
             agent_key = "{agent_key}"
-            mode = "test"
             endpoint = "{endpoint}"
             "#
         ))))
@@ -419,7 +416,6 @@ mod tests {
 
                     [account]
                     id = "acme"
-                    mode = "test"
                     endpoint = "{}/"
                     "#,
                     server.uri()

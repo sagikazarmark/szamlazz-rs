@@ -50,7 +50,6 @@ namespace = "acct"            # prefixes every external id the worker writes to 
 [account]
 id = "acme"
 agent_key = "..."             # or RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY in the environment
-mode = "test"                 # the account is a test account; "live" (the default) for a real one
 ```
 
 **4. Start Restate and the endpoint, register the endpoint.** The repository root has a `compose.yaml` with a Restate server (ingress on `:8080`, admin API and UI on `:9070`, the three experimental flags multi-account mode needs); `docker compose up -d` starts it. Start the endpoint on the host and register it with the server — with the [`restate` CLI](https://docs.restate.dev/installation) or with a plain call to the admin API:
@@ -73,10 +72,10 @@ curl -X POST localhost:8080/restate/call/Szamlazz.Agent/check_account
 ```
 
 ```json CheckAccountResponse
-{ "scope": null, "account": { "id": "acme", "mode": "test", "supplier_id": null }, "namespace": "acct", "credentials": { "state": "ok" } }
+{ "scope": null, "account": { "id": "acme" }, "namespace": "acct", "credentials": { "state": "ok" } }
 ```
 
-`credentials: {"state": "ok"}` means szamlazz.hu accepted the key. `{"state": "rejected", "code": "3", …}` means it did not — fix the key; that answer is data, not an error.
+`credentials: {"state": "ok"}` means szamlazz.hu accepted the key. `{"state": "rejected", "code": "3", …}` means it did not — fix the key; that answer is data, not an error. It does **not** tell you *which* szamlazz.hu account the key opens, nor whether it is a test account — no operation does, and the worker checks neither ([Accounts are yours to verify](#accounts-are-yours-to-verify)) — so also query one document you know to be this account's (`Szamlazz.Agent.query` by its number) and read `test` and the seller block on the answer: the company named there is the one the key issues for.
 
 **6. Issue the first invoice.** A create request through the ingress (`/restate/call/{service}/{key}/{handler}`; the key is the order number, trimmed):
 
@@ -154,8 +153,6 @@ max_duration = "1m"
 id = "acme"                   # the account's identifier as the worker knows it; journaled with every invocation, shown in the Restate UI
 agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default. http or https, no user:password@ (a load error); plain http off loopback is a start-up warn
-mode = "live"                 # live | test — validated against <teszt> on every document found under our external ids
-supplier_id = 972720          # optional pin; when set, validated against szallito/id on every document found under our external ids
 
 [account.defaults]            # all optional
 e_invoice = false
@@ -186,9 +183,9 @@ RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY="..." \
 restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS=5`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). An environment value is read as the **string** it was set to, and the key's type decides what it means: `3` is a count on `max_attempts`, `1.5` a factor, `true` a flag, `90` ninety seconds on a duration — and an agent key is taken exactly as written, so an all-digit key keeps its leading zeros (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY=0071234` reaches szamlazz.hu as `0071234`; no quoting needed). Durations are `"90s"`, `"2m"`, `"1h"` or a bare non-negative integer of seconds, in the file and in the environment alike.
+Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__ENDPOINT=http://127.0.0.1:1234/`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS=5`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). An environment value is read as the **string** it was set to, and the key's type decides what it means: `3` is a count on `max_attempts`, `1.5` a factor, `true` a flag, `90` ninety seconds on a duration — and an agent key is taken exactly as written, so an all-digit key keeps its leading zeros (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY=0071234` reaches szamlazz.hu as `0071234`; no quoting needed). Durations are `"90s"`, `"2m"`, `"1h"` or a bare non-negative integer of seconds, in the file and in the environment alike.
 
-`namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, per account its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`, and whether request identity verification is on (`request identity verification enabled keys=1`, or `disabled: accepting unsigned requests` — at `warn` when `identity_keys` is not mentioned at all, see [Request Identity](#request-identity)). An `endpoint` is an `http` or `https` URL with a host and **no userinfo**: `https://user:password@host/` is a load error, because the endpoint is journaled with the account (shown in the Restate UI for the retention period) and printed in that start-up log. Plain `http` is allowed — a local mock, a proxy — but the agent key travels in the request body, so an `http` endpoint on a host other than loopback is logged at `warn` at start-up as sending it in cleartext.
+`namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, per account its scope (or `<unscoped>`), `id` and `endpoint`, and whether request identity verification is on (`request identity verification enabled keys=1`, or `disabled: accepting unsigned requests` — at `warn` when `identity_keys` is not mentioned at all, see [Request Identity](#request-identity)). An `endpoint` is an `http` or `https` URL with a host and **no userinfo**: `https://user:password@host/` is a load error, because the endpoint is journaled with the account (shown in the Restate UI for the retention period) and printed in that start-up log. Plain `http` is allowed — a local mock, a proxy — but the agent key travels in the request body, so an `http` endpoint on a host other than loopback is logged at `warn` at start-up as sending it in cleartext.
 
 **The configuration is strict.** A key the binary does not know — at any level: the top level, a policy table, an account table, its `defaults`, `seller` or `seller.email` — is refused at start-up with an error naming the key, its path, where it came from and what is accepted there, instead of being ignored and leaving the setting at its default:
 
@@ -197,7 +194,7 @@ Error: invalid configuration
 
 Caused by:
     2 unknown keys:
-      unknown key `account.mod` in restate-szamlazz.toml TOML file; expected one of `id`, `agent_key`, `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`
+      unknown key `account.endpont` in restate-szamlazz.toml TOML file; expected one of `id`, `agent_key`, `endpoint`, `defaults`, `seller`
       unknown key `isue` (RESTATE_SZAMLAZZ_ISUE__MAX_ATTEMPTS) in environment variables; expected one of `namespace`, `issue`, `read`, `resolve`, `account`, `accounts`, `identity_keys`
 ```
 
@@ -208,7 +205,7 @@ Every unknown key is reported at once. A value of the wrong type is refused the 
 ```sh
 $ restate-szamlazz --check-config --config restate-szamlazz.toml
 INFO restate_szamlazz: loaded szamlazz.hu account configuration namespace=acct scoped=false accounts=1
-INFO restate_szamlazz: szamlazz.hu account scope="<unscoped>" account=acme mode=Live endpoint=https://www.szamlazz.hu/szamla/ supplier_id=Some(972720)
+INFO restate_szamlazz: szamlazz.hu account scope="<unscoped>" account=acme endpoint=https://www.szamlazz.hu/szamla/
 INFO restate_szamlazz: bound Restate service service=Szamlazz.Order kind=VirtualObject handlers=8
 INFO restate_szamlazz: bound Restate service service=Szamlazz.Agent kind=Service handlers=5
 INFO restate_szamlazz: request identity verification enabled keys=1
@@ -230,8 +227,6 @@ namespace = "acct"            # one namespace for the deployment; every account'
 [accounts.acme]               # reachable as /restate/scope/acme/call/…
 id = "acme"
 agent_key = "acme-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
-supplier_id = 972720          # optional pin: the seller record's id (szallito/id) on the account's documents
-mode = "live"
 
 [accounts.acme.seller]
 bank_account = "..."
@@ -241,11 +236,11 @@ id = "beta"
 agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__AGENT_KEY
 ```
 
-`[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: two accounts sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), two pinning the same `supplier_id`, or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
+`[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: two accounts sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
 
 **`identity_keys` is required in this shape.** The scope is protocol data inside the request the Restate server sends to the endpoint, and the scope selects the account: an endpoint that accepts unsigned requests lets any client that can reach `{bind}:{port}` invoke either service under any scope — on every account the deployment serves — with nothing in between, because the gateway of the rule below sits in front of the *ingress*, not in front of this endpoint. Identity keys are what enforce the assumption the model rests on, that only the Restate runtime speaks to the endpoint; the worker cannot check it and does not refuse to start without them — the start-up log warns when `identity_keys` is not mentioned (an `identity_keys = []` written out is taken at its word in this shape too, so never write it into a deployment's configuration), and the [deploy checklist](#deploy-checklist) has it as the first line. See [Request Identity](#request-identity).
 
-**`supplier_id` is an optional pin, in this shape too.** It is `szallito/id` — szamlazz.hu's id for the seller record printed on every document the account issues, 972720 on the szamlazz.hu test account; read it off any of the account's documents with `Szamlazz.Agent.query` or `szamlazz invoice get --json` (`.supplier.id`). When set, every document a handler finds is checked against it and a mismatch is `account_mismatch` (409) or `conflict{external_id_collision}` — which catches an agent key configured under the wrong scope on the first found document, something `mode` alone cannot. The worker cannot verify the value itself (szamlazz.hu has no "which account am I?" operation, and `check_account` finds no document), so it is a fact you record, not one the worker establishes; leave it unset until you have read it off a real document rather than guess it.
+<a id="accounts-are-yours-to-verify"></a>**Accounts are yours to verify; the worker holds no account pin.** Nothing on a document the worker finds is compared with the account it was configured for. szamlazz.hu has no "which account am I?" operation, and a create's reply carries neither `teszt` nor the seller block — only a query body does — so any check on those fields could fire only *after* the first document of a fresh order was issued into whatever account the key opens. 0.3 had two such tripwires (`mode` against `<teszt>`, `supplier_id` against the undocumented `szallito/id`); [ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md)'s account-pin amendment dropped both rather than keep a check that cannot prevent the first wrong-account document and whose reference value had to be read off the very account being checked. **The risk is yours, stated plainly**: a key pasted into the wrong `[accounts.<scope>]`, a live key where a test one was meant (staging issuing real invoices to NAV) or a test key where a live one was meant (production issuing test documents) issues there, answers `issued`, and nothing in the worker fails — the documents are real, in another company's name or the wrong account, and reversing them is a storno like any other. The check is the last line of the [deploy checklist](#deploy-checklist): under each scope, `Szamlazz.Agent.query` one document you know to be that account's — its number from the szamlazz.hu UI — and read `test` and the seller block (name, tax number) on the answer. Do it at onboarding, after every key rotation, and before pointing any environment at a live account.
 
 **Scope format.** The static resolver's scope keys are `[a-z0-9_]`, 1–36 bytes — a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`, non-empty, at most 36 characters — ASCII, so bytes; a dashed UUID is exactly 36), chosen so that environment overrides can address them (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the constraint on the account identifiers your application uses as scopes with this binary; a deployment with its own `AccountResolver` may use Restate's full format.
 
@@ -268,11 +263,11 @@ agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BET
 ```sh
 # a multi-account deployment: once per scope
 curl -X POST localhost:8080/restate/scope/acme/call/Szamlazz.Agent/check_account
-# {"scope":"acme","account":{"id":"acme","mode":"live","supplier_id":972720},"namespace":"acct","credentials":{"state":"ok"}}
+# {"scope":"acme","account":{"id":"acme"},"namespace":"acct","credentials":{"state":"ok"}}
 
 # a single-account deployment: unscoped
 curl -X POST localhost:8080/restate/call/Szamlazz.Agent/check_account
-# {"scope":null,"account":{"id":"acme","mode":"live","supplier_id":972720},"namespace":"acct","credentials":{"state":"ok"}}
+# {"scope":null,"account":{"id":"acme"},"namespace":"acct","credentials":{"state":"ok"}}
 ```
 
 | Answer | Meaning |
@@ -283,7 +278,7 @@ curl -X POST localhost:8080/restate/call/Szamlazz.Agent/check_account
 | `400 unknown_account` | The scope names no account (or the request is unscoped on a multi-account deployment). Fix the configuration or the address. |
 | `503 unavailable` | szamlazz.hu did not answer the probe through the `[read]` policy, or the resolver or the credential store could not be reached; call again. |
 
-Credential acceptance is the only szamlazz.hu-verified fact in the answer: the supplier id appears only in found-document bodies, so a not-found probe cannot cross-check `supplier_id` — it echoes the configuration. A wrong `mode` or `supplier_id` surfaces on the first document found under the account, on any handler that finds one (`account_mismatch` by number — `Szamlazz.Agent.query` is the likeliest first — `conflict{external_id_collision}` under an external id), not here. The probe is the only defence against the `protocol_v7`-off case: the worker has no per-request signal of "was this call scoped?" that it is willing to depend on (the ingress's `x-restate-ingress-path` header is undocumented and caller-overridable), so run the probe under every scope before you open the services, and after every server upgrade.
+Credential acceptance is the only szamlazz.hu-verified fact in the answer; `account.id` echoes the configuration. **Which** szamlazz.hu account the key opens, and whether it is a test account, surfaces nowhere in the worker ([Accounts are yours to verify](#accounts-are-yours-to-verify)) — so, **after the probe, under each scope, query one document you know to be the account's** (`Szamlazz.Agent.query`, `{"selector": {"invoice_number": "…"}}`, a number from the account's szamlazz.hu UI) and read `test` and the seller block on the answer; the company named there is the one this scope will issue for, and `test` says whether for real. On a freshly opened live account with no document yet, issue one in the UI first. The probe is the only defence against the `protocol_v7`-off case: the worker has no per-request signal of "was this call scoped?" that it is willing to depend on (the ingress's `x-restate-ingress-path` header is undocumented and caller-overridable), so run the probe under every scope before you open the services, and after every server upgrade.
 
 ### Single → multi flag day
 
@@ -298,7 +293,7 @@ curl -X PATCH localhost:9070/services/Szamlazz.Agent -H 'content-type: applicati
 until [ "$(curl -s localhost:9070/query -H 'accept: application/json' -H 'content-type: application/json' \
       -d '{"query": "SELECT count(*) AS n FROM sys_invocation WHERE status <> '"'"'completed'"'"'"}' | jq -r '.rows[0].n')" = "0" ]; do sleep 2; done
 
-# 3. Switch the configuration — keep `namespace`; move the account under `[accounts.<scope>]` and add `supplier_id` —
+# 3. Switch the configuration — keep `namespace`; move the account under `[accounts.<scope>]` —
 #    and register the new revision (a new deployment URI; the old revision serves nothing once drained).
 restate deployments register http://host:9081
 
@@ -308,7 +303,8 @@ restate deployments register http://host:9081
 curl -X PATCH localhost:9070/services/Szamlazz.Order -H 'content-type: application/json' -d '{"public": true}'
 curl -X PATCH localhost:9070/services/Szamlazz.Agent -H 'content-type: application/json' -d '{"public": true}'
 
-# 6. Probe every scope (the deploy checklist above): each answers its account with credentials ok.
+# 6. Probe every scope (the deploy checklist above): each answers its account with credentials ok —
+#    then query one known document per scope and read its seller block.
 for scope in acme beta_events; do
   curl -X POST "localhost:8080/restate/scope/$scope/call/Szamlazz.Agent/check_account"
 done
@@ -361,7 +357,7 @@ Every handler takes and returns JSON; the discovery manifest carries JSON Schema
 | `Szamlazz.Order.storno_invoice` | Reverses (`sztornó`) an invoice of this order; idempotent. The storno carries the original's fulfillment date (`teljesitesDatum` = the invoice's `telj`), as NAV requires; there is no way to set another ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)). |
 | `Szamlazz.Order.delete_proforma` | Deletes the order's proforma; answers `{deleted, reason}` — a paid one is `{deleted: false, reason: "proforma_paid"}` unless `force`. |
 | `Szamlazz.Order.get` | What szamlazz.hu holds under the order's external ids right now (proforma, invoice, prepayment, final), each `live`, `reversed` or — a proforma — `consumed`. No input. Read-only, never blocks behind issuing. Does not list correctives and never fills `storno_number` (the create and storno handlers report it). |
-| `Szamlazz.Agent.check_account` | The read-only probe of the [deploy checklist](#deploy-checklist): the scope the SDK saw, the configured account (`id`, `mode`, `supplier_id`), the namespace and whether szamlazz.hu accepted the credentials (`ok` / `rejected`). No input. One sentinel query; issues nothing. |
+| `Szamlazz.Agent.check_account` | The read-only probe of the [deploy checklist](#deploy-checklist): the scope the SDK saw, the configured account (`id`), the namespace and whether szamlazz.hu accepted the credentials (`ok` / `rejected`). No input. One sentinel query; issues nothing. |
 | `Szamlazz.Agent.query` | Queries a document by invoice number, order number or external id. Code 7 is 404 `not_found`; another szamlazz.hu code is passed through as 422 `szamlazz_error` with the code in `szamlazz_code`. |
 | `Szamlazz.Agent.query_taxpayer` | Looks a Hungarian taxpayer up through NAV (`xmltaxpayer`) on the scope's account — `{"tax_number": "12345678-2-42"}` or the bare stem `"12345678"`, nothing else — and answers `{valid, name?, tax_number?, vat_code?, addresses[]}`; `valid: false` is a normal 200. Read-only, one step under the `[read]` policy; any other NAV or szamlazz.hu code is a 422 `szamlazz_error` with that code in `szamlazz_code`. Not cached here — cache in the caller with a TTL on the order of a day. |
 | `Szamlazz.Agent.set_payments` | Registers credit entries (`jóváírás`) on an invoice; replaces unless `additive`. At most five entries — a sixth is 400 `invalid_input`, nothing sent; szamlazz.hu refusing the entries is 422 `szamlazz_error`. No query precedes the send, so it has no `not_found` path. **`additive: true` is at-least-once**: a lost reply is `outcome_unknown`, and the handler's one retry after a crash re-sends — each send that reaches szamlazz.hu appends the entries again. Query the invoice before re-sending an additive call that ended in `outcome_unknown`; a replacing call is repeated as is. |
@@ -629,7 +625,7 @@ curl localhost:9070/services/Szamlazz.Agent/openapi
 | `base_reversed` | `correct_invoice` on a reversed invoice. | The caller: a reversed invoice cannot be corrected; correct the reissued one. | `existing_number` |
 | `foreign` | A live invoice under this order number that is under none of the order's external ids — issued outside this worker (another channel, another namespace) on the same szamlazz.hu account. | **State of the world — page.** Someone issued outside the worker; open `existing_number` on szamlazz.hu and decide (storno and let the worker issue, or keep it and stop calling for this order). Never retry blindly. | `existing_number` |
 | `duplicate_order_number` | szamlazz.hu refused the order number as a duplicate (71/152) and no live document of ours could be found under the external id. | **State of the world — page**, as `foreign`; `existing_number` names the document when the order-number query finds one. | `code`, `message`, `existing_number?` |
-| `external_id_collision` | The newest document under one of the order's external ids belongs to another order, kind, account mode or supplier. | **Page**: a namespace shared by two deployments, or a `mode` / `supplier_id` misconfiguration. Query the `external_id` with `Szamlazz.Agent.query` to see whose it is. Never retryable as is. | `existing_number` |
+| `external_id_collision` | The newest document under one of the order's external ids belongs to another order or kind. | **Page**: a namespace shared by two deployments. Query the `external_id` with `Szamlazz.Agent.query` to see whose it is. Never retryable as is. | `existing_number` |
 
 **`rejected` pseudo-codes.** `code` on a `rejected` outcome is szamlazz.hu's numeric code — except for three tokens the worker sets itself, none of which szamlazz.hu answered: `not_stornoable` (a `StornoResponse`: szamlazz.hu echoed the document unchanged — a proforma or delivery note, which cannot be stornoed), `proforma_paid` (`delete_proforma`'s `reason`: the proforma has registered credit entries and `force` was not sent) and `request` (the request violates the Számla Agent wire contract and was never sent — a document without line items, a character XML cannot carry; a create or storno answers it as `rejected{code: "request"}` with the reason in `message`, and `set_payments` turns the same case — a sixth credit entry — into the `invalid_input` fault). Fix the request; re-sending as is repeats the answer.
 
@@ -673,7 +669,7 @@ curl localhost:9070/services/Szamlazz.Agent/openapi
 { "invoice_number": "E-2026-123", "outstanding": "0.00", "gross_total": "505.46" }
 ```
 
-**`QueryResponse`** — `Szamlazz.Agent.query`'s projection of the document as szamlazz.hu holds it. `document_type` is szamlazz.hu's `tipus` code — `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `SS` storno, `HS` corrective — and `referenced_invoice_number` is the invoice a storno reversed or a corrective corrected; `supplier_id` and `test` are the pins the account check reads (`account_mismatch` when they are not the resolved account's); `payments` are the credit entries as recorded:
+**`QueryResponse`** — `Szamlazz.Agent.query`'s projection of the document as szamlazz.hu holds it. `document_type` is szamlazz.hu's `tipus` code — `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `SS` storno, `HS` corrective — and `referenced_invoice_number` is the invoice a storno reversed or a corrective corrected; `test` is `teszt` as szamlazz.hu reported it — what the go-live check reads off a known document, since the worker compares it with nothing; `payments` are the credit entries as recorded:
 
 ```json QueryResponse
 {
@@ -694,7 +690,6 @@ curl localhost:9070/services/Szamlazz.Agent/openapi
     { "date": "2026-09-14", "title": "bankkártya", "amount": "-252.73", "comment": null, "bank_account": null }
   ],
   "outstanding": "0.00",
-  "supplier_id": 972720,
   "test": true
 }
 ```
@@ -834,7 +829,6 @@ The e2e harness asserts this envelope on every fault it receives from a live Res
 | `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know, a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound, or an order key outside the key alphabet (the message names the rule; nothing was journaled or sent) — or it carries a value the operation cannot take: an option the handler does not take (`options.proforma` on `create_proforma` or `create_final`), a `{number}` proforma link that is not a proforma, an empty `buyer.name`, a `query_taxpayer` tax number in neither accepted form, a sixth credit entry on `set_payments` (the wire contract takes five; nothing is sent), a line item whose arithmetic overflows a decimal (nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment: it arrived unscoped on a multi-account deployment (`[accounts.<scope>]`, which serves accounts by scope only), or under a scope no account is reachable by — on a single-account deployment (`[account]`, served unscoped only), any scope. Nothing was issued. | Fix the address — `/restate/scope/{scope}/call/…` with a configured scope, or `/restate/call/…` on a single-account deployment; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `Szamlazz.Order.correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome, not this fault.) | Fix the number — the invoice was never issued, or the number you stored is wrong; do not retry as is. |
-| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order.storno_invoice` / `correct_invoice` on their verify, the proforma of `options.proforma: {number}`, or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `Szamlazz.Agent.set_payments` and `query_taxpayer` are the two exemptions: `set_payments` registers the credit entry without a preceding query — a verify round trip per credit entry to catch a misconfiguration every other found document already catches is not worth it, and a credit entry is not a legal document — and `query_taxpayer` finds no document at all (a taxpayer record is NAV's and carries no pins). | Check `account.mode` / `account.supplier_id` — a test account configured as live fails on its first found document — or the scope the call was made under; do not retry blindly. |
 | `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one — `valid: false` is a 200, not this), `set_payments` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Branch on `szamlazz_code`. A NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`; a refused credit entry is fixed before it is re-sent. |
 | `outcome_unknown` | 500 | The create or storno step ran out of its `[issue]` policy while a document may or may not have been issued — or `Szamlazz.Agent.set_payments` lost the reply to its one send. | Retry with a new `Idempotency-Key` or read `get`. For `set_payments` with `additive: true`, query the invoice first: the lost send may have appended the entries. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the `[read]` policy (the message names the step, the last failure and — where the step knows them — the order, kind and external id), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so the storno is not sent — or the worker's own account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Retry with a new `Idempotency-Key` later. |
@@ -847,7 +841,7 @@ Handlers that call szamlazz.hu kill the invocation after five attempts (2 m → 
 ### Caller contract
 
 1. Send an `Idempotency-Key` per logical request; Restate dedupes retries and attaches concurrent duplicates to the in-flight invocation. It is deduplicated per scope.
-2. Tell a **fault** from **no answer** before deciding what to do with the key. A fault — a 4xx/5xx with `x-restate-error-source: invocation` and a body the worker wrote — is a completed invocation whose stored completion Restate replays under the same key for the retention period (30 days on every handler that writes; verified): an **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`", never "no document exists"; the handler reconciles by external id, so the retry is safe. No answer — a client timeout, an ingress 5xx whose source is *not* `invocation` — is an invocation still in flight, re-dispatched by Restate for up to ~24 min under a worker outage: **keep the key** and retry with it (the retry attaches to the in-flight invocation and receives its outcome) or read `get`; a new key would start a second invocation behind the first. A killed invocation (attempts exhausted) is a fault whose envelope `message` is the last retryable error's text, not the worker's `{code, message}`: treat it as `outcome_unknown`. The other faults are settled — nothing landed: `invalid_input`, `unknown_account`, `not_found` and `account_mismatch` are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit entries it was sent). Retrying as is repeats the answer: fix the request, the number, the scope or the account — or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
+2. Tell a **fault** from **no answer** before deciding what to do with the key. A fault — a 4xx/5xx with `x-restate-error-source: invocation` and a body the worker wrote — is a completed invocation whose stored completion Restate replays under the same key for the retention period (30 days on every handler that writes; verified): an **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`", never "no document exists"; the handler reconciles by external id, so the retry is safe. No answer — a client timeout, an ingress 5xx whose source is *not* `invocation` — is an invocation still in flight, re-dispatched by Restate for up to ~24 min under a worker outage: **keep the key** and retry with it (the retry attaches to the in-flight invocation and receives its outcome) or read `get`; a new key would start a second invocation behind the first. A killed invocation (attempts exhausted) is a fault whose envelope `message` is the last retryable error's text, not the worker's `{code, message}`: treat it as `outcome_unknown`. The other faults are settled — nothing landed: `invalid_input`, `unknown_account` and `not_found` are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit entries it was sent). Retrying as is repeats the answer: fix the request, the number, the scope or the account — or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the flag can never cause a duplicate.
 
 **Calling from a webhook handler.** A create normally answers within a few seconds, but it can legitimately take **minutes**: while szamlazz.hu is flaky the worker waits out its `[read]` policy (up to 5 m per read step by default) and re-executes the create step under `[issue]` (2 m → 10 m between executions); the call stays open the whole time. So:
@@ -871,7 +865,7 @@ The worker keeps nothing, so your application is the only record of what it aske
 | the last `Idempotency-Key` per operation, and whether it ended in a **fault** | Decides the next key: a fault (rule 2) needs a new one; no answer keeps it. |
 | `customer_account_url` on first sight | Present on a fresh `issued` only — never on `already_issued`, `reconciled` or `get`. |
 
-`external_id`s need no column: `{namespace}:{order}:{kind}` is deterministic. The account (its `id`, `mode`, `supplier_id`) is never in a response — record the scope, not the account.
+`external_id`s need no column: `{namespace}:{order}:{kind}` is deterministic. The account (its `id`) is never in a response — record the scope, not the account.
 
 ## Caller guidance: a Pretix integration
 

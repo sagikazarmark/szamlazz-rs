@@ -236,7 +236,7 @@ mod tests {
     use figment::Jail;
     use figment::providers::{Format, Toml};
     use restate_szamlazz::account::StaticResolver;
-    use restate_szamlazz::config::{AccountMode, IssueConfig, ReadConfig, ResolveConfig};
+    use restate_szamlazz::config::{IssueConfig, ReadConfig, ResolveConfig};
 
     use super::*;
 
@@ -270,8 +270,6 @@ mod tests {
         id = "acme"
         agent_key = "agent-key"
         endpoint = "https://www.szamlazz.hu/szamla/"
-        mode = "live"
-        supplier_id = 972720
 
         [account.defaults]
         e_invoice = false
@@ -433,8 +431,6 @@ mod tests {
             account.endpoint.as_deref(),
             Some("https://www.szamlazz.hu/szamla/")
         );
-        assert_eq!(account.mode, AccountMode::Live);
-        assert_eq!(account.supplier_id, Some(972_720));
         assert!(!account.defaults.e_invoice);
         assert_eq!(account.defaults.language, "hu");
         assert_eq!(account.defaults.currency, "HUF");
@@ -482,8 +478,6 @@ mod tests {
             .expect("the single account");
         assert_eq!(account.id.as_str(), "acme");
         assert_eq!(account.endpoint, None);
-        assert_eq!(account.mode, AccountMode::Live);
-        assert_eq!(account.supplier_id, None);
         assert_eq!(account.defaults.currency, "HUF");
         assert_eq!(account.seller.bank_account, None);
         assert_eq!(
@@ -498,15 +492,12 @@ mod tests {
     /// `[account.defaults]`, an issue-policy field, a read-policy field and
     /// the namespace itself. Every value is a string the field's type reads:
     /// `"3"` is `3` on a count, `"1.5"` on a factor, `"true"` on a flag,
-    /// `"90"` seconds on a duration, `"972720"` on the supplier pin — and an
-    /// all-digit agent key stays the string it was written as, leading zero
-    /// included.
+    /// `"90"` seconds on a duration — and an all-digit agent key stays the
+    /// string it was written as, leading zero included.
     #[test]
     fn environment_overrides_nest_with_double_underscores_and_are_read_as_strings() {
         Jail::expect_with(|jail| {
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY", "0071234");
-            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__MODE", "test");
-            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__SUPPLIER_ID", "972721");
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY", "EUR");
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__E_INVOICE", "true");
             jail.set_env("RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS", "3");
@@ -523,8 +514,6 @@ mod tests {
                 .as_ref()
                 .expect("the single account");
             assert_eq!(account.agent_key.expose(), "0071234", "byte-exact");
-            assert_eq!(account.mode, AccountMode::Test);
-            assert_eq!(account.supplier_id, Some(972_721));
             assert_eq!(account.defaults.currency, "EUR");
             assert!(account.defaults.e_invoice);
             assert_eq!(config.worker.issue.max_attempts, 3);
@@ -573,7 +562,7 @@ mod tests {
                 "config.yaml",
                 "namespace: acct\naccount:\n  id: acme\n  agent_key: k\n",
             )?;
-            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__MODE", "test");
+            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY", "EUR");
 
             for file in ["config.toml", "config.json", "config.yaml"] {
                 let figment = figment(Some(Path::new(file))).expect(file);
@@ -582,8 +571,7 @@ mod tests {
                 let account = config.accounts.account.as_ref().expect(file);
                 assert_eq!(account.id.as_str(), "acme", "{file}");
                 assert_eq!(
-                    account.mode,
-                    AccountMode::Test,
+                    account.defaults.currency, "EUR",
                     "{file}: the environment is merged on top"
                 );
             }
@@ -795,8 +783,6 @@ mod tests {
             id = "acme"
             agent_key = "key-acme-file"
             endpoint = "http://127.0.0.1:1/"
-            mode = "test"
-            supplier_id = 972720
 
             [accounts.acme.seller]
             bank_account = "11111111-22222222"
@@ -805,8 +791,6 @@ mod tests {
             id = "beta"
             agent_key = "key-beta-file"
             endpoint = "http://127.0.0.1:1/"
-            mode = "test"
-            supplier_id = 972721
         "#;
 
         let config = load(MULTI).expect("configuration should load");
@@ -822,14 +806,17 @@ mod tests {
 
         Jail::expect_with(|jail| {
             jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY", "key-acme-env");
-            jail.set_env("RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__MODE", "live");
+            jail.set_env(
+                "RESTATE_SZAMLAZZ_ACCOUNTS__BETA_EVENTS__DEFAULTS__LANGUAGE",
+                "en",
+            );
 
             let config = load_with_env(MULTI).expect("configuration should load");
 
             let acme = &config.accounts.accounts["acme"];
             let beta = &config.accounts.accounts["beta_events"];
             assert_eq!(acme.agent_key.expose(), "key-acme-env");
-            assert_eq!(acme.mode, AccountMode::Test);
+            assert_eq!(acme.defaults.language, "hu", "untouched");
             assert_eq!(
                 acme.seller.bank_account.as_deref(),
                 Some("11111111-22222222"),
@@ -840,7 +827,7 @@ mod tests {
                 "key-beta-file",
                 "the other account's key is untouched"
             );
-            assert_eq!(beta.mode, AccountMode::Live);
+            assert_eq!(beta.defaults.language, "en");
             assert_eq!(beta.id.as_str(), "beta");
 
             // What the binary then builds: each account under its scope.
@@ -859,7 +846,7 @@ mod tests {
     #[test]
     fn both_shapes_are_refused_at_load_naming_both_sources() {
         let error = load(&format!(
-            "{}\n[accounts.beta]\nid = \"beta\"\nagent_key = \"k\"\nsupplier_id = 1",
+            "{}\n[accounts.beta]\nid = \"beta\"\nagent_key = \"k\"",
             minimal()
         ))
         .expect_err("both shapes in one file");
@@ -877,7 +864,6 @@ mod tests {
                     [accounts.acme]
                     id = "acme"
                     agent_key = "k"
-                    supplier_id = 1
                     "#,
             )
             .expect_err("a stray single-shape override on a multi-account file");
@@ -965,7 +951,6 @@ mod tests {
             [accounts.acme]
             id = "acme"
             agent_key = "k"
-            supplier_id = 1
         "#;
         let cases = [
             // A misspelt policy table leaves the issue policy at its default.
@@ -974,17 +959,11 @@ mod tests {
                 "isue",
                 "issue",
             ),
-            // A misspelt `mode` runs a test account as live.
+            // A misspelt `endpoint` posts to production.
             (
-                format!("{}\nmod = \"test\"", minimal()),
-                "account.mod",
-                "mode",
-            ),
-            // A misspelt `supplier_id` drops the supplier pin.
-            (
-                format!("{}\nsupplyer_id = 1", minimal()),
-                "account.supplyer_id",
-                "supplier_id",
+                format!("{}\nendpont = \"http://127.0.0.1:1/\"", minimal()),
+                "account.endpont",
+                "endpoint",
             ),
             (
                 format!("{}\n[account.defaults]\ncurency = \"EUR\"", minimal()),
@@ -1054,12 +1033,12 @@ mod tests {
 
         // The environment is a source like any other.
         Jail::expect_with(|jail| {
-            jail.set_env("RESTATE_SZAMLAZZ_ACOUNT__MODE", "test");
+            jail.set_env("RESTATE_SZAMLAZZ_ACOUNT__ID", "acme");
             let error = load_with_env(minimal())
                 .expect_err("a misspelt environment override must not load");
             let message = format!("{error:#}");
             assert!(
-                message.contains("unknown key `acount` (RESTATE_SZAMLAZZ_ACOUNT__MODE)"),
+                message.contains("unknown key `acount` (RESTATE_SZAMLAZZ_ACOUNT__ID)"),
                 "the error names the key and the variable that set it: {message}"
             );
             assert!(message.contains("in environment variables"), "{message}");

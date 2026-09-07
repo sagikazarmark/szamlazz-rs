@@ -51,7 +51,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| **Not unique**: two `SZ` under different orders with the same external id → both issued, no warning. Re-checked three days later, with the same result, and extended: the same id on a `D` and then an `SZ` under two other orders → both issued (not unique **across kinds** either); the same id on an `SZ` and, in the storno request, on its own `SS` → the `SS` is issued carrying it (not unique between an original and its reversal). szamlazz.hu's documentation describes `szamlaKulsoAzon` only as "the invoice can be identified with this key by the third party system … later the invoice can be queried with this key"; it names no uniqueness rule and no duplicate code — unlike the order number, which has the account toggle and 71/152. | A3-create1/2; XPRB-P1 (`102`, `103`), XPRB-P3 (`D-CTEST-18`, `104`), XPRB-P4 (`105` → `SS` `106`) | Validate every `Found` document (`rendelesszam`, `tipus`, `teszt`, `szallito/id` when pinned), else `conflict{external_id_collision}`. The id is a tag, never a key: nothing about `{namespace}:{order}:{kind}` may assume the server refuses a second holder. |
+| **Not unique**: two `SZ` under different orders with the same external id → both issued, no warning. Re-checked three days later, with the same result, and extended: the same id on a `D` and then an `SZ` under two other orders → both issued (not unique **across kinds** either); the same id on an `SZ` and, in the storno request, on its own `SS` → the `SS` is issued carrying it (not unique between an original and its reversal). szamlazz.hu's documentation describes `szamlaKulsoAzon` only as "the invoice can be identified with this key by the third party system … later the invoice can be queried with this key"; it names no uniqueness rule and no duplicate code — unlike the order number, which has the account toggle and 71/152. | A3-create1/2; XPRB-P1 (`102`, `103`), XPRB-P3 (`D-CTEST-18`, `104`), XPRB-P4 (`105` → `SS` `106`) | Validate every `Found` document (`rendelesszam`, `tipus`, `teszt`), else `conflict{external_id_collision}`. The id is a tag, never a key: nothing about `{namespace}:{order}:{kind}` may assume the server refuses a second holder. |
 | Query and PDF by a shared external id return the **latest** holder (last-writer-wins): 50 over 49; 74 over 72; `103` over `102`; the `SZ` `104` over the `D`; the `SS` `106` over its original `105`. | A3-query-ext, A3-pdf-ext, A5-q-ext; XPRB-P1/P3/P4 | The newest holder is exactly the document a create asks about, so `{namespace}:{order}:{kind}` needs no generation suffix; a reissue becomes the newest holder and the stornoed original stays reachable by number and via the storno's `hivszamlaszam`. |
 | An external id is **reusable after its holder is reversed**: `SZ` `102` (order A, id *shared*) stornoed → a new `SZ` `108` under the same order A with the same id was issued; query by the id and by order A → `108`. | XPRB-P6 | The *Reissue* path end to end: the lookup step sees the reversed holder, the create step sends with the same id, the new document becomes the newest holder. No new id, no suffix. |
 | Read-your-writes lag **≈ 0**: query by external id succeeded 771 ms after the create returned, and at +2 s, +10 s, +60 s; `pdf --external-id` works. | A1-q0/q2/q10/q60, A1-pdf | The 2-minute re-check gap is justified by in-flight requests (see Latency), not by lag. |
@@ -130,7 +130,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Header presence is **per operation**: create (152, 73), storno (14, 221, 352) and delete-proforma (335) set `szlahu_error_code` + `szlahu_error`; query (7) and credit (463) are **body-only**. | A6, B3/B5/B7, C6, D1, D8 | The crate must always parse `<hibakod>`; never detect errors from headers alone. |
 | Code 7's text — "Hiányzó adat: számla xml (ismeretlen számlaszám, rendelésszám vagy külső azonosító)." — covers unknown number, order number *or* external id, and also a consumed proforma. | D1-query-*, C2-5 | 7 is "not on the query surface", not "never existed". |
 | Codes 14, 73, 221, 352, 463 were not named in the crate at probe time (parsed as `Unknown`). | error.rs review | Type them; none is retryable. The classification a document-issuing caller acts on is `ErrorCode::outcome_class()` (#13): `Unknown` = 1, 55, 56 without a number and every code the crate does not know — a new code may be a refusal or a new "issued, but…" code, so the worker re-queries and, with nothing under the external id, faults `outcome_unknown` rather than answer `rejected`; typing the code is what settles it as a refusal. `DuplicateOrderNumber` = 71/152, `NotFound` = 7, `Rejected` = the rest (the credential codes included). |
-| The `szlahu_id` header is the **document id** (= `alap/id` = `gazdEsemAzon`), different for every document. `szallito/id` is the id of the **seller record** — the `<szallito>` block is the seller as printed on the document (`nev` "TESZT - Cloud Community Hungary Kft.", address, tax number, bank), and `<id>` is szamlazz.hu's row id for it: 972720 on this account, identical on 10/10 queries on 2026-09-03 and 12/12 on 2026-09-06 (`SZ`, `SS`, `D`), and it appears **only in query bodies** — create responses have no `<szallito>`. szamlazz.hu documents the element nowhere (the XSD has it `int`, mandatory, unannotated; the Adatkapcsolat sample comments every neighbour and leaves it blank); the same `szallitoTipus` names the third-party vendor on an incoming invoice, so it is a party-record id, not an account id. One account is one company (an agent key belongs to the account; a multi-account user is 164), which is what makes it a usable **proxy** for the account. | C3, D9; XPRB-P1…P6 (every query) | The account's `supplier_id` pin — optional in both configuration shapes — is checked against `szallito/id` on every document found under our external ids or by number; when set it catches a key/scope swap on the first found document, which `teszt` alone cannot. A not-found probe (`check_account`) cannot cross-check it; the worker has no way to verify the configured value (there is no "whoami" operation), so it is an operator-recorded fact, not a server-verified one. Any text calling `szlahu_id` the supplier id, or `szallito/id` "the only server-side account identity", is wrong. |
+| The `szlahu_id` header is the **document id** (= `alap/id` = `gazdEsemAzon`), different for every document. `<szallito>` is the **seller party** of the document — the counterpart of `<vevo>`, as szamlazz.hu's own docs define the word: in standard invoicing "the supplier issues the invoice to the buyer", and in *Megbízott számlakibocsátás* the szállító is the **megbízó**, "az a cég, akinek a nevében a számlák készülnek", whose account holds the documents (a delegate issues in it with a dedicated login; no XML field marks it, and an agent key — which belongs to an account, never a user — cannot be used for delegate calls, so a document sent with one is issued "a megbízó saját neve alatt"). The block is the seller as printed on the document (`nev` "TESZT - Cloud Community Hungary Kft.", address, tax number, bank); its `<id>` was 972720 on this account, identical on 10/10 queries on 2026-09-03 and 12/12 on 2026-09-06 (`SZ`, `SS`, `D`), and it appears **only in query bodies** — create responses have no `<szallito>`. szamlazz.hu documents the `<id>` nowhere in three documentation sections (the XSD has it `int`, mandatory, unannotated; the Adatkapcsolat sample comments every neighbour and leaves it blank); the same `szallitoTipus` names the third-party vendor on an incoming invoice; and the Adatkapcsolat re-pushes an outgoing invoice when `<bankszamla>` in its `<szallito>` block changes (editable after issuance on NAV-imported invoices), so the block is per-document state, and whether `<id>` is a stable party-record id or a per-snapshot row is unknown. Its stability across an edit of the seller data was never tested; its value on a NAV-imported (`forras = 34`) or any live-account document never seen. | C3, D9; XPRB-P1…P6 (every query); docs.szamlazz.hu (*Megbízott számlakibocsátás*, *Kimenő számlák*), 2026-09-07 | **The worker holds no account pin** (ADR 0006, account-pin amendment, 2026-09-07). `szallito/id` was an optional `supplier_id` pin from the XPRB probe until then, mandatory in the multi-account shape before that: an undocumented row id of unverified stability whose reference value could only be read off a document *through the configuration it was meant to check* — a swapped key would have pinned the wrong account's id — and whose false positive would strand every order of a pinned account. `teszt` was the `mode` pin: documented and stable, but in the query body only, like `<szallito>` — a create response (`xmlszamlavalasz`, the `szlahu_*` headers) carries neither — so neither check could fire before the first document of a fresh order was issued into whatever account the key opened. Both were dropped rather than keep a tripwire that cannot gate. Which account a key opens, and whether it is a test account, is the operator's go-live check (query a known document under each scope, read `test` and the seller block). The agent crate still parses both in full. Any text calling `szlahu_id` the supplier id, or `szallito/id` an account identity, is wrong. |
 | Success headers on create/storno/credit: `szlahu_szamlaszam`, `szlahu_id`, `szlahu_kintlevoseg`, `szlahu_vevoifiokurl`, …; delete success sets none. | A1, D1, D3 | — |
 
 ## Latency
@@ -155,7 +155,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Caveat | Why it matters |
 |---|---|
 | Everything above is one TEST account, two days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents, the 8 `P60-*` invoices with their 8 stornos, and the 6 `XPRB-*` documents with their 5 stornos). | Nothing here is a documented guarantee. |
-| Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | The account's `mode` (default `live`) is validated against `<teszt>` on every document found under our external ids; a live account has `teszt=false` and its own seller-record id. In multi-account mode each account carries its own `mode` and, optionally, `supplier_id`. |
+| Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | Neither is compared with anything by the worker (ADR 0006, account-pin amendment); `Szamlazz.Agent.query` projects `teszt` as `test`, which is what the go-live check reads off a known document. A live account has `teszt=false`. |
 | E-invoicing is enabled (`<eszamla>1</eszamla>` on all but `D`/`SL`). | 352 (kelt must be today) on storno may be an e-invoice rule; behavior on paper-invoice accounts is unknown. The same may hold for an explicit storno `teljesitesDatum`, accepted here (P48). |
 | The test account did not produce 56 for bad addresses. | Either test accounts do not send mail or 56 is raised only on synchronous hand-off failures. |
 | Other probes were issuing concurrently, so `CTEST-2026-*` numbers are not contiguous. | Irrelevant to the facts; noted so the raw logs are not misread. |
@@ -180,10 +180,10 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   date by today explains. Low: the replay is no longer the primary guard.
 - Whether `szallito/id` is **stable across edits of the seller data** (company name, address, bank
   account in Settings): if szamlazz.hu snapshots a new seller record per edit, documents issued before
-  and after an edit would carry different ids on the same account and a pinned `supplier_id` would
-  `account_mismatch` on one side. Cheap to settle on the test account (edit the seller address, issue
-  one document, compare to 972720). Moderate for a deployment that pins it; none for one that does not
-  (the pin is optional in both shapes).
+  and after an edit would carry different ids on the same account. Cheap to settle on the test account
+  (edit the seller address, issue one document, compare to 972720). **None** for the worker since the
+  account-pin amendment (ADR 0006): nothing reads the value. Worth settling only if a pin on the seller
+  block is ever reconsidered — and then the seller **tax number**, not this id, is the candidate.
 - 352 on **create** does not exist on this account (P48-P5: the date is silently replaced by today);
   whether a live or non-e-invoice account rejects, replaces or *keeps* a non-today `keltDatum` is
   unverified. Low–moderate: the service does not pin `issue_date` unless the caller supplies it, and a
@@ -233,22 +233,19 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   header form (header + body, or body-only) is likewise assumed from the documentation; the crate
   parses `<hibakod>` either way. Moderate: were a credential code ever returned *after* a document was
   issued, the fault still says "outcome unknown" and the next call's external-id query finds it.
-- **Everything on a live account** (`teszt=false`, possibly non-e-invoice): e-mail sending, 56, 352,
-  `szallito/id`. Go-live precondition — see below.
+- **Everything on a live account** (`teszt=false`, possibly non-e-invoice): e-mail sending, 56, 352.
+  Go-live precondition — see below.
 - **By-number operations under the wrong scope** (multi-account mode, ADR 0006): what szamlazz.hu answers
   when account A's agent key queries, credits or stornos an invoice *number* that belongs to account B —
   7 (not on this account's query surface) is expected, but a shared number space or a different code is
-  possible; only one account was probed. Moderate: every handler that finds a document by number —
-  `Szamlazz.Order.storno_invoice` and `correct_invoice` on their verify, `Szamlazz.Agent.query` and
-  `Szamlazz.Agent.storno` on what they find — refuses one whose `teszt` / `szallito/id` are not the resolved
-  account's (`account_mismatch`), so B's document reaching A's key is caught whatever szamlazz.hu answers;
-  `Szamlazz.Agent.set_payments` sends without a query and checks nothing (a credit entry is not a legal
-  document). What stays undetectable is the collision: a wrong-scope request naming a number that also exists
-  on the resolved account acts on *that* account's document, which legitimately matches its pins. So the
-  worker no longer relies on 7 across accounts for safety — 7 is `not_found`, B's document is
-  `account_mismatch` — and what remains unverified is only whether the number spaces can overlap at all; the
-  caller records the scope as used per order (safety contract rule 5) precisely so that the case is never
-  exercised.
+  possible; only one account was probed. Moderate: since the account-pin amendment (ADR 0006) no handler
+  compares a found document with the account — B's document reaching A's key, were szamlazz.hu to answer it,
+  is acted on as A's; the right key under the right scope is the go-live check's job, and the caller records
+  the scope as used per order (safety contract rule 5) precisely so that the case is never exercised. What
+  is undetectable in any design is the collision: a wrong-scope request naming a number that also exists on
+  the resolved account acts on *that* account's document. The worker does not rely on 7 across accounts for
+  safety — 7 is `not_found` — and what remains unverified is only whether the number spaces can overlap at
+  all.
 
 ## Go-live checklist
 
@@ -260,7 +257,7 @@ before starting.
 
 | Step | Probe | Expect | Feeds |
 |---|---|---|---|
-| 1 | A1 — create with an external id, query by it at +0/+2/+10/+60 s | Hit every time; `<teszt>false</teszt>`; note `szallito/id` | `mode = live` (per account in multi-account mode) and, if the deployment pins it, the account's `supplier_id`; lag ≈ 0 |
+| 1 | A1 — create with an external id, query by it at +0/+2/+10/+60 s; **read the `<szallito>` block** (name, tax number) | Hit every time; `<teszt>false</teszt>`; the seller is the company this account — this scope, in multi-account mode — is meant to issue for | lag ≈ 0; the right key under the right scope, live as meant — the worker checks neither (ADR 0006, account-pin amendment), this step does |
 | 2 | A4-base — byte-identical resend of a create | Same number, byte-identical response | Toggle ON confirmed; replay guard works |
 | 3 | A4c — resend with the buyer name changed only in case/trailing space | 152 naming the trimmed order number | Fingerprint is byte-exact on the buyer name; 152 header shape |
 | 4 | A5 — create → storno → byte-identical resend | A **new** invoice; order number reusable | Replay ends at storno (ADR 0003 hazard is real here too) |
@@ -275,6 +272,6 @@ before starting.
 | 13 | P60-V1 — create with `<afakulcs>27.00</afakulcs>` (via `VatRate::Other("27.00")`; the crate's `Percent` renders `27`) | `sikeres=true`; the query returns `afakulcs 27.0` | `VatRate::as_wire`'s normalisation stays a nicety on this account; a rejection here means a caller sending `Other("27.00")` is `rejected` with nothing issued |
 | 14 | `D` → `ES` with the reference — create a `D` under a fresh order, then an `ES` under the same order **with** `dijbekeroSzamlaszam` = the `D` (`InvoiceKind::Prepayment { proforma_number }`); query the `ES` by number and the `D` by number | `sikeres=true`; the `ES` shows `<hivdijbekszam>` = the `D`; the `D` is 7 | What `create_prepayment` sends under `auto` for a live proforma of ours (#69) is accepted on this account; a refusal here (record the code) blocks the `D` → `ES` flow — `none` is `conflict{proforma_live}` — until the proforma is deleted first |
 
-Record `szallito/id`, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj`, the
+Record the seller name and tax number, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj`, the
 step-10/11 answers, the step-12 stored EUR values and the step-14 answer in the deployment notes; if any expectation fails, stop and
 revisit the corresponding ADR before go-live.

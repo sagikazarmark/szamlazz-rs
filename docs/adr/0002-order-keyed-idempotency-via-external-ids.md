@@ -71,7 +71,8 @@ repetition" is ON**; it is the second guard, not the first.
   were both issued, no warning) and a query by a shared id returns the newest holder (last-writer-
   wins) — verified. Every `Found` document is therefore validated before adoption:
   `rendelesszam == order ∧ tipus ∈ kind-set ∧ teszt == account.mode ∧ szallito/id == supplier_id`;
-  anything else is `conflict{external_id_collision}`. For the same reason a generation's id is
+  anything else is `conflict{external_id_collision}`. *Amended (ADR 0006, account-pin amendment):* the two
+  account terms are gone; the formula is `rendelesszam == order ∧ tipus ∈ kind-set`. For the same reason a generation's id is
   never reused: the gen-0 id on gen 1 would hide the stornoed original behind the newer document.
 - An external id attaches only on the call that *creates* the document; a replayed create, a
   repeat storno with a new id and a whitespace-padded replay all stored nothing (verified). The
@@ -132,7 +133,12 @@ repetition" is ON**; it is the second guard, not the first.
 - `supplier_id` is `szallito/id` from the first query response (the `szlahu_id` header is the
   document id); the account's `mode` is validated against `<teszt>` on every adopted document. *Amended
   (ADR 0006):* both pins are read from the invocation's journaled `Account`; `supplier_id` is required in
-  the multi-account shape.
+  the multi-account shape. *Amended again (ADR 0006, XPRB amendment, then account-pin amendment):* `supplier_id`
+  optional in both shapes, then both pins dropped — `szallito/id` is the undocumented row id of the seller record
+  as printed on the document, and reading its reference value off a document through the configuration it was
+  meant to check made the pin tautological; and neither it nor `teszt` is in a create response, so neither could
+  fire before the first document of a fresh order was issued. The worker holds no account pin; which account a
+  key opens, and whether it is a test account, is the go-live check.
 - External ids of ~110 characters with `: . _ -` are accepted and queryable (verified), so the namespace
   (1–16 chars `[a-z0-9-]`; then called the slug) plus order, kind and gen fit without hashing. *Amended
   (#64):* 110 is also the **bound** — `ExternalId::MAX_LEN` — because szamlazz.hu documents no limit and a

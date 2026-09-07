@@ -59,14 +59,16 @@ of this kind we issued for this order?", which is exactly what the external-id q
 reissued document becomes the newest holder of the same id; the stornoed original stays reachable by its number
 and through the storno's `hivszamlaszam`. Nothing needs a suffix.
 
-**Every `Found` document is validated before it is trusted**: `rendelesszam == order ∧ tipus ∈ kind-set ∧
-teszt == account.mode ∧ (account.supplier_id unset ∨ szallito/id == supplier_id)`; anything else is
-`conflict{external_id_collision}` (`InvoiceDocumentExt::is_ours`). External ids are not unique server-side (verified),
-so this is the only protection against adopting a stranger's document. *Amended (ADR 0006):* `account` is the
-invocation's journaled `Account`, resolved from the scope — the pins are per account, not per deployment; `mode`
-defaults to `live` and is always checked, and `supplier_id` — `szallito/id`, the id of the account's seller record on
-every document it issues, a proxy for the account the worker cannot verify against the server — is an optional pin in
-both configuration shapes (ADR 0006, XPRB amendment); set, two accounts pinning the same id are refused at load. The
+**Every `Found` document is validated before it is trusted**: `rendelesszam == order ∧ tipus ∈ kind-set`;
+anything else is `conflict{external_id_collision}` (`InvoiceDocumentExt::is_ours`). External ids are not unique
+server-side (verified), so this is the only protection against adopting a stranger's document. *Amended (ADR 0006):*
+the formula gained `teszt == account.mode`, `account` being the invocation's journaled `Account`, resolved from the
+scope, `mode` defaulting to `live`. *Amended (ADR 0006, XPRB amendment, then account-pin amendment):* a
+`(account.supplier_id unset ∨ szallito/id == supplier_id)` term — `szallito/id`, the undocumented row id of the
+seller record as printed on the document — went from mandatory in the multi-account shape to optional in both; then
+both account terms were dropped, since neither `teszt` nor `szallito/id` is in a create response and neither check
+could fire before the first document of a fresh order was issued into whatever account the key opens. The worker
+holds no account pin; which account a key opens is the operator's go-live check. The
 non-uniqueness of external ids was re-confirmed on 2026-09-06 (same kind, across kinds, original vs. its storno, and
 reusable after a reversal — the *Reissue* path end to end).
 
@@ -107,8 +109,8 @@ line of the closure on every execution — is the guard, the key is deduplicatio
   szamlazz.hu no longer knows is simply absent — live accounts cannot delete invoices); the `payments_before`
   capture on storno (query before stornoing — the server erases `<kifizetesek>` on the original); the ledger
   snapshot (`get` is four live queries and can return `unavailable`); the operator handlers `record_reversal` /
-  `forget` (nothing to repair); the account fingerprint learned into state (pin `supplier_id` on the `Account`); schema
-  versioning and state migrations.
+  `forget` (nothing to repair); the account fingerprint learned into state (pin `supplier_id` on the `Account` —
+  itself dropped since: ADR 0006, account-pin amendment); schema versioning and state migrations.
 - **Gained**: nothing to migrate, repair or drift; `get` is never stale; a UI storno, a support storno and a
   service storno are one case (`sztornozott`); a kill has nothing to compensate; a reset Restate cluster loses
   only in-flight invocations; the crate is a fraction of its former size.

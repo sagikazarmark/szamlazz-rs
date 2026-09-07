@@ -102,8 +102,13 @@ What it relies on:
   live. Running without it is unsupported.
 - **Deterministic external ids**, derived from the order key alone, so that a re-executed closure or a new
   invocation can ask "is there already one?" without state.
-- **Validation of every found document** — order number, `tipus`, `teszt`, and the `supplier_id` pin when
-  configured — because external ids are not unique server-side and a query returns the newest holder.
+- **Validation of every found document** — order number and `tipus` — because external ids are not unique
+  server-side and a query returns the newest holder. Nothing about the account: the worker holds **no account
+  pin**. A create's reply carries neither `teszt` nor the seller block (only a query body does), so any check on
+  them could fire only after the first document of a fresh order had been issued into whatever account the key
+  opens; 0.3's two tripwires (`mode` against `teszt`, `supplier_id` against the undocumented `szallito/id`) were
+  dropped by ADR 0006's account-pin amendment. Which account a key opens — and whether it is a test account — is
+  the operator's go-live check: query a known document under each scope and read `test` and the seller block.
 - The deployment's **namespace** prefixes the external ids and is permanent — changing it would hide every
   document issued so far. It is pinned per invocation, so a redeploy cannot move a running invocation.
 - **The account is resolved once per invocation and journaled.** Every handler resolves the request's scope to
@@ -133,8 +138,7 @@ What it relies on:
   1. One szamlazz.hu account is reachable under exactly one scope value; unscoped counts as a value; no fan-in
      (two scopes reaching one account would split an order's per-key lock across two Virtual Objects). The
      static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape is
-     served by scope only and is checked at load time (unique `(endpoint, agent_key)` pairs, unique ids, and
-     unique `supplier_id`s among the accounts that pin one — the pin is optional in both shapes).
+     served by scope only and is checked at load time (unique `(endpoint, agent_key)` pairs, unique ids).
   2. The scope → account mapping is append-only: moving traffic to another account means a new scope, never
      re-pointing an existing one. Appending a scope cannot create fan-in; any change that could put one account
      under two identities at once (the single → multi flag day above all) is a drain–switch–resume.
@@ -196,18 +200,15 @@ activation details.
 - `contract::TerminalCode`: the eight fault codes a `TerminalError` carries, each with its HTTP status
   (`TerminalCode::status`; `TerminalCode::ALL` lists them in the order of the fault table below) — `invalid_input`
   (400), `unknown_account` (400: the request names no account of this deployment), `not_found` (404: the document the
-  request names by number is not known to szamlazz.hu — code 7), `account_mismatch` (409: a document found by number —
-  on `Szamlazz.Order`'s verifies, including the proforma of `options.proforma: {number}`, or on `Szamlazz.Agent.query`
-  / `storno` — belongs to another szamlazz.hu account than the resolved one; `set_payments` and `query_taxpayer` find
-  none and are exempt), `szamlazz_error` (422: szamlazz.hu answered with an error code of its own that the handler
+  request names by number is not known to szamlazz.hu — code 7), `szamlazz_error` (422: szamlazz.hu answered with an error code of its own that the handler
   passes through, the code in the fault's `szamlazz_code` field), `outcome_unknown` (500), `unavailable` (503; also
   the prologue's own faults: the resolve policy exhausted, the credential store gone or unavailable) and
   `credentials_rejected` (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the
   request; the outcome is not known).
 - `contract::CheckAccountResponse` (`CheckedAccount`, `CredentialsCheck`): the output of
-  `Szamlazz.Agent.check_account` — `scope`, `account: {id, mode, supplier_id}`, `namespace` and
+  `Szamlazz.Agent.check_account` — `scope`, `account: {id}`, `namespace` and
   `credentials: {state: ok} | {state: rejected, code, message}`; credential acceptance is its only szamlazz.hu-verified
-  fact, the rest echoes the configured account.
+  fact, the rest echoes the configuration.
 - `contract::QueryTaxpayerRequest` / `QueryTaxpayerResponse` (`TaxpayerAddress`): the contract of
   `Szamlazz.Agent.query_taxpayer` — `tax_number` in, the bare eight-digit stem (`12345678`) or the full
   `NNNNNNNN-N-NN` form (`12345678-2-42`) and nothing else (`QueryTaxpayerRequest::prefix` derives the prefix or
@@ -258,14 +259,14 @@ activation details.
 - `account::Account`, `Accounts`, `AccountResolver`, `CredentialStore`, `StaticResolver`, `StaticConfig`: one
   szamlazz.hu account as the worker knows it (never its key), the bundle of the two pluggable traits both services
   hold, and the configuration-backed implementation of both. The traits are object-safe (`BoxFuture`), require no
-  `Debug`, and carry the checklist a resolver of your own guarantees — no fan-in, append-only, a `supplier_id` pin
-  on every account once there is more than one (recommended, never required: the one pin that catches an agent key
-  under the wrong scope), unique supplier ids among the accounts that pin one, unique `(endpoint, credentials)`
-  pairs, `mode` matching `teszt`, a stable `credential_ref` across rotations, never caching `Unscoped` / `Unknown`;
-  the prologue logs a `warn` when a scoped request resolves to an account without a supplier pin. `Accounts`' `Debug` (and so
+  `Debug`, and carry the checklist a resolver of your own guarantees — no fan-in, append-only, unique
+  `(endpoint, credentials)` pairs, the right key under the right scope (the worker holds no account pin: verified
+  at go-live by reading `test` and the seller block of a known document under each scope, never inferred), a
+  stable `credential_ref` across rotations, never caching `Unscoped` / `Unknown`.
+  `Accounts`' `Debug` (and so
   `Order`'s and `Agent`'s) names the trait objects without descending into them, so a store that derives `Debug`
   over a key map cannot print its keys through the services. `StaticConfig` is either `[account]` (`id`,
-  `agent_key`, `endpoint`, `mode`, `supplier_id`, `defaults`, `seller`; reachable unscoped) or a table of
+  `agent_key`, `endpoint`, `defaults`, `seller`; reachable unscoped) or a table of
   `[accounts.<scope>]` (the same fields; each reachable under its scope only, keys
   `[a-z0-9_]` of at most 36 bytes so environment overrides can address them) — never both. `StaticResolver::try_from`
   validates it, and `Accounts::from` bundles it as resolver and store.
@@ -318,9 +319,8 @@ Three identities work together ([ADR 0002](../../docs/adr/0002-order-keyed-idemp
   server-side and a query returns the newest holder, which is exactly the question asked — "what is the newest
   document of this kind we issued for this order?" A reissued invoice becomes the newest holder of the same id;
   the stornoed original stays reachable by number and through the storno's `hivszamlaszam`. Because the id is
-  not unique, every found document is **validated** before it is trusted: `rendelesszam == order`, `tipus` of
-  the expected kind, `teszt == account.mode`, and `szallito/id == supplier_id` when pinned; anything else is
-  `conflict{external_id_collision}`.
+  not unique, every found document is **validated** before it is trusted: `rendelesszam == order` and `tipus` of
+  the expected kind; anything else is `conflict{external_id_collision}`.
 - The **`Idempotency-Key`** of the ingress identifies a logical request; the service never relies on it for
   safety.
 
@@ -363,8 +363,8 @@ calling from a webhook handler and what to store per order, held to the contract
      here would start a second invocation that queues behind the first.
    - **A killed invocation** (attempts exhausted) is a fault whose envelope `message` is the last retryable error's **text**, not
      the worker's `{code, message}` JSON: treat an unparsable 5xx `invocation` body as `outcome_unknown`.
-   - **The other faults are settled** — nothing landed: `invalid_input`, `unknown_account`, `not_found` and
-     `account_mismatch` are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an
+   - **The other faults are settled** — nothing landed: `invalid_input`, `unknown_account` and `not_found` are
+     raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an
      error (to a read, or refusing the credit entries it was sent). Retrying as is repeats the answer: fix the
      request, the number, the scope or the account — or, for a `szamlazz_error` relaying a NAV outage, retry later
      with a new key.
@@ -404,7 +404,6 @@ serde's message, naming the field when there is one — never the SDK's plain-te
 | `invalid_input` | 400 | The request is malformed — its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent — or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_payments` (the wire contract takes five; nothing is sent), a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
-| `account_mismatch` | 409 | A document found by number — by `Szamlazz.Order`'s verifies (`storno_invoice`, a corrective's base, the proforma of `create_invoice`'s `options.proforma: {number}`) or by `Szamlazz.Agent.query` / `storno` — belongs to another szamlazz.hu account (`teszt` or `szallito/id` differ from the resolved account's); the message names the observed and expected pins. Nothing was sent. `set_payments` sends without a query and `query_taxpayer` finds no document (a taxpayer record carries no pins): the two handlers that cannot raise it. | Check the account's `mode` / `supplier_id`, or the scope; do not retry blindly. |
 | `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from — `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_payments` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued — or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` — **at-least-once**: every send that reached szamlazz.hu appended the entries — query the invoice before re-sending; a replacing call is repeated as is. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so it is not sent ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)) — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
@@ -480,11 +479,11 @@ cancellation of the invocation is never swallowed.
   schemars`, every request schema closed with `additionalProperties: false` and the response schemas open), the
   discovery and binding tests of the adapters (with `Body<T>` turning a malformed body — an unknown field, a wrong
   type, a missing field, invalid JSON — into the 400 `invalid_input` fault while discovering exactly as `Json<T>`,
-  the account pins of a document found by number, the storno intent built from a verified document — its `telj` as
+  the storno intent built from a verified document — its `telj` as
   the fulfillment date, `eszamla` lifted with the account default as fallback, an empty `telj` as the 503
   `unavailable` fault naming the invoice — the `Order` handlers' key parsing refusing an untrimmed key as
   `invalid_input` while `OrderKey::parse` still trims, and the sentinels that the agent key reaches neither the
-  `credentials_rejected` warning nor the body of a `credentials_rejected` or `account_mismatch` fault), and the
+  `credentials_rejected` warning nor the body of a `credentials_rejected` fault), and the
   wiremock tests of the gateway against synthetic szamlazz.hu responses
   (`tests/gateway.rs`: the lookup matrix — `Absent`, `Live`, `Reversed`, `Collision`, `Foreign`, the corrective's
   exemption from the hint, `Unanswered` on a lost reply and `Api` on another code — and the create step — `Issued`,
@@ -525,9 +524,9 @@ cancellation of the invocation is never swallowed.
   on `create_invoice` (`none` beside a live proforma → `conflict{proforma_live}` after the `proforma-link` read with
   nothing sent; `auto` → `issued` with `dijbekeroSzamlaszam` before `elolegszamla` on the wire; `create_final` and
   `create_proforma` refusing the option 400 `invalid_input` before any call), `options.proforma: {number}` checked like every
-  found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
-  the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
-  order's → `issued` with `dijbekeroSzamlaszam` on the wire), `correct_invoice` issuing a corrective under its
+  found document (another order's or an order-less proforma → `conflict{not_managed}` naming it after the verify
+  alone with the create mock `expect(0)`, this order's → `issued` with `dijbekeroSzamlaszam` on the wire whatever
+  its `teszt` says), `correct_invoice` issuing a corrective under its
   `correction_id` with the base named on the wire and finding it again, `delete_proforma` deleting the order's live
   proforma after one send and answering `absent` once it is gone, a create with a misspelt `options.reissue` answered
   400 `invalid_input` naming the field with nothing journaled and zero szamlazz.hu requests, a create under an
@@ -547,15 +546,14 @@ cancellation of the invocation is never swallowed.
   under two scopes concurrently → two `issued` with each account's key on the create wire exactly once; the same
   `Idempotency-Key` under two scopes → two invocation ids and two documents, each replaying its own completion;
   `check_account` under each scope → its own account with its key on the probe, unscoped → `unknown_account`; an
-  order whose invocations were purged stornoed and reissued; `Szamlazz.Agent.storno` refusing a document whose
-  `teszt` or `szallito/id` is not the resolved account's as `account_mismatch` after the verify alone (storno mock
-  `expect(0)`), not checking the supplier id when the account pins none, reversing a document of the account's own
-  pins, and checking an order-bearing document's pins before answering it — mismatched pins `account_mismatch`
-  without echoing the other account's order number, the account's own pins `managed_by_order`; `Szamlazz.Agent.storno`
+  order whose invocations were purged stornoed and reissued; `Szamlazz.Agent.storno` under a scope reversing a
+  document whose `teszt` and `szallito/id` are not what the account's documents carry (compared with nothing) with
+  that scope's key, reversing one of the account's own, and answering an order-bearing document `managed_by_order`
+  with nothing sent; `Szamlazz.Agent.storno`
   sending `<teljesitesDatum>` equal to the original's `telj` and answering a `telj`-less original 503 `unavailable`
-  without an order identity, only the verify journaled and nothing sent — after `account_mismatch`,
-  `managed_by_order` and `reversed` on `telj`-less documents; `Szamlazz.Agent.query`
-  answering a mismatched document `account_mismatch`, a matching one as the projection and code 7 as `not_found`;
+  without an order identity, only the verify journaled and nothing sent — after `managed_by_order` and `reversed`
+  on `telj`-less documents; `Szamlazz.Agent.query`
+  answering the projection with `test` as reported and no `supplier_id`, and code 7 as `not_found`;
   `Szamlazz.Agent.query_taxpayer` under each scope asking NAV with that scope's key and nothing else on the wire, the
   full tax number under one scope and the bare stem under the other both journaling one `taxpayer-12345678` step,
   `valid: false` as a 200, and a malformed tax number answered 400 `invalid_input` naming it with nothing journaled

@@ -4,8 +4,6 @@ namespace = "acct"            # one namespace for the deployment; every account'
 [accounts.acme]               # reachable as /restate/scope/acme/call/…
 id = "acme"
 agent_key = "acme-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__ACME__AGENT_KEY
-supplier_id = 972720          # optional pin: the seller record's id (szallito/id) on the account's documents
-mode = "live"
 
 [accounts.acme.seller]
 bank_account = "..."

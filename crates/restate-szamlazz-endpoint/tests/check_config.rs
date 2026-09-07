@@ -60,7 +60,7 @@ fn a_valid_single_account_file_exits_0_and_prints_the_start_up_summary() {
     assert!(
         output
             .stdout
-            .contains(r#"scope="<unscoped>" account=acme mode=Live"#),
+            .contains(r#"scope="<unscoped>" account=acme endpoint="#),
         "the summary lists the account: {output}"
     );
     assert!(

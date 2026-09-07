@@ -202,7 +202,7 @@ impl DeleteProformaResponse {
 ///
 /// A slot is `None` when szamlazz.hu holds nothing under its external id
 /// *or* when the newest holder of the id fails validation (an external-id
-/// collision: another order, kind, account mode or supplier). A read must
+/// collision: another order or kind). A read must
 /// not fail, so `get` reports such a slot as absent; the issuing handlers
 /// refuse the same situation as `conflict{external_id_collision}`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

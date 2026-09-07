@@ -1,8 +1,6 @@
 {
   "Account": {
     "id": "acme",
-    "mode": "test",
-    "supplier_id": 972720,
     "endpoint": "https://szamlazz.example.test/szamla/",
     "defaults": {
       "e_invoice": true,

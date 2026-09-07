@@ -35,8 +35,11 @@ use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 
-/// The supplier id (`szallito/id`) of the documents [`Doc`] renders unless a
-/// test says otherwise: the account pin a found document is checked against.
+/// The `szallito/id` of the documents [`Doc`] renders unless a test says
+/// otherwise: the seller record's id as szamlazz.hu prints it in a query body
+/// (972720 on the test account). Wire realism only — the worker holds no
+/// account pin (ADR 0006, account-pin amendment), and tests that render
+/// another value assert exactly that.
 pub(crate) const SUPPLIER: u64 = 972_720;
 
 /// The `telj` every document carries unless a test says otherwise: the
@@ -57,9 +60,12 @@ pub(crate) struct Doc<'a> {
     /// `rendelesszam`; `None` renders no element — a document issued outside
     /// any order.
     pub(crate) order: Option<&'a str>,
-    /// `teszt` — the document's account mode, one of the two account pins.
+    /// `teszt` — whether a test account issued the document. Parsed and
+    /// projected by `query`, compared with nothing (ADR 0006, account-pin
+    /// amendment).
     pub(crate) test: bool,
-    /// `szallito/id` — the document's supplier id, the other account pin.
+    /// `szallito/id` — the seller record's id in the `<szallito>` block.
+    /// Parsed, compared with nothing (ADR 0006, account-pin amendment).
     pub(crate) supplier_id: u64,
     /// `<sztornozott>true</sztornozott>` — the document is reversed (as
     /// observed); `false` renders no element, as on a live document and on
@@ -302,12 +308,12 @@ mod tests {
         assert!(document.payments.is_empty());
     }
 
-    /// Each pin and marker the worker reads renders from its field: `teszt`
-    /// and `szallito/id` (the account pins), `rendelesszam`, `sztornozott`,
-    /// and the `hivszamlaszam` / `hivdijbekszam` references of a storno and
-    /// of the invoice that consumed a proforma.
+    /// Each marker the worker reads renders from its field — `rendelesszam`,
+    /// `sztornozott`, and the `hivszamlaszam` / `hivdijbekszam` references of
+    /// a storno and of the invoice that consumed a proforma — and so do the
+    /// two it parses but compares with nothing, `teszt` and `szallito/id`.
     #[test]
-    fn the_pins_and_markers_render_from_their_fields() {
+    fn the_markers_render_from_their_fields() {
         let other = Doc {
             order: Some("ORD-2"),
             test: false,
