@@ -444,6 +444,15 @@ impl Default for Defaults {
 /// Journaled inside the [`Account`](crate::account::Account), so
 /// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
 /// and set fields.
+///
+/// Deliberately not the agent crate's [`Seller`], although the fields mirror
+/// it: the account's journal shape is this crate's contract with every
+/// in-flight invocation (ADR 0005), and a crate-owned type keeps a `Seller`
+/// change in `szamlazz-agent` — a field renamed, retyped, or made required —
+/// from altering what an `account` entry replays as. The same reason
+/// `Szamlazz.Agent.query_taxpayer` journals the crate-owned
+/// `QueryTaxpayerResponse` projection rather than the agent crate's
+/// `TaxpayerInfo` (J-05-07, #115).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]

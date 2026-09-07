@@ -11,7 +11,11 @@ concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the sour
 deterministic external ids (`{namespace}:{order}:{kind}`) so that any invocation can find what an earlier one
 issued. The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of
 unmanaged documents), the NAV taxpayer lookup by tax number (`query_taxpayer`) and the read-only `check_account`
-probe over the same gateway module. Both are projections of the Számla Agent model: deployment
+probe over the same gateway module. It is **unkeyed**: its invocations run concurrently, so two by-number writes on
+one invoice are not serialised by the worker as an order's handlers are — two replacing `set_payments` (`additive:
+false`) race and the last send to land wins, which under reordered webhook deliveries may be the older snapshot (a
+keyed `Szamlazz.Document` object was judged over-engineering); the caller serialises per invoice on its side, or sends
+`additive: true` and lets szamlazz.hu sum. Both are projections of the Számla Agent model: deployment
 constants live in config, line totals are computed, domain outcomes are returned as data.
 
 The design is in [`docs/design/restate-szamlazz.md`](../../docs/design/restate-szamlazz.md), the decisions
@@ -154,7 +158,8 @@ What it relies on:
      document but never prove ownership.
 
 What it does not do: PDF download, receipts, IPN and Adatkapcsolat ingestion, the proforma →
-payment → invoice lifecycle workflow, multiple prepayments per order, tracking *who* reversed a document, and
+payment → invoice lifecycle workflow, multiple prepayments per order, tracking *who* reversed a document,
+serialising `Szamlazz.Agent`'s by-number writes per invoice (the service is unkeyed — see above), and
 reissuing on its own initiative — a create after any reversal returns `reversed` and issues a replacement only
 with `reissue: true` and a new `Idempotency-Key` ([ADR 0003](../../docs/adr/0003-explicit-reissue-after-external-reversal.md),
 [ADR 0005](../../docs/adr/0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md)).

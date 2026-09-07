@@ -1,5 +1,5 @@
 //! The pure projection of a [`DocumentInput`] plus the account's defaults and
-//! seller block into the Agent's [`CreateInvoice`] (design §6 step 0).
+//! seller block into the Agent's [`CreateInvoice`] (design §5 step 0).
 
 use std::str::FromStr as _;
 

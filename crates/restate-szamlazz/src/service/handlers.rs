@@ -295,8 +295,9 @@ impl Order {
 /// The `Szamlazz.Agent` service: query, credit entries and storno by document
 /// number, the NAV taxpayer lookup by tax number, and the `check_account`
 /// probe. Never calls into `Order`; a document that carries an order number
-/// is reported as `managed_by_order` instead — after the account check every
-/// found document gets.
+/// is reported as `managed_by_order` instead, read off the verified document.
+/// Unkeyed: invocations run concurrently, so two by-number writes on one
+/// invoice are not serialised here — the caller's business (see [`Agent`]).
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the
@@ -404,6 +405,11 @@ impl Agent {
     /// 60 s client timeout (never the server's ~500 ms default) so that it
     /// cannot re-send while the first send is still in flight; a caller that
     /// sees `outcome_unknown` queries the invoice before re-sending.
+    ///
+    /// Not serialised per invoice: the service is unkeyed, so two concurrent
+    /// replacing calls on one invoice race and the last send to land wins
+    /// (see [`Agent`]). The caller serialises per invoice, or sends
+    /// `additive: true` and lets szamlazz.hu sum.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
