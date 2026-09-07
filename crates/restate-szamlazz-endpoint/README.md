@@ -215,7 +215,7 @@ INFO restate_szamlazz: request identity verification enabled keys=1
 INFO restate_szamlazz: configuration is valid; not listening (--check-config)
 ```
 
-A configuration without `identity_keys` prints, in the place of the `enabled` line, the same `warn` the real start-up would — `request identity verification disabled: accepting unsigned requests — any client reaching 0.0.0.0:9080 can invoke the services under any scope; …` — so a CI job can grep for it (`--bind` and `--port` name the address the warn shows).
+A configuration without `identity_keys` prints, in the place of the `enabled` line, the same `warn` the real start-up would — `request identity verification disabled: accepting unsigned requests — any client reaching 0.0.0.0:9080 can invoke the services under any scope; …` — so a CI job can grep for it (`--bind` and `--port` name the address the warn shows; under `--port 0` it names the address alone, since the port is the kernel's to pick at bind time and the start-up line is what names it).
 
 The two example files under [`fixtures/`](fixtures) — the single-account configuration above and the multi-account one below — are what the test suite runs `--check-config` against.
 

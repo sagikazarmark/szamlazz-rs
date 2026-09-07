@@ -221,13 +221,30 @@ fn build_endpoint(config: EndpointConfig, bind_addr: SocketAddr) -> Result<Endpo
         // stands between the port and either service on any account; the
         // operator who did not write `identity_keys = []` may not know (#96).
         RequestIdentity::Unsigned { deliberate: false } => {
+            let reachable = reachable_at(bind_addr);
             tracing::warn!(
-                "request identity verification disabled: accepting unsigned requests — any client reaching {bind_addr} can invoke the services under any scope; set `identity_keys` to the Restate server's request identity public keys (README: Request Identity), or write `identity_keys = []` out to accept this for local development"
+                "request identity verification disabled: accepting unsigned requests — any client reaching {reachable} can invoke the services under any scope; set `identity_keys` to the Restate server's request identity public keys (README: Request Identity), or write `identity_keys = []` out to accept this for local development"
             );
         }
     }
 
     Ok(endpoint.build())
+}
+
+/// Where the unsigned-requests warning says the endpoint is reachable: the
+/// address as configured — or, under `--port 0`, the address alone, since
+/// the kernel picks the port at bind time and nothing is known of it before
+/// (nor ever under `--check-config`, which never binds); `:0` would name an
+/// address no client can reach.
+fn reachable_at(bind_addr: SocketAddr) -> String {
+    if bind_addr.port() == 0 {
+        format!(
+            "{} on the ephemeral port bound at start (--port 0; the start-up line names it)",
+            bind_addr.ip()
+        )
+    } else {
+        bind_addr.to_string()
+    }
 }
 
 #[cfg(test)]

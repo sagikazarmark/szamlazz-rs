@@ -184,6 +184,28 @@ fn the_unsigned_requests_warning_names_the_bind_address() {
     );
 }
 
+/// Under `--port 0` the kernel picks the port at bind time, so before the
+/// bind — and under `--check-config`, which never binds — nothing is known of
+/// it: the warning names the address without a port rather than `:0`, which
+/// no client can reach.
+#[test]
+fn the_unsigned_requests_warning_does_not_name_port_0_as_reachable() {
+    let file = temp_file("no-identity-keys-port-0.toml", NO_IDENTITY_KEYS);
+
+    let output = check_config_with_args(&file, &[], &["--bind", "127.0.0.1", "--port", "0"]);
+
+    assert_eq!(output.status.code(), Some(0), "{output}");
+    let warning = output.unsigned_line();
+    assert!(
+        warning.contains("any client reaching 127.0.0.1 on the ephemeral port bound at start"),
+        "the warning names the address and says the port is not yet known: {warning}"
+    );
+    assert!(
+        !warning.contains("127.0.0.1:0"),
+        "port 0 is not an address a client can reach: {warning}"
+    );
+}
+
 /// The multi-account fixture is valid too, and its summary lists each
 /// account under its scope — and the identity key the shape requires.
 #[test]
