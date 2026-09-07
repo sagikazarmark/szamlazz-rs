@@ -763,13 +763,15 @@ impl Drop for Restate {
     }
 }
 
-/// An ingress reply: the status, the parsed body and the invocation id the
-/// ingress reports in `x-restate-id`.
+/// An ingress reply: the status, the parsed body, the invocation id the
+/// ingress reports in `x-restate-id` and the `x-restate-error-source` header
+/// of an error reply.
 #[derive(Debug)]
 struct Reply {
     status: u16,
     body: Value,
     invocation_id: Option<String>,
+    error_source: Option<String>,
 }
 
 impl Reply {
@@ -779,9 +781,30 @@ impl Reply {
             .unwrap_or_else(|| panic!("no x-restate-id on the reply: {}", self.body))
     }
 
-    /// The structured fault inside the ingress error envelope: the handler's
-    /// `TerminalError` message is the fault JSON.
+    /// The structured fault inside the ingress error envelope, asserting the
+    /// envelope the endpoint README documents (*Faults*): the body is
+    /// Restate's `{"code": <HTTP status>, "message": "<string>", "source":
+    /// "invocation"}`, `x-restate-error-source` is `invocation`, and the
+    /// worker's fault is the JSON **string** in `message` — the handler's
+    /// `TerminalError` message — parsed a second time.
     fn fault(&self) -> Fault {
+        assert_eq!(
+            self.body["code"].as_u64(),
+            Some(u64::from(self.status)),
+            "the envelope's code is the HTTP status: {}",
+            self.body
+        );
+        assert_eq!(
+            self.body["source"], "invocation",
+            "a fault is the invocation's terminal error: {}",
+            self.body
+        );
+        assert_eq!(
+            self.error_source.as_deref(),
+            Some("invocation"),
+            "x-restate-error-source marks the fault as the worker's: {}",
+            self.body
+        );
         let message = self.body["message"]
             .as_str()
             .unwrap_or_else(|| panic!("an error envelope with a message: {}", self.body));
@@ -960,6 +983,20 @@ const RUN_NAMES: &[RunPath] = &[
             "account",
             "exclusivity-invoice",
             "exclusivity-final",
+            "proforma-link",
+            "lookup-prepayment",
+            "create-prepayment",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_prepayment",
+        &[
+            "namespace",
+            "account",
+            "exclusivity-invoice",
+            "exclusivity-final",
+            "verify-proforma-{number}",
             "lookup-prepayment",
             "create-prepayment",
         ],
@@ -1686,17 +1723,22 @@ impl Harness {
         }
         let response = request.send().await.expect("ingress call");
         let status = response.status().as_u16();
-        let invocation_id = response
-            .headers()
-            .get("x-restate-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let invocation_id = header("x-restate-id");
+        let error_source = header("x-restate-error-source");
         let text = response.text().await.expect("body");
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
         Reply {
             status,
             body,
             invocation_id,
+            error_source,
         }
     }
 
@@ -2036,7 +2078,7 @@ async fn e2e_order_protocol() {
     proforma_is_deleted_by_the_orders_handler(&h).await;
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
-    prepayment_takes_no_proforma_option(&h).await;
+    prepayment_converts_the_proforma_like_the_invoice(&h).await;
     proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(&h).await;
     a_live_final_closes_the_order_to_the_other_creates(&h).await;
     a_malformed_body_is_a_structured_invalid_input(&h).await;
@@ -3189,13 +3231,56 @@ async fn secondary_lookup_collision_refuses_to_create(h: &Harness) {
     eprintln!("(ix) collision on the prepayment lookup → conflict{{external_id_collision}}: pass");
 }
 
-/// (x) `create_prepayment` takes no `options.proforma` — anything but `auto`
-/// is `invalid_input` before any szamlazz.hu call — and under `auto` it runs
-/// no proforma lookup: the server converts the order's live proforma by
-/// shared order number on its own.
-async fn prepayment_takes_no_proforma_option(h: &Harness) {
+/// (x) `create_prepayment` consumes the order's proforma like `create_invoice`
+/// does (#69): `options.proforma: none` while a live proforma of ours exists
+/// is `conflict{proforma_live, existing_number}` after the `proforma-link`
+/// read with nothing sent — szamlazz.hu would link it by shared order number
+/// anyway — under the default `auto` the create carries
+/// `dijbekeroSzamlaszam` beside the `elolegszamla` flag, and under
+/// `{number}` the named proforma is verified like every found document
+/// (`verify-proforma-{number}` in place of `proforma-link`) and linked.
+/// `create_final` and `create_proforma` still take no `options.proforma`:
+/// anything but `auto` is `invalid_input` before any szamlazz.hu call.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two refusals, the conflict, then the issued prepayment invoice under auto and under a number"
+)]
+async fn prepayment_converts_the_proforma_like_the_invoice(h: &Harness) {
     h.reset().await;
     let before = h.requests_seen().await;
+    for (i, handler) in ["create_final", "create_proforma"].into_iter().enumerate() {
+        let reply = h
+            .call(
+                "E2E-10",
+                handler,
+                &json!({ "document": document(dec!(1000)), "options": { "proforma": "none" } }),
+                &format!("e2e-10-refused-{i}"),
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{handler}: {}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, "invalid_input", "{handler}: {}", reply.body);
+        assert!(
+            fault.message.contains(&format!("not {handler}")),
+            "{handler}: names the handler: {}",
+            fault.message
+        );
+    }
+    assert_eq!(h.requests_seen().await, before, "refused before any call");
+
+    // The order's live proforma of ours, under `acct:E2E-10:proforma`.
+    let proforma = Doc {
+        external_id: Some("acct:E2E-10:proforma"),
+        ..Doc::new("D-10", "D", "E2E-10")
+    };
+    h.absent("E2E-10", &["invoice", "prepayment", "final"])
+        .await;
+    h.holds(&proforma).await;
+    create()
+        .respond_with(created("ES-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
     let reply = h
         .call(
             "E2E-10",
@@ -3204,43 +3289,116 @@ async fn prepayment_takes_no_proforma_option(h: &Harness) {
             "e2e-10-k1",
         )
         .await;
-    assert_eq!(reply.status, 400, "{}", reply.body);
-    assert_eq!(reply.fault().code, "invalid_input", "{}", reply.body);
-    assert_eq!(h.requests_seen().await, before, "refused before any call");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let conflict = &reply.body;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(conflict["conflict_reason"], "proforma_live", "{conflict}");
+    assert_eq!(conflict["existing_number"], "D-10");
+    assert_eq!(conflict["kind"], "prepayment");
+    assert_eq!(conflict["external_id"], "acct:E2E-10:prepayment");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "exclusivity-invoice",
+            "exclusivity-final",
+            "proforma-link",
+        ],
+        "the proforma link is what refused, nothing after it: {runs:?}"
+    );
 
+    // Under `auto` the same proforma is linked explicitly.
+    h.reset().await;
     h.absent("E2E-10", &["invoice", "prepayment", "final"])
-        .await;
-    // The order's live proforma, reachable by number and order; its external
-    // id is guarded, not held: under `auto` the prepayment runs no proforma
-    // lookup, so the selector must never be queried (a hit would find the
-    // proforma and link it — the guard's answer is what a lookup would see).
-    // Mounted before `holds`, so a stated external id could never shadow it.
-    let proforma = Doc::new("D-10", "D", "E2E-10");
-    external_id_query("acct:E2E-10:proforma")
-        .respond_with(proforma.response())
-        .expect(0)
-        .mount(&h.mock)
         .await;
     h.holds(&proforma).await;
     create()
+        .and(body_string_contains(
+            "<dijbekeroSzamlaszam>D-10</dijbekeroSzamlaszam>",
+        ))
         .and(body_string_contains("<elolegszamla>true</elolegszamla>"))
         .respond_with(created("ES-10", "1000", "1270"))
         .expect(1)
         .mount(&h.mock)
         .await;
-    let issued = h
-        .ok(
+    let reply = h
+        .call(
             "E2E-10",
             "create_prepayment",
             &json!({ "document": document(dec!(1000)) }),
             "e2e-10-k2",
         )
         .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let issued = &reply.body;
     assert_eq!(issued["outcome"], "issued", "{issued}");
     assert_eq!(issued["kind"], "prepayment");
     assert_eq!(issued["invoice_number"], "ES-10");
     assert_eq!(issued["external_id"], "acct:E2E-10:prepayment");
-    eprintln!("(x) create_prepayment: proforma option refused, no proforma lookup: pass");
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "exclusivity-invoice",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-prepayment",
+            "create-prepayment",
+        ],
+        "{runs:?}"
+    );
+
+    // Under `{number}` the named proforma is verified by number — this
+    // order's, the account's pins — and linked, on another order.
+    h.reset().await;
+    h.absent("E2E-10p", &["invoice", "prepayment", "final"])
+        .await;
+    h.holds(&Doc::new("D-10p", "D", "E2E-10p")).await;
+    create()
+        .and(body_string_contains(
+            "<dijbekeroSzamlaszam>D-10p</dijbekeroSzamlaszam>",
+        ))
+        .and(body_string_contains("<elolegszamla>true</elolegszamla>"))
+        .respond_with(created("ES-10p", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-10p",
+            "create_prepayment",
+            &json!({
+                "document": document(dec!(1000)),
+                "options": { "proforma": { "number": "D-10p" } },
+            }),
+            "e2e-10p-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "ES-10p");
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs,
+        [
+            "namespace",
+            "account",
+            "exclusivity-invoice",
+            "exclusivity-final",
+            "verify-proforma-D-10p",
+            "lookup-prepayment",
+            "create-prepayment",
+        ],
+        "{runs:?}"
+    );
+    eprintln!(
+        "(x) create_prepayment: none → conflict{{proforma_live}}, auto → dijbekeroSzamlaszam on the wire, {{number}} → verified and linked; create_final/create_proforma refuse the option: pass"
+    );
 }
 
 /// (x-a) `create_proforma` on an order whose invoice or prepayment invoice is
@@ -3427,14 +3585,12 @@ async fn a_live_final_closes_the_order_to_the_other_creates(h: &Harness) {
         let runs = h.runs(reply.invocation_id()).await;
         let mut expected = vec!["namespace", "account"];
         expected.extend(if kind == "invoice" {
-            vec![
-                "exclusivity-prepayment",
-                "exclusivity-final",
-                "proforma-link",
-            ]
+            vec!["exclusivity-prepayment", "exclusivity-final"]
         } else {
             vec!["exclusivity-invoice", "exclusivity-final"]
         });
+        // Both kinds convert a proforma (#69), so both run the link.
+        expected.push("proforma-link");
         let (lookup, create_step) = (format!("lookup-{kind}"), format!("create-{kind}"));
         expected.extend([lookup.as_str(), create_step.as_str()]);
         assert_eq!(runs, expected, "{handler}: {runs:?}");
@@ -4634,6 +4790,8 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
     assert_eq!(fault.code, "unavailable", "{fault:?}");
     assert!(fault.message.contains("credentials"), "{fault:?}");
     assert!(!fault.message.contains("scripted"), "{fault:?}");
+    // No response names the account, nor the store's reference (#65).
+    assert!(!fault.message.contains("acct"), "{fault:?}");
     assert!(
         elapsed < Duration::from_secs(30),
         "terminal, not routed into the handler's retries: {elapsed:?}"
@@ -5683,7 +5841,10 @@ async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harn
     assert_eq!(reply.body["order_key"], "E2E-34", "{}", reply.body);
     assert_eq!(h.requests_seen().await, 1);
 
-    // Before the fault: a reversed document is `reversed`.
+    // Before the fault: a reversed document is `reversed`, with the storno
+    // number the by-number storno lookup names — nothing under the id (a
+    // reversal from the UI) leaves it unknown; the verify and the lookup are
+    // the only requests, nothing is sent (J25, #65).
     h.reset().await;
     number_query("SZ-35")
         .respond_with(
@@ -5695,15 +5856,63 @@ async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harn
         )
         .mount(&h.mock)
         .await;
+    external_id_query("acct:by-number:SZ-35:storno")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
     storno_never_sent(&h.mock).await;
     let reply = h
         .call_agent_scoped("acme", "storno", &storno_of("SZ-35"))
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
-    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+    assert_eq!(reply.body["storno_number"], Value::Null, "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-SZ-35",
+            "lookup-storno-SZ-35"
+        ]
+    );
+    assert_eq!(h.requests_seen().await, 2, "the verify and the lookup");
+
+    // Reversed by a storno of ours (a lost reply, a retry with a new key):
+    // the lookup names it.
+    h.reset().await;
+    number_query("SZ-36")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..without_telj("SZ-36")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:by-number:SZ-36:storno")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-36"),
+                ..Doc::unmanaged("SS-36", "SS")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-36"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-36", "{}", reply.body);
+    assert_eq!(h.requests_seen().await, 2, "the verify and the lookup");
     eprintln!(
-        "(xviii-e) Szamlazz.Agent.storno: teljesitesDatum on the wire; telj-less → unavailable without an order identity, after account_mismatch / managed_by_order / reversed: pass"
+        "(xviii-e) Szamlazz.Agent.storno: teljesitesDatum on the wire; telj-less → unavailable without an order identity, after account_mismatch / managed_by_order / reversed (storno number from the by-number lookup): pass"
     );
 }
 

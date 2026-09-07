@@ -1,3 +1,4 @@
+identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]   # required in this shape: without it anyone reaching the port issues on every account
 namespace = "acct"            # one namespace for the deployment; every account's external ids share it
 
 [accounts.acme]               # reachable as /restate/scope/acme/call/…

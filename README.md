@@ -5,6 +5,15 @@
 
 **Rust crates for integrating with [szamlazz.hu](https://www.szamlazz.hu), the Hungarian invoicing service.**
 
+Three protocol libraries — the Számla Agent client, the IPN receiver, the Adatkapcsolat receiver — and a **durable
+invoicing worker** on [Restate](https://restate.dev/): the `Szamlazz.Order` service issues, corrects and reverses
+szamlazz.hu documents **exactly once per order** under retries, crashes and concurrent callers, keeping no state of its
+own (szamlazz.hu is the source of truth). You call it over HTTP with a JSON body from any language — no Rust, no
+Restate SDK — and branch on the outcome it returns as data; the runnable binary, the request and response reference,
+the fault envelope and the guidance for calling from a webhook handler are in the
+[`restate-szamlazz-endpoint` README](crates/restate-szamlazz-endpoint/README.md). Issuing from Rust directly starts at
+[`szamlazz-agent`](crates/szamlazz-agent).
+
 ## Features
 
 - **Complete integration surface.** Use the Számla Agent, receive IPN status snapshots, and accept Adatkapcsolat documents.
@@ -24,7 +33,7 @@ This virtual workspace contains six packages intended for publication and indepe
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
 | [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless — szamlazz.hu is the source of truth, reached through deterministic external ids. |
-| [`restate-szamlazz-endpoint`](crates/restate-szamlazz-endpoint) | Standalone `restate-szamlazz` binary and container image hosting both services for a Restate server. |
+| [`restate-szamlazz-endpoint`](crates/restate-szamlazz-endpoint) | Standalone `restate-szamlazz` binary and container image hosting both services for a Restate server; its README is the caller reference for non-Rust users. |
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 

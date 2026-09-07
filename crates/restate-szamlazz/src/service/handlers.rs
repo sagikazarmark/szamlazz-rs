@@ -31,13 +31,15 @@ use crate::contract::{
 /// [`Body`] and decodes it first — a malformed body is the `invalid_input`
 /// fault before anything is journaled — then parses its key (an invalid or
 /// untrimmed key is `invalid_input` likewise, before the prologue), then runs
-/// the prologue — pin the namespace, resolve the request's scope to its
-/// account (journaled once per invocation), fetch the credentials for this
-/// execution, open the gateway — and then its operation. Issuing is two
-/// durable steps — a read-only lookup and a query-first create under the
-/// issue policy's run retry policy (design §5) — and every handler that calls
-/// szamlazz.hu kills the invocation after five attempts (ADR 0004); the
-/// external-id query inside the create step is what makes both safe.
+/// its execution inside one span (`execution{scope, order,
+/// restate.invocation.id, account.id}`, so every log line it emits is
+/// attributable): the prologue — pin the namespace, resolve the request's
+/// scope to its account (journaled once per invocation), fetch the
+/// credentials for this execution, open the gateway — and then its operation.
+/// Issuing is two durable steps — a read-only lookup and a query-first create
+/// under the issue policy's run retry policy (design §5) — and every handler
+/// that calls szamlazz.hu kills the invocation after five attempts (ADR 0004);
+/// the external-id query inside the create step is what makes both safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -61,10 +63,14 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Proforma, request))
-            .await
-            .map(Json)
+        // Reborrowed so that the `async move` body captures the reference,
+        // not the context; every handler below does the same.
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Proforma, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Issues the invoice (`számla`) of the order, converting its live
@@ -89,22 +95,25 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Invoice, request))
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Invoice, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Issues the prepayment invoice (`előlegszámla`) of the order; one per
     /// order.
     ///
-    /// Takes no `options.proforma` (anything but `auto` is `invalid_input`)
-    /// and runs no proforma lookup: the Agent cannot carry
-    /// `dijbekeroSzamlaszam` on a prepayment invoice, and szamlazz.hu
-    /// converts the order's live proforma by shared order number regardless
-    /// (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
-    /// auto-linking, deletion"). `get` reports the proforma as `consumed`
-    /// once the link landed.
+    /// Converts the order's live proforma unless told otherwise
+    /// (`options.proforma`, exactly as `create_invoice` takes it): the create
+    /// carries `dijbekeroSzamlaszam`, so the link does not rest on
+    /// szamlazz.hu's own linking by shared order number — which happens
+    /// regardless (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
+    /// auto-linking, deletion"), and is why `none` is `conflict{proforma_live}`
+    /// while a live proforma of ours exists. `get` reports the proforma as
+    /// `consumed` once the link landed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -125,14 +134,24 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Prepayment, request))
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Prepayment, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Issues the final invoice (`végszámla`) settling the order's live
     /// prepayment invoice.
+    ///
+    /// szamlazz.hu links the prepayment invoice (the create carries
+    /// `elolegSzamlaszam`) but does **not** net it into the final invoice's
+    /// totals: the caller's `document` lists the full performance and deducts
+    /// the prepayment as a negative line item at the same VAT rate
+    /// ([behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices)).
+    /// Takes no `options.proforma` (anything but `auto` is `invalid_input`):
+    /// the order's proforma was consumed by the prepayment invoice.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -153,10 +172,12 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.issue_kind(&ctx, order, DocumentKind::Final, request))
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Final, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Issues a corrective invoice (`helyesbítő számla`) for an invoice of
@@ -181,10 +202,12 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.correct(&ctx, order, request))
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.correct(ctx, order, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Reverses (`sztornó`) an invoice of this order; idempotent.
@@ -208,10 +231,12 @@ impl Order {
     ) -> HandlerResult<Json<StornoResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.storno(&ctx, order, request))
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.storno(ctx, order, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Deletes the order's proforma.
@@ -235,10 +260,12 @@ impl Order {
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
-        let execution = self.prologue(&ctx).await?;
-        Box::pin(execution.delete(&ctx, order, request))
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            Box::pin(execution.delete(ctx, order, request)).await
+        })
+        .await
+        .map(Json)
     }
 
     /// What szamlazz.hu holds under the order's external ids right now: four
@@ -251,8 +278,12 @@ impl Order {
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
         let order = order_key(ctx.key())?;
-        let execution = self.prologue_shared(&ctx).await?;
-        execution.status(&ctx, order).await.map(Json)
+        let ctx = &ctx;
+        self.execute_shared(ctx, |execution| async move {
+            execution.status(ctx, order).await
+        })
+        .await
+        .map(Json)
     }
 }
 
@@ -281,8 +312,12 @@ impl Agent {
         journal_retention = "1d"
     )]
     async fn check_account(&self, ctx: Context<'_>) -> HandlerResult<Json<CheckAccountResponse>> {
-        let execution = self.prologue(&ctx).await?;
-        execution.check_account_request(&ctx).await.map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            execution.check_account_request(ctx).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Queries a document by number, order number or external id. The
@@ -304,8 +339,12 @@ impl Agent {
         request: Body<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
         let request = request.into_request()?;
-        let execution = self.prologue(&ctx).await?;
-        execution.query_request(&ctx, request).await.map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            execution.query_request(ctx, request).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Looks a Hungarian taxpayer up through NAV (`xmltaxpayer`) by tax
@@ -334,11 +373,12 @@ impl Agent {
         // Both refusals precede the prologue: nothing journaled, nothing sent.
         let request = request.into_request()?;
         let prefix = taxpayer_prefix(&request)?;
-        let execution = self.prologue(&ctx).await?;
-        execution
-            .query_taxpayer_request(&ctx, prefix)
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            execution.query_taxpayer_request(ctx, prefix).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Registers credit entries (`jóváírás`) on an invoice.
@@ -366,11 +406,12 @@ impl Agent {
         request: Body<SetPaymentsRequest>,
     ) -> HandlerResult<Json<SetPaymentsResponse>> {
         let request = request.into_request()?;
-        let execution = self.prologue(&ctx).await?;
-        execution
-            .set_payments_request(&ctx, request)
-            .await
-            .map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            execution.set_payments_request(ctx, request).await
+        })
+        .await
+        .map(Json)
     }
 
     /// Reverses an invoice that no `Order` manages. The storno step is the
@@ -401,7 +442,11 @@ impl Agent {
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
         let request = request.into_request()?;
-        let execution = self.prologue(&ctx).await?;
-        execution.storno_request(&ctx, request).await.map(Json)
+        let ctx = &ctx;
+        self.execute(ctx, |execution| async move {
+            execution.storno_request(ctx, request).await
+        })
+        .await
+        .map(Json)
     }
 }

@@ -156,11 +156,19 @@ opaque_string! {
     CredentialRef
 }
 
-/// A Számla Agent endpoint URL: an `http` or `https` URI with a host.
+/// A Számla Agent endpoint URL: an `http` or `https` URI with a host and no
+/// userinfo.
 ///
 /// Validated when parsed and when deserialized, so an [`Account`] never
-/// carries an endpoint the client cannot post to. The text is kept as
-/// written.
+/// carries an endpoint the client cannot post to — or one that would leak:
+/// the endpoint is journaled with the account and printed in the start-up
+/// log, so a `user:password@` in it would be shown in the Restate UI for the
+/// retention period, and it is refused (#65). Plain `http` stays allowed — a
+/// local mock or a proxy is a legitimate target, and the type cannot tell a
+/// test deployment from production — but the agent key travels in the request
+/// body, so `http` to a host other than loopback sends it in cleartext;
+/// [`Endpoint::is_cleartext`] reports that case for the start-up log to warn
+/// about. The text is kept as written.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Endpoint(String);
 
@@ -179,7 +187,8 @@ impl Endpoint {
     /// # Errors
     ///
     /// Returns an error when the text is not a URI, its scheme is neither
-    /// `http` nor `https`, or it has no host.
+    /// `http` nor `https`, it has no host, or its authority carries userinfo
+    /// (`user:password@host`).
     pub fn parse(value: &str) -> Result<Self, InvalidEndpoint> {
         let uri: Uri = value.parse()?;
         match uri.scheme_str().map(str::to_ascii_lowercase).as_deref() {
@@ -189,6 +198,12 @@ impl Endpoint {
         if uri.host().is_none_or(str::is_empty) {
             return Err(InvalidEndpoint::Host);
         }
+        if uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().contains('@'))
+        {
+            return Err(InvalidEndpoint::Userinfo);
+        }
         Ok(Self(value.to_owned()))
     }
 
@@ -196,6 +211,28 @@ impl Endpoint {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether posting to this endpoint sends the agent key in cleartext:
+    /// the scheme is `http` and the host is not loopback (`localhost`,
+    /// `127.0.0.0/8`, `::1`). A local mock is not cleartext in any sense that
+    /// matters; anything else on `http` is.
+    #[must_use]
+    pub fn is_cleartext(&self) -> bool {
+        // Validated on construction, so this parses.
+        let Ok(uri) = self.0.parse::<Uri>() else {
+            return false;
+        };
+        if uri.scheme_str().map(str::to_ascii_lowercase).as_deref() != Some("http") {
+            return false;
+        }
+        let host = uri.host().unwrap_or_default();
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        !loopback
     }
 }
 
@@ -248,7 +285,7 @@ impl<'de> Deserialize<'de> for Endpoint {
 }
 
 /// A string that is not a valid [`Endpoint`]. Does not echo the text: an
-/// endpoint URL may carry userinfo.
+/// endpoint URL may carry userinfo — the very thing one variant refuses.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InvalidEndpoint {
@@ -261,6 +298,10 @@ pub enum InvalidEndpoint {
     /// The URI has no host.
     #[error("endpoint has no host")]
     Host,
+    /// The authority carries userinfo (`user:password@host`), which the
+    /// journal and the start-up log would show.
+    #[error("endpoint must not carry userinfo (user:password@host)")]
+    Userinfo,
 }
 
 /// The future the two traits return: boxed so that the traits are
@@ -653,6 +694,61 @@ mod tests {
             serde_json::from_value::<Endpoint>(json!("localhost")).is_err(),
             "deserialization validates too"
         );
+    }
+
+    /// An endpoint with userinfo is refused (#65): the endpoint is journaled
+    /// with the account and printed in the start-up log, so a password in it
+    /// would be shown in the Restate UI for the retention period. The error
+    /// never echoes the text.
+    #[test]
+    fn endpoint_refuses_userinfo() {
+        for invalid in [
+            "https://u5er:s3cret@www.szamlazz.hu/szamla/",
+            "https://u5er@example.com/",
+            "http://:s3cret@127.0.0.1:1234/",
+        ] {
+            let error = Endpoint::parse(invalid).expect_err(invalid);
+            assert!(
+                matches!(error, InvalidEndpoint::Userinfo),
+                "{invalid}: {error:?}"
+            );
+            assert!(!error.to_string().contains("s3cret"), "{error}");
+            assert!(!error.to_string().contains("u5er"), "{error}");
+        }
+        assert!(
+            serde_json::from_value::<Endpoint>(json!("https://u:p@example.com/")).is_err(),
+            "deserialization refuses it too"
+        );
+    }
+
+    /// Plain `http` stays allowed — a local mock or a proxy is a legitimate
+    /// target and the type cannot tell a test deployment from production —
+    /// but an `http` endpoint on a host other than loopback sends the agent
+    /// key in cleartext, which the type reports so the start-up log can warn.
+    #[test]
+    fn endpoint_reports_cleartext_off_loopback() {
+        for cleartext in [
+            "http://szamlazz.internal/szamla/",
+            "http://10.0.0.7:8080/",
+            "http://host.docker.internal:1234/",
+            "HTTP://EXAMPLE.COM/",
+        ] {
+            let endpoint = Endpoint::parse(cleartext).expect(cleartext);
+            assert!(endpoint.is_cleartext(), "{cleartext}");
+        }
+        for safe in [
+            "https://www.szamlazz.hu/szamla/",
+            "https://szamlazz.internal/",
+            "http://127.0.0.1:1234/",
+            "http://127.1.2.3/",
+            "http://localhost:1234/",
+            "http://LOCALHOST/",
+            "http://[::1]:1234/",
+        ] {
+            let endpoint = Endpoint::parse(safe).expect(safe);
+            assert!(!endpoint.is_cleartext(), "{safe}");
+        }
+        assert!(!Endpoint::production().is_cleartext());
     }
 
     /// A resolver and a store that a downstream build might plug in: the

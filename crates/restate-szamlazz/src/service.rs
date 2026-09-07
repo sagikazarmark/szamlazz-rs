@@ -5,13 +5,20 @@
 //! the [`Gateway`](crate::gateway::Gateway) and domain outcomes are returned as
 //! data. Neither keeps state — szamlazz.hu is the source of truth, reached
 //! through the order's deterministic external ids. `TerminalError`s carry a
-//! [`TerminalCode`](crate::contract::TerminalCode) and always mean "outcome
-//! unknown — retry with a new `Idempotency-Key`".
+//! [`TerminalCode`](crate::contract::TerminalCode): three of the codes mean
+//! "outcome unknown — retry with a new `Idempotency-Key`, or read `get`"
+//! (`outcome_unknown`, `unavailable`, `credentials_rejected`), the rest are
+//! settled — the same request never succeeds, or szamlazz.hu's own answer is
+//! passed through. On the wire a fault is the JSON string inside Restate's
+//! ingress envelope (`{"code": <HTTP status>, "message": "<fault JSON>",
+//! "source": "invocation"}`): the fault → `TerminalError` conversion in
+//! `support` hands the SDK the status and the fault JSON as the message, and
+//! the ingress wraps them in its envelope.
 //!
 //! Each service holds exactly two things: the [`Accounts`] bundle — the
 //! account resolver and the credential store — and a [`WorkerConfig`] with the
-//! deployment-level settings (the namespace of the external ids, the issue
-//! and resolve policies). Every handler runs the same prologue after parsing
+//! deployment-level settings (the namespace of the external ids; the issue,
+//! read and resolve policies). Every handler runs the same prologue after parsing
 //! its key: **pin** the namespace in a pure durable step, **resolve** the
 //! request's scope to its account in a durable step named `account` under the
 //! resolve policy, **fetch** the account's credentials outside the journal on
@@ -24,6 +31,8 @@
 //! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`), the
 //!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
 //!   probe, registered as `Szamlazz.Agent`.
+
+use std::future::Future;
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
@@ -77,17 +86,29 @@ impl Order {
         &self.config
     }
 
-    /// The prologue of an exclusive handler: pin → resolve → fetch → open.
-    async fn prologue(&self, ctx: &ObjectContext<'_>) -> Result<Execution, HandlerError> {
-        support::object::prologue(ctx, &self.accounts, &self.config).await
+    /// Runs an exclusive handler's execution: the prologue (pin → resolve →
+    /// fetch → open), then `body` on the execution it built, inside the
+    /// execution span carrying the scope, the key, the invocation id and the
+    /// account id.
+    async fn execute<T, F, Fut>(&self, ctx: &ObjectContext<'_>, body: F) -> Result<T, HandlerError>
+    where
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        support::object::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
     }
 
-    /// The prologue of a shared handler (`get`).
-    async fn prologue_shared(
+    /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
+    async fn execute_shared<T, F, Fut>(
         &self,
         ctx: &SharedObjectContext<'_>,
-    ) -> Result<Execution, HandlerError> {
-        support::shared::prologue(ctx, &self.accounts, &self.config).await
+        body: F,
+    ) -> Result<T, HandlerError>
+    where
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        support::shared::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
     }
 }
 
@@ -121,9 +142,15 @@ impl Agent {
         &self.config
     }
 
-    /// The prologue of every handler: pin → resolve → fetch → open.
-    async fn prologue(&self, ctx: &Context<'_>) -> Result<Execution, HandlerError> {
-        support::service::prologue(ctx, &self.accounts, &self.config).await
+    /// Runs a handler's execution: the prologue (pin → resolve → fetch →
+    /// open), then `body` on the execution it built, inside the execution
+    /// span carrying the scope, the invocation id and the account id.
+    async fn execute<T, F, Fut>(&self, ctx: &Context<'_>, body: F) -> Result<T, HandlerError>
+    where
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        support::service::execute(ctx, None, &self.accounts, &self.config, body).await
     }
 }
 

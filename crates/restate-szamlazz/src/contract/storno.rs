@@ -138,14 +138,14 @@ impl StornoResponse {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct DeleteProformaRequest {
-    /// Delete even when the proforma has registered payments. szamlazz.hu has
-    /// no guard of its own; without `force` a paid proforma is
-    /// `rejected{proforma_paid}`.
+    /// Delete even when the proforma has registered credit entries. szamlazz.hu has
+    /// no guard of its own; without `force` a paid proforma is answered
+    /// `{deleted: false, reason: "proforma_paid"}`.
     pub force: bool,
 }
 
 impl DeleteProformaRequest {
-    /// A delete request; `force` deletes a proforma with registered payments
+    /// A delete request; `force` deletes a proforma with registered credit entries
     /// too. `Default::default()` is `new(false)`.
     #[must_use]
     pub const fn new(force: bool) -> Self {
@@ -306,7 +306,10 @@ pub enum DocumentState {
     Live,
     /// The document carries `<sztornozott>true</sztornozott>`.
     Reversed {
-        /// The storno invoice number, when known.
+        /// The storno invoice number, when known. `Szamlazz.Order.get` never
+        /// fills it (finding the storno would take the order-number hint,
+        /// which shows only the newest document); the create and storno
+        /// handlers report it in their own responses when the hint yields it.
         #[serde(default)]
         storno_number: Option<String>,
     },

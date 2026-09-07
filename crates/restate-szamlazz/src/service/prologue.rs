@@ -30,6 +30,42 @@ pub(super) struct Execution {
     pub(super) config: WorkerConfig,
 }
 
+/// The span every handler execution runs in, from the handler's first line to
+/// its answer: `execution{scope, order, restate.invocation.id, account.id}`.
+///
+/// Opened before the prologue's first step and left after the handler's last,
+/// so every log line the execution emits — the prologue's own warnings, the
+/// gateway steps' spans and events, the paging `credentials_rejected` warning
+/// — is attributable to a scope, an account and an invocation from the
+/// worker's log alone (#65). `scope` is what the SDK saw (`<unscoped>` when
+/// the request carried none, as the start-up log prints it); `order` is the
+/// Virtual Object key, absent on the stateless `Szamlazz.Agent`; `account.id`
+/// is [`tracing::field::Empty`] until the `account` step has answered and
+/// [`record_account`] fills it. `restate.invocation.id` is the value the
+/// ingress returns as `x-restate-id`, the caller's handle on the invocation.
+/// Never the key: the account id is journaled and shown in the Restate UI
+/// already, so logging it leaks nothing.
+pub(super) fn execution_span(
+    scope: Option<&str>,
+    order: Option<&str>,
+    invocation_id: &str,
+) -> tracing::Span {
+    tracing::info_span!(
+        "execution",
+        scope = %scope.unwrap_or("<unscoped>"),
+        // `None` records nothing, like `Empty`.
+        order = order.map(tracing::field::display),
+        restate.invocation.id = %invocation_id,
+        account.id = tracing::field::Empty,
+    )
+}
+
+/// Records the resolved account's id on the current execution span — a no-op
+/// outside one, since the field is declared there only.
+pub(super) fn record_account(account: &Account) {
+    tracing::Span::current().record("account.id", tracing::field::display(&account.id));
+}
+
 /// The journaled answer of the `account` step: the account, or the reason the
 /// request names none. Data, so that unscoped and unknown are settled by the
 /// journal and never retried.
@@ -159,8 +195,12 @@ pub(super) async fn fetch_credentials(
     }
 }
 
-/// The terminal fault of a failed credential fetch. Never echoes the store's
-/// own message; names the account and the reference.
+/// The terminal fault of a failed credential fetch. The operator's warning
+/// names the account and the reference; the caller's message names neither —
+/// no response names the account (design §7), and a store's reference may be
+/// internal topology (a secret path) — and never echoes the store's own
+/// message. It does tell the two causes apart: a reference the store does not
+/// know is configuration, an unavailable store is an outage.
 pub(super) fn fetch_fault(account: &Account, error: &FetchError) -> Fault {
     tracing::warn!(
         account = %account.id,
@@ -168,9 +208,14 @@ pub(super) fn fetch_fault(account: &Account, error: &FetchError) -> Fault {
         error = %error,
         "credentials could not be fetched"
     );
+    let cause = match error {
+        FetchError::Gone { .. } => {
+            "the credential store has no credentials under the account's reference"
+        }
+        FetchError::Unavailable(_) => "the credential store is unavailable",
+    };
     Fault::unavailable(format!(
-        "credentials of account {} could not be fetched ({error}); retry with a new Idempotency-Key",
-        account.id
+        "the account's credentials could not be fetched ({cause}); retry with a new Idempotency-Key"
     ))
 }
 
@@ -338,26 +383,74 @@ mod tests {
         );
     }
 
+    /// The `unavailable` fault of a failed credential fetch tells the caller
+    /// what to do and nothing about the deployment: neither the store's own
+    /// message (a vault token, a DSN), nor the credential reference (a
+    /// database-backed store's ref is internal topology — a secret path), nor
+    /// the account id (no response names the account; design §7). Both cases
+    /// — the store gone for the reference, the store unavailable — are told
+    /// apart in the text. The operator's warning carries the account and the
+    /// reference (#65).
     #[test]
-    fn a_failed_credential_fetch_is_unavailable_and_never_echoes_the_cause() {
+    fn a_failed_credential_fetch_is_unavailable_and_names_neither_the_account_nor_the_ref() {
+        use crate::test_support::LogCapture;
+
+        const ACCOUNT: &str = "acct-8e1f";
+        const REF: &str = "secrets/kv/accounts/acme/szamlazz";
+        let account = Account::new(AccountId::from(ACCOUNT), CredentialRef::from(REF));
+
+        let capture = LogCapture::default();
+        let guard = capture.subscribe();
+        drop(fetch_fault(
+            &Account::new(AccountId::from("warmup"), CredentialRef::from("warmup")),
+            &FetchError::unavailable(std::io::Error::other("warm-up")),
+        ));
+        LogCapture::rebuild_interest();
+
         let (status, body) = fault_body(fetch_fault(
-            &account(),
+            &account,
             &FetchError::unavailable(std::io::Error::other("vault token v.abc123 rejected")),
         ));
         assert_eq!(status, 503);
         assert_eq!(body["code"], "unavailable");
         let message = body["message"].as_str().expect("message");
-        assert!(message.contains("acct"), "{message}");
+        assert!(
+            message.contains("credential store is unavailable"),
+            "{message}"
+        );
+        assert!(
+            message.contains("retry with a new Idempotency-Key"),
+            "{message}"
+        );
         assert!(!message.contains("abc123"), "{message}");
+        assert!(!message.contains(ACCOUNT), "{message}");
+        assert!(!message.contains(REF), "{message}");
 
         let (status, body) = fault_body(fetch_fault(
-            &account(),
+            &account,
             &FetchError::Gone {
-                credential_ref: CredentialRef::from("acct"),
+                credential_ref: CredentialRef::from(REF),
             },
         ));
         assert_eq!(status, 503);
         assert_eq!(body["code"], "unavailable");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("no credentials"), "{message}");
+        assert!(!message.contains(ACCOUNT), "{message}");
+        assert!(!message.contains(REF), "{message}");
+        drop(guard);
+
+        let logs = capture.logs();
+        let warnings: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("could not be fetched") && !line.contains("warmup"))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{logs}");
+        for line in warnings {
+            assert!(line.contains("WARN"), "{line}");
+            assert!(line.contains(&format!("account={ACCOUNT}")), "{line}");
+            assert!(line.contains(&format!("credential_ref={REF}")), "{line}");
+        }
     }
 
     #[test]

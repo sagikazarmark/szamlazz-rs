@@ -363,7 +363,6 @@ impl Harness {
         external_id: &ExternalId,
         reversed: Option<&str>,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        let order = order();
         let refs = if kind == IssuedKind::Corrective {
             DocumentRefs {
                 corrected: Some("SZ-1"),
@@ -372,6 +371,20 @@ impl Harness {
         } else {
             DocumentRefs::default()
         };
+        self.create_with_refs(kind, external_id, reversed, refs)
+            .await
+    }
+
+    /// The create step for a document of `ORD-1` carrying `refs` — what the
+    /// handler's steps 1–2 resolved.
+    async fn create_with_refs(
+        &self,
+        kind: IssuedKind,
+        external_id: &ExternalId,
+        reversed: Option<&str>,
+        refs: DocumentRefs<'_>,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        let order = order();
         let create = self
             .gateway
             .build_create(kind, &document(), &order, external_id, refs)
@@ -816,6 +829,48 @@ async fn create_with_nothing_under_the_id_sends_the_create_and_is_issued() {
     assert!(create_body.contains("<rendelesSzam>ORD-1</rendelesSzam>"));
     assert!(create_body.contains("<szamlaLetoltes>false</szamlaLetoltes>"));
     assert!(create_body.contains("<nev>Kovács Bt.</nev>"));
+}
+
+/// The prepayment invoice consuming the order's proforma carries the
+/// reference like the plain invoice does (#69): `dijbekeroSzamlaszam` beside
+/// the `elolegszamla` flag on the create body, so szamlazz.hu links the
+/// proforma explicitly rather than by shared order number. (The element's
+/// XSD position is the Agent crate's own test.)
+#[tokio::test]
+async fn prepayment_consuming_a_proforma_sends_the_reference() {
+    let h = Harness::start().await;
+    let prepayment_id = ExternalId::new("acct:ORD-1:prepayment");
+    external_id_query(prepayment_id.as_str())
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .and(body_string_contains(
+            "<dijbekeroSzamlaszam>D-1</dijbekeroSzamlaszam>",
+        ))
+        .and(body_string_contains("<elolegszamla>true</elolegszamla>"))
+        .respond_with(created("ES-1", "1000", "1270"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    let refs = DocumentRefs {
+        proforma: Some("D-1"),
+        ..DocumentRefs::default()
+    };
+    match h
+        .create_with_refs(IssuedKind::Prepayment, &prepayment_id, None, refs)
+        .await
+    {
+        Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("ES-1")),
+        other => panic!("expected Issued, got {other:?}"),
+    }
+    let bodies = h.bodies().await;
+    assert_eq!(bodies.len(), 2, "the leading query, then the create");
+    let create_body = &bodies[1];
+    assert!(create_body.contains("<szamlaKulsoAzon>acct:ORD-1:prepayment</szamlaKulsoAzon>"));
+    assert!(create_body.contains("<dijbekeroSzamlaszam>D-1</dijbekeroSzamlaszam>"));
 }
 
 #[tokio::test]

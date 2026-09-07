@@ -14,8 +14,13 @@ use crate::xml;
 /// What kind of document the invoice operation issues.
 ///
 /// The wire encodes these as independent boolean flags (`dijbekero`,
-/// `elolegszamla`, …); this enum makes the meaningless combinations
-/// unrepresentable and attaches the per-kind required references.
+/// `elolegszamla`, …) and references; this enum makes the meaningless
+/// combinations unrepresentable (a proforma consuming a proforma, a
+/// corrective without the invoice it corrects) and attaches to each kind the
+/// references it can carry. The proforma being consumed
+/// (`dijbekeroSzamlaszam`) is one of them on the three kinds the XSD lets
+/// carry it — an invoice, a prepayment invoice and a final invoice — and
+/// [`InvoiceKind::proforma_number`] reads it uniformly.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
@@ -32,15 +37,37 @@ pub enum InvoiceKind {
     /// A delivery note (`szállítólevél`) — a non-financial document.
     #[doc(alias = "szállítólevél")]
     DeliveryNote,
-    /// A prepayment (advance) invoice (`előlegszámla`).
+    /// A prepayment (advance) invoice (`előlegszámla`), optionally issued
+    /// against a proforma.
+    ///
+    /// szamlazz.hu also consumes a proforma that shares the prepayment
+    /// invoice's order number when the reference is absent (verified); the
+    /// reference makes the link explicit rather than leaving it to the order
+    /// number. A prepayment invoice sent *with* the reference has not been
+    /// exercised on the test account yet — see the behaviour notes'
+    /// [unverified list](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#still-unverified).
     #[doc(alias = "előlegszámla")]
-    Prepayment,
+    Prepayment {
+        /// The proforma being invoiced (`dijbekeroSzamlaszam`), if any.
+        proforma_number: Option<InvoiceNumber>,
+    },
     /// A final invoice (`végszámla`) settling a prepayment invoice.
+    ///
+    /// szamlazz.hu links the prepayment invoice — by `prepayment_number` or
+    /// by the shared order number — but does **not** net it into the final
+    /// invoice's totals: a final invoice sent with the full performance as
+    /// its only lines is issued for the full amount, and the buyer is billed
+    /// the prepayment twice. A `végszámla` lists the full performance and
+    /// deducts the prepayment as a **negative line item at the same VAT
+    /// rate**; the caller supplies that line. Verified on the test account:
+    /// [behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices).
     #[doc(alias = "végszámla")]
     Final {
         /// The prepayment invoice being settled (`elolegSzamlaszam`), if
         /// referenced explicitly.
         prepayment_number: Option<InvoiceNumber>,
+        /// The proforma being invoiced (`dijbekeroSzamlaszam`), if any.
+        proforma_number: Option<InvoiceNumber>,
     },
     /// A corrective invoice (`helyesbítő számla`).
     #[doc(alias = "helyesbítő számla")]
@@ -56,6 +83,29 @@ impl InvoiceKind {
     pub fn invoice() -> Self {
         Self::Invoice {
             proforma_number: None,
+        }
+    }
+
+    /// A prepayment invoice with no proforma reference.
+    #[must_use]
+    pub fn prepayment() -> Self {
+        Self::Prepayment {
+            proforma_number: None,
+        }
+    }
+
+    /// The proforma this document converts (`dijbekeroSzamlaszam`), on the
+    /// kinds that can carry one: an invoice, a prepayment invoice, a final
+    /// invoice. `None` for the other kinds.
+    #[must_use]
+    pub fn proforma_number(&self) -> Option<&InvoiceNumber> {
+        match self {
+            Self::Invoice { proforma_number }
+            | Self::Prepayment { proforma_number }
+            | Self::Final {
+                proforma_number, ..
+            } => proforma_number.as_ref(),
+            Self::Proforma | Self::DeliveryNote | Self::Corrective { .. } => None,
         }
     }
 }
@@ -741,7 +791,10 @@ impl AgentRequest for CreateInvoice {
         if self.items.is_empty() {
             return Err(RequestError::MissingLineItems);
         }
-        if let InvoiceKind::Final { prepayment_number } = &self.kind {
+        if let InvoiceKind::Final {
+            prepayment_number, ..
+        } = &self.kind
+        {
             let has_prepayment_number = prepayment_number
                 .as_ref()
                 .is_some_and(|number| !number.as_str().trim().is_empty());
@@ -835,15 +888,18 @@ impl AgentRequest for CreateInvoice {
                     }
                 }
                 f.text_opt("rendelesSzam", h.order_number.as_deref());
+                // `dijbekeroSzamlaszam` precedes every kind flag in the XSD
+                // and is one element whichever kind carries it.
+                f.text_opt(
+                    "dijbekeroSzamlaszam",
+                    self.kind.proforma_number().map(InvoiceNumber::as_str),
+                );
                 match &self.kind {
-                    InvoiceKind::Invoice { proforma_number } => {
-                        f.text_opt(
-                            "dijbekeroSzamlaszam",
-                            proforma_number.as_ref().map(InvoiceNumber::as_str),
-                        );
-                    }
-                    InvoiceKind::Prepayment => f.bool("elolegszamla", true),
-                    InvoiceKind::Final { prepayment_number } => {
+                    InvoiceKind::Invoice { .. } => {}
+                    InvoiceKind::Prepayment { .. } => f.bool("elolegszamla", true),
+                    InvoiceKind::Final {
+                        prepayment_number, ..
+                    } => {
                         f.bool("vegszamla", true);
                         f.text_opt(
                             "elolegSzamlaszam",
@@ -1403,6 +1459,138 @@ mod tests {
         assert!(!xml.contains("<dijbekero>"));
     }
 
+    /// `dijbekeroSzamlaszam` sits between `rendelesSzam` and `elolegszamla`
+    /// in the XSD (`fixtures/upstream/agent/xsd/xmlszamla.xsd`, `fejlecTipus`),
+    /// so a prepayment invoice converting a proforma writes the reference
+    /// before its own flag.
+    #[test]
+    fn prepayment_writes_the_proforma_reference_before_its_flag() {
+        let mut invoice = sample();
+        invoice.header.order_number = Some("ORD-1".to_owned());
+        invoice.kind = InvoiceKind::Prepayment {
+            proforma_number: Some(InvoiceNumber::new("D-2026-7")),
+        };
+        let xml =
+            String::from_utf8(invoice.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
+        assert!(
+            xml.contains(
+                "<rendelesSzam>ORD-1</rendelesSzam><dijbekeroSzamlaszam>D-2026-7</dijbekeroSzamlaszam><elolegszamla>true</elolegszamla></fejlec>"
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn prepayment_without_a_proforma_writes_the_flag_alone() {
+        let mut invoice = sample();
+        invoice.kind = InvoiceKind::prepayment();
+        assert_eq!(invoice.kind.proforma_number(), None);
+        let xml =
+            String::from_utf8(invoice.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
+        assert!(xml.contains("<elolegszamla>true</elolegszamla>"), "{xml}");
+        assert!(!xml.contains("<dijbekeroSzamlaszam>"), "{xml}");
+    }
+
+    /// The final invoice's three optional header elements in XSD order:
+    /// `dijbekeroSzamlaszam`, `vegszamla`, `elolegSzamlaszam`.
+    #[test]
+    fn final_invoice_writes_the_proforma_reference_before_its_flag() {
+        let mut invoice = sample();
+        invoice.kind = InvoiceKind::Final {
+            prepayment_number: Some(InvoiceNumber::new("E-2026-3")),
+            proforma_number: Some(InvoiceNumber::new("D-2026-7")),
+        };
+        assert_eq!(
+            invoice.kind.proforma_number(),
+            Some(&InvoiceNumber::new("D-2026-7"))
+        );
+        let xml =
+            String::from_utf8(invoice.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
+        assert!(
+            xml.contains(
+                "<dijbekeroSzamlaszam>D-2026-7</dijbekeroSzamlaszam><vegszamla>true</vegszamla><elolegSzamlaszam>E-2026-3</elolegSzamlaszam></fejlec>"
+            ),
+            "{xml}"
+        );
+    }
+
+    /// Only the three kinds that can carry the reference expose one.
+    #[test]
+    fn proforma_number_is_none_on_the_kinds_that_cannot_carry_one() {
+        for kind in [
+            InvoiceKind::Proforma,
+            InvoiceKind::DeliveryNote,
+            InvoiceKind::Corrective {
+                corrected_number: InvoiceNumber::new("E-2026-42"),
+            },
+        ] {
+            assert_eq!(kind.proforma_number(), None, "{kind:?}");
+        }
+        assert_eq!(
+            InvoiceKind::Invoice {
+                proforma_number: Some(InvoiceNumber::new("D-1")),
+            }
+            .proforma_number(),
+            Some(&InvoiceNumber::new("D-1"))
+        );
+    }
+
+    /// The JSON shape a caller building the request from JSON (the CLI) sends:
+    /// every kind that carries a proforma reference is an object with
+    /// `proforma_number` — the prepayment invoice included since #69, before
+    /// which it was the bare string `"prepayment"` — and a `final` written
+    /// before #69, without `proforma_number`, still decodes.
+    #[test]
+    fn invoice_kind_json_shape() {
+        use serde_json::json;
+
+        for (kind, json) in [
+            (
+                InvoiceKind::invoice(),
+                json!({"invoice": {"proforma_number": null}}),
+            ),
+            (
+                InvoiceKind::prepayment(),
+                json!({"prepayment": {"proforma_number": null}}),
+            ),
+            (
+                InvoiceKind::Prepayment {
+                    proforma_number: Some(InvoiceNumber::new("D-1")),
+                },
+                json!({"prepayment": {"proforma_number": "D-1"}}),
+            ),
+            (
+                InvoiceKind::Final {
+                    prepayment_number: Some(InvoiceNumber::new("E-1")),
+                    proforma_number: Some(InvoiceNumber::new("D-1")),
+                },
+                json!({"final": {"prepayment_number": "E-1", "proforma_number": "D-1"}}),
+            ),
+            (InvoiceKind::Proforma, json!("proforma")),
+        ] {
+            assert_eq!(serde_json::to_value(&kind).expect("serialize"), json);
+            assert_eq!(
+                serde_json::from_value::<InvoiceKind>(json).expect("deserialize"),
+                kind
+            );
+        }
+
+        let legacy_final: InvoiceKind =
+            serde_json::from_value(json!({"final": {"prepayment_number": "E-1"}}))
+                .expect("a final without proforma_number decodes");
+        assert_eq!(
+            legacy_final,
+            InvoiceKind::Final {
+                prepayment_number: Some(InvoiceNumber::new("E-1")),
+                proforma_number: None,
+            }
+        );
+        assert!(
+            serde_json::from_value::<InvoiceKind>(json!("prepayment")).is_err(),
+            "the pre-#69 bare string is not accepted"
+        );
+    }
+
     #[test]
     fn writes_current_optional_blocks_in_xsd_order() {
         let mut invoice = sample();
@@ -1832,6 +2020,7 @@ mod tests {
         let mut invoice = sample();
         invoice.kind = InvoiceKind::Final {
             prepayment_number: None,
+            proforma_number: None,
         };
         assert!(matches!(
             invoice.to_wire(&Credentials::agent_key("key")),
@@ -1846,6 +2035,7 @@ mod tests {
         invoice.header.order_number = None;
         invoice.kind = InvoiceKind::Final {
             prepayment_number: Some(InvoiceNumber::from("E-2026-1")),
+            proforma_number: None,
         };
         invoice
             .to_wire(&Credentials::agent_key("key"))

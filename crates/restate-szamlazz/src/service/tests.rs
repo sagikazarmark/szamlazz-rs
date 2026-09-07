@@ -744,6 +744,116 @@ async fn account_mismatch_never_leaks_the_agent_key() {
     assert!(message.contains("supplier Some(1)"), "{message}");
 }
 
+/// Every handler execution runs inside one span — `execution` — carrying the
+/// scope, the order key, the invocation id and, once the prologue has resolved
+/// it, the account id (#65). Every log line under it is thereby attributable
+/// to an account in a multi-account deployment: the paging
+/// `credentials_rejected` warning — whose own fields stay the namespace and
+/// the code — and the events inside a gateway step's span alike.
+#[tokio::test]
+async fn the_execution_span_attributes_every_log_line_under_it() {
+    use tracing::Instrument as _;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::prologue::{execution_span, record_account};
+    use super::support::Fault;
+    use crate::contract::{DocumentKind, IssuedKind};
+    use crate::gateway::{LookupOutcome, LookupRequest};
+    use crate::identity::{ExternalId, OrderKey};
+    use crate::test_support::LogCapture;
+
+    let server = MockServer::start().await;
+    // Another code: the lookup warns about it inside its own span.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>57</hibakod><hibauzenet>Hibás számlaszám.</hibauzenet></xmlszamlavalasz>"#,
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let order = Order::from_parts(
+        accounts(&server.uri(), "key"),
+        WorkerConfig::new(namespace()),
+    );
+
+    let capture = LogCapture::default();
+    let guard = capture.subscribe();
+    // Pin the span's and the warning's callsites to this thread's subscriber
+    // (see `LogCapture`); the warm-up is told apart by its scope.
+    {
+        let span = execution_span(Some("warmup"), None, "inv_warmup");
+        let _entered = span.enter();
+        drop(Fault::credentials_rejected(
+            &"warmup".parse().expect("namespace"),
+            "0",
+            "warm-up",
+        ));
+    }
+    LogCapture::rebuild_interest();
+
+    let account = order.accounts().resolve(None).await.expect("account");
+    let credentials = order.accounts().fetch(&account).await.expect("credentials");
+    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let order_key = OrderKey::parse("ORD-1").expect("order key");
+    let external_id = ExternalId::for_kind(&namespace(), &order_key, DocumentKind::Invoice);
+    async {
+        // What the prologue does once the `account` step has answered.
+        record_account(gateway.account());
+        drop(Fault::credentials_rejected(
+            &namespace(),
+            "3",
+            "Sikertelen bejelentkezés.",
+        ));
+        let outcome = gateway
+            .lookup(LookupRequest {
+                external_id: &external_id,
+                kind: IssuedKind::Invoice,
+                order: &order_key,
+                our_numbers: &[],
+            })
+            .await;
+        assert!(
+            matches!(outcome, Ok(LookupOutcome::Api { .. })),
+            "{outcome:?}"
+        );
+    }
+    .instrument(execution_span(
+        Some("acme-events"),
+        Some("ORD-1"),
+        "inv_1abc",
+    ))
+    .await;
+    drop(guard);
+
+    let logs = capture.logs();
+    let attributed = |line: &str| {
+        line.contains("execution{")
+            && line.contains("scope=acme-events")
+            && line.contains("order=ORD-1")
+            && line.contains("restate.invocation.id=inv_1abc")
+            && line.contains("account.id=acct")
+    };
+    let warning = logs
+        .lines()
+        .find(|line| line.contains("rejected the agent credentials") && !line.contains("warmup"))
+        .unwrap_or_else(|| panic!("the credentials_rejected warning: {logs}"));
+    assert!(warning.contains("WARN"), "{warning}");
+    assert!(attributed(warning), "{warning}");
+    assert!(warning.contains("namespace=acct"), "{warning}");
+    assert!(warning.contains("code=3"), "{warning}");
+    let step = logs
+        .lines()
+        .find(|line| line.contains("gateway.lookup{"))
+        .unwrap_or_else(|| panic!("an event inside the gateway step's span: {logs}"));
+    assert!(attributed(step), "{step}");
+    assert!(
+        step.contains("external_id=acct:ORD-1:invoice"),
+        "the step's own fields stay: {step}"
+    );
+}
+
 #[test]
 fn lookup_classifies_query_outcomes() {
     use super::support::Lookup;
@@ -928,6 +1038,149 @@ fn an_exhausted_read_is_a_structured_unavailable() {
     let error = TerminalError::from(read_exhausted("get-proforma", &cancelled));
     assert_eq!(error.code(), 503, "a cancellation is the same fault");
     assert!(error.message().contains("409"), "{}", error.message());
+}
+
+/// The best-effort reads — the storno-number hint after a verify found the
+/// document already reversed, and `Szamlazz.Agent.storno`'s storno lookup in
+/// the same situation — swallow an exhausted read policy: the handler's
+/// answer (`reversed`) is already known, so the number is reported as unknown
+/// after a `warn` naming the step. They never swallow a cancellation: the SDK
+/// ends a cancelled run with 409, and an invocation told to stop must not
+/// answer `reversed` as if nothing had happened (J13, #65) — the error is
+/// propagated as it came.
+#[test]
+fn a_best_effort_read_swallows_exhaustion_but_propagates_a_cancellation() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::best_effort;
+    use crate::test_support::LogCapture;
+
+    let capture = LogCapture::default();
+    let guard = capture.subscribe();
+    drop(best_effort(
+        "hint-storno-warmup",
+        TerminalError::new_with_code(500, "warm-up"),
+    ));
+    LogCapture::rebuild_interest();
+
+    let exhausted = TerminalError::new_with_code(500, "szamlazz.hu is unavailable: maintenance");
+    best_effort("hint-storno-SZ-1", exhausted).expect("exhaustion is swallowed");
+
+    let cancelled = TerminalError::new_with_code(409, "cancelled");
+    let error = best_effort("hint-storno-SZ-1", cancelled).expect_err("a cancellation propagates");
+    assert_eq!(error.code(), 409);
+    assert_eq!(error.message(), "cancelled");
+    drop(guard);
+
+    let logs = capture.logs();
+    let warnings: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("WARN") && !line.contains("warmup"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the swallowed exhaustion warns, the cancellation does not: {logs}"
+    );
+    assert!(warnings[0].contains("hint-storno-SZ-1"), "{}", warnings[0]);
+    assert!(warnings[0].contains("maintenance"), "{}", warnings[0]);
+}
+
+/// What the two best-effort reads make of an answer, for a document the
+/// verify already saw reversed: `Szamlazz.Order.storno_invoice`'s order-number
+/// hint names the storno when it is the `SS` referencing the invoice — any
+/// other document under the order, nothing, or another code is unknown;
+/// `Szamlazz.Agent.storno`'s by-number storno lookup names it when a storno of
+/// ours holds the id (J25, #65) — nothing under it (a reversal from the UI) or
+/// another code is unknown. Rejected credentials stay the fault on both.
+#[test]
+fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::{storno_number_from_hint, storno_number_from_lookup};
+    use crate::gateway::{QueryOutcome, StornoLookupOutcome};
+
+    let namespace = namespace();
+    let rejected_body = |error: TerminalError| {
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "credentials_rejected", "{body}");
+        assert_eq!(body["szamlazz_code"], "3", "{body}");
+    };
+    let rejected = || QueryOutcome::CredentialsRejected {
+        code: "3".to_owned(),
+        message: "Sikertelen bejelentkezés.".to_owned(),
+    };
+
+    let storno = Doc {
+        referenced_invoice: Some("SZ-1"),
+        ..Doc::new("SS-1", "SS")
+    };
+    assert_eq!(
+        storno_number_from_hint(QueryOutcome::Found(storno.boxed()), "SZ-1", &namespace)
+            .expect("data"),
+        Some("SS-1".to_owned())
+    );
+    for not_its_storno in [
+        // The reversed invoice itself is the newest document under the order.
+        QueryOutcome::Found(Doc::default().boxed()),
+        // Another invoice's storno.
+        QueryOutcome::Found(
+            Doc {
+                referenced_invoice: Some("SZ-9"),
+                ..Doc::new("SS-9", "SS")
+            }
+            .boxed(),
+        ),
+        QueryOutcome::NotFound,
+        QueryOutcome::Api {
+            code: "57".to_owned(),
+            message: "Hibás számlaszám.".to_owned(),
+        },
+    ] {
+        assert_eq!(
+            storno_number_from_hint(not_its_storno.clone(), "SZ-1", &namespace).expect("data"),
+            None,
+            "{not_its_storno:?}"
+        );
+    }
+    rejected_body(TerminalError::from(
+        storno_number_from_hint(rejected(), "SZ-1", &namespace).expect_err("a fault"),
+    ));
+
+    assert_eq!(
+        storno_number_from_lookup(
+            StornoLookupOutcome::AlreadyReversed {
+                storno_number: "SS-1".to_owned(),
+            },
+            &namespace,
+        )
+        .expect("data"),
+        Some("SS-1".to_owned())
+    );
+    for unknown in [
+        StornoLookupOutcome::Absent,
+        StornoLookupOutcome::Api {
+            code: "57".to_owned(),
+            message: "Hibás számlaszám.".to_owned(),
+        },
+    ] {
+        assert_eq!(
+            storno_number_from_lookup(unknown.clone(), &namespace).expect("data"),
+            None,
+            "{unknown:?}"
+        );
+    }
+    let QueryOutcome::CredentialsRejected { code, message } = rejected() else {
+        unreachable!()
+    };
+    rejected_body(TerminalError::from(
+        storno_number_from_lookup(
+            StornoLookupOutcome::CredentialsRejected { code, message },
+            &namespace,
+        )
+        .expect_err("a fault"),
+    ));
 }
 
 /// The Virtual Object key must arrive trimmed (design §3): Restate's per-key

@@ -149,9 +149,15 @@ impl Default for BodyLimit {
 ///   `router(key, …)` that is a header not equal to `key`. Retries stop.
 /// - **`503`** — the resolver could not check the key ([`Err`]): the record
 ///   stays retryable instead of being dropped.
-/// - **`400`** — an authenticated push whose body fails the full parse
-///   (element namespaces, typed structure, embedded PDF). szamlazz.hu
-///   retries, surfacing the misconfiguration in its logs.
+/// - **`400`** — an authenticated push whose body is not the pushed document
+///   at all: an element outside the document's namespace, XML the typed
+///   parse cannot read (truncated, an `alap/id` missing, a date that is not a
+///   date). Never a document that merely omits what the XSD requires, carries
+///   an unknown `irany` or a PDF that does not decode — [`Document::parse`]
+///   reads those leniently and the push is Acked, because szamlazz.hu retries
+///   a `400` identically for 72 hours and then drops the record. A receiver
+///   that wants the XSD's verdict calls [`Document::validate`] from its
+///   handler.
 /// - **`500`** — the handler failed; szamlazz.hu retries for up to 72 hours.
 ///
 /// Retry-keeping: `401`, `413`, `400`, `503`, `500`. Final: `200`, with or
@@ -365,6 +371,9 @@ where
     };
 
     // Authenticated: the per-element namespace pass and the typed parse.
+    // Shape only — a body that is not the pushed document. Content is read
+    // leniently: a 400 here is retried identically for 72 hours and then
+    // dropped, so it must not be the answer to a missing element.
     let document = match Document::parse_identified(&body, root) {
         Ok(document) => document,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),

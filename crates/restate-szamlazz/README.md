@@ -174,11 +174,13 @@ activation details.
 - `contract::CreateRequest` / `CreateResponse`: input and output of the four `create_*` handlers. The request
   carries the `DocumentInput` (buyer, line items, dates, payment method, per-call overrides) and `CreateOptions`
   (`reissue`, `proforma: auto | none | {number}`); the response carries the `Outcome`, the identity (`kind`,
-  `external_id`), the numbers and totals, and `warnings`. `CorrectRequest` (`invoice_number`, `correction_id`,
+  `external_id`), the numbers and totals, and `warnings`. `customer_account_url` is set only on the execution that
+  actually issued (a fresh `issued`), never on `already_issued`, `reconciled` or `get`. `CorrectRequest` (`invoice_number`, `correction_id`,
   `document`) is the input of `correct_invoice` and shares the response. Every request type — and every object it
   nests — is closed (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the schema): a field the
   contract does not know is refused as `invalid_input` naming the field, never silently dropped. Response types stay
-  open.
+  open. One example body per outcome, with the `conflict_reason` table, is in the
+  [endpoint README](../restate-szamlazz-endpoint/README.md#response-reference).
 - `service::Body<T>`: how every handler takes its input — a `Json<T>` whose decode runs in the handler, so a
   malformed body is the structured `invalid_input` fault instead of the SDK's plain-text 400. Same discovery
   schema as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
@@ -189,7 +191,8 @@ activation details.
   invoice, prepayment invoice or final invoice), `live`, `foreign` (a live invoice under the order number that is
   under none of the order's external ids — another channel's), `duplicate_order_number`,
   `external_id_collision`, `proforma_live`, `proforma_missing`, `prepayment_missing`, `prepayment_reversed`,
-  `base_reversed`, `not_managed`.
+  `base_reversed`, `not_managed`. Both carry `ALL` and `as_str` (the snake-case token) — what the endpoint README's
+  response reference is held to. Both are `#[non_exhaustive]`: a client branches with a default arm.
 - `contract::TerminalCode`: the eight fault codes a `TerminalError` carries, each with its HTTP status
   (`TerminalCode::status`; `TerminalCode::ALL` lists them in the order of the fault table below) — `invalid_input`
   (400), `unknown_account` (400: the request names no account of this deployment), `not_found` (404: the document the
@@ -216,8 +219,11 @@ activation details.
   `QueryResponse`, `SetPaymentsRequest` / `SetPaymentsResponse`: the remaining handler contracts.
 - `contract::OrderStatus` / `DocumentStatus`: the live view `get` returns — one optional `DocumentStatus` per
   kind (`number`, `state`, `gross`, `net`, `payments`, `referenced_proforma`, `e_invoice`) with
-  `DocumentState` flattened as `{state: live}`, `{state: reversed, storno_number?}` or, for a consumed
-  proforma, `{state: consumed, by}`.
+  `DocumentState` flattened as `{state: live}`, `{state: reversed, storno_number}` or, for a consumed
+  proforma, `{state: consumed, by}`. `get` never fills `storno_number` (finding the storno would take the
+  order-number hint, which shows only the newest document) — the create and storno handlers report it; a `null` slot
+  is *nothing of ours* under that external id, which may still be a foreign holder (a create there answers
+  `conflict{external_id_collision}`); correctives are not in the view.
 - `CorrectionId`: the caller-supplied identity of one corrective invoice,
   `^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$` and not one of the external-id tokens (`ExternalId::TOKENS`, in any letter
   case); embedded in the corrective's external id.
@@ -265,9 +271,9 @@ activation details.
   validates it, and `Accounts::from` bundles it as resolver and store.
 - `gateway::Gateway`: the module that speaks to szamlazz.hu on behalf of one account, over
   `szamlazz_agent::Client` — one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
-  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `probe`), each returning every expected szamlazz.hu
+  `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `query_taxpayer`, `probe`), each returning every expected szamlazz.hu
   outcome as data. Two `Err`s say what a run retry policy may re-execute: the read fns (`lookup`, `verify`, `query`,
-  `hint`, `lookup_storno`, `probe`) return `Err(Unanswered)` when szamlazz.hu did not answer — a transport or parse
+  `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return `Err(Unanswered)` when szamlazz.hu did not answer — a transport or parse
   failure, `szlahu_down` — and `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known
   (an answer to their leading query — another code, `szlahu_down` — is data: nothing was sent).
   It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
@@ -338,11 +344,15 @@ worker; callers authenticate to Restate ingress separately.
 
 ## Caller Contract
 
+The [endpoint README](../restate-szamlazz-endpoint/README.md#services) is the canonical caller reference — every
+request and response body with one example per outcome, the `conflict_reason` table, the fault envelope, guidance for
+calling from a webhook handler and what to store per order, held to the contract types by its `tests/readme.rs`. The rules, for an embedder:
+
 1. Send an **`Idempotency-Key`** per logical request. Restate dedupes retries and attaches concurrent duplicates
    to the in-flight invocation.
 2. Tell a **fault** from **no answer** before deciding what to do with the key.
-   - **A fault** is a 5xx **with a body the worker wrote** and `x-restate-error-source: invocation`: the invocation
-     completed, and Restate stores that completion under the key for the retention period, so the same key would
+   - **A fault** is a 4xx/5xx **with a body the worker wrote** and `x-restate-error-source: invocation`: the invocation
+     completed, and Restate stores that completion under the key for the retention period (30 days on the write handlers), so the same key would
      replay the failure. An **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or
      storno handler means "outcome unknown — retry with a **new** key, or read `Szamlazz.Order.get`", never "no
      document exists"; the retry with a new key reconciles by external id and is safe.
@@ -351,7 +361,7 @@ worker; callers authenticate to Restate ingress separately.
      re-dispatches it for up to ~24 min on `Szamlazz.Order` (five attempts, 2 m → 10 m). **Keep the key** and retry
      with it — the retry attaches to the in-flight invocation and receives its outcome — or read `get`; a new key
      here would start a second invocation that queues behind the first.
-   - **A killed invocation** (attempts exhausted) is a fault whose body is the last retryable error's **text**, not
+   - **A killed invocation** (attempts exhausted) is a fault whose envelope `message` is the last retryable error's **text**, not
      the worker's `{code, message}` JSON: treat an unparsable 5xx `invocation` body as `outcome_unknown`.
    - **The other faults are settled** — nothing landed: `invalid_input`, `unknown_account`, `not_found` and
      `account_mismatch` are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an
@@ -365,8 +375,10 @@ worker; callers authenticate to Restate ingress separately.
    on some step: the deployment is misconfigured, not the request. The request that drew the code was not acted on,
    but the code may have come to a re-query after a send, and an earlier execution may have landed with a lost
    reply, so rule 2 applies — once the key is fixed, retry with a
-   new key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
-   appears in neither the log nor the fault.
+   new key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code, inside the
+   execution's span — `execution{scope, order, restate.invocation.id, account.id}`, which every handler execution
+   runs in — so the line says whose key broke and under which invocation (`restate.invocation.id` is the
+   `x-restate-id` the caller got); the key itself appears in neither the log nor the fault.
 5. An `unknown_account` fault (400) means the request named no account of this deployment — unscoped where
    accounts are scoped, or a scope no account is reachable by. Nothing was issued and the same request never
    succeeds: fix the scope, do not retry.
@@ -375,8 +387,11 @@ worker; callers authenticate to Restate ingress separately.
    storno response is meaningful only under the same scope; `external_id` is the only namespace marker in any
    response, and no response names the account.
 
-Faults are `TerminalError`s with a JSON body `{ "code", "message", "szamlazz_code"?, "order"?, "kind"?,
-"external_id"? }`; the ingress reports them with the HTTP status below and `x-restate-error-source: invocation`. `code`
+Faults are `TerminalError`s whose message is the JSON `{ "code", "message", "szamlazz_code"?, "order"?, "kind"?,
+"external_id"? }`. **On the wire that JSON is a string inside Restate's ingress envelope** — the body is
+`{"code": <HTTP status>, "message": "<the fault JSON>", "source": "invocation"}` under `x-restate-error-source:
+invocation`, so a caller parses `message` a second time; the envelope's own `code` is the status below, never the token
+(the Rust SDK carries a terminal error as code plus message and offers no other channel). The fault's `code`
 is always one of the eight tokens of `contract::TerminalCode` — a szamlazz.hu code never travels in it, but in
 `szamlazz_code` beside it, present on every fault a szamlazz.hu answer caused: the `szamlazz_error` pass-through,
 `credentials_rejected`, and `unavailable` on a code a read cannot conclude from. A malformed body is the same shape:
@@ -452,7 +467,11 @@ external id (`lookup-storno-{number}`) and a storno step (`storno-{number}`) und
 on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`. The storno request is a
 pure function of the verified original — its `telj` as `teljesitesDatum`, its `eszamla` (or the account default) as
 the e-invoice flag — so every execution of the step sends byte-identical bytes; a verified original without a `telj`
-is `unavailable` with nothing sent, raised after the answers that need no send.
+is `unavailable` with nothing sent, raised after the answers that need no send. A document the verify already sees
+reversed is `reversed` with a **best-effort** storno number — `Szamlazz.Order.storno_invoice` from the order-number
+hint, `Szamlazz.Agent.storno` from the by-number storno lookup (ours when we issued the storno, unknown after a
+reversal from the UI): an exhausted read reports the reversal without the number after a `warn`, while a
+cancellation of the invocation is never swallowed.
 
 ## Testing
 
@@ -502,7 +521,10 @@ is `unavailable` with nothing sent, raised after the answers that need no send.
   `telj`-less document of another order → `conflict{not_managed}`, a `telj`-less proforma → `rejected{not_stornoable}`
   and a `telj`-less reversed invoice → `reversed` with its storno number — a storno whose first reply is lost
   re-executed with a byte-identical body under one `storno-{number}` entry, `reissue` on live → `conflict{live}`, an
-  external reversal, proforma auto-link and `consumed` in `get`, `options.proforma: {number}` checked like every
+  external reversal, proforma auto-link and `consumed` in `get`, `options.proforma` on `create_prepayment` exactly as
+  on `create_invoice` (`none` beside a live proforma → `conflict{proforma_live}` after the `proforma-link` read with
+  nothing sent; `auto` → `issued` with `dijbekeroSzamlaszam` before `elolegszamla` on the wire; `create_final` and
+  `create_proforma` refusing the option 400 `invalid_input` before any call), `options.proforma: {number}` checked like every
   found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
   the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
   order's → `issued` with `dijbekeroSzamlaszam` on the wire), `correct_invoice` issuing a corrective under its
@@ -547,7 +569,9 @@ is `unavailable` with nothing sent, raised after the answers that need no send.
   one of its handler's paths, that every handler seen is pinned and that every path was walked in full — a renamed,
   inserted, reordered or dropped step strands every in-flight invocation on replay (ADR 0005) and fails here
   instead. The harness calls through
-  `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses fault bodies and reads
+  `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses fault bodies out of the
+  ingress envelope — asserting on every fault that the body is `{code: <status>, message, source: "invocation"}` under
+  `x-restate-error-source: invocation` and that the worker's fault is the JSON in `message` — and reads
   `sys_journal` / `sys_invocation` through the SQL introspection API.
 - The same command runs the **protocol-v7 canary** (`e2e_check_account_without_protocol_v7`), on a server of its
   own with `protocol_v7` off: the ingress accepts the scoped path and keys the invocation by the scope, but the SDK

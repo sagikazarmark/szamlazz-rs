@@ -15,6 +15,14 @@
 //! are for a *definite* verdict, and anything uncertain is a non-200 that
 //! keeps the retry window alive. Express them via the ack constructors.
 //!
+//! A push is at-most-N-times delivery, and a non-200 szamlazz.hu retries
+//! identically for 72 hours loses the record. So [`Document::parse`] refuses
+//! only what the receiver cannot Ack — shape, never content: an element the
+//! XSD requires but the push omits is `None`, an unknown enumeration token is
+//! kept, a PDF that does not decode is `None` beside the raw XML. The XSD's
+//! verdict is a signal a receiver can ask for ([`Document::validate`]) or
+//! make a gate of ([`Document::parse_strict`]).
+//!
 //! The core is framework-free and `wasm32`-clean: [`Document::parse`] takes
 //! raw body bytes, ack types render response bodies. Implement [`Handler`]
 //! for your business logic; with the `axum` feature, `axum::router` wires
@@ -77,7 +85,7 @@ pub use document::{
     ReceiptDocument, ReceiptInfo, ReceiptItem, ReceiptItemLedger, ReceiptPayment, RecordedPayment,
     Totals, TransactionDirection, TransactionPartner, VatRate, VatTotal,
 };
-pub use error::{AckError, ParseError, XmlError};
+pub use error::{AckError, ParseError, ValidationError, XmlError};
 pub use fanout::{Fanout, FanoutError, HandlerFailure};
 pub use handler::{Handler, MaybeSend, MaybeSync};
 
