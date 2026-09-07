@@ -163,6 +163,16 @@ fn build_endpoint(config: EndpointConfig) -> Result<Endpoint> {
             supplier_id = ?account.supplier_id,
             "szamlazz.hu account"
         );
+        // Allowed — a mock or a proxy is a legitimate target — but the agent
+        // key travels in the request body, so say so (#65).
+        if account.endpoint.is_cleartext() {
+            tracing::warn!(
+                scope = scope.unwrap_or("<unscoped>"),
+                account = %account.id,
+                endpoint = %account.endpoint,
+                "the endpoint is plain http on a host other than loopback: the agent key is sent in cleartext"
+            );
+        }
     }
 
     let accounts = Accounts::from(resolver);

@@ -17,7 +17,9 @@ use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
-use super::support::service::{lookup_storno, run_once, run_reading, storno_step};
+use super::support::service::{
+    lookup_storno, run_once, run_reading, storno_number_of_unmanaged, storno_step,
+};
 use super::support::{Fault, StornoIntent, check_pins, storno_response, verified_document};
 use crate::account::Account;
 use crate::config::Namespace;
@@ -265,7 +267,10 @@ impl Execution {
     /// against the resolved account, then — for a document carrying no order
     /// number — the lookup and storno steps of design §6 under the by-number
     /// storno external id. A document carrying an order number is answered
-    /// as `managed_by_order` after the check, never before it.
+    /// as `managed_by_order` after the check, never before it; one already
+    /// reversed is `reversed` with the storno number the by-number storno
+    /// lookup names, best effort (ours when we issued the storno, unknown
+    /// otherwise).
     pub(super) async fn storno_request(
         &self,
         ctx: &Context<'_>,
@@ -305,7 +310,14 @@ impl Execution {
             );
         }
         if found.info.reversed == Some(true) {
-            return Ok(StornoResponse::new(StornoOutcome::Reversed, number));
+            // Idempotent: already reversed by anyone. The storno number is
+            // best effort — ours when a storno of ours holds the by-number
+            // storno id, unknown otherwise (J25); a cancelled invocation
+            // propagates as such.
+            let storno_number = storno_number_of_unmanaged(ctx, self, &number).await?;
+            let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
+            response.storno_number = storno_number;
+            return Ok(response);
         }
         // The intent is a pure function of the verified document: a `telj`
         // it does not carry is a fault after every answer that needs no send

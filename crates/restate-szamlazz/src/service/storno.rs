@@ -122,10 +122,10 @@ impl Execution {
         }
         check_pins(gateway.account(), &found)?;
         if found.info.reversed == Some(true) {
-            // Idempotent: already reversed by anyone.
-            let storno_number = object::storno_number_of(ctx, self, order, number)
-                .await
-                .map_err(about)?;
+            // Idempotent: already reversed by anyone. The storno number is
+            // best effort; a cancelled invocation propagates as such.
+            let storno_number =
+                object::storno_number_of(ctx, self, order, number, storno_id).await?;
             let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
             response.storno_number = storno_number;
             return Ok(ControlFlow::Break(response));

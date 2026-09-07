@@ -234,6 +234,41 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
     ))
 }
 
+/// The status the SDK ends a run with when the invocation was cancelled
+/// (`restate-sdk` 0.12, `endpoint/context.rs`: `TerminalFailure { code: 409,
+/// message: "cancelled" }`). A closure's own error never reaches a run's
+/// `TerminalError` with this code — `run_retrying` turns it into a retryable
+/// failure and exhaustion is 500 — so on a run's error the code alone tells a
+/// cancellation from an exhausted policy.
+const CANCELLED: u16 = 409;
+
+/// What a **best-effort** read makes of a run that ended without an answer —
+/// the storno-number hint after a verify found the document already reversed,
+/// and `Szamlazz.Agent.storno`'s storno lookup in the same situation: reads
+/// whose handler already knows its answer (`reversed`) and only lacks the
+/// storno number. An exhausted read policy is swallowed — logged at `warn`
+/// naming the step and the last failure — and the number is reported as
+/// unknown, rather than failing a handler whose answer is known. A
+/// cancellation is never swallowed: the invocation was told to stop, and a
+/// cancelled invocation must not complete as `reversed` as if nothing had
+/// happened (J13, #65); it is propagated as it came, so the SDK reports the
+/// cancellation.
+///
+/// # Errors
+///
+/// The cancellation, unchanged.
+pub(super) fn best_effort(step: &str, error: TerminalError) -> Result<(), TerminalError> {
+    if error.code() == CANCELLED {
+        return Err(error);
+    }
+    tracing::warn!(
+        step,
+        last_failure = %error.message(),
+        "the storno number could not be read; reporting the reversal without it"
+    );
+    Ok(())
+}
+
 /// Parses the Virtual Object key as an [`OrderKey`].
 ///
 /// The key must arrive trimmed (design §3). Restate's per-key lock is on the
@@ -413,6 +448,55 @@ pub(super) fn storno_response(
     })
 }
 
+/// The storno number a **best-effort** order-number hint names for a document
+/// of the order the verify already saw reversed: the hint when it is the `SS`
+/// referencing `number`, unknown when it is any other document (something
+/// newer was issued under the order), nothing (code 7) or another code
+/// (nothing may be concluded from it, and the handler's answer — `reversed` —
+/// is known). Rejected credentials stay the fault they are on every step.
+///
+/// # Errors
+///
+/// `credentials_rejected`; the caller attaches the storno's identity.
+pub(super) fn storno_number_from_hint(
+    outcome: QueryOutcome,
+    number: &str,
+    namespace: &Namespace,
+) -> Result<Option<String>, Fault> {
+    match outcome {
+        QueryOutcome::Found(found) if found.is_storno_of(number) => {
+            Ok(Some(found.number().to_owned()))
+        }
+        QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api { .. } => Ok(None),
+        QueryOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+    }
+}
+
+/// The storno number a **best-effort** storno lookup names for a document the
+/// verify already saw reversed: the `SS` under the storno external id when the
+/// storno was ours, unknown when nothing is under the id (a reversal from the
+/// UI leaves nothing there) or another code answered (nothing may be concluded
+/// from it, and the handler's answer — `reversed` — is known). Rejected
+/// credentials stay the fault they are on every step.
+///
+/// # Errors
+///
+/// `credentials_rejected`.
+pub(super) fn storno_number_from_lookup(
+    outcome: StornoLookupOutcome,
+    namespace: &Namespace,
+) -> Result<Option<String>, Fault> {
+    match outcome {
+        StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(Some(storno_number)),
+        StornoLookupOutcome::Absent | StornoLookupOutcome::Api { .. } => Ok(None),
+        StornoLookupOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+    }
+}
+
 /// What a query by one of our external ids found (design §3).
 ///
 /// Every caller matches all three variants: an issuing handler refuses a
@@ -480,10 +564,6 @@ macro_rules! journal_helpers {
             use std::future::Future;
             use std::sync::Arc;
 
-            use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
-            use restate_sdk::errors::{HandlerError, TerminalError};
-            use restate_sdk::prelude::$ctx;
-            use restate_sdk::serde::Json;
             use super::{Fault, Journaled, Lookup, StornoIntent};
             use crate::account::Accounts;
             use crate::config::WorkerConfig;
@@ -494,9 +574,43 @@ macro_rules! journal_helpers {
             };
             use crate::identity::{ExternalId, OrderKey};
             use crate::service::prologue::{self as decisions, Execution};
+            use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
+            use restate_sdk::errors::{HandlerError, TerminalError};
+            use restate_sdk::prelude::$ctx;
+            use restate_sdk::serde::Json;
+            use tracing::Instrument as _;
+
+            /// Runs one handler execution: the prologue, then `body` on the
+            /// execution it built, the whole inside the execution span
+            /// (`prologue::execution_span`) — so every log line from the
+            /// prologue's first step to the handler's answer carries the
+            /// scope, the key, the invocation id and, once resolved, the
+            /// account id. `key` is the Virtual Object key on the object
+            /// contexts, `None` on the stateless service. The body takes the
+            /// execution by value: nothing of it outlives the call.
+            pub(in crate::service) async fn execute<T, F, Fut>(
+                ctx: &$ctx<'_>,
+                key: Option<&str>,
+                accounts: &Accounts,
+                config: &WorkerConfig,
+                body: F,
+            ) -> Result<T, HandlerError>
+            where
+                F: FnOnce(Execution) -> Fut + Send,
+                Fut: Future<Output = Result<T, HandlerError>> + Send,
+            {
+                let span = decisions::execution_span(ctx.scope(), key, ctx.invocation_id());
+                async move {
+                    let execution = prologue(ctx, accounts, config).await?;
+                    body(execution).await
+                }
+                .instrument(span)
+                .await
+            }
 
             /// The prologue of every handler (design §4): pin → resolve →
-            /// fetch → open.
+            /// fetch → open. Runs inside the execution span [`execute`]
+            /// opened, on which it records the account id once resolved.
             ///
             /// 1. **Pin** the namespace in a pure durable step (`namespace`):
             ///    a redeploy with a changed namespace cannot make a running
@@ -510,7 +624,7 @@ macro_rules! journal_helpers {
             ///    on every execution, including replays — with a short
             ///    in-process retry, then terminal `unavailable`.
             /// 4. **Open** the gateway for this execution over a fresh client.
-            pub(in crate::service) async fn prologue(
+            async fn prologue(
                 ctx: &$ctx<'_>,
                 accounts: &Accounts,
                 config: &WorkerConfig,
@@ -544,6 +658,7 @@ macro_rules! journal_helpers {
                     .map_err(|error| decisions::resolve_exhausted(&error))?
                 };
                 let account = decisions::account_of(resolution)?;
+                decisions::record_account(&account);
 
                 // 3. Fetch, outside the journal.
                 let credentials = decisions::fetch_credentials(accounts, &account).await?;
@@ -637,6 +752,36 @@ macro_rules! journal_helpers {
                     .map_err(|error| super::read_exhausted(&name, &error))
             }
 
+            /// A **best-effort** read under the read policy — [`run_reading`]
+            /// for a step whose handler already knows its answer and only
+            /// lacks a detail: the answer of `f` as `Some`, or `None` when the
+            /// read policy is exhausted (logged at `warn` naming the step;
+            /// [`super::best_effort`]).
+            ///
+            /// # Errors
+            ///
+            /// A cancellation of the invocation, as it came: never swallowed,
+            /// so a cancelled invocation does not complete as if nothing had
+            /// happened (J13, #65).
+            pub(in crate::service) async fn run_best_effort<'ctx, T, F, Fut>(
+                ctx: &$ctx<'ctx>,
+                name: impl Into<String>,
+                exec: &Execution,
+                f: F,
+            ) -> Result<Option<T>, TerminalError>
+            where
+                F: FnOnce() -> Fut + Send + 'ctx,
+                Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
+                T: Journaled + Send + 'static,
+            {
+                let name = name.into();
+                match run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f).await
+                {
+                    Ok(value) => Ok(Some(value)),
+                    Err(error) => super::best_effort(&name, error).map(|()| None),
+                }
+            }
+
             /// Journaled query of document `number` (a verify), under the read
             /// policy.
             pub(in crate::service) async fn verify(
@@ -694,21 +839,6 @@ macro_rules! journal_helpers {
                     account.supplier_id,
                 )
                 .map_err(about)
-            }
-
-            /// Journaled order-number hint, under the read policy.
-            pub(in crate::service) async fn hint(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                name: impl Into<String>,
-                order: &OrderKey,
-            ) -> Result<QueryOutcome, Fault> {
-                let gateway = Arc::clone(&exec.gateway);
-                let order = order.clone();
-                run_reading(ctx, name, exec, move || async move {
-                    gateway.hint(&order).await
-                })
-                .await
             }
 
             /// The storno lookup step (design §6 step 2): one read-only
@@ -774,44 +904,64 @@ macro_rules! journal_helpers {
                 .await
             }
 
-            /// The storno number of a reversed document, when the order-number
-            /// hint is the `SS` referencing it. Best effort: a hint that is
-            /// not that `SS` — or that the read policy could not get answered
-            /// — is `None`, since the handler's answer (`reversed`) is already
-            /// known; only rejected credentials are a fault.
+            /// The storno number of a reversed document of `order`, when the
+            /// order-number hint is the `SS` referencing it (step
+            /// `hint-storno-{number}`, a best-effort read under the read
+            /// policy — [`run_best_effort`]). Rejected credentials are a fault
+            /// about the storno (`storno_id`); everything else the hint can
+            /// answer is data ([`super::storno_number_from_hint`]).
             pub(in crate::service) async fn storno_number_of(
                 ctx: &$ctx<'_>,
                 exec: &Execution,
                 order: &OrderKey,
                 number: &str,
-            ) -> Result<Option<String>, Fault> {
-                let outcome = match hint(ctx, exec, format!("hint-storno-{number}"), order).await
-                {
-                    Ok(outcome) => outcome,
-                    Err(fault) => {
-                        tracing::warn!(
-                            number,
-                            fault = %fault.message,
-                            "the storno number could not be read; reporting the reversal without it"
-                        );
-                        return Ok(None);
-                    }
+                storno_id: &ExternalId,
+            ) -> Result<Option<String>, HandlerError> {
+                let gateway = Arc::clone(&exec.gateway);
+                let hinted = order.clone();
+                let Some(outcome) = run_best_effort(
+                    ctx,
+                    format!("hint-storno-{number}"),
+                    exec,
+                    move || async move { gateway.hint(&hinted).await },
+                )
+                .await?
+                else {
+                    return Ok(None);
                 };
-                Ok(match outcome {
-                    QueryOutcome::Found(found) if found.is_storno_of(number) => {
-                        Some(found.number().to_owned())
-                    }
-                    QueryOutcome::CredentialsRejected { code, message } => {
-                        return Err(Fault::credentials_rejected(
-                            &exec.config.namespace,
-                            code,
-                            message,
-                        ));
-                    }
-                    QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api { .. } => {
-                        None
-                    }
-                })
+                super::storno_number_from_hint(outcome, number, &exec.config.namespace)
+                    .map_err(|fault| fault.about(order, None, storno_id.as_str()).into())
+            }
+
+            /// The storno number of a reversed document no `Order` manages,
+            /// when a storno of ours holds `{namespace}:by-number:{number}:storno`
+            /// (step `lookup-storno-{number}` — the same entry the storno
+            /// protocol's lookup step writes, which this path never reaches —
+            /// a best-effort read under the read policy, [`run_best_effort`]).
+            /// The only read that can name an unmanaged document's storno: it
+            /// carries no order number for the hint (J25, #65). Rejected
+            /// credentials are a fault; everything else is data
+            /// ([`super::storno_number_from_lookup`]).
+            pub(in crate::service) async fn storno_number_of_unmanaged(
+                ctx: &$ctx<'_>,
+                exec: &Execution,
+                number: &str,
+            ) -> Result<Option<String>, HandlerError> {
+                let gateway = Arc::clone(&exec.gateway);
+                let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
+                let looked_up = number.to_owned();
+                let Some(outcome) = run_best_effort(
+                    ctx,
+                    format!("lookup-storno-{number}"),
+                    exec,
+                    move || async move { gateway.lookup_storno(&external_id, &looked_up).await },
+                )
+                .await?
+                else {
+                    return Ok(None);
+                };
+                super::storno_number_from_lookup(outcome, &exec.config.namespace)
+                    .map_err(Into::into)
             }
         }
     };

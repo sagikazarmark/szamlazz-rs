@@ -365,8 +365,10 @@ worker; callers authenticate to Restate ingress separately.
    on some step: the deployment is misconfigured, not the request. The request that drew the code was not acted on,
    but the code may have come to a re-query after a send, and an earlier execution may have landed with a lost
    reply, so rule 2 applies — once the key is fixed, retry with a
-   new key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
-   appears in neither the log nor the fault.
+   new key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code, inside the
+   execution's span — `execution{scope, order, restate.invocation.id, account.id}`, which every handler execution
+   runs in — so the line says whose key broke and under which invocation (`restate.invocation.id` is the
+   `x-restate-id` the caller got); the key itself appears in neither the log nor the fault.
 5. An `unknown_account` fault (400) means the request named no account of this deployment — unscoped where
    accounts are scoped, or a scope no account is reachable by. Nothing was issued and the same request never
    succeeds: fix the scope, do not retry.
@@ -452,7 +454,11 @@ external id (`lookup-storno-{number}`) and a storno step (`storno-{number}`) und
 on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`. The storno request is a
 pure function of the verified original — its `telj` as `teljesitesDatum`, its `eszamla` (or the account default) as
 the e-invoice flag — so every execution of the step sends byte-identical bytes; a verified original without a `telj`
-is `unavailable` with nothing sent, raised after the answers that need no send.
+is `unavailable` with nothing sent, raised after the answers that need no send. A document the verify already sees
+reversed is `reversed` with a **best-effort** storno number — `Szamlazz.Order.storno_invoice` from the order-number
+hint, `Szamlazz.Agent.storno` from the by-number storno lookup (ours when we issued the storno, unknown after a
+reversal from the UI): an exhausted read reports the reversal without the number after a `warn`, while a
+cancellation of the invocation is never swallowed.
 
 ## Testing
 
