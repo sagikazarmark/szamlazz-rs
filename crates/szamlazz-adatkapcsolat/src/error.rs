@@ -48,14 +48,43 @@ pub enum ParseError {
         /// Namespace found on the root element, if any.
         actual: String,
     },
-    /// The XML was well formed but omitted required protocol structure.
+    /// The document parsed but does not conform to its XSD — an element the
+    /// schema requires is missing, an enumeration carries an unknown value,
+    /// a VAT rate is negative. Raised only by [`Document::parse_strict`];
+    /// [`Document::parse`] reads such a document leniently.
+    ///
+    /// [`Document::parse`]: crate::Document::parse
+    /// [`Document::parse_strict`]: crate::Document::parse_strict
     #[error("invalid document structure: {0}")]
-    Validation(String),
+    Validation(#[from] ValidationError),
 }
 
 impl From<quick_xml::DeError> for ParseError {
     fn from(error: quick_xml::DeError) -> Self {
         Self::Xml(XmlError(Box::new(error)))
+    }
+}
+
+/// A parsed document that does not conform to its XSD: the first requirement
+/// it misses, as [`Document::validate`] reports it.
+///
+/// The parse does not need what the schema requires; this is the signal for a
+/// receiver that does. Its message names the element by its wire path
+/// (`missing required invoice alap/kelt`).
+///
+/// [`Document::validate`]: crate::Document::validate
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+#[non_exhaustive]
+pub struct ValidationError {
+    message: String,
+}
+
+impl ValidationError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
     }
 }
 
