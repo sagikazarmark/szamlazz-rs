@@ -116,6 +116,18 @@ impl Order {
 /// same accounts as [`Order`], the taxpayer lookup and the `check_account`
 /// probe. No handler compares what it finds with the account (ADR 0006,
 /// account-pin amendment).
+///
+/// **Unkeyed.** A stateless service's invocations run concurrently, so two
+/// by-number writes on one invoice — `set_payments`, `storno` — are not
+/// serialised by the worker as [`Order`]'s handlers are by its per-key lock.
+/// Two replacing `set_payments` (`additive: false`) race and the last send to
+/// land wins, which under reordered webhook deliveries may be the older
+/// snapshot; two `storno`s both send, and szamlazz.hu's idempotent storno
+/// answers the repeat with the existing storno number (verified for a
+/// sequential repeat; two sends in the same instant are unverified). A keyed
+/// `Szamlazz.Document` object per invoice number was judged over-engineering
+/// for two writes whose only hazard is a replace: the caller serialises per
+/// invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
 #[derive(Debug, Clone)]
 pub struct Agent {
     accounts: Accounts,

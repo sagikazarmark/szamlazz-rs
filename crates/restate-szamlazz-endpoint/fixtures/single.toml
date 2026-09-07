@@ -8,7 +8,7 @@ factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # the hard bound on re-executing the step
 
-[read]                        # optional; the read policy: the run retry policy of every read-only step (lookups, verifies, hints, get, query, check_account)
+[read]                        # optional; the read policy: the run retry policy of every read-only step (lookups, verifies, hints, get, query, query_taxpayer, check_account)
 max_attempts = 5              # executions of the step, including the first
 initial_delay = "5s"          # before the first re-execution
 factor = 2.0
