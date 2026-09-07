@@ -4000,6 +4000,8 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
     assert_eq!(fault.code, "unavailable", "{fault:?}");
     assert!(fault.message.contains("credentials"), "{fault:?}");
     assert!(!fault.message.contains("scripted"), "{fault:?}");
+    // No response names the account, nor the store's reference (#65).
+    assert!(!fault.message.contains("acct"), "{fault:?}");
     assert!(
         elapsed < Duration::from_secs(30),
         "terminal, not routed into the handler's retries: {elapsed:?}"
@@ -5049,7 +5051,10 @@ async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harn
     assert_eq!(reply.body["order_key"], "E2E-34", "{}", reply.body);
     assert_eq!(h.requests_seen().await, 1);
 
-    // Before the fault: a reversed document is `reversed`.
+    // Before the fault: a reversed document is `reversed`, with the storno
+    // number the by-number storno lookup names — nothing under the id (a
+    // reversal from the UI) leaves it unknown; the verify and the lookup are
+    // the only requests, nothing is sent (J25, #65).
     h.reset().await;
     number_query("SZ-35")
         .respond_with(
@@ -5061,15 +5066,63 @@ async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harn
         )
         .mount(&h.mock)
         .await;
+    external_id_query("acct:by-number:SZ-35:storno")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
     storno_never_sent(&h.mock).await;
     let reply = h
         .call_agent_scoped("acme", "storno", &storno_of("SZ-35"))
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
-    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+    assert_eq!(reply.body["storno_number"], Value::Null, "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-SZ-35",
+            "lookup-storno-SZ-35"
+        ]
+    );
+    assert_eq!(h.requests_seen().await, 2, "the verify and the lookup");
+
+    // Reversed by a storno of ours (a lost reply, a retry with a new key):
+    // the lookup names it.
+    h.reset().await;
+    number_query("SZ-36")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..without_telj("SZ-36")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:by-number:SZ-36:storno")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-36"),
+                ..Doc::unmanaged("SS-36", "SS")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-36"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-36", "{}", reply.body);
+    assert_eq!(h.requests_seen().await, 2, "the verify and the lookup");
     eprintln!(
-        "(xviii-e) Szamlazz.Agent.storno: teljesitesDatum on the wire; telj-less → unavailable without an order identity, after account_mismatch / managed_by_order / reversed: pass"
+        "(xviii-e) Szamlazz.Agent.storno: teljesitesDatum on the wire; telj-less → unavailable without an order identity, after account_mismatch / managed_by_order / reversed (storno number from the by-number lookup): pass"
     );
 }
 

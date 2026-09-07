@@ -32,6 +32,8 @@
 //!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
 //!   probe, registered as `Szamlazz.Agent`.
 
+use std::future::Future;
+
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 
@@ -84,17 +86,29 @@ impl Order {
         &self.config
     }
 
-    /// The prologue of an exclusive handler: pin → resolve → fetch → open.
-    async fn prologue(&self, ctx: &ObjectContext<'_>) -> Result<Execution, HandlerError> {
-        support::object::prologue(ctx, &self.accounts, &self.config).await
+    /// Runs an exclusive handler's execution: the prologue (pin → resolve →
+    /// fetch → open), then `body` on the execution it built, inside the
+    /// execution span carrying the scope, the key, the invocation id and the
+    /// account id.
+    async fn execute<T, F, Fut>(&self, ctx: &ObjectContext<'_>, body: F) -> Result<T, HandlerError>
+    where
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        support::object::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
     }
 
-    /// The prologue of a shared handler (`get`).
-    async fn prologue_shared(
+    /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
+    async fn execute_shared<T, F, Fut>(
         &self,
         ctx: &SharedObjectContext<'_>,
-    ) -> Result<Execution, HandlerError> {
-        support::shared::prologue(ctx, &self.accounts, &self.config).await
+        body: F,
+    ) -> Result<T, HandlerError>
+    where
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        support::shared::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
     }
 }
 
@@ -128,9 +142,15 @@ impl Agent {
         &self.config
     }
 
-    /// The prologue of every handler: pin → resolve → fetch → open.
-    async fn prologue(&self, ctx: &Context<'_>) -> Result<Execution, HandlerError> {
-        support::service::prologue(ctx, &self.accounts, &self.config).await
+    /// Runs a handler's execution: the prologue (pin → resolve → fetch →
+    /// open), then `body` on the execution it built, inside the execution
+    /// span carrying the scope, the invocation id and the account id.
+    async fn execute<T, F, Fut>(&self, ctx: &Context<'_>, body: F) -> Result<T, HandlerError>
+    where
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        support::service::execute(ctx, None, &self.accounts, &self.config, body).await
     }
 }
 
