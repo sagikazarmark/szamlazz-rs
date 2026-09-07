@@ -12,6 +12,14 @@ files must not be copied, symlinked, or otherwise included in published Cargo
 packages. The source tables below document only this workspace-local corpus;
 they do not describe package fixtures.
 
+The corpus is read by tests, never embedded in them: `crates/szamlazz-agent/tests/upstream`
+and `crates/szamlazz-adatkapcsolat/tests/upstream` are workspace-only symlinks into
+`fixtures/upstream/agent/` and `fixtures/upstream/adatkapcsolat/`, excluded from the
+package (`exclude = ["tests/upstream"]` in each `Cargo.toml`). The tests behind them
+(`tests/upstream.rs`, `tests/document.rs`) open the files at run time with `std::fs` —
+never `include_bytes!`, which would copy them into the package — and skip with a
+message when the directory is absent, as it is in a package built from crates.io.
+
 ## Packaged synthetic fixtures
 
 Files under `fixtures/synthetic/` are project-maintained synthetic test data

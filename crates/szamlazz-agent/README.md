@@ -9,23 +9,18 @@ The core performs no I/O: request types serialize into a ready-to-send `WireRequ
 
 ## Quick Start
 
-Enable `client-reqwest` to use the ready-made async client:
+Enable `client-reqwest` to use the ready-made async client. The happy path of an integration: issue an invoice under an order number and an external id, find it again by that id, and fetch its PDF.
 
 ```rust
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
+use szamlazz_agent::ops::query_pdf::{InvoiceSelector, QueryInvoicePdf};
+use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::{
     Client, Credentials, Currency, Date, Language, LineItem, PaymentMethod, Rounding, VatRate,
 };
 
 async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new(Credentials::agent_key("your-agent-key"))?;
-    let header = InvoiceHeader::new(
-        "2026-07-04".parse::<Date>()?,
-        "2026-07-12".parse::<Date>()?,
-        PaymentMethod::Transfer,
-        Currency::HUF,
-        Language::Hungarian,
-    );
     let item = LineItem::try_calculated(
         "Development",
         1.into(),
@@ -35,6 +30,18 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
         Rounding::minor_unit(&Currency::HUF),
     )?;
     // Constructors take the required fields; set the rest with functional update.
+    // The order number and the external id are how the document is found later:
+    // szamlazz.hu answers a query by either, so keep both with the order.
+    let header = InvoiceHeader {
+        order_number: Some("ORD-1".to_owned()),
+        ..InvoiceHeader::new(
+            "2026-07-04".parse::<Date>()?,
+            "2026-07-12".parse::<Date>()?,
+            PaymentMethod::Transfer,
+            Currency::HUF,
+            Language::Hungarian,
+        )
+    };
     let request = CreateInvoice {
         external_id: Some("shop:ORD-1:invoice".to_owned()),
         ..CreateInvoice::new(
@@ -47,9 +54,75 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 
     let created = client.send(&request).await?;
     println!("issued: {:?}", created.invoice_number);
+
+    // Query by the external id: the newest document carrying it, in full.
+    let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId("shop:ORD-1:invoice".to_owned()));
+    let document = client.send(&query).await?;
+    assert_eq!(document.info.order_number.as_deref(), Some("ORD-1"));
+    println!("gross total: {}", document.totals.total.gross);
+
+    // Fetch the PDF — by invoice number here; the order number or the external id work too.
+    let fetch = QueryInvoicePdf::new(InvoiceSelector::InvoiceNumber(document.info.invoice_number));
+    let fetched = client.send(&fetch).await?;
+    fetched.pdf.save_to("ORD-1.pdf")?; // or `fetched.pdf.as_bytes()` for the raw bytes
     Ok(())
 }
 ```
+
+## When the Call Fails
+
+Every failure is a `ClientError` variant, and each says something different about the document you asked for. Invoice creation has no idempotency key, so before re-sending a create ask `outcome_class()` whether a document may already exist — and when it may, query by the external id first:
+
+```rust
+use szamlazz_agent::ops::invoice::CreateInvoice;
+use szamlazz_agent::ops::query_pdf::InvoiceSelector;
+use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
+use szamlazz_agent::{Client, ClientError, InvoiceNumber, OutcomeClass};
+
+/// The issued invoice's number — `None` only for a PDF preview, which issues nothing.
+async fn issue_once(
+    client: &Client,
+    request: &CreateInvoice,
+) -> Result<Option<InvoiceNumber>, ClientError> {
+    let error = match client.send(request).await {
+        Ok(created) => return Ok(created.invoice_number),
+        Err(error) => error,
+    };
+
+    match &error {
+        // Refused by this crate before anything was sent: fix the request.
+        ClientError::Request(refusal) => eprintln!("invalid request: {refusal}"),
+        // szamlazz.hu answered with an error code and its Hungarian message.
+        ClientError::Api(api) => eprintln!("szamlazz.hu error {}: {}", api.code, api.message),
+        // No answer to conclude from: the request may have been acted on.
+        ClientError::Transport(cause) => eprintln!("transport: {cause}"),
+        ClientError::ServiceUnavailable(message) => eprintln!("szlahu_down: {message}"),
+        ClientError::Parse(cause) => eprintln!("unreadable response: {cause}"),
+        _ => eprintln!("{error}"),
+    }
+
+    match error.outcome_class() {
+        // Nothing was issued: the request, the account or the order number is the problem.
+        OutcomeClass::Rejected | OutcomeClass::NotFound | OutcomeClass::DuplicateOrderNumber => {
+            Err(error)
+        }
+        // `Unknown` (and any class a later version adds): a document may exist.
+        // Look for it before re-sending; re-send only when it is not there.
+        _ => {
+            let Some(external_id) = &request.external_id else {
+                return Err(error);
+            };
+            let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId(external_id.clone()));
+            match client.send(&query).await {
+                Ok(document) => Ok(Some(document.info.invoice_number)),
+                Err(_) => Err(error), // still open: keep the external id, query again later
+            }
+        }
+    }
+}
+```
+
+`ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number — query by `InvoiceSelector::OrderNumber` to find it.
 
 ## Bring Your Own HTTP Client
 

@@ -66,8 +66,9 @@ mod xml;
 #[cfg(feature = "client-reqwest")]
 pub use client::{Client, ClientError};
 
-/// The README's examples, compiled as doctests: the quick start needs
-/// `client-reqwest`, the sans-IO round trip only the `ureq` dev-dependency.
+/// The README's examples, compiled as doctests: the quick start (issue, query
+/// by external id, fetch the PDF) and the failure branch need `client-reqwest`,
+/// the sans-IO round trip only the `ureq` dev-dependency.
 #[cfg(all(doctest, feature = "client-reqwest"))]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
