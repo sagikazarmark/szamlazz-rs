@@ -8,6 +8,8 @@
 //! request contradicts what szamlazz.hu holds. [`ConflictReason`] is shared
 //! with the storno handlers (see [`storno`](super::storno)).
 
+use std::fmt;
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +138,38 @@ pub enum Outcome {
     Conflict,
 }
 
+impl Outcome {
+    /// Every outcome, in the order the endpoint README shows one example of
+    /// each (`issued` in its quick start, the rest in the response reference).
+    pub const ALL: [Self; 6] = [
+        Self::Issued,
+        Self::AlreadyIssued,
+        Self::Reconciled,
+        Self::Reversed,
+        Self::Rejected,
+        Self::Conflict,
+    ];
+
+    /// The snake-case token carried in `outcome`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Issued => "issued",
+            Self::AlreadyIssued => "already_issued",
+            Self::Reconciled => "reconciled",
+            Self::Reversed => "reversed",
+            Self::Rejected => "rejected",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Why a create, correct or storno request was answered with `outcome:
 /// conflict`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -183,6 +217,50 @@ pub enum ConflictReason {
     NotManaged,
 }
 
+impl ConflictReason {
+    /// Every reason, in the order of the endpoint README's `conflict_reason`
+    /// table.
+    pub const ALL: [Self; 12] = [
+        Self::Live,
+        Self::PrepaidChain,
+        Self::OrderInvoiced,
+        Self::ProformaLive,
+        Self::ProformaMissing,
+        Self::NotManaged,
+        Self::PrepaymentMissing,
+        Self::PrepaymentReversed,
+        Self::BaseReversed,
+        Self::Foreign,
+        Self::DuplicateOrderNumber,
+        Self::ExternalIdCollision,
+    ];
+
+    /// The snake-case token carried in `conflict_reason`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PrepaidChain => "prepaid_chain",
+            Self::OrderInvoiced => "order_invoiced",
+            Self::Live => "live",
+            Self::Foreign => "foreign",
+            Self::DuplicateOrderNumber => "duplicate_order_number",
+            Self::ExternalIdCollision => "external_id_collision",
+            Self::ProformaLive => "proforma_live",
+            Self::ProformaMissing => "proforma_missing",
+            Self::PrepaymentMissing => "prepayment_missing",
+            Self::PrepaymentReversed => "prepayment_reversed",
+            Self::BaseReversed => "base_reversed",
+            Self::NotManaged => "not_managed",
+        }
+    }
+}
+
+impl fmt::Display for ConflictReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Informational flags attached to a successful response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -224,7 +302,10 @@ pub struct CreateResponse {
     /// Outstanding amount (`kintlévőség`).
     #[serde(default)]
     pub outstanding: Option<Decimal>,
-    /// Buyer-facing account URL (`vevői fiók URL`).
+    /// Buyer-facing account URL (`vevői fiók URL`). szamlazz.hu returns it
+    /// only in the response to the create that issued the document, so it is
+    /// present on a fresh `issued` and absent on `already_issued`,
+    /// `reconciled` and `get`: persist it on first sight.
     #[serde(default)]
     pub customer_account_url: Option<String>,
     /// The number of the document a conflict is about (the live document on
@@ -556,6 +637,9 @@ mod tests {
         assert_eq!(response.invoice_number, None);
     }
 
+    /// Every reason is in `ALL`, and its `as_str` token is the snake-case
+    /// serde token — what a caller branches on and what the endpoint README's
+    /// `conflict_reason` table is held to.
     #[test]
     fn every_conflict_reason_is_snake_case() {
         let reasons = [
@@ -575,9 +659,38 @@ mod tests {
             (ConflictReason::BaseReversed, "base_reversed"),
             (ConflictReason::NotManaged, "not_managed"),
         ];
+        assert_eq!(ConflictReason::ALL.len(), reasons.len());
         for (reason, token) in reasons {
+            assert!(ConflictReason::ALL.contains(&reason), "{token} is in ALL");
+            assert_eq!(reason.as_str(), token);
             assert_eq!(
                 serde_json::to_value(reason).expect("serialize"),
+                json!(token)
+            );
+            assert_eq!(
+                serde_json::from_value::<ConflictReason>(json!(token)).expect("deserialize"),
+                reason
+            );
+        }
+    }
+
+    /// Every outcome is in `ALL` with its snake-case token, the same way.
+    #[test]
+    fn every_outcome_is_snake_case() {
+        let outcomes = [
+            (Outcome::Issued, "issued"),
+            (Outcome::AlreadyIssued, "already_issued"),
+            (Outcome::Reconciled, "reconciled"),
+            (Outcome::Reversed, "reversed"),
+            (Outcome::Rejected, "rejected"),
+            (Outcome::Conflict, "conflict"),
+        ];
+        assert_eq!(Outcome::ALL.len(), outcomes.len());
+        for (outcome, token) in outcomes {
+            assert!(Outcome::ALL.contains(&outcome), "{token} is in ALL");
+            assert_eq!(outcome.as_str(), token);
+            assert_eq!(
+                serde_json::to_value(outcome).expect("serialize"),
                 json!(token)
             );
         }

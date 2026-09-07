@@ -5,13 +5,20 @@
 //! the [`Gateway`](crate::gateway::Gateway) and domain outcomes are returned as
 //! data. Neither keeps state — szamlazz.hu is the source of truth, reached
 //! through the order's deterministic external ids. `TerminalError`s carry a
-//! [`TerminalCode`](crate::contract::TerminalCode) and always mean "outcome
-//! unknown — retry with a new `Idempotency-Key`".
+//! [`TerminalCode`](crate::contract::TerminalCode): three of the codes mean
+//! "outcome unknown — retry with a new `Idempotency-Key`, or read `get`"
+//! (`outcome_unknown`, `unavailable`, `credentials_rejected`), the rest are
+//! settled — the same request never succeeds, or szamlazz.hu's own answer is
+//! passed through. On the wire a fault is the JSON string inside Restate's
+//! ingress envelope (`{"code": <HTTP status>, "message": "<fault JSON>",
+//! "source": "invocation"}`): the fault → `TerminalError` conversion in
+//! `support` hands the SDK the status and the fault JSON as the message, and
+//! the ingress wraps them in its envelope.
 //!
 //! Each service holds exactly two things: the [`Accounts`] bundle — the
 //! account resolver and the credential store — and a [`WorkerConfig`] with the
-//! deployment-level settings (the namespace of the external ids, the issue
-//! and resolve policies). Every handler runs the same prologue after parsing
+//! deployment-level settings (the namespace of the external ids; the issue,
+//! read and resolve policies). Every handler runs the same prologue after parsing
 //! its key: **pin** the namespace in a pure durable step, **resolve** the
 //! request's scope to its account in a durable step named `account` under the
 //! resolve policy, **fetch** the account's credentials outside the journal on

@@ -13,7 +13,8 @@
 //! domain outcomes are returned as data.
 //!
 //! - [`contract`] — the request/response types.
-//! - [`config`] — the deployment-level configuration (namespace, issue and resolve policies).
+//! - [`config`] — the deployment-level configuration (the namespace; the issue, read and resolve
+//!   policies).
 //! - [`account`] — the account model, the account resolver and credential store traits, and
 //!   the static resolver over deployment configuration.
 //! - [`identity`] — order keys and external ids.

@@ -527,13 +527,15 @@ impl Drop for Restate {
     }
 }
 
-/// An ingress reply: the status, the parsed body and the invocation id the
-/// ingress reports in `x-restate-id`.
+/// An ingress reply: the status, the parsed body, the invocation id the
+/// ingress reports in `x-restate-id` and the `x-restate-error-source` header
+/// of an error reply.
 #[derive(Debug)]
 struct Reply {
     status: u16,
     body: Value,
     invocation_id: Option<String>,
+    error_source: Option<String>,
 }
 
 impl Reply {
@@ -543,9 +545,30 @@ impl Reply {
             .unwrap_or_else(|| panic!("no x-restate-id on the reply: {}", self.body))
     }
 
-    /// The structured fault inside the ingress error envelope: the handler's
-    /// `TerminalError` message is the fault JSON.
+    /// The structured fault inside the ingress error envelope, asserting the
+    /// envelope the endpoint README documents (*Faults*): the body is
+    /// Restate's `{"code": <HTTP status>, "message": "<string>", "source":
+    /// "invocation"}`, `x-restate-error-source` is `invocation`, and the
+    /// worker's fault is the JSON **string** in `message` — the handler's
+    /// `TerminalError` message — parsed a second time.
     fn fault(&self) -> Fault {
+        assert_eq!(
+            self.body["code"].as_u64(),
+            Some(u64::from(self.status)),
+            "the envelope's code is the HTTP status: {}",
+            self.body
+        );
+        assert_eq!(
+            self.body["source"], "invocation",
+            "a fault is the invocation's terminal error: {}",
+            self.body
+        );
+        assert_eq!(
+            self.error_source.as_deref(),
+            Some("invocation"),
+            "x-restate-error-source marks the fault as the worker's: {}",
+            self.body
+        );
         let message = self.body["message"]
             .as_str()
             .unwrap_or_else(|| panic!("an error envelope with a message: {}", self.body));
@@ -1214,17 +1237,22 @@ impl Harness {
         }
         let response = request.send().await.expect("ingress call");
         let status = response.status().as_u16();
-        let invocation_id = response
-            .headers()
-            .get("x-restate-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let invocation_id = header("x-restate-id");
+        let error_source = header("x-restate-error-source");
         let text = response.text().await.expect("body");
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
         Reply {
             status,
             body,
             invocation_id,
+            error_source,
         }
     }
 

@@ -579,19 +579,30 @@ pub(crate) mod tests {
         );
     }
 
+    /// The wire tokens the endpoint README's request reference lists.
     #[test]
     fn payment_method_wire_shapes() {
-        assert_eq!(
-            serde_json::to_value(PaymentMethod::CashOnDelivery).expect("serialize"),
-            json!("cash_on_delivery")
-        );
+        for (method, token) in [
+            (PaymentMethod::Transfer, "transfer"),
+            (PaymentMethod::Cash, "cash"),
+            (PaymentMethod::Card, "card"),
+            (PaymentMethod::Check, "check"),
+            (PaymentMethod::CashOnDelivery, "cash_on_delivery"),
+            (PaymentMethod::PayPal, "pay_pal"),
+            (PaymentMethod::SzepCard, "szep_card"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&method).expect("serialize"),
+                json!(token)
+            );
+            assert_eq!(
+                serde_json::from_value::<PaymentMethod>(json!(token)).expect("deserialize"),
+                method
+            );
+        }
         assert_eq!(
             serde_json::to_value(PaymentMethod::Other("Bitcoin".to_owned())).expect("serialize"),
             json!({"other": "Bitcoin"})
-        );
-        assert_eq!(
-            serde_json::from_value::<PaymentMethod>(json!("szep_card")).expect("deserialize"),
-            PaymentMethod::SzepCard
         );
     }
 

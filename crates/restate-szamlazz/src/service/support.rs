@@ -51,6 +51,13 @@ impl Journaled for TaxpayerOutcome {}
 /// what the fault is about, and the identity of the document it is about.
 /// `code` is always a `TerminalCode` token; a szamlazz.hu code never travels
 /// in it.
+///
+/// What the caller receives is Restate's ingress envelope with this JSON as
+/// the **string** in its `message`: `{"code": <HTTP status>, "message":
+/// "<fault JSON>", "source": "invocation"}` (server 1.7.8), under
+/// `x-restate-error-source: invocation`. The SDK offers no other channel for
+/// a structured terminal error, so the envelope is documented in the endpoint
+/// README (*Faults*) and asserted by the e2e harness (`Reply::fault`).
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct Fault {
     code: TerminalCode,
