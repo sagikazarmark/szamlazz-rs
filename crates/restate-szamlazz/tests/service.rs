@@ -31,12 +31,16 @@
 //! the protocol-v7 canary on a server of its own without the flag.
 //!
 //! The harness calls through the `/restate/call/…` and
-//! `/restate/scope/{scope}/call/…` ingress paths, reports the invocation id
-//! (`x-restate-id`) and parses fault bodies, and reads `sys_journal` /
-//! `sys_invocation` through the SQL introspection API — `raw` hex-decoded to
-//! bytes, since run results are stored as bytes. What szamlazz.hu holds is
-//! stated per document ([`Harness::holds`] and its siblings), so one `<szamla>`
-//! body answers every selector the document is reachable by (design §11).
+//! `/restate/scope/{scope}/call/…` ingress paths (and `/restate/send/…` for a
+//! call it does not wait for), reports the invocation id (`x-restate-id`) and
+//! parses fault bodies, reads `sys_journal` / `sys_invocation` through the
+//! SQL introspection API — `raw` hex-decoded to bytes, since run results are
+//! stored as bytes — and purges or kills invocations through the admin API.
+//! What szamlazz.hu holds is stated per document ([`Harness::holds`] and its
+//! siblings), so one `<szamla>` body answers every selector the document is
+//! reachable by (design §11); every mock's `expect(n)` is verified at the
+//! next scenario's [`Harness::reset`] (the last scenario's when the harness
+//! is dropped).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -121,6 +125,10 @@ struct Doc<'a> {
     /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
     /// invoice and `3` for one created with `eszamla=true` (P73).
     eszamla: Option<i32>,
+    /// The registered credit entries (`kifizetesek`), by amount; empty
+    /// renders no element. What makes a proforma *paid* for
+    /// `delete_proforma`.
+    payments: &'a [&'a str],
 }
 
 impl<'a> Doc<'a> {
@@ -147,6 +155,7 @@ impl<'a> Doc<'a> {
             external_id: None,
             fulfillment_date: Some(ORIGINAL_TELJ),
             eszamla: None,
+            payments: &[],
         }
     }
 
@@ -158,6 +167,20 @@ impl<'a> Doc<'a> {
             .eszamla
             .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
         let telj = self.fulfillment_date.map(|date| date.to_string());
+        let payments = if self.payments.is_empty() {
+            String::new()
+        } else {
+            let mut entries = String::from("<kifizetesek>");
+            for amount in self.payments {
+                entries.push_str(
+                    "<kifizetes><datum>2026-09-03</datum><jogcim>transfer</jogcim><osszeg>",
+                );
+                entries.push_str(amount);
+                entries.push_str("</osszeg></kifizetes>");
+            }
+            entries.push_str("</kifizetesek>");
+            entries
+        };
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
@@ -166,6 +189,7 @@ impl<'a> Doc<'a> {
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
+  {payments}
 </szamla>"#,
             supplier_id = self.supplier_id,
             number = self.number,
@@ -219,6 +243,53 @@ fn api_error(code: &str, message: &str) -> ResponseTemplate {
         )
 }
 
+/// szamlazz.hu's 152 on a create: the order number already exists on another
+/// document, naming the order and never the existing document's number.
+fn duplicate_order_number(order: &str) -> ResponseTemplate {
+    api_error(
+        "152",
+        &format!(
+            "Már létező rendelésszám: {order}. Az ismétlődés engedélyezhető a Beállítások oldalon."
+        ),
+    )
+}
+
+/// The credit-entry operation's success: the invoice's totals after the
+/// update, with `outstanding` (`kintlevoseg`) distinct from `gross` so that
+/// the response's field mapping is observable.
+fn credited(number: &str, gross: &str, outstanding: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("szlahu_szamlaszam", number)
+        .insert_header("szlahu_bruttovegosszeg", gross)
+        .insert_header("szlahu_kintlevoseg", outstanding)
+        .set_body_raw(
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>{number}</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>{gross}</szamlabrutto><kintlevoseg>{outstanding}</kintlevoseg></xmlszamlavalasz>"#
+            ),
+            "application/xml",
+        )
+}
+
+/// The proforma deletion's success (`xmlszamladbkdelvalasz`).
+fn proforma_deleted() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(
+        r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>true</sikeres></xmlszamladbkdelvalasz>"#,
+        "application/xml",
+    )
+}
+
+/// The proforma deletion's code 335 — no such proforma: deleted already, in
+/// headers and body as szamlazz.hu reports it.
+fn proforma_gone() -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("szlahu_error_code", "335")
+        .insert_header("szlahu_error", "Nincs+ilyen+d%C3%ADjbek%C3%A9r%C5%91")
+        .set_body_raw(
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>false</sikeres><hibakod>335</hibakod><hibauzenet>Nincs ilyen díjbekérő</hibauzenet></xmlszamladbkdelvalasz>"#,
+            "application/xml",
+        )
+}
+
 fn op(action: &str) -> MockBuilder {
     Mock::given(method("POST")).and(body_string_contains(format!("name=\"{action}\"")))
 }
@@ -265,6 +336,18 @@ fn create_with_bank_account(bank_account: &str) -> MockBuilder {
 
 fn storno() -> MockBuilder {
     op("action-szamla_agent_st")
+}
+
+/// The credit-entry operation (`set_payments`).
+fn credit() -> MockBuilder {
+    op("action-szamla_agent_kifiz")
+}
+
+/// The proforma deletion (`delete_proforma`) of `number`.
+fn delete_of(number: &str) -> MockBuilder {
+    op("action-szamla_agent_dijbekero_torlese").and(body_string_contains(format!(
+        "<szamlaszam>{number}</szamlaszam>"
+    )))
 }
 
 /// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: the storno
@@ -1187,14 +1270,18 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
 }
 
 /// The static resolver and store behind a script: the resolver fails the
-/// next N resolutions with `unavailable`, and the store can be taken down.
-/// What the prologue's e2e drives — a resolver that fails then succeeds, a
-/// store that always fails — on the one deployment the harness registers.
+/// next N resolutions with `unavailable` or hangs the next N forever, and the
+/// store can be taken down. What the prologue's e2e drives — a resolver that
+/// fails then succeeds, one that never answers, a store that always fails —
+/// on the one deployment the harness registers.
 #[derive(Debug)]
 struct ScriptedAccounts {
     inner: StaticResolver,
     /// Resolutions left to fail with `unavailable`.
     resolver_failures: AtomicU32,
+    /// Resolutions left to hang — a future that never completes, so the
+    /// invocation is stuck in its `account` step until it is killed.
+    resolver_hangs: AtomicU32,
     /// How many times the resolver was asked.
     resolutions: AtomicU32,
     /// Whether every fetch fails with `unavailable`.
@@ -1208,6 +1295,7 @@ impl ScriptedAccounts {
         Self {
             inner,
             resolver_failures: AtomicU32::new(0),
+            resolver_hangs: AtomicU32::new(0),
             resolutions: AtomicU32::new(0),
             store_down: AtomicBool::new(false),
             fetches: AtomicU32::new(0),
@@ -1216,6 +1304,10 @@ impl ScriptedAccounts {
 
     fn fail_next_resolutions(&self, count: u32) {
         self.resolver_failures.store(count, Ordering::SeqCst);
+    }
+
+    fn hang_next_resolutions(&self, count: u32) {
+        self.resolver_hangs.store(count, Ordering::SeqCst);
     }
 
     fn set_store_down(&self, down: bool) {
@@ -1238,6 +1330,11 @@ impl AccountResolver for ScriptedAccounts {
     ) -> BoxFuture<'a, Result<Account, ResolveError>> {
         Box::pin(async move {
             self.resolutions.fetch_add(1, Ordering::SeqCst);
+            let hanging = self.resolver_hangs.load(Ordering::SeqCst);
+            if hanging > 0 {
+                self.resolver_hangs.store(hanging - 1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
             let outstanding = self.resolver_failures.load(Ordering::SeqCst);
             if outstanding > 0 {
                 self.resolver_failures
@@ -1772,6 +1869,73 @@ impl Harness {
         reply.body
     }
 
+    /// Submits `Szamlazz.Order.{handler}` on `key` without waiting for it
+    /// (`/restate/send/…`): the invocation id of the accepted invocation.
+    /// ("Send" alone is a szamlazz.hu request in this file.)
+    async fn submit(&self, key: &str, handler: &str, body: &Value) -> String {
+        let reply = self
+            .invoke(
+                &format!("/restate/send/Szamlazz.Order/{key}/{handler}"),
+                Some(body),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, 202, "send {handler} on {key}: {}", reply.body);
+        reply.invocation_id().to_owned()
+    }
+
+    /// Kills an invocation (`PATCH /invocations/{id}/kill`): what an operator
+    /// does to one that will not finish, and what `on_max_attempts = kill`
+    /// does after the handler's attempts are spent.
+    async fn kill(&self, invocation_id: &str) {
+        self.patch_invocation(invocation_id, "kill").await;
+    }
+
+    /// `PATCH /invocations/{id}/{action}` on the admin API, asserting success.
+    async fn patch_invocation(&self, invocation_id: &str, action: &str) {
+        let response = self
+            .http
+            .patch(format!(
+                "{}/invocations/{invocation_id}/{action}",
+                self.restate.admin
+            ))
+            .send()
+            .await
+            .expect(action);
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        assert!(
+            (200..300).contains(&status),
+            "{action} of {invocation_id} failed ({status}): {body}"
+        );
+    }
+
+    /// Waits until `sys_invocation` reports the invocation in one of
+    /// `statuses`; the status it reached.
+    async fn await_status(&self, invocation_id: &str, statuses: &[&str]) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let rows = self
+                .sql(&format!(
+                    "SELECT status FROM sys_invocation WHERE id = '{invocation_id}'"
+                ))
+                .await;
+            let status = rows
+                .first()
+                .and_then(|row| row["status"].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            if statuses.contains(&status.as_str()) {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invocation {invocation_id} is {status:?}, not one of {statuses:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Runs a SQL query against the introspection API (`POST :9070/query`).
     async fn sql(&self, query: &str) -> Vec<Value> {
         let response = self
@@ -1891,21 +2055,7 @@ impl Harness {
     /// Purges a completed invocation (`PATCH /invocations/{id}/purge`), so a
     /// later call runs against an order Restate has no memory of.
     async fn purge(&self, invocation_id: &str) {
-        let response = self
-            .http
-            .patch(format!(
-                "{}/invocations/{invocation_id}/purge",
-                self.restate.admin
-            ))
-            .send()
-            .await
-            .expect("purge");
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        assert!(
-            (200..300).contains(&status),
-            "purge of {invocation_id} failed ({status}): {body}"
-        );
+        self.patch_invocation(invocation_id, "purge").await;
         // The purge is asynchronous; wait for the row to go.
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -1925,7 +2075,14 @@ impl Harness {
         }
     }
 
+    /// Verifies the previous scenario's `expect(n)` counts — wiremock checks
+    /// them on `verify` and on drop, never on `reset` — then forgets every
+    /// mock and every recorded request. A mock that saw more or fewer
+    /// requests than it expected fails here, at the start of the next
+    /// scenario, naming the mock and the requests received; the last
+    /// scenario's mocks are checked when the harness is dropped.
     async fn reset(&self) {
+        self.mock.verify().await;
         self.mock.reset().await;
     }
 
@@ -1941,6 +2098,17 @@ impl Harness {
     /// The bodies of the storno requests szamlazz.hu has seen so far.
     async fn storno_bodies(&self) -> Vec<String> {
         self.bodies_of("action-szamla_agent_st").await
+    }
+
+    /// The bodies of the proforma deletions szamlazz.hu has seen so far.
+    async fn delete_bodies(&self) -> Vec<String> {
+        self.bodies_of("action-szamla_agent_dijbekero_torlese")
+            .await
+    }
+
+    /// The bodies of the credit-entry requests szamlazz.hu has seen so far.
+    async fn credit_bodies(&self) -> Vec<String> {
+        self.bodies_of("action-szamla_agent_kifiz").await
     }
 
     /// The bodies of the requests of `action` szamlazz.hu has seen so far.
@@ -2056,8 +2224,10 @@ async fn e2e_order_protocol() {
     issued_then_already_issued(&h).await;
     idempotency_key_replays_without_calling_szamlazz(&h).await;
     duplicate_order_number_reconciles(&h).await;
+    duplicate_order_number_with_nothing_of_ours_is_a_settled_conflict(&h).await;
     storno_then_stale_create_then_reissue(&h).await;
     storno_repeats_the_originals_fulfillment_date_or_refuses(&h).await;
+    storno_rejections_and_exhaustion_at_the_orders_handler(&h).await;
     reissue_on_live_is_a_conflict(&h).await;
     external_reversal_detected(&h).await;
     reversal_between_executions_is_reversed_not_reissued(&h).await;
@@ -2065,19 +2235,27 @@ async fn e2e_order_protocol() {
     proforma_auto_link_and_consumed(&h).await;
     proforma_by_number_is_checked_like_every_found_document(&h).await;
     corrective_is_issued_under_its_correction_id(&h).await;
+    correctives_verify_their_base_and_take_no_hint(&h).await;
+    a_duplicate_order_number_on_a_corrective_is_rejected(&h).await;
     proforma_is_deleted_by_the_orders_handler(&h).await;
+    delete_proforma_guards_paid_proformas_and_settles_every_answer(&h).await;
     status_shape(&h).await;
     secondary_lookup_collision_refuses_to_create(&h).await;
     prepayment_converts_the_proforma_like_the_invoice(&h).await;
     proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(&h).await;
     a_live_final_closes_the_order_to_the_other_creates(&h).await;
+    the_other_chains_live_document_refuses_the_create(&h).await;
+    the_invoices_proforma_link_is_settled_before_any_send(&h).await;
+    create_final_settles_its_prepayment_invoice_first(&h).await;
     a_malformed_body_is_a_structured_invalid_input(&h).await;
     an_untrimmed_order_key_is_refused(&h).await;
     bounded_inputs_are_refused_and_disturb_no_other_invocation(&h).await;
     exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
+    after_an_outcome_unknown_the_next_call_answers_already_issued(&h).await;
     flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     exhausted_lookup_read_is_a_structured_unavailable(&h).await;
     answered_code_on_the_create_leading_query_is_an_immediate_unavailable(&h).await;
+    an_answered_code_on_the_hint_is_inconclusive_and_the_create_proceeds(&h).await;
     flaky_get_read_is_retried_by_the_read_policy(&h).await;
     run_retries_do_not_spend_invocation_attempts(&h).await;
     harness_scoped_call_and_leak_positive_control(&h).await;
@@ -2085,6 +2263,7 @@ async fn e2e_order_protocol() {
     purged_invocation_queries_szamlazz_again(&h).await;
     flaky_resolver_is_retried_by_the_resolve_policy(&h).await;
     failing_credential_store_is_a_terminal_unavailable(&h).await;
+    a_killed_invocation_releases_the_order_key(&h).await;
 
     // Phase 2: the flag day, then the multi-account deployment by scope.
     flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
@@ -2095,11 +2274,13 @@ async fn e2e_order_protocol() {
     agent_storno_acts_on_what_the_verify_finds(&h).await;
     agent_query_projects_what_it_finds(&h).await;
     every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(&h).await;
+    set_payments_replaces_or_appends_and_answers_a_lost_reply(&h).await;
     agent_query_taxpayer_runs_on_the_scoped_account(&h).await;
     agent_storno_repeats_the_originals_fulfillment_date_or_refuses(&h).await;
     storno_is_issued_in_the_originals_form_not_the_accounts_default(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
+    the_order_keeps_no_state(&h).await;
     no_agent_key_in_any_journal_of_the_run(&h).await;
     every_handler_journals_its_pinned_run_names(&h).await;
 }
@@ -2287,7 +2468,8 @@ async fn idempotency_key_replays_without_calling_szamlazz(h: &Harness) {
         before,
         "a replayed completion reaches neither the query nor the create mock"
     );
-    // The create mock's `expect(1)` is verified when the server is reset.
+    // The create mock's `expect(1)` is verified by the next scenario's
+    // `reset`.
     eprintln!("(ii) same key → identical response, no szamlazz.hu call: pass");
 }
 
@@ -2328,6 +2510,112 @@ async fn duplicate_order_number_reconciles(h: &Harness) {
     assert_eq!(reconciled["outcome"], "reconciled", "{reconciled}");
     assert_eq!(reconciled["invoice_number"], "SZ-3");
     eprintln!("(iii) 152 + ext-id re-query → reconciled: pass");
+}
+
+/// (iii-b) a duplicate-order-number answer (152) whose external-id re-query
+/// finds nothing of ours is a **settled** `conflict{duplicate_order_number}`
+/// after one send (#41): szamlazz.hu refused the order number, so re-sending
+/// would only repeat the refusal — never `Unconfirmed`, so no run retry is
+/// spent on it. With nothing under the order at all (the contradiction, logged
+/// at `warn`) the conflict names no `existing_number`; with a live invoice
+/// another channel issued between our lookup step and our create — the very
+/// race the rule exists for; the hint missed, the naming query after the 152
+/// finds it — the conflict names it.
+async fn duplicate_order_number_with_nothing_of_ours_is_a_settled_conflict(h: &Harness) {
+    // Nothing under the order at all.
+    h.reset().await;
+    h.absent("E2E-3B", &["prepayment", "final", "proforma", "invoice"])
+        .await;
+    order_query("E2E-3B")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(duplicate_order_number("E2E-3B"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let watch = h.watch("E2E-3B");
+    let reply = h
+        .call(
+            "E2E-3B",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-3b-k1",
+        )
+        .await;
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let conflict = &reply.body;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(
+        conflict["conflict_reason"], "duplicate_order_number",
+        "{conflict}"
+    );
+    assert_eq!(conflict["existing_number"], Value::Null, "{conflict}");
+    assert_eq!(conflict["code"], "152", "{conflict}");
+    assert!(
+        conflict["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("E2E-3B")),
+        "{conflict}"
+    );
+    // Settled inside the one execution: no run failed.
+    assert!(retries.max_retry_count <= 1, "{retries:?}");
+    assert!(retries.failures.is_empty(), "{retries:?}");
+    assert_eq!(h.create_bodies().await.len(), 1, "one send, no re-send");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ]
+    );
+
+    // A live invoice of another channel, issued between the lookup and the
+    // create: the hint missed, the naming query finds it.
+    h.reset().await;
+    h.absent("E2E-3C", &["prepayment", "final", "proforma", "invoice"])
+        .await;
+    order_query("E2E-3C")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-3C")
+        .respond_with(Doc::new("SZ-3C-OTHER", "SZ", "E2E-3C").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(duplicate_order_number("E2E-3C"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let conflict = h
+        .ok(
+            "E2E-3C",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-3c-k1",
+        )
+        .await;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(
+        conflict["conflict_reason"], "duplicate_order_number",
+        "{conflict}"
+    );
+    assert_eq!(conflict["existing_number"], "SZ-3C-OTHER", "{conflict}");
+    assert_eq!(conflict["code"], "152");
+    assert_eq!(h.create_bodies().await.len(), 1, "one send");
+    eprintln!(
+        "(iii-b) 152 with nothing of ours → conflict{{duplicate_order_number}} settled after one send, existing_number null / the other channel's invoice: pass"
+    );
 }
 
 /// After the storno of `SZ-1` on `E2E-1`: the reversed document under our
@@ -2506,25 +2794,33 @@ async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harness) {
     assert_eq!(conflict["conflict_reason"], "not_managed", "{conflict}");
     assert_eq!(h.requests_seen().await, 1);
 
-    // Before the fault: a proforma is `rejected{not_stornoable}`.
-    h.reset().await;
-    number_query("D-4C")
-        .respond_with(
-            Doc {
-                fulfillment_date: None,
-                ..Doc::new("D-4C", "D", "E2E-4")
-            }
-            .response(),
-        )
-        .mount(&h.mock)
-        .await;
-    storno_never_sent(&h.mock).await;
-    let rejected = h
-        .ok("E2E-4", "storno_invoice", &storno_of("D-4C"), "e2e-4-s3")
-        .await;
-    assert_eq!(rejected["outcome"], "rejected", "{rejected}");
-    assert_eq!(rejected["code"], "not_stornoable", "{rejected}");
-    assert_eq!(h.requests_seen().await, 1);
+    // Before the fault: a proforma, and a delivery note, are
+    // `rejected{not_stornoable}`.
+    for (number, tipus) in [("D-4C", "D"), ("SL-4C", "SL")] {
+        h.reset().await;
+        number_query(number)
+            .respond_with(
+                Doc {
+                    fulfillment_date: None,
+                    ..Doc::new(number, tipus, "E2E-4")
+                }
+                .response(),
+            )
+            .mount(&h.mock)
+            .await;
+        storno_never_sent(&h.mock).await;
+        let rejected = h
+            .ok(
+                "E2E-4",
+                "storno_invoice",
+                &storno_of(number),
+                &format!("e2e-4-s3-{tipus}"),
+            )
+            .await;
+        assert_eq!(rejected["outcome"], "rejected", "{tipus}: {rejected}");
+        assert_eq!(rejected["code"], "not_stornoable", "{tipus}: {rejected}");
+        assert_eq!(h.requests_seen().await, 1, "{tipus}");
+    }
 
     // Before the fault: an already reversed invoice is `reversed`, with the
     // storno number from the hint.
@@ -2617,6 +2913,176 @@ async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harness) {
     );
     eprintln!(
         "(iv-b) telj-less original → unavailable about the storno with nothing sent, after not_managed / not_stornoable / reversed; lost storno reply → byte-identical re-execution: pass"
+    );
+}
+
+/// (iv-c) the storno step's answers at the order's handler (design §6 steps
+/// 3–4): szamlazz.hu's typed refusals — 14 (a storno of a storno) and 221
+/// (the invoice has a corrective) — are `rejected{code, message}`, settled
+/// after one send that carries the caller's comment; every execution's send
+/// losing its reply exhausts the issue policy into the structured
+/// `outcome_unknown` naming the storno's identity, with the `storno-{number}`
+/// run as the retried command and one send per execution; and the next call
+/// — a new `Idempotency-Key` — is answered by the storno lookup (design §6
+/// step 2) when the `SS` is under the storno external id while the verify
+/// still reports the original live — szamlazz.hu's query surface behind the
+/// storno that landed — `reversed` with the storno number and nothing sent,
+/// through `verify-storno-{number}` and `lookup-storno-{number}` alone. (A
+/// verify that already reports `sztornozott` answers before the lookup, from
+/// the hint — (iv-b).)
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two typed refusals, the exhaustion, then the reconciling call"
+)]
+async fn storno_rejections_and_exhaustion_at_the_orders_handler(h: &Harness) {
+    let with_comment = |number: &str| json!({ "invoice_number": number, "comment": "wrong buyer" });
+
+    // 14 and 221: szamlazz.hu's typed refusals, settled after one send.
+    for (code, message) in [
+        ("14", "Sztornó számla nem sztornózható."),
+        (
+            "221",
+            "Ez a számla nem sztornózható (van helyesbítő számlája).",
+        ),
+    ] {
+        h.reset().await;
+        h.holds(&Doc::new("SZ-44", "SZ", "E2E-44")).await;
+        external_id_query("acct:E2E-44:storno:SZ-44")
+            .respond_with(not_found())
+            .mount(&h.mock)
+            .await;
+        storno_repeating_telj()
+            .and(body_string_contains("<megjegyzes>wrong buyer</megjegyzes>"))
+            .respond_with(api_error(code, message))
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call(
+                "E2E-44",
+                "storno_invoice",
+                &with_comment("SZ-44"),
+                &format!("e2e-44-s{code}"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{code}: {}", reply.body);
+        let rejected = &reply.body;
+        assert_eq!(rejected["outcome"], "rejected", "{code}: {rejected}");
+        assert_eq!(rejected["code"], code, "{code}: {rejected}");
+        assert_eq!(rejected["message"], message, "{code}: {rejected}");
+        assert_eq!(rejected["invoice_number"], "SZ-44", "{code}");
+        assert_eq!(rejected["storno_number"], Value::Null, "{code}");
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            [
+                "namespace",
+                "account",
+                "verify-storno-SZ-44",
+                "lookup-storno-SZ-44",
+                "storno-SZ-44",
+            ],
+            "{code}"
+        );
+        assert_eq!(h.storno_bodies().await.len(), 1, "{code}: one send");
+    }
+
+    // Exhaustion: every execution's send loses its reply and the re-query
+    // still misses.
+    h.reset().await;
+    h.holds(&Doc::new("SZ-45", "SZ", "E2E-45")).await;
+    external_id_query("acct:E2E-45:storno:SZ-45")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno_repeating_telj()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(2)
+        .mount(&h.mock)
+        .await;
+    let started = Instant::now();
+    let watch = h.watch("E2E-45");
+    let reply = h
+        .call("E2E-45", "storno_invoice", &storno_of("SZ-45"), "e2e-45-s1")
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    assert!(
+        elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
+        "the issue policy's delay (1 s) was honoured, not the handler's: {elapsed:?}"
+    );
+    let fault = reply.fault();
+    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert!(fault.message.contains("storno step"), "{fault:?}");
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+    assert_eq!(fault.order.as_deref(), Some("E2E-45"), "{fault:?}");
+    assert_eq!(fault.kind.as_deref(), Some("invoice"), "{fault:?}");
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-45:storno:SZ-45"),
+        "{fault:?}"
+    );
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["storno-SZ-45"],
+        "the storno step is what retried: {retries:?}"
+    );
+    assert_eq!(
+        h.storno_bodies().await.len(),
+        2,
+        "one send per execution of the storno step"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("outcome_unknown")),
+        "{invocation:?}"
+    );
+
+    // The next call: the storno landed after all and its `SS` is under the
+    // storno external id, while the verify still reports the original live
+    // — so the lookup, not the verify, is what answers, and nothing is sent.
+    h.reset().await;
+    h.holds(&Doc::new("SZ-45", "SZ", "E2E-45")).await;
+    external_id_query("acct:E2E-45:storno:SZ-45")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-45"),
+                ..Doc::new("SS-45", "SS", "E2E-45")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno_never_sent(&h.mock).await;
+    let reply = h
+        .call("E2E-45", "storno_invoice", &storno_of("SZ-45"), "e2e-45-s2")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-45", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-45");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-storno-SZ-45",
+            "lookup-storno-SZ-45",
+        ],
+        "the lookup is what answered, no storno step"
+    );
+    assert_eq!(h.requests_seen().await, 2, "the verify and the lookup");
+    eprintln!(
+        "(iv-c) storno 14 / 221 → rejected{{code}} after one send; exhaustion → outcome_unknown about the storno; next call finds the SS → reversed, nothing sent: pass"
     );
 }
 
@@ -3078,6 +3544,265 @@ async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
     );
 }
 
+/// (vii-c') `correct_invoice` verifies its base like every document found by
+/// number (design §3) and settles every refusal after the verify alone, with
+/// nothing sent: a base szamlazz.hu does not know (code 7) is 404 `not_found`
+/// naming the invoice and carrying the corrective's identity; a reversed base
+/// is `conflict{base_reversed, existing_number}`; a base carrying another
+/// order's number is `conflict{not_managed, existing_number}`. A live base of
+/// this order is corrected under `{namespace}:{order}:corrective:{correction_id}`
+/// on the wire (`szamlaKulsoAzon`), a second `correction_id` is a second
+/// corrective under its own id, and neither takes the order-number hint —
+/// correctives are exempt from it — so a live foreign invoice under the order
+/// is never met (review J23: the verify's arms were pinned by nothing).
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the three refusals of the verify, then two correctives on the wire"
+)]
+async fn correctives_verify_their_base_and_take_no_hint(h: &Harness) {
+    let body = |base: &str, correction_id: &str| {
+        json!({
+            "invoice_number": base,
+            "correction_id": correction_id,
+            "document": document(dec!(-1000)),
+        })
+    };
+
+    // Code 7 on the base.
+    h.reset().await;
+    number_query("SZ-C7")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("HS-X", "-1000", "-1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-C2",
+            "correct_invoice",
+            &body("SZ-C7", "fix-7"),
+            "e2e-c2-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "not_found", "{fault:?}");
+    assert!(fault.message.contains("SZ-C7"), "{fault:?}");
+    assert_eq!(fault.szamlazz_code, None, "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-C2"), "{fault:?}");
+    assert_eq!(fault.kind.as_deref(), Some("corrective"), "{fault:?}");
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-C2:corrective:fix-7"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "verify-base-SZ-C7"]
+    );
+    assert_eq!(h.requests_seen().await, 1, "the verify, nothing else");
+
+    // A reversed base, then a base of another order.
+    for (base, order, reason, correction_id) in [
+        ("SZ-C8", "E2E-C2", "base_reversed", "fix-8"),
+        ("SZ-C9", "OTHER-C", "not_managed", "fix-9"),
+    ] {
+        h.reset().await;
+        number_query(base)
+            .respond_with(
+                Doc {
+                    reversed: reason == "base_reversed",
+                    ..Doc::new(base, "SZ", order)
+                }
+                .response(),
+            )
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        create()
+            .respond_with(created("HS-X", "-1000", "-1270"))
+            .expect(0)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call(
+                "E2E-C2",
+                "correct_invoice",
+                &body(base, correction_id),
+                &format!("e2e-c2-{base}"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{base}: {}", reply.body);
+        let conflict = &reply.body;
+        assert_eq!(conflict["outcome"], "conflict", "{base}: {conflict}");
+        assert_eq!(conflict["conflict_reason"], reason, "{base}: {conflict}");
+        assert_eq!(conflict["existing_number"], base, "{base}: {conflict}");
+        assert_eq!(conflict["kind"], "corrective", "{base}");
+        assert_eq!(
+            conflict["external_id"],
+            format!("acct:E2E-C2:corrective:{correction_id}"),
+            "{base}"
+        );
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            ["namespace", "account", &format!("verify-base-{base}")],
+            "{base}: the verify is the last step journaled"
+        );
+        assert_eq!(h.requests_seen().await, 1, "{base}: nothing sent");
+    }
+
+    // Two correctives of one live base, each under its own id; the hint is
+    // never taken, so a live foreign invoice under the order is never met.
+    h.reset().await;
+    number_query("SZ-C3")
+        .respond_with(Doc::new("SZ-C3", "SZ", "E2E-C3").response())
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-C3")
+        .respond_with(Doc::new("SZ-FOREIGN-C3", "SZ", "E2E-C3").response())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    for correction_id in ["fix-a", "fix-b"] {
+        let external_id = format!("acct:E2E-C3:corrective:{correction_id}");
+        external_id_query(&external_id)
+            .respond_with(not_found())
+            .mount(&h.mock)
+            .await;
+        create()
+            .and(body_string_contains(format!(
+                "<szamlaKulsoAzon>{external_id}</szamlaKulsoAzon>"
+            )))
+            .and(body_string_contains(
+                "<helyesbitettSzamlaszam>SZ-C3</helyesbitettSzamlaszam>",
+            ))
+            .and(body_string_contains(
+                "<helyesbitoszamla>true</helyesbitoszamla>",
+            ))
+            .respond_with(created(&format!("HS-C3-{correction_id}"), "-1000", "-1270"))
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+    }
+    for correction_id in ["fix-a", "fix-b"] {
+        let reply = h
+            .call(
+                "E2E-C3",
+                "correct_invoice",
+                &body("SZ-C3", correction_id),
+                &format!("e2e-c3-{correction_id}"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{correction_id}: {}", reply.body);
+        assert_eq!(
+            reply.body["outcome"], "issued",
+            "{correction_id}: {}",
+            reply.body
+        );
+        assert_eq!(
+            reply.body["invoice_number"],
+            format!("HS-C3-{correction_id}"),
+            "{correction_id}"
+        );
+        assert_eq!(
+            reply.body["external_id"],
+            format!("acct:E2E-C3:corrective:{correction_id}"),
+            "{correction_id}"
+        );
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            [
+                "namespace",
+                "account",
+                "verify-base-SZ-C3",
+                "lookup-corrective",
+                "create-corrective",
+            ],
+            "{correction_id}"
+        );
+    }
+    assert_eq!(
+        h.create_bodies().await.len(),
+        2,
+        "one create per correction id"
+    );
+    assert_eq!(
+        h.bodies_of("action-szamla_agent_xml")
+            .await
+            .iter()
+            .filter(|body| body.contains("<rendelesSzam>"))
+            .count(),
+        0,
+        "no order-number query for a corrective"
+    );
+    eprintln!(
+        "(vii-c') correct_invoice: base 7 → not_found; reversed → conflict{{base_reversed}}; another order's → conflict{{not_managed}}; two correction ids → two correctives under their ids, no hint: pass"
+    );
+}
+
+/// (vii-c'') a duplicate-order-number answer (152) to a corrective's create
+/// is `rejected{152}`, never `conflict{duplicate_order_number}`: storno and
+/// corrective invoices are exempt from the order-number-repetition rule, so
+/// the answer is a plain refusal — the external-id re-query (which could
+/// still reconcile a corrective that landed) misses, and no order-number
+/// query follows it; one send. (The gateway pins the closure; this pins the
+/// handler's response.)
+async fn a_duplicate_order_number_on_a_corrective_is_rejected(h: &Harness) {
+    h.reset().await;
+    number_query("SZ-C4")
+        .respond_with(Doc::new("SZ-C4", "SZ", "E2E-C4").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-C4:corrective:fix-1")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-C4")
+        .respond_with(Doc::new("SZ-C4", "SZ", "E2E-C4").response())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(duplicate_order_number("E2E-C4"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let rejected = h
+        .ok(
+            "E2E-C4",
+            "correct_invoice",
+            &json!({
+                "invoice_number": "SZ-C4",
+                "correction_id": "fix-1",
+                "document": document(dec!(-1000)),
+            }),
+            "e2e-c4-k1",
+        )
+        .await;
+    assert_eq!(rejected["outcome"], "rejected", "{rejected}");
+    assert_eq!(rejected["conflict_reason"], Value::Null, "{rejected}");
+    assert_eq!(rejected["code"], "152", "{rejected}");
+    assert!(
+        rejected["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("E2E-C4")),
+        "{rejected}"
+    );
+    assert_eq!(rejected["kind"], "corrective");
+    assert_eq!(h.create_bodies().await.len(), 1, "one send");
+    assert_eq!(
+        h.requests_seen().await,
+        5,
+        "the verify, the lookup, the leading query, the send and the external-id re-query — no order-number query"
+    );
+    eprintln!("(vii-c'') 152 on a corrective → rejected{{152}}, no order query: pass");
+}
+
 /// (vii-d) `delete_proforma`: the order's live proforma is found under its
 /// external id (`proforma-for-delete`) and deleted (`delete-proforma-{number}`,
 /// one send); once gone, a second call finds nothing and answers
@@ -3094,12 +3819,8 @@ async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    op("action-szamla_agent_dijbekero_torlese")
-        .and(body_string_contains("<szamlaszam>D-D1</szamlaszam>"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>true</sikeres></xmlszamladbkdelvalasz>"#,
-            "application/xml",
-        ))
+    delete_of("D-D1")
+        .respond_with(proforma_deleted())
         .expect(1)
         .mount(&h.mock)
         .await;
@@ -3127,6 +3848,184 @@ async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     assert_eq!(again["reason"], "absent", "{again}");
     eprintln!(
         "(vii-d) delete_proforma → deleted after one send; again → absent, nothing sent: pass"
+    );
+}
+
+/// (vii-d') `delete_proforma`'s other answers (design §6 tail). szamlazz.hu
+/// has no guard against deleting a proforma with registered credit entries,
+/// so the handler has one: a paid proforma without `force` is `{deleted:
+/// false, reason: proforma_paid}` after the lookup alone, and with `force` it
+/// is deleted (one send). A document under `…:proforma` that is not this
+/// order's proforma is `{deleted: false, reason: external_id_collision}` —
+/// never touched, since the newest holder may hide a proforma of ours behind
+/// it. szamlazz.hu's 335 (no such proforma — deleted since the lookup) is
+/// `{deleted: true}` like a fresh deletion. A lost reply is the
+/// `outcome_unknown` fault about the proforma: the delete has no retry of its
+/// own (one send, one step journaled), and the next call's lookup tells.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the paid guard with and without force, the collision, 335 and the lost reply"
+)]
+async fn delete_proforma_guards_paid_proformas_and_settles_every_answer(h: &Harness) {
+    let paid = Doc {
+        external_id: Some("acct:E2E-46:proforma"),
+        payments: &["1270"],
+        ..Doc::new("D-46", "D", "E2E-46")
+    };
+
+    // Paid, without `force`: refused after the lookup, nothing sent.
+    h.reset().await;
+    h.holds(&paid).await;
+    delete_of("D-46")
+        .respond_with(proforma_deleted())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-46", "delete_proforma", &json!({}), "e2e-46-k1")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["deleted"], false, "{}", reply.body);
+    assert_eq!(reply.body["reason"], "proforma_paid", "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "proforma-for-delete"],
+        "the lookup is what refused"
+    );
+    assert_eq!(h.requests_seen().await, 1, "the lookup, nothing else");
+
+    // Paid, with `force`: deleted.
+    h.reset().await;
+    h.holds(&paid).await;
+    delete_of("D-46")
+        .respond_with(proforma_deleted())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-46",
+            "delete_proforma",
+            &json!({ "force": true }),
+            "e2e-46-k2",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["deleted"], true, "{}", reply.body);
+    assert!(reply.body["reason"].is_null(), "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "proforma-for-delete",
+            "delete-proforma-D-46"
+        ]
+    );
+    assert_eq!(h.delete_bodies().await.len(), 1, "exactly one delete");
+
+    // Another order's proforma under our id: a collision, never touched.
+    h.reset().await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-46:proforma"),
+        ..Doc::new("D-OTHER", "D", "OTHER-46")
+    })
+    .await;
+    delete_of("D-OTHER")
+        .respond_with(proforma_deleted())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let collision = h
+        .ok(
+            "E2E-46",
+            "delete_proforma",
+            &json!({ "force": true }),
+            "e2e-46-k3",
+        )
+        .await;
+    assert_eq!(collision["deleted"], false, "{collision}");
+    assert_eq!(collision["reason"], "external_id_collision", "{collision}");
+    assert_eq!(h.requests_seen().await, 1, "nothing sent");
+
+    // 335 — gone since the lookup: deleted all the same.
+    h.reset().await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-47:proforma"),
+        ..Doc::new("D-47", "D", "E2E-47")
+    })
+    .await;
+    delete_of("D-47")
+        .respond_with(proforma_gone())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-47", "delete_proforma", &json!({}), "e2e-47-k1")
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["deleted"], true, "{}", reply.body);
+    assert!(reply.body["reason"].is_null(), "{}", reply.body);
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "proforma-for-delete",
+            "delete-proforma-D-47"
+        ]
+    );
+    assert_eq!(h.delete_bodies().await.len(), 1, "one send");
+
+    // A lost reply: `outcome_unknown` about the proforma, one send.
+    h.reset().await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-48:proforma"),
+        ..Doc::new("D-48", "D", "E2E-48")
+    })
+    .await;
+    delete_of("D-48")
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-48", "delete_proforma", &json!({}), "e2e-48-k1")
+        .await;
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert!(
+        fault.message.contains("proforma deletion outcome unknown"),
+        "{fault:?}"
+    );
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+    assert_eq!(fault.order.as_deref(), Some("E2E-48"), "{fault:?}");
+    assert_eq!(fault.kind.as_deref(), Some("proforma"), "{fault:?}");
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-48:proforma"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "proforma-for-delete",
+            "delete-proforma-D-48"
+        ]
+    );
+    assert_eq!(
+        h.delete_bodies().await.len(),
+        1,
+        "the delete has no retry of its own"
+    );
+    eprintln!(
+        "(vii-d') delete_proforma: paid → not deleted{{proforma_paid}}, force → deleted; collision → not deleted; 335 → deleted; lost reply → outcome_unknown after one send: pass"
     );
 }
 
@@ -3671,6 +4570,444 @@ async fn mount_prepaid_chain(h: &Harness, n: &str, es_reversed: bool, vs_reverse
         .await;
 }
 
+/// (x-f) the two chains refuse each other at the exclusivity step (design §5
+/// step 1): a live prepayment invoice of ours under `…:prepayment` refuses
+/// `create_invoice`, a live invoice of ours under `…:invoice` refuses
+/// `create_prepayment`, both as `conflict{prepaid_chain, existing_number}`
+/// from the first exclusivity row with nothing read or sent after it. A
+/// **reversed** prepayment invoice refuses nothing: `create_invoice` walks
+/// every step and issues — the storno of the `ES`, the newest document under
+/// the order, is not an invoice kind and so never foreign.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two refusals, then the create a reversed prepayment invoice does not refuse"
+)]
+async fn the_other_chains_live_document_refuses_the_create(h: &Harness) {
+    // The handler and its kind, then the other chain's kind and the live
+    // document of ours held under it.
+    for (handler, kind, held_kind, held_number, held_tipus) in [
+        ("create_invoice", "invoice", "prepayment", "ES-40", "ES"),
+        ("create_prepayment", "prepayment", "invoice", "SZ-40", "SZ"),
+    ] {
+        h.reset().await;
+        h.holds(&Doc {
+            external_id: Some(&format!("acct:E2E-40:{held_kind}")),
+            ..Doc::new(held_number, held_tipus, "E2E-40")
+        })
+        .await;
+        create()
+            .respond_with(created("X-40", "1000", "1270"))
+            .expect(0)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call(
+                "E2E-40",
+                handler,
+                &create_body(dec!(1000), false),
+                &format!("e2e-40-{handler}"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{handler}: {}", reply.body);
+        let conflict = &reply.body;
+        assert_eq!(conflict["outcome"], "conflict", "{handler}: {conflict}");
+        assert_eq!(
+            conflict["conflict_reason"], "prepaid_chain",
+            "{handler}: {conflict}"
+        );
+        assert_eq!(conflict["existing_number"], held_number, "{handler}");
+        assert_eq!(conflict["kind"], kind, "{handler}");
+        assert_eq!(conflict["external_id"], format!("acct:E2E-40:{kind}"));
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            ["namespace", "account", &format!("exclusivity-{held_kind}")],
+            "{handler}: the first exclusivity row is what refused"
+        );
+        assert_eq!(
+            h.requests_seen().await,
+            1,
+            "{handler}: the one exclusivity lookup, nothing else"
+        );
+    }
+
+    // A reversed prepayment invoice under `…:prepayment` refuses nothing.
+    h.reset().await;
+    external_id_query("acct:E2E-40:prepayment")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::new("ES-40", "ES", "E2E-40")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    h.absent("E2E-40", &["final", "proforma", "invoice"]).await;
+    order_query("E2E-40")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("ES-40"),
+                ..Doc::new("SS-40", "SS", "E2E-40")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    create()
+        .and(body_string_contains(
+            "<szamlaKulsoAzon>acct:E2E-40:invoice</szamlaKulsoAzon>",
+        ))
+        .respond_with(created("SZ-40", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-40",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-40-k3",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-40");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ]
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+    eprintln!(
+        "(x-f) live ES → create_invoice conflict{{prepaid_chain}}; live SZ → create_prepayment conflict{{prepaid_chain}}; reversed ES refuses nothing: pass"
+    );
+}
+
+/// (x-g) `create_invoice`'s proforma link (design §5 step 2) settles every
+/// case before anything is sent: `options.proforma: none` while a live
+/// proforma of ours exists is `conflict{proforma_live, existing_number}` from
+/// the `proforma-link` read — szamlazz.hu would link the proforma by shared
+/// order number regardless, so refusing is the honest answer; a named
+/// proforma szamlazz.hu does not know (code 7) is `conflict{proforma_missing,
+/// existing_number}` after the verify — an outcome, never `not_found`; and a
+/// named document of this order that is not a proforma is the `invalid_input`
+/// fault naming the number and its `tipus`. (The prepayment invoice's `none`
+/// is (x); the by-number `not_managed` is (vii-b).)
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the conflict, the missing proforma and the invalid link"
+)]
+async fn the_invoices_proforma_link_is_settled_before_any_send(h: &Harness) {
+    let by_number = |number: &str| {
+        json!({
+            "document": document(dec!(1000)),
+            "options": { "proforma": { "number": number } },
+        })
+    };
+
+    // `none` while a live proforma of ours exists.
+    h.reset().await;
+    h.absent("E2E-42", &["prepayment", "final"]).await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-42:proforma"),
+        ..Doc::new("D-42", "D", "E2E-42")
+    })
+    .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-42",
+            "create_invoice",
+            &json!({ "document": document(dec!(1000)), "options": { "proforma": "none" } }),
+            "e2e-42-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let conflict = &reply.body;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(conflict["conflict_reason"], "proforma_live", "{conflict}");
+    assert_eq!(conflict["existing_number"], "D-42");
+    assert_eq!(conflict["kind"], "invoice");
+    assert_eq!(conflict["external_id"], "acct:E2E-42:invoice");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+        ],
+        "the proforma link is what refused, nothing after it"
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        3,
+        "the two exclusivity lookups and the link, nothing else"
+    );
+
+    // A named proforma szamlazz.hu does not know.
+    h.reset().await;
+    h.absent("E2E-42", &["prepayment", "final"]).await;
+    number_query("D-MISSING")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-42",
+            "create_invoice",
+            &by_number("D-MISSING"),
+            "e2e-42-k2",
+        )
+        .await;
+    assert_eq!(
+        reply.status, 200,
+        "an outcome, not not_found: {}",
+        reply.body
+    );
+    let conflict = &reply.body;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(
+        conflict["conflict_reason"], "proforma_missing",
+        "{conflict}"
+    );
+    assert_eq!(conflict["existing_number"], "D-MISSING");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "verify-proforma-D-MISSING",
+        ]
+    );
+    assert_eq!(h.requests_seen().await, 3);
+
+    // A named document of this order that is not a proforma.
+    h.reset().await;
+    h.absent("E2E-42", &["prepayment", "final"]).await;
+    number_query("SZ-42")
+        .respond_with(Doc::new("SZ-42", "SZ", "E2E-42").response())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call("E2E-42", "create_invoice", &by_number("SZ-42"), "e2e-42-k3")
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert!(
+        fault.message.contains("SZ-42 is not a proforma (tipus SZ)"),
+        "names the number and its tipus: {fault:?}"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "verify-proforma-SZ-42",
+        ]
+    );
+    assert_eq!(h.requests_seen().await, 3, "nothing sent");
+    eprintln!(
+        "(x-g) create_invoice: none with a live D → conflict{{proforma_live}}; {{number}} on 7 → conflict{{proforma_missing}}; {{number}} of an SZ → invalid_input; nothing sent: pass"
+    );
+}
+
+/// (x-h) `create_final` settles its prepayment invoice first
+/// (`prepayment-for-final`, design §5 kind specifics): none under
+/// `…:prepayment` is `conflict{prepayment_missing}` without an
+/// `existing_number`, a reversed one is `conflict{prepayment_reversed,
+/// existing_number}`, both with nothing sent and no step after the check; a
+/// live one is named on the wire — `elolegSzamlaszam` beside the `vegszamla`
+/// flag — and is never foreign to the lookup step's hint although it is the
+/// newest live invoice-kind document under the order; and szamlazz.hu's 73
+/// (the referenced prepayment invoice cannot be identified — how the server
+/// enforces one final invoice per prepayment invoice) is `rejected{73}` with
+/// its message, settled after one send.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two refusals, the issued final on the wire and the 73"
+)]
+async fn create_final_settles_its_prepayment_invoice_first(h: &Harness) {
+    // Absent.
+    h.reset().await;
+    h.absent("E2E-43", &["prepayment"]).await;
+    create()
+        .respond_with(created("VS-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-43",
+            "create_final",
+            &create_body(dec!(1000), false),
+            "e2e-43-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let conflict = &reply.body;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(
+        conflict["conflict_reason"], "prepayment_missing",
+        "{conflict}"
+    );
+    assert_eq!(conflict["existing_number"], Value::Null, "{conflict}");
+    assert_eq!(conflict["kind"], "final");
+    assert_eq!(conflict["external_id"], "acct:E2E-43:final");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        ["namespace", "account", "prepayment-for-final"]
+    );
+    assert_eq!(h.requests_seen().await, 1);
+
+    // Reversed.
+    h.reset().await;
+    external_id_query("acct:E2E-43:prepayment")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::new("ES-43", "ES", "E2E-43")
+            }
+            .response(),
+        )
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("VS-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let conflict = h
+        .ok(
+            "E2E-43",
+            "create_final",
+            &create_body(dec!(1000), false),
+            "e2e-43-k2",
+        )
+        .await;
+    assert_eq!(conflict["outcome"], "conflict", "{conflict}");
+    assert_eq!(
+        conflict["conflict_reason"], "prepayment_reversed",
+        "{conflict}"
+    );
+    assert_eq!(conflict["existing_number"], "ES-43");
+    assert_eq!(h.requests_seen().await, 1);
+
+    // Live: named on the wire, and not foreign although it is the newest
+    // live invoice-kind document under the order.
+    h.reset().await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-43:prepayment"),
+        ..Doc::new("ES-43", "ES", "E2E-43")
+    })
+    .await;
+    h.absent("E2E-43", &["final"]).await;
+    create()
+        .and(body_string_contains("<vegszamla>true</vegszamla>"))
+        .and(body_string_contains(
+            "<elolegSzamlaszam>ES-43</elolegSzamlaszam>",
+        ))
+        .and(body_string_contains(
+            "<szamlaKulsoAzon>acct:E2E-43:final</szamlaKulsoAzon>",
+        ))
+        .respond_with(created("VS-43", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-43",
+            "create_final",
+            &create_body(dec!(1000), false),
+            "e2e-43-k3",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["kind"], "final");
+    assert_eq!(reply.body["invoice_number"], "VS-43");
+    assert_eq!(reply.body["external_id"], "acct:E2E-43:final");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "prepayment-for-final",
+            "lookup-final",
+            "create-final",
+        ]
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+
+    // szamlazz.hu's 73: the referenced prepayment invoice cannot be
+    // identified — a rejection, settled after one send.
+    h.reset().await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-43:prepayment"),
+        ..Doc::new("ES-43", "ES", "E2E-43")
+    })
+    .await;
+    h.absent("E2E-43", &["final"]).await;
+    create()
+        .respond_with(api_error(
+            "73",
+            "A hivatkozott előlegszámla nem beazonosítható. Rendelésszám: E2E-43, előlegszámla száma: ES-43",
+        ))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let rejected = h
+        .ok(
+            "E2E-43",
+            "create_final",
+            &create_body(dec!(1000), false),
+            "e2e-43-k4",
+        )
+        .await;
+    assert_eq!(rejected["outcome"], "rejected", "{rejected}");
+    assert_eq!(rejected["code"], "73", "{rejected}");
+    assert!(
+        rejected["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("nem beazonosítható")),
+        "{rejected}"
+    );
+    assert_eq!(rejected["kind"], "final");
+    assert_eq!(h.create_bodies().await.len(), 1, "one send, no re-send");
+    eprintln!(
+        "(x-h) create_final: absent ES → conflict{{prepayment_missing}}; reversed → conflict{{prepayment_reversed}}; live → issued with elolegSzamlaszam on the wire; 73 → rejected{{73}}: pass"
+    );
+}
+
 /// (x-b) a malformed body — one carrying a field the contract does not
 /// know, a misspelt `reissue` — is refused as the structured `invalid_input`
 /// fault (400, `{code, message}` naming the field), not accepted as
@@ -3994,8 +5331,8 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
     let retries = watch.await.expect("watch");
     assert_eq!(reply.status, 500, "{}", reply.body);
     assert!(
-        elapsed < Duration::from_secs(60),
-        "the run policy's delay was honoured, not the handler's: {elapsed:?}"
+        elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
+        "the run policy's delay (1 s initial) was honoured, not the handler's: {elapsed:?}"
     );
 
     // The ingress wraps the handler's terminal error; the fault is the JSON
@@ -4048,6 +5385,77 @@ async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
         "the two steps are journaled by name: {runs:?}"
     );
     eprintln!("(xi) exhausted create step → structured outcome_unknown; run retries visible: pass");
+}
+
+/// (xi-a) what `outcome_unknown` asks the caller to do works: the next call
+/// on the same order with a **new** `Idempotency-Key` — after (xi) left the
+/// outcome of `E2E-11`'s create unknown — finds the document that landed
+/// after all under its external id and answers `already_issued` from the
+/// lookup step, with nothing sent; the same key would replay (xi)'s fault.
+/// (`reconciled` is the create step's own answer to a 152 — (iii); a lookup
+/// that finds the document never reaches the create step.)
+async fn after_an_outcome_unknown_the_next_call_answers_already_issued(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-11", &["prepayment", "final", "proforma"])
+        .await;
+    h.holds(&Doc {
+        external_id: Some("acct:E2E-11:invoice"),
+        ..Doc::new("SZ-11", "SZ", "E2E-11")
+    })
+    .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+
+    // The same key: the stored fault, nothing read.
+    let before = h.requests_seen().await;
+    let replayed = h
+        .call(
+            "E2E-11",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-11-k1",
+        )
+        .await;
+    assert_eq!(replayed.status, 500, "{}", replayed.body);
+    assert_eq!(replayed.fault().code, "outcome_unknown");
+    assert_eq!(
+        h.requests_seen().await,
+        before,
+        "a replayed completion reaches nothing"
+    );
+
+    // A new key: the lookup finds what landed.
+    let reply = h
+        .call(
+            "E2E-11",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-11-k2",
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-11");
+    assert_eq!(reply.body["external_id"], "acct:E2E-11:invoice");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+        ],
+        "the lookup answered; no create step"
+    );
+    assert!(h.create_bodies().await.is_empty(), "nothing sent");
+    eprintln!(
+        "(xi-a) after outcome_unknown: the same key replays the fault; a new key → already_issued from the lookup, nothing sent: pass"
+    );
 }
 
 /// (xi-b) a read that szamlazz.hu fails to answer once is retried by the
@@ -4297,6 +5705,130 @@ async fn answered_code_on_the_create_leading_query_is_an_immediate_unavailable(h
     assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
     eprintln!(
         "(xi-c') answered code on the create step's leading query → immediate unavailable{{szamlazz_code}}, nothing created: pass"
+    );
+}
+
+/// (xi-c'') the two queries of the lookup step answer a szamlazz.hu code
+/// differently (`Gateway::lookup` steps 1–2). The order-number **hint**
+/// answered with a code that is neither 7 nor a credential code — here 57 —
+/// is data the hint cannot conclude from: it looks for a foreign document,
+/// and a code says nothing about one, so the lookup continues as on a miss
+/// and the create proceeds to `issued` in one execution — no run failure
+/// recorded (the read policy is not spent on an answer), the hint queried
+/// exactly once, one create on the wire. The **external-id** query answered
+/// with the same code is the lookup's own `unavailable` (503) at once, with
+/// the code beside it and nothing sent — the hint is never asked.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the same code on the hint, then on the external-id query"
+)]
+async fn an_answered_code_on_the_hint_is_inconclusive_and_the_create_proceeds(h: &Harness) {
+    // The hint.
+    h.reset().await;
+    h.absent("E2E-29B", &["prepayment", "final", "proforma", "invoice"])
+        .await;
+    order_query("E2E-29B")
+        .respond_with(api_error("57", "Hibás XML."))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-29B", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let watch = h.watch("E2E-29B");
+    let reply = h
+        .call(
+            "E2E-29B",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-29b-k1",
+        )
+        .await;
+    let retries = watch.await.expect("watch");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-29B");
+    assert!(retries.max_retry_count <= 1, "{retries:?}");
+    assert!(retries.failures.is_empty(), "{retries:?}");
+    assert!(retries.failing_commands.is_empty(), "{retries:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ]
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
+    assert_eq!(
+        h.requests_seen().await,
+        7,
+        "two exclusivity lookups, the link, the external id, the hint, the leading query and the create"
+    );
+
+    // The external-id query.
+    h.reset().await;
+    h.absent("E2E-29C", &["prepayment", "final", "proforma"])
+        .await;
+    external_id_query("acct:E2E-29C:invoice")
+        .respond_with(api_error("57", "Hibás XML."))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    order_query("E2E-29C")
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    create()
+        .respond_with(created("SZ-X", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call(
+            "E2E-29C",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-29c-k1",
+        )
+        .await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-29C"), "{fault:?}");
+    assert_eq!(fault.kind.as_deref(), Some("invoice"), "{fault:?}");
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-29C:invoice"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+        ],
+        "the lookup answered as data; no create step"
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        4,
+        "the three reads before the lookup and its external-id query; no hint, nothing sent"
+    );
+    eprintln!(
+        "(xi-c'') code 57 on the hint → inconclusive, issued in one execution; on the lookup's external-id query → unavailable{{szamlazz_code}}, nothing sent: pass"
     );
 }
 
@@ -4810,6 +6342,85 @@ async fn failing_credential_store_is_a_terminal_unavailable(h: &Harness) {
     assert_eq!(issued["outcome"], "issued", "{issued}");
     eprintln!(
         "(xv) failing credential store → terminal unavailable, zero szamlazz.hu requests: pass"
+    );
+}
+
+/// (xv-b) a killed invocation releases the order key. An invocation that
+/// will not finish — its `account` step hangs on a resolver that never
+/// answers — holds the Virtual Object's lock; the same order's next exclusive
+/// handler queues behind it. The kill (what an operator does to a stuck
+/// invocation, and what `on_max_attempts = kill` does once a handler's
+/// attempts are spent — ADR 0004) ends it as a failed completion, and the
+/// queued `delete_proforma` runs at once, answering from szamlazz.hu.
+/// Journaled by the killed one: `namespace`, and the `account` command it
+/// never completed — a prefix of every handler's path. (`get` would prove
+/// nothing here: it is shared and never waits for the lock.)
+async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-K", &["proforma"]).await;
+    let resolutions_before = h.script.resolutions();
+    h.script.hang_next_resolutions(1);
+    let stuck = h.submit("E2E-K", "delete_proforma", &json!({})).await;
+    // The hung resolution is the next one asked for; nothing else resolves
+    // until it is.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while h.script.resolutions() == resolutions_before {
+        assert!(
+            Instant::now() < deadline,
+            "the hung invocation never resolved"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    h.await_status(&stuck, &["running"]).await;
+
+    // The queued call: submitted while the lock is held, answered after the
+    // kill.
+    let queued = h.submit("E2E-K", "delete_proforma", &json!({})).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let waiting = h.invocation(&queued).await;
+    assert_ne!(
+        waiting.status, "completed",
+        "the queued call waits behind the lock: {waiting:?}"
+    );
+    assert_eq!(
+        h.requests_seen().await,
+        0,
+        "nothing read while the lock is held"
+    );
+
+    h.kill(&stuck).await;
+    let killed = h.await_status(&stuck, &["completed", "killed"]).await;
+    let stuck_row = h.invocation(&stuck).await;
+    assert!(
+        stuck_row
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.to_lowercase().contains("kill")),
+        "the kill is the completion ({killed}): {stuck_row:?}"
+    );
+    assert_eq!(
+        h.runs(&stuck).await,
+        ["namespace", "account"],
+        "the killed invocation journaled the prologue's two commands"
+    );
+
+    let started = Instant::now();
+    h.await_status(&queued, &["completed"]).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the key was released by the kill, not by a timeout: {elapsed:?}"
+    );
+    let done = h.invocation(&queued).await;
+    assert_eq!(done.completion_failure, None, "{done:?}");
+    assert_eq!(
+        h.runs(&queued).await,
+        ["namespace", "account", "proforma-for-delete"],
+        "the queued delete ran to its answer (absent)"
+    );
+    assert_eq!(h.requests_seen().await, 1, "the queued delete's lookup");
+    eprintln!(
+        "(xv-b) a killed invocation releases the order key; the queued call runs at once: pass"
     );
 }
 
@@ -5459,7 +7070,7 @@ async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(h: 
 
     // A sixth credit entry: the caller's request, nothing sent.
     h.reset().await;
-    op("action-szamla_agent_kifiz")
+    credit()
         .respond_with(api_error("999", "never"))
         .expect(0)
         .mount(&h.mock)
@@ -5476,7 +7087,7 @@ async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(h: 
 
     // A refused credit entry: szamlazz.hu's answer, passed through.
     h.reset().await;
-    op("action-szamla_agent_kifiz")
+    credit()
         .and(body_string_contains("SZ-30"))
         .respond_with(api_error(
             "463",
@@ -5531,6 +7142,148 @@ async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(h: 
     );
     eprintln!(
         "(xviii-c') faults: query Api → 422 szamlazz_error{{szamlazz_code}}; sixth entry → 400 invalid_input, nothing sent; refused entry → 422; order storno on 7 → 404 not_found with identity: pass"
+    );
+}
+
+/// (xviii-c'') `Szamlazz.Agent.set_payments` under a scope, its one step
+/// `set-payments-{number}` with no query before it: a replacing call puts
+/// `<additiv>false</additiv>` on the wire with that account's key and the
+/// entries as sent, an additive one `<additiv>true</additiv>`, and the answer
+/// is the invoice's totals as szamlazz.hu reported them — `outstanding`
+/// distinct from `gross_total`. A replacing call with no entries would clear
+/// the invoice's payments: refused as `invalid_input` before the wire. A lost
+/// reply is `outcome_unknown` after exactly one send — the step has no retry
+/// of its own — and the fault's advice follows `additive`: a replacing call
+/// is repeated as is, an additive one may have landed its entries, so the
+/// caller queries the invoice first (at-least-once).
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two wire shapes, the refusal, and the two lost-reply faults"
+)]
+async fn set_payments_replaces_or_appends_and_answers_a_lost_reply(h: &Harness) {
+    let entry = json!({
+        "date": "2026-09-05",
+        "method": "transfer",
+        "amount": "1000",
+        "description": "first instalment",
+    });
+    let request = |number: &str, additive: bool| {
+        json!({
+            "invoice_number": number,
+            "entries": [entry.clone()],
+            "additive": additive,
+        })
+    };
+
+    // Replacing, then additive: the flag on the wire, the totals in the
+    // answer.
+    for (number, additive) in [("SZ-50", false), ("SZ-51", true)] {
+        h.reset().await;
+        credit()
+            .and(body_string_contains(format!(
+                "<szamlaszam>{number}</szamlaszam>"
+            )))
+            .and(body_string_contains(format!(
+                "<additiv>{additive}</additiv>"
+            )))
+            .and(body_string_contains(agent_key_tag(AGENT_KEY)))
+            .and(body_string_contains("<osszeg>1000</osszeg>"))
+            .and(body_string_contains("<jogcim>átutalás</jogcim>"))
+            .and(body_string_contains("<leiras>first instalment</leiras>"))
+            .respond_with(credited(number, "1270", "270"))
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call_agent_scoped("acme", "set_payments", &request(number, additive))
+            .await;
+        assert_eq!(reply.status, 200, "{number}: {}", reply.body);
+        assert_eq!(reply.body["invoice_number"], number, "{}", reply.body);
+        assert_eq!(reply.body["outstanding"], "270", "{}", reply.body);
+        assert_eq!(reply.body["gross_total"], "1270", "{}", reply.body);
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            ["namespace", "account", &format!("set-payments-{number}")],
+            "{number}: one step, no query before it"
+        );
+        assert_eq!(h.requests_seen().await, 1, "{number}: the one send");
+    }
+
+    // A replacing call with no entries: refused before the wire.
+    h.reset().await;
+    credit()
+        .respond_with(api_error("999", "never"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped(
+            "acme",
+            "set_payments",
+            &json!({ "invoice_number": "SZ-52", "entries": [] }),
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.szamlazz_code, None, "{fault:?}");
+    assert!(fault.message.contains("at least one entry"), "{fault:?}");
+    assert!(fault.message.contains("nothing was sent"), "{fault:?}");
+    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+
+    // A lost reply, replacing then additive: one send each, and the advice
+    // follows the flag.
+    for (number, additive, advice, never) in [
+        (
+            "SZ-53",
+            false,
+            "call set_payments again",
+            "query the invoice",
+        ),
+        (
+            "SZ-54",
+            true,
+            "query the invoice before re-sending",
+            "call set_payments again",
+        ),
+    ] {
+        h.reset().await;
+        credit()
+            .and(body_string_contains(format!(
+                "<szamlaszam>{number}</szamlaszam>"
+            )))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call_agent_scoped("acme", "set_payments", &request(number, additive))
+            .await;
+        assert_eq!(reply.status, 500, "{number}: {}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, "outcome_unknown", "{number}: {fault:?}");
+        assert!(
+            fault
+                .message
+                .contains("credit entry registration outcome unknown"),
+            "{number}: {fault:?}"
+        );
+        assert!(fault.message.contains(advice), "{number}: {fault:?}");
+        assert!(!fault.message.contains(never), "{number}: {fault:?}");
+        assert_eq!(fault.order, None, "{number}: a by-number fault: {fault:?}");
+        assert_eq!(
+            h.runs(reply.invocation_id()).await,
+            ["namespace", "account", &format!("set-payments-{number}")],
+            "{number}"
+        );
+        assert_eq!(
+            h.credit_bodies().await.len(),
+            1,
+            "{number}: the step has no retry of its own"
+        );
+    }
+    eprintln!(
+        "(xviii-c'') set_payments: additiv false/true on the wire with the totals answered; empty replace → invalid_input before the wire; lost reply → outcome_unknown after one send, advice by additive: pass"
     );
 }
 
@@ -6073,6 +7826,37 @@ async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
     );
     eprintln!(
         "(xx) credential rotation between executions → new key on the wire, account entry unchanged: pass"
+    );
+}
+
+/// (xx-b) the `Szamlazz.Order` object keeps no state (design §3, ADR 0005):
+/// after every create, storno, delete and read of the run, on both
+/// deployments, the `state` table holds no row for the service — szamlazz.hu
+/// is the only record, and there is nothing a redeploy could leave behind.
+/// Checked over the run's invocations so that the empty table is not vacuous.
+async fn the_order_keeps_no_state(h: &Harness) {
+    // Far under what the run issues; a floor against an empty table proving
+    // nothing (a purge or a retention change emptying `sys_invocation`).
+    const ENOUGH_ORDER_INVOCATIONS: usize = 40;
+    let orders = h
+        .all_invocations()
+        .await
+        .into_iter()
+        .filter(|(_, invocation)| invocation.service == "Szamlazz.Order")
+        .count();
+    assert!(
+        orders >= ENOUGH_ORDER_INVOCATIONS,
+        "{orders} Szamlazz.Order invocations were run"
+    );
+    let state = h
+        .sql("SELECT service_name, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'")
+        .await;
+    assert!(
+        state.is_empty(),
+        "Szamlazz.Order keeps no state, yet the state table holds: {state:?}"
+    );
+    eprintln!(
+        "(xx-b) the state table holds nothing for Szamlazz.Order after {orders} invocations: pass"
     );
 }
 
