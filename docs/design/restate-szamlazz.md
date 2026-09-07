@@ -97,8 +97,8 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
 |---|---|---|
 | `create_proforma` | exclusive | `CreateRequest` → `CreateResponse` |
 | `create_invoice` | exclusive | `CreateRequest` (options: `reissue`, `proforma`) → `CreateResponse` |
-| `create_prepayment` | exclusive | `CreateRequest` → `CreateResponse` (v1: one prepayment per order) |
-| `create_final` | exclusive | `CreateRequest` → `CreateResponse` (requires a live prepayment; passes `elolegSzamlaszam`) |
+| `create_prepayment` | exclusive | `CreateRequest` (options: `reissue`, `proforma`) → `CreateResponse` (v1: one prepayment per order) |
+| `create_final` | exclusive | `CreateRequest` → `CreateResponse` (requires a live prepayment; passes `elolegSzamlaszam`; the caller supplies the negative prepayment line) |
 | `correct_invoice` | exclusive | `CorrectRequest { invoice_number, correction_id, document }` → `CreateResponse` |
 | `storno_invoice` | exclusive | `StornoRequest { invoice_number, comment? }` → `StornoResponse`; the storno repeats the verified original's `telj` as `teljesitesDatum` (ADR 0007) — never a caller's date |
 | `delete_proforma` | exclusive | `DeleteProformaRequest { force }` → `DeleteProformaResponse` |
@@ -217,7 +217,8 @@ gateway opened for this execution.
    (an answer nothing can be concluded from); no answer → `Unanswered`, retried by the read policy. A document under
    the secondary id that fails validation → `conflict{external_id_collision, number}`: the query returns the newest
    holder, so a foreign document may hide a live document of ours behind it, and refusing is the only safe answer.
-2. **Proforma link** (`options.proforma`; `create_invoice` only — see kind specifics):
+2. **Proforma link** (`options.proforma`; the kinds that convert a proforma — `create_invoice` and `create_prepayment` (#69) —
+   see kind specifics):
    - `auto` (default): `ctx.run(query "{namespace}:{order}:proforma")` → live `D` → pass `dijbekeroSzamlaszam`; 7 → none.
    - `none`: same query; live `D` → `conflict{proforma_live, existing_number}` (the server links by shared order
      number regardless — verified — so refusing is the only honest answer).
@@ -323,14 +324,19 @@ gateway opened for this execution.
 
 Kind specifics: `create_proforma` — kind `D`; exclusivity against `…:invoice`, `…:prepayment` and `…:final` (a live
 one → `conflict{order_invoiced, existing_number}`, never `foreign`); `proforma` option not applicable.
-`create_prepayment` — exclusivity against `…:invoice` and `…:final`; `proforma` option not applicable (anything but
-`auto` → `invalid_input`) and **no step 2**: the Agent's prepayment invoice cannot carry `dijbekeroSzamlaszam`, and
-the server converts the order's live `D` by shared order number regardless (verified — an `ES` issued without the
-reference shows `hivdijbekszam`), so `get` derives `consumed` from the `ES`. `create_final` — no exclusivity row of
+`create_prepayment` — exclusivity against `…:invoice` and `…:final`; **step 2 as for `create_invoice`** (#69): the
+Agent's prepayment invoice carries `dijbekeroSzamlaszam` (the XSD lists it beside `elolegszamla` as an independent
+element), so the live `D` of ours is linked explicitly under `auto`, `none` is `conflict{proforma_live}` — the
+server converts the order's live `D` by shared order number regardless (verified — an `ES` issued without the
+reference shows `hivdijbekszam`) — and `{number}` is verified like every found document; `get` derives `consumed`
+from the `ES`. `create_final` — no exclusivity row of
 its own (a live `SZ` cannot coexist with the live `ES` it requires); `ctx.run(query "…:prepayment")` must be a live
 `ES` (7 → `conflict{prepayment_missing}`, reversed → `conflict{prepayment_reversed}`, fails validation →
 `conflict{external_id_collision}`); passes `elolegSzamlaszam`; the server enforces one final per prepayment (73 →
-`rejected`); the server does not net the prepayment into the final's totals.
+`rejected`); the server does not net the prepayment into the final's totals — the caller's document deducts it as a
+negative line (behaviour note C6-2); `proforma` option not applicable (anything but `auto` → `invalid_input`): the
+Agent's final invoice can carry `dijbekeroSzamlaszam` too, but the order's `D` was consumed by the `ES` and
+`create_proforma` is refused once the `ES` is live, so there is nothing for the final to link.
 `correct_invoice` — `ctx.run(verify invoice_number)` under the read policy: 7 → `TerminalError{not_found}`, reversed → `conflict{base_reversed}`,
 `rendelesszam ≠ key` → `conflict{not_managed}`, `teszt` / supplier pin mismatch → `TerminalError{account_mismatch}`; ext id `…:corrective:{correction_id}`; the same lookup and create
 steps with the corrective exemption (verified): no order-number hint — the live base invoice under the order is
@@ -848,8 +854,10 @@ functions they are extracted into.
   create mock `expect(0)`, another order's proforma and one carrying no order number → `conflict{not_managed}`
   naming it with nothing sent, this order's → `issued` with `dijbekeroSzamlaszam` on the wire; `get` shape; a
   collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
-  `expect(0)` and the slot absent in `get`; `create_prepayment` refusing `options.proforma` and issuing without a
-  proforma lookup; `create_proforma` on an order whose own invoice, then whose own prepayment invoice, is live under
+  `expect(0)` and the slot absent in `get`; `create_prepayment` taking `options.proforma` as `create_invoice` does
+  (`none` beside a live `D` of ours → `conflict{proforma_live}` after `proforma-link` with nothing sent, `auto` →
+  `issued` with `dijbekeroSzamlaszam` before `elolegszamla` on the wire) while `create_final` and `create_proforma`
+  refuse it 400 `invalid_input` before any call; `create_proforma` on an order whose own invoice, then whose own prepayment invoice, is live under
   `…:invoice` / `…:prepayment` → `conflict{order_invoiced, existing_number}`, and on an order whose live invoice is
   under none of our ids → `conflict{foreign}`, the create mock `expect(0)` in every case; a live `VS` under `…:final`
   beside a reversed `ES` (its `SS` the newest document under the order) → `create_invoice` and `create_prepayment`,

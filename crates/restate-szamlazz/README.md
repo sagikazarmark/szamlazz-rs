@@ -518,7 +518,10 @@ cancellation of the invocation is never swallowed.
   `telj`-less document of another order → `conflict{not_managed}`, a `telj`-less proforma → `rejected{not_stornoable}`
   and a `telj`-less reversed invoice → `reversed` with its storno number — a storno whose first reply is lost
   re-executed with a byte-identical body under one `storno-{number}` entry, `reissue` on live → `conflict{live}`, an
-  external reversal, proforma auto-link and `consumed` in `get`, `options.proforma: {number}` checked like every
+  external reversal, proforma auto-link and `consumed` in `get`, `options.proforma` on `create_prepayment` exactly as
+  on `create_invoice` (`none` beside a live proforma → `conflict{proforma_live}` after the `proforma-link` read with
+  nothing sent; `auto` → `issued` with `dijbekeroSzamlaszam` before `elolegszamla` on the wire; `create_final` and
+  `create_proforma` refusing the option 400 `invalid_input` before any call), `options.proforma: {number}` checked like every
   found document (a proforma of this order with the wrong `teszt` → `account_mismatch` after the verify alone with
   the create mock `expect(0)`, another order's or an order-less proforma → `conflict{not_managed}` naming it, this
   order's → `issued` with `dijbekeroSzamlaszam` on the wire), a create with a misspelt `options.reissue` answered

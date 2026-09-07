@@ -38,7 +38,8 @@ _Avoid_: sales/purchase invoice, AR/AP, inbound/outbound
 A payment request that is not yet an invoice. Created via the invoice operation with a flag; deletable (real invoices are not — they can only be reversed).
 
 **Prepayment invoice (előlegszámla)** / **Final invoice (végszámla)**:
-Advance invoice and the invoice that settles it. Both are invoice-operation flags.
+Advance invoice and the invoice that settles it. Both are invoice-operation flags. Like the plain invoice, either may name the proforma it converts (`dijbekeroSzamlaszam`; `InvoiceKind::Prepayment { proforma_number }`, `InvoiceKind::Final { prepayment_number, proforma_number }` — the XSD lists the element independently of the kind flags, #69), and the worker's `create_prepayment` takes `options.proforma` exactly as `create_invoice` does (`create_final` does not: the order's proforma was consumed by the prepayment invoice). szamlazz.hu links the prepayment invoice to the final (`elolegSzamlaszam` or shared order number) but does **not** net it into the final's totals: the final invoice lists the full performance and deducts the prepayment as a negative line at the same VAT rate, supplied by the caller (behaviour note C6-2).
+_Avoid_: a final invoice "netted by the server", a prepayment invoice as unable to carry the proforma reference (the pre-#69 shape)
 
 **Corrective invoice (helyesbítő számla)**:
 An invoice that corrects a previously issued one, referencing its number.
