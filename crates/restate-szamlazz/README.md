@@ -138,7 +138,8 @@ What it relies on:
   1. One szamlazz.hu account is reachable under exactly one scope value; unscoped counts as a value; no fan-in
      (two scopes reaching one account would split an order's per-key lock across two Virtual Objects). The
      static resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape is
-     served by scope only and is checked at load time (unique `(endpoint, agent_key)` pairs, unique ids).
+     served by scope only and is checked at load time (unique `(endpoint, agent_key)` pairs — the endpoint compared
+     normalised, `Endpoint::normalized`, so two spellings of one server are one — and unique ids).
   2. The scope → account mapping is append-only: moving traffic to another account means a new scope, never
      re-pointing an existing one. Appending a scope cannot create fan-in; any change that could put one account
      under two identities at once (the single → multi flag day above all) is a drain–switch–resume.
