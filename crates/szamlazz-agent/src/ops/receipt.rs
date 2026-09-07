@@ -12,6 +12,7 @@ use crate::ops::invoice::ExchangeRate;
 use crate::types::{Currency, PaymentMethod, Pdf, ReceiptNumber, VatRate};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
+use crate::xml::totals::{AfakulcsosszXml, OsszegekXml};
 
 /// The PDF template a receipt is rendered with (`pdfSablon`).
 ///
@@ -915,13 +916,6 @@ impl From<KifizetesXml> for ReceiptPayment {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct OsszegekXml {
-    #[serde(default)]
-    afakulcsossz: Vec<AfakulcsosszXml>,
-    totalossz: TotalosszXml,
-}
-
 impl From<OsszegekXml> for ReceiptTotals {
     fn from(osszegek: OsszegekXml) -> Self {
         Self {
@@ -935,19 +929,6 @@ impl From<OsszegekXml> for ReceiptTotals {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct AfakulcsosszXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    afatipus: Option<String>,
-    afakulcs: String,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    netto: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    afa: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    brutto: Decimal,
-}
-
 impl From<AfakulcsosszXml> for VatRateTotal {
     fn from(ossz: AfakulcsosszXml) -> Self {
         Self {
@@ -958,16 +939,6 @@ impl From<AfakulcsosszXml> for VatRateTotal {
             gross: ossz.brutto,
         }
     }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TotalosszXml {
-    #[serde(deserialize_with = "xml::de::from_text")]
-    netto: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    afa: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    brutto: Decimal,
 }
 
 #[cfg(test)]
@@ -1246,6 +1217,46 @@ mod tests {
         assert_eq!(receipt.totals.by_rate[0].vat_rate(), VatRate::Akk);
         assert_eq!(receipt.totals.total.gross, dec!(254));
         assert!(result.pdf.is_none());
+    }
+
+    /// The totals block's lenient forms: an empty `afatipus` is no VAT type,
+    /// and an `osszegek` carrying no `afakulcsossz` at all is a receipt with
+    /// no per-rate subtotals — the grand total stands on its own.
+    #[test]
+    fn parses_totals_without_vat_type_or_rate_subtotals() {
+        let receipt_with_subtotals = |subtotals: &str| {
+            let body = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <xmlnyugtavalasz xmlns=\"http://www.szamlazz.hu/xmlnyugtavalasz\"><sikeres>true</sikeres>\
+                 <nyugta><alap><id>1</id><nyugtaszam>NYGT-2026-1</nyugtaszam><tipus>NY</tipus>\
+                 <stornozott>false</stornozott><kelt>2026-07-04</kelt><fizmod>készpénz</fizmod>\
+                 <penznem>HUF</penznem><teszt>false</teszt></alap><tetelek></tetelek>\
+                 <osszegek>{subtotals}\
+                 <totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>\
+                 </nyugta></xmlnyugtavalasz>"
+            );
+            let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+            query_sample().parse(&response).expect("success").receipt
+        };
+
+        let receipt = receipt_with_subtotals(
+            "<afakulcsossz><afatipus></afatipus><afakulcs>27</afakulcs>\
+             <netto>1000</netto><afa>270</afa><brutto>1270</brutto></afakulcsossz>",
+        );
+        assert_eq!(receipt.totals.by_rate.len(), 1);
+        assert_eq!(receipt.totals.by_rate[0].vat_type, None);
+        assert_eq!(receipt.totals.by_rate[0].vat_code, "27");
+        assert_eq!(receipt.totals.by_rate[0].vat_rate(), VatRate::percent(27));
+        assert_eq!(receipt.totals.by_rate[0].net, dec!(1000));
+        assert_eq!(receipt.totals.by_rate[0].vat, dec!(270));
+        assert_eq!(receipt.totals.by_rate[0].gross, dec!(1270));
+        assert_eq!(receipt.totals.total.net, dec!(1000));
+        assert_eq!(receipt.totals.total.vat, dec!(270));
+        assert_eq!(receipt.totals.total.gross, dec!(1270));
+
+        let receipt = receipt_with_subtotals("");
+        assert!(receipt.totals.by_rate.is_empty());
+        assert_eq!(receipt.totals.total.gross, dec!(1270));
     }
 
     #[test]
