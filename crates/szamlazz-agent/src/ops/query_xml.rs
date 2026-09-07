@@ -119,14 +119,23 @@ pub struct Supplier {
 }
 
 /// The documented integer value of `<eszamla>` in queried invoice XML.
+///
+/// A code, not a flag: the create and storno requests take a boolean
+/// `eszamla`, the queried document reports one of these integers. The
+/// mapping is szamlazz.hu's own annotation ("0: not an invoice, 1: paper
+/// invoice, 2: e-invoice, 3: e-invoice") and was confirmed against a test
+/// account: an invoice created with `<eszamla>true</eszamla>` is queried back
+/// as `3`, one created with `false` as `1`; `2` was not observed there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvoiceAppearance {
     /// `0`: the document is not an invoice, for example a proforma.
     NotInvoice,
-    /// `1`: paper invoice.
+    /// `1`: paper invoice — what a create with `eszamla` `false` (the
+    /// default) issues.
     Paper,
-    /// `2` or `3`: e-invoice, retaining the exact code.
+    /// `2` or `3`: e-invoice, retaining the exact code. A create with
+    /// `eszamla` `true` was observed to issue `3`.
     Electronic(i32),
     /// Any future integer code.
     Unknown(i32),

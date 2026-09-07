@@ -55,7 +55,10 @@ Send the original's `telj` explicitly, always, and do not let the caller choose 
   express; omitting the element would act on an inconclusive check, which the design forbids. This differs
   from `eszamla`, which is lifted from the verified document with the account default as fallback: `eszamla`
   is an open code set for which the account's own default is a legitimate choice, `telj` is a fiscal fact of
-  the document for which no default can be right. The fault comes *after* the known answers — an already
+  the document for which no default can be right. (The two are alike in one respect: szamlazz.hu enforces
+  neither — a storno with the wrong `teljesitesDatum` and one in the wrong form are both accepted silently,
+  #48 and #73 — so in both the worker, not the server, is the guard.) The fault comes *after* the known
+  answers — an already
   reversed or not-stornoable document without a `telj` still gets `reversed` or `rejected{not_stornoable}`
   without sending.
 - **No post-storno read.** The storno document is immutable (the vendor's remedy for a wrong storno date is a
@@ -90,8 +93,10 @@ rebuilds the same request and sends byte-identical bytes; nothing new is journal
   proforma or delivery note reaching it would be `unavailable` rather than `rejected{not_stornoable}`.
   Accepted — twice theoretical (fact 5) — and noted; aligning the two handlers' pre-checks is a separate
   change if wanted.
-- The explicit date is verified on the test account only (`eszamla=1`, `teszt=true`); storno dates are
-  account-sensitive (`keltDatum` ≠ today is rejected with 352 there). The go-live checklist gains a step:
+- The explicit date is verified on the test account only (`teszt=true`; paper stornos in P48, and the two
+  e-invoice stornos of P73 — `eszamla=1` in a queried document is *paper*, settled by #73); storno dates are
+  account-sensitive (`keltDatum` ≠ today is rejected with 352 there — observed on a paper storno, so not an
+  e-invoice rule). The go-live checklist gains a step:
   storno a dated invoice on the target account, query the storno, assert its `telj` equals the original's.
 - The test fixtures' documents carry a `telj`, so every verify-based test exercises the happy path; the
   fault path is a fixture without one.

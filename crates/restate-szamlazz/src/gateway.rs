@@ -415,6 +415,14 @@ pub trait InvoiceDocumentExt {
 
     /// Whether it is an e-invoice; `None` for non-invoices (proformas) and
     /// unknown `eszamla` codes, where the account default applies.
+    ///
+    /// What the storno handlers send as the storno's `eszamla`. szamlazz.hu
+    /// does not require a storno's form to match its original's — a mismatch
+    /// is accepted silently and the storno document takes the request's flag
+    /// (P73) — so this derivation, not the server, is what keeps a reversal
+    /// in its original's form. `1` is paper and `2`/`3` are e-invoice codes,
+    /// as the vendor annotation says and the test account confirmed (`3` for
+    /// an invoice created with `eszamla=true`).
     fn e_invoice(&self) -> Option<bool>;
 
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.

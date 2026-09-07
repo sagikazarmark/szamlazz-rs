@@ -616,6 +616,10 @@ pub struct CreateInvoice {
     /// The document kind to issue.
     pub kind: InvoiceKind,
     /// Issue an e-invoice (`eszamla`); requires the subscription feature.
+    ///
+    /// The issued document reports the result as its queried
+    /// [`InvoiceAppearance`](crate::ops::query_xml::InvoiceAppearance): `1`
+    /// (paper) for `false`, an e-invoice code (`3` observed) for `true`.
     #[doc(alias = "e-számla")]
     #[serde(default)]
     pub e_invoice: bool,

@@ -19,23 +19,30 @@ use jiff::civil::Date;
 use rust_decimal::dec;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
+use szamlazz_agent::ops::query_pdf::InvoiceSelector;
+use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
 use szamlazz_agent::{
-    Client, Credentials, Currency, Language, LineItem, PaymentMethod, Rounding, VatRate,
+    Client, Credentials, Currency, InvoiceNumber, Language, LineItem, PaymentMethod, Rounding,
+    VatRate,
 };
 
+/// A client for the test-mode account `SZAMLAZZ_AGENT_KEY` names.
 fn client() -> Client {
     let key = std::env::var("SZAMLAZZ_AGENT_KEY")
         .expect("SZAMLAZZ_AGENT_KEY must point at a test-mode account");
     Client::new(Credentials::agent_key(key)).expect("client")
 }
 
+/// Today's date, for `keltDatum` and `teljesitesDatum`.
 fn today() -> Date {
     // Live tests run on real infrastructure; wall clock is fine here.
     jiff::Zoned::now().date()
 }
 
+/// A one-line HUF document of `kind` — the same buyer, dates and line item on
+/// every live test, so the documents an account accumulates are recognisable.
 fn document(kind: InvoiceKind) -> CreateInvoice {
     let mut invoice = CreateInvoice::new(
         kind,
@@ -121,4 +128,136 @@ async fn proforma_lifecycle() {
         )))
         .await
         .expect("delete proforma");
+}
+
+// ----- `eszamla` semantics (issue #73)
+
+/// A `<eszamla>` code as szamlazz.hu reports it, for the probe table.
+fn appearance_cell(document: &InvoiceDocument) -> String {
+    let appearance = document.info.e_invoice;
+    format!("{} ({appearance:?})", appearance.code())
+}
+
+/// One line of a case for an assertion message.
+fn case_label(create_e_invoice: bool, storno_e_invoice: bool) -> String {
+    format!("created eszamla={create_e_invoice}, storno eszamla={storno_e_invoice}")
+}
+
+/// The document as szamlazz.hu holds it now, fetched by number.
+async fn query_by_number(client: &Client, number: &InvoiceNumber) -> InvoiceDocument {
+    client
+        .send(&QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(
+            number.clone(),
+        )))
+        .await
+        .expect("query by number")
+}
+
+/// What `<eszamla>` means in a queried document, and whether a storno's
+/// `eszamla` must match its original's — settled live (P73 in
+/// `docs/szamlazz-hu-behaviour.md`): an invoice created with
+/// `<eszamla>true</eszamla>` and one with `false`, each queried back, then
+/// stornoed with a matching and a mismatching `eszamla` (four originals, since
+/// a repeat storno only echoes the existing storno). Asserts what was
+/// observed — the mapping the crate publishes as [`InvoiceAppearance`] (`1`
+/// paper, `2`/`3` e-invoice), and that every storno is accepted and issued in
+/// the *request's* form — and prints the four cases as a table
+/// (`--nocapture`). A create refused by the account (no e-invoice feature)
+/// fails the test with the code.
+///
+/// Every document is stornoed by the probe itself; nothing is left to clean up.
+#[tokio::test]
+#[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
+async fn eszamla_semantics() {
+    let client = client();
+    // The order numbers and external ids of a run must not repeat an earlier
+    // run's: a repeated order number would meet the duplicate-order-number
+    // check, a repeated external id would make the earlier run's documents
+    // holders of this run's ids. Whole seconds since the epoch plus the
+    // process id are unique across runs on one machine and keep the order
+    // number well inside 40 bytes.
+    let tag = format!(
+        "{}-{}",
+        jiff::Timestamp::now().as_second(),
+        std::process::id()
+    );
+
+    // (created as e-invoice?, storno as e-invoice?)
+    let cases = [(true, true), (true, false), (false, true), (false, false)];
+
+    println!("\nrun tag: {tag}");
+    println!(
+        "| Created `eszamla` | Original `<eszamla>` | Storno `eszamla` | Storno result | `SS` `<eszamla>` |"
+    );
+    println!("|---|---|---|---|---|");
+
+    for (index, (create_e_invoice, storno_e_invoice)) in cases.into_iter().enumerate() {
+        let label = case_label(create_e_invoice, storno_e_invoice);
+        let order = format!("ESZ-{tag}-{index}");
+        let mut invoice = document(InvoiceKind::invoice());
+        invoice.header.order_number = Some(order.clone());
+        invoice.external_id = Some(format!("esz-{tag}:{index}"));
+        invoice.e_invoice = create_e_invoice;
+        invoice.download_pdf = false;
+
+        let created = client
+            .send(&invoice)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: create refused: {error}"));
+        let number = created
+            .invoice_number
+            .clone()
+            .expect("issued invoice number");
+        let original = query_by_number(&client, &number).await;
+        assert_eq!(original.info.document_type, "SZ", "{label}");
+        assert_eq!(
+            original.info.order_number.as_deref(),
+            Some(order.as_str()),
+            "{label}"
+        );
+
+        let mut storno = StornoInvoice::new(number.clone());
+        storno.e_invoice = storno_e_invoice;
+        storno.fulfillment_date = original.info.fulfillment_date;
+        storno.external_id = Some(format!("esz-{tag}:{index}:storno"));
+        let reversal = client
+            .send(&storno)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: storno of {number} refused: {error}"));
+        assert!(
+            reversal.reverses(&number),
+            "{label}: storno of {number} echoed the original"
+        );
+        let storno_document = query_by_number(&client, &reversal.invoice_number).await;
+        assert_eq!(storno_document.info.document_type, "SS", "{label}");
+
+        println!(
+            "| `{create_e_invoice}` | `{number}`: {} | `{storno_e_invoice}` | `sikeres=true`, `{}` | {} |",
+            appearance_cell(&original),
+            reversal.invoice_number,
+            appearance_cell(&storno_document),
+        );
+
+        // The mapping the crate publishes: a document created as an e-invoice
+        // reports an e-invoice code, a paper one reports `1`.
+        assert_eq!(
+            original.info.e_invoice.is_e_invoice(),
+            create_e_invoice,
+            "{label}: {number} queried as {:?}",
+            original.info.e_invoice
+        );
+        if !create_e_invoice {
+            assert_eq!(original.info.e_invoice, InvoiceAppearance::Paper, "{label}");
+        }
+        // The storno takes the request's form, whatever the original's: a
+        // mismatch is neither refused nor corrected, so a caller that wants
+        // the reversal in its original's form must derive the flag itself.
+        assert_eq!(
+            storno_document.info.e_invoice.is_e_invoice(),
+            storno_e_invoice,
+            "{label}: storno {} queried as {:?}",
+            reversal.invoice_number,
+            storno_document.info.e_invoice
+        );
+    }
 }
