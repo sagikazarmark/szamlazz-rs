@@ -466,7 +466,10 @@ external id (`lookup-storno-{number}`) and a storno step (`storno-{number}`) und
 on every execution — on both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`. The storno request is a
 pure function of the verified original — its `telj` as `teljesitesDatum`, its `eszamla` (or the account default) as
 the e-invoice flag — so every execution of the step sends byte-identical bytes; a verified original without a `telj`
-is `unavailable` with nothing sent, raised after the answers that need no send. A document the verify already sees
+is `unavailable` with nothing sent, raised after the answers that need no send. Neither the date nor the form is
+enforced by szamlazz.hu — it issues the storno with whatever `teljesitesDatum` and `eszamla` the request carries — so
+the derivation from the verified original is what keeps a reversal on its original's date and in its original's form.
+A document the verify already sees
 reversed is `reversed` with a **best-effort** storno number — `Szamlazz.Order.storno_invoice` from the order-number
 hint, `Szamlazz.Agent.storno` from the by-number storno lookup (ours when we issued the storno, unknown after a
 reversal from the UI): an exhausted read reports the reversal without the number after a `warn`, while a

@@ -54,6 +54,16 @@ pub struct StornoInvoice {
     pub invoice_number: InvoiceNumber,
     /// Issue the storno invoice as an e-invoice (`eszamla`); requires the
     /// subscription feature.
+    ///
+    /// szamlazz.hu does not require it to match the reversed invoice: a paper
+    /// storno of an e-invoice and an e-invoice storno of a paper invoice are
+    /// both accepted silently, and the storno invoice takes *this* value
+    /// (observed on a test account — its queried
+    /// [`e_invoice`](crate::ops::query_xml::InvoiceInfo::e_invoice) is `3` or
+    /// `1` as sent here, whatever the original's). To reverse an invoice in
+    /// its own form, read the original's
+    /// [`InvoiceAppearance`](crate::ops::query_xml::InvoiceAppearance) first
+    /// and set this from it.
     #[doc(alias = "e-számla")]
     #[serde(default)]
     pub e_invoice: bool,
@@ -85,10 +95,10 @@ pub struct StornoInvoice {
     /// Issue date of the storno invoice (`keltDatum`). `None` lets szamlazz.hu
     /// use today.
     ///
-    /// Leave it `None`: on e-invoice accounts any `keltDatum` other than today
-    /// is rejected with
+    /// Leave it `None`: any `keltDatum` other than today is rejected with
     /// [`ErrorCode::IssueDateMustBeToday`](crate::ErrorCode::IssueDateMustBeToday)
-    /// (352).
+    /// (352). Observed on a paper storno of a paper invoice, so it is not a
+    /// rule of e-invoices only.
     #[doc(alias = "keltDatum")]
     pub issue_date: Option<Date>,
     /// Fulfillment date of the storno invoice (`teljesitesDatum`).

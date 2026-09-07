@@ -2,17 +2,24 @@
 
 What the `restate-szamlazz` design relies on that szamlazz.hu does not document, observed against the
 live Számla Agent. Every row below was observed on **one szamlazz.hu TEST account, on one day
-(2026-09-03)** — the rows marked `P48-*` on the same account on **2026-09-06** — with e-invoicing
-enabled (`<eszamla>1</eszamla>`), every document marked `<teszt>true</teszt>`, and the account toggle
-"Disable order number repetition" ON, through the `szamlazz-agent` crate. Probe ids (`A1`, `B4`, `C2-5`,
-…) refer to the review record's probe findings A–D and their raw request/response logs, which are not
-part of this repository; `P48-P0`…`P48-P7` are the storno-date probes of issue #48 (supplier id 972720,
-13 documents `CTEST-2026-82`…`91`, `D-CTEST-17`); `P60-H1`…`H5`, `P60-E1`…`E3`, `P60-V1`/`V2` are the line-item
-rounding probes of issue #60 (2026-09-06, same account: `CTEST-2026-92`…`99`, each stornoed as
-`E-CTEST-2026-1`…`8`; `CTEST-2026-92`…`97` in one run, `98`/`99` in a follow-up); `XPRB-P1`…`P6` are the
-external-id uniqueness re-check of 2026-09-06 (same account: `CTEST-2026-102`…`111`, `D-CTEST-18`; every
-invoice stornoed, the proforma deleted; a scratch harness on the `szamlazz-agent` crate, outside the
-repository). Restate runtime facts live in ADRs 0001, 0002, 0004 and 0005, not here.
+(2026-09-03)** — the rows marked `P48-*` on the same account on **2026-09-06**, `P73-*` on **2026-09-07** —
+on **paper invoices** (`<eszamla>1</eszamla>`; the account can issue e-invoices, and does so only when a
+request says `<eszamla>true</eszamla>` — see *Storno semantics*), every document marked
+`<teszt>true</teszt>`, and the account toggle "Disable order number repetition" ON, through the
+`szamlazz-agent` crate. Probe ids (`A1`, `B4`, `C2-5`, …) refer to the review record's probe findings A–D
+and their raw request/response logs, which are not part of this repository; `P48-P0`…`P48-P7` are the
+storno-date probes of issue #48 (supplier id 972720, 13 documents `CTEST-2026-82`…`91`, `D-CTEST-17`);
+`P60-H1`…`H5`, `P60-E1`…`E3`, `P60-V1`/`V2` are the line-item rounding probes of issue #60 (2026-09-06, same
+account: `CTEST-2026-92`…`99`, each stornoed as `E-CTEST-2026-1`…`8`; `CTEST-2026-92`…`97` in one run, `98`/`99`
+in a follow-up); `XPRB-P1`…`P6` are the external-id uniqueness re-check of 2026-09-06 (same account:
+`CTEST-2026-102`…`111`, `D-CTEST-18`; every invoice stornoed, the proforma deleted; a scratch harness on
+the `szamlazz-agent` crate, outside the repository); `P73-EE`, `P73-EP`, `P73-PE`, `P73-PP` are the `eszamla`
+probe of issue #73 (2026-09-07, same account; the letters are the original's and the storno request's form,
+**E**-invoice or **P**aper: `E-CTEST-2026-9` → `E-CTEST-2026-10`, `E-CTEST-2026-11` → `CTEST-2026-112`,
+`CTEST-2026-113` → `E-CTEST-2026-12`, `CTEST-2026-114` → `CTEST-2026-115`; reproduced the same day by a second run,
+`E-CTEST-2026-13`…`16` and `CTEST-2026-116`…`119`; the `eszamla_semantics` test of
+`crates/szamlazz-agent/tests/live.rs`, which runs the same four cases on demand, asserts the observed answers and
+prints them as a table). Restate runtime facts live in ADRs 0001, 0002, 0004 and 0005, not here.
 
 Treat these as facts about *that* account. Some may depend on account settings (e-invoice, cash
 accounting), and szamlazz.hu may change any of them without notice; the go-live checklist at the end
@@ -78,13 +85,15 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Storno of a **proforma** or a **delivery note** → `sikeres=true` echoing the *requested* number with **positive** totals; the document is unchanged (no `<sztornozott>`, no `SS`). | B5-storno-proforma, B5-storno-delivery-note | Success-shaped no-op. Validate: `invoice_number ≠ requested ∧ gross_total ≤ 0`, else `NotStornoable` → `rejected{not_stornoable}` (the echo keeps the requested number, so a zero-gross echo of a 0-HUF proforma is still the no-op). `tipus` is not in the storno response — confirm `SS` in a follow-up query. |
 | Storno of an **`SS`** → 14 "Sztornó és jóváíró számlát nem lehet sem sztornózni, sem jóváírni." | B5-storno-SS | Type 14 in the crate; `rejected{14}`. |
 | Storno of an invoice that **has a corrective** → 221 "Ez a számla nem sztornózható (van helyesbítő számlája)." | B7-storno-corrected-orig | The server is the guard: `rejected{221}`; type 221. |
-| Storno `keltDatum` other than today → 352 "A számla kelte csak a mai nap lehet: 2026.09.03.." | B3-storno-earlier-kelt | Never send `keltDatum` on a storno; type 352. On **create** the same value is not rejected — see the next row. |
+| Storno `keltDatum` other than today → 352 "A számla kelte csak a mai nap lehet: 2026.09.03.." The reversed invoice was a paper one (`eszamla=1`, settled as paper by P73), and that session's stornos were numbered in the paper sequence (`SS`-73 between `SZ`-72 and `SZ`-74, no `E-` prefix — see the P73 rows), so the storno request was paper too: 352 is not an e-invoice rule. | B3-storno-earlier-kelt | Never send `keltDatum` on a storno; type 352. On **create** the same value is not rejected — see the next row. |
 | Create `keltDatum` = yesterday → `sikeres=true`, but the issued invoice's `<kelt>` is **today**: the sent date is silently replaced, not rejected. | P48-P5 | 352 on create does not exist on this account; a pinned `issue_date` on a create is a request, not a guarantee (the replay row above already excludes it from the fingerprint). The `InvoiceHeader::issue_date` doc should say "replaced", not only "used when absent". |
 | Storno with `teljesitesDatum` **omitted** → the `SS` carries the **original's `telj`** (original `telj` 2026-07-15, original `kelt` and today 2026-09-06 → `SS` `telj` 2026-07-15; `SS` `kelt` today). | P48-P1, P48-P5 | The server default is what NAV requires (the storno must repeat the original's date — ADR 0007). The worker does **not** rely on it: it sends the date explicitly, so a change in the default fails loud (a rejection) rather than silent. |
 | Storno with `teljesitesDatum` **equal to the original's `telj`** → accepted silently; `SS` `telj` = that date. | P48-P2 | What `storno_invoice` and `Szamlazz.Agent.storno` send (ADR 0007). |
 | Storno with `teljesitesDatum` in **another calendar month** (today vs the original's July), or **40 days in the future** → accepted silently: HTTP 200, `sikeres=true`, no error, no warning header or body element; the `SS` carries the sent date. The szamlazz.hu UI warns on a month mismatch; the Agent API does not. | P48-P3, P48-P4 | The API is no guard against a wrong storno date — the worker is, by never taking one from the caller (ADR 0007). |
 | Repeat storno of a reversed invoice with a **different `teljesitesDatum`** and a **new `szamlaKulsoAzon`** → the B4 echo (same `SS` number and `szlahu_id`, −1270); the `SS`'s `telj` is unchanged and the new external id is not stored (query by it → 7). | P48-P6 | Consistent with B4 and A4a: the echo ignores the whole request but the number. |
 | `<telj>` was present on every queried document: `SZ`, `SS` and `D` (a proforma created with a July `telj` carried it). The response XSD has `telj` mandatory. | P48-P0…P7 | The crate parses `telj` as `Option<Date>` leniently; an absent one is szamlazz.hu breaking its schema, answered as `unavailable` by the storno handlers (ADR 0007), never defaulted. |
+| **`<eszamla>` in a queried document is the vendor annotation's code, not a flag**: an `SZ` created with `<eszamla>true</eszamla>` is queried back as **`3`** and numbered under the account's e-invoice prefix (`E-CTEST-2026-9`, `E-CTEST-2026-11`); one created with `false` is queried back as **`1`** and numbered in the paper sequence (`CTEST-2026-113`, `CTEST-2026-114`). `2` was not observed; `0` is the proforma (every `D` in A–D, P48, XPRB). So every document of the 2026-09-03/06 probes, all `eszamla=1`, was a **paper** invoice — the earlier reading of `1` as "e-invoicing enabled" was wrong. | P73-EE, P73-EP (the e-invoices); P73-PE, P73-PP (the paper ones) | `InvoiceAppearance` (`1` → `Paper`, `2`/`3` → `Electronic`) and the worker's derivation (`InvoiceDocumentExt::e_invoice`: `Paper` → `Some(false)`, `Electronic` → `Some(true)`, else `None`, which `StornoIntent::from_verified` fills with the account default) stand as published; the pre-#73 behaviour-note premise, not the crate, was the wrong side of finding A-13. The number prefix (`E-`) is the account's e-invoice prefix, a hint only. |
+| **The `SS` takes the storno request's `eszamla`, not the original's**, and a mismatch is accepted silently — all four cases `sikeres=true`, no error code, no warning, no 352 (each storno also carried `teljesitesDatum` = the original's `telj`). Matching: the e-invoice `E-CTEST-2026-9` (`3`) stornoed with `eszamla=true` → `E-CTEST-2026-10`, `<eszamla>3</eszamla>`; the paper `CTEST-2026-114` (`1`) stornoed with `false` → `CTEST-2026-115`, `1`. Mismatching: the e-invoice `E-CTEST-2026-11` (`3`) stornoed with `false` → **`CTEST-2026-112`, `1`**; the paper `CTEST-2026-113` (`1`) stornoed with `true` → **`E-CTEST-2026-12`, `3`**. | P73-EE, P73-PP (matching); P73-EP, P73-PE (mismatching) | szamlazz.hu is no guard against a storno in the wrong form — the worker is: the storno handlers lift `eszamla` from the verified original (`StornoIntent::from_verified`), never from the caller (`StornoRequest` has no such field), so a reversal is issued in its original's form; the account default applies only to a document whose code the crate does not know. The P60 stornos `E-CTEST-2026-1`…`8` of the paper `CTEST-2026-92`…`99` sit under the e-invoice prefix, which P73 shows is what `eszamla=true` produces — so those were mismatched stornos accepted the same way (a deduction from the numbering; their `<eszamla>` was not queried). |
 
 ## Proformas: conversion, auto-linking, deletion
 
@@ -154,9 +163,9 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Caveat | Why it matters |
 |---|---|
-| Everything above is one TEST account, two days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents, the 8 `P60-*` invoices with their 8 stornos, and the 6 `XPRB-*` documents with their 5 stornos). | Nothing here is a documented guarantee. |
+| Everything above is one TEST account, three days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents, the 8 `P60-*` invoices with their 8 stornos, and the 6 `XPRB-*` documents with their 5 stornos; 2026-09-07: the 4 `P73-*` invoices with their 4 stornos, twice). | Nothing here is a documented guarantee. |
 | Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | Neither is compared with anything by the worker (ADR 0006, account-pin amendment); `Szamlazz.Agent.query` projects `teszt` as `test`, which is what the go-live check reads off a known document. A live account has `teszt=false`. |
-| E-invoicing is enabled (`<eszamla>1</eszamla>` on all but `D`/`SL`). | 352 (kelt must be today) on storno may be an e-invoice rule; behavior on paper-invoice accounts is unknown. The same may hold for an explicit storno `teljesitesDatum`, accepted here (P48). |
+| Every probe document but the two P73 e-invoices is a **paper** invoice (`<eszamla>1</eszamla>` on all but `D`/`SL`); the account can issue e-invoices (`eszamla=true` → `3`) but no probe before P73 asked for one, and P73's two `eszamla=true` stornos (P73-EE, P73-PE) are the only e-invoice stornos whose request flag is on record. | 352 (kelt must be today) was observed on a paper storno, so it is not an e-invoice rule; whether an e-invoice storno has *additional* rules (55 "E-számla aláírása sikertelen" is an e-invoice-only code) is unverified beyond those two accepted stornos. The pre-#73 reading of this row — "e-invoicing is enabled (`eszamla=1`)" — was wrong; see *Storno semantics*. |
 | The test account did not produce 56 for bad addresses. | Either test accounts do not send mail or 56 is raised only on synchronous hand-off failures. |
 | Other probes were issuing concurrently, so `CTEST-2026-*` numbers are not contiguous. | Irrelevant to the facts; noted so the raw logs are not misread. |
 
@@ -185,13 +194,15 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   account-pin amendment (ADR 0006): nothing reads the value. Worth settling only if a pin on the seller
   block is ever reconsidered — and then the seller **tax number**, not this id, is the candidate.
 - 352 on **create** does not exist on this account (P48-P5: the date is silently replaced by today);
-  whether a live or non-e-invoice account rejects, replaces or *keeps* a non-today `keltDatum` is
-  unverified. Low–moderate: the service does not pin `issue_date` unless the caller supplies it, and a
-  caller that does must not read the response as confirmation of the date.
-- An explicit storno **`teljesitesDatum` on a live or non-e-invoice account** (accepted on the test
-  account, P48-P2). Moderate: `storno_invoice` and `Szamlazz.Agent.storno` send it on every storno (ADR
-  0007); a rejection would surface as `rejected{code}` with nothing issued, and would block stornos until
-  addressed — go-live step 9 is the check.
+  whether a live account rejects, replaces or *keeps* a non-today `keltDatum` is unverified — and whether
+  an **e-invoice** create does (P48-P5 was a paper create). Low–moderate: the service does not pin
+  `issue_date` unless the caller supplies it, and a caller that does must not read the response as
+  confirmation of the date.
+- An explicit storno **`teljesitesDatum` on a live account** (accepted on the test account on paper
+  stornos, P48-P2, and on the two e-invoice stornos of P73). Moderate: `storno_invoice` and
+  `Szamlazz.Agent.storno` send it on every storno (ADR 0007); a rejection would surface as
+  `rejected{code}` with nothing issued, and would block stornos until addressed — go-live step 9 is the
+  check.
 - Whether "last" in `query --order` is by id or by `kelt` (indistinguishable while kelt must be
   today). Low: the hint is secondary.
 - Server code for a sixth credit entry; credit on the `SS` itself (463 expected). Low.
@@ -233,8 +244,12 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   header form (header + body, or body-only) is likewise assumed from the documentation; the crate
   parses `<hibakod>` either way. Moderate: were a credential code ever returned *after* a document was
   issued, the fault still says "outcome unknown" and the next call's external-id query finds it.
-- **Everything on a live account** (`teszt=false`, possibly non-e-invoice): e-mail sending, 56, 352.
-  Go-live precondition — see below.
+- **Everything on a live account** (`teszt=false`): e-mail sending, 56, 352. Go-live precondition — see
+  below.
+- **`<eszamla>2`**: the vendor annotation lists it beside `3` as an e-invoice; P73 saw only `3` for an
+  invoice created with `eszamla=true`. Which documents (an `SS`? an incoming invoice? an older signing
+  scheme?) carry `2` is unknown. Low: `InvoiceAppearance::Electronic` keeps both, and the worker treats
+  both as an e-invoice.
 - **By-number operations under the wrong scope** (multi-account mode, ADR 0006): what szamlazz.hu answers
   when account A's agent key queries, credits or stornos an invoice *number* that belongs to account B —
   7 (not on this account's query surface) is expected, but a shared number space or a different code is
@@ -271,7 +286,8 @@ before starting.
 | 12 | P60-H1/E1 — one HUF line whose rounded net differs from `nettoEgysegar × mennyiseg` by 0.5 (`2 × 1234.25`, `nettoErtek=2469`); one EUR line sent via `LineItem::new` with a three-decimal net (`1 × 100.005`, `afaErtek=27.00135`, `bruttoErtek=127.00635`); query both by number | Both `sikeres=true`; the HUF line stored as sent; the EUR line stored as `netto 100.01`, `afa 27`, `brutto 127.01` with `nettoegysegar 100.005` | The 259 tolerance covers the worker's half-minor-unit discrepancy on this account (a 259 here means unit prices must be whole units); szamlazz.hu rounds each value to two decimals independently, so the worker's per-step `Rounding::minor_unit` is what keeps the stored document consistent |
 | 13 | P60-V1 — create with `<afakulcs>27.00</afakulcs>` (via `VatRate::Other("27.00")`; the crate's `Percent` renders `27`) | `sikeres=true`; the query returns `afakulcs 27.0` | `VatRate::as_wire`'s normalisation stays a nicety on this account; a rejection here means a caller sending `Other("27.00")` is `rejected` with nothing issued |
 | 14 | `D` → `ES` with the reference — create a `D` under a fresh order, then an `ES` under the same order **with** `dijbekeroSzamlaszam` = the `D` (`InvoiceKind::Prepayment { proforma_number }`); query the `ES` by number and the `D` by number | `sikeres=true`; the `ES` shows `<hivdijbekszam>` = the `D`; the `D` is 7 | What `create_prepayment` sends under `auto` for a live proforma of ours (#69) is accepted on this account; a refusal here (record the code) blocks the `D` → `ES` flow — `none` is `conflict{proforma_live}` — until the proforma is deleted first |
+| 15 | P73-EE / P73-PP — create one `SZ` with `<eszamla>true</eszamla>` and one with `false`; query both by number; storno each with `eszamla` **matching** the original's; query both `SS` by number (`eszamla_semantics` in `crates/szamlazz-agent/tests/live.rs` runs all four P73 cases — the two mismatching stornos too — and prints the table; on an account without the e-invoice feature it fails on the first create with the account's code — record it) | The e-invoice is `<eszamla>3</eszamla>` (or `2`), the paper one `1`; each `SS` carries its original's code; no 352 | `InvoiceAppearance` and the worker's storno `eszamla` derivation (`Paper` → `false`, `Electronic` → `true`) hold on this account, so a reversal is issued in its original's form; a `1` on the e-invoice or a `3` on the paper one means the code set differs here — stop and revisit the enum before any storno |
 
-Record the seller name and tax number, `teszt`, `eszamla`, the observed error headers per operation, the step-9 `telj`, the
+Record the seller name and tax number, `teszt`, the step-15 `eszamla` codes, the observed error headers per operation, the step-9 `telj`, the
 step-10/11 answers, the step-12 stored EUR values and the step-14 answer in the deployment notes; if any expectation fails, stop and
 revisit the corresponding ADR before go-live.

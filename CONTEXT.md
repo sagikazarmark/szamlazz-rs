@@ -70,6 +70,10 @@ _Avoid_: payment (overloaded — reserve for the buyer's act)
 **Response version (válaszverzió)**:
 Agent request field selecting the response body format: 1 = plain text or raw PDF bytes, 2 = structured XML with base64 PDF.
 
+**Invoice appearance (`eszamla`)**:
+Whether a document is a paper invoice or an e-invoice. A boolean on the create and storno requests (`eszamla`, default `false` = paper); an integer code in a queried document, `szamlazz_agent::ops::query_xml::InvoiceAppearance`: `0` not an invoice (a proforma), `1` paper, `2`/`3` e-invoice, anything else `Unknown` — the vendor annotation, confirmed on the test account (#73): a create with `true` is queried back as `3`, one with `false` as `1`; `2` was never observed. szamlazz.hu does **not** require a storno's `eszamla` to match its original's — a mismatch is accepted silently and the `SS` takes the *request's* flag, numbered under the account's e-invoice prefix (`E-…`) when `true` — so the worker's storno handlers lift the flag from the verified original (`InvoiceDocumentExt::e_invoice`: `Paper` → `Some(false)`, `Electronic` → `Some(true)`, else `None`, which `StornoIntent::from_verified` fills with the account's `defaults.e_invoice`), never from the caller, exactly as they lift `telj` (ADR 0007); that derivation, not the server, is what keeps a reversal in its original's form. Every document of the 2026-09-03/06 probes was paper; 352 (`keltDatum` must be today on a storno) was observed there on a paper storno, so it is not a rule of e-invoices only.
+_Avoid_: e-invoicing "enabled" as a reading of `<eszamla>1</eszamla>` (the pre-#73 behaviour-note premise; `1` is paper), `eszamla` as a flag in a queried document (it is a code), a caller-settable storno `e_invoice`
+
 **Outstanding amount (kintlévőség)**:
 The unpaid remainder of an invoice's gross total.
 

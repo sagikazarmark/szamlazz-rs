@@ -405,8 +405,12 @@ answers when one account names another's invoice number is unverified — behavi
    query's answers, nothing sent — #63); `CredentialsRejected` →
    `TerminalError{credentials_rejected}` (the request that drew the code was not acted on; the outcome is not known).
 
-`e_invoice` for the storno: the verified document's `eszamla` when known, else the account default — an open code set
-for which the account's own default is a legitimate choice. `fulfillment_date` has no such fallback: it is a fiscal
+`e_invoice` for the storno: the verified document's `eszamla` when known (`1` paper → `false`, `2`/`3` e-invoice →
+`true` — the vendor annotation, confirmed on the test account, #73), else the account default — an open code set
+for which the account's own default is a legitimate choice. The derivation is the only guard: szamlazz.hu does not
+require a storno's `eszamla` to match its original's — a mismatch is accepted silently and the storno document takes
+the *request's* flag (P73) — so a caller-supplied or default flag would put a paper storno on an e-invoice without a
+word from the server. `fulfillment_date` has no such fallback: it is a fiscal
 fact of the document (ADR 0007). No post-storno read verifies the `SS`'s `telj` (the storno document is immutable and
 cannot be stornoed, so a mismatch found afterwards is un-actionable); the go-live checklist verifies it once per
 account.

@@ -1175,10 +1175,11 @@ fn the_order_key_must_arrive_trimmed() {
 
 /// The storno intent both storno handlers build from the verified original
 /// (design §6 step 3, ADR 0007): the storno repeats the original's `telj`,
-/// lifts `eszamla` from the document with the account default as fallback,
-/// and an original szamlazz.hu returned without a `telj` — its schema has
-/// the element mandatory — is the `unavailable` fault naming the invoice,
-/// never a send without the date or with a default.
+/// lifts `eszamla` from the document (the appearance cases are
+/// [`the_storno_intent_lifts_eszamla_from_the_original_not_the_default`]),
+/// and an original szamlazz.hu returned without a `telj` — its schema has the
+/// element mandatory — is the `unavailable` fault naming the invoice, never
+/// a send without the date or with a default.
 #[test]
 fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     use restate_sdk::errors::TerminalError;
@@ -1206,36 +1207,6 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     assert_eq!(intent.storno_id, storno_id());
     assert_eq!(intent.comment.as_deref(), Some("wrong buyer"));
     assert!(intent.e_invoice, "lifted from the document");
-
-    // `eszamla = 1` is paper; an appearance the crate does not know (`0`,
-    // what a proforma carries) falls back to the account default.
-    let paper = StornoIntent::from_verified(
-        &Doc {
-            eszamla: Some(1),
-            ..Doc::default()
-        }
-        .parse(),
-        &account,
-        "SZ-1".to_owned(),
-        storno_id(),
-        None,
-    )
-    .expect("an intent");
-    assert!(!paper.e_invoice);
-    account.defaults.e_invoice = true;
-    let unknown = StornoIntent::from_verified(
-        &Doc {
-            eszamla: Some(0),
-            ..Doc::default()
-        }
-        .parse(),
-        &account,
-        "SZ-1".to_owned(),
-        storno_id(),
-        None,
-    )
-    .expect("an intent");
-    assert!(unknown.e_invoice, "the account default");
 
     // `telj` empty (parsed as absent): the fault, 503 `unavailable`, naming
     // the invoice; `.about(..)` attaches the storno identity as every fault.
@@ -1274,4 +1245,52 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     assert_eq!(body["order"], "ORD-1");
     assert_eq!(body["kind"], "invoice");
     assert_eq!(body["external_id"], "acct:ORD-1:storno:SZ-1");
+}
+
+/// The storno's `eszamla` is the verified original's appearance, and the
+/// account default only where the code is not an invoice appearance
+/// (design §6 step 3). szamlazz.hu does not require a storno's form to match
+/// its original's — a mismatch is accepted silently and the storno document
+/// takes the *request's* flag (P73) — so the intent, not the server, keeps a
+/// reversal in its original's form: `1` (paper) is `false` under an e-invoice
+/// default, `3` (the code szamlazz.hu reports for an invoice created with
+/// `eszamla=true`) and `2` are `true` under a paper default, and `0` (a
+/// proforma) is whatever the account default says.
+#[test]
+fn the_storno_intent_lifts_eszamla_from_the_original_not_the_default() {
+    use super::support::StornoIntent;
+    use crate::account::Account;
+    use crate::identity::ExternalId;
+
+    let mut account = Account::new("acct", "acct");
+    let intent = |eszamla: i32, account: &Account| {
+        StornoIntent::from_verified(
+            &Doc {
+                eszamla: Some(eszamla),
+                ..Doc::default()
+            }
+            .parse(),
+            account,
+            "SZ-1".to_owned(),
+            ExternalId::new("acct:ORD-1:storno:SZ-1"),
+            None,
+        )
+        .expect("an intent")
+        .e_invoice
+    };
+
+    account.defaults.e_invoice = true;
+    assert!(!intent(1, &account), "paper, whatever the account default");
+    assert!(intent(0, &account), "not an invoice: the account default");
+
+    account.defaults.e_invoice = false;
+    assert!(
+        intent(3, &account),
+        "e-invoice, whatever the account default"
+    );
+    assert!(
+        intent(2, &account),
+        "e-invoice, whatever the account default"
+    );
+    assert!(!intent(0, &account), "not an invoice: the account default");
 }

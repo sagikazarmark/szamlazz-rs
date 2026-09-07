@@ -75,8 +75,9 @@ pub(crate) struct Doc<'a> {
     pub(crate) referenced_invoice: Option<&'a str>,
     /// `hivdijbekszam` — the proforma an invoice or prepayment consumed.
     pub(crate) referenced_proforma: Option<&'a str>,
-    /// `eszamla`; `None` follows `tipus` as szamlazz.hu does — `0` on a
-    /// proforma, `2` (e-invoice) on anything else.
+    /// `eszamla`; `None` follows `tipus` — `0` on a proforma, `2` (an
+    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
+    /// invoice and `3` for one created with `eszamla=true` (P73).
     pub(crate) eszamla: Option<i32>,
     /// `kelt`; `None` renders no element.
     pub(crate) issue_date: Option<Date>,
@@ -366,8 +367,8 @@ mod tests {
         );
     }
 
-    /// `eszamla` follows `tipus` as on szamlazz.hu — `0` on a proforma, `2`
-    /// (e-invoice) on anything else — unless a test sets the code itself.
+    /// `eszamla` follows `tipus` — `0` on a proforma, `2` (an e-invoice code)
+    /// on anything else — unless a test sets the code itself.
     #[test]
     fn eszamla_follows_the_kind_unless_set() {
         assert_eq!(Doc::new("D-1", "D").parse().info.e_invoice.code(), 0);

@@ -143,7 +143,8 @@ pub enum ErrorCode {
     DuplicateReceiptCallId,
     /// 352 (observed) — the issue date (`keltDatum`) may only be today:
     /// `A számla kelte csak a mai nap lehet: ….` Observed on a storno request
-    /// carrying an earlier `keltDatum` on an e-invoice account; omit
+    /// carrying an earlier `keltDatum`, reversing a paper invoice with a paper
+    /// storno — so not a rule of e-invoices only; omit
     /// [`StornoInvoice::issue_date`](crate::ops::storno::StornoInvoice::issue_date)
     /// to let the server date the storno invoice.
     IssueDateMustBeToday,

@@ -117,6 +117,10 @@ struct Doc<'a> {
     external_id: Option<&'a str>,
     /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
     fulfillment_date: Option<Date>,
+    /// `eszamla`; `None` follows `tipus` — `0` on a proforma, `2` (an
+    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
+    /// invoice and `3` for one created with `eszamla=true` (P73).
+    eszamla: Option<i32>,
 }
 
 impl<'a> Doc<'a> {
@@ -142,6 +146,7 @@ impl<'a> Doc<'a> {
             supplier_id: SUPPLIER,
             external_id: None,
             fulfillment_date: Some(ORIGINAL_TELJ),
+            eszamla: None,
         }
     }
 
@@ -149,7 +154,9 @@ impl<'a> Doc<'a> {
         let opt = |tag: &str, value: Option<&str>| {
             value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
         };
-        let eszamla = if self.tipus == "D" { 0 } else { 2 };
+        let eszamla = self
+            .eszamla
+            .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
         let telj = self.fulfillment_date.map(|date| date.to_string());
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2090,6 +2097,7 @@ async fn e2e_order_protocol() {
     every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(&h).await;
     agent_query_taxpayer_runs_on_the_scoped_account(&h).await;
     agent_storno_repeats_the_originals_fulfillment_date_or_refuses(&h).await;
+    storno_is_issued_in_the_originals_form_not_the_accounts_default(&h).await;
     account_change_between_executions_does_not_reach_the_invocation(&h).await;
     credential_rotation_between_executions_is_picked_up(&h).await;
     no_agent_key_in_any_journal_of_the_run(&h).await;
@@ -2596,6 +2604,11 @@ async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harness) {
     );
     assert!(stornos[0].contains(&original_telj_tag()));
     assert!(!stornos[0].contains("<keltDatum>"));
+    assert!(
+        stornos[0].contains("<eszamla>true</eszamla>"),
+        "an e-invoice original (eszamla 2) is reversed as an e-invoice, whatever the account default (paper): {}",
+        stornos[0]
+    );
     let runs = h.runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "storno-SZ-4E").count(),
@@ -5777,6 +5790,105 @@ async fn agent_storno_repeats_the_originals_fulfillment_date_or_refuses(h: &Harn
     assert_eq!(h.requests_seen().await, 2, "the verify and the lookup");
     eprintln!(
         "(xviii-e) Szamlazz.Agent.storno: teljesitesDatum on the wire; telj-less → unavailable without an order identity, after managed_by_order / reversed (storno number from the by-number lookup): pass"
+    );
+}
+
+/// (xviii-f) The storno's `eszamla` is the verified original's appearance,
+/// not the account default — on both storno handlers. szamlazz.hu accepts a
+/// mismatch silently and issues the storno in the *request's* form (P73), so
+/// the derivation is the only thing keeping a reversal in its original's
+/// form. `acme` is switched to issuing e-invoices by default; a **paper**
+/// original (`<eszamla>1</eszamla>`) is still reversed with
+/// `<eszamla>false</eszamla>` by `Szamlazz.Order.storno_invoice`, and — the
+/// default switched back to paper — an **e-invoice** original (`3`, the code
+/// szamlazz.hu was observed to report) is reversed with
+/// `<eszamla>true</eszamla>` by `Szamlazz.Agent.storno`.
+async fn storno_is_issued_in_the_originals_form_not_the_accounts_default(h: &Harness) {
+    // A paper original under an account that defaults to e-invoices.
+    h.reset().await;
+    h.multi()
+        .update("acme", |account| account.defaults.e_invoice = true);
+    h.holds(&Doc {
+        eszamla: Some(1),
+        ..Doc::new("SZ-73", "SZ", "E2E-73")
+    })
+    .await;
+    external_id_query("acct:E2E-73:storno:SZ-73")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno_repeating_telj()
+        .and(body_string_contains("<eszamla>false</eszamla>"))
+        .respond_with(created("SS-73", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno()
+        .and(body_string_contains("<eszamla>true</eszamla>"))
+        .respond_with(created("SS-X", "-1000", "-1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_scoped(
+            "acme",
+            "E2E-73",
+            "storno_invoice",
+            &storno_of("SZ-73"),
+            "e2e-73-k1",
+        )
+        .await;
+    h.multi()
+        .update("acme", |account| account.defaults.e_invoice = false);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-73", "{}", reply.body);
+    let stornos = h.storno_bodies().await;
+    assert_eq!(stornos.len(), 1, "{stornos:?}");
+    assert!(
+        stornos[0].contains("<eszamla>false</eszamla>"),
+        "a paper original is reversed on paper under an e-invoice default: {}",
+        stornos[0]
+    );
+
+    // An e-invoice original (`3`) under the paper default, by number.
+    h.reset().await;
+    h.holds(&Doc {
+        eszamla: Some(3),
+        ..Doc::unmanaged("SZ-74", "SZ")
+    })
+    .await;
+    external_id_query("acct:by-number:SZ-74:storno")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    storno_repeating_telj()
+        .and(body_string_contains("<eszamla>true</eszamla>"))
+        .respond_with(created("SS-74", "-1000", "-1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    storno()
+        .and(body_string_contains("<eszamla>false</eszamla>"))
+        .respond_with(created("SS-X", "-1000", "-1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-74"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
+    assert_eq!(reply.body["storno_number"], "SS-74", "{}", reply.body);
+    let stornos = h.storno_bodies().await;
+    assert_eq!(stornos.len(), 1, "{stornos:?}");
+    assert!(
+        stornos[0].contains("<eszamla>true</eszamla>"),
+        "an e-invoice original is reversed as an e-invoice under a paper default: {}",
+        stornos[0]
+    );
+    eprintln!(
+        "(xviii-f) storno eszamla is the verified original's (1 → false under an e-invoice default; 3 → true under a paper default), on both handlers: pass"
     );
 }
 

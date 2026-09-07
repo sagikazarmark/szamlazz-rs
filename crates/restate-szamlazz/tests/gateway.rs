@@ -91,6 +91,10 @@ struct Doc<'a> {
     payments: &'a [&'a str],
     /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
     fulfillment_date: Option<Date>,
+    /// `eszamla`; `None` follows `tipus` — `0` on a proforma, `2` (an
+    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
+    /// invoice and `3` for one created with `eszamla=true` (P73).
+    eszamla: Option<i32>,
 }
 
 impl<'a> Doc<'a> {
@@ -106,6 +110,7 @@ impl<'a> Doc<'a> {
             supplier_id: SUPPLIER,
             payments: &[],
             fulfillment_date: Some(ORIGINAL_TELJ),
+            eszamla: None,
         }
     }
 
@@ -118,7 +123,9 @@ impl<'a> Doc<'a> {
     }
 
     fn xml(&self) -> String {
-        let eszamla = if self.tipus == "D" { 0 } else { 2 };
+        let eszamla = self
+            .eszamla
+            .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
         let opt = |tag: &str, value: Option<&str>| {
             value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
         };
@@ -2219,6 +2226,71 @@ async fn storno_reversed_is_validated() {
         "the storno repeats the original's fulfillment date (ADR 0007): {body}"
     );
     assert!(!body.contains("<keltDatum>"), "352 otherwise");
+}
+
+/// A storno of an e-invoice — `<eszamla>2</eszamla>` or `3` in the verified
+/// original — goes out with `<eszamla>true</eszamla>`, one of a paper invoice
+/// (`1`) with `false`: `Gateway::verify` reads the code, `e_invoice()` turns
+/// it into the flag and `Gateway::storno` puts it on the wire unchanged. The
+/// gateway's half of the derivation; `StornoIntent::from_verified` (the
+/// handlers' half, with the account default for a code that is not an
+/// invoice appearance) is unit-tested beside it. szamlazz.hu accepts a
+/// mismatch silently and issues the storno in the *request's* form (P73), so
+/// nothing downstream corrects a wrong flag.
+#[tokio::test]
+async fn storno_carries_the_verified_originals_appearance() {
+    for (code, expected) in [(2, true), (3, true), (1, false)] {
+        let h = Harness::start().await;
+        let storno_id = storno_id();
+        number_query("SZ-1")
+            .respond_with(
+                Doc {
+                    eszamla: Some(code),
+                    ..Doc::new("SZ-1", "SZ")
+                }
+                .response(),
+            )
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        external_id_query(storno_id.as_str())
+            .respond_with(not_found())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(created("SS-1", "-1000", "-1270"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        let original = match h.gateway.verify("SZ-1").await {
+            Ok(QueryOutcome::Found(document)) => document,
+            other => panic!("eszamla {code}: expected Found, got {other:?}"),
+        };
+        let e_invoice = original
+            .e_invoice()
+            .unwrap_or_else(|| panic!("eszamla {code} is an invoice appearance"));
+        assert_eq!(e_invoice, expected, "eszamla {code}");
+
+        let request = StornoStepRequest {
+            e_invoice,
+            ..storno_request(&storno_id)
+        };
+        assert!(
+            matches!(
+                h.gateway.storno(request).await,
+                Ok(StornoOutcome::Reversed(_))
+            ),
+            "eszamla {code}"
+        );
+        let body = &h.bodies().await[2];
+        assert!(
+            body.contains(&format!("<eszamla>{expected}</eszamla>")),
+            "eszamla {code}: the storno is issued in the original's form: {body}"
+        );
+        assert!(body.contains(&original_telj_tag()), "eszamla {code}");
+    }
 }
 
 #[tokio::test]
