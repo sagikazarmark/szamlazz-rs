@@ -297,7 +297,7 @@ impl Order {
 /// probe. Never calls into `Order`; a document that carries an order number
 /// is reported as `managed_by_order` instead, read off the verified document.
 /// Unkeyed: invocations run concurrently, so two by-number writes on one
-/// invoice are not serialised here — the caller's business (see [`Agent`]).
+/// invoice are not serialised here — the caller's (see [`Agent`]).
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the

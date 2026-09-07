@@ -123,7 +123,8 @@ impl Order {
 /// Two replacing `set_payments` (`additive: false`) race and the last send to
 /// land wins, which under reordered webhook deliveries may be the older
 /// snapshot; two `storno`s both send, and szamlazz.hu's idempotent storno
-/// answers the repeat with the existing storno number. A keyed
+/// answers the repeat with the existing storno number (verified for a
+/// sequential repeat; two sends in the same instant are unverified). A keyed
 /// `Szamlazz.Document` object per invoice number was judged over-engineering
 /// for two writes whose only hazard is a replace: the caller serialises per
 /// invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
