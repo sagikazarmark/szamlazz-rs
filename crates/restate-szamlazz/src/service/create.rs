@@ -88,8 +88,10 @@ impl Identity {
     ///
     /// # Errors
     ///
-    /// The two faults a settled step can still be: rejected credentials, and
-    /// an `Issued` without a number (a gateway bug, answered as
+    /// The faults a settled step can still be: rejected credentials; the
+    /// leading query answered with another code or `szlahu_down`
+    /// (`unavailable`, as the lookup step answers the same — nothing was
+    /// sent); and an `Issued` without a number (a gateway bug, answered as
     /// `outcome_unknown`). The caller attaches the document's identity.
     fn respond_to(
         &self,
@@ -150,6 +152,15 @@ impl Identity {
             CreateOutcome::Rejected { code, message } => self.rejected(code, message),
             CreateOutcome::CredentialsRejected { code, message } => {
                 return Err(Fault::credentials_rejected(namespace, code, message));
+            }
+            // The leading query answered with a code or `szlahu_down`: the
+            // fault the lookup step raises for the same answer, at once —
+            // nothing was sent (#63).
+            CreateOutcome::Api { code, message } => {
+                return Err(Fault::inconclusive_answer(code, message));
+            }
+            CreateOutcome::Unavailable { message } => {
+                return Err(Fault::szlahu_down_answer(message));
             }
         })
     }
@@ -906,5 +917,39 @@ mod tests {
         assert_eq!(error.code(), 503);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], TerminalCode::CredentialsRejected.as_str());
+
+        // The leading query's answers (#63): `unavailable` at once, the shape
+        // the lookup step gives the same code — the szamlazz.hu code beside
+        // it, never in `code`; `szlahu_down` has no code to carry.
+        let fault = respond(CreateOutcome::Api {
+            code: "57".to_owned(),
+            message: "Hibás XML.".to_owned(),
+        })
+        .expect_err("a fault");
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], TerminalCode::Unavailable.as_str());
+        assert_eq!(body["szamlazz_code"], "57");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("code 57"), "{message}");
+        assert!(
+            message.contains("retry with a new Idempotency-Key"),
+            "{message}"
+        );
+
+        let fault = respond(CreateOutcome::Unavailable {
+            message: "maintenance".to_owned(),
+        })
+        .expect_err("a fault");
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], TerminalCode::Unavailable.as_str());
+        assert!(body.get("szamlazz_code").is_none(), "{body}");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("szlahu_down"), "{message}");
+        assert!(message.contains("maintenance"), "{message}");
+        assert!(message.contains("nothing was sent"), "{message}");
     }
 }

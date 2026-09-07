@@ -123,8 +123,8 @@ pub enum Outcome {
     /// nothing new was issued.
     AlreadyIssued,
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
-    /// external-id re-query found our live document: an earlier attempt had
-    /// landed.
+    /// external-id re-query found our live document: an earlier execution's
+    /// send had landed.
     Reconciled,
     /// The document of this kind was reversed; nothing new was issued. Pass
     /// `reissue: true` (with a new `Idempotency-Key`) to issue a new one.

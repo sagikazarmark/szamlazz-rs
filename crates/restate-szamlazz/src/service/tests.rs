@@ -560,6 +560,7 @@ fn a_szamlazz_code_travels_in_its_own_field() {
         Fault::invalid_input("x"),
         Fault::not_found("x"),
         Fault::unavailable("x"),
+        Fault::szlahu_down_answer("x"),
         Fault::outcome_unknown("x"),
         Fault::account_mismatch("x"),
         Fault::unknown_account("x"),
@@ -572,8 +573,10 @@ fn a_szamlazz_code_travels_in_its_own_field() {
 }
 
 /// The fault a credential rejection raises names the szamlazz.hu code, tells
-/// the caller nothing was issued, and carries the document identity when one
-/// is attached.
+/// the caller the outcome is not known — never that "this attempt issued
+/// nothing", which a post-send re-query can make false and which uses a word
+/// the glossary avoids for a handler execution (#63) — and carries the
+/// document identity when one is attached.
 #[test]
 fn credentials_rejected_fault_names_the_code_and_the_document() {
     use restate_sdk::errors::TerminalError;
@@ -598,7 +601,13 @@ fn credentials_rejected_fault_names_the_code_and_the_document() {
     let message = body["message"].as_str().expect("message");
     assert!(message.contains("136"), "{message}");
     assert!(message.contains("Bejelentkezés letiltva"), "{message}");
-    assert!(message.contains("issued nothing"), "{message}");
+    assert!(message.contains("fix the account's agent key"), "{message}");
+    assert!(
+        message.contains("retry with a new Idempotency-Key"),
+        "{message}"
+    );
+    assert!(!message.contains("attempt"), "{message}");
+    assert!(!message.contains("issued nothing"), "{message}");
 }
 
 /// The agent key never reaches the operator's warning or the caller's fault
@@ -815,6 +824,63 @@ fn lookup_classifies_query_outcomes() {
     .expect_err("a fault");
     let error = restate_sdk::errors::TerminalError::from(fault);
     assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "credentials_rejected");
+}
+
+/// The settled storno step as the response (design §6 step 4), for the two
+/// answers the leading query can settle it with before anything is sent
+/// (#63): another code is `unavailable` naming it — the shape the storno
+/// lookup gives the same code — and `szlahu_down` is `unavailable` without a
+/// `szamlazz_code`. Both services share this mapping.
+#[test]
+fn a_settled_storno_step_maps_its_leading_query_answers_onto_faults() {
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::storno_response;
+    use crate::gateway::StornoOutcome;
+
+    let respond =
+        |outcome: StornoOutcome| storno_response(outcome, "SZ-1".to_owned(), &namespace());
+
+    let response = respond(StornoOutcome::AlreadyReversed {
+        storno_number: "SS-1".to_owned(),
+    })
+    .expect("data");
+    assert_eq!(response.storno_number.as_deref(), Some("SS-1"));
+
+    let fault = respond(StornoOutcome::Api {
+        code: "57".to_owned(),
+        message: "Hibás XML.".to_owned(),
+    })
+    .expect_err("a fault");
+    let error = TerminalError::from(fault);
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(body["szamlazz_code"], "57");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("code 57"), "{message}");
+
+    let fault = respond(StornoOutcome::Unavailable {
+        message: "maintenance".to_owned(),
+    })
+    .expect_err("a fault");
+    let error = TerminalError::from(fault);
+    assert_eq!(error.code(), 503);
+    let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(body.get("szamlazz_code"), None, "{body}");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("szlahu_down"), "{message}");
+    assert!(message.contains("nothing was sent"), "{message}");
+
+    let fault = respond(StornoOutcome::CredentialsRejected {
+        code: "3".to_owned(),
+        message: "login".to_owned(),
+    })
+    .expect_err("a fault");
+    let error = TerminalError::from(fault);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "credentials_rejected");
 }

@@ -91,9 +91,7 @@ impl Execution {
             })?;
 
         // Step 4: branch on data.
-        storno_response(outcome, number).map_err(|(code, message)| {
-            about(Fault::credentials_rejected(namespace, code, message)).into()
-        })
+        storno_response(outcome, number, namespace).map_err(|fault| about(fault).into())
     }
 
     /// Step 1 of the storno protocol: the document must be known, carry this

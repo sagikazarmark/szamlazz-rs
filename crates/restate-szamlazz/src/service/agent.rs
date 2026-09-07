@@ -343,9 +343,7 @@ impl Execution {
                 error.message()
             ))
         })?;
-        storno_response(outcome, number).map_err(|(code, message)| {
-            Fault::credentials_rejected(&self.config.namespace, code, message).into()
-        })
+        storno_response(outcome, number, &self.config.namespace).map_err(Into::into)
     }
 }
 

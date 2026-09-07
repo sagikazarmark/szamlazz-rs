@@ -200,7 +200,7 @@ activation details.
   passes through, the code in the fault's `szamlazz_code` field), `outcome_unknown` (500), `unavailable` (503; also
   the prologue's own faults: the resolve policy exhausted, the credential store gone or unavailable) and
   `credentials_rejected` (503: szamlazz.hu answered 3, 135, 136 or 164 — the worker's agent key is wrong, not the
-  request; the execution that raised it issued nothing).
+  request; the outcome is not known).
 - `contract::CheckAccountResponse` (`CheckedAccount`, `CredentialsCheck`): the output of
   `Szamlazz.Agent.check_account` — `scope`, `account: {id, mode, supplier_id}`, `namespace` and
   `credentials: {state: ok} | {state: rejected, code, message}`; credential acceptance is its only szamlazz.hu-verified
@@ -260,7 +260,8 @@ activation details.
   `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `probe`), each returning every expected szamlazz.hu
   outcome as data. Two `Err`s say what a run retry policy may re-execute: the read fns (`lookup`, `verify`, `query`,
   `hint`, `lookup_storno`, `probe`) return `Err(Unanswered)` when szamlazz.hu did not answer — a transport or parse
-  failure, `szlahu_down` — and `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known.
+  failure, `szlahu_down` — and `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known
+  (an answer to their leading query — another code, `szlahu_down` — is data: nothing was sent).
   It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account configuration by the services goes through `Gateway::account()`; a gateway is opened
   per handler execution by the prologue (`Gateway::open`) and never outlives it. `Szamlazz.Order` calls it inside
   `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate service calls
@@ -348,8 +349,9 @@ worker; callers authenticate to Restate ingress separately.
    `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document is
    `conflict{live}`, so the flag can never cause a duplicate.
 4. A `credentials_rejected` fault (503) means szamlazz.hu refused the worker's agent key (codes 3, 135, 136, 164)
-   on some step: the deployment is misconfigured, not the request. The execution that raised it issued nothing, but
-   an earlier execution may have landed with a lost reply, so rule 2 applies — once the key is fixed, retry with a
+   on some step: the deployment is misconfigured, not the request. The request that drew the code was not acted on,
+   but the code may have come to a re-query after a send, and an earlier execution may have landed with a lost
+   reply, so rule 2 applies — once the key is fixed, retry with a
    new key or read `get`. The worker logs every occurrence at `warn` with the namespace and the code; the key itself
    appears in neither the log nor the fault.
 5. An `unknown_account` fault (400) means the request named no account of this deployment — unscoped where
@@ -423,9 +425,13 @@ bounded by `max_duration` — and every execution is query-first: it sends only 
 **nothing**, or **exactly the document the lookup step saw reversed**; a live document an earlier execution issued
 is answered `issued` without sending, a document reversed since the lookup is answered `reversed` without sending
 (a new document needs an explicit `reissue`, [ADR 0003](../../docs/adr/0003-explicit-reissue-after-external-reversal.md)),
-and the lookup's reversed document reported live is `conflict{live}`. A lost reply is re-queried once, immediately;
+and the lookup's reversed document reported live is `conflict{live}`. An *answer* to the leading query that is
+neither 7 nor a credential code — another szamlazz.hu code, or `szlahu_down` — is settled data too, with nothing
+sent: the handler raises the same `unavailable` the lookup step raises for that code, at once, rather than spending
+the issue policy on a read (#63). A lost reply is re-queried once, immediately;
 when nothing landed the step is *unconfirmed* and
-Restate re-executes it after the delay. When the policy is exhausted (or the invocation is cancelled mid-create)
+Restate re-executes it after the delay (a re-query that fails itself leaves the step unconfirmed naming both the
+send's cause and the re-query's failure). When the policy is exhausted (or the invocation is cancelled mid-create)
 the handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next
 invocation's lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number
 answer their re-query cannot resolve is `rejected`. Storno has the same shape: a read-only lookup of the storno

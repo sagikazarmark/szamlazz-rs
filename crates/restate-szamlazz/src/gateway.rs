@@ -5,7 +5,10 @@
 //! The `Err`s are deliberate and say what a run retry policy may re-execute:
 //! the read-only steps return [`Unanswered`] when szamlazz.hu did not answer
 //! (a transport or parse failure, `szlahu_down`), and the create and storno
-//! steps return [`Unconfirmed`] when szamlazz.hu's answer is *not* known.
+//! steps return [`Unconfirmed`] when szamlazz.hu's answer is *not* known — an
+//! answer to a write step's leading query is data too ([`CreateOutcome::Api`],
+//! [`CreateOutcome::Unavailable`] and the storno twins): nothing was sent, so
+//! nothing is unconfirmed.
 //!
 //! [`Gateway`] owns the client and the [`Account`] it speaks for; it is not a
 //! second client — the Számla Agent `Client` is the transport it wraps.
@@ -265,31 +268,102 @@ pub enum CreateOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
+    /// szamlazz.hu answered the **leading** query with another code (neither
+    /// 7 nor a credential code): an answer the step cannot conclude from, so
+    /// nothing was sent. Settled data, as [`LookupOutcome::Api`] is for the
+    /// same code one step earlier — not [`Unconfirmed`], which would spend the
+    /// issue policy, sized for the post-send window, on a read and report an
+    /// answer as silence (#63). The same code on a post-send re-query is
+    /// [`Unconfirmed::ReQueryFailed`]: there a send happened.
+    Api {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
+    /// szamlazz.hu reported unavailability (`szlahu_down`) to the **leading**
+    /// query: nothing was sent. Settled data for the same reason as
+    /// [`CreateOutcome::Api`]. (The lookup step, under the read policy sized
+    /// for reads, re-executes on the same answer — [`Unanswered::Unavailable`].)
+    Unavailable {
+        /// szamlazz.hu's message.
+        message: String,
+    },
 }
 
 /// The create or storno step ended without a settled outcome: the run retry
 /// policy re-executes the step, whose leading query then finds whatever
 /// landed.
 ///
-/// Every variant follows an immediate external-id re-query that found no live
-/// document of ours (read-your-writes lag ≈ 0, so "nothing" is not lag).
+/// Reserved for exchanges whose answer is not known. An *answer* to the
+/// leading query — another code, `szlahu_down` — is settled data
+/// ([`CreateOutcome::Api`], [`CreateOutcome::Unavailable`] and the storno
+/// twins), never this. Every variant but [`Unconfirmed::Transport`] on the
+/// leading query follows an immediate external-id re-query: one that found no
+/// live document of ours (read-your-writes lag ≈ 0, so "nothing" is not lag),
+/// or one that failed itself ([`Unconfirmed::ReQueryFailed`], which names
+/// both causes).
+///
+/// The display is what the run journals as its last failure and what the
+/// `outcome_unknown` fault repeats on exhaustion: each variant names the
+/// cause it stands for.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unconfirmed {
     /// The HTTP exchange or the response parse failed — on the leading query
-    /// (nothing was sent), on the create or storno, or on the re-query itself.
+    /// (nothing was sent) or on the create or storno.
     #[error("transport failure: {0}")]
     Transport(String),
-    /// szamlazz.hu reported an open code, one that leaves the outcome open:
-    /// 1, 55, 56 without a number, a code the agent crate does not know
-    /// ([`OutcomeClass::Unknown`]), or `szlahu_down`.
-    #[error("open code {}: {message}", code.as_deref().unwrap_or("szlahu_down"))]
+    /// szamlazz.hu reported an open code to the create or storno, one that
+    /// leaves the outcome open: 1, 55, 56 without a number, or a code the
+    /// agent crate does not know ([`OutcomeClass::Unknown`]). `code` is
+    /// `None` for the one open answer that names no code — success without
+    /// a document number — which is as open as a code would be.
+    #[error("{}", open_display(code.as_deref(), message))]
     Open {
         /// The szamlazz.hu code, when one was reported.
         code: Option<String>,
         /// What was reported.
         message: String,
     },
+    /// szamlazz.hu reported unavailability (`szlahu_down`) to the create or
+    /// storno: whether it acted first is not known.
+    #[error("szamlazz.hu is unavailable (szlahu_down): {0}")]
+    Unavailable(String),
+    /// The send ended without a settled answer — `sent` says how — and the
+    /// immediate re-query that would have settled it failed itself, so
+    /// neither is known. Both are named: the re-query's failure never hides
+    /// that a send happened (#63).
+    #[error("{sent}; the re-query that would have settled it failed: {re_query}")]
+    ReQueryFailed {
+        /// How the send ended — the display of the [`Unconfirmed`] it would
+        /// have been had the re-query found nothing, or the duplicate-order-
+        /// number answer (71/152) the re-query was to resolve.
+        sent: String,
+        /// The re-query's failure: a transport failure, another code, or
+        /// `szlahu_down`.
+        re_query: String,
+    },
+}
+
+/// The display of [`Unconfirmed::Open`]: the code when one was reported,
+/// otherwise the one open answer without a code (#63).
+fn open_display(code: Option<&str>, message: &str) -> String {
+    match code {
+        Some(code) => format!("open code {code}: {message}"),
+        None => format!("open answer without a code or a document number: {message}"),
+    }
+}
+
+impl Unconfirmed {
+    /// This send-side cause, composed with the failure of the re-query that
+    /// would have settled it: [`Unconfirmed::ReQueryFailed`] naming both.
+    fn re_query_failed(self, re_query: &QueryError) -> Self {
+        Self::ReQueryFailed {
+            sent: self.to_string(),
+            re_query: re_query.to_string(),
+        }
+    }
 }
 
 /// A read-only step got no answer from szamlazz.hu: the read policy
@@ -659,6 +733,22 @@ pub enum StornoOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
+    /// szamlazz.hu answered the **leading** query with another code (neither
+    /// 7 nor a credential code): nothing was sent. Settled data, as
+    /// [`CreateOutcome::Api`] is for the create step (#63).
+    Api {
+        /// The szamlazz.hu code.
+        code: String,
+        /// The szamlazz.hu message.
+        message: String,
+    },
+    /// szamlazz.hu reported unavailability (`szlahu_down`) to the **leading**
+    /// query: nothing was sent. Settled data, as [`CreateOutcome::Unavailable`]
+    /// is for the create step (#63).
+    Unavailable {
+        /// szamlazz.hu's message.
+        message: String,
+    },
 }
 
 /// The result of a proforma deletion.
@@ -910,16 +1000,20 @@ impl Gateway {
     ///    [`CreateOutcome::LiveAgain`]; an invalid hit is
     ///    [`CreateOutcome::Collision`]; code 7 and `request.reversed` still
     ///    reversed continue; rejected credentials are
-    ///    [`CreateOutcome::CredentialsRejected`]; a failed query is
-    ///    [`Unconfirmed::Transport`] — never create when the check itself
+    ///    [`CreateOutcome::CredentialsRejected`]; another code is
+    ///    [`CreateOutcome::Api`] and `szlahu_down` [`CreateOutcome::Unavailable`]
+    ///    — answers, settled with nothing sent (#63); only a transport failure
+    ///    is [`Unconfirmed::Transport`] — never create when the check itself
     ///    failed. The rule: the step sends only when the external id holds
     ///    nothing, or exactly the document the lookup step saw reversed.
     /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
     ///    a refusal [`CreateOutcome::Rejected`], rejected credentials
-    ///    [`CreateOutcome::CredentialsRejected`]. A lost reply or an open code
-    ///    is re-queried once, immediately: what landed settles the step,
-    ///    nothing is [`Unconfirmed`]. 71/152 is re-queried the same way and
-    ///    then named through the order-number query.
+    ///    [`CreateOutcome::CredentialsRejected`]. A lost reply, an open code
+    ///    or `szlahu_down` is re-queried once, immediately: what landed
+    ///    settles the step, nothing is [`Unconfirmed`], and a re-query that
+    ///    fails itself is [`Unconfirmed::ReQueryFailed`] naming both. 71/152
+    ///    is re-queried the same way and then named through the order-number
+    ///    query.
     ///
     /// # Errors
     ///
@@ -942,9 +1036,27 @@ impl Gateway {
         &self,
         request: &CreateStepRequest<'_>,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        // Step 1: the leading query.
-        if let Some(settled) = self.settled_by_query(request).await? {
-            return Ok(settled);
+        // Step 1: the leading query. An answer settles the step — nothing
+        // has been sent; only an exchange without one is unconfirmed.
+        match self.settled_by_query(request).await {
+            Ok(Some(settled)) => return Ok(settled),
+            // Nothing under the id, or the lookup's reversed document still
+            // reversed: send. (`seen` settles 7 as `Absent`; the `NotFound`
+            // arm keeps the match exhaustive and is right if reached.)
+            Ok(None) | Err(QueryError::NotFound) => {}
+            Err(QueryError::Api { code, message }) => {
+                tracing::warn!(code = %code, "the leading query was answered with another code");
+                return Ok(CreateOutcome::Api { code, message });
+            }
+            Err(QueryError::Unavailable(message)) => {
+                tracing::warn!("the leading query was answered with szlahu_down");
+                return Ok(CreateOutcome::Unavailable { message });
+            }
+            // `settled_by_query` settles the credential codes; likewise.
+            Err(QueryError::CredentialsRejected { code, message }) => {
+                return Ok(CreateOutcome::CredentialsRejected { code, message });
+            }
+            Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
         // Step 2: create.
@@ -969,8 +1081,16 @@ impl Gateway {
                     Ok(CreateOutcome::CredentialsRejected { code, message })
                 }
                 Failure::Unknown { code, message } => {
-                    tracing::warn!(code = ?code, "open code; re-querying");
-                    self.settle_or(request, Unconfirmed::Open { code, message })
+                    tracing::warn!(code = %code, "open code; re-querying");
+                    let open = Unconfirmed::Open {
+                        code: Some(code),
+                        message,
+                    };
+                    self.settle_or(request, open).await
+                }
+                Failure::Unavailable(message) => {
+                    tracing::warn!("szlahu_down on the create; re-querying");
+                    self.settle_or(request, Unconfirmed::Unavailable(message))
                         .await
                 }
                 Failure::Transport(message) => {
@@ -987,15 +1107,17 @@ impl Gateway {
     }
 
     /// The immediate re-query after a create whose reply was lost or open:
-    /// what landed settles the step; nothing is `unconfirmed`.
+    /// what landed settles the step; nothing is `unconfirmed`, and a re-query
+    /// that fails itself is unconfirmed naming both causes.
     async fn settle_or(
         &self,
         request: &CreateStepRequest<'_>,
         unconfirmed: Unconfirmed,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        match self.settled_by_query(request).await? {
-            Some(settled) => Ok(settled),
-            None => Err(unconfirmed),
+        match self.settled_by_query(request).await {
+            Ok(Some(settled)) => Ok(settled),
+            Ok(None) => Err(unconfirmed),
+            Err(error) => Err(unconfirmed.re_query_failed(&error)),
         }
     }
 
@@ -1020,13 +1142,21 @@ impl Gateway {
         code: String,
         message: String,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        match self.settled_by_query(request).await? {
-            Some(CreateOutcome::Found(found)) => {
+        match self.settled_by_query(request).await {
+            Ok(Some(CreateOutcome::Found(found))) => {
                 tracing::info!(number = %found.number(), "reconciled after duplicate");
                 return Ok(CreateOutcome::Reconciled(found));
             }
-            Some(settled) => return Ok(settled),
-            None => {}
+            Ok(Some(settled)) => return Ok(settled),
+            Ok(None) => {}
+            // Whether the duplicate is ours is what the re-query was to
+            // settle; unconfirmed, naming the refusal it was resolving.
+            Err(error) => {
+                return Err(Unconfirmed::ReQueryFailed {
+                    sent: format!("duplicate order number {code}: {message}"),
+                    re_query: error.to_string(),
+                });
+            }
         }
 
         if request.kind == IssuedKind::Corrective {
@@ -1082,11 +1212,14 @@ impl Gateway {
     ///
     /// # Errors
     ///
-    /// [`Unconfirmed::Transport`] when the query itself failed.
+    /// The query's own failure, for the caller to place: on the leading query
+    /// an answer (another code, `szlahu_down`) is settled data and only a
+    /// transport failure is [`Unconfirmed`]; after a send every failure
+    /// leaves the step unconfirmed.
     async fn settled_by_query(
         &self,
         request: &CreateStepRequest<'_>,
-    ) -> Result<Option<CreateOutcome>, Unconfirmed> {
+    ) -> Result<Option<CreateOutcome>, QueryError> {
         match self
             .seen(request.external_id, request.order, request.kind)
             .await
@@ -1120,7 +1253,7 @@ impl Gateway {
             Err(QueryError::CredentialsRejected { code, message }) => {
                 Ok(Some(CreateOutcome::CredentialsRejected { code, message }))
             }
-            Err(error) => Err(Unconfirmed::Transport(error.to_string())),
+            Err(error) => Err(error),
         }
     }
 
@@ -1318,8 +1451,10 @@ impl Gateway {
     /// 1. Query the storno external id: an `SS` referencing the invoice is
     ///    [`StornoOutcome::AlreadyReversed`] — an earlier execution sent it;
     ///    code 7 (or another holder) continues; rejected credentials are
-    ///    [`StornoOutcome::CredentialsRejected`]; a failed query is
-    ///    [`Unconfirmed::Transport`] — never send when the check itself
+    ///    [`StornoOutcome::CredentialsRejected`]; another code is
+    ///    [`StornoOutcome::Api`] and `szlahu_down` [`StornoOutcome::Unavailable`]
+    ///    — answers, settled with nothing sent (#63); only a transport failure
+    ///    is [`Unconfirmed::Transport`] — never send when the check itself
     ///    failed.
     /// 2. Send `xmlszamlast` with the external id, comment, e-invoice flag and
     ///    `teljesitesDatum` — the verified original's `telj`, which NAV
@@ -1328,10 +1463,11 @@ impl Gateway {
     ///    [`CreatedInvoice::reverses`] is [`StornoOutcome::Reversed`], an
     ///    echo of the requested number [`StornoOutcome::NotStornoable`], a
     ///    refusal [`StornoOutcome::Rejected`], rejected credentials
-    ///    [`StornoOutcome::CredentialsRejected`]. A lost reply or an open
-    ///    code is re-queried once, immediately: a landed storno settles the
-    ///    step as [`StornoOutcome::AlreadyReversed`], nothing is
-    ///    [`Unconfirmed`].
+    ///    [`StornoOutcome::CredentialsRejected`]. A lost reply, an open code
+    ///    or `szlahu_down` is re-queried once, immediately: a landed storno
+    ///    settles the step as [`StornoOutcome::AlreadyReversed`], nothing is
+    ///    [`Unconfirmed`], and a re-query that fails itself is
+    ///    [`Unconfirmed::ReQueryFailed`] naming both.
     ///
     /// # Errors
     ///
@@ -1353,9 +1489,27 @@ impl Gateway {
         &self,
         request: StornoStepRequest<'_>,
     ) -> Result<StornoOutcome, Unconfirmed> {
-        // Step 1: the leading query.
-        if let Some(settled) = self.storno_settled_by_query(&request).await? {
-            return Ok(settled);
+        // Step 1: the leading query. An answer settles the step — nothing
+        // has been sent; only an exchange without one is unconfirmed.
+        match self.storno_settled_by_query(&request).await {
+            Ok(Some(settled)) => return Ok(settled),
+            // No storno of ours under the id: send. (`storno_seen` settles 7
+            // as `None`; the `NotFound` arm keeps the match exhaustive and is
+            // right if reached.)
+            Ok(None) | Err(QueryError::NotFound) => {}
+            Err(QueryError::Api { code, message }) => {
+                tracing::warn!(code = %code, "the leading query was answered with another code");
+                return Ok(StornoOutcome::Api { code, message });
+            }
+            Err(QueryError::Unavailable(message)) => {
+                tracing::warn!("the leading query was answered with szlahu_down");
+                return Ok(StornoOutcome::Unavailable { message });
+            }
+            // `storno_settled_by_query` settles the credential codes; likewise.
+            Err(QueryError::CredentialsRejected { code, message }) => {
+                return Ok(StornoOutcome::CredentialsRejected { code, message });
+            }
+            Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
         // Step 2: send.
@@ -1388,8 +1542,16 @@ impl Gateway {
                     Ok(StornoOutcome::CredentialsRejected { code, message })
                 }
                 Failure::Unknown { code, message } => {
-                    tracing::warn!(code = ?code, "open code; re-querying");
-                    self.storno_settle_or(&request, Unconfirmed::Open { code, message })
+                    tracing::warn!(code = %code, "open code; re-querying");
+                    let open = Unconfirmed::Open {
+                        code: Some(code),
+                        message,
+                    };
+                    self.storno_settle_or(&request, open).await
+                }
+                Failure::Unavailable(message) => {
+                    tracing::warn!("szlahu_down on the storno; re-querying");
+                    self.storno_settle_or(&request, Unconfirmed::Unavailable(message))
                         .await
                 }
                 Failure::Transport(message) => {
@@ -1402,15 +1564,17 @@ impl Gateway {
     }
 
     /// The immediate re-query after a storno whose reply was lost or open:
-    /// a landed storno settles the step; nothing is `unconfirmed`.
+    /// a landed storno settles the step; nothing is `unconfirmed`, and a
+    /// re-query that fails itself is unconfirmed naming both causes.
     async fn storno_settle_or(
         &self,
         request: &StornoStepRequest<'_>,
         unconfirmed: Unconfirmed,
     ) -> Result<StornoOutcome, Unconfirmed> {
-        match self.storno_settled_by_query(request).await? {
-            Some(settled) => Ok(settled),
-            None => Err(unconfirmed),
+        match self.storno_settled_by_query(request).await {
+            Ok(Some(settled)) => Ok(settled),
+            Ok(None) => Err(unconfirmed),
+            Err(error) => Err(unconfirmed.re_query_failed(&error)),
         }
     }
 
@@ -1421,11 +1585,14 @@ impl Gateway {
     ///
     /// # Errors
     ///
-    /// [`Unconfirmed::Transport`] when the query itself failed.
+    /// The query's own failure, for the caller to place: on the leading query
+    /// an answer (another code, `szlahu_down`) is settled data and only a
+    /// transport failure is [`Unconfirmed`]; after a send every failure
+    /// leaves the step unconfirmed.
     async fn storno_settled_by_query(
         &self,
         request: &StornoStepRequest<'_>,
-    ) -> Result<Option<StornoOutcome>, Unconfirmed> {
+    ) -> Result<Option<StornoOutcome>, QueryError> {
         match self
             .storno_seen(request.external_id, request.invoice_number)
             .await
@@ -1435,7 +1602,7 @@ impl Gateway {
             Err(QueryError::CredentialsRejected { code, message }) => {
                 Ok(Some(StornoOutcome::CredentialsRejected { code, message }))
             }
-            Err(error) => Err(Unconfirmed::Transport(error.to_string())),
+            Err(error) => Err(error),
         }
     }
 
@@ -1563,8 +1730,9 @@ impl Gateway {
 /// Whether `code` means szamlazz.hu rejected the agent credentials: 3 invalid
 /// credentials, 135 browser session active, 136 login blocked, 164 multiple
 /// accounts. szamlazz.hu answers these before it acts on the request (its
-/// documentation; unverified on the probe account), so the attempt that sees
-/// one has issued nothing — the worker's configuration is wrong, not the request.
+/// documentation; unverified on the probe account), so the request that
+/// draws one was not acted on — the worker's configuration is wrong, not the
+/// request.
 #[must_use]
 pub fn is_credentials_rejected(code: &ErrorCode) -> bool {
     matches!(
@@ -1647,12 +1815,15 @@ enum Failure {
         message: String,
     },
     /// [`OutcomeClass::Unknown`] — 1, 55, 56 without a number, a code the
-    /// agent crate does not know, or any class added to the crate later — and
-    /// `szlahu_down` (`code: None`): the outcome is open, re-query.
+    /// agent crate does not know, or any class added to the crate later: the
+    /// outcome is open, re-query.
     Unknown {
-        code: Option<String>,
+        code: String,
         message: String,
     },
+    /// `szlahu_down`: whether szamlazz.hu acted before answering is not
+    /// known, re-query.
+    Unavailable(String),
     Transport(String),
 }
 
@@ -1675,16 +1846,10 @@ fn classify_failure(error: ClientError) -> Failure {
                 // `Unknown`, and any class the agent crate adds later: a
                 // document may exist, so the step re-queries rather than
                 // claims `rejected`.
-                _ => Failure::Unknown {
-                    code: Some(code),
-                    message,
-                },
+                _ => Failure::Unknown { code, message },
             }
         }
-        ClientError::ServiceUnavailable(message) => Failure::Unknown {
-            code: None,
-            message,
-        },
+        ClientError::ServiceUnavailable(message) => Failure::Unavailable(message),
         ClientError::Request(error) => Failure::Rejected {
             code: REQUEST_CODE.to_owned(),
             message: error.to_string(),
