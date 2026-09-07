@@ -2,9 +2,9 @@
 //! endpoint and exits without listening — what a CI job or an init container
 //! runs before the real process starts.
 //!
-//! Spawns `restate-szamlazz --check-config` on the fixtures and on a broken
-//! file, with an otherwise empty environment, and asserts the exit status and
-//! what was printed.
+//! Spawns `restate-szamlazz --check-config` on the fixtures, on a file without
+//! identity keys and on a broken file, with an otherwise empty environment,
+//! and asserts the exit status and what was printed.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,20 @@ const VALID: &str = "configuration is valid; not listening (--check-config)";
 /// The line the binary logs once it listens — which `--check-config` never
 /// reaches.
 const STARTED: &str = "starting Restate szamlazz.hu endpoint";
+/// The phrase both "no identity key" lines share — the `warn` on a
+/// configuration that does not mention `identity_keys` and the `info` on
+/// `identity_keys = []` written out — and what a CI job greps for.
+const UNSIGNED: &str = "accepting unsigned requests";
+
+/// A valid single-account configuration that does not mention
+/// `identity_keys`.
+const NO_IDENTITY_KEYS: &str = r#"
+namespace = "acct"
+
+[account]
+id = "acme"
+agent_key = "k"
+"#;
 
 /// The single-account fixture — the README's example — is valid: exit 0, the
 /// start-up summary (namespace, shape, account, bound services, identity
@@ -72,8 +86,12 @@ fn a_valid_single_account_file_exits_0_and_prints_the_start_up_summary() {
     assert!(
         output
             .stdout
-            .contains("request identity verification enabled"),
+            .contains("request identity verification enabled keys=1"),
         "the fixture's identity key was accepted: {output}"
+    );
+    assert!(
+        !output.stdout.contains(UNSIGNED),
+        "with a key configured nothing warns about unsigned requests: {output}"
     );
     assert!(
         !output.stdout.contains(STARTED),
@@ -81,8 +99,93 @@ fn a_valid_single_account_file_exits_0_and_prints_the_start_up_summary() {
     );
 }
 
+/// A configuration that does not mention `identity_keys` is valid — the
+/// endpoint would start — but `--check-config` prints the start-up `warn`:
+/// the consequence, with the address the endpoint would listen on, and both
+/// remedies; a CI job greps for it.
+#[test]
+fn a_file_without_identity_keys_exits_0_and_warns_about_unsigned_requests() {
+    let file = temp_file("no-identity-keys.toml", NO_IDENTITY_KEYS);
+
+    let output = check_config(&file, &[]);
+
+    assert_eq!(output.status.code(), Some(0), "{output}");
+    assert!(output.stdout.contains(VALID), "{output}");
+    let warning = output.unsigned_line();
+    assert!(warning.contains("WARN"), "at warn level: {warning}");
+    assert!(
+        warning
+            .contains("any client reaching 0.0.0.0:9080 can invoke the services under any scope"),
+        "the warning names the consequence and the default bind address: {warning}"
+    );
+    assert!(
+        warning.contains("set `identity_keys`") && warning.contains("Request Identity"),
+        "the warning names the fix and the README section: {warning}"
+    );
+    assert!(
+        warning.contains("`identity_keys = []`"),
+        "the warning names the local-development opt-out: {warning}"
+    );
+    assert!(
+        !output
+            .stdout
+            .contains("request identity verification enabled"),
+        "{output}"
+    );
+}
+
+/// `identity_keys = []` written out is the deliberate opt-out: the same
+/// unsigned endpoint, said at `info`, so a laptop configuration does not
+/// page.
+#[test]
+fn an_explicit_empty_identity_keys_exits_0_and_says_so_without_warning() {
+    let file = temp_file(
+        "empty-identity-keys.toml",
+        r#"
+        identity_keys = []
+        namespace = "acct"
+
+        [account]
+        id = "acme"
+        agent_key = "k"
+        "#,
+    );
+
+    let output = check_config(&file, &[]);
+
+    assert_eq!(output.status.code(), Some(0), "{output}");
+    assert!(output.stdout.contains(VALID), "{output}");
+    let line = output.unsigned_line();
+    assert!(line.contains("INFO"), "at info level: {line}");
+    assert!(
+        line.contains("(identity_keys = [])"),
+        "the line names the setting that opted out: {line}"
+    );
+    assert!(
+        !output.stdout.contains("WARN"),
+        "a deliberate opt-out does not warn: {output}"
+    );
+}
+
+/// The warning names the address `--bind` and `--port` select, since that is
+/// what "any client reaching it" means for this process.
+#[test]
+fn the_unsigned_requests_warning_names_the_bind_address() {
+    let file = temp_file("no-identity-keys-bind.toml", NO_IDENTITY_KEYS);
+
+    let output = check_config_with_args(&file, &[], &["--bind", "127.0.0.1", "--port", "19080"]);
+
+    assert_eq!(output.status.code(), Some(0), "{output}");
+    assert!(
+        output
+            .unsigned_line()
+            .contains("any client reaching 127.0.0.1:19080 can invoke"),
+        "{output}"
+    );
+}
+
 /// The multi-account fixture is valid too, and its summary lists each
-/// account under its scope.
+/// account under its scope — and the identity key the shape requires.
 #[test]
 fn a_valid_multi_account_file_exits_0_and_lists_every_scope() {
     let output = check_config(&fixture("multi.toml"), &[]);
@@ -95,6 +198,12 @@ fn a_valid_multi_account_file_exits_0_and_lists_every_scope() {
                 .stdout
                 .contains(r#"scope="beta_events" account=beta"#),
         "{output}"
+    );
+    assert!(
+        output
+            .stdout
+            .contains("request identity verification enabled keys=1"),
+        "the multi-account fixture carries the key the shape requires: {output}"
     );
     assert!(output.stdout.contains(VALID), "{output}");
 }
@@ -211,10 +320,16 @@ fn temp_file(name: &str, contents: &str) -> PathBuf {
 /// Runs `restate-szamlazz --check-config --config {file}` with an empty
 /// environment plus `env`, and returns what it printed and how it exited.
 fn check_config(file: &Path, env: &[(&str, &str)]) -> Checked {
+    check_config_with_args(file, env, &[])
+}
+
+/// [`check_config`] with further command-line arguments (`--bind`, `--port`).
+fn check_config_with_args(file: &Path, env: &[(&str, &str)], args: &[&str]) -> Checked {
     let mut command = Command::new(BINARY);
     command
         .args(["--check-config", "--config"])
         .arg(file)
+        .args(args)
         .env_clear()
         .env("RUST_LOG", "info")
         .env("NO_COLOR", "1")
@@ -267,6 +382,19 @@ struct Checked {
     status: ExitStatus,
     stdout: String,
     stderr: String,
+}
+
+impl Checked {
+    /// The stdout line saying the endpoint accepts unsigned requests, at
+    /// whichever level; fails with the whole output when there is none.
+    fn unsigned_line(&self) -> &str {
+        self.stdout
+            .lines()
+            .find(|line| line.contains(UNSIGNED))
+            .unwrap_or_else(|| {
+                panic!("the summary says the endpoint accepts unsigned requests: {self}")
+            })
+    }
 }
 
 impl std::fmt::Display for Checked {

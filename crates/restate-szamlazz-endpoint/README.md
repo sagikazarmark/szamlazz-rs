@@ -41,9 +41,10 @@ From nothing to a first invoice on a szamlazz.hu test account, on one machine.
 for name in "Kovács Bt." "Kovács Bt. (2)"; do jq --arg n "$name" '.buyer.name = $n' examples/invoice.json | szamlazz invoice create -f - --json; done   # the second answers error 152
 ```
 
-**3. A minimal configuration.** `namespace` and the account's `id` and `agent_key` are all the binary needs; everything else has a default (the full reference is under [Configuration](#configuration)). `identity_keys` is production-only — it makes the endpoint refuse requests a Restate server did not sign — and is left out here:
+**3. A minimal configuration.** `namespace` and the account's `id` and `agent_key` are all the binary needs to start; everything else has a default (the full reference is under [Configuration](#configuration)). One more line is said on purpose: `identity_keys` makes the endpoint refuse requests a Restate server did not sign, and on a laptop, where nothing but your own Restate server reaches the port, you write it out empty — the deliberate opt-out; leaving the key out instead is a start-up `warn` ([Request Identity](#request-identity)):
 
 ```toml
+identity_keys = []            # local development only: accept unsigned requests, deliberately; production lists the Restate server's public keys
 namespace = "acct"            # prefixes every external id the worker writes to szamlazz.hu; pick once, never change
 
 [account]
@@ -126,7 +127,7 @@ One deployment serves one szamlazz.hu account unscoped (`[account]`) **or** any 
 The binary reads a TOML, JSON or YAML file (by extension) and applies `RESTATE_SZAMLAZZ_` environment overrides on top, with `__` separating nesting levels. Everything constant for a deployment lives here and never travels in a request payload: the deployment-level settings at the top (`namespace`, `[issue]`, `[read]`, `[resolve]`) and the szamlazz.hu account under `[account]` — or, in [multi-account mode](#multi-account-mode), the accounts under `[accounts.<scope>]`. The full reference, every key with its default:
 
 ```toml
-identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]   # production: the Restate server's request identity keys (see Request Identity)
+identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]   # the Restate server's request identity public keys; required wherever anything but the Restate runtime can reach the port, and in multi-account mode. `[]` written out = accept unsigned requests, deliberately (local development); omitted = the same, with a start-up warn (see Request Identity)
 namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id ({namespace}:{order}:{kind}); permanent
 
 [issue]                       # optional; the issue policy: the run retry policy of the create and storno steps
@@ -187,7 +188,7 @@ restate-szamlazz --config restate-szamlazz.toml
 
 Any key can be overridden the same way (`RESTATE_SZAMLAZZ_ACCOUNT__MODE=test`, `RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS=3`, `RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS=5`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY=EUR`). An environment value is read as the **string** it was set to, and the key's type decides what it means: `3` is a count on `max_attempts`, `1.5` a factor, `true` a flag, `90` ninety seconds on a duration — and an agent key is taken exactly as written, so an all-digit key keeps its leading zeros (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY=0071234` reaches szamlazz.hu as `0071234`; no quoting needed). Durations are `"90s"`, `"2m"`, `"1h"` or a bare non-negative integer of seconds, in the file and in the environment alike.
 
-`namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, and — per account — its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`. An `endpoint` is an `http` or `https` URL with a host and **no userinfo**: `https://user:password@host/` is a load error, because the endpoint is journaled with the account (shown in the Restate UI for the retention period) and printed in that start-up log. Plain `http` is allowed — a local mock, a proxy — but the agent key travels in the request body, so an `http` endpoint on a host other than loopback is logged at `warn` at start-up as sending it in cleartext.
+`namespace` and exactly one of `[account]` or `[accounts.<scope>]`, each account with `id` and `agent_key`, are required; everything else has a default. The agent key is never logged; the start-up log names the namespace, whether the deployment is scoped, per account its scope (or `<unscoped>`), `id`, `mode`, `endpoint` and `supplier_id`, and whether request identity verification is on (`request identity verification enabled keys=1`, or `disabled: accepting unsigned requests` — at `warn` when `identity_keys` is not mentioned at all, see [Request Identity](#request-identity)). An `endpoint` is an `http` or `https` URL with a host and **no userinfo**: `https://user:password@host/` is a load error, because the endpoint is journaled with the account (shown in the Restate UI for the retention period) and printed in that start-up log. Plain `http` is allowed — a local mock, a proxy — but the agent key travels in the request body, so an `http` endpoint on a host other than loopback is logged at `warn` at start-up as sending it in cleartext.
 
 **The configuration is strict.** A key the binary does not know — at any level: the top level, a policy table, an account table, its `defaults`, `seller` or `seller.email` — is refused at start-up with an error naming the key, its path, where it came from and what is accepted there, instead of being ignored and leaving the setting at its default:
 
@@ -202,7 +203,7 @@ Caused by:
 
 Every unknown key is reported at once. A value of the wrong type is refused the same way, naming the key and the source (`invalid type: found string "three", expected u32 for key "RESTATE_SZAMLAZZ_ISSUE__MAX_ATTEMPTS" in environment variables`); `[account]` together with a non-empty `[accounts]` names both tables and where each came from — the case of a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` left over after the [flag day](#single--multi-flag-day), which would otherwise materialise a partial `[account]`. The pre-release layout — `account.slug` for the namespace, top-level `[defaults]` and `[seller]` tables — is refused with the same error, each moved key named with where it went. Then the invariants are checked (`WorkerConfig::validate`, the static resolver's account rules) and the process exits with the first violated one. One of them is a floor rather than a shape: `issue.initial_delay` must be at least 90 s — the Számla Agent client's 60 s request timeout plus a 30 s margin — because a create or storno step that is re-executed sooner would query for the cut execution's send while that send may still be in flight (szamlazz.hu has been seen to stall for a minute and still issue). `initial_delay = "5s"` is refused with `issue.initial_delay (5s) must be at least 90s — …`, naming the rule; `[read]` has no floor because a read writes nothing, `[resolve]` none because it never reaches szamlazz.hu.
 
-**Check a configuration without starting.** `--check-config` loads and validates the configuration, builds the endpoint — so an account or identity-key error surfaces too — logs the same summary the start-up log prints and exits 0 without listening; an invalid configuration exits non-zero with the error. Run it in CI and as an init container before the real process:
+**Check a configuration without starting.** `--check-config` loads and validates the configuration, builds the endpoint — so an account or identity-key error surfaces too — logs the same summary the start-up log prints, request identity verification included, and exits 0 without listening; an invalid configuration exits non-zero with the error. Run it in CI and as an init container before the real process:
 
 ```sh
 $ restate-szamlazz --check-config --config restate-szamlazz.toml
@@ -210,8 +211,11 @@ INFO restate_szamlazz: loaded szamlazz.hu account configuration namespace=acct s
 INFO restate_szamlazz: szamlazz.hu account scope="<unscoped>" account=acme mode=Live endpoint=https://www.szamlazz.hu/szamla/ supplier_id=Some(972720)
 INFO restate_szamlazz: bound Restate service service=Szamlazz.Order kind=VirtualObject handlers=8
 INFO restate_szamlazz: bound Restate service service=Szamlazz.Agent kind=Service handlers=5
+INFO restate_szamlazz: request identity verification enabled keys=1
 INFO restate_szamlazz: configuration is valid; not listening (--check-config)
 ```
+
+A configuration without `identity_keys` prints, in the place of the `enabled` line, the same `warn` the real start-up would — `request identity verification disabled: accepting unsigned requests — any client reaching 0.0.0.0:9080 can invoke the services under any scope; …` — so a CI job can grep for it (`--bind` and `--port` name the address the warn shows).
 
 The two example files under [`fixtures/`](fixtures) — the single-account configuration above and the multi-account one below — are what the test suite runs `--check-config` against.
 
@@ -220,6 +224,7 @@ The two example files under [`fixtures/`](fixtures) — the single-account confi
 Several szamlazz.hu accounts in one deployment, selected per request by the **Restate scope**: the caller addresses `/restate/scope/{scope}/call/Szamlazz.Order/{order}/{handler}` (and `/restate/scope/{scope}/call/Szamlazz.Agent/{handler}`), and the worker resolves the scope to the account configured under `[accounts.<scope>]`. Restate namespaces the Virtual Object key and the `Idempotency-Key` per scope, so two accounts' orders never share a lock or a stored response — the same order number under two scopes is two `Szamlazz.Order` instances. The scope is the only channel for the account: no header, body field or key prefix selects it.
 
 ```toml
+identity_keys = ["publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f"]   # required in this shape: without it anyone reaching the port issues on every account
 namespace = "acct"            # one namespace for the deployment; every account's external ids share it
 
 [accounts.acme]               # reachable as /restate/scope/acme/call/…
@@ -238,6 +243,8 @@ agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BET
 
 `[account]` and `[accounts.<scope>]` are mutually exclusive: both present is a load error, and there is no default account. In this shape an **unscoped** request is `unknown_account` (400); in the single-account shape a **scoped** one is. The configuration is validated at start-up against the checkable half of the safety contract — one szamlazz.hu account is reachable under exactly one scope — and the process exits on: two accounts sharing an `(endpoint, agent_key)` pair, two sharing an `id` (the credential reference), two pinning the same `supplier_id`, or a scope key outside `[a-z0-9_]` / longer than 36 bytes.
 
+**`identity_keys` is required in this shape.** The scope is protocol data inside the request the Restate server sends to the endpoint, and the scope selects the account: an endpoint that accepts unsigned requests lets any client that can reach `{bind}:{port}` invoke either service under any scope — on every account the deployment serves — with nothing in between, because the gateway of the rule below sits in front of the *ingress*, not in front of this endpoint. Identity keys are what enforce the assumption the model rests on, that only the Restate runtime speaks to the endpoint; the worker cannot check it and does not refuse to start without them — the start-up log warns when `identity_keys` is not mentioned (an `identity_keys = []` written out is taken at its word in this shape too, so never write it into a deployment's configuration), and the [deploy checklist](#deploy-checklist) has it as the first line. See [Request Identity](#request-identity).
+
 **`supplier_id` is an optional pin, in this shape too.** It is `szallito/id` — szamlazz.hu's id for the seller record printed on every document the account issues, 972720 on the szamlazz.hu test account; read it off any of the account's documents with `Szamlazz.Agent.query` or `szamlazz invoice get --json` (`.supplier.id`). When set, every document a handler finds is checked against it and a mismatch is `account_mismatch` (409) or `conflict{external_id_collision}` — which catches an agent key configured under the wrong scope on the first found document, something `mode` alone cannot. The worker cannot verify the value itself (szamlazz.hu has no "which account am I?" operation, and `check_account` finds no document), so it is a fact you record, not one the worker establishes; leave it unset until you have read it off a real document rather than guess it.
 
 **Scope format.** The static resolver's scope keys are `[a-z0-9_]`, 1–36 bytes — a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`, non-empty, at most 36 characters — ASCII, so bytes; a dashed UUID is exactly 36), chosen so that environment overrides can address them (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the constraint on the account identifiers your application uses as scopes with this binary; a deployment with its own `AccountResolver` may use Restate's full format.
@@ -250,7 +257,13 @@ agent_key = "beta-key"        # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNTS__BET
 
 ### Deploy checklist
 
-After every deploy or configuration change, call `Szamlazz.Agent.check_account` **under each configured scope** (unscoped on a single-account deployment). It runs the prologue like every handler, sends one read-only query of a sentinel external id that nothing the service issues carries, and answers with what the SDK saw, the *configured* account, the namespace and whether szamlazz.hu accepted the credentials. It issues nothing.
+**Before exposing the endpoint** — before the port is reachable by anything but the Restate runtime, and always in multi-account mode:
+
+- `identity_keys` lists the Restate server's request identity public keys. The start-up log (or `--check-config`) prints `request identity verification enabled keys=N`; a `WARN … accepting unsigned requests` line means any client reaching the port can invoke the services under any scope — stop and fix the configuration ([Request Identity](#request-identity)). `identity_keys = []` is the deliberate opt-out for a laptop, never for a deployment.
+- No `WARN … the agent key is sent in cleartext` line: every account's `endpoint` is `https`, or `http` on loopback only.
+- The ingress sits behind a gateway that sets the scope from the authenticated identity and strips `x-restate-*` headers (the rule under [Multi-account mode](#multi-account-mode)).
+
+**After every deploy or configuration change**, call `Szamlazz.Agent.check_account` **under each configured scope** (unscoped on a single-account deployment). It runs the prologue like every handler, sends one read-only query of a sentinel external id that nothing the service issues carries, and answers with what the SDK saw, the *configured* account, the namespace and whether szamlazz.hu accepted the credentials. It issues nothing.
 
 ```sh
 # a multi-account deployment: once per scope
@@ -309,7 +322,7 @@ The mapping is append-only: moving traffic to another szamlazz.hu account means 
 restate-szamlazz --config restate-szamlazz.toml --bind 0.0.0.0 --port 9080
 ```
 
-`--config`, `--bind` and `--port` also read `CONFIG_FILE`, `BIND_ADDR` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). Every handler execution runs inside one span, `execution{scope, order, restate.invocation.id, account.id}` — the scope the request arrived under (`<unscoped>` when none), the order key (absent on `Szamlazz.Agent`), the invocation id the caller got as `x-restate-id`, and the id of the account the request resolved to — so every line the worker logs during an invocation, the `credentials_rejected` warning included, says which account and which invocation it is about; correlate a caller's fault by its `x-restate-id` with `restate.invocation.id` in the log and with `id` in Restate's `sys_invocation`. The agent key appears in no log line. The endpoint binds `{bind}:{port}` — `0.0.0.0:9080` by default; `--bind 127.0.0.1` keeps it off the network, `--port 0` takes an ephemeral port; the start-up log names the bound address — and speaks HTTP/2 only, as every Restate SDK endpoint does. `--check-config` validates and exits instead (see [Configuration](#configuration)).
+`--config`, `--bind` and `--port` also read `CONFIG_FILE`, `BIND_ADDR` and `PORT`. Logging goes through `tracing` with `RUST_LOG` (default `info`). Every handler execution runs inside one span, `execution{scope, order, restate.invocation.id, account.id}` — the scope the request arrived under (`<unscoped>` when none), the order key (absent on `Szamlazz.Agent`), the invocation id the caller got as `x-restate-id`, and the id of the account the request resolved to — so every line the worker logs during an invocation, the `credentials_rejected` warning included, says which account and which invocation it is about; correlate a caller's fault by its `x-restate-id` with `restate.invocation.id` in the log and with `id` in Restate's `sys_invocation`. The agent key appears in no log line. The endpoint binds `{bind}:{port}` — `0.0.0.0:9080` by default; `--bind 127.0.0.1` keeps it off the network, `--port 0` takes an ephemeral port; the start-up log names the bound address, and a start-up `warn` names it as reachable by anyone when no `identity_keys` are configured ([Request Identity](#request-identity)) — and speaks HTTP/2 only, as every Restate SDK endpoint does. `--check-config` validates and exits instead (see [Configuration](#configuration)).
 
 Register it with a Restate server — the `restate` CLI ([install](https://docs.restate.dev/installation)) or the admin API's `POST /deployments` do the same thing:
 
@@ -895,7 +908,17 @@ Restate signs every request it makes to a service endpoint when the runtime is c
 RESTATE_SZAMLAZZ_IDENTITY_KEYS="publickeyv1_old,publickeyv1_new" restate-szamlazz --config restate-szamlazz.toml
 ```
 
-Without `identity_keys` the endpoint accepts unsigned requests — fine on a laptop, not in production. Identity keys authenticate the Restate runtime to this endpoint; callers authenticate to Restate ingress separately.
+**Identity keys are required wherever anything but the Restate runtime can reach the port, and always in [multi-account mode](#multi-account-mode).** They authenticate the Restate runtime to this endpoint; callers authenticate to the Restate ingress separately, behind the gateway of [ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md) — which sits in front of the ingress, not in front of this endpoint. The scope that selects the account is protocol data inside the request the runtime sends here, so an endpoint accepting unsigned requests lets any client that reaches `{bind}:{port}` invoke either service under any scope, on every account the deployment serves. The worker cannot verify who is on the other end of the port; identity keys are what enforce the assumption the scope model rests on.
+
+**Without `identity_keys` the endpoint accepts unsigned requests, and says so at start-up.** Whether it says so at `warn` or at `info` depends on whether you said so first:
+
+| Configuration | Start-up log (and `--check-config`) |
+|---|---|
+| `identity_keys = ["publickeyv1_…"]` | `INFO request identity verification enabled keys=1` |
+| `identity_keys = []` — the empty list, written out | `INFO request identity verification disabled: accepting unsigned requests (identity_keys = [])` — the deliberate opt-out for local development, where only your own Restate server reaches the port |
+| `identity_keys` not mentioned | `` WARN request identity verification disabled: accepting unsigned requests — any client reaching 0.0.0.0:9080 can invoke the services under any scope; set `identity_keys` to the Restate server's request identity public keys (README: Request Identity), or write `identity_keys = []` out to accept this for local development `` |
+
+Only the list literal `[]` is the opt-out. A delimited string that yields no key — `identity_keys = ""`, or an empty `RESTATE_SZAMLAZZ_IDENTITY_KEYS` in the environment — warns like an omission, and it overrides a file's keys or its `[]` the same way: an empty variable is what a deployment template renders when the secret it should carry is missing, which is exactly the case the warning exists for. The endpoint does not refuse to start without keys; the warning and the [deploy checklist](#deploy-checklist) are the guards, and a CI job that greps `--check-config` output for `accepting unsigned requests` catches both unsigned lines — the omission and a `[]` that slipped from a laptop into a deployment's configuration — while one that greps for `WARN` catches the omission alone.
 
 ## License
 

@@ -609,6 +609,7 @@ side — its own layout type has one explicit field per top-level key and assemb
 so a parse error keeps the key path and the source figment attaches (a `#[serde(flatten)]` would drop both):
 
 ```toml
+identity_keys = ["publickeyv1_…"]   # the Restate server's request identity public keys (§10); `[]` written out is the local-development opt-out, the key unmentioned a start-up warn
 namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
 
 [issue]      # the issue policy: the run retry policy of the create (§5 step 4) and storno (§6 step 3) steps; shapes no journal entry
@@ -685,6 +686,7 @@ on the account identifiers a caller uses as scopes with the static resolver. The
 shared by every account.
 
 ```toml
+identity_keys = ["publickeyv1_…"]   # required in this shape (§10): the scope inside an unsigned request selects any account
 namespace = "acct"
 
 [accounts.acme]
@@ -720,11 +722,22 @@ reads; `identity_keys`; tracing; `--check-config` for CI and init containers (lo
 logs the start-up summary, exits 0 without listening — non-zero with the error otherwise);
 container image on `v*` tags, running as a non-root user (uid 65532) with `STOPSIGNAL SIGTERM`. The start-up log
 names the namespace, whether the deployment is scoped, and per account its scope (or `<unscoped>`), id, mode,
-endpoint and supplier id — never the key — then the bound address and the signals that stop the process. An
+endpoint and supplier id — never the key — then whether request identity verification is on, then the bound address
+and the signals that stop the process. An
 account's `endpoint` is an `http` or `https` URL with a host and no userinfo (`user:password@` is a load error: the
 endpoint is journaled with the account and printed here); plain `http` is allowed — a local mock, a proxy — and one
 on a host other than loopback is logged at `warn` as sending the agent key in cleartext (`Endpoint::is_cleartext`;
-#65). `SIGTERM`
+#65). Request identity is read as a three-way decision (`RequestIdentity`; #96): `identity_keys` with at least one
+key is `Verified` (the SDK refuses unsigned requests; `info … enabled keys=N`); the empty list **written out**
+(`identity_keys = []`) is `Unsigned { deliberate: true }` — the local-development opt-out, an `info`; the key not
+mentioned is `Unsigned { deliberate: false }`, a `warn` naming the consequence (any client reaching `{bind}:{port}`
+can invoke the services under any scope — the scope is protocol data inside the request, and identity keys are what
+enforce ADR 0006's assumption that only the Restate runtime speaks to the endpoint) and the two remedies. A delimited
+string yielding no key — an empty `RESTATE_SZAMLAZZ_IDENTITY_KEYS` — is folded to "not mentioned" by the
+deserializer, because that is what a template with a missing secret renders, and it overrides a file's keys or its
+`[]` the same way; only the list literal opts out. The endpoint does not refuse to start without keys: the warn, the
+README's deploy checklist (keys required wherever anything but the runtime reaches the port, and in the multi-account
+shape) and `--check-config`, which prints the same line, are the guards. `SIGTERM`
 or `SIGINT` stops it cleanly through the SDK's `serve_with_cancel` (the SDK's own `serve` waits for `SIGINT` alone,
 and an unhandled `SIGTERM` would end PID 1 on the spot): accepting stops, open connections get the SDK's 10 s connection
 drain, the process exits 0. An invocation the drain cuts resumes on Restate's next dispatch after the handler's retry
@@ -798,7 +811,9 @@ functions they are extracted into.
   rather than the partial account's missing field; environment values as strings the type reads, the all-digit agent
   key byte-exact through to a wiremock szamlazz.hu; the known-key tree matched field for field against the library
   types' `Serialize` output; every TOML example of the endpoint README, design §9 and `fixtures/` loading and building
-  its accounts), `Body<T>` — a well-formed body
+  its accounts; the request-identity decision — keys as a list or a delimited string are `Verified`, `identity_keys`
+  unmentioned is unsigned by omission, `[]` written out in TOML, JSON or YAML is deliberate, and a blank string or a
+  blank `RESTATE_SZAMLAZZ_IDENTITY_KEYS` is not the opt-out even over a file's keys or its `[]`), `Body<T>` — a well-formed body
   decodes, a misspelt option / a wrong type / a missing field / an empty body each leave the handler as the 400
   `invalid_input` fault naming the field, and its schema and input metadata are `Json<T>`'s, in the discovery
   manifest too — `prepare` refusing

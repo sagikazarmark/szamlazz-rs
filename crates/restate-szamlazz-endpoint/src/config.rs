@@ -3,8 +3,9 @@
 //! `[read]`, `[resolve]`), the static resolver's accounts
 //! ([`StaticConfig`](restate_szamlazz::account::StaticConfig): `[account]` or
 //! `[accounts.<scope>]`) and what only the hosting process cares about
-//! (request identity keys). Strict: a key the configuration does not know, at
-//! any level, is refused with its path and source ([`schema`]).
+//! (`identity_keys`, read as the [`RequestIdentity`] decision). Strict: a key
+//! the configuration does not know, at any level, is refused with its path
+//! and source ([`schema`]).
 
 mod schema;
 mod sources;
@@ -70,14 +71,46 @@ pub struct EndpointConfig {
     pub worker: WorkerConfig,
     /// The accounts of the static resolver.
     pub accounts: StaticConfig,
-    /// Restate request identity public keys (`publickeyv1_...`).
-    ///
-    /// With at least one key configured the endpoint rejects unsigned
-    /// requests. Listing the old and the new key keeps both valid during
-    /// rotation. Accepts a list or a comma/whitespace-delimited string, so
-    /// the `RESTATE_SZAMLAZZ_IDENTITY_KEYS` environment override stays a
-    /// plain string.
-    pub identity_keys: Vec<String>,
+    /// What the endpoint does with a request's signature, as `identity_keys`
+    /// decides it.
+    pub request_identity: RequestIdentity,
+}
+
+/// What the endpoint does with the signature Restate puts on every request
+/// when the runtime holds a request identity key — as the top-level
+/// `identity_keys` decides it.
+///
+/// Identity keys are what enforce the assumption the scope model rests on
+/// (ADR 0006): that only the Restate runtime speaks to the endpoint. The
+/// scope travels as protocol data inside the request, so an endpoint that
+/// accepts unsigned requests lets any client reaching its port invoke either
+/// service under any scope. Hence the distinction between the two unsigned
+/// cases: an operator who wrote `identity_keys = []` chose this (a laptop);
+/// one whose configuration does not mention `identity_keys` may not have —
+/// the start-up log warns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestIdentity {
+    /// `identity_keys` lists at least one `publickeyv1_...` public key: a
+    /// request not signed with one of them is refused. Listing the old and
+    /// the new key keeps both valid during rotation.
+    Verified(Vec<String>),
+    /// No key is configured: every request is accepted, signed or not.
+    /// `deliberate` when the configuration writes the empty list out
+    /// (`identity_keys = []`, in the file — the local-development opt-out),
+    /// not when it omits `identity_keys` or sets it to a delimited string
+    /// that yields no key (an empty `RESTATE_SZAMLAZZ_IDENTITY_KEYS`, which
+    /// is what a deployment template renders when the secret is missing).
+    Unsigned {
+        /// Whether the operator wrote the empty list out.
+        deliberate: bool,
+    },
+}
+
+impl Default for RequestIdentity {
+    /// What `identity_keys` unmentioned means: unsigned, and not by choice.
+    fn default() -> Self {
+        Self::Unsigned { deliberate: false }
+    }
 }
 
 /// The file layout, one explicit field per top-level key. The library's
@@ -98,8 +131,10 @@ struct Layout {
     account: Option<StaticAccount>,
     #[serde(default)]
     accounts: BTreeMap<String, StaticAccount>,
+    /// The `identity_keys` key, read straight into the decision it makes;
+    /// the default is the key unmentioned.
     #[serde(default, deserialize_with = "identity_keys")]
-    identity_keys: Vec<String>,
+    identity_keys: RequestIdentity,
 }
 
 impl From<Layout> for EndpointConfig {
@@ -121,7 +156,7 @@ impl From<Layout> for EndpointConfig {
                 resolve,
             },
             accounts: StaticConfig { account, accounts },
-            identity_keys,
+            request_identity: identity_keys,
         }
     }
 }
@@ -152,7 +187,14 @@ impl EndpointConfig {
     }
 }
 
-fn identity_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+/// Reads `identity_keys` — a list, or a comma/whitespace-delimited string,
+/// the shape the `RESTATE_SZAMLAZZ_IDENTITY_KEYS` environment override has
+/// since every environment value is a string — as the [`RequestIdentity`] it
+/// decides. Any key makes it `Verified`. The empty list literal is the
+/// deliberate opt-out; a delimited string that yields no key is not — it
+/// reads as the key unmentioned, because an empty environment variable is
+/// what a deployment template renders when the secret is missing.
+fn identity_keys<'de, D>(deserializer: D) -> Result<RequestIdentity, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -164,12 +206,22 @@ where
     }
 
     Ok(match IdentityKeys::deserialize(deserializer)? {
-        IdentityKeys::List(keys) => keys,
-        IdentityKeys::Delimited(keys) => keys
-            .split([',', ' ', '\t', '\n'])
-            .filter(|key| !key.is_empty())
-            .map(str::to_owned)
-            .collect(),
+        IdentityKeys::List(keys) if keys.is_empty() => {
+            RequestIdentity::Unsigned { deliberate: true }
+        }
+        IdentityKeys::List(keys) => RequestIdentity::Verified(keys),
+        IdentityKeys::Delimited(keys) => {
+            let keys: Vec<String> = keys
+                .split([',', ' ', '\t', '\n'])
+                .filter(|key| !key.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if keys.is_empty() {
+                RequestIdentity::default()
+            } else {
+                RequestIdentity::Verified(keys)
+            }
+        }
     })
 }
 
@@ -188,7 +240,8 @@ mod tests {
 
     use super::*;
 
-    /// The configuration example of design §9.
+    /// The configuration example of design §9, with `identity_keys = []`
+    /// written out.
     const SPEC_EXAMPLE: &str = r#"
         identity_keys = []
         namespace = "acct"
@@ -404,7 +457,11 @@ mod tests {
             Some("Your invoice")
         );
         assert_eq!(account.seller.email.body.as_deref(), Some("Thank you"));
-        assert!(config.identity_keys.is_empty());
+        assert_eq!(
+            config.request_identity,
+            RequestIdentity::Unsigned { deliberate: true },
+            "`identity_keys = []` is written out"
+        );
     }
 
     /// `namespace` and `[account]` (`id`, `agent_key`) are the only required
@@ -429,7 +486,11 @@ mod tests {
         assert_eq!(account.supplier_id, None);
         assert_eq!(account.defaults.currency, "HUF");
         assert_eq!(account.seller.bank_account, None);
-        assert!(config.identity_keys.is_empty());
+        assert_eq!(
+            config.request_identity,
+            RequestIdentity::Unsigned { deliberate: false },
+            "`identity_keys` is not mentioned"
+        );
     }
 
     /// Environment overrides address every level with `__`: the agent key
@@ -582,8 +643,14 @@ mod tests {
         ))
         .expect("configuration should load");
 
-        assert_eq!(list.identity_keys, ["publickeyv1_old", "publickeyv1_new"]);
-        assert_eq!(delimited.identity_keys, list.identity_keys);
+        assert_eq!(
+            list.request_identity,
+            RequestIdentity::Verified(vec![
+                "publickeyv1_old".to_owned(),
+                "publickeyv1_new".to_owned()
+            ])
+        );
+        assert_eq!(delimited.request_identity, list.request_identity);
     }
 
     #[test]
@@ -596,7 +663,102 @@ mod tests {
 
             let config = load_with_env(minimal()).expect("configuration should load");
 
-            assert_eq!(config.identity_keys, ["publickeyv1_old", "publickeyv1_new"]);
+            assert_eq!(
+                config.request_identity,
+                RequestIdentity::Verified(vec![
+                    "publickeyv1_old".to_owned(),
+                    "publickeyv1_new".to_owned()
+                ])
+            );
+            Ok(())
+        });
+    }
+
+    /// Without a key the endpoint accepts unsigned requests either way; what
+    /// differs is whether the operator said so. `identity_keys = []` written
+    /// out is the deliberate opt-out (local development; an `info` at
+    /// start-up); a configuration that does not mention `identity_keys` is
+    /// the omission the start-up `warn` names — in the file, and when a
+    /// JSON or YAML file writes the empty list.
+    #[test]
+    fn omitting_identity_keys_is_unsigned_by_omission_and_an_explicit_empty_list_is_deliberate() {
+        let omitted = load(minimal()).expect("configuration should load");
+        assert_eq!(
+            omitted.request_identity,
+            RequestIdentity::Unsigned { deliberate: false }
+        );
+
+        let written_out =
+            load(&format!("identity_keys = []\n{}", minimal())).expect("configuration should load");
+        assert_eq!(
+            written_out.request_identity,
+            RequestIdentity::Unsigned { deliberate: true }
+        );
+
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.json",
+                r#"{"namespace": "acct", "identity_keys": [], "account": {"id": "acme", "agent_key": "k"}}"#,
+            )?;
+            jail.create_file(
+                "config.yaml",
+                "namespace: acct\nidentity_keys: []\naccount:\n  id: acme\n  agent_key: k\n",
+            )?;
+            for file in ["config.json", "config.yaml"] {
+                let config =
+                    EndpointConfig::load(&figment(Some(Path::new(file))).expect(file)).expect(file);
+                assert_eq!(
+                    config.request_identity,
+                    RequestIdentity::Unsigned { deliberate: true },
+                    "{file}: the empty list is written out"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// A delimited string that yields no key is not the opt-out: an empty
+    /// `RESTATE_SZAMLAZZ_IDENTITY_KEYS` is what a deployment template renders
+    /// when the secret it should carry is missing — the very case the
+    /// start-up warning exists for — so it warns like an omission, and it
+    /// overrides a file's keys or its written-out `[]` the same way. Only the
+    /// list literal `[]` is deliberate.
+    #[test]
+    fn a_delimited_string_without_keys_is_not_the_opt_out() {
+        let blank = load(&format!("identity_keys = \"\"\n{}", minimal()))
+            .expect("configuration should load");
+        assert_eq!(
+            blank.request_identity,
+            RequestIdentity::Unsigned { deliberate: false }
+        );
+        let separators = load(&format!("identity_keys = \" , \"\n{}", minimal()))
+            .expect("configuration should load");
+        assert_eq!(
+            separators.request_identity,
+            RequestIdentity::Unsigned { deliberate: false }
+        );
+
+        Jail::expect_with(|jail| {
+            jail.set_env("RESTATE_SZAMLAZZ_IDENTITY_KEYS", "");
+
+            let over_keys = load_with_env(&format!(
+                "identity_keys = [\"publickeyv1_old\"]\n{}",
+                minimal()
+            ))
+            .expect("configuration should load");
+            assert_eq!(
+                over_keys.request_identity,
+                RequestIdentity::Unsigned { deliberate: false },
+                "the blank override replaces the file's keys and warns"
+            );
+
+            let over_opt_out = load_with_env(&format!("identity_keys = []\n{}", minimal()))
+                .expect("configuration should load");
+            assert_eq!(
+                over_opt_out.request_identity,
+                RequestIdentity::Unsigned { deliberate: false },
+                "the blank override is not the file's deliberate `[]`"
+            );
             Ok(())
         });
     }
