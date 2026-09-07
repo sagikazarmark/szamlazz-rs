@@ -1,5 +1,6 @@
-//! Internal XML plumbing: an order-preserving document writer and lenient
-//! deserialization helpers.
+//! Internal XML plumbing: an order-preserving document writer, lenient
+//! deserialization helpers, and the response blocks more than one operation
+//! parses.
 //!
 //! Request writers are hand-written on purpose: element order in the Számla
 //! Agent XML is fixed, so the writer code *is* the wire specification. See
@@ -224,6 +225,63 @@ pub(crate) mod de {
     {
         let value = String::deserialize(deserializer)?;
         value.trim().parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// The `osszegek` totals block, byte-identical on a queried invoice
+/// (`szamla`) and on a receipt (`nyugta`).
+///
+/// One wire shape, two public targets: each operation keeps its own `From`
+/// conversion into its public totals type (`Totals` for the invoice query,
+/// `ReceiptTotals` for receipts), so the wire is modelled once while the
+/// public API stays per document.
+pub(crate) mod totals {
+    use rust_decimal::Decimal;
+
+    use super::de;
+
+    /// The `osszegek` element: per-VAT-rate subtotals and the grand total.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct OsszegekXml {
+        /// Per-VAT-rate subtotals (`afakulcsossz`); may be absent, parsed as
+        /// no subtotals.
+        #[serde(default)]
+        pub afakulcsossz: Vec<AfakulcsosszXml>,
+        /// The grand total (`totalossz`).
+        pub totalossz: TotalosszXml,
+    }
+
+    /// One `afakulcsossz` element: the subtotal of a single VAT rate.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct AfakulcsosszXml {
+        /// The special VAT code (`afatipus`); an empty element is none.
+        #[serde(default, deserialize_with = "de::empty_as_none")]
+        pub afatipus: Option<String>,
+        /// The numeric VAT rate token (`afakulcs`).
+        pub afakulcs: String,
+        /// Net subtotal (`netto`).
+        #[serde(deserialize_with = "de::from_text")]
+        pub netto: Decimal,
+        /// VAT subtotal (`afa`).
+        #[serde(deserialize_with = "de::from_text")]
+        pub afa: Decimal,
+        /// Gross subtotal (`brutto`).
+        #[serde(deserialize_with = "de::from_text")]
+        pub brutto: Decimal,
+    }
+
+    /// The `totalossz` element: the document's grand total.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct TotalosszXml {
+        /// Net total (`netto`).
+        #[serde(deserialize_with = "de::from_text")]
+        pub netto: Decimal,
+        /// VAT total (`afa`).
+        #[serde(deserialize_with = "de::from_text")]
+        pub afa: Decimal,
+        /// Gross total (`brutto`).
+        #[serde(deserialize_with = "de::from_text")]
+        pub brutto: Decimal,
     }
 }
 

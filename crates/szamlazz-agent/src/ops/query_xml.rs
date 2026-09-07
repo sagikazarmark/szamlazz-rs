@@ -16,6 +16,7 @@ use crate::error::{ParseError, ResponseError};
 use crate::types::{InvoiceNumber, Pdf, VatRate};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
+use crate::xml::totals::{AfakulcsosszXml, OsszegekXml, TotalosszXml};
 
 /// The invoice XML query (`xmlszamlaxml`, `action-szamla_agent_xml`).
 ///
@@ -1064,13 +1065,6 @@ struct CimkekXml {
     cimke: Vec<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct OsszegekXml {
-    #[serde(default)]
-    afakulcsossz: Vec<AfakulcsosszXml>,
-    totalossz: TotalosszXml,
-}
-
 impl From<OsszegekXml> for Totals {
     fn from(osszegek: OsszegekXml) -> Self {
         Self {
@@ -1078,19 +1072,6 @@ impl From<OsszegekXml> for Totals {
             total: osszegek.totalossz.into(),
         }
     }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AfakulcsosszXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    afatipus: Option<String>,
-    afakulcs: String,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    netto: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    afa: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    brutto: Decimal,
 }
 
 impl From<AfakulcsosszXml> for VatTotal {
@@ -1103,16 +1084,6 @@ impl From<AfakulcsosszXml> for VatTotal {
             gross: ossz.brutto,
         }
     }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TotalosszXml {
-    #[serde(deserialize_with = "xml::de::from_text")]
-    netto: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    afa: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
-    brutto: Decimal,
 }
 
 impl From<TotalosszXml> for GrandTotal {
@@ -1244,6 +1215,47 @@ mod tests {
             Some("AAM")
         );
         assert_eq!(document.totals.by_vat_rate[0].vat_rate(), VatRate::Aam);
+    }
+
+    /// The totals block's lenient forms: an empty `afatipus` is no VAT type,
+    /// and an `osszegek` carrying no `afakulcsossz` at all is a document with
+    /// no per-rate subtotals — the grand total stands on its own.
+    #[test]
+    fn parses_totals_without_vat_type_or_rate_subtotals() {
+        let document_with_subtotals = |subtotals: &str| {
+            let body = format!(
+                "<szamla xmlns=\"http://www.szamlazz.hu/szamla\">\
+                 <szallito><nev>Seller</nev><cim><irsz>1</irsz><telepules>B</telepules><cim>C</cim></cim></szallito>\
+                 <alap><id>1</id><szamlaszam>X-1</szamlaszam><tipus>E</tipus><eszamla>0</eszamla></alap>\
+                 <vevo><nev>Buyer</nev></vevo><tetelek></tetelek>\
+                 <osszegek>{subtotals}\
+                 <totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek></szamla>"
+            );
+            let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+            sample().parse(&response).expect("success")
+        };
+
+        let document = document_with_subtotals(
+            "<afakulcsossz><afatipus></afatipus><afakulcs>27</afakulcs>\
+             <netto>1000</netto><afa>270</afa><brutto>1270</brutto></afakulcsossz>",
+        );
+        assert_eq!(document.totals.by_vat_rate.len(), 1);
+        assert_eq!(document.totals.by_vat_rate[0].vat_type, None);
+        assert_eq!(document.totals.by_vat_rate[0].vat_rate_code, "27");
+        assert_eq!(
+            document.totals.by_vat_rate[0].vat_rate(),
+            VatRate::percent(27)
+        );
+        assert_eq!(document.totals.by_vat_rate[0].net, dec!(1000));
+        assert_eq!(document.totals.by_vat_rate[0].vat, dec!(270));
+        assert_eq!(document.totals.by_vat_rate[0].gross, dec!(1270));
+        assert_eq!(document.totals.total.net, dec!(1000));
+        assert_eq!(document.totals.total.vat, dec!(270));
+        assert_eq!(document.totals.total.gross, dec!(1270));
+
+        let document = document_with_subtotals("");
+        assert!(document.totals.by_vat_rate.is_empty());
+        assert_eq!(document.totals.total.gross, dec!(1270));
     }
 
     #[test]
