@@ -71,7 +71,7 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 
 ## When the Call Fails
 
-Every failure is a `ClientError` variant, and each says something different about the document you asked for. Invoice creation has no idempotency key, so before re-sending a create ask `outcome_class()` whether a document may already exist — and when it may, query by the external id first:
+Every failure is a `ClientError` variant, and each says something different about the document you asked for. Invoice creation has no idempotency key, so a failed create settles to one of three outcomes, and only one of them permits sending the same request again: `outcome_class()` says whether a document may already exist, and when it may, a query by the external id says whether one does.
 
 ```rust
 use szamlazz_agent::ops::invoice::CreateInvoice;
@@ -79,13 +79,24 @@ use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::{Client, ClientError, InvoiceNumber, OutcomeClass};
 
-/// The issued invoice's number — `None` only for a PDF preview, which issues nothing.
-async fn issue_once(
-    client: &Client,
-    request: &CreateInvoice,
-) -> Result<Option<InvoiceNumber>, ClientError> {
+/// What one create settled to.
+enum Outcome {
+    /// Issued — now, or by an earlier attempt whose reply was lost.
+    /// `None` only for a PDF preview, which issues nothing.
+    Issued(Option<InvoiceNumber>),
+    /// Nothing was issued: szamlazz.hu refused, or confirmed that nothing
+    /// carries the external id. The one outcome after which the same
+    /// request may be sent again, once its cause is fixed.
+    NotIssued(ClientError),
+    /// A document may exist: neither the create nor the reconciling query
+    /// answered. Never send again from here — query by the external id
+    /// until szamlazz.hu answers.
+    Unknown(ClientError),
+}
+
+async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
     let error = match client.send(request).await {
-        Ok(created) => return Ok(created.invoice_number),
+        Ok(created) => return Outcome::Issued(created.invoice_number),
         Err(error) => error,
     };
 
@@ -104,25 +115,31 @@ async fn issue_once(
     match error.outcome_class() {
         // Nothing was issued: the request, the account or the order number is the problem.
         OutcomeClass::Rejected | OutcomeClass::NotFound | OutcomeClass::DuplicateOrderNumber => {
-            Err(error)
+            Outcome::NotIssued(error)
         }
         // `Unknown` (and any class a later version adds): a document may exist.
-        // Look for it before re-sending; re-send only when it is not there.
+        // Ask szamlazz.hu what carries the external id before anything is sent again.
         _ => {
             let Some(external_id) = &request.external_id else {
-                return Err(error);
+                return Outcome::Unknown(error); // nothing to reconcile by
             };
             let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId(external_id.clone()));
             match client.send(&query).await {
-                Ok(document) => Ok(Some(document.info.invoice_number)),
-                Err(_) => Err(error), // still open: keep the external id, query again later
+                // An earlier attempt issued it; only the reply was lost.
+                Ok(document) => Outcome::Issued(Some(document.info.invoice_number)),
+                // Code 7: szamlazz.hu confirms nothing carries the id — the create did not land.
+                Err(answer) if answer.outcome_class() == OutcomeClass::NotFound => {
+                    Outcome::NotIssued(error)
+                }
+                // The query did not answer either: still open.
+                Err(_) => Outcome::Unknown(error),
             }
         }
     }
 }
 ```
 
-`ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number — query by `InvoiceSelector::OrderNumber` to find it.
+`Outcome::Unknown` is answered by querying again, never by re-sending: the create may have landed, and a second one would be a second legal document. `ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number — query by `InvoiceSelector::OrderNumber` to find it.
 
 ## Bring Your Own HTTP Client
 
