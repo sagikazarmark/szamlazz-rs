@@ -54,6 +54,21 @@ fn a_valid_single_account_file_exits_0_and_prints_the_start_up_summary() {
             && output.stdout.contains("service=Szamlazz.Agent"),
         "the summary lists the bound services: {output}"
     );
+    // The README's start-up log excerpt shows the two `bound Restate service`
+    // lines with their handler counts; the binary prints exactly those, so
+    // the excerpt cannot drift from what an operator compares it against.
+    let readme = include_str!("../README.md");
+    for service in ["Szamlazz.Order", "Szamlazz.Agent"] {
+        let marker = format!("bound Restate service service={service}");
+        let excerpt = readme
+            .lines()
+            .find_map(|line| line.find(&marker).map(|at| line[at..].trim()))
+            .unwrap_or_else(|| panic!("the README's start-up log excerpt names {service}"));
+        assert!(
+            output.stdout.contains(excerpt),
+            "the binary prints the README's line `{excerpt}`: {output}"
+        );
+    }
     assert!(
         output
             .stdout

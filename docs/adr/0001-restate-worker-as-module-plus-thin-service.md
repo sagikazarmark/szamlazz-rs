@@ -20,7 +20,7 @@ the owner asked for — `Order` depends on the gateway, nothing depends on `Orde
 fact: `Szamlazz.Order → gateway ← Szamlazz.Agent`. Everything the services know about the account
 they read through `Gateway::account()`. Since #25 neither service holds a gateway: both hold the
 `Accounts` bundle (account resolver + credential store) and the deployment-level `WorkerConfig`
-(namespace, issue and resolve policies), and every handler's prologue resolves its account and opens a
+(namespace; the issue, read and resolve policies — the read policy since #37), and every handler's prologue resolves its account and opens a
 gateway for its own execution ([ADR 0006](0006-account-selection-via-restate-scopes.md)).
 
 The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, the identity

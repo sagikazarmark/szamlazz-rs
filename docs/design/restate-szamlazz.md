@@ -33,7 +33,7 @@ async fn per durable step with outcome-as-data. `Szamlazz.Order` calls it inside
 stateless facade over it for by-number operations. Every read of account configuration by the services — the
 ownership-validation pins, the document defaults, the seller block — goes through `Gateway::account()`. The services
 hold no gateway: each holds the `Accounts` bundle (account resolver + credential store) and a `WorkerConfig` with the
-deployment-level settings (the namespace of the external ids, the issue and resolve policies), and every handler's
+deployment-level settings (the namespace of the external ids; the issue, read and resolve policies), and every handler's
 prologue (§4) resolves its account and opens a gateway for its own execution. No Restate service calls another; no
 `Order` handler calls a handler on its own key.
 
@@ -403,9 +403,10 @@ echoed — and builds the same storno intent from what it found, so its storno c
 
 `delete_proforma({force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed —
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
-live `D` with payments ∧ `!force` → `rejected{proforma_paid}` (the server has no guard — verified);
+live `D` with payments ∧ `!force` → `{deleted: false, reason: proforma_paid}` (the server has no guard — verified);
 `ctx.run(DeleteProforma{InvoiceNumber})` (`max_attempts(1)`): success | 335 → `{deleted: true}`; 3/135/136/164 →
-`TerminalError{credentials_rejected}`; other → `rejected{code}`; `Transport` → `TerminalError{outcome_unknown}`.
+`TerminalError{credentials_rejected}`; other → `{deleted: false, reason: <code>}`; `Transport` → `TerminalError{outcome_unknown}`.
+The response is `DeleteProformaResponse { deleted, reason? }` throughout — never a `rejected` outcome.
 
 `get`: four `ctx.run` queries under the read policy (`get-{kind}`, `…:proforma|invoice|prepayment|final`) → `OrderStatus { proforma?, invoice?,
 prepayment?, final?: DocumentStatus }` where `DocumentStatus { number, state: live | reversed | consumed{by},
@@ -445,7 +446,18 @@ OrderStatus — see §6
 TerminalError { code, message, szamlazz_code?, order?, kind?, external_id? }
 TerminalError codes: invalid_input (400) | unknown_account (400) | not_found (404) | account_mismatch (409)
                    | szamlazz_error (422) | outcome_unknown (500) | unavailable (503) | credentials_rejected (503)
+On the wire (Restate 1.7.8 ingress), a TerminalError is the JSON *string* in `message` of Restate's own envelope:
+  { "code": <HTTP status>, "message": "<the TerminalError JSON above>", "source": "invocation" }
+  + header x-restate-error-source: invocation
 ```
+
+The envelope is Restate's, not ours: the Rust SDK 0.12 carries a terminal error as `(code, message)` and offers no
+other channel, so the worker serialises the fault into the message and the caller parses `message` a second time
+(`From<Fault> for TerminalError` in `service::support`). A caller reading the envelope's `code` sees the HTTP status,
+never the token. The endpoint README (*Faults*) shows one body per case — a structured fault, a killed invocation
+(the same envelope with the last retryable error's text in `message`), an ingress error (`source: ingress`) — held to
+the contract types by the endpoint crate's `tests/readme.rs`; the e2e harness asserts the envelope on every fault it
+receives (`Reply::fault`).
 
 `invalid_input`: the caller's request, which the same request never gets past — a 400 and "fix the request". Three
 sources. A **malformed body**: every request type and every object it nests (`CreateRequest`, `CreateOptions`,
@@ -505,8 +517,9 @@ storno original **without a `telj`** (§6 step 1,
 ADR 0007: szamlazz.hu breaking its own schema on a date the storno must repeat — nothing is sent; the message names
 the invoice, and `Szamlazz.Order.storno_invoice` attaches the order, kind and storno external id). It also covers the
 prologue's own faults: the resolve policy
-exhausted, the credential store gone or unavailable through the in-process retry. Like every fault it means
-"outcome unknown": a read that fails may sit before a create that an earlier execution already landed.
+exhausted, the credential store gone or unavailable through the in-process retry. One of the three "outcome unknown"
+codes: a read that fails may sit before a create that an earlier execution already landed, so the caller retries with a
+new `Idempotency-Key` or reads `get` — never concludes that no document exists.
 
 `credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
 or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request —
@@ -514,7 +527,7 @@ the same request succeeds once the key is fixed — so it is 503, not a 4xx ("do
 unauthenticated"). The request that drew the code was not acted on — szamlazz.hu answers these codes before acting
 on a request, and on the 71/152 re-query path the create was already refused as a duplicate — but the code may have
 come to the re-query after a send with an open code, and an earlier execution may have landed with a lost reply,
-which is why it is a fault under the "every error means outcome unknown" rule and never `rejected`; its message
+which is why it is the third "outcome unknown" code and never `rejected`; its message
 says the outcome is not known, never "this attempt issued nothing" (#63). Every
 occurrence is logged at `warn` with the namespace and the code (never the key).
 
@@ -532,24 +545,31 @@ exists on the resolved account — that document legitimately matches the accoun
 
 ## 8. Caller contract (documented in the crate READMEs)
 
+The **endpoint README** is the canonical caller reference — the request and response reference with one example per
+outcome, the `conflict_reason` table, the fault envelope, the guidance for calling from a webhook handler and what a
+caller stores per order; its
+JSON examples and tables are held to the contract types by the endpoint crate's `tests/readme.rs`. The library README
+carries the same rules for an embedder. The rules:
+
 1. Send an `Idempotency-Key` per logical request; Restate dedupes retries and attaches concurrent duplicates to the
    in-flight invocation. Deduplication is per scope: the same key under two scopes is two invocations.
-2. Tell a **fault** from **no answer** before deciding what to do with the key (ADR 0004, #87). A fault — a 5xx
-   with a body the worker wrote and `x-restate-error-source: invocation` — is a completed invocation whose stored
-   completion is replayed under the same key for the retention period (verified): an **`outcome_unknown`,
-   `unavailable` or `credentials_rejected`** fault from an issuing or storno handler means "outcome unknown — retry
-   with a **new** key, or read `get`"; the handler reconciles by external id, so the retry is safe. Never interpret
-   one of these as "no document exists". No answer — a client timeout, an ingress 5xx whose source is not
-   `invocation` — is an invocation still in flight, re-dispatched by Restate for as long as the handler's invocation
-   retry policy allows: **keep the key** (a retry with it attaches to the in-flight invocation) or read `get`. A
-   killed invocation is a fault whose body is the last retryable error's text, not `{code, message}`; treat it as
-   `outcome_unknown`. The one exception to "retry with a new key" is
-   `Szamlazz.Agent.set_payments` with `additive: true`, which has nothing to reconcile by: every send that reached
-   szamlazz.hu appended the entries, so query the invoice before re-sending (the fault's message says so). The other
-   faults are settled (§7) — nothing landed: `invalid_input`, `unknown_account`, `not_found` and `account_mismatch`
-   are raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or
-   refusing the credit entries it was sent). Retrying as is repeats the answer: the caller fixes the request, the
-   number, the scope or the account — or, for a `szamlazz_error` relaying a NAV outage, retries later with a new key.
+2. Tell a **fault** from **no answer** before deciding what to do with the key (ADR 0004, #87). A fault — a 4xx/5xx
+   with `x-restate-error-source: invocation` and a body the worker wrote, inside Restate's envelope (§7) — is a
+   completed invocation whose stored completion is replayed under the same key for the retention period (30 days on
+   the write handlers;
+   verified): an **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler
+   means "outcome unknown — retry with a **new** key, or read `get`"; the handler reconciles by external id, so the
+   retry is safe. Never interpret one of these as "no document exists". No answer — a client timeout, an ingress 5xx
+   whose source is not `invocation` — is an invocation still in flight, re-dispatched by Restate for as long as the
+   handler's invocation retry policy allows: **keep the key** (a retry with it attaches to the in-flight invocation) or
+   read `get`. A killed invocation is a fault whose envelope `message` is the last retryable error's text, not `{code, message}`;
+   treat it as `outcome_unknown`. The one exception to "retry with a new key" is `Szamlazz.Agent.set_payments` with
+   `additive: true`, which has nothing to reconcile by: every send that reached szamlazz.hu appended the entries, so
+   query the invoice before re-sending (the fault's message says so). The other faults are settled (§7) — nothing
+   landed: `invalid_input`, `unknown_account`, `not_found` and `account_mismatch` are raised before anything is sent,
+   and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit entries it was sent).
+   Retrying as is repeats the answer: the caller fixes the request, the number, the scope or the account — or, for a
+   `szamlazz_error` relaying a NAV outage, retries later with a new key.
 3. After a storno — by this service, the UI or anyone — a create returns `outcome: reversed`. Send `reissue: true`
    (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the
    flag can never cause a duplicate.
@@ -560,6 +580,11 @@ exists on the resolved account — that document legitimately matches the accoun
 5. A 5xx whose `x-restate-error-source` is `invocation` is this worker's fault (`outcome_unknown`, `unavailable`,
    `credentials_rejected`): page, do not auto-retry into it; then rule 2. Auto-retry a 5xx only when the source is
    `ingress` or absent.
+6. From a webhook handler: a client timeout of about 90 s (longer than szamlazz.hu's 60 s request timeout); on
+   timeout, re-send with the **same** key or poll `get` — a create can legitimately take minutes while szamlazz.hu is
+   flaky (the read and issue policies, §9); or `/restate/send/…` and read the result with `get`. Always acknowledge
+   the webhook and own the retry queue: a provider retries with the *same* notification id, which after a fault
+   replays the stored failure for the retention period, and any **changed** request needs a new key.
 
 ## 9. Configuration (deployment-constant; never in payloads)
 
