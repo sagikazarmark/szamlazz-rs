@@ -14,7 +14,7 @@ use szamlazz_agent::ops::taxpayer::{
 };
 
 use super::document::PaymentMethod;
-use super::outstanding;
+use super::{InvoiceNumber, outstanding};
 use crate::account::Account;
 use crate::config::AccountMode;
 
@@ -44,7 +44,7 @@ impl QueryRequest {
 #[serde(rename_all = "snake_case")]
 pub enum Selector {
     /// By invoice number (`számlaszám`).
-    InvoiceNumber(String),
+    InvoiceNumber(InvoiceNumber),
     /// By order number (`rendelésszám`); returns the last document issued
     /// under it.
     OrderNumber(String),
@@ -394,7 +394,7 @@ impl From<AgentTaxpayerAddress> for TaxpayerAddress {
 #[serde(deny_unknown_fields)]
 pub struct SetPaymentsRequest {
     /// The invoice to register credit entries on.
-    pub invoice_number: String,
+    pub invoice_number: InvoiceNumber,
     /// The credit entries (`jóváírások`); szamlazz.hu accepts at most five.
     pub entries: Vec<PaymentEntry>,
     /// Add to the existing entries instead of replacing them.
@@ -414,9 +414,9 @@ impl SetPaymentsRequest {
     /// A replacing request: `entries` become the invoice's credit entries.
     /// Set [`additive`](Self::additive) to append instead.
     #[must_use]
-    pub fn new(invoice_number: impl Into<String>, entries: Vec<PaymentEntry>) -> Self {
+    pub fn new(invoice_number: InvoiceNumber, entries: Vec<PaymentEntry>) -> Self {
         Self {
-            invoice_number: invoice_number.into(),
+            invoice_number,
             entries,
             additive: false,
         }
@@ -595,7 +595,7 @@ mod tests {
     fn query_request_selectors() {
         let cases = [
             (
-                Selector::InvoiceNumber("SZ-1".to_owned()),
+                Selector::InvoiceNumber("SZ-1".parse().expect("valid number")),
                 json!({"invoice_number": "SZ-1"}),
             ),
             (
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn set_payments_request_round_trips() {
         let request = SetPaymentsRequest {
-            invoice_number: "SZ-1".to_owned(),
+            invoice_number: "SZ-1".parse().expect("valid number"),
             entries: vec![PaymentEntry {
                 date: date(2026, 7, 10),
                 method: PaymentMethod::Card,

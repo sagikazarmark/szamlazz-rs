@@ -1773,7 +1773,9 @@ async fn verify_query_and_hint() {
     }
     match h
         .gateway
-        .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
+        .query(&Selector::InvoiceNumber(
+            "SZ-1".parse().expect("valid number"),
+        ))
         .await
     {
         Ok(QueryOutcome::Found(found)) => {
@@ -1784,7 +1786,9 @@ async fn verify_query_and_hint() {
     }
     assert_eq!(
         h.gateway
-            .query(&Selector::InvoiceNumber("SZ-404".to_owned()))
+            .query(&Selector::InvoiceNumber(
+                "SZ-404".parse().expect("valid number")
+            ))
             .await,
         Ok(QueryOutcome::NotFound)
     );

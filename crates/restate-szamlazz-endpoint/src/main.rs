@@ -326,7 +326,9 @@ mod tests {
         let config = config("", &format!("{}/", server.uri()), "agent-key");
         let outcome = gateway(config)
             .await
-            .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
+            .query(&Selector::InvoiceNumber(
+                "SZ-1".parse().expect("valid number"),
+            ))
             .await;
 
         assert_eq!(outcome, Ok(QueryOutcome::NotFound));
@@ -374,7 +376,9 @@ mod tests {
 
         let outcome = gateway(config)
             .await
-            .query(&Selector::InvoiceNumber("SZ-1".to_owned()))
+            .query(&Selector::InvoiceNumber(
+                "SZ-1".parse().expect("valid number"),
+            ))
             .await;
 
         assert_eq!(outcome, Ok(QueryOutcome::NotFound));

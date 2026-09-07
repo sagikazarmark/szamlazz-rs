@@ -189,10 +189,16 @@ impl Gateway {
 }
 
 /// The gross total of a built create request: the sum of its line items'
-/// gross values, the amount the payload fingerprint covers.
+/// gross values, or `None` when the sum does not fit a decimal. Checked, like
+/// every arithmetic on caller input — a panic here would run on the SDK's
+/// connection task and take every in-flight invocation on it down with the
+/// request (#64).
 #[must_use]
-pub fn gross_total(create: &CreateInvoice) -> Decimal {
-    create.items.iter().map(|item| item.gross_value).sum()
+pub fn gross_total(create: &CreateInvoice) -> Option<Decimal> {
+    create
+        .items
+        .iter()
+        .try_fold(Decimal::ZERO, |sum, item| sum.checked_add(item.gross_value))
 }
 
 /// Maps a template token — the wire value (`SzlaMost`) or the
@@ -312,7 +318,7 @@ mod tests {
         assert_eq!(create.items.len(), 1);
         assert_eq!(create.items[0].net_value, dec!(20000));
         assert_eq!(create.items[0].gross_value, dec!(25400));
-        assert_eq!(gross_total(&create), dec!(25400));
+        assert_eq!(gross_total(&create), Some(dec!(25400)));
         create
             .to_wire(&Credentials::agent_key("key"))
             .expect("valid request");
@@ -520,6 +526,33 @@ mod tests {
             error.to_string(),
             "items[1]: line item net value (unit price × quantity) overflows a decimal"
         );
+    }
+
+    /// A built request's total is summed with checked arithmetic: two items
+    /// that fit on their own but not together are `None`, never a panic
+    /// (#64, J8 — a panic on the connection task would tear down every
+    /// in-flight invocation on it).
+    #[test]
+    fn gross_total_of_items_that_overflow_together_is_none_not_a_panic() {
+        let gateway = gateway(&json!({}));
+        let mut document = sample_document();
+        // Each item's own arithmetic fits: 1 × (MAX / 2) at 0 % VAT.
+        let half = Decimal::MAX / dec!(2);
+        document.items = vec![
+            LineItemInput::new("a", dec!(1), "db", half, "0"),
+            LineItemInput::new("b", dec!(1), "db", half, "0"),
+            LineItemInput::new("c", dec!(1), "db", half, "0"),
+        ];
+        let create = gateway
+            .build_create(
+                IssuedKind::Invoice,
+                &document,
+                &order(),
+                &external_id(),
+                DocumentRefs::default(),
+            )
+            .expect("each item fits on its own");
+        assert_eq!(gross_total(&create), None);
     }
 
     #[test]

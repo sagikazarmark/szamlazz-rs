@@ -5,7 +5,10 @@ amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) (the account
 (the caller trims the key: a Virtual Object key with leading or trailing whitespace is refused as `invalid_input`
 rather than trimmed by the handler, because Restate's per-key lock is on the raw key and a padded key would be a
 second instance of the same order with its own lock and the same external ids; the `OrderKey` type itself still
-trims).
+trims) and by #64 (the key's alphabet is tightened to what this record already claimed and the code did not enforce —
+no internal whitespace of *any* kind, where the code refused only runs — plus no `:` and Unicode NFC, and its length
+is 40 bytes, not 64; the composed external id is bounded at 110 bytes by bounding its parts; the caller's
+`invoice_number` is bounded the same way; see "Bounded inputs" below).
 Still holds: the key rule (trimmed, case preserved, validated), the deterministic external id, the query-first
 create inside a single `ctx.run` — now the create *step* under the issue policy's run retry policy (ADR 0004,
 amended by #22) rather than one `max_attempts(1)` run per attempt — the `Found`-validation rule, the 2 m
@@ -24,9 +27,10 @@ to do so without a server-side idempotency key (the Agent has none for invoices)
 trailing whitespace, case preserved. This matches the server: the create path trims before both the
 replay match and the duplicate check, while case is significant (two invoices coexist under
 `PRB-C-Case` and `prb-c-case`), and the query path matches exactly (a padded order number is
-creatable but not queryable) — all verified. The key is validated (1–64 bytes after trim, no control
-characters, no internal whitespace runs → `invalid_input`); nothing is case-folded or NFC-normalized
-because the server does neither. The key carries no account namespace *because the Restate scope does*
+creatable but not queryable) — all verified. The key is validated (1–40 bytes after trim, no control
+characters, no internal whitespace of any kind, no `:`, Unicode NFC → `invalid_input`; #64); nothing is
+case-folded or NFC-normalized because the server does neither — a key outside the alphabet is refused,
+never rewritten. The key carries no account namespace *because the Restate scope does*
 (ADR 0006; first written as "one szamlazz.hu account per deployment"): Restate namespaces the Virtual
 Object key and the `Idempotency-Key` per scope, so the same order number under two scopes is two `Order`
 instances; the deployment's namespace lives in the external id and is shared by every account.
@@ -130,7 +134,65 @@ repetition" is ON**; it is the second guard, not the first.
   (ADR 0006):* both pins are read from the invocation's journaled `Account`; `supplier_id` is required in
   the multi-account shape.
 - External ids of ~110 characters with `: . _ -` are accepted and queryable (verified), so the namespace
-  (1–16 chars `[a-z0-9-]`; then called the slug) plus order, kind and gen fit without hashing.
+  (1–16 chars `[a-z0-9-]`; then called the slug) plus order, kind and gen fit without hashing. *Amended
+  (#64):* 110 is also the **bound** — `ExternalId::MAX_LEN` — because szamlazz.hu documents no limit and a
+  truncated id would make every leading query by the full id answer 7 and a lost reply re-send.
 - Two order numbers differing only in case are two VO keys and two server documents. Internal
   whitespace and control characters are rejected rather than collapsed, because the server's
   handling of them is untested.
+
+## Bounded inputs (#64)
+
+The 2026-09-06 review found four caller inputs the worker later relied on without a bound (J5, J8, J11, A2,
+J-07-12). The decisions:
+
+- **The `OrderKey` alphabet is what this record claimed.** The code admitted a single internal space, an NBSP,
+  `:` and non-NFC text while the text above said internal whitespace is rejected. The code now matches the
+  text, and the text is made precise: after trimming, 1–40 bytes, no control character, **no whitespace of any
+  kind** (`char::is_whitespace`, so a space and an NBSP alike), **no `:`** (the external-id separator — `ORD:1`
+  plus a kind would otherwise compose an id another order's composition reads as), and **Unicode NFC**
+  (refused, not normalised). The alternative — amending the text to the lenient code — was rejected: the
+  server's handling of internal whitespace and NFC is unverified (behaviour notes, "Still unverified"), and a
+  `rendelesszam` the server stored differently from the key would fail `carries_order` on the worker's own
+  document and strand the order behind a permanent `conflict{external_id_collision}`. Refusing is always
+  safe; a later probe (#15 probe 4) may relax the rule, never the other way round. Nothing is trimmed,
+  collapsed or normalised on the caller's behalf. The `OrderKey` type still trims its edges (its `FromStr`,
+  `TryFrom<String>` and serde are the lenient entry for a caller building keys from its own order numbers);
+  the handler refuses an untrimmed *raw* key as before (#40).
+- **A `correction_id` is never an external-id token.** `invoice`, `proforma`, `prepayment`, `final`,
+  `corrective`, `storno`, `by-number`, `check-account` — in any letter case — are refused
+  (`InvalidCorrectionId::Reserved`). With `:` out of the key this was already impossible to exploit; the rule
+  is belt and braces, and it pins the token set (`ExternalId::TOKENS`) in one place.
+- **The composed external id is bounded at 110 bytes by bounding its parts**, not by checking the
+  composition: `Namespace` 16, `OrderKey` 40, `CorrectionId` 40, the caller's `InvoiceNumber` 40. The
+  longest shape, `{namespace}:{order}:corrective:{correction_id}`, is 16 + 1 + 40 + 1 + 10 + 1 + 40 = 109;
+  `const` assertions in `identity.rs` prove every shape at compile time, so raising any part's bound fails
+  the build until the budget is re-balanced. Bounding the parts was preferred to refusing at construction
+  because it gives the caller a rule per field rather than a rule about a combination, and to hashing
+  because a hashed id is not derivable by eye from the key. 40 was chosen for all three because a dashed UUID
+  (36) fits each — the Pretix-shaped `{event}-{code}` key and a UUID `correction_id` are the expected
+  callers — and one number is easier to remember than three. The real server limit is unknown (#15 probe 5);
+  110 is what was verified.
+- **The caller's `invoice_number` is a contract type**, `contract::InvoiceNumber`: 1–40 bytes, no whitespace,
+  no control character, no `:`, refused by its `Deserialize` so a bad number is a *Malformed body*
+  (`invalid_input` before the prologue). It flows into step names (`verify-{number}`, `storno-{number}`) and
+  into the storno external ids, so it is bounded like the other segments. Nothing is trimmed: a padded number
+  would be answered 7 by szamlazz.hu, and the rule is the better diagnosis. szamlazz.hu's own numbers are far
+  inside the bound; NAV allows 50 characters, so 40 is a bet that no real prefix approaches it — raise it,
+  and the storno shapes, if it does.
+- **Arithmetic on caller input is checked, never panicking** (J8). The `LineItem::try_calculated` path of #60
+  already answers an overflowing `unit_price × quantity` as `invalid_input`; #64 makes the two remaining
+  `Decimal` sums in the worker checked too — `outstanding` (on szamlazz.hu's amounts, on the response path of
+  `create_*` and `query`) and `gross_total` (a public helper with no production caller today; checked so that
+  a future caller cannot reintroduce the panic). The check runs *after* the prologue — it needs the account's
+  currency defaults for the rounding — so `namespace` and `account` are journaled before the 400; a duplicate
+  pre-prologue check was rejected as a second site for one rule. The e2e scenario proves the property that
+  matters: an overflowing body sent beside a healthy create against the same endpoint issues nothing, exactly
+  one create reaches the wire, and the healthy create is `issued` without a retry.
+- **Retroactivity.** A tighter key hides nothing issued so far: no deployment of the worker has issued against
+  a production account yet (#15 is the go-live checklist), and the test-account documents issued during the
+  probes were under keys inside the new alphabet. Had there been documents under a key the new rule refuses
+  (a 41–64-byte key, a key with an internal space), they would be reachable only by `Szamlazz.Agent.query`
+  by number or order number — the `Order` for that key would be unaddressable — so the rule would have had to
+  grandfather them or migrate them; that is the cost a *later* tightening would carry, and why the alphabet
+  is settled now, before the first live document, rather than after.

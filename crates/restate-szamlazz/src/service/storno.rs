@@ -31,6 +31,7 @@ impl Execution {
             invoice_number: number,
             comment,
         } = request;
+        let number = String::from(number);
         let gateway = &self.gateway;
         let namespace = &self.config.namespace;
         let storno_id = ExternalId::for_storno(namespace, &order, &number);

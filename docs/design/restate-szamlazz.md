@@ -44,8 +44,10 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
 — through deterministic external ids:
 
 - **VO key** = the order number, trimmed of leading/trailing whitespace, case preserved (the server trims and is
-  case-sensitive — verified). Validation: 1–64 bytes after trim, no control characters, no whitespace runs →
-  `invalid_input`. The caller trims: a key whose trimmed form differs from the raw key is refused as `invalid_input`
+  case-sensitive — verified). Validation: 1–40 bytes after trim (a dashed UUID fits), no control characters, no
+  internal whitespace of any kind, no `:` (the external-id separator), Unicode NFC → `invalid_input` naming the
+  rule; nothing is collapsed or normalised, because the server's handling is unverified and a `rendelesszam` it
+  stored differently from the key would strand the order behind `conflict{external_id_collision}` (ADR 0002, #64). The caller trims: a key whose trimmed form differs from the raw key is refused as `invalid_input`
   naming the rule, before the prologue, because Restate's per-key lock is on the *raw* key — `ORD-1` and ` ORD-1`
   would be two instances with two locks mapping to one szamlazz.hu order and identical external ids, and two
   concurrent creates under them would both pass their lookup and both send, leaving the order-number-repetition
@@ -59,8 +61,12 @@ order at a time. Everything else is answered by querying szamlazz.hu — the acc
   deployment, shared by every account), so *any* invocation can find what an earlier one issued:
   - slot kinds: `"{namespace}:{order}:{kind}"`, `kind ∈ proforma | invoice | prepayment | final`
   - correctives: `"{namespace}:{order}:corrective:{correction_id}"` (caller-supplied id; several correctives per invoice
-    are legitimate)
+    are legitimate; `^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$` and not one of the external-id tokens)
   - storno: `"{namespace}:{order}:storno:{original_number}"`
+  - Bounded at **110 bytes** (`ExternalId::MAX_LEN`, the length verified accepted and queryable) by bounding the
+    parts — namespace 16, order key 40, correction id 40, the caller's invoice number 40 (`contract::InvoiceNumber`:
+    no whitespace, no control character, no `:`) — so the longest shape, the corrective, is 109; proven at compile
+    time in `identity.rs` (#64).
   - Ext ids are not unique server-side; a query returns the **newest** holder (verified). That is exactly the
     question we ask — "what is the newest document of this kind we issued for this order?" — and it is why a reissue
     after a storno needs no generation counter: the new document becomes the newest holder, the old one stays

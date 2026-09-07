@@ -10,7 +10,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::{ConflictReason, DocumentKind};
+use super::{ConflictReason, DocumentKind, InvoiceNumber};
 
 /// Input of `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,7 +18,7 @@ use super::{ConflictReason, DocumentKind};
 #[serde(deny_unknown_fields)]
 pub struct StornoRequest {
     /// The invoice to reverse.
-    pub invoice_number: String,
+    pub invoice_number: InvoiceNumber,
     /// Comment placed on the storno invoice.
     #[serde(default)]
     pub comment: Option<String>,
@@ -27,9 +27,9 @@ pub struct StornoRequest {
 impl StornoRequest {
     /// A storno request without a comment.
     #[must_use]
-    pub fn new(invoice_number: impl Into<String>) -> Self {
+    pub fn new(invoice_number: InvoiceNumber) -> Self {
         Self {
-            invoice_number: invoice_number.into(),
+            invoice_number,
             comment: None,
         }
     }
@@ -328,12 +328,13 @@ mod tests {
 
     #[test]
     fn storno_request_round_trips() {
-        let mut storno = StornoRequest::new("SZ-1");
+        let sz_1 = || "SZ-1".parse::<InvoiceNumber>().expect("valid number");
+        let mut storno = StornoRequest::new(sz_1());
         storno.comment = Some("wrong buyer".to_owned());
         round_trip(&storno);
         let bare: StornoRequest =
             serde_json::from_value(json!({"invoice_number": "SZ-1"})).expect("deserialize");
-        assert_eq!(bare, StornoRequest::new("SZ-1"));
+        assert_eq!(bare, StornoRequest::new(sz_1()));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::document::DocumentInput;
-use super::{CorrectionId, IssuedKind};
+use super::{CorrectionId, InvoiceNumber, IssuedKind};
 
 /// Input of `Szamlazz.Order.create_proforma`, `create_invoice`,
 /// `create_prepayment` and `create_final`.
@@ -78,7 +78,7 @@ pub enum ProformaLink {
     /// it, `conflict{not_managed}` when it does not carry this order's
     /// number, the `account_mismatch` fault when it belongs to another
     /// szamlazz.hu account, `invalid_input` when it is not a proforma.
-    Number(String),
+    Number(InvoiceNumber),
 }
 
 /// Input of `Szamlazz.Order.correct_invoice`.
@@ -87,7 +87,7 @@ pub enum ProformaLink {
 #[serde(deny_unknown_fields)]
 pub struct CorrectRequest {
     /// The invoice being corrected; must carry this order's number.
-    pub invoice_number: String,
+    pub invoice_number: InvoiceNumber,
     /// The identity of this corrective. A new id issues a new corrective by
     /// contract; the same id finds the one it issued.
     pub correction_id: CorrectionId,
@@ -99,12 +99,12 @@ impl CorrectRequest {
     /// A corrective of `invoice_number` under `correction_id`.
     #[must_use]
     pub fn new(
-        invoice_number: impl Into<String>,
+        invoice_number: InvoiceNumber,
         correction_id: CorrectionId,
         document: DocumentInput,
     ) -> Self {
         Self {
-            invoice_number: invoice_number.into(),
+            invoice_number,
             correction_id,
             document,
         }
@@ -372,7 +372,7 @@ mod tests {
     fn create_request_round_trips() {
         let mut request = CreateRequest::new(sample_document());
         request.options.reissue = true;
-        request.options.proforma = ProformaLink::Number("D-1".to_owned());
+        request.options.proforma = ProformaLink::Number("D-1".parse().expect("valid number"));
         let json = round_trip(&request);
         assert_eq!(json.get("request_id"), None);
         assert_eq!(json["options"]["reissue"], true);
@@ -396,7 +396,7 @@ mod tests {
             (ProformaLink::Auto, json!("auto")),
             (ProformaLink::None, json!("none")),
             (
-                ProformaLink::Number("D-1".to_owned()),
+                ProformaLink::Number("D-1".parse().expect("valid number")),
                 json!({"number": "D-1"}),
             ),
         ];
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn correct_request_round_trips() {
         let correct = CorrectRequest {
-            invoice_number: "SZ-1".to_owned(),
+            invoice_number: "SZ-1".parse().expect("valid number"),
             correction_id: correction_id(),
             document: sample_document(),
         };
