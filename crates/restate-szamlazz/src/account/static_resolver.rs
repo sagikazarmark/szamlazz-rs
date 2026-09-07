@@ -57,7 +57,7 @@ use szamlazz_agent::Credentials;
 
 use super::{
     Account, AccountId, AccountResolver, BoxFuture, CredentialRef, CredentialStore, Endpoint,
-    FetchError, InvalidEndpoint, ResolveError,
+    FetchError, InvalidEndpoint, NormalizedEndpoint, ResolveError,
 };
 use crate::config::{Defaults, Secret, SellerConfig};
 
@@ -183,8 +183,10 @@ pub enum StaticConfigError {
         /// The second account's table.
         second: AccountTable,
     },
-    /// Two accounts share an `(endpoint, agent_key)` pair: one szamlazz.hu
-    /// account would be reachable under two scopes. The key is not echoed.
+    /// Two accounts share an `(endpoint, agent_key)` pair — the endpoint
+    /// compared normalised, so `https://x/szamla/` and `https://x/szamla`
+    /// are one: one szamlazz.hu account would be reachable under two scopes.
+    /// The key is not echoed.
     #[error("{first} and {second} share an endpoint and agent key")]
     DuplicateCredentials {
         /// The first account's table.
@@ -325,11 +327,13 @@ impl StaticResolver {
 
     /// Builds the multi-account shape, enforcing the checkable half of the
     /// safety contract in one pass: every account is built, then its id and
-    /// `(endpoint, agent key)` are claimed against the accounts before it.
+    /// `(endpoint, agent key)` are claimed against the accounts before it —
+    /// the endpoint on its normalised form ([`Endpoint::normalized`]), so two
+    /// spellings of one server with one key are one account.
     fn multi(accounts: BTreeMap<String, StaticAccount>) -> Result<Self, StaticConfigError> {
         let mut entries = BTreeMap::new();
         let mut ids: BTreeMap<String, AccountTable> = BTreeMap::new();
-        let mut credentials: BTreeMap<(String, String), AccountTable> = BTreeMap::new();
+        let mut credentials: BTreeMap<(NormalizedEndpoint, String), AccountTable> = BTreeMap::new();
         for (scope, account) in accounts {
             validate_scope(&scope).map_err(|source| StaticConfigError::InvalidScope {
                 scope: scope.clone(),
@@ -345,7 +349,7 @@ impl StaticResolver {
                     second: table,
                 });
             }
-            let pair = (entry.account.endpoint.to_string(), agent_key);
+            let pair = (entry.account.endpoint.normalized(), agent_key);
             if let Some(first) = credentials.insert(pair, table.clone()) {
                 return Err(StaticConfigError::DuplicateCredentials {
                     first,
@@ -712,6 +716,69 @@ mod tests {
             ),
             "a written and a defaulted production endpoint are the same endpoint"
         );
+    }
+
+    /// The fan-in rule holds across spellings of one endpoint (J32): a
+    /// trailing slash, the scheme's or the host's case, or the default port
+    /// written out do not make one szamlazz.hu account two. Two paths, two
+    /// schemes or two keys still do.
+    #[test]
+    fn duplicate_credentials_are_found_across_endpoint_spellings() {
+        const KEY: &str = "shared-sentinel-key-3c9e";
+        let with_endpoints = |acme: &str, beta: &str| {
+            let mut config = multi();
+            config["accounts"]["acme"]["agent_key"] = json!(KEY);
+            config["accounts"]["beta_events"]["agent_key"] = json!(KEY);
+            config["accounts"]["acme"]["endpoint"] = json!(acme);
+            config["accounts"]["beta_events"]["endpoint"] = json!(beta);
+            config
+        };
+        for (acme, beta) in [
+            (
+                "https://www.szamlazz.hu/szamla/",
+                "https://www.szamlazz.hu/szamla",
+            ),
+            (
+                "HTTPS://WWW.SZAMLAZZ.HU/szamla/",
+                "https://www.szamlazz.hu/szamla/",
+            ),
+            (
+                "https://www.szamlazz.hu:443/szamla/",
+                "https://www.szamlazz.hu/szamla/",
+            ),
+            ("http://127.0.0.1:80/", "http://127.0.0.1"),
+        ] {
+            let error = resolver(with_endpoints(acme, beta))
+                .expect_err(&format!("{acme} and {beta} are one endpoint"));
+            assert!(
+                matches!(error, StaticConfigError::DuplicateCredentials { .. }),
+                "{acme} vs {beta}: {error:?}"
+            );
+            assert!(!format!("{error:?}").contains(KEY), "{error:?}");
+        }
+        for (acme, beta) in [
+            (
+                "https://www.szamlazz.hu/szamla/",
+                "https://www.szamlazz.hu/other/",
+            ),
+            (
+                "http://www.szamlazz.hu/szamla/",
+                "https://www.szamlazz.hu/szamla/",
+            ),
+            (
+                "https://www.szamlazz.hu:8443/szamla/",
+                "https://www.szamlazz.hu/szamla/",
+            ),
+        ] {
+            resolver(with_endpoints(acme, beta))
+                .unwrap_or_else(|e| panic!("{acme} and {beta} are two endpoints: {e}"));
+        }
+        let mut config = with_endpoints(
+            "https://www.szamlazz.hu/szamla/",
+            "https://www.szamlazz.hu/szamla",
+        );
+        config["accounts"]["beta_events"]["agent_key"] = json!("another-sentinel-key-7f10");
+        resolver(config).expect("one endpoint with two keys is two accounts");
     }
 
     /// Two scopes with one id would share a credential reference.

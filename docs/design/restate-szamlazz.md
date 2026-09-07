@@ -669,7 +669,10 @@ mutually exclusive (both present is a load error) and there is no default accoun
 its scope only (`/restate/scope/{scope}/call/…`); an unscoped request is `unknown_account`, as a scoped request is on
 the single-account shape. Load-time validation enforces the checkable half of the resolver's safety contract — one
 szamlazz.hu account under exactly one scope, no fan-in: unique `(endpoint, agent_key)` pairs and unique ids (the
-credential reference). *Which* szamlazz.hu account a key opens is not checkable — no operation answers "which account
+credential reference). The endpoint is compared on its normalised form (`Endpoint::normalized`: scheme and host
+case-folded, a default port written out dropped, trailing slashes trimmed), so `…/szamla/` defaulted beside `…/szamla`
+typed with one key is refused as the one account it is rather than admitted as two (J32); the account keeps and posts
+to the text as written. *Which* szamlazz.hu account a key opens is not checkable — no operation answers "which account
 am I?", `check_account` finds no document, and a found document exposes no account identity the worker could verify
 against configuration (0.3's optional `supplier_id` pin on `szallito/id` is gone: ADR 0006, account-pin amendment)
 — so a key under the wrong scope is the operator's go-live check to catch: under each scope, `Szamlazz.Agent.query` a

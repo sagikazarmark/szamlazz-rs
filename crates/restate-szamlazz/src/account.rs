@@ -233,7 +233,54 @@ impl Endpoint {
                 .is_ok_and(|ip| ip.is_loopback());
         !loopback
     }
+
+    /// The endpoint as the comparison key of the safety contract's fan-in
+    /// rule — unique `(endpoint, credentials)` pairs: two endpoints with
+    /// equal keys reach one server, so one agent key under both is one
+    /// szamlazz.hu account under two scopes.
+    ///
+    /// Folds what a URL may spell two ways for one target: the scheme's and
+    /// the host's case, the scheme's default port written out (`:443` on
+    /// `https`, `:80` on `http`) and the path's trailing slashes —
+    /// `https://www.szamlazz.hu/szamla/` (the default) and
+    /// `https://www.szamlazz.hu/szamla` (typed) are one endpoint. The rule
+    /// errs toward refusing: a pair refused at load time costs the operator a
+    /// configuration fix, a pair admitted costs duplicate documents. Nothing
+    /// else is folded — a path's case and a query are kept as written — and
+    /// the endpoint itself is untouched: what the client posts to, what is
+    /// journaled and what the start-up log prints stay the text as written.
+    #[must_use]
+    pub fn normalized(&self) -> NormalizedEndpoint {
+        // Validated on construction, so this parses; the fallback keeps the
+        // comparison textual rather than panicking.
+        let Ok(uri) = self.0.parse::<Uri>() else {
+            return NormalizedEndpoint(self.0.clone());
+        };
+        let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
+        let host = uri.host().unwrap_or_default().to_ascii_lowercase();
+        let default_port = if scheme == "https" { 443 } else { 80 };
+        let port = uri
+            .port_u16()
+            .filter(|port| *port != default_port)
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        let path = uri.path().trim_end_matches('/');
+        let query = uri
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default();
+        NormalizedEndpoint(format!("{scheme}://{host}{port}{path}{query}"))
+    }
 }
+
+/// An [`Endpoint`] reduced to what identifies its target, for the fan-in
+/// rule's `(endpoint, credentials)` comparison ([`Endpoint::normalized`]).
+/// Compared, hashed and ordered; never displayed and never posted to — the
+/// folding that makes two spellings equal (the trimmed trailing slash above
+/// all) may produce a URL szamlazz.hu does not serve, so the type exposes no
+/// text. Not journaled.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NormalizedEndpoint(String);
 
 impl Default for Endpoint {
     fn default() -> Self {
@@ -331,7 +378,11 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///   scope; a scope's account is never changed in place. A running
 ///   invocation stays on the account it journaled either way.
 /// - **Unique `(endpoint, credentials)` pairs.** The same agent key on the
-///   same endpoint is one account, whatever its `id`.
+///   same endpoint is one account, whatever its `id` — and the same endpoint
+///   is the same server, however spelled: compare on
+///   [`Endpoint::normalized`] (scheme and host case, a default port written
+///   out, a trailing slash), as the static resolver does, so `…/szamla/`
+///   beside `…/szamla` with one key is refused rather than admitted as two.
 /// - **The right key under the right scope.** The worker holds no account
 ///   pin — nothing on a found document is checked against the account (see
 ///   [`Account`], *No account pin*) — so a key that opens another szamlazz.hu
@@ -732,6 +783,59 @@ mod tests {
             assert!(!endpoint.is_cleartext(), "{safe}");
         }
         assert!(!Endpoint::production().is_cleartext());
+    }
+
+    /// The fan-in rule compares endpoints on a normalised form: two spellings
+    /// of one server are one endpoint, two servers stay two. The endpoint
+    /// itself keeps its text, and the key is not a URL — it has no text to
+    /// post to.
+    #[test]
+    fn endpoint_normalizes_for_comparison_only() {
+        let same = [
+            ("https://x/", "https://x"),
+            ("https://x/szamla/", "https://x/szamla"),
+            ("https://x/szamla/", "https://x/szamla//"),
+            ("HTTPS://X/szamla/", "https://x/szamla/"),
+            ("https://x:443/szamla/", "https://x/szamla/"),
+            ("http://x:80/", "http://x/"),
+            ("http://[::1]:1234/", "http://[::1]:1234"),
+            ("https://x/a?b=1", "https://x/a/?b=1"),
+            (Endpoint::PRODUCTION, "https://www.szamlazz.hu/szamla"),
+        ];
+        for (a, b) in same {
+            let (a, b) = (Endpoint::parse(a).expect(a), Endpoint::parse(b).expect(b));
+            assert_eq!(
+                a.normalized(),
+                b.normalized(),
+                "{a} and {b} are one endpoint"
+            );
+            assert_ne!(a, b, "the endpoints themselves keep their spelling");
+        }
+        let different = [
+            ("https://x/a", "https://x/b"),
+            ("https://x/Szamla/", "https://x/szamla/"),
+            ("http://x/", "https://x/"),
+            ("https://x:8443/", "https://x/"),
+            ("https://x:80/", "https://x/"),
+            ("https://x/a?b=1", "https://x/a?b=2"),
+            ("https://x/a?b=1", "https://x/a"),
+            ("https://x/", "https://y/"),
+        ];
+        for (a, b) in different {
+            let (a, b) = (Endpoint::parse(a).expect(a), Endpoint::parse(b).expect(b));
+            assert_ne!(
+                a.normalized(),
+                b.normalized(),
+                "{a} and {b} are two endpoints"
+            );
+        }
+        let endpoint = Endpoint::parse("HTTPS://X:443/szamla/").expect("endpoint");
+        assert_eq!(endpoint.as_str(), "HTTPS://X:443/szamla/");
+        assert_eq!(
+            serde_json::to_value(&endpoint).expect("json"),
+            json!("HTTPS://X:443/szamla/"),
+            "normalisation never reaches the journal"
+        );
     }
 
     /// A resolver and a store that a downstream build might plug in: the
