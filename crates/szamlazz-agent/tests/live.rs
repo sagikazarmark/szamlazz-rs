@@ -28,17 +28,21 @@ use szamlazz_agent::{
     VatRate,
 };
 
+/// A client for the test-mode account `SZAMLAZZ_AGENT_KEY` names.
 fn client() -> Client {
     let key = std::env::var("SZAMLAZZ_AGENT_KEY")
         .expect("SZAMLAZZ_AGENT_KEY must point at a test-mode account");
     Client::new(Credentials::agent_key(key)).expect("client")
 }
 
+/// Today's date, for `keltDatum` and `teljesitesDatum`.
 fn today() -> Date {
     // Live tests run on real infrastructure; wall clock is fine here.
     jiff::Zoned::now().date()
 }
 
+/// A one-line HUF document of `kind` — the same buyer, dates and line item on
+/// every live test, so the documents an account accumulates are recognisable.
 fn document(kind: InvoiceKind) -> CreateInvoice {
     let mut invoice = CreateInvoice::new(
         kind,
@@ -139,6 +143,7 @@ fn case_label(create_e_invoice: bool, storno_e_invoice: bool) -> String {
     format!("created eszamla={create_e_invoice}, storno eszamla={storno_e_invoice}")
 }
 
+/// The document as szamlazz.hu holds it now, fetched by number.
 async fn query_by_number(client: &Client, number: &InvoiceNumber) -> InvoiceDocument {
     client
         .send(&QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(
@@ -165,7 +170,17 @@ async fn query_by_number(client: &Client, number: &InvoiceNumber) -> InvoiceDocu
 #[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
 async fn eszamla_semantics() {
     let client = client();
-    let tag = jiff::Timestamp::now().as_second() % 1_000_000;
+    // The order numbers and external ids of a run must not repeat an earlier
+    // run's: a repeated order number would meet the duplicate-order-number
+    // check, a repeated external id would make the earlier run's documents
+    // holders of this run's ids. Whole seconds since the epoch plus the
+    // process id are unique across runs on one machine and keep the order
+    // number well inside 40 bytes.
+    let tag = format!(
+        "{}-{}",
+        jiff::Timestamp::now().as_second(),
+        std::process::id()
+    );
 
     // (created as e-invoice?, storno as e-invoice?)
     let cases = [(true, true), (true, false), (false, true), (false, false)];

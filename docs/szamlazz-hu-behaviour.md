@@ -3,8 +3,10 @@
 What the `restate-szamlazz` design relies on that szamlazz.hu does not document, observed against the
 live Számla Agent. Every row below was observed on **one szamlazz.hu TEST account, on one day
 (2026-09-03)** — the rows marked `P48-*` on the same account on **2026-09-06**, `P73-*` on **2026-09-07** —
-on **paper invoices** (`<eszamla>1</eszamla>`; the account can issue e-invoices, and does so only when a
-request says `<eszamla>true</eszamla>` — see *Storno semantics*), every document marked
+on **paper invoices** (`<eszamla>1</eszamla>` on every queried document of the 2026-09-03/06 probes; the account
+can issue e-invoices, and does so only when a request says `<eszamla>true</eszamla>` — the P73 rows, whose two
+e-invoice originals and two e-invoice stornos are the exceptions, and by their `E-` numbering the P60 stornos; see
+*Storno semantics*), every document marked
 `<teszt>true</teszt>`, and the account toggle "Disable order number repetition" ON, through the
 `szamlazz-agent` crate. Probe ids (`A1`, `B4`, `C2-5`, …) refer to the review record's probe findings A–D
 and their raw request/response logs, which are not part of this repository; `P48-P0`…`P48-P7` are the
@@ -16,8 +18,8 @@ in a follow-up); `XPRB-P1`…`P6` are the external-id uniqueness re-check of 202
 the `szamlazz-agent` crate, outside the repository); `P73-EE`, `P73-EP`, `P73-PE`, `P73-PP` are the `eszamla`
 probe of issue #73 (2026-09-07, same account; the letters are the original's and the storno request's form,
 **E**-invoice or **P**aper: `E-CTEST-2026-9` → `E-CTEST-2026-10`, `E-CTEST-2026-11` → `CTEST-2026-112`,
-`CTEST-2026-113` → `E-CTEST-2026-12`, `CTEST-2026-114` → `CTEST-2026-115`; reproduced the same day by a second run,
-`E-CTEST-2026-13`…`16` and `CTEST-2026-116`…`119`; the `eszamla_semantics` test of
+`CTEST-2026-113` → `E-CTEST-2026-12`, `CTEST-2026-114` → `CTEST-2026-115`; reproduced the same day by two more runs,
+`E-CTEST-2026-13`…`20` and `CTEST-2026-116`…`123`; the `eszamla_semantics` test of
 `crates/szamlazz-agent/tests/live.rs`, which runs the same four cases on demand, asserts the observed answers and
 prints them as a table). Restate runtime facts live in ADRs 0001, 0002, 0004 and 0005, not here.
 
@@ -163,9 +165,9 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Caveat | Why it matters |
 |---|---|
-| Everything above is one TEST account, three days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents, the 8 `P60-*` invoices with their 8 stornos, and the 6 `XPRB-*` documents with their 5 stornos; 2026-09-07: the 4 `P73-*` invoices with their 4 stornos, twice). | Nothing here is a documented guarantee. |
+| Everything above is one TEST account, three days (2026-09-03: roughly 75 document-creating calls in four sessions; 2026-09-06: the 13 `P48-*` documents, the 8 `P60-*` invoices with their 8 stornos, and the 6 `XPRB-*` documents with their 5 stornos; 2026-09-07: the 4 `P73-*` invoices with their 4 stornos, three times). | Nothing here is a documented guarantee. |
 | Every document is `<teszt>true</teszt>`; `szallito/id` is 972720. | Neither is compared with anything by the worker (ADR 0006, account-pin amendment); `Szamlazz.Agent.query` projects `teszt` as `test`, which is what the go-live check reads off a known document. A live account has `teszt=false`. |
-| Every probe document but the two P73 e-invoices is a **paper** invoice (`<eszamla>1</eszamla>` on all but `D`/`SL`); the account can issue e-invoices (`eszamla=true` → `3`) but no probe before P73 asked for one, and P73's two `eszamla=true` stornos (P73-EE, P73-PE) are the only e-invoice stornos whose request flag is on record. | 352 (kelt must be today) was observed on a paper storno, so it is not an e-invoice rule; whether an e-invoice storno has *additional* rules (55 "E-számla aláírása sikertelen" is an e-invoice-only code) is unverified beyond those two accepted stornos. The pre-#73 reading of this row — "e-invoicing is enabled (`eszamla=1`)" — was wrong; see *Storno semantics*. |
+| Every probe document is a **paper** invoice (`<eszamla>1</eszamla>` on all but `D`/`SL`) except the four P73 e-invoices — the two originals created with `eszamla=true` and the two stornos sent with it (`E-CTEST-2026-9`…`12`, all `3`) — and, by their `E-` numbering, the eight P60 stornos (not queried); the account can issue e-invoices but no probe before P73 asked for one, and P73's two `eszamla=true` stornos (P73-EE, P73-PE) are the only e-invoice stornos whose request flag is on record. | 352 (kelt must be today) was observed on a paper storno, so it is not an e-invoice rule; whether an e-invoice storno has *additional* rules (55 "E-számla aláírása sikertelen" is an e-invoice-only code) is unverified beyond those two accepted stornos. The pre-#73 reading of this row — "e-invoicing is enabled (`eszamla=1`)" — was wrong; see *Storno semantics*. |
 | The test account did not produce 56 for bad addresses. | Either test accounts do not send mail or 56 is raised only on synchronous hand-off failures. |
 | Other probes were issuing concurrently, so `CTEST-2026-*` numbers are not contiguous. | Irrelevant to the facts; noted so the raw logs are not misread. |
 
