@@ -20,6 +20,14 @@ use crate::test_support::{Doc, ORIGINAL_TELJ};
 #[allow(clippy::cast_possible_truncation)]
 const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as u64;
 
+/// The `inactivity_timeout` / `abort_timeout` of every handler whose step is
+/// one szamlazz.hu round trip — the four reads and `set_payments`' one send —
+/// in the discovery reports (milliseconds): `2m`, the 60 s client timeout
+/// plus the margin a stalling szamlazz.hu needs (#114). The writes whose step
+/// is three trips carry `4m` / `3m`. A literal, like the attributes it pins
+/// (the handler macro takes no constant).
+const ONE_TRIP_TIMEOUT_MS: u64 = 120_000;
+
 /// The `Accounts` bundle of a test account at `endpoint` with `agent_key`,
 /// through the static resolver — what the endpoint binary builds.
 fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
@@ -76,7 +84,11 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
         if name == "get" {
             // Read-only: shared, an empty input, the default back-off with
             // three attempts, no idempotency retention; an explicit journal
-            // retention so the journal is inspectable.
+            // retention so the journal is inspectable. The timeouts are the
+            // reads' 2m / 2m (#114): a read step is one szamlazz.hu round trip
+            // bounded by the 60 s client timeout, and szamlazz.hu has been
+            // seen to stall for a minute and still answer — the server's 1 m
+            // default would suspend exactly such a read.
             assert_eq!(handler.ty, Some(HandlerType::Shared));
             let input = handler.input.as_ref().expect("an empty input payload");
             assert!(
@@ -85,8 +97,8 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
             );
             assert_eq!(handler.retry_policy_max_attempts, Some(3));
             assert_eq!(handler.retry_policy_initial_interval, None);
-            assert_eq!(handler.inactivity_timeout, None);
-            assert_eq!(handler.abort_timeout, None);
+            assert_eq!(handler.inactivity_timeout, Some(ONE_TRIP_TIMEOUT_MS));
+            assert_eq!(handler.abort_timeout, Some(ONE_TRIP_TIMEOUT_MS));
             assert_eq!(handler.journal_retention, Some(24 * 3_600_000));
             assert_eq!(handler.idempotency_retention, None);
             continue;
@@ -164,7 +176,9 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             // Read-only: a short 10s → 1m back-off, three attempts, no
             // idempotency retention (nothing to replay); an explicit journal
             // retention so the journal is inspectable — and, for the probe,
-            // so the leak assertion can scan it.
+            // so the leak assertion can scan it. The reads' 2m / 2m timeouts
+            // (#114): one 60 s round trip plus the margin a stalling
+            // szamlazz.hu needs, the same rule as `set_payments`' one send.
             assert_eq!(
                 handler.retry_policy_initial_interval,
                 Some(10_000),
@@ -177,8 +191,12 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 "{name}"
             );
             assert_eq!(handler.retry_policy_max_attempts, Some(3), "{name}");
-            assert_eq!(handler.inactivity_timeout, None, "{name}");
-            assert_eq!(handler.abort_timeout, None, "{name}");
+            assert_eq!(
+                handler.inactivity_timeout,
+                Some(ONE_TRIP_TIMEOUT_MS),
+                "{name}"
+            );
+            assert_eq!(handler.abort_timeout, Some(ONE_TRIP_TIMEOUT_MS), "{name}");
             assert_eq!(handler.journal_retention, Some(24 * 3_600_000), "{name}");
             assert_eq!(handler.idempotency_retention, None, "{name}");
             if name == "check_account" {
@@ -242,8 +260,12 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 // Two attempts: an additive send is at-least-once, so every
                 // invocation attempt is a potential second copy of the entries.
                 assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
-                assert_eq!(handler.inactivity_timeout, Some(120_000), "{name}");
-                assert_eq!(handler.abort_timeout, Some(120_000), "{name}");
+                assert_eq!(
+                    handler.inactivity_timeout,
+                    Some(ONE_TRIP_TIMEOUT_MS),
+                    "{name}"
+                );
+                assert_eq!(handler.abort_timeout, Some(ONE_TRIP_TIMEOUT_MS), "{name}");
             }
         }
     }

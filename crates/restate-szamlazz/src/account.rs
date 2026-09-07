@@ -400,6 +400,12 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///   worker journals and reports to the caller as `unknown_account`; a
 ///   resolver that cached them would turn the appending of a scope into a
 ///   window of refusals. A resolver may cache resolved accounts internally.
+/// - **Answer within seconds.** The worker bounds every `resolve` call at
+///   ten seconds and drops the future at the deadline; a slow answer is
+///   `unavailable` — retried under the resolve policy, then the terminal
+///   fault. A resolver over a pool or a network sets its own, shorter
+///   timeouts and answers `Unavailable` itself rather than letting a call
+///   hang into the worker's bound.
 ///
 /// Unscoped and unknown are answers, not faults of the resolver: the request
 /// names no account, and the worker reports that to the caller as a terminal
@@ -442,6 +448,12 @@ pub trait AccountResolver: Send + Sync {
 /// - A `Gone` reference is an answer (the account's credentials were
 ///   removed); `Unavailable` is a fault of the store. Neither display text
 ///   echoes the store's own message.
+/// - **Answer within seconds.** The worker bounds every `fetch` call at ten
+///   seconds and drops the future at the deadline; a slow answer is
+///   `unavailable` — retried in process like a reported `Unavailable`, then
+///   the terminal fault. A store over a secrets service or a network sets its
+///   own, shorter timeouts and answers `Unavailable` itself rather than
+///   letting a call hang into the worker's bound.
 ///
 /// # Debug
 ///

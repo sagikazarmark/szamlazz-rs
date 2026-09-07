@@ -3,10 +3,14 @@
 //! This module holds the decisions of those steps — functions of their inputs
 //! whose only effect is a log line, which is what can be unit-tested (the SDK
 //! has no mock context; the durable behaviour is asserted end to end) — and
-//! the one step that runs outside the journal, the credential fetch. The
-//! durable steps themselves are stamped per context type in
-//! `support::{object, shared, service}::prologue`.
+//! the prologue's two calls into an embedder's trait objects, each under the
+//! worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of the
+//! `account` step's closure, and the credential fetch, the one step that runs
+//! outside the journal. The durable steps themselves are stamped per context
+//! type in `support::{object, shared, service}::prologue`.
 
+use std::borrow::Cow;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +20,7 @@ use szamlazz_agent::Credentials;
 
 use super::support::Fault;
 use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
-use crate::config::WorkerConfig;
+use crate::config::{WorkerConfig, format_duration};
 use crate::gateway::Gateway;
 
 /// What one handler execution runs on: the gateway opened for this execution
@@ -83,12 +87,91 @@ pub(super) enum Resolution {
     },
 }
 
+/// The bound on each call into the account resolver or the credential store
+/// — every `resolve`, every `fetch` attempt — after which the call is dropped
+/// and answered as unavailable (J6, #114). The worker's own constant, not a
+/// setting: the static resolver is in memory and never reaches it, and a
+/// database-backed one that has not answered in ten seconds is not going to
+/// — waiting on would only hold the execution until the handler's inactivity
+/// timeout, spending an invocation attempt on a wait the resolve policy or
+/// the fetch loop is there to retry.
+pub(super) const CALL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Which of the two calls into an embedder's trait objects the worker bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoundedCall {
+    /// `AccountResolver::resolve`.
+    Resolver,
+    /// `CredentialStore::fetch`.
+    Store,
+}
+
+impl BoundedCall {
+    /// The subject of the timeout's display text.
+    fn subject(self) -> &'static str {
+        match self {
+            Self::Resolver => "the account resolver",
+            Self::Store => "the credential store",
+        }
+    }
+}
+
+/// A bounded call that had not answered at [`CALL_DEADLINE`]; its future was
+/// dropped. Names the deadline, so that a fault built from it says what
+/// happened; names nothing of the account.
+#[derive(Debug, thiserror::Error)]
+#[error("{} did not answer within {}", call.subject(), format_duration(CALL_DEADLINE))]
+pub(super) struct TimedOut {
+    /// The call that outlived the bound.
+    call: BoundedCall,
+}
+
+/// Awaits `future` — one `call` into an embedder's trait object — for at most
+/// [`CALL_DEADLINE`], dropping it at the deadline.
+///
+/// # Errors
+///
+/// [`TimedOut`] when the deadline passed without an answer.
+async fn bounded<T>(call: BoundedCall, future: impl Future<Output = T>) -> Result<T, TimedOut> {
+    tokio::time::timeout(CALL_DEADLINE, future)
+        .await
+        .map_err(|_elapsed| TimedOut { call })
+}
+
 /// The `account` step's one error: the resolver could not answer. Retryable
 /// to the SDK, so the resolve policy re-executes the step; its display never
-/// echoes the resolver's own message (it becomes `last_failure`).
+/// echoes the resolver's own message (it becomes `last_failure`, and the
+/// exhausted step's fault text) but does tell a resolver that reported itself
+/// unavailable from one the worker gave up waiting on.
 #[derive(Debug, thiserror::Error)]
-#[error("the account resolver is unavailable")]
-pub(super) struct ResolverUnavailable(#[source] BoxError);
+pub(super) enum ResolverUnavailable {
+    /// The resolver answered `ResolveError::Unavailable`.
+    #[error("the account resolver is unavailable")]
+    Reported(#[source] BoxError),
+    /// The resolver had not answered at [`CALL_DEADLINE`].
+    #[error(transparent)]
+    TimedOut(TimedOut),
+}
+
+/// Resolves the request's scope through `accounts` under [`CALL_DEADLINE`]:
+/// the body of the `account` step's closure. Every answer of the resolver is
+/// data; its unavailability, reported or by the deadline, is the retryable
+/// error.
+///
+/// # Errors
+///
+/// [`ResolverUnavailable`]: the resolver answered `Unavailable`, or had not
+/// answered at the deadline. Retryable — the resolve policy re-executes the
+/// step.
+pub(super) async fn resolve(
+    accounts: &Accounts,
+    scope: Option<&str>,
+) -> Result<Resolution, ResolverUnavailable> {
+    match bounded(BoundedCall::Resolver, accounts.resolve(scope)).await {
+        Ok(result) => resolution(result),
+        Err(timed_out) => Err(ResolverUnavailable::TimedOut(timed_out)),
+    }
+}
 
 /// The `account` step's closure result: every answer of the resolver as
 /// data, its unavailability as the retryable error.
@@ -106,7 +189,7 @@ pub(super) fn resolution(
         Ok(account) => Ok(Resolution::Account(Box::new(account))),
         Err(ResolveError::Unscoped) => Ok(Resolution::Unscoped),
         Err(ResolveError::Unknown { scope }) => Ok(Resolution::Unknown { scope }),
-        Err(ResolveError::Unavailable(source)) => Err(ResolverUnavailable(source)),
+        Err(ResolveError::Unavailable(source)) => Err(ResolverUnavailable::Reported(source)),
     }
 }
 
@@ -142,38 +225,67 @@ const FETCH_ATTEMPTS: u32 = 3;
 /// The pause before each re-fetch.
 const FETCH_PAUSE: Duration = Duration::from_millis(200);
 
+/// How one fetch of the store ended short of credentials: the store's own
+/// answer, or the worker's deadline on the call.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum FetchFailure {
+    /// The store answered with its error.
+    #[error(transparent)]
+    Store(FetchError),
+    /// The store had not answered at [`CALL_DEADLINE`].
+    #[error(transparent)]
+    TimedOut(TimedOut),
+}
+
+impl FetchFailure {
+    /// Whether the next attempt of the loop may answer differently: a store
+    /// that is unavailable or silent may recover; a reference the store does
+    /// not know is settled.
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Store(FetchError::Gone { .. }) => false,
+            Self::Store(FetchError::Unavailable(_)) | Self::TimedOut(_) => true,
+        }
+    }
+}
+
 /// Fetches the account's credentials outside the journal, on every
-/// execution, with a short in-process retry of an unavailable store.
+/// execution, with a short in-process retry of an unavailable store; each
+/// attempt is one call bounded by [`CALL_DEADLINE`], so the loop ends within
+/// `FETCH_ATTEMPTS × CALL_DEADLINE` plus the pauses.
 ///
 /// # Errors
 ///
 /// The terminal `unavailable` fault: the store is gone for this reference
-/// or stayed unavailable through the retries. Terminal by decision: a
-/// retryable error would route a prolonged store outage into the handler's
-/// kill-on-five and an unstructured 500, whereas this is structured and
-/// immediate. The cost — an outage during a replay of an invocation whose
-/// create already landed surfaces as `unavailable` although the document
-/// exists — is reconciled by `get` or a retry with a new `Idempotency-Key`.
+/// or stayed unavailable — reporting so, or not answering in time — through
+/// the retries. Terminal by decision: a retryable error would route a
+/// prolonged store outage into the handler's kill-on-five and an unstructured
+/// 500, whereas this is structured and immediate. The cost — an outage during
+/// a replay of an invocation whose create already landed surfaces as
+/// `unavailable` although the document exists — is reconciled by `get` or a
+/// retry with a new `Idempotency-Key`.
 pub(super) async fn fetch_credentials(
     accounts: &Accounts,
     account: &Account,
 ) -> Result<Credentials, Fault> {
     let mut attempt = 1;
     loop {
-        match accounts.fetch(account).await {
-            Ok(credentials) => return Ok(credentials),
-            Err(error @ FetchError::Unavailable(_)) if attempt < FETCH_ATTEMPTS => {
-                tracing::warn!(
-                    account = %account.id,
-                    attempt,
-                    error = %error,
-                    "credential store unavailable; retrying"
-                );
-                attempt += 1;
-                tokio::time::sleep(FETCH_PAUSE).await;
-            }
-            Err(error) => return Err(fetch_fault(account, &error)),
+        let failure = match bounded(BoundedCall::Store, accounts.fetch(account)).await {
+            Ok(Ok(credentials)) => return Ok(credentials),
+            Ok(Err(error)) => FetchFailure::Store(error),
+            Err(timed_out) => FetchFailure::TimedOut(timed_out),
+        };
+        if !failure.is_retryable() || attempt >= FETCH_ATTEMPTS {
+            return Err(fetch_fault(account, &failure));
         }
+        tracing::warn!(
+            account = %account.id,
+            attempt,
+            error = %failure,
+            "credential store unavailable; retrying"
+        );
+        attempt += 1;
+        tokio::time::sleep(FETCH_PAUSE).await;
     }
 }
 
@@ -181,20 +293,24 @@ pub(super) async fn fetch_credentials(
 /// names the account and the reference; the caller's message names neither —
 /// no response names the account (design §7), and a store's reference may be
 /// internal topology (a secret path) — and never echoes the store's own
-/// message. It does tell the two causes apart: a reference the store does not
-/// know is configuration, an unavailable store is an outage.
-pub(super) fn fetch_fault(account: &Account, error: &FetchError) -> Fault {
+/// message. It does tell the causes apart: a reference the store does not
+/// know is configuration, an unavailable store is an outage, a store silent
+/// past the deadline is the worker giving up on it.
+pub(super) fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
     tracing::warn!(
         account = %account.id,
         credential_ref = %account.credential_ref,
-        error = %error,
+        error = %failure,
         "credentials could not be fetched"
     );
-    let cause = match error {
-        FetchError::Gone { .. } => {
-            "the credential store has no credentials under the account's reference"
+    let cause: Cow<'static, str> = match failure {
+        FetchFailure::Store(FetchError::Gone { .. }) => {
+            "the credential store has no credentials under the account's reference".into()
         }
-        FetchError::Unavailable(_) => "the credential store is unavailable",
+        FetchFailure::Store(FetchError::Unavailable(_)) => {
+            "the credential store is unavailable".into()
+        }
+        FetchFailure::TimedOut(timed_out) => timed_out.to_string().into(),
     };
     Fault::unavailable(format!(
         "the account's credentials could not be fetched ({cause}); retry with a new Idempotency-Key"
@@ -214,10 +330,13 @@ pub(super) fn open(account: Account, credentials: Credentials) -> Result<Arc<Gat
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use serde_json::json;
 
     use super::*;
-    use crate::account::{AccountId, CredentialRef};
+    use crate::account::{AccountId, AccountResolver, BoxFuture, CredentialRef, CredentialStore};
     use crate::contract::TerminalCode;
 
     fn account() -> Account {
@@ -228,6 +347,41 @@ mod tests {
         let error = TerminalError::from(fault);
         let body = serde_json::from_str(error.message()).expect("json body");
         (error.code(), body)
+    }
+
+    /// A resolver and store whose calls never complete — a database-backed
+    /// embedder's pool that never answers — counting how often each was
+    /// asked.
+    #[derive(Default)]
+    struct Hung {
+        resolves: AtomicU32,
+        fetches: AtomicU32,
+    }
+
+    impl AccountResolver for Hung {
+        fn resolve<'a>(
+            &'a self,
+            _scope: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Account, ResolveError>> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl CredentialStore for Hung {
+        fn fetch<'a>(
+            &'a self,
+            _credential_ref: &'a CredentialRef,
+        ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn hung() -> (Arc<Hung>, Accounts) {
+        let hung = Arc::new(Hung::default());
+        let accounts = Accounts::new(hung.clone(), hung.clone());
+        (hung, accounts)
     }
 
     #[test]
@@ -292,6 +446,80 @@ mod tests {
         assert!(std::error::Error::source(&error).is_some());
     }
 
+    /// A resolver that never answers is bounded by the worker, not by the
+    /// handler's inactivity timeout: at the deadline the `account` step's
+    /// closure answers the same retryable error an unavailable resolver
+    /// does, so the resolve policy re-executes the step — and its text names
+    /// the deadline, so the exhausted step's fault says what happened (J6).
+    #[tokio::test(start_paused = true)]
+    async fn a_resolver_that_never_answers_is_unavailable_at_the_deadline() {
+        let (hung, accounts) = hung();
+        let started = tokio::time::Instant::now();
+
+        let error = resolve(&accounts, Some("acme"))
+            .await
+            .expect_err("retryable");
+
+        assert_eq!(started.elapsed(), CALL_DEADLINE);
+        assert_eq!(hung.resolves.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(error, ResolverUnavailable::TimedOut(_)),
+            "{error:?}"
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("did not answer within"), "{rendered}");
+        assert!(rendered.contains("10s"), "{rendered}");
+        // The `resolution` decision is untouched by the bound: an answer that
+        // arrives in time is still the answer.
+        assert_eq!(
+            resolution(Ok(account())).expect("data"),
+            Resolution::Account(Box::new(account()))
+        );
+    }
+
+    /// A store that never answers is bounded per attempt: the fetch loop
+    /// gives each of its attempts the deadline, pauses between them, and ends
+    /// in the terminal `unavailable` fault within `attempts × deadline` plus
+    /// the pauses — never in the handler's inactivity timeout. The fault's
+    /// text names the deadline and neither the account nor the credential
+    /// reference (#65).
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_never_answers_is_the_terminal_fault_after_its_attempts() {
+        const ACCOUNT: &str = "acct-8e1f";
+        const REF: &str = "secrets/kv/accounts/acme/szamlazz";
+        let account = Account::new(AccountId::from(ACCOUNT), CredentialRef::from(REF));
+        let (hung, accounts) = hung();
+        let started = tokio::time::Instant::now();
+
+        let fault = fetch_credentials(&accounts, &account)
+            .await
+            .expect_err("terminal");
+
+        let elapsed = started.elapsed();
+        let deadlines = CALL_DEADLINE * FETCH_ATTEMPTS;
+        let pauses = FETCH_PAUSE * (FETCH_ATTEMPTS - 1);
+        assert!(elapsed >= deadlines, "{elapsed:?} < {deadlines:?}");
+        assert!(
+            elapsed <= deadlines + pauses,
+            "{elapsed:?} > {:?}",
+            deadlines + pauses
+        );
+        assert_eq!(hung.fetches.load(Ordering::SeqCst), FETCH_ATTEMPTS);
+
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503);
+        assert_eq!(body["code"], "unavailable");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("did not answer within"), "{message}");
+        assert!(message.contains("10s"), "{message}");
+        assert!(
+            message.contains("retry with a new Idempotency-Key"),
+            "{message}"
+        );
+        assert!(!message.contains(ACCOUNT), "{message}");
+        assert!(!message.contains(REF), "{message}");
+    }
+
     #[test]
     fn an_exhausted_resolve_step_is_unavailable() {
         let (status, body) = fault_body(resolve_exhausted(&TerminalError::new_with_code(
@@ -329,13 +557,15 @@ mod tests {
         let guard = capture.subscribe();
         drop(fetch_fault(
             &Account::new(AccountId::from("warmup"), CredentialRef::from("warmup")),
-            &FetchError::unavailable(std::io::Error::other("warm-up")),
+            &FetchFailure::Store(FetchError::unavailable(std::io::Error::other("warm-up"))),
         ));
         LogCapture::rebuild_interest();
 
         let (status, body) = fault_body(fetch_fault(
             &account,
-            &FetchError::unavailable(std::io::Error::other("vault token v.abc123 rejected")),
+            &FetchFailure::Store(FetchError::unavailable(std::io::Error::other(
+                "vault token v.abc123 rejected",
+            ))),
         ));
         assert_eq!(status, 503);
         assert_eq!(body["code"], "unavailable");
@@ -354,9 +584,9 @@ mod tests {
 
         let (status, body) = fault_body(fetch_fault(
             &account,
-            &FetchError::Gone {
+            &FetchFailure::Store(FetchError::Gone {
                 credential_ref: CredentialRef::from(REF),
-            },
+            }),
         ));
         assert_eq!(status, 503);
         assert_eq!(body["code"], "unavailable");

@@ -407,7 +407,7 @@ serde's message, naming the field when there is one — never the SDK's plain-te
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from — `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_payments` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
 | `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued — or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` — **at-least-once**: every send that reached szamlazz.hu appended the entries — query the invoice before re-sending; a replacing call is repeated as is. |
-| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so it is not sent ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)) — or the account resolver or credential store could not answer. Nothing was sent by the execution that raised it. | Rule 2, later. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`) — the date the storno must repeat, so it is not sent ([ADR 0007](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md)) — or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
 A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
@@ -424,16 +424,27 @@ szamlazz.hu pins its own. On `Szamlazz.Order`, `initial_interval = 2m`, factor 2
 and timeouts throughout (its storno step is the same closure); `set_payments` uses two attempts with the same
 `initial_interval = 2m` and `2m` / `2m` timeouts (one send) — two, because an additive send is at-least-once and
 every attempt is a potential second copy of the entries; `query`, `query_taxpayer` and `check_account` three with the
-same one-day journal retention. The 2 m interval is longer than the 60 s client timeout, so the retry after a crash
-cannot run while the first send is still in flight. **An invocation attempt is spent only on a worker-side failure**
-— the worker unreachable, a rollout cutting the connection, the abort timeout, an undecodable journal — never on a
-run retry: a step re-executed under `[issue]`, `[read]` or `[resolve]` is re-dispatched by the server without
-advancing the handler's attempt count (verified end to end against 1.7.8). So the run policies decide how long a
-szamlazz.hu outage is tolerated, the invocation policy how long a worker outage is (~24 min of back-off on the
+same one-day journal retention. The timeouts follow one rule: a step's szamlazz.hu round trips at the client's 60 s
+`REQUEST_TIMEOUT` each, plus the margin a stalling szamlazz.hu needs — `4m` / `3m` where the step is three trips
+(the create and storno steps' leading query, send and re-query), `2m` / `2m` where it is one, which is
+`set_payments`' send and every read step alike: `get`, `query`, `query_taxpayer` and `check_account` carry
+`inactivity_timeout = 2m`, `abort_timeout = 2m` too, never the server's 1 m defaults, on which a read stalled for
+the minute szamlazz.hu has been seen to stall would be suspended and then aborted — an invocation attempt spent on a
+read that would have completed (#114). The 2 m interval is longer than the 60 s client timeout, so the retry after
+a crash cannot run while the first send is still in flight. **An invocation attempt is spent only on a worker-side
+failure** — the worker unreachable, a rollout cutting the connection, the abort timeout, an undecodable journal —
+never on a run retry: a step re-executed under `[issue]`, `[read]` or `[resolve]` is re-dispatched by the server
+without advancing the handler's attempt count (verified end to end against 1.7.8). So the run policies decide how
+long a szamlazz.hu outage is tolerated, the invocation policy how long a worker outage is (~24 min of back-off on the
 `Szamlazz.Order` writes and `Szamlazz.Agent.storno`, 2 min on `set_payments`), and szamlazz.hu's "max 5 attempts"
 etiquette is the issue policy's business — every re-dispatch is query-first and multiplies no sends. Kill, not
 pause: a paused invocation holds the order's key and blocks the very handler that would reconcile it. Kill releases
-the key, and the external-id query inside the create step is what makes that safe.
+the key, and the external-id query inside the create step is what makes that safe. The prologue's own waits are
+bounded too: one `AccountResolver::resolve` or `CredentialStore::fetch` call gets ten seconds (a worker constant,
+not a setting — a resolver that has not answered by then is not going to), after which the call is dropped and
+answered as unavailable — retried under `[resolve]`, or by the fetch loop's three in-process attempts, then the
+terminal `unavailable`, whose text names the deadline and neither the account nor the credential reference — so a
+hung database pool behind an embedder's resolver never holds an execution until the handler's inactivity timeout.
 
 Inside a handler, issuing is two durable steps. The **lookup** (`lookup-{kind}`) is read-only and settles every
 case that needs no create: a live document of ours is `already_issued` (or `conflict{live}` with `reissue`), a
