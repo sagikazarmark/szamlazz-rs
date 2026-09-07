@@ -585,11 +585,13 @@ macro_rules! journal_helpers {
             /// 2. **Resolve** the request's scope to its account in a durable
             ///    step named `account` under the resolve policy: unscoped and
             ///    unknown are journaled as data and become the terminal
-            ///    `unknown_account`; an unavailable resolver is retryable and
+            ///    `unknown_account`; an unavailable resolver — reporting so,
+            ///    or silent past `prologue::CALL_DEADLINE` — is retryable and
             ///    journals nothing; exhaustion is `unavailable`.
             /// 3. **Fetch** the account's credentials outside the journal —
             ///    on every execution, including replays — with a short
-            ///    in-process retry, then terminal `unavailable`.
+            ///    in-process retry, each attempt bounded by the same
+            ///    deadline, then terminal `unavailable`.
             /// 4. **Open** the gateway for this execution over a fresh client.
             async fn prologue(
                 ctx: &$ctx<'_>,
@@ -614,9 +616,7 @@ macro_rules! journal_helpers {
                         ctx,
                         "account",
                         config.resolve.run_retry_policy(),
-                        move || async move {
-                            decisions::resolution(accounts.resolve(scope.as_deref()).await)
-                        },
+                        move || async move { decisions::resolve(&accounts, scope.as_deref()).await },
                     )
                     .await
                     .map_err(|error| decisions::resolve_exhausted(&error))?

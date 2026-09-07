@@ -271,9 +271,14 @@ impl Order {
     /// What szamlazz.hu holds under the order's external ids right now: four
     /// queries, no state. Read-only, so it runs concurrently with the
     /// exclusive handlers. The journal is retained a day so that it can be
-    /// inspected; there is nothing to replay.
+    /// inspected; there is nothing to replay. The timeouts are the reads'
+    /// (#114): a read step is one round trip bounded by the 60 s client
+    /// timeout, and szamlazz.hu has been seen to stall for a minute and still
+    /// answer, so the server's 1 m default would suspend exactly such a read.
     #[handler(
         invocation_retry_policy(max_attempts = 3, on_max_attempts = "kill"),
+        inactivity_timeout = "2m",
+        abort_timeout = "2m",
         journal_retention = "1d"
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
@@ -301,6 +306,8 @@ impl Agent {
     /// canary for the experimental Restate flags (`scope: null` under a
     /// scoped call means the server did not forward the scope). No input.
     /// The journal is retained a day so that the leak assertion can scan it.
+    /// The timeouts are the reads' 2m / 2m (#114): one 60 s round trip plus
+    /// the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
             initial_interval = "10s",
@@ -309,6 +316,8 @@ impl Agent {
             max_attempts = 3,
             on_max_attempts = "kill"
         ),
+        inactivity_timeout = "2m",
+        abort_timeout = "2m",
         journal_retention = "1d"
     )]
     async fn check_account(&self, ctx: Context<'_>) -> HandlerResult<Json<CheckAccountResponse>> {
@@ -322,7 +331,8 @@ impl Agent {
 
     /// Queries a document by number, order number or external id. The
     /// journal is retained a day so that it can be inspected; there is
-    /// nothing to replay.
+    /// nothing to replay. The timeouts are the reads' 2m / 2m (#114): one
+    /// 60 s round trip plus the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
             initial_interval = "10s",
@@ -331,6 +341,8 @@ impl Agent {
             max_attempts = 3,
             on_max_attempts = "kill"
         ),
+        inactivity_timeout = "2m",
+        abort_timeout = "2m",
         journal_retention = "1d"
     )]
     async fn query(
@@ -354,7 +366,8 @@ impl Agent {
     /// under the read policy; `valid: false` is data. Not cached here: the
     /// caller caches, with a TTL on the order of a day. The journal is
     /// retained a day so that it can be inspected; there is nothing to
-    /// replay.
+    /// replay. The timeouts are the reads' 2m / 2m (#114): one 60 s round
+    /// trip plus the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
             initial_interval = "10s",
@@ -363,6 +376,8 @@ impl Agent {
             max_attempts = 3,
             on_max_attempts = "kill"
         ),
+        inactivity_timeout = "2m",
+        abort_timeout = "2m",
         journal_retention = "1d"
     )]
     async fn query_taxpayer(

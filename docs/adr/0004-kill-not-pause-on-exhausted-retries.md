@@ -245,6 +245,42 @@ the arm with `Invoked | Suspended | Inboxed | Scheduled`, `do_append_response_si
 `resume` keeps the pinned deployment unless `--deployment latest` is passed (`lifecycle/manual_resume.rs`,
 `resolve_pinned_deployment`). Neither is exercised end to end yet; this amendment changes no `on_max_attempts`.
 
+## Amended (#114): every wait has a bound — the reads' timeouts, a deadline on the prologue's calls
+
+Two waits the worker could sit in had no bound of their own (review 2026-09-06, J10 and J6).
+
+**The read handlers ran on the server's defaults.** `Szamlazz.Order.get`, `Szamlazz.Agent.query`, `query_taxpayer`
+and `check_account` set neither `inactivity_timeout` nor `abort_timeout`, so they took Restate's 1 m / 1 m, while
+every write handler sized its own from one rule — a step's szamlazz.hu round trips at the Számla Agent client's
+`REQUEST_TIMEOUT` (60 s) each, plus margin: `4m` / `3m` for the create and storno steps' three trips, `2m` / `2m` for
+`set_payments`' one send. A read step is one trip bounded by the same 60 s, and szamlazz.hu has been observed to stall
+for a minute at a time and still answer (behaviour notes), so a stalled read landed exactly on the default inactivity
+boundary: suspended, then aborted, an invocation attempt spent on a read that would have completed — and `get` is
+four such reads back to back. The four read handlers now carry `inactivity_timeout = 2m`, `abort_timeout = 2m`, the
+one-trip value of the same rule; the discovery test pins them beside the writes'. (#50 reshapes `get` into fewer reads
+and lands after this, so it reshapes an explicit budget rather than a default.)
+
+**The prologue's `resolve` and `fetch` had no deadline.** The resolve policy bounds re-executions of the `account`
+step, not one hung call inside it — the policy evaluates only on closure *failure* — and the fetch loop pauses between
+attempts, but each attempt was unbounded: a hung `AccountResolver::resolve` or `CredentialStore::fetch` (a
+database-backed embedder's pool that never answers) held the execution until the handler's inactivity and abort
+timeouts, spending an invocation attempt on a wait the policies exist to retry. Both calls now run under
+`tokio::time::timeout` with a worker-owned constant, `prologue::CALL_DEADLINE` = 10 s — a constant, not a setting: the
+static resolver is in memory and never reaches it, and a resolver that has not answered in ten seconds is not going
+to. At the deadline the future is dropped and the timeout is the existing retryable answer: in the `account` step the
+closure's error (`ResolverUnavailable::TimedOut`, so the resolve policy re-executes it, and the exhausted step's fault
+text — the last error's display, as for every `run_retrying` step — names the deadline); in the fetch loop one
+attempt's failure (`FetchFailure::TimedOut`, retried through the same branch as a reported `Unavailable`, then the
+terminal `unavailable` fault, whose text names the deadline and neither the account nor the credential reference,
+#65). The loop therefore ends within `3 × 10 s` plus the two 200 ms pauses. The timeout is a variant of its own
+beside the reported `Unavailable` rather than folded into `ResolveError::Unavailable` / `FetchError::Unavailable` as
+#114 first sketched it: those displays are fixed and never echo their source, so a fold could not name the deadline in
+the fault text — and a resolver that reports itself unavailable and one the worker gave up on are two things an
+operator reads differently. Both are unit-tested under a paused tokio clock (a resolver that never answers is the
+error at exactly the deadline; a store that never answers is the fault after three attempts within that bound); the
+trait rustdoc checklists tell an embedder that the worker bounds the call and that a resolver or store over a pool
+sets its own, shorter timeouts. No journaled type changed shape.
+
 ## Consequences
 
 - Kill is safe because there is nothing to compensate: the external-id query inside the create
