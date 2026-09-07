@@ -16,9 +16,10 @@ use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 /// The documents a create refers to, by number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DocumentRefs<'a> {
-    /// The proforma an invoice converts (`dijbekeroSzamlaszam`); only
-    /// [`IssuedKind::Invoice`] can carry it — the Agent's prepayment invoice
-    /// has no such field and szamlazz.hu links by shared order number instead.
+    /// The proforma the document consumes (`dijbekeroSzamlaszam`); carried by
+    /// [`IssuedKind::Invoice`], [`IssuedKind::Prepayment`] and
+    /// [`IssuedKind::Final`] — the three kinds the Agent lets carry the
+    /// reference — and ignored by the others.
     pub proforma: Option<&'a str>,
     /// The prepayment a final invoice settles (`elolegSzamlaszam`); required
     /// for [`IssuedKind::Final`].
@@ -111,12 +112,11 @@ impl Gateway {
                 None => return Err(InputError::MissingExchangeRate(currency.to_string())),
             })
         };
+        let proforma_number = refs.proforma.map(InvoiceNumber::new);
         let invoice_kind = match kind {
             IssuedKind::Proforma => InvoiceKind::Proforma,
-            IssuedKind::Invoice => InvoiceKind::Invoice {
-                proforma_number: refs.proforma.map(InvoiceNumber::new),
-            },
-            IssuedKind::Prepayment => InvoiceKind::Prepayment,
+            IssuedKind::Invoice => InvoiceKind::Invoice { proforma_number },
+            IssuedKind::Prepayment => InvoiceKind::Prepayment { proforma_number },
             IssuedKind::Final => InvoiceKind::Final {
                 prepayment_number: Some(InvoiceNumber::new(refs.prepayment.ok_or(
                     InputError::MissingReference {
@@ -124,6 +124,7 @@ impl Gateway {
                         reference: "prepayment",
                     },
                 )?)),
+                proforma_number,
             },
             IssuedKind::Corrective => InvoiceKind::Corrective {
                 corrected_number: InvoiceNumber::new(refs.corrected.ok_or(
@@ -423,7 +424,7 @@ mod tests {
             build(IssuedKind::Prepayment, DocumentRefs::default())
                 .expect("prepayment")
                 .kind,
-            InvoiceKind::Prepayment
+            InvoiceKind::prepayment()
         );
         assert_eq!(
             build(IssuedKind::Final, DocumentRefs::default()),
@@ -443,7 +444,8 @@ mod tests {
             .expect("final")
             .kind,
             InvoiceKind::Final {
-                prepayment_number: Some(InvoiceNumber::new("ES-1"))
+                prepayment_number: Some(InvoiceNumber::new("ES-1")),
+                proforma_number: None,
             }
         );
         assert_eq!(
@@ -493,6 +495,51 @@ mod tests {
             Err(InputError::UnknownLanguage("tlh".to_owned()))
         );
         assert_eq!(IssuedKind::from(DocumentKind::Final), IssuedKind::Final);
+    }
+
+    /// The proforma reference rides on every kind the Agent lets carry it —
+    /// the invoice, the prepayment invoice (#69) and the final invoice — as
+    /// `dijbekeroSzamlaszam`: what step 2 linked is what the create carries.
+    /// The other kinds ignore it.
+    #[test]
+    fn proforma_reference_rides_on_the_kinds_the_agent_lets_carry_it() {
+        let gateway = gateway(&json!({}));
+        let document = sample_document();
+        let refs = DocumentRefs {
+            proforma: Some("D-1"),
+            prepayment: Some("ES-1"),
+            corrected: Some("SZ-1"),
+        };
+        let kind_of = |kind| {
+            gateway
+                .build_create(kind, &document, &order(), &external_id(), refs)
+                .expect("build")
+                .kind
+        };
+        let proforma_number = Some(InvoiceNumber::new("D-1"));
+
+        assert_eq!(
+            kind_of(IssuedKind::Invoice),
+            InvoiceKind::Invoice {
+                proforma_number: proforma_number.clone(),
+            }
+        );
+        assert_eq!(
+            kind_of(IssuedKind::Prepayment),
+            InvoiceKind::Prepayment {
+                proforma_number: proforma_number.clone(),
+            }
+        );
+        assert_eq!(
+            kind_of(IssuedKind::Final),
+            InvoiceKind::Final {
+                prepayment_number: Some(InvoiceNumber::new("ES-1")),
+                proforma_number,
+            }
+        );
+        for kind in [IssuedKind::Proforma, IssuedKind::Corrective] {
+            assert_eq!(kind_of(kind).proforma_number(), None, "{kind}");
+        }
     }
 
     #[test]

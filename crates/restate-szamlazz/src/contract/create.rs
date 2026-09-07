@@ -53,10 +53,10 @@ pub struct CreateOptions {
     /// `outcome: reversed`; with it a live document answers
     /// `conflict{live}`, so the flag can never cause a duplicate.
     pub reissue: bool,
-    /// Which proforma the invoice converts (`create_invoice` only; the other
-    /// kinds refuse anything but `auto` as `invalid_input`). A prepayment
-    /// invoice cannot carry the reference — szamlazz.hu converts the order's
-    /// live proforma by shared order number on its own.
+    /// Which proforma the document converts — on `create_invoice` and
+    /// `create_prepayment`, the two kinds the Agent lets carry the reference
+    /// (`dijbekeroSzamlaszam`); `create_proforma` and `create_final` refuse
+    /// anything but `auto` as `invalid_input`.
     pub proforma: ProformaLink,
 }
 
@@ -72,8 +72,8 @@ pub enum ProformaLink {
     #[default]
     Auto,
     /// Reference no proforma. Refused with `conflict{proforma_live}` while a
-    /// live proforma of ours exists, because szamlazz.hu links by shared order
-    /// number regardless.
+    /// live proforma of ours exists, because szamlazz.hu links it to the
+    /// invoice or prepayment invoice by shared order number regardless.
     None,
     /// Reference a proforma by number. Checked like every document found by
     /// number: `conflict{proforma_missing}` when szamlazz.hu does not know

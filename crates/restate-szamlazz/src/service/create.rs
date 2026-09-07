@@ -225,6 +225,21 @@ const fn exclusive_with(kind: DocumentKind) -> &'static [(DocumentKind, Conflict
     }
 }
 
+/// Step 2's gate: the kinds that convert a proforma and so take
+/// `options.proforma` and run the proforma link. The invoice and the
+/// prepayment invoice do — the Agent carries `dijbekeroSzamlaszam` on both
+/// (#69), and szamlazz.hu links the order's live proforma to either by shared
+/// order number regardless (`docs/szamlazz-hu-behaviour.md`, "Proformas:
+/// conversion, auto-linking, deletion"), which is what makes `none` a
+/// `conflict{proforma_live}` on both. A proforma has nothing to convert; the
+/// final invoice settles a prepayment invoice, and the proforma the order had
+/// was consumed by that prepayment invoice — a live proforma of ours cannot
+/// exist beside it, because `create_proforma` is refused once the prepayment
+/// invoice is live (`order_invoiced`).
+const fn links_proforma(kind: DocumentKind) -> bool {
+    matches!(kind, DocumentKind::Invoice | DocumentKind::Prepayment)
+}
+
 impl Execution {
     // ----- entry points ----------------------------------------------------
 
@@ -260,12 +275,9 @@ impl Execution {
             return Ok(response);
         }
 
-        // Step 2: the proforma link. Invoices only: the Agent cannot carry
-        // `dijbekeroSzamlaszam` on a prepayment invoice, and the server
-        // converts the order's live proforma by shared order number anyway
-        // (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
-        // auto-linking, deletion"), so a prepayment skips the lookup.
-        if kind == DocumentKind::Invoice
+        // Step 2: the proforma link, on the kinds that convert a proforma
+        // (`links_proforma`): the invoice and the prepayment invoice.
+        if links_proforma(kind)
             && let Some(response) = self
                 .proforma_link(ctx, &prepared, &identity, &mut refs)
                 .await?
@@ -355,9 +367,9 @@ impl Execution {
         request: CreateRequest,
     ) -> Result<Prepared, Fault> {
         let CreateRequest { document, options } = request;
-        if options.proforma != ProformaLink::Auto && kind != DocumentKind::Invoice {
+        if options.proforma != ProformaLink::Auto && !links_proforma(kind) {
             return Err(Fault::invalid_input(format!(
-                "options.proforma applies to create_invoice only, not create_{kind}"
+                "options.proforma applies to create_invoice and create_prepayment only, not create_{kind}"
             )));
         }
         self.validate_document(kind.into(), &document, &order)?;
@@ -482,7 +494,8 @@ impl Execution {
 
     // ----- step 2: the proforma link ---------------------------------------
 
-    /// `options.proforma` for an invoice.
+    /// `options.proforma` for an invoice or a prepayment invoice
+    /// ([`links_proforma`]).
     ///
     /// Under `auto` and `none` a document under `…:proforma` that fails
     /// validation is `conflict{external_id_collision}` — see
@@ -801,33 +814,38 @@ mod tests {
         assert_eq!(exclusive_with(DocumentKind::Final), []);
     }
 
-    /// `options.proforma` is an invoice option: the Agent cannot carry
-    /// `dijbekeroSzamlaszam` on a prepayment invoice, and the other kinds
-    /// have nothing to convert.
+    /// `options.proforma` is an option of the kinds that convert a proforma:
+    /// the invoice and, since #69, the prepayment invoice — the Agent carries
+    /// `dijbekeroSzamlaszam` on both. A proforma has nothing to convert and
+    /// the final invoice settles a prepayment invoice, so both refuse
+    /// anything but `auto` before any read.
     #[test]
-    fn options_proforma_applies_to_create_invoice_only() {
+    fn options_proforma_applies_to_the_kinds_that_convert_a_proforma() {
         let order = order();
         for link in [
             ProformaLink::None,
             ProformaLink::Number("D-1".parse().expect("valid number")),
         ] {
-            let prepared = order
-                .prepare(ord_1(), DocumentKind::Invoice, request(link.clone()))
-                .expect("create_invoice accepts options.proforma");
-            assert_eq!(prepared.proforma, link);
+            for kind in [DocumentKind::Invoice, DocumentKind::Prepayment] {
+                assert!(links_proforma(kind));
+                let prepared = order
+                    .prepare(ord_1(), kind, request(link.clone()))
+                    .unwrap_or_else(|error| {
+                        panic!("create_{kind} accepts options.proforma: {error:?}")
+                    });
+                assert_eq!(prepared.proforma, link);
+            }
 
-            for kind in [
-                DocumentKind::Prepayment,
-                DocumentKind::Proforma,
-                DocumentKind::Final,
-            ] {
+            for kind in [DocumentKind::Proforma, DocumentKind::Final] {
+                assert!(!links_proforma(kind));
                 let fault = order
                     .prepare(ord_1(), kind, request(link.clone()))
                     .err()
                     .unwrap_or_else(|| panic!("create_{kind} must refuse {link:?}"));
                 let message = invalid_input(fault);
                 assert!(
-                    message.contains(&format!("not create_{kind}")),
+                    message.contains(&format!("not create_{kind}"))
+                        && message.contains("create_invoice and create_prepayment"),
                     "{kind}: {message}"
                 );
             }

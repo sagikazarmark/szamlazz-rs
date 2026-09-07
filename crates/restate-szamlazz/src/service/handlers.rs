@@ -98,13 +98,14 @@ impl Order {
     /// Issues the prepayment invoice (`előlegszámla`) of the order; one per
     /// order.
     ///
-    /// Takes no `options.proforma` (anything but `auto` is `invalid_input`)
-    /// and runs no proforma lookup: the Agent cannot carry
-    /// `dijbekeroSzamlaszam` on a prepayment invoice, and szamlazz.hu
-    /// converts the order's live proforma by shared order number regardless
-    /// (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
-    /// auto-linking, deletion"). `get` reports the proforma as `consumed`
-    /// once the link landed.
+    /// Converts the order's live proforma unless told otherwise
+    /// (`options.proforma`, exactly as `create_invoice` takes it): the create
+    /// carries `dijbekeroSzamlaszam`, so the link does not rest on
+    /// szamlazz.hu's own linking by shared order number — which happens
+    /// regardless (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
+    /// auto-linking, deletion"), and is why `none` is `conflict{proforma_live}`
+    /// while a live proforma of ours exists. `get` reports the proforma as
+    /// `consumed` once the link landed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -133,6 +134,14 @@ impl Order {
 
     /// Issues the final invoice (`végszámla`) settling the order's live
     /// prepayment invoice.
+    ///
+    /// szamlazz.hu links the prepayment invoice (the create carries
+    /// `elolegSzamlaszam`) but does **not** net it into the final invoice's
+    /// totals: the caller's `document` lists the full performance and deducts
+    /// the prepayment as a negative line item at the same VAT rate
+    /// ([behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices)).
+    /// Takes no `options.proforma` (anything but `auto` is `invalid_input`):
+    /// the order's proforma was consumed by the prepayment invoice.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
