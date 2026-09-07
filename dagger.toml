@@ -5,5 +5,13 @@ source = "github.com/sagikazarmark/daggerverse-beta/rust"
 
 settings.version = "1.98-slim-trixie"
 
+# The workspace's own checks: the tests with every feature and the handler
+# layer of restate-szamlazz end to end. The rust module's plain `cargo test`
+# keeps running beside them — it is the one run with default features.
+[modules.ci]
+source = ".dagger/modules/ci"
+
+settings.container = "rust:container"
+
 [modules.dagger-gha]
 source = "github.com/sagikazarmark/daggerverse-beta/dagger-gha"

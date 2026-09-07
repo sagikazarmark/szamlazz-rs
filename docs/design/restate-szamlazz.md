@@ -849,9 +849,16 @@ functions they are extracted into.
   and re-encode to a superset of itself, and refuses a fixture directory no journaled type claims. The `Journaled`
   marker trait bounds the run helpers, and each enum's pins name its variants exhaustively, so a new variant
   fails to compile until pinned. Harness tests cover the superset check and the verify / update / archive
-  behaviour on a scratch directory.
-- End to end (docker-gated): Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
-  `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts them on `/version`; `compose.yaml` matches) + wiremock as
+  behaviour on a scratch directory. The same module's leak guard serialises every variant of every journaled type
+  built around an account whose agent key is a sentinel — the `account` step's entry through the static resolver
+  from configuration carrying the key, `DeleteOutcome::Transport` and `SetPaymentsOutcome::Transport` from a gateway
+  opened with the sentinel credentials against an endpoint that refuses connections, the registry's samples for the
+  rest — and asserts the sentinel is in none of them: the cheap complement to the `assert_not_impl_any!` guard and
+  to the e2e's byte scan, which needs a server.
+- End to end (`tests/service.rs`, ignored; a Restate server from one of three sources — see "What CI runs" below):
+  Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
+  `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts on `/version` exactly the features the server's flags enable;
+  `compose.yaml` matches) + wiremock as
   szamlazz.hu — issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
   152 → reconciled; storno → reversed with the storno mock matched on `<teljesitesDatum>` equal to the fixture's
   `telj` and no `<keltDatum>` on the wire; a `telj`-less original → 503 `unavailable` naming the invoice with
@@ -867,7 +874,11 @@ functions they are extracted into.
   `options.proforma: {number}` checked like every found document — a proforma of this order with `teszt = false` →
   409 `account_mismatch` naming the observed pin with `verify-proforma-{number}` the last step journaled and the
   create mock `expect(0)`, another order's proforma and one carrying no order number → `conflict{not_managed}`
-  naming it with nothing sent, this order's → `issued` with `dijbekeroSzamlaszam` on the wire; `get` shape; a
+  naming it with nothing sent, this order's → `issued` with `dijbekeroSzamlaszam` on the wire; `correct_invoice` on
+  a live invoice of the order → `issued` under `…:corrective:{correction_id}` with `helyesbitettSzamlaszam` naming
+  the base on the wire through `verify-base-{number}`, `lookup-corrective`, `create-corrective`, and the same
+  `correction_id` again → `already_issued`; `delete_proforma` on the order's live proforma → `deleted` after one
+  `delete-proforma-{number}` send, and again → `deleted{reason: absent}` with nothing sent; `get` shape; a
   collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
   `expect(0)` and the slot absent in `get`; `create_prepayment` taking `options.proforma` as `create_invoice` does
   (`none` beside a live `D` of ours → `conflict{proforma_live}` after `proforma-link` with nothing sent, `auto` →
@@ -945,12 +956,42 @@ functions they are extracted into.
   new key while the `account` entry read in flight and after completion is byte-identical; and, over every
   `sys_journal` row of every invocation the server holds (hex-decoded `raw`) plus every
   `sys_invocation.completion_failure`, none of the three agent keys of the run — while the same scan finds the
-  positive control's sentinel.
+  positive control's sentinel; and, last, the **run-name pin**: for every invocation the server holds, the `ctx.run`
+  names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES` (the durable steps of
+  every handler of both services, parametrized names — `verify-storno-{number}`, `taxpayer-{prefix}` — pinned by
+  their prefix), every handler seen is in the table, and every path in the table was walked in full by at least one
+  invocation. The type fixtures pin what an entry holds; this pins which entries a handler writes and in what order —
+  the other half of what an in-flight invocation replays across a deploy (ADR 0005). A renamed, inserted, reordered
+  or dropped step fails here rather than stranding the invocation.
   The harness (`tests/service.rs`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes — run results are bytes and
   render as integer arrays in `entry_json`) and `sys_invocation`, and purges invocations (`PATCH
   /invocations/{id}/purge`). `get`, `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and
   `Szamlazz.Agent.check_account` set `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
+- The protocol-v7 canary (`tests/service.rs`, a second ignored test on a server of its own, on its own ports, with
+  vqueues and scoped Virtual Objects on and protocol v7 **off**): the ingress accepts a scoped path and the server
+  keys the invocation by the scope (`sys_invocation.scope = acme`), but the SDK never sees it — a scoped
+  `check_account` on the single-account deployment answers 200 with the account and `scope: null`, the signal a
+  deploy pipeline reads, and on the multi-account deployment (after the flag day on the same server) 400
+  `unknown_account` naming the unscoped case with nothing sent: every scoped call fails closed. What §4 and ADR 0006
+  say about the flag, provoked once against a server without it.
+- **What CI runs.** `dagger check` (`.github/workflows/dagger.yaml`) runs the `rust` module's `build`, `test`
+  (default features), `clippy`, `doc`, `audit` and `fmt` checks and, from the workspace's own `ci` module
+  (`.dagger/modules/ci`, wired onto `rust:container`), `ci:test` — `cargo test --workspace --all-features --locked`,
+  so the `szamlazz-adatkapcsolat` archiver tests behind `opendal` and the `schemars` contract tests run — and
+  `ci:end-to-end`: the ignored `tests/service.rs` suite, both e2e tests, on every pull request. The Dagger
+  container has no docker daemon, and a Dagger service cannot reach back into the container that binds it, so the
+  harness starts `restate-server` itself: the check copies the binary out of the Restate image and sets
+  `RESTATE_SERVER_BIN`, and the harness spawns one process per suite on the loopback (bind addresses, base
+  directory and the experimental flags through Restate's `RESTATE_*` environment; log and data under a temp
+  directory of its own, kept when the test fails), registers the endpoint at `127.0.0.1` and kills the process on
+  drop. The **server gate** decides the source once from the environment, in this order: `RESTATE_ADMIN_URL` /
+  `RESTATE_INGRESS_URL` (a running server with the three flags; the main suite only — the canary needs a server of
+  its own shape), `RESTATE_SERVER_BIN`, the docker daemon (a container of the image, the endpoint registered at
+  `host.docker.internal`; `RESTATE_ENDPOINT_HOST` overrides the host in every mode). With none of them the suite
+  skips with a message on a developer machine and **fails** when `CI` is set — the check sets it — because a run
+  that passed by skipping proves nothing. The gate is a pure function under its own tests; the docker mode is the
+  developer default and is exercised on developer machines, not in CI.
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)

@@ -1,0 +1,87 @@
+"""
+The checks of this workspace the generic `rust` module cannot express: the
+workspace tests with every feature, and the handler layer of `restate-szamlazz`
+end to end against a real Restate server.
+
+Runs on the `rust` module's container (wired in as `container` from
+`rust:container`): the toolchain, the workspace at `/work/src` and the cargo
+caches. The two checks share one compilation of the test targets.
+"""
+type Ci {
+  let container: Container!
+  let restateVersion: String!
+
+  new(
+    """
+    The Rust toolchain container with the workspace mounted (`rust:container`).
+    """
+    container: Container!,
+    """
+    The Restate server version the end-to-end suite runs against; the image
+    `docker.restate.dev/restatedev/restate:<version>` provides the binary.
+    """
+    restateVersion: String! = "1.7.8",
+  ) {
+    self.container = container
+    self.restateVersion = restateVersion
+
+    self
+  }
+
+  """
+  `cargo test` with every feature of every crate. Plain `cargo test` compiles
+  the `szamlazz-adatkapcsolat` archiver tests (behind `opendal`) and the
+  `schemars` contract tests of `restate-szamlazz` to nothing; this runs them.
+  Doctests included (`--all-targets` would drop them).
+  """
+  test: String! @check {
+    self
+      .compiled
+      .withExec(["cargo", "test", "--workspace", "--all-features", "--locked"])
+      .combinedOutput
+  }
+
+  """
+  The handler layer end to end: the ignored `tests/service.rs` suite of
+  `restate-szamlazz` — the `Szamlazz.Order` and `Szamlazz.Agent` handlers, the
+  multi-account flag day and scope isolation, the journal scan for the agent
+  key, the run-name pin and the protocol-v7 canary — against `restate-server`
+  processes the harness spawns in this container from the binary of the
+  Restate image (`RESTATE_SERVER_BIN`; there is no docker here). `CI` is set,
+  so a run without a server fails instead of skipping.
+  """
+  endToEnd: String! @check {
+    self
+      .compiled
+      .withFile("/usr/local/bin/restate-server", self.restateServer)
+      .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
+      .withEnvVariable("CI", "true")
+      .withExec([
+        "cargo", "test",
+        "-p", "restate-szamlazz",
+        "--all-features", "--locked",
+        "--test", "service",
+        "--", "--ignored",
+      ])
+      .combinedOutput
+  }
+
+  """
+  The container with every test target compiled once, for both checks.
+  """
+  let compiled: Container! {
+    self
+      .container
+      .withExec(["cargo", "test", "--workspace", "--all-features", "--locked", "--no-run"])
+  }
+
+  """
+  The `restate-server` binary, taken from the Restate image.
+  """
+  let restateServer: File! {
+    Dagger
+      .container
+      .from("docker.restate.dev/restatedev/restate:" + self.restateVersion)
+      .file("/usr/local/bin/restate-server")
+  }
+}

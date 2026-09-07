@@ -52,6 +52,11 @@ The workspace MSRV is Rust 1.92. Run the canonical Dagger check with:
 dagger check
 ```
 
+It runs the `rust` module's build, test, clippy, doc, audit and fmt checks and the workspace's own `ci` module
+(`.dagger/modules/ci`): `ci:test` — the workspace tests with every feature — and `ci:end-to-end` — the
+`restate-szamlazz` handler layer against a real Restate server started inside the container. Run one with
+`dagger check ci:end-to-end`.
+
 Run the individual host checks with the tracked lockfile:
 
 ```bash
@@ -60,6 +65,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 cargo test --doc --workspace --all-features --locked
 cargo doc --workspace --all-features --no-deps --locked
+# the end-to-end suite of restate-szamlazz, against docker (or RESTATE_SERVER_BIN)
+cargo test -p restate-szamlazz --test service -- --ignored
 ```
 
 ## License
