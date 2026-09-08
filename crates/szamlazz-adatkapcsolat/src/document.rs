@@ -7,8 +7,8 @@
 //! through [`Document::validate`] / [`Document::parse_strict`]. Date fields are
 //! the business-level civil [`Date`] type; XML Schema's optional `xs:date`
 //! timezone suffix (`Z`/`±hh:mm`) is accepted on the wire and discarded, and a
-//! date text that is not a date reads as `None`, so no date element, however
-//! it is written, can fail the delivery of the record it sits in.
+//! date text that is not a date reads as `None`, so no date element, whatever
+//! text it holds, can fail the delivery of the record it sits in.
 
 use std::fmt;
 use std::sync::Arc;
