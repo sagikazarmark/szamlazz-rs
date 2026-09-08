@@ -44,7 +44,10 @@
 //! and proves the isolation properties multi-account mode leans on: the same
 //! order key issuing concurrently under two scopes with each account's own
 //! key on the wire, the same `Idempotency-Key` under two scopes being two
-//! invocations, credential rotation and account changes between executions,
+//! invocations, and, under one scope, the order-key lock and the in-flight
+//! attach (the first invocation held at its credential fetch, which the
+//! mutable store of this phase can do), credential rotation and account
+//! changes between executions,
 //! an order Restate has no memory of, and (over the hex-decoded `raw` of
 //! every journal entry of every invocation in the run) that no agent key
 //! was ever journaled; and, last, that every invocation's `ctx.run` names are
@@ -57,7 +60,8 @@
 //! call it does not wait for), reports the invocation id (`x-restate-id`) and
 //! parses fault bodies, reads `sys_journal` / `sys_invocation` through the
 //! SQL introspection API (`raw` hex-decoded to bytes, since run results are
-//! stored as bytes), and purges or kills invocations through the admin API.
+//! stored as bytes), and purges, kills or cancels invocations through the
+//! admin API.
 //! What szamlazz.hu holds is stated per document
 //! ([`harness::Harness::holds`] and its siblings), so one `<szamla>` body
 //! answers every selector the document is reachable by; every mock's
@@ -130,9 +134,6 @@ async fn e2e_order_protocol() {
     faults::a_malformed_body_is_a_structured_invalid_input(&h).await;
     faults::an_untrimmed_order_key_is_refused(&h).await;
     faults::bounded_inputs_are_refused_and_disturb_no_other_invocation(&h).await;
-    concurrency::same_key_same_scope_concurrent_creates_issue_once(&h).await;
-    concurrency::same_key_same_scope_second_call_in_the_first_calls_delay(&h).await;
-    concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation(&h).await;
     policies::exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     policies::after_an_outcome_unknown_the_next_call_answers_already_issued(&h).await;
     policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key(&h).await;
@@ -153,6 +154,9 @@ async fn e2e_order_protocol() {
     multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
     multi_account::same_order_key_under_two_scopes_issues_on_both_accounts(&h).await;
     multi_account::same_idempotency_key_under_two_scopes_is_two_invocations(&h).await;
+    concurrency::same_key_same_scope_concurrent_creates_issue_once(&h).await;
+    concurrency::same_key_same_scope_second_call_between_the_first_calls_executions(&h).await;
+    concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation(&h).await;
     agent_reads::check_account_under_each_scope_names_its_account(&h).await;
     storno::purged_order_is_stornoed_and_reissued(&h).await;
     agent_writes::agent_storno_acts_on_what_the_verify_finds(&h).await;

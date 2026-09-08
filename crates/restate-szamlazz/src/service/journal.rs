@@ -46,14 +46,19 @@
 //! It writes a missing fixture (a new variant or type), and for a fixture that
 //! *differs* it keeps the committed shape beside the new one as
 //! `<variant>.<n>.json` before writing `<variant>.json`. The archived shape
-//! stays in the compatibility test forever, so an additive change (a defaulted
-//! field) regenerates cleanly while a rename or removal keeps failing on the
-//! archived file: the only way to make that pass is to delete the file, which
-//! is the explicit acknowledgement that in-flight invocations of the previous
-//! deployment will be killed on upgrade. Review every regenerated diff as a
-//! contract change. A generator failure while the compatibility test passes
-//! is a formatting change and not a journal break (a dependency upgrade that
-//! prints a number or a date differently), and regenerates the same way.
+//! stays in the compatibility test for as long as the type is journaled, so an
+//! additive change (a defaulted field) regenerates cleanly while a rename or
+//! removal keeps failing on the archived file. That failure is the answer,
+//! not an obstacle: keep the old name (add the new field with a default, add
+//! the new variant), or, for a shape that must change beyond that, retire the
+//! type (the archive rule below); before the first production deployment a
+//! break may instead be listed in [`DELIBERATE_BREAKS`], with its archives
+//! kept. Deleting the archived file is never the way: it would make the test
+//! pass while every in-flight invocation of the previous deployment is killed
+//! on upgrade. Review every regenerated diff as a contract change. A generator
+//! failure while the compatibility test passes is a formatting change and not
+//! a journal break (a dependency upgrade that prints a number or a date
+//! differently), and regenerates the same way.
 //!
 //! The one exception on disk is the pre-go-live break of #127, when the
 //! document outcomes went from the agent crate's types to the worker's

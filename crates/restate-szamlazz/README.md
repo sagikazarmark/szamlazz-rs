@@ -689,14 +689,6 @@ for szamlazz.hu, in two phases on one server.
   retried under the read policy and completing `issued` in one invocation with exactly one create on the wire; a
   lookup that never answers as a structured `unavailable` naming the order, kind and external id with zero
   creates; `get` completing after one of its reads is retried;
-- the order-key lock, same key, same scope (#125): two `create_invoice` with distinct `Idempotency-Key`s, the
-  second started the moment szamlazz.hu has received the first's create and three seconds before it answers →
-  `issued` + `already_issued`, one create on the wire, the second answered after the first with its runs ending
-  at `lookup-invoice`; the same with the second call arriving in the first's create-step `initial_delay` after
-  a `szlahu_down` send (two sends, both the first call's; that the second call was sent before szamlazz.hu
-  received the second create is asserted); and the **same** `Idempotency-Key` sent while the first invocation
-  is in flight attaching to it (sent before the first was answered, answered no earlier: one invocation id on
-  both replies, one invocation on the order, one create);
 - a scoped call answered `unknown_account` with zero szamlazz.hu requests; `check_account` unscoped answering the
   account with `credentials: ok` after one sentinel query (and `rejected` as data on code 3); a purged invocation
   querying szamlazz.hu again; a flaky resolver retried under the resolve policy; a failing credential store as a
@@ -710,6 +702,16 @@ for szamlazz.hu, in two phases on one server.
   `unknown_account`; the same order key under two scopes concurrently → two `issued` with each account's key on
   the create wire exactly once; the same `Idempotency-Key` under two scopes → two invocation ids and two
   documents, each replaying its own completion;
+- the order-key lock, same key, same scope (#125), with the first invocation **held** at its credential fetch
+  (`hold_fetch`) until the second call is on the server, so the race is the scenario's, not a clock's: two
+  `create_invoice` with distinct `Idempotency-Key`s, the second accepted and queued while the first is held,
+  the first then released to send into a three-second szamlazz.hu reply → `issued` + `already_issued`, one
+  create, the second answered after the first with its runs ending at `lookup-invoice`; the same with the second
+  call arriving between the first's two create-step executions (a `szlahu_down` first send, the second execution
+  held at its fetch; two sends, both the first call's, the second one received after the second call was on the
+  server); and the **same** `Idempotency-Key` sent while the first is held attaching to it: unanswered for as long
+  as the hold is held, no second row on `sys_invocation`, then one invocation id and one body on both replies,
+  one create;
 - `check_account` under each scope → its own account with its key on the probe, unscoped → `unknown_account`; an
   order whose invocations were purged stornoed and reissued;
 - `Szamlazz.Agent.storno` under a scope reversing a document whose `teszt` and `szallito/id` are not what the

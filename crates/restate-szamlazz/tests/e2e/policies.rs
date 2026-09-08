@@ -199,22 +199,24 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    h.create_lands_slowly(
-        &Doc {
-            external_id: Some("acct:E2E-L4:invoice"),
-            ..Doc::new("SZ-L4", "SZ", "E2E-L4")
-        },
-        Duration::from_secs(4),
-    )
-    .await;
+    let mut sends = h
+        .create_lands_slowly(
+            &Doc {
+                external_id: Some("acct:E2E-L4:invoice"),
+                ..Doc::new("SZ-L4", "SZ", "E2E-L4")
+            },
+            Duration::from_secs(4),
+        )
+        .await;
 
     let body = create_body(dec!(1000), false);
     let started = Instant::now();
     let (reply, cancelled) = tokio::join!(
         h.call("E2E-L4", "create_invoice", &body, "e2e-l4-k1"),
         async {
-            // szamlazz.hu has the create; its reply is four seconds away.
-            h.wait_for_creates(1).await;
+            // szamlazz.hu has the create (the stub signals its receipt); its
+            // reply is four seconds away.
+            sends.received(1).await;
             let in_flight = h.in_flight_on("E2E-L4").await;
             h.cancel(&in_flight).await;
             in_flight

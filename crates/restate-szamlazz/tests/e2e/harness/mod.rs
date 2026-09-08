@@ -47,7 +47,7 @@ use crate::harness::gate::{FEATURES, Restate};
 use crate::harness::ingress::Reply;
 use crate::harness::introspection::{Invocation, JournalEntry};
 use crate::harness::szamlazz::{
-    Doc, create_lands_but_reply_lost, create_lands_on_the_second_send, create_lands_slowly,
+    Doc, Sends, create_lands_but_reply_lost, create_lands_on_the_second_send, create_lands_slowly,
     external_id_query, holds, holds_after_misses, loses_reply_once, not_found,
 };
 
@@ -114,11 +114,11 @@ pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
 ///   not a query count. Code 7 on the external id before.
 /// - [`Harness::create_lands_slowly`]: the same transition at the create's
 ///   receipt, but the create is answered `created` after a delay: the window
-///   a second caller, a same-key retry or a cancellation arrives in while the
-///   first send's reply is in flight.
+///   a second caller or a cancellation arrives in while the first send's
+///   reply is in flight, opened to the scenario by the returned [`Sends`].
 /// - [`Harness::create_lands_on_the_second_send`]: the first create answered
-///   without landing (`szlahu_down`, a 500), the second landing; the create
-///   step's `initial_delay` between the two is the window.
+///   without landing (`szlahu_down`, a 500), the second landing: what a
+///   create step meets when it re-executes after an *Unconfirmed* send.
 /// - The raw builders (`number_query`, `order_query`, `external_id_query`,
 ///   `create`, `storno`), `expect(n)` and `up_to_n_times(n)`: a stub the
 ///   scenario asserts on (`expect`), a non-document answer (7, 500, an API
@@ -765,19 +765,19 @@ impl Harness {
 
     /// The create lands at once but its reply takes `delay`, and `doc` is the
     /// holder of its external id from the request's receipt: see
-    /// [`create_lands_slowly`].
-    pub(crate) async fn create_lands_slowly(&self, doc: &Doc<'_>, delay: Duration) {
-        create_lands_slowly(&self.mock, doc, delay).await;
+    /// [`create_lands_slowly`]. The [`Sends`] signals the receipt.
+    pub(crate) async fn create_lands_slowly(&self, doc: &Doc<'_>, delay: Duration) -> Sends {
+        create_lands_slowly(&self.mock, doc, delay).await
     }
 
     /// The first create is answered `first` without landing, the second lands
     /// and `doc` is the holder from then on: see
-    /// [`create_lands_on_the_second_send`].
+    /// [`create_lands_on_the_second_send`]. The [`Sends`] counts both.
     pub(crate) async fn create_lands_on_the_second_send(
         &self,
         doc: &Doc<'_>,
         first: ResponseTemplate,
-    ) {
-        create_lands_on_the_second_send(&self.mock, doc, first).await;
+    ) -> Sends {
+        create_lands_on_the_second_send(&self.mock, doc, first).await
     }
 }
