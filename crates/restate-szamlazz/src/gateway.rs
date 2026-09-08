@@ -87,7 +87,7 @@ pub mod build;
 pub mod document;
 
 pub use build::{DocumentRefs, InputError, gross_total};
-pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry, Unnumbered};
+pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 
 /// The pseudo-code of a rejection that never reached szamlazz.hu: the request
 /// violates the Számla Agent wire contract (a sixth credit entry; a replacing

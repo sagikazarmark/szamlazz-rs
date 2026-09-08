@@ -26,15 +26,18 @@ use crate::identity::OrderKey;
 /// ([`LookupOutcome`](super::LookupOutcome), [`CreateOutcome`](super::CreateOutcome),
 /// [`QueryOutcome`](super::QueryOutcome)).
 ///
-/// What the handlers read of a found document and nothing else: its identity
-/// (`alap/id`, `szamlaszam`, `tipus`), the markers the checks below are made
+/// What the handlers read of a found document, and its szamlazz.hu id: the
+/// identity (`szamlaszam`, `tipus`), the markers the checks below are made
 /// on (`rendelesszam`, `sztornozott`, `hivszamlaszam`, `hivdijbekszam`,
 /// `eszamla`, `teszt`), the dates the storno and `Szamlazz.Agent.query`
 /// repeat (`kelt`, `telj`, `fizh`), the currency, the grand total and the
-/// credit entries. The buyer block, the seller block, the line items and the
-/// PDF szamlazz.hu returns with the document are not here: the worker never
-/// reads them, and a journal entry is visible in the Restate UI for the
-/// retention period.
+/// credit entries, plus `alap/id`, which no handler reads and the entry
+/// carries so that an operator can correlate it with szamlazz.hu (#127). The
+/// buyer block, the seller block, the line items and the PDF szamlazz.hu
+/// returns with the document are not here: the worker never reads them, and
+/// a journal entry is visible in the Restate UI for the retention period. The
+/// external id the document was queried by is not here either: szamlazz.hu
+/// never echoes `szamlaKulsoAzon`, and the handler holds it from the key.
 ///
 /// Additive-only: a field may be added with a serde default; nothing is
 /// renamed, removed or retyped (the `gateway` module docs). Pinned under
@@ -43,7 +46,10 @@ use crate::identity::OrderKey;
 #[non_exhaustive]
 pub struct FoundDocument {
     /// szamlazz.hu's internal document identifier (`alap/id`): a document
-    /// identifier, not an account's or a seller's.
+    /// identifier, not an account's or a seller's. Read by no handler;
+    /// carried so that a journal entry names the document the way
+    /// szamlazz.hu's own records do (the same value a create reply's
+    /// `szlahu_id` header carries, [`IssuedDocument::document_id`]).
     pub document_id: u64,
     /// The document number (`szamlaszam`).
     pub number: String,
@@ -248,7 +254,8 @@ pub struct IssuedDocument {
     pub number: String,
     /// szamlazz.hu's internal document identifier (the `szlahu_id` header):
     /// the same value a query returns as [`FoundDocument::document_id`];
-    /// `None` when the header is absent or not a number.
+    /// `None` when the header is absent or not a number. Read by no handler;
+    /// carried for the same correlation.
     pub document_id: Option<u64>,
     /// The net total (`szamlanetto`).
     pub net_total: Option<Decimal>,
@@ -572,15 +579,14 @@ mod tests {
         // The projection's own reading of the parsed value, with the parser's
         // normalisation out of the way.
         for (raw, read) in [
-            ("ORD-1", Some("ORD-1")),
-            ("  ORD-1 ", Some("ORD-1")),
-            ("", None),
-            ("   ", None),
-            ("\t\n", None),
+            (Some("ORD-1"), Some("ORD-1")),
+            (Some("  ORD-1 "), Some("ORD-1")),
+            (Some(""), None),
+            (Some("   "), None),
+            (Some("\t\n"), None),
+            (None, None),
         ] {
-            let mut wire = Doc::default().wire();
-            wire.info.order_number = Some(raw.to_owned());
-            let found = FoundDocument::from(wire);
+            let found = Doc::default().assigned_order(raw);
             assert_eq!(found.order_number.as_deref(), read, "order_number {raw:?}");
             assert_eq!(
                 found.carries_order(&order),
@@ -588,10 +594,5 @@ mod tests {
                 "order_number {raw:?}"
             );
         }
-        let mut wire = Doc::default().wire();
-        wire.info.order_number = None;
-        let found = FoundDocument::from(wire);
-        assert_eq!(found.order_number, None);
-        assert!(!found.carries_order(&order));
     }
 }

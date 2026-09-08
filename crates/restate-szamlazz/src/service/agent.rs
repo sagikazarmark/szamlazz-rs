@@ -521,20 +521,15 @@ mod tests {
 
         // The projection's own reading of the parsed value, with the parser's
         // normalisation out of the way.
-        let assigned = |raw: &str| {
-            let mut wire = Doc::default().wire();
-            wire.info.order_number = Some(raw.to_owned());
-            FoundDocument::from(wire)
-        };
         for raw in ["", "   "] {
             assert_eq!(
-                unmanaged_storno_verdict(&assigned(raw), "SZ-1"),
+                unmanaged_storno_verdict(&Doc::default().assigned_order(Some(raw)), "SZ-1"),
                 StornoVerdict::Proceed,
                 "order_number {raw:?}: the worker's own reading"
             );
         }
         let StornoVerdict::Answered(response) =
-            unmanaged_storno_verdict(&assigned(" ORD-1 "), "SZ-1")
+            unmanaged_storno_verdict(&Doc::default().assigned_order(Some(" ORD-1 ")), "SZ-1")
         else {
             panic!("a padded order number is answered");
         };

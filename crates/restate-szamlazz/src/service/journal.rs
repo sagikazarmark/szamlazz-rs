@@ -52,9 +52,10 @@
 //! document outcomes went from the agent crate's types to the worker's
 //! projections: its archives are kept as the record of the shape that was
 //! replaced and listed in [`DELIBERATE_BREAKS`], which the compatibility test
-//! skips and asserts still fail to replay. Nothing was in flight to be
-//! killed. It is a record, not a mechanism: a break after go-live deletes
-//! the archive and drains before deploying.
+//! skips and asserts still fail to replay (and one of which the data guard
+//! reads as its positive control). Nothing was in flight to be killed. The
+//! list is not a way to break the journal again: a break after go-live
+//! deletes the archive and drains before deploying.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -254,7 +255,7 @@ fn create_outcome_pins() -> Pins {
     pins(
         "create-outcome",
         &[
-            CreateOutcome::Issued(creation_result()),
+            CreateOutcome::Issued(issued_document()),
             CreateOutcome::Found(document("SZ-1", false)),
             CreateOutcome::Reversed(document("SZ-1", true)),
             CreateOutcome::LiveAgain(document("SZ-1", false)),
@@ -329,7 +330,7 @@ fn storno_outcome_pins() -> Pins {
     pins(
         "storno-outcome",
         &[
-            StornoOutcome::Reversed(created_invoice()),
+            StornoOutcome::Reversed(storno_document()),
             StornoOutcome::AlreadyReversed {
                 storno_number: "SS-1".to_owned(),
             },
@@ -513,7 +514,7 @@ const DOWN: &str = "Karbantartás miatt a szolgáltatás átmenetileg nem elérh
 /// URL and a PDF (which the projection drops). Parsed the way the gateway
 /// parses it and projected the way the create step projects it, since the
 /// agent's types are `#[non_exhaustive]`.
-fn creation_result() -> IssuedDocument {
+fn issued_document() -> IssuedDocument {
     let create = CreateInvoice::new(
         InvoiceKind::invoice(),
         InvoiceHeader::new(
@@ -543,7 +544,7 @@ fn creation_result() -> IssuedDocument {
 /// The reply of a storno of `SZ-1`: the storno invoice `SS-1` with negative
 /// totals, parsed the way the gateway parses it and projected the way the
 /// storno step projects it.
-fn created_invoice() -> IssuedDocument {
+fn storno_document() -> IssuedDocument {
     StornoInvoice::new("SZ-1")
         .parse(&reply("SS-1", "-10000", "-12700", "0"))
         .expect("xmlszamlavalasz parses")
@@ -752,7 +753,8 @@ do not regenerate; keep the old name (see the gateway module docs).";
 /// does not decode into. Nothing was in flight to be killed: there was no
 /// production deployment before the change. The compatibility test skips
 /// these and asserts each still fails to replay, so an entry cannot outlive
-/// its reason; the archives stay committed as the shape that was replaced.
+/// its reason; the archives stay committed as the shape that was replaced
+/// (and `lookup-outcome/live.1.json` is the data guard's positive control).
 ///
 /// A break after go-live is not listed here: it is a drained deploy and a
 /// deleted archive (the module docs).

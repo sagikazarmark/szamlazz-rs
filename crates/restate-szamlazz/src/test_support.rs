@@ -4,11 +4,12 @@
 //!
 //! [`Doc`] renders szamlazz.hu's `<szamla>` response XML, parses it into the
 //! Számla Agent crate's [`InvoiceDocument`] and projects it onto the worker's
-//! [`FoundDocument`] the way the gateway reads a query answer. Both the
-//! agent's response types and the projection are `#[non_exhaustive]` on
-//! purpose, so a unit test cannot construct one directly; the XML is the
-//! seam, and it is what szamlazz.hu actually says (tests state the answer
-//! szamlazz.hu gives, not a second model of it). Every unit test that needs a
+//! [`FoundDocument`] the way the gateway reads a query answer. The agent's
+//! response types are `#[non_exhaustive]` on purpose, so a unit test cannot
+//! construct one directly, and the projection is constructed through the wire
+//! by convention (ADR 0008; a literal would state a second model of the
+//! document): the XML is the seam, and it is what szamlazz.hu actually says
+//! (tests state the answer szamlazz.hu gives). Every unit test that needs a
 //! found document builds it here; the two renderers below are the deliberate
 //! exceptions.
 //!
@@ -244,9 +245,11 @@ impl<'a> Doc<'a> {
     }
 
     /// The document as the Számla Agent crate parses a query answer, before
-    /// the worker's projection: for a test that needs to put a value the
-    /// renderer cannot into the wire type (a `rendelesszam` the parser would
-    /// have trimmed) and read what [`FoundDocument::from`] makes of it.
+    /// the worker's projection: what the builder's own tests read (each field
+    /// as the parser sees it), and the seam for a test that needs a value the
+    /// renderer cannot put on the wire (a `rendelesszam` the parser would
+    /// have trimmed; [`Doc::assigned_order`]) to read what
+    /// [`FoundDocument::from`] makes of it.
     pub(crate) fn wire(&self) -> InvoiceDocument {
         QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(
             self.number,
@@ -260,6 +263,17 @@ impl<'a> Doc<'a> {
     /// [`FoundDocument`].
     pub(crate) fn parse(&self) -> FoundDocument {
         FoundDocument::from(self.wire())
+    }
+
+    /// [`Doc::parse`] with `order` assigned to the parsed `rendelesszam`
+    /// **after** the agent crate's parser, so the projection's own reading of
+    /// the element (trim, empty as none) is exercised with the parser's
+    /// normalisation out of the way: the renderer cannot put an untrimmed or
+    /// empty element on the wire and have it arrive as such.
+    pub(crate) fn assigned_order(&self, order: Option<&str>) -> FoundDocument {
+        let mut wire = self.wire();
+        wire.info.order_number = order.map(str::to_owned);
+        FoundDocument::from(wire)
     }
 
     /// [`Doc::parse`] boxed, as the gateway outcomes carry a found document.

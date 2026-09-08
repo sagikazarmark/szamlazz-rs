@@ -237,12 +237,17 @@ what the handlers read, and nothing else (`restate_szamlazz::gateway::document`)
   crate's `InvoiceAppearance` reads it, so a code the crate learns later is read on replay), `issue_date`
   (`kelt`), `fulfillment_date` (`telj`), `due_date` (`fizh`), `currency`, `test` (`teszt`), the grand total
   (`net_total`, `vat_total`, `gross_total`) and `payments` (`RecordedCreditEntry`: date, title, amount, comment,
-  bank account). `LookupOutcome`, `CreateOutcome` and `QueryOutcome` carry it boxed where they carried
+  bank account). `document_id` is read by no handler and is carried so that an entry names the document the way
+  szamlazz.hu's records do. The external id of #127's field list is **not** carried: szamlazz.hu never echoes
+  `szamlaKulsoAzon` in a query or create response (above), so it cannot be read off a document, and every handler
+  holds it from the key already. `LookupOutcome`, `CreateOutcome` and `QueryOutcome` carry it boxed where they carried
   `Box<InvoiceDocument>`. The checks the services make on a found document (`is_live`, `is_ours`,
   `carries_order`, `is_storno_of`, `e_invoice`, `payment_amounts`) are its methods; `InvoiceDocumentExt` is gone.
   `Szamlazz.Agent.query`'s `QueryResponse` (a caller contract, unchanged) is projected from it.
-- `IssuedDocument`, from a create reply (`InvoiceCreationResult`, `TryFrom`: a reply without a number is not an
-  issued document, and the create step re-queries as before) and from a storno reply (`CreatedInvoice`, `From`):
+- `IssuedDocument`, from a create reply (`InvoiceCreationResult`, `TryFrom` rather than the `From` #127 named:
+  the agent type's number is optional, a PDF preview's reply has none, and on `main` the create step already turned
+  such a reply into `Unconfirmed::Open` before it could be journaled; the conversion now says so in its type, and the
+  handler's unreachable "issued without a number" arm is gone) and from a storno reply (`CreatedInvoice`, `From`):
   `number`, `document_id`, `net_total`, `gross_total`, `outstanding`, `customer_account_url`,
   `notification_delivery_failed`; never the PDF. `CreateOutcome::Issued` and `StornoOutcome::Reversed` carry it.
 
@@ -263,9 +268,9 @@ change and so nothing in flight to be killed. The generator archived the twelve 
 `create-outcome/{issued,found,reversed,live-again,reconciled,collision}`, `query-outcome/found`,
 `storno-outcome/reversed`); `service::journal::DELIBERATE_BREAKS` lists them, and the compatibility test skips
 each and asserts it still fails to replay, so the list cannot outlive its reason. The archives are the record of the
-shape that was replaced, not a mechanism: a break after go-live is a deleted archive and a drained deploy (the
-#47 amendment's *Consequences*), and the endpoint README's rolling-update guidance names this release as the one
-whose drain is mandatory.
+shape that was replaced (one of them the data guard's positive control), not a way to break the journal again: a
+break after go-live is a deleted archive and a drained deploy (the #47 amendment's *Consequences*), and the endpoint
+README's rolling-update guidance names this release as the one whose drain is mandatory.
 
 **Consequences.** The agent crate's response types are free to evolve without a journal review; the worker's
 journal contract is the projections' and the crate's own. A field a handler comes to need is added to the
