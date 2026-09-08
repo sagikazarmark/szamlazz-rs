@@ -6,8 +6,9 @@ read from that journaled `Account` (below); amended by #47, every journaled type
 by fixtures (the *Journal compatibility* section); amended by #70; widening a field to `Option<T>` is the one
 retype the rule admits (the *Widening* paragraph); amended by #127; every journaled type is crate-owned, a
 `szamlazz_agent` response type is never journaled directly (the *Crate-owned projections* section), the one
-deliberate break of the pre-go-live window; amended by #125; the registry is complete by mechanism and an
-archived fixture is never deleted after go-live (the *Completeness by mechanism, and the archive rule* section).
+deliberate break of the pre-go-live window; amended by #125; the registry is complete by mechanism, and after
+go-live an archived fixture of a type still journaled is never deleted: a shape that must break is a new type and
+the old one retired with its directory (the *Completeness by mechanism, and the archive rule* section).
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,

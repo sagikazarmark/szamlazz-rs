@@ -61,8 +61,8 @@
 //! replaced and listed in [`DELIBERATE_BREAKS`], which the compatibility test
 //! skips and asserts still fail to replay (and one of which the data guard
 //! reads as its positive control). Nothing was in flight to be killed. The
-//! list is not a way to break the journal again: a break after go-live
-//! deletes the archive and drains before deploying.
+//! list is not a way to break the journal again: after go-live a shape that
+//! must break is a retired type, never a deleted archive (the archive rule).
 //!
 //! # The archive rule
 //!
@@ -79,9 +79,10 @@
 //! shape; the same commit after go-live would have been a killed invocation
 //! for every order in flight across the upgrade. So the rule is the
 //! reviewer's, stated here where the generator's instructions are: before
-//! go-live, a regeneration without an archive is a judgement call recorded in
-//! the commit message; after it, the archive is committed with the new shape
-//! and stays for as long as the type is journaled.
+//! go-live, a regeneration without an archive, or a break listed in
+//! [`DELIBERATE_BREAKS`], is a judgement call recorded in the commit message;
+//! after it, the archive is committed with the new shape and stays for as
+//! long as the type is journaled.
 //!
 //! The one way a directory goes is **retirement**: a shape that must change
 //! beyond what additive allows is a *new* journaled type under a new
@@ -849,8 +850,9 @@ do not regenerate; keep the old name (see the gateway module docs).";
 /// its reason; the archives stay committed as the shape that was replaced
 /// (and `lookup-outcome/live.1.json` is the data guard's positive control).
 ///
-/// A break after go-live is not listed here: it is a drained deploy and a
-/// deleted archive (the module docs).
+/// A break after go-live is not listed here: it is a new journaled type and a
+/// drained deploy that retires the old one with its directory, never a
+/// deleted archive (the archive rule in the module docs).
 const DELIBERATE_BREAKS: &[(&str, &str)] = &[
     ("lookup-outcome", "live.1.json"),
     ("lookup-outcome", "reversed.1.json"),

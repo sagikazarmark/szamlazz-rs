@@ -116,12 +116,17 @@ async fn assert_second_call_queued_behind_the_first(
 /// Object's lock; it runs once the first has completed, its lookup finds the
 /// document that landed, and it answers `already_issued` without a
 /// `create-invoice` run. One create on the wire; both invocations completed;
-/// the second answered after the first. The race is real (the second call is
-/// started the moment szamlazz.hu has received the first's create, three
-/// seconds before it answers), and the order provable (the reply times, the
-/// runs), not a lucky interleaving: without the lock the second call's lookup
-/// would find the document that szamlazz.hu already holds and answer inside
-/// the three seconds, before the first.
+/// the second answered after the first. The race is real and asserted from
+/// the server's side, not assumed from the client's: the second call is
+/// started the moment szamlazz.hu has received the first's create, and both
+/// invocations are seen **in flight together** on `sys_invocation` (the
+/// first `running`, the second queued behind it, neither completed) before
+/// the first is answered; a stalled test host that let the first complete
+/// before the second was accepted would fail here, not pass by running them
+/// one after the other. The order is then provable (the reply times, the
+/// runs): without the lock the second call's lookup would find the document
+/// that szamlazz.hu already holds and answer inside the three seconds, before
+/// the first.
 pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harness) {
     h.reset().await;
     h.absent("E2E-L1", &["prepayment", "final", "proforma"])
@@ -141,7 +146,7 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
 
     let body = create_body(dec!(1000), false);
     let started = Instant::now();
-    let (first, second) = tokio::join!(
+    let (first, second, both_in_flight) = tokio::join!(
         timed(h.call("E2E-L1", "create_invoice", &body, "e2e-l1-k1")),
         async {
             // The moment szamlazz.hu has the first call's create request and
@@ -149,8 +154,27 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
             h.wait_for_creates(1).await;
             timed(h.call("E2E-L1", "create_invoice", &body, "e2e-l1-k2")).await
         },
+        async {
+            // The server holds both invocations on the key at once: the first
+            // mid-send, the second queued behind its lock.
+            h.wait_for_creates(1).await;
+            let in_flight = h.await_in_flight_on("E2E-L1", 2).await;
+            (in_flight, Instant::now())
+        },
     );
     let elapsed = started.elapsed();
+    let (in_flight, both_in_flight) = both_in_flight;
+    assert!(
+        both_in_flight < first.done,
+        "both invocations were in flight together before the first was answered: the second was \
+         queued behind the lock, not run after it (in flight {in_flight:?} at {both_in_flight:?}, \
+         first answered {:?})",
+        first.done
+    );
+    assert!(
+        in_flight.contains(&first.reply.invocation_id().to_owned()),
+        "the first invocation was one of the two in flight: {in_flight:?}"
+    );
     assert!(
         elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(60),
         "the first call waited for szamlazz.hu's delayed reply and nothing was retried by the handler: {elapsed:?}"
