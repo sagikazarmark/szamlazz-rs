@@ -227,9 +227,22 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
 /// the lock while it is held, and only then is it released to send. The
 /// second send lands; the second call then finds the document from its
 /// lookup. Two creates on the wire, both the first call's; the same
-/// assertions as (xxiii) otherwise. The hold is what places the second call
-/// between the sends: the run retry delay itself is never raced (the
-/// harness's `hold_fetch` exists for this).
+/// assertions as (xxiii) otherwise.
+///
+/// #125 asks for the second call to arrive *while the create step waits out
+/// its delay*. This scenario places it a step later, at the re-execution's
+/// fetch, on purpose: the delay is a server-side timer of one second that
+/// cannot be widened (under vqueues a run retry delay at or above 2 s leaves
+/// the invoker for the scheduler and takes every in-flight column with it:
+/// `worker_config`'s rustdoc, verified in #123), the worker runs nothing
+/// during it, and a call raced into it is accepted before or after the timer
+/// as the host's load decides, which is the class of scenario #123 removed
+/// from this suite. The hold is the deterministic form of the same property:
+/// the second call is on the server after the first send that did not land
+/// and before the second that does, the lock queues it across the whole of
+/// the first invocation's retry (the key is held through `backing-off` and
+/// the re-execution alike), and it is answered from its lookup with nothing
+/// of its own sent.
 pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_executions(
     h: &Harness,
 ) {

@@ -458,7 +458,10 @@ pub(crate) async fn create_lands_on_the_second_send(
 /// awaits: the moment szamlazz.hu has the send and its reply is still on its
 /// way (a delayed stub), or the moment the first of two sends is answered. The
 /// count moves at the responder, which wiremock runs at receipt, before any
-/// delay: a transport-side fact, not a guess from the client's clock.
+/// delay: a transport-side fact, not a guess from the client's clock. The
+/// document's landing is published **with** the count (both under the one
+/// write that notifies the receiver), so a query made after `received`
+/// resolves finds what the counted request landed.
 #[derive(Clone)]
 pub(crate) struct Sends(watch::Receiver<u64>);
 
@@ -507,21 +510,24 @@ async fn create_lands_when(
     let (sends, received) = watch::channel(0u64);
     create()
         .respond_with(move |_: &Request| {
-            let mut seen = 0u64;
+            // The answer is chosen and the landing recorded under the same
+            // write that publishes the count: a receiver woken by the count
+            // sees the document landed, never the count ahead of it.
+            let mut reply = None;
             sends.send_modify(|count| {
-                *count += 1;
-                seen = *count;
-            });
-            let index = usize::try_from(seen - 1).expect("a few sends");
-            match answers.get(index) {
-                Some((reply, lands)) => {
-                    if *lands {
-                        flip.store(true, Ordering::SeqCst);
+                let index = usize::try_from(*count).expect("a few sends");
+                reply = Some(match answers.get(index) {
+                    Some((template, lands)) => {
+                        if *lands {
+                            flip.store(true, Ordering::SeqCst);
+                        }
+                        template.clone()
                     }
-                    reply.clone()
-                }
-                None => ResponseTemplate::new(500),
-            }
+                    None => ResponseTemplate::new(500),
+                });
+                *count += 1;
+            });
+            reply.expect("chosen under the write")
         })
         .expect(expected)
         .mount(mock)
@@ -713,11 +719,15 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
 
 /// `create_lands_slowly(doc, delay)` makes the document the holder of its
 /// external id the moment the create request is *received*, while the create's
-/// own reply is still `delay` away: a query racing the in-flight send finds
-/// the document; the reply, when it comes, is the created document. The
-/// [`Sends`] it returns resolves at that receipt, inside the delay.
+/// own reply is still `delay` away: the [`Sends`] resolves at that receipt
+/// with the send's reply still outstanding, a query then finds the document,
+/// and the reply, when it comes, is the created document, no sooner than the
+/// delay. The order is read off the send task (not finished when the signal
+/// resolves) and the delay off a lower bound; no upper bound on the clock,
+/// which a loaded host would break without the stub being wrong.
 #[tokio::test]
 async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in_flight() {
+    const DELAY: Duration = Duration::from_secs(2);
     let mock = MockServer::start().await;
     let mut sends = create_lands_slowly(
         &mock,
@@ -725,7 +735,7 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
             external_id: Some("acct:ORD-6:invoice"),
             ..Doc::new("SZ-6", "SZ", "ORD-6")
         },
-        Duration::from_millis(600),
+        DELAY,
     )
     .await;
 
@@ -748,27 +758,24 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
                 .expect("create")
         }
     });
-    // The create is received at once: the signal resolves inside the delay,
-    // and the query in the reply's window finds the document.
+    // The signal resolves at receipt: the request is recorded and the send
+    // has no reply yet. The landing was published with the count, so the
+    // query finds the document whenever it is made.
     sends.received(1).await;
     assert!(
-        started.elapsed() < Duration::from_millis(600),
-        "the receipt was signalled before the reply"
+        !send.is_finished(),
+        "the receipt was signalled while the send's reply was still outstanding"
     );
     assert_eq!(mock.received_requests().await.expect("requests").len(), 2);
     let (_, body) = query_by(&mock, by_id).await;
     assert!(
         body.contains("<szamlaszam>SZ-6</szamlaszam>"),
-        "the holder while the reply is in flight: {body}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_millis(600),
-        "the query did not wait for the reply"
+        "the holder from the receipt on: {body}"
     );
 
     let response = send.await.expect("join");
     assert!(
-        started.elapsed() >= Duration::from_millis(600),
+        started.elapsed() >= DELAY,
         "the reply waited the delay: {:?}",
         started.elapsed()
     );
