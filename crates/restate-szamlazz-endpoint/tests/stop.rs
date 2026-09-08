@@ -88,12 +88,22 @@ fn bind_selects_the_address() {
 
 /// A running endpoint: the address it was asked to bind, the child, its
 /// stdout lines as a reader thread hands them over, and the lines seen so far
-/// (the last one is the start-up line).
+/// (the last one is the start-up line). Killed when dropped, so an assertion
+/// that fails between `start` and `stop` leaves no process behind.
 struct Endpoint {
     bind: &'static str,
     child: Child,
     lines: Receiver<String>,
     log: Vec<String>,
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        // A child `stop` has already waited for is gone: `kill` is a no-op on
+        // one and `wait` answers its status again.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// An endpoint that has exited: its status and everything it logged.
@@ -150,7 +160,7 @@ impl Endpoint {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let _ = endpoint.child.kill();
+                    // The drop kills the child.
                     panic!(
                         "the endpoint did not start within {START_TIMEOUT:?}\n{}",
                         endpoint.log.join("\n")
@@ -199,6 +209,8 @@ impl Endpoint {
                 break status;
             }
             if Instant::now() >= deadline {
+                // Killed here, before the drop, so that the pipe ends and the
+                // reader thread hands over the rest of the log.
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 self.log.extend(self.lines.iter());

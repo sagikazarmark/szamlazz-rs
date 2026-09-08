@@ -269,7 +269,10 @@ pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: 
 /// create step (the first loses its reply): the second execution's create
 /// carries the **journaled** account's bank account (the invocation
 /// finishes on the account it started on), and only new invocations see the
-/// change.
+/// change. The change is made while the second execution is held at its
+/// fetch (its `account` step already replayed; a hold on the store, not a
+/// race against the run retry delay), so it is certainly in place before the second
+/// execution opens its gateway and sends.
 pub(crate) async fn account_change_between_executions_does_not_reach_the_invocation(h: &Harness) {
     h.reset().await;
     h.absent("E2E-19", &["prepayment", "final", "proforma", "invoice"])
@@ -298,12 +301,20 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
         .await;
 
     let body = create_body(dec!(1000), false);
+    // The second execution's fetch (the first execution's is the first).
+    let hold = h.multi().hold_fetch("acme", 2);
     let call = h.call_scoped("acme", "E2E-19", "create_invoice", &body, "e2e-19-k1");
     let change = async {
-        h.wait_for_creates(1).await;
+        hold.reached().await;
+        assert_eq!(
+            h.create_bodies().await.len(),
+            1,
+            "the first execution sent before the second reached its fetch"
+        );
         h.multi().update("acme", |account| {
             account.seller.bank_account = Some(BANK_ACCOUNT_CHANGED.to_owned());
         });
+        hold.release();
     };
     let (reply, ()) = tokio::join!(call, change);
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -364,6 +375,9 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
 /// step (the first loses its reply): the second execution fetches the
 /// credentials again and carries the new key, while the journaled `account`
 /// entry is byte-identical before and after; credentials are never in it.
+/// The rotation is made while the second execution is held at its fetch (a
+/// hold on the store, not a race against the run retry delay), so the fetch that
+/// answers it is the one the second execution's gateway opens with.
 pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
     h.reset().await;
     h.absent("E2E-20", &["prepayment", "final", "proforma", "invoice"])
@@ -384,15 +398,23 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
         .await;
 
     let body = create_body(dec!(1000), false);
+    // The second execution's fetch (the first execution's is the first).
+    let hold = h.multi().hold_fetch("beta", 2);
     let call = h.call_scoped("beta", "E2E-20", "create_invoice", &body, "e2e-20-k1");
     let rotate = async {
-        // The first execution's create is on the wire: the `account` entry is
-        // journaled and the re-execution is a second away. Read the entry as
-        // journaled *before* the rotation, then rotate. (Journal entries are
-        // immutable, so the comparison below proves the rotation left the
-        // second execution's account as journaled: the credentials are not
-        // part of it.)
-        h.wait_for_creates(1).await;
+        // The second execution is parked at its fetch: the first execution's
+        // create is on the wire and answered, the `account` entry is
+        // journaled and replayed. Read the entry as journaled *before* the
+        // rotation, then rotate, then let the fetch answer. (Journal entries
+        // are immutable, so the comparison below proves the rotation left
+        // the second execution's account as journaled: the credentials are
+        // not part of it.)
+        hold.reached().await;
+        assert_eq!(
+            h.create_bodies().await.len(),
+            1,
+            "the first execution sent before the second reached its fetch"
+        );
         let invocations = h.all_invocations().await;
         let (id, _) = invocations
             .iter()
@@ -407,6 +429,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
             .raw
             .clone();
         h.multi().rotate("beta", KEY_B_V2);
+        hold.release();
         (id.clone(), before)
     };
     let (reply, (id, before)) = tokio::join!(call, rotate);

@@ -1,7 +1,8 @@
 //! Rows of the SQL introspection API: a `sys_journal` entry with its `raw`
 //! hex-decoded to bytes ([`JournalEntry`]), the result of a named run
-//! ([`run_result`]), a `sys_invocation` row ([`Invocation`]) and what a watch
-//! saw of an invocation's attempts while it ran ([`Retries`]).
+//! ([`run_result`]) and a `sys_invocation` row ([`Invocation`]). What a watch
+//! saw of an invocation's attempts while it ran is
+//! [`admin::Retries`](crate::harness::admin::Retries).
 
 use serde_json::Value;
 
@@ -59,15 +60,6 @@ pub(crate) fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<
         .iter()
         .take_while(|entry| !entry.entry_type.starts_with("Command:"))
         .find(|entry| entry.entry_type == "Notification: Run")
-}
-
-/// What [`Harness::watch`](crate::harness::Harness::watch) saw of an
-/// invocation's attempts while it ran.
-#[derive(Debug, Default)]
-pub(crate) struct Retries {
-    pub(crate) max_retry_count: u64,
-    pub(crate) failures: Vec<String>,
-    pub(crate) failing_commands: Vec<String>,
 }
 
 /// A `sys_invocation` row of a completed invocation. `retry_count` and the

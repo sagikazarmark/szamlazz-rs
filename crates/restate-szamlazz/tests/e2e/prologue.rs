@@ -156,7 +156,7 @@ pub(crate) async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness)
         )
         .await;
     let elapsed = started.elapsed();
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert!(

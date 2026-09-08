@@ -46,7 +46,7 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
         )
         .await;
     let elapsed = started.elapsed();
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 500, "{}", reply.body);
     assert!(
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
@@ -214,7 +214,7 @@ pub(crate) async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness)
         )
         .await;
     let elapsed = started.elapsed();
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-27");
@@ -293,7 +293,7 @@ pub(crate) async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harnes
         )
         .await;
     let elapsed = started.elapsed();
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 503, "{}", reply.body);
     assert!(
         elapsed < Duration::from_secs(60),
@@ -385,7 +385,7 @@ pub(crate) async fn answered_code_on_the_create_leading_query_is_an_immediate_un
             "e2e-29-k1",
         )
         .await;
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 503, "{}", reply.body);
 
     let fault = reply.fault();
@@ -468,7 +468,7 @@ pub(crate) async fn an_answered_code_on_the_hint_is_inconclusive_and_the_create_
             "e2e-29b-k1",
         )
         .await;
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-29B");

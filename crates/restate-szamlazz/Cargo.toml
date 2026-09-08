@@ -34,9 +34,17 @@ unicode-normalization = "0.1.25"
 [dev-dependencies]
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 static_assertions = "1.1.0"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# `sync` for the e2e harness's sampler (a `watch` channel stops it), `signal`
+# for its SIGINT/SIGTERM handler, which stops the Restate server it started.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "test-util"] }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
+
+# The e2e harness spawns `restate-server` in a process group of its own, kills
+# the group with `killpg(2)` and tells a stale container from a concurrent
+# run's by whether its starting process is alive (`kill(2)` with no signal).
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true }
 
 [lints]
 workspace = true

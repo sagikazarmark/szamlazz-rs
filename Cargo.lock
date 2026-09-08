@@ -2304,6 +2304,7 @@ dependencies = [
  "bytes",
  "http",
  "jiff",
+ "nix",
  "reqwest",
  "restate-sdk",
  "rust_decimal",
