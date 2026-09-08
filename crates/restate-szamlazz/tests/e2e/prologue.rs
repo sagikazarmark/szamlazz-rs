@@ -6,12 +6,12 @@
 
 use std::time::{Duration, Instant};
 
+use restate_e2e_harness::run_result;
 use rust_decimal::dec;
 use serde_json::json;
 
 use restate_szamlazz::contract::TerminalCode;
 
-use crate::harness::introspection::run_result;
 use crate::harness::szamlazz::{
     Doc, api_error, create, created, not_found, number_query, order_query,
 };

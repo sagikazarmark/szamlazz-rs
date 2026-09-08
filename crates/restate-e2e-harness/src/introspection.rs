@@ -2,7 +2,7 @@
 //! hex-decoded to bytes ([`JournalEntry`]), the result of a named run
 //! ([`run_result`]) and a `sys_invocation` row ([`Invocation`]). What a watch
 //! saw of an invocation's attempts while it ran is
-//! [`admin::Retries`](crate::harness::admin::Retries).
+//! [`Retries`](crate::admin::Retries).
 
 use serde_json::Value;
 
@@ -14,17 +14,22 @@ use serde_json::Value;
 /// carries the name, and the `Notification: Run` that follows it, which
 /// carries the result bytes (verified against 1.7.8). A leak check must scan
 /// every row, not the named ones.
-#[derive(Debug)]
-pub(crate) struct JournalEntry {
-    pub(crate) index: u64,
-    pub(crate) entry_type: String,
-    pub(crate) name: Option<String>,
-    pub(crate) raw: Vec<u8>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEntry {
+    /// The entry's position in the journal.
+    pub index: u64,
+    /// `entry_type` as the server names it (`Command: Run`, `Notification:
+    /// Run`, …).
+    pub entry_type: String,
+    /// The name of a named entry (a `ctx.run`'s).
+    pub name: Option<String>,
+    /// `raw`, hex-decoded.
+    pub raw: Vec<u8>,
 }
 
 impl JournalEntry {
     /// One `sys_journal` row (`index`, `entry_type`, `name`, `raw`).
-    pub(crate) fn from_row(row: &Value) -> Self {
+    pub fn from_row(row: &Value) -> Self {
         Self {
             index: row["index"].as_u64().expect("index"),
             entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
@@ -37,12 +42,14 @@ impl JournalEntry {
     }
 
     /// Whether the entry is a `ctx.run` command (named).
-    pub(crate) fn is_run(&self) -> bool {
+    #[must_use]
+    pub fn is_run(&self) -> bool {
         self.entry_type == "Command: Run"
     }
 
     /// Whether the entry's bytes contain `needle`.
-    pub(crate) fn raw_contains(&self, needle: &str) -> bool {
+    #[must_use]
+    pub fn raw_contains(&self, needle: &str) -> bool {
         self.raw
             .windows(needle.len())
             .any(|window| window == needle.as_bytes())
@@ -50,9 +57,10 @@ impl JournalEntry {
 }
 
 /// The result of the run named `name`: the `Notification: Run` row that
-/// follows its command before any other command (the handlers await every
-/// run, so its notification is the next journal event after the command).
-pub(crate) fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a JournalEntry> {
+/// follows its command before any other command (a handler that awaits every
+/// run has its notification as the next journal event after the command).
+#[must_use]
+pub fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a JournalEntry> {
     let command = journal
         .iter()
         .position(|entry| entry.is_run() && entry.name.as_deref() == Some(name))?;
@@ -62,25 +70,32 @@ pub(crate) fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<
         .find(|entry| entry.entry_type == "Notification: Run")
 }
 
-/// A `sys_invocation` row of a completed invocation. `retry_count` and the
-/// last failure are attempt state, gone once the invocation completed; see
-/// [`Harness::watch`](crate::harness::Harness::watch) for them.
-#[derive(Debug)]
-pub(crate) struct Invocation {
-    pub(crate) status: String,
-    pub(crate) completion_failure: Option<String>,
-    pub(crate) scope: Option<String>,
-    pub(crate) service: String,
-    pub(crate) handler: String,
+/// A `sys_invocation` row. `retry_count` and the last failure are attempt
+/// state, gone once the invocation completed; see
+/// [`Watch`](crate::admin::Watch) for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    /// `status` (`completed`, `running`, `backing-off`, …).
+    pub status: String,
+    /// `completion_failure`: the terminal error's text of a failed
+    /// invocation.
+    pub completion_failure: Option<String>,
+    /// `scope`: the partition key the server keyed the invocation by, under
+    /// scoped Virtual Objects.
+    pub scope: Option<String>,
+    /// `target_service_name`.
+    pub service: String,
+    /// `target_handler_name`.
+    pub handler: String,
 }
 
 impl Invocation {
     /// The columns every `sys_invocation` query of the harness selects.
-    pub(crate) const COLUMNS: &str =
+    pub const COLUMNS: &str =
         "status, completion_failure, scope, target_service_name, target_handler_name";
 
     /// One `sys_invocation` row with [`Self::COLUMNS`].
-    pub(crate) fn from_row(row: &Value) -> Self {
+    pub fn from_row(row: &Value) -> Self {
         Self {
             status: row["status"].as_str().unwrap_or_default().to_owned(),
             completion_failure: row["completion_failure"].as_str().map(str::to_owned),
@@ -105,4 +120,34 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `raw` is hex on the wire and bytes in the entry; a run's result is the
+    /// notification after its command.
+    #[test]
+    fn a_journal_row_decodes_its_raw_and_a_run_finds_its_result() {
+        let journal: Vec<JournalEntry> = [
+            json!({ "index": 0, "entry_type": "Command: Input", "name": null, "raw": "" }),
+            json!({ "index": 1, "entry_type": "Command: Run", "name": "step", "raw": "00" }),
+            json!({ "index": 2, "entry_type": "Notification: Run", "name": null, "raw": "7b7d" }),
+            json!({ "index": 3, "entry_type": "Command: Output", "name": null, "raw": null }),
+        ]
+        .iter()
+        .map(JournalEntry::from_row)
+        .collect();
+        assert!(journal[1].is_run());
+        assert!(!journal[2].is_run());
+        let result = run_result(&journal, "step").expect("the run's result");
+        assert_eq!(result.index, 2);
+        assert_eq!(result.raw, b"{}");
+        assert!(result.raw_contains("{}"));
+        assert!(run_result(&journal, "other").is_none());
+        assert_eq!(decode_hex("abc"), None, "an odd length is not hex");
+        assert_eq!(decode_hex("zz"), None);
+    }
 }

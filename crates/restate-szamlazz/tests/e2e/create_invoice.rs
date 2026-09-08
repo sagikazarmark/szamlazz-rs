@@ -5,6 +5,7 @@
 //! reply settled by the immediate re-query, the proforma link and the
 //! secondary-lookup collision.
 
+use restate_e2e_harness::run_result;
 use rust_decimal::dec;
 use serde_json::{Value, json};
 use wiremock::ResponseTemplate;
@@ -13,7 +14,6 @@ use wiremock::matchers::body_string_contains;
 use restate_szamlazz::contract::TerminalCode;
 
 use crate::harness::accounts::AGENT_KEY;
-use crate::harness::introspection::run_result;
 use crate::harness::szamlazz::{
     Doc, api_error, create, created, duplicate_order_number, external_id_query, not_found,
     number_query, order_query,

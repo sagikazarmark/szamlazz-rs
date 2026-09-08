@@ -23,7 +23,7 @@ Issuing from Rust directly starts at [`szamlazz-agent`](crates/szamlazz-agent).
 
 ## Workspace
 
-This virtual workspace contains five packages intended for publication and independent use:
+This virtual workspace contains six packages intended for publication and independent use:
 
 | Package | Purpose |
 |---|---|
@@ -32,6 +32,7 @@ This virtual workspace contains five packages intended for publication and indep
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
 | [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless: szamlazz.hu is the source of truth, reached through deterministic external ids. |
+| [`restate-e2e-harness`](crates/restate-e2e-harness) | End-to-end test harness for `restate_sdk` endpoints against a real `restate-server` (server gate and launcher, in-process deployment, ingress, admin API, journal introspection, run-name matcher); nothing of szamlazz in it, versioned on its own, unix only. |
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 
@@ -52,8 +53,8 @@ dagger check
 
 It runs the `rust` module's build, test, clippy, doc, audit and fmt checks and the workspace's own `ci` module
 (`.dagger/modules/ci`): `ci:test` (the workspace tests with every feature) and `ci:end-to-end` (the
-`restate-szamlazz` handler layer against a real Restate server started inside the container). Run one with
-`dagger check ci:end-to-end`.
+`restate-szamlazz` handler layer and the `restate-e2e-harness` smoke test against `restate-server` processes started
+inside the container). Run one with `dagger check ci:end-to-end`.
 
 Run the individual host checks with the tracked lockfile:
 
@@ -63,8 +64,11 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 cargo test --doc --workspace --all-features --locked
 cargo doc --workspace --all-features --no-deps --locked
-# the end-to-end suite of restate-szamlazz, against docker (or RESTATE_SERVER_BIN)
-cargo test -p restate-szamlazz --test e2e -- --ignored
+# the end-to-end suites, against a restate-server binary (or a running server:
+# RESTATE_ADMIN_URL / RESTATE_INGRESS_URL, e.g. `docker compose up -d`)
+dagger call ci restate-server export --path ./restate-server
+RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-szamlazz --test e2e -- --ignored
+RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness -- --ignored
 ```
 
 ## License

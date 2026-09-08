@@ -4,22 +4,24 @@
 //!
 //! The two end-to-end tests are ignored by default:
 //! `cargo test -p restate-szamlazz --test e2e -- --ignored`.
-//! The server comes from the environment, decided once (the server gate,
-//! [`harness::gate`]): `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` reuse a
-//! running server (with the three experimental flags; `compose.yaml` sets
-//! them; the main suite only), `RESTATE_SERVER_BIN` names a `restate-server`
-//! binary the harness spawns on the loopback (what the Dagger check does),
-//! otherwise a docker daemon runs a container of the Restate image. With none
-//! of them the suite skips with a message, and fails when `CI` is set, since
-//! a skipped run in CI proves nothing. A server the harness starts binds
-//! ports chosen free at launch, none fixed, so two runs on one host collide
-//! with nothing; it is stopped when the run ends and on a SIGINT or SIGTERM to
-//! the test process. Unix only, as `restate-server` itself is: the server's
-//! process group, the stop signals and the liveness check behind the stale
-//! container removal are.
-//! The harness's own tests (the server gate, the sampler's decision, the
-//! fetch hold, the run-pattern matching, the stub helpers) live beside what
-//! they test under [`harness`], need only wiremock and run un-ignored.
+//! The server comes from the environment, decided once (the server gate of
+//! the `restate-e2e-harness` crate): `RESTATE_ADMIN_URL` /
+//! `RESTATE_INGRESS_URL` reuse a running server (with the three experimental
+//! flags; `compose.yaml` sets them; the main suite only), `RESTATE_SERVER_BIN`
+//! names a `restate-server` binary the harness spawns on the loopback (what
+//! the Dagger check does; `dagger call ci restate-server export --path
+//! ./restate-server` gives a developer the same binary). With neither the
+//! suite skips with a message, and fails when `CI` is set, since a skipped
+//! run in CI proves nothing. A server the harness starts binds ports chosen
+//! free at launch, none fixed, so two runs on one host collide with nothing;
+//! it is stopped when the run ends and on a SIGINT or SIGTERM to the test
+//! process. Unix only, as `restate-server` itself is: the server's process
+//! group and the stop signals are.
+//! The Restate half of the harness (the gate, the spawned server, the
+//! deployment, the ingress, the admin API and the run-name matcher) is that
+//! crate, tested there; the szamlazz half under [`harness`] has its own
+//! tests (the fetch hold, the stub helpers) beside what they test, needing
+//! only wiremock and running un-ignored.
 //!
 //! One binary, one tree: this file holds the two tests and the order the
 //! scenarios run in; [`harness`] is everything the scenarios drive; and every
@@ -92,18 +94,17 @@ mod storno;
 use restate_szamlazz::contract::TerminalCode;
 use serde_json::json;
 
-use crate::harness::Harness;
 use crate::harness::accounts::AGENT_KEY;
-use crate::harness::gate::{MAIN_SERVER, Reuse, WITHOUT_PROTOCOL_V7, launcher_or_skip};
 use crate::harness::szamlazz::{not_found, probe_with_key};
+use crate::harness::{Harness, MAIN_SERVER, Reuse, WITHOUT_PROTOCOL_V7, launcher_or_skip};
 
 #[tokio::test]
-#[ignore = "needs a Restate server: docker, RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
+#[ignore = "needs a Restate server: RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
 async fn e2e_order_protocol() {
     let Some(launcher) = launcher_or_skip(Reuse::Allowed) else {
         return;
     };
-    let mut h = Harness::start(launcher.launch(&MAIN_SERVER)).await;
+    let mut h = Harness::start(launcher.launch(&MAIN_SERVER).await).await;
 
     // Phase 1: the single-account deployment, unscoped.
     create_invoice::issued_then_already_issued(&h).await;
@@ -187,12 +188,12 @@ async fn e2e_order_protocol() {
 /// server of its own, on ports of its own; never a reused one, whose flags
 /// are the main suite's.
 #[tokio::test]
-#[ignore = "needs a Restate server: docker or RESTATE_SERVER_BIN"]
+#[ignore = "needs a Restate server: RESTATE_SERVER_BIN"]
 async fn e2e_check_account_without_protocol_v7() {
     let Some(launcher) = launcher_or_skip(Reuse::Never) else {
         return;
     };
-    let mut h = Harness::start(launcher.launch(&WITHOUT_PROTOCOL_V7)).await;
+    let mut h = Harness::start(launcher.launch(&WITHOUT_PROTOCOL_V7).await).await;
 
     // The single-account deployment: the scoped probe answers the account
     // and reports the scope it saw: none.

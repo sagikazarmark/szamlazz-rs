@@ -3,13 +3,13 @@
 //! under two scopes, an account change and a credential rotation between two
 //! executions.
 
+use restate_e2e_harness::run_result;
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
 use restate_szamlazz::contract::TerminalCode;
 
 use crate::harness::accounts::{AGENT_KEY, BANK_ACCOUNT, BANK_ACCOUNT_CHANGED, KEY_B, KEY_B_V2};
-use crate::harness::introspection::run_result;
 use crate::harness::szamlazz::{
     Doc, agent_key_tag, create, create_with_bank_account, create_with_key, created, not_found,
     order_query,

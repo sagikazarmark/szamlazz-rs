@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use jiff::civil::{Date, date};
 use serde_json::{Value, json};
+use szamlazz_agent::reqwest;
 use tokio::sync::watch;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, Request, ResponseTemplate};

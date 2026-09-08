@@ -984,7 +984,7 @@ show: the durable sequence, replay, the per-key lock and the journal.
   opened with the sentinel credentials against an endpoint that refuses connections, the registry's samples for the
   rest, and asserts the sentinel is in none of them: the cheap complement to the `assert_not_impl_any!` guard and
   to the e2e's byte scan, which needs a server.
-- End to end (`tests/e2e/`, ignored; a Restate server from one of three sources: see "What CI runs" below):
+- End to end (`tests/e2e/`, ignored; a Restate server from one of two sources: see "What CI runs" below):
   Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts on `/version` exactly the features the server's flags enable;
   `compose.yaml` matches) + wiremock as
@@ -1139,10 +1139,19 @@ show: the durable sequence, replay, the per-key lock and the journal.
   (wiremock checks the counts on `verify`, never on `reset`). `get`, `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and
   `Szamlazz.Agent.check_account` set `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
   The suite is one integration-test binary, `tests/e2e/main.rs`, which holds the two tests and the order the scenarios
-  run in; `harness/` is one module per concern (`gate`, the server gate and the launcher; `accounts`, the scripted
-  and mutable resolver and store; `szamlazz`: the document fixture, selector matchers and stub helpers; `ingress`;
-  `introspection`; `run_names`, the `RUN_NAMES` table and its matching), with the harness's own tests (the server
-  gate, the run-pattern matching, the stub helpers against wiremock alone) beside what they test; and every
+  run in; `harness/` is the szamlazz half of the harness, one module per concern (`mod.rs`, the `Harness` composing
+  the server, the wiremock and the accounts, and the two server specs; `accounts`, the scripted and mutable resolver
+  and store; `szamlazz`: the document fixture, selector matchers and stub helpers; `ingress`, a reply with the
+  contract's `Fault` decoded; `run_names`, the `RUN_NAMES` table), with the harness's own tests (the fetch hold, the
+  stub helpers against wiremock alone) beside what they test; the Restate half (the server gate and launcher, the
+  spawned server, the in-process deployment, `set_public` / `drain`, the ingress reply and envelope check, the admin
+  API's SQL, journals, `sys_invocation` rows, kill / cancel / purge and the in-flight sampler, the run-name matcher)
+  is the workspace's `restate-e2e-harness` crate (`crates/restate-e2e-harness`, published and versioned on its own,
+  unix only), a path dev-dependency that knows no szamlazz type and never depends on `restate-szamlazz` (a
+  dependency back would be a dev-dependency cycle Cargo resolves by compiling the crate twice, and every `Order`,
+  `Agent` or `Fault` crossing the boundary would be two types); its pure decisions (the gate, the sampler, the
+  matcher) are tested there, and its one ignored `e2e_smoke` proves its contract with a trivial service of its own
+  and no consumer. Every
   other file is one handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`,
   `create_final`, `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`,
   `faults`, `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
@@ -1158,7 +1167,8 @@ show: the durable sequence, replay, the per-key lock and the journal.
   (default features), `clippy`, `doc`, `audit` and `fmt` checks and, from the workspace's own `ci` module
   (`.dagger/modules/ci`, wired onto `rust:container`), `ci:test` (`cargo test --workspace --all-features --locked`,
   so the `szamlazz-adatkapcsolat` archiver tests behind `opendal` and the `schemars` contract tests run), and
-  `ci:end-to-end`: the ignored `tests/e2e` suite, both e2e tests, on every pull request. The Dagger
+  `ci:end-to-end`: the ignored `e2e_` tests of the workspace (this suite's two and the `restate-e2e-harness` crate's
+  `e2e_smoke`), on every pull request. The Dagger
   container has no docker daemon, and a Dagger service cannot reach back into the container that binds it, so the
   harness starts `restate-server` itself: the check copies the binary out of the Restate image and sets
   `RESTATE_SERVER_BIN`, and the harness spawns one process per suite on the loopback (bind addresses, base
@@ -1166,11 +1176,13 @@ show: the durable sequence, replay, the per-key lock and the journal.
   directory of its own, kept when the test fails), registers the endpoint at `127.0.0.1` and kills the process on
   drop. The **server gate** decides the source once from the environment, in this order: `RESTATE_ADMIN_URL` /
   `RESTATE_INGRESS_URL` (a running server with the three flags; the main suite only, the canary needs a server of
-  its own shape), `RESTATE_SERVER_BIN`, the docker daemon (a container of the image, the endpoint registered at
-  `host.docker.internal`; `RESTATE_ENDPOINT_HOST` overrides the host in every mode). With none of them the suite
-  skips with a message on a developer machine and **fails** when `CI` is set (the check sets it), because a run
-  that passed by skipping proves nothing. The gate is a pure function under its own tests; the docker mode is the
-  developer default and is exercised on developer machines, not in CI.
+  its own shape; `compose.yaml` starts one), `RESTATE_SERVER_BIN` (the same binary the check uses, exported for a
+  developer by `dagger call ci restate-server export --path ./restate-server`; `RESTATE_ENDPOINT_HOST` overrides
+  the endpoint host in either mode). With neither the suite skips with a message on a developer machine and
+  **fails** when `CI` is set (the check sets it), because a run that passed by skipping proves nothing. The gate is a
+  pure function under its own tests. There is no docker launcher: CI never used one, a developer gets the binary the
+  way CI does or reuses a running server, and with it went the container naming, the stale-container scheme and the
+  published-port read-back (#167).
 - Live: the go-live checklist in `szamlazz-hu-behaviour.md`, to be automated as ignored tests (issue #15).
 
 ## 12. What v2 gives up relative to v1 (deliberately)
