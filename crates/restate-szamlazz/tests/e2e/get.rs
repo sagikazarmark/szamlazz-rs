@@ -73,7 +73,7 @@ pub(crate) async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
 
     let watch = h.watch("E2E-29");
     let reply = h.get_reply("E2E-29").await;
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let status = &reply.body;
     assert_eq!(status["invoice"]["number"], "SZ-29", "{status}");
@@ -140,10 +140,10 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
     );
 
     let started = Instant::now();
-    let watch = h.watch_for("E2E-30", Duration::from_secs(12));
+    let watch = h.watch("E2E-30");
     let reply = h.get_reply("E2E-30").await;
     let elapsed = started.elapsed();
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let status = &reply.body;
     assert_eq!(status["invoice"]["number"], "SZ-30", "{status}");

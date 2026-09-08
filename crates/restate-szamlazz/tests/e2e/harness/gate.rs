@@ -3,12 +3,26 @@
 //! starts), and the server itself ([`Restate`]): a running one reused, a
 //! `restate-server` binary spawned on the loopback, or a container of
 //! [`IMAGE`]. The two suites of the binary run concurrently, each on a server
-//! of its own shape ([`MAIN_SERVER`], [`WITHOUT_PROTOCOL_V7`]).
+//! of its own shape ([`MAIN_SERVER`], [`WITHOUT_PROTOCOL_V7`]), on ports
+//! chosen free at launch ([`Ports`]): nothing is fixed, so two runs on one
+//! host collide with nothing.
+//!
+//! A server the harness starts is stopped when the harness drops, and by a
+//! SIGINT or SIGTERM to the test process ([`stop_on_signal`]), which unwinds
+//! nothing: the container is named per run and labelled, so a stale one (its
+//! test process gone) is found and removed by the next run, while a
+//! concurrent run's is left alone; the process leads a process group of its
+//! own and the group is killed.
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
+use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, Once, PoisonError};
 
 const IMAGE: &str = "docker.restate.dev/restatedev/restate:1.7.8";
 
@@ -125,36 +139,77 @@ pub(crate) const FEATURES: [(&str, &str); 3] = [
 /// harness starts and expected of one reused through the environment.
 const SERVER_FLAGS: [&str; 3] = [FEATURES[0].1, FEATURES[1].1, FEATURES[2].1];
 
-/// The shape of a server the harness starts: its flags and the host ports of
-/// its ingress and admin APIs (and, for a spawned binary, of its node port).
-/// Two suites in one test binary run concurrently, so each has its own.
+/// The shape of a server the harness starts: its name (in the node name, the
+/// base dir and the container name) and its flags. Its ports are chosen free
+/// at launch ([`Ports`]), so two suites in one test binary, and two runs on
+/// one host, each have their own.
 pub(crate) struct ServerSpec {
+    name: &'static str,
     flags: &'static [&'static str],
-    ingress_port: u16,
-    admin_port: u16,
-    node_port: u16,
 }
 
 /// The main suite's server: the three flags.
 pub(crate) const MAIN_SERVER: ServerSpec = ServerSpec {
+    name: "main",
     flags: &SERVER_FLAGS,
-    ingress_port: 18080,
-    admin_port: 19070,
-    node_port: 15122,
 };
 
 /// The protocol-v7 canary's server: vqueues and scoped Virtual Objects on,
 /// protocol v7 off (a deployment that forgot the one flag the scope needs to
-/// reach the SDK). Its own ports: the two suites run concurrently.
+/// reach the SDK).
 pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
+    name: "canary",
     flags: &[FEATURES[0].1, FEATURES[2].1],
-    ingress_port: 18081,
-    admin_port: 19071,
-    node_port: 15222,
 };
 
+/// The host ports of a server the harness started, chosen free at launch: a
+/// listener on port 0 for each of the spawned binary's (bound, read, released
+/// and passed through `RESTATE_*`), a docker-assigned host port for the
+/// container's (`-p 0:8080`, read back with `docker port`). Nothing here is
+/// fixed, so a second run on the host, another Restate or anything else on a
+/// port collides with nothing.
+#[derive(Debug, Clone, Copy)]
+struct Ports {
+    ingress: u16,
+    admin: u16,
+    /// The spawned binary's node port; a container's is not published.
+    node: Option<u16>,
+}
+
+impl fmt::Display for Ports {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "admin {} / ingress {}", self.admin, self.ingress)?;
+        if let Some(node) = self.node {
+            write!(f, " / node {node}")?;
+        }
+        Ok(())
+    }
+}
+
+/// `N` distinct free ports on the loopback: each bound on port 0 and read
+/// back, all released together. Free at this moment, not reserved: what the
+/// server binds a moment later, so a port taken in between is reported by
+/// the server failing to start ([`Restate::exited`]), naming the ports.
+fn free_ports<const N: usize>() -> [u16; N] {
+    let listeners: Vec<TcpListener> = (0..N)
+        .map(|_| TcpListener::bind("127.0.0.1:0").expect("a free loopback port"))
+        .collect();
+    let mut ports = [0; N];
+    for (port, listener) in ports.iter_mut().zip(&listeners) {
+        *port = listener.local_addr().expect("the bound address").port();
+    }
+    ports
+}
+
+/// The label every container the harness starts carries, with the pid of the
+/// test process that started it: how a stale one (its process gone) is found
+/// and removed by the next run, whichever of the shapes it belonged to.
+const CONTAINER_LABEL: &str = "szamlazz-e2e";
+const CONTAINER_PID_LABEL: &str = "szamlazz-e2e.pid";
+
 /// A Restate server: an existing one (from the environment), a `restate-server`
-/// process, or a container (the last two stopped on drop).
+/// process, or a container (the last two stopped on drop, and on a stop
+/// signal to the test process).
 pub(crate) struct Restate {
     pub(crate) admin: String,
     pub(crate) ingress: String,
@@ -162,11 +217,204 @@ pub(crate) struct Restate {
     pub(crate) flags: &'static [&'static str],
     /// The host name under which the server reaches this process's endpoint.
     pub(crate) endpoint_host: String,
-    container: Option<String>,
+    /// The ports of a server the harness started; a reused one's are in its
+    /// URLs.
+    ports: Option<Ports>,
+    /// What stops the server this handle started, if it started one.
+    stopper: Option<Stopper>,
+    /// The spawned server, kept to be reaped after the group is killed.
     process: Option<Child>,
     /// The spawned server's base directory, removed on drop unless the test
     /// is failing; then it stays, with `restate-server.log` in it.
     base_dir: Option<PathBuf>,
+}
+
+/// What stops a server the harness started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stopper {
+    /// `docker rm -f` of the container by its name.
+    Container(String),
+    /// `killpg(2)` of the process group the spawned server leads (its pid is
+    /// the group's id: it was spawned with `process_group(0)`).
+    ProcessGroup(u32),
+}
+
+/// Whether [`Stopper::stop`] waits for the docker daemon to finish removing
+/// the container. The drop path waits; the signal path, which exits right
+/// after, does not: a `docker rm -f` takes a few hundred milliseconds, during
+/// which the server is already dead and a test thread's ingress call fails,
+/// unwinds and races the handler to a failure exit, and the `docker` process
+/// finishes the removal on its own either way. A process group is killed at
+/// once in both cases; the drop path reaps the leader afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    ForRemoval,
+    No,
+}
+
+impl Stopper {
+    fn stop(&self, wait: Wait) {
+        match self {
+            Self::Container(name) => {
+                let mut rm = Command::new("docker");
+                rm.args(["rm", "-f", name])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                match wait {
+                    Wait::ForRemoval => {
+                        let _ = rm.status();
+                    }
+                    Wait::No => {
+                        let _ = rm.spawn();
+                    }
+                }
+            }
+            Self::ProcessGroup(pid) => kill_group(*pid),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    if let Ok(pid) = i32::try_from(pid) {
+        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pid: u32) {}
+
+/// Whether the process `pid` is alive: what tells a stale container (its
+/// test process gone) from a concurrent run's live one.
+#[cfg(unix)]
+fn process_alive(pid: i32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    // Signal 0: no signal is sent, the check is made. EPERM is a live
+    // process of another user.
+    !matches!(kill(Pid::from_raw(pid), None), Err(Errno::ESRCH))
+}
+
+/// Without a way to ask, a container is assumed live and left alone.
+#[cfg(not(unix))]
+fn process_alive(_pid: i32) -> bool {
+    true
+}
+
+/// Removes every container of [`CONTAINER_LABEL`] whose starting process is
+/// gone: the servers of interrupted runs (a `kill -9`, a runner cut off), which
+/// `--rm` does not remove because the server itself is still running. A
+/// container whose process is alive is a concurrent run's and is left alone.
+fn remove_stale_containers() {
+    let Ok(output) = Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label={CONTAINER_LABEL}"),
+            "--format",
+            &format!("{{{{.ID}}}} {{{{.Label \"{CONTAINER_PID_LABEL}\"}}}}"),
+        ])
+        .output()
+    else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((id, pid)) = line.split_once(' ') else {
+            continue;
+        };
+        let stale = pid.parse::<i32>().is_ok_and(|pid| !process_alive(pid));
+        if stale {
+            let _ = Command::new("docker").args(["rm", "-f", id]).output();
+            eprintln!("removed the container {id} a run (pid {pid}) left behind");
+        }
+    }
+}
+
+/// Every server this test process started and has not stopped yet, by what
+/// stops it: what [`stop_on_signal`] runs when the process is told to stop.
+static STARTED: Mutex<Vec<Stopper>> = Mutex::new(Vec::new());
+
+fn started() -> std::sync::MutexGuard<'static, Vec<Stopper>> {
+    STARTED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Stops every started server on SIGINT or SIGTERM to the test process, then
+/// exits with the signal's conventional status. A signal ends the process
+/// without unwinding, so nothing's `Drop` runs; without this, a Ctrl-C leaves
+/// the container running under the daemon and the process (in a group of its
+/// own, so the terminal's SIGINT does not reach it) holding its ports until
+/// the next run finds it. Installed once, on the first server started; its
+/// own thread and runtime, so it outlives the test that started the first
+/// server.
+fn stop_on_signal() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let handler = std::thread::Builder::new()
+            .name("e2e-stop-on-signal".to_owned())
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                let Ok(runtime) = runtime else {
+                    eprintln!(
+                        "WARNING: no runtime for the stop-signal handler; a Ctrl-C will leave the \
+                         Restate servers this run starts behind (the next run removes them)"
+                    );
+                    return;
+                };
+                runtime.block_on(async {
+                    let (signal, status) = match stop_signal().await {
+                        Ok(stopped) => stopped,
+                        Err(error) => {
+                            eprintln!(
+                                "WARNING: the stop-signal handler could not register ({error}); a \
+                                 Ctrl-C will leave the Restate servers this run starts behind (the \
+                                 next run removes them)"
+                            );
+                            return;
+                        }
+                    };
+                    let stoppers = started().clone();
+                    eprintln!(
+                        "{signal}: stopping {} Restate server(s) the suite started, then exiting",
+                        stoppers.len()
+                    );
+                    for stopper in &stoppers {
+                        stopper.stop(Wait::No);
+                    }
+                    std::process::exit(status);
+                });
+            });
+        if let Err(error) = handler {
+            eprintln!(
+                "WARNING: no thread for the stop-signal handler ({error}); a Ctrl-C will leave the \
+                 Restate servers this run starts behind (the next run removes them)"
+            );
+        }
+    });
+}
+
+/// The first of SIGINT and SIGTERM, with the exit status convention for it.
+#[cfg(unix)]
+async fn stop_signal() -> std::io::Result<(&'static str, i32)> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(tokio::select! {
+        _ = interrupt.recv() => ("SIGINT", 130),
+        _ = terminate.recv() => ("SIGTERM", 143),
+    })
+}
+
+#[cfg(not(unix))]
+async fn stop_signal() -> std::io::Result<(&'static str, i32)> {
+    tokio::signal::ctrl_c().await?;
+    Ok(("Ctrl-C", 130))
 }
 
 impl Launcher {
@@ -179,13 +427,16 @@ impl Launcher {
             std::env::var("RESTATE_ENDPOINT_HOST").unwrap_or_else(|_| default.to_owned())
         };
         match self {
-            Self::Reuse { admin, ingress } => {
-                let mut restate =
-                    Restate::on_host_ports(spec, endpoint_host("host.docker.internal"));
-                restate.admin = admin;
-                restate.ingress = ingress;
-                restate
-            }
+            Self::Reuse { admin, ingress } => Restate {
+                admin,
+                ingress,
+                flags: spec.flags,
+                endpoint_host: endpoint_host("host.docker.internal"),
+                ports: None,
+                stopper: None,
+                process: None,
+                base_dir: None,
+            },
             Self::Binary(binary) => Restate::spawn(&binary, spec, endpoint_host("127.0.0.1")),
             Self::Docker => Restate::container(spec, endpoint_host("host.docker.internal")),
         }
@@ -193,34 +444,53 @@ impl Launcher {
 }
 
 impl Restate {
-    /// A server reachable on `spec`'s host ports with `spec`'s flags, running
-    /// nothing of its own yet: what every launcher fills in.
-    fn on_host_ports(spec: &ServerSpec, endpoint_host: String) -> Self {
+    /// A server reachable on the loopback at `ports` with `spec`'s flags,
+    /// running nothing of its own yet: what the two launchers fill in.
+    fn on_ports(ports: Ports, spec: &ServerSpec, endpoint_host: String) -> Self {
         Self {
-            admin: format!("http://127.0.0.1:{}", spec.admin_port),
-            ingress: format!("http://127.0.0.1:{}", spec.ingress_port),
+            admin: format!("http://127.0.0.1:{}", ports.admin),
+            ingress: format!("http://127.0.0.1:{}", ports.ingress),
             flags: spec.flags,
             endpoint_host,
-            container: None,
+            ports: Some(ports),
+            stopper: None,
             process: None,
             base_dir: None,
         }
     }
 
+    /// Records what stops the server this handle started, for drop and for a
+    /// stop signal.
+    fn started(&mut self, stopper: Stopper) {
+        started().push(stopper.clone());
+        stop_on_signal();
+        self.stopper = Some(stopper);
+    }
+
     /// A container of [`IMAGE`] with `spec`'s flags, its ingress and admin
-    /// ports published on `spec`'s host ports.
+    /// ports published on docker-assigned host ports, under a name of this
+    /// run (the pid and the shape's name) and the label a stale one is found
+    /// by; the stale containers of earlier runs are removed first.
     fn container(spec: &ServerSpec, endpoint_host: String) -> Self {
+        remove_stale_containers();
+        let name = format!("restate-szamlazz-e2e-{}-{}", std::process::id(), spec.name);
         let mut args = vec![
             "run".to_owned(),
             "--rm".to_owned(),
             "-d".to_owned(),
+            "--name".to_owned(),
+            name.clone(),
+            "--label".to_owned(),
+            format!("{CONTAINER_LABEL}=1"),
+            "--label".to_owned(),
+            format!("{CONTAINER_PID_LABEL}={}", std::process::id()),
             // Docker Desktop resolves `host.docker.internal` on its own;
             // a Linux daemon needs the alias to reach the endpoint.
             "--add-host=host.docker.internal:host-gateway".to_owned(),
             "-p".to_owned(),
-            format!("{}:8080", spec.ingress_port),
+            "0:8080".to_owned(),
             "-p".to_owned(),
-            format!("{}:9070", spec.admin_port),
+            "0:9070".to_owned(),
         ];
         for flag in spec.flags {
             args.push("-e".to_owned());
@@ -236,21 +506,48 @@ impl Restate {
             "docker run failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let container = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let mut restate = Self::on_host_ports(spec, endpoint_host);
-        restate.container = Some(container);
+        // Stop the container on every failure from here on, the port
+        // read-back included.
+        let mut restate = Self {
+            admin: String::new(),
+            ingress: String::new(),
+            flags: spec.flags,
+            endpoint_host,
+            ports: None,
+            stopper: None,
+            process: None,
+            base_dir: None,
+        };
+        restate.started(Stopper::Container(name.clone()));
+        let ports = Ports {
+            ingress: published_port(&name, 8080),
+            admin: published_port(&name, 9070),
+            node: None,
+        };
+        restate.admin = format!("http://127.0.0.1:{}", ports.admin);
+        restate.ingress = format!("http://127.0.0.1:{}", ports.ingress);
+        restate.ports = Some(ports);
+        eprintln!("restate-server container {name} on {ports}");
         restate
     }
 
     /// A `restate-server` process from `binary` with `spec`'s flags, bound to
-    /// the loopback on `spec`'s ports, its data and log under a directory of
-    /// its own in the temp dir. Configured through Restate's environment
-    /// (`RESTATE_<SECTION>__<KEY>`), so no config file is written.
+    /// the loopback on three ports chosen free ([`free_ports`]), its data and
+    /// log under a directory of its own in the temp dir, leading a process
+    /// group of its own so that the group is what gets killed. Configured
+    /// through Restate's environment (`RESTATE_<SECTION>__<KEY>`), so no
+    /// config file is written.
     fn spawn(binary: &PathBuf, spec: &ServerSpec, endpoint_host: String) -> Self {
+        let [ingress, admin, node] = free_ports::<3>();
+        let ports = Ports {
+            ingress,
+            admin,
+            node: Some(node),
+        };
         let base_dir = std::env::temp_dir().join(format!(
             "restate-szamlazz-e2e-{}-{}",
             std::process::id(),
-            spec.admin_port
+            spec.name
         ));
         fs::create_dir_all(&base_dir).expect("the server's base dir");
         let log = fs::File::create(base_dir.join("restate-server.log")).expect("the server log");
@@ -258,27 +555,23 @@ impl Restate {
         command
             .arg("--no-logo")
             .env("RESTATE_BASE_DIR", &base_dir)
-            .env("RESTATE_NODE_NAME", format!("e2e-{}", spec.admin_port))
+            .env("RESTATE_NODE_NAME", format!("e2e-{}", spec.name))
             .env("RESTATE_LISTEN_MODE", "tcp")
-            .env(
-                "RESTATE_BIND_ADDRESS",
-                format!("127.0.0.1:{}", spec.node_port),
-            )
+            .env("RESTATE_BIND_ADDRESS", format!("127.0.0.1:{node}"))
             .env(
                 "RESTATE_ADVERTISED_ADDRESS",
-                format!("http://127.0.0.1:{}", spec.node_port),
+                format!("http://127.0.0.1:{node}"),
             )
             .env(
                 "RESTATE_INGRESS__BIND_ADDRESS",
-                format!("127.0.0.1:{}", spec.ingress_port),
+                format!("127.0.0.1:{ingress}"),
             )
-            .env(
-                "RESTATE_ADMIN__BIND_ADDRESS",
-                format!("127.0.0.1:{}", spec.admin_port),
-            )
+            .env("RESTATE_ADMIN__BIND_ADDRESS", format!("127.0.0.1:{admin}"))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone().expect("the server log")))
             .stderr(Stdio::from(log));
+        #[cfg(unix)]
+        command.process_group(0);
         for flag in spec.flags {
             let (name, value) = flag.split_once('=').expect("NAME=value");
             command.env(name, value);
@@ -287,27 +580,88 @@ impl Restate {
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {}: {error}", binary.display()));
         eprintln!(
-            "restate-server (pid {}) on admin {} / ingress {}, base dir {}",
+            "restate-server (pid {}) on {ports}, base dir {}",
             process.id(),
-            spec.admin_port,
-            spec.ingress_port,
             base_dir.display()
         );
-        let mut restate = Self::on_host_ports(spec, endpoint_host);
+        let mut restate = Self::on_ports(ports, spec, endpoint_host);
+        restate.started(Stopper::ProcessGroup(process.id()));
         restate.process = Some(process);
         restate.base_dir = Some(base_dir);
         restate
     }
+
+    /// Why the server the harness started is gone, if it is: the spawned
+    /// process exited (its status and the tail of its log), or the container
+    /// is not running. Polled while waiting for the admin API, so a server
+    /// that cannot start (a port chosen free and taken since, most likely) is
+    /// reported at once, naming its ports, rather than waited on until the
+    /// deadline. `None` for a reused server, and for one still running.
+    pub(crate) fn exited(&mut self) -> Option<String> {
+        let ports = self.ports?;
+        if let Some(process) = &mut self.process {
+            let status = process.try_wait().ok().flatten()?;
+            let log = self
+                .base_dir
+                .as_ref()
+                .and_then(|base_dir| fs::read_to_string(base_dir.join("restate-server.log")).ok())
+                .unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(30).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            return Some(format!(
+                "restate-server exited with {status} before its admin API came up, on ports \
+                 {ports} (chosen free at launch; one may have been taken since). The last lines \
+                 of its log:\n{}",
+                tail.join("\n")
+            ));
+        }
+        if let Some(Stopper::Container(name)) = &self.stopper {
+            let running = Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Running}}", name])
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).trim() == "true"
+                });
+            if !running {
+                return Some(format!(
+                    "the container {name} is not running before its admin API came up, on ports \
+                     {ports}"
+                ));
+            }
+        }
+        None
+    }
+}
+
+/// The host port docker published `container_port` of `name` on: the first
+/// line of `docker port` (`0.0.0.0:32768`, then the IPv6 twin).
+fn published_port(name: &str, container_port: u16) -> u16 {
+    let output = Command::new("docker")
+        .args(["port", name, &container_port.to_string()])
+        .output()
+        .expect("docker port");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| line.rsplit_once(':')?.1.parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "docker port {name} {container_port}: no published port in {stdout:?} ({})",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
 }
 
 impl Drop for Restate {
     fn drop(&mut self) {
-        if let Some(container) = &self.container {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", container])
-                .output();
+        if let Some(stopper) = self.stopper.take() {
+            stopper.stop(Wait::ForRemoval);
+            started().retain(|started| *started != stopper);
         }
         if let Some(process) = &mut self.process {
+            // The group is killed above; this reaps the leader (and is the
+            // stop where there is no process group).
             let _ = process.kill();
             let _ = process.wait();
         }

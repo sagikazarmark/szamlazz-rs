@@ -11,9 +11,13 @@
 //! binary the harness spawns on the loopback (what the Dagger check does),
 //! otherwise a docker daemon runs a container of the Restate image. With none
 //! of them the suite skips with a message, and fails when `CI` is set, since
-//! a skipped run in CI proves nothing. The harness's own tests (the server
-//! gate, the run-pattern matching, the stub helpers) live beside what they
-//! test under [`harness`], need only wiremock and run un-ignored.
+//! a skipped run in CI proves nothing. A server the harness starts binds
+//! ports chosen free at launch, none fixed, so two runs on one host collide
+//! with nothing; it is stopped when the run ends and on a SIGINT or SIGTERM to
+//! the test process.
+//! The harness's own tests (the server gate, the sampler's decision, the
+//! fetch hold, the run-pattern matching, the stub helpers) live beside what
+//! they test under [`harness`], need only wiremock and run un-ignored.
 //!
 //! One binary, one tree: this file holds the two tests and the order the
 //! scenarios run in; [`harness`] is everything the scenarios drive; and every
@@ -165,8 +169,8 @@ async fn e2e_order_protocol() {
 /// "unscoped" from "scope not forwarded"), and on the multi-account deployment
 /// as `unknown_account` naming the unscoped case, with nothing sent: every
 /// scoped call fails closed, no account is reached under the wrong scope. A
-/// server of its own, on its own ports; never a reused one, whose flags are
-/// the main suite's.
+/// server of its own, on ports of its own; never a reused one, whose flags
+/// are the main suite's.
 #[tokio::test]
 #[ignore = "needs a Restate server: docker or RESTATE_SERVER_BIN"]
 async fn e2e_check_account_without_protocol_v7() {

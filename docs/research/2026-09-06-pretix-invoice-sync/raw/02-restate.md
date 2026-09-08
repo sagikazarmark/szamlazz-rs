@@ -107,7 +107,10 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
   with NULL `retry_count`/`last_failure`/`next_retry_at`** for what the docs call backing-off. Truthful tables:
   `sys_vqueues` (`stage='inbox'`, `status='backing-off'`, `run_at`), `sys_vqueue_entry_status` (`retry_attempts`,
   `num_errors`, `next_at`), `sys_journal_events` (**V** by source: `handle_task_error`; `lib.rs` `RetryViaScheduler`
-  arm; `types/src/config/invocation.rs`; **U** end to end, #87 used 1 s delays).
+  arm; `types/src/config/invocation.rs`; **V** end to end on 1.7.8 with the three flags, #123: a 2 s run retry delay
+  in the e2e's read policy showed `running` → `ready` (no `retry_count`, no `last_failure`) → `running` with
+  `retry_count` back at 1, picked up again after ≈ 1.2 s; the 1 s delays of #87 show `backing-off` with the attempt
+  state, which is why the e2e keeps them).
 - `POST /query` on admin port 9070, DataFusion SQL, e.g. `… where target_service_name='Szamlazz.Order' and status in
   ('paused','backing-off')` (**V**: docs introspection). The admin port has **no authentication by design**;
   network-restrict it (**V**: docs server/security). Documented for operators; nothing forbids a reconciler.

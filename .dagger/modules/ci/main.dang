@@ -49,6 +49,17 @@ type Ci {
   processes the harness spawns in this container from the binary of the
   Restate image (`RESTATE_SERVER_BIN`; there is no docker here). `CI` is set,
   so a run without a server fails instead of skipping.
+
+  Runs with the selection `compiled` built (`--workspace --all-features`, every
+  test target), narrowed to the two ignored e2e tests by name, so nothing is
+  compiled here: selecting the package (`-p restate-szamlazz`) or the target
+  (`--test e2e`) unifies dev-dependency features differently (only the
+  packages with a selected dev target contribute theirs) and recompiles
+  fifty-odd crates, `tokio`, `hyper`, `reqwest` and `restate-sdk` among them,
+  before the suite starts: a minute of every run. The other test binaries
+  start, match nothing and exit. When the suite fails, the log of every
+  `restate-server` the harness kept (a failing test keeps the server's base
+  dir) follows the output, since the container is discarded with the check.
   """
   endToEnd: String! @check {
     self
@@ -56,18 +67,30 @@ type Ci {
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
       .withEnvVariable("CI", "true")
-      .withExec([
-        "cargo", "test",
-        "-p", "restate-szamlazz",
-        "--all-features", "--locked",
-        "--test", "e2e",
-        "--", "--ignored",
-      ])
+      .withExec(["sh", "-c", self.endToEndScript])
       .combinedOutput
   }
 
   """
-  The container with every test target compiled once, for both checks.
+  The e2e run, then its kept server logs when it failed, exiting with the
+  run's status.
+  """
+  let endToEndScript: String! = """cargo test --workspace --all-features --locked --tests -- --ignored e2e_
+status=$?
+if [ "$status" -ne 0 ]; then
+  for log in "${TMPDIR:-/tmp}"/restate-szamlazz-e2e-*/restate-server.log; do
+    [ -f "$log" ] || continue
+    echo
+    echo "==== $log (kept by the harness; last 300 lines) ===="
+    tail -n 300 "$log"
+  done
+fi
+exit "$status"
+"""
+
+  """
+  The container with every test target compiled once, for both checks: the
+  same selection both run with.
   """
   let compiled: Container! {
     self

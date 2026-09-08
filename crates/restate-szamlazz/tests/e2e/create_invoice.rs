@@ -202,7 +202,7 @@ pub(crate) async fn duplicate_order_number_with_nothing_of_ours_is_a_settled_con
             "e2e-3b-k1",
         )
         .await;
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let conflict = &reply.body;
     assert_eq!(conflict["outcome"], "conflict", "{conflict}");
@@ -460,7 +460,7 @@ pub(crate) async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Ha
             "e2e-6c-k1",
         )
         .await;
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let response = &reply.body;
     assert_eq!(response["outcome"], "issued", "{response}");

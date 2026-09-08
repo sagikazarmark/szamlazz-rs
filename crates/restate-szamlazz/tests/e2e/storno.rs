@@ -404,7 +404,7 @@ pub(crate) async fn storno_rejections_and_exhaustion_at_the_orders_handler(h: &H
         .call("E2E-45", "storno_invoice", &storno_of("SZ-45"), "e2e-45-s1")
         .await;
     let elapsed = started.elapsed();
-    let retries = watch.await.expect("watch");
+    let retries = watch.finish().await;
     assert_eq!(reply.status, 500, "{}", reply.body);
     assert!(
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),

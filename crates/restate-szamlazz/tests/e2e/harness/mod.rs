@@ -3,6 +3,8 @@
 //!
 //! - [`gate`]: where the server comes from (the *server gate*), the launcher
 //!   and the server process or container.
+//! - [`admin`]: the admin API's SQL endpoint and the sampler over it
+//!   ([`admin::Watch`]) that records an invocation's run retries while it runs.
 //! - [`accounts`]: the scripted and mutable resolver and store the two
 //!   deployments run over, and the deployments themselves.
 //! - [`szamlazz`]: what szamlazz.hu holds (the document fixture, the
@@ -12,11 +14,12 @@
 //! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]) and its
 //!   matching, the *run-name pin*.
 //!
-//! The harness's own tests (the server gate, the run-pattern matching, the
-//! stub helpers against wiremock alone) live beside what they test and need
-//! no server.
+//! The harness's own tests (the server gate, the sampler's decision, the
+//! run-pattern matching, the stub helpers against wiremock alone) live beside
+//! what they test and need no server.
 
 pub(crate) mod accounts;
+pub(crate) mod admin;
 pub(crate) mod gate;
 mod ingress;
 pub(crate) mod introspection;
@@ -39,9 +42,10 @@ use wiremock::MockServer;
 use crate::harness::accounts::{
     MutableAccounts, ScriptedAccounts, multi_account_services, services,
 };
+use crate::harness::admin::{Admin, Watch};
 use crate::harness::gate::{FEATURES, Restate};
 use crate::harness::ingress::Reply;
-use crate::harness::introspection::{Invocation, JournalEntry, Retries};
+use crate::harness::introspection::{Invocation, JournalEntry};
 use crate::harness::szamlazz::{
     Doc, create_lands_but_reply_lost, external_id_query, holds, holds_after_misses,
     loses_reply_once, not_found,
@@ -119,21 +123,26 @@ pub(crate) struct Harness {
     restate: Restate,
     pub(crate) mock: MockServer,
     http: reqwest::Client,
+    /// The server's admin API: the SQL endpoint, and what a [`Watch`] samples.
+    admin: Admin,
     pub(crate) script: Arc<ScriptedAccounts>,
     /// The multi-account phase's resolver and store, once the flag day ran.
     multi: Option<Arc<MutableAccounts>>,
 }
 
 impl Harness {
-    /// The harness on `restate`: waits for its admin API, checks that
-    /// `/version` reports exactly the features the server's flags enable, and
-    /// serves and registers the single-account deployment.
-    pub(crate) async fn start(restate: Restate) -> Self {
+    /// The harness on `restate`: waits for its admin API (failing at once,
+    /// with the server's own account of it, when a server the harness started
+    /// is gone before then), checks that `/version` reports exactly the
+    /// features the server's flags enable, and serves and registers the
+    /// single-account deployment.
+    pub(crate) async fn start(mut restate: Restate) -> Self {
         let mock = MockServer::start().await;
         let http = plain_http()
             .timeout(Duration::from_secs(120))
             .build()
             .expect("client");
+        let admin = Admin::new(restate.admin.clone(), http.clone());
 
         // Wait for the admin API.
         let deadline = Instant::now() + Duration::from_secs(90);
@@ -142,6 +151,9 @@ impl Harness {
                 && response.status().is_success()
             {
                 break;
+            }
+            if let Some(reason) = restate.exited() {
+                panic!("{reason}");
             }
             assert!(
                 Instant::now() < deadline,
@@ -177,6 +189,7 @@ impl Harness {
             restate,
             mock,
             http,
+            admin,
             script: scripted,
             multi: None,
         };
@@ -490,23 +503,14 @@ impl Harness {
         }
     }
 
-    /// Runs a SQL query against the introspection API (`POST :9070/query`).
+    /// Runs a SQL query against the introspection API (`POST :9070/query`);
+    /// a scenario's read, so an exchange without rows is a failure of the
+    /// scenario (the sampler, [`Self::watch`], retries instead).
     pub(crate) async fn sql(&self, query: &str) -> Vec<Value> {
-        let response = self
-            .http
-            .post(format!("{}/query", self.restate.admin))
-            .header("accept", "application/json")
-            .json(&json!({ "query": query }))
-            .send()
+        self.admin
+            .sql(query)
             .await
-            .expect("sql query");
-        let status = response.status().as_u16();
-        let body: Value = response.json().await.expect("sql json");
-        assert_eq!(status, 200, "sql failed: {body}");
-        body["rows"]
-            .as_array()
-            .unwrap_or_else(|| panic!("rows: {body}"))
-            .clone()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// The names of the `ctx.run` commands of an invocation, in journal
@@ -544,70 +548,17 @@ impl Harness {
         Invocation::from_row(row)
     }
 
-    /// How often [`watch_for`](Self::watch_for) samples `sys_invocation`; a
-    /// run retry under the 1 s test policies is visible for ten samples.
-    const WATCH_POLL: Duration = Duration::from_millis(100);
-
-    /// [`watch_for`](Self::watch_for) over four seconds, enough for the one
-    /// or two run retries a scenario provokes under the 1 s test policies.
-    pub(crate) fn watch(&self, key: &str) -> tokio::task::JoinHandle<Retries> {
-        self.watch_for(key, Duration::from_secs(4))
-    }
-
-    /// Watches the invocations on Virtual Object `key` for `window` (a
-    /// detached task polling every [`Self::WATCH_POLL`], so it carries its own
-    /// copy of the query; `sql` borrows the harness) and records what
+    /// Watches the invocations on Virtual Object `key` and records what
     /// `sys_invocation` reports **while they are in flight**: `retry_count`
     /// (the invoker's count of starts), `last_failure` and
-    /// `last_failure_related_command_name` are attempt state, cleared once the
-    /// invocation completes; a completed row shows neither the count nor the
-    /// failing command (verified against 1.7.8). Start it before the call,
-    /// await it after.
-    pub(crate) fn watch_for(
-        &self,
-        key: &str,
-        window: Duration,
-    ) -> tokio::task::JoinHandle<Retries> {
-        let admin = self.restate.admin.clone();
-        let http = self.http.clone();
-        let key = key.to_owned();
-        let polls = window.as_millis() / Self::WATCH_POLL.as_millis();
-        tokio::spawn(async move {
-            let mut retries = Retries::default();
-            for _ in 0..polls {
-                tokio::time::sleep(Self::WATCH_POLL).await;
-                let body: Value = http
-                    .post(format!("{admin}/query"))
-                    .header("accept", "application/json")
-                    .json(&json!({
-                        "query": format!(
-                            "SELECT retry_count, last_failure, last_failure_related_command_name FROM sys_invocation WHERE target_service_key = '{key}'"
-                        )
-                    }))
-                    .send()
-                    .await
-                    .expect("sql query")
-                    .json()
-                    .await
-                    .expect("sql json");
-                for row in body["rows"].as_array().into_iter().flatten() {
-                    if let Some(count) = row["retry_count"].as_u64() {
-                        retries.max_retry_count = retries.max_retry_count.max(count);
-                    }
-                    if let Some(failure) = row["last_failure"].as_str()
-                        && !retries.failures.iter().any(|seen| seen == failure)
-                    {
-                        retries.failures.push(failure.to_owned());
-                    }
-                    if let Some(command) = row["last_failure_related_command_name"].as_str()
-                        && !retries.failing_commands.iter().any(|seen| seen == command)
-                    {
-                        retries.failing_commands.push(command.to_owned());
-                    }
-                }
-            }
-            retries
-        })
+    /// `last_failure_related_command_name` are in-flight columns, cleared once
+    /// the invocation completes; a completed row shows neither the count nor
+    /// the failing command (verified against 1.7.8). Start it before the
+    /// call, [`finish`](Watch::finish) it after: the sampler ends as soon as
+    /// it observes the invocation completed, and `finish` ends one whose call
+    /// was answered between two samples.
+    pub(crate) fn watch(&self, key: &str) -> Watch {
+        Watch::start(self.admin.clone(), key)
     }
 
     /// Purges a completed invocation (`PATCH /invocations/{id}/purge`), so a
@@ -680,23 +631,6 @@ impl Harness {
             .map(|request| String::from_utf8_lossy(&request.body).into_owned())
             .filter(|body| body.contains(&marker))
             .collect()
-    }
-
-    /// Waits until szamlazz.hu has seen at least `count` create requests: the
-    /// moment between two executions of a create step whose first lost its
-    /// reply, when a between-executions change can be made.
-    pub(crate) async fn wait_for_creates(&self, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if self.create_bodies().await.len() >= count {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "szamlazz.hu did not see {count} create request(s)"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
     }
 
     /// Every journal entry of every invocation the server still holds, with

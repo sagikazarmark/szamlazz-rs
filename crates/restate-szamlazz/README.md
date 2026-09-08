@@ -714,18 +714,21 @@ scenarios run in (one server start-up, the server gate decided once). `tests/e2e
 module per concern:
 
 - `gate`: the server gate, the launcher and the server process or container;
-- `accounts`: the scripted and mutable resolver and store the two deployments run over;
+- `admin`: the admin API's SQL endpoint and the sampler over it (`watch`), which records an invocation's
+  `retry_count`, `last_failure` and failing command while it is in flight and ends when the invocation does;
+- `accounts`: the scripted and mutable resolver and store the two deployments run over, and the fetch a scenario
+  holds so an account change or a key rotation lands between two executions in sequence;
 - `szamlazz`: the document fixture, the selector matchers and the stub helpers;
 - `ingress`: a reply and its fault;
 - `introspection`: `sys_journal` / `sys_invocation` rows;
 - `run_names`: the `RUN_NAMES` table and its matching.
 
-The harness's own tests (the server gate, the run-pattern matching, the stub helpers against wiremock alone) sit
-beside what they test and run un-ignored. Every other file is one handler family's scenarios (`create_invoice`,
-`create_proforma`, `create_prepayment`, `create_final`, `correct_invoice`, `storno`, `delete_proforma`, `get`,
-`policies`, `agent_reads`, `agent_writes`, `faults`, `prologue`, `multi_account`, `pins`), each scenario a
-`pub(crate) async fn` taking the harness; a new scenario goes into its handler's file and is called from
-`main.rs` in sequence.
+The harness's own tests (the server gate, the sampler's decision, the fetch hold, the run-pattern matching, the
+stub helpers against wiremock alone) sit beside what they test and run un-ignored. Every other file is one
+handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`, `create_final`,
+`correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`, `faults`,
+`prologue`, `multi_account`, `pins`), each scenario a `pub(crate) async fn` taking the harness; a new scenario
+goes into its handler's file and is called from `main.rs` in sequence.
 
 **The protocol-v7 canary** (`e2e_check_account_without_protocol_v7`) runs in the same command on a server of its
 own with `protocol_v7` off: the ingress accepts the scoped path and keys the invocation by the scope, but the SDK
@@ -736,20 +739,43 @@ for, provoked once.
 **Where the server comes from.** The harness decides once from the environment:
 
 - `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` reuse a running server with the three flags (the main suite only);
-- `RESTATE_SERVER_BIN` names a `restate-server` binary the harness spawns on the loopback, one process per suite,
-  on its own ports (what CI uses);
+- `RESTATE_SERVER_BIN` names a `restate-server` binary the harness spawns on the loopback, one process per suite
+  (what CI uses);
 - otherwise a docker daemon runs a container of the image, reached at `host.docker.internal`
   (`RESTATE_ENDPOINT_HOST` overrides the host in every mode).
 
 With none of them the suite skips with a message, and **fails** when `CI` is set, so a CI run never passes by
 skipping.
 
+**Ports.** A server the harness starts binds ports chosen free at launch, never fixed ones: for the spawned binary
+a listener on port 0 for each of its ingress, admin and node ports (bound, read, released and passed through
+`RESTATE_*`), for the container docker-assigned host ports (`-p 0:8080`, read back with `docker port`). So two
+runs on one host (`cargo test -p restate-szamlazz --all-features --test e2e -- --ignored` twice, concurrently),
+another Restate on 8080/9070, or anything else on a port collide with nothing; the wiremock and the SDK endpoint
+take ephemeral ports likewise. A port chosen free and taken before the server bound it shows as the server
+failing to start, which the harness reports at once with the ports it chose and the last lines of the server's
+log, instead of waiting out the 90 s health deadline. The start-up line names the ports of every server. A reused
+server's ports are whatever its URLs say.
+
+**Lifecycle.** A server the harness starts is stopped when the run ends, passes or fails, and when the test process
+is told to stop: a SIGINT (Ctrl-C) or SIGTERM runs no `Drop`, so the harness stops every server it started itself
+and exits with the signal's status (130 or 143). The container is named per run (`restate-szamlazz-e2e-{pid}-main`
+/ `-canary`) and labelled `szamlazz-e2e` with the pid of the test process, so a stale one (its process gone: a
+`kill -9`, a runner cut off) is found by the label and removed before the next run starts, while a concurrent
+run's, whose process is alive, is left alone; the spawned binary leads a process group of its own and the group is
+killed. A failing test keeps the spawned server's base dir (`$TMPDIR/restate-szamlazz-e2e-{pid}-{main|canary}`,
+its log in it) for inspection.
+
 **What CI runs.** `dagger check` (the `Dagger` workflow on every pull request) runs the `rust` module's `build`,
 `test` (default features), `clippy`, `doc`, `audit` and `fmt` checks and the workspace's own `ci` module
 (`.dagger/modules/ci`): `ci:test` is `cargo test --workspace --all-features --locked` (so the `schemars` contract
 tests and the `szamlazz-adatkapcsolat` archiver tests run), `ci:end-to-end` is the ignored suite above with
-`restate-server` copied out of the Restate image and `CI` set. `dagger check ci:end-to-end` runs it locally the
-same way.
+`restate-server` copied out of the Restate image and `CI` set, run as
+`cargo test --workspace --all-features --locked --tests -- --ignored e2e_`: the same selection the container
+compiled the tests with, narrowed to the two e2e tests by name, so the check compiles nothing (`-p` or `--test e2e`
+would unify dev-dependency features differently and recompile fifty-odd crates first); when it fails, the kept
+`restate-server.log` of every server follows its output. `dagger check ci:end-to-end` runs it locally the same
+way.
 
 ### Go-live
 
