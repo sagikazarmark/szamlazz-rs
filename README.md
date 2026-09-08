@@ -67,8 +67,8 @@ cargo doc --workspace --all-features --no-deps --locked
 # the end-to-end suites, against a restate-server binary (or a running server:
 # RESTATE_ADMIN_URL / RESTATE_INGRESS_URL, e.g. `docker compose up -d`)
 dagger call ci restate-server export --path ./restate-server
-RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-szamlazz --test e2e -- --ignored
-RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness -- --ignored
+RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-szamlazz --test e2e --all-features --locked -- --ignored
+RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness --locked -- --ignored
 ```
 
 ## License

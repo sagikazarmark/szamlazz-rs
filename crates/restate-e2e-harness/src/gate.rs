@@ -78,12 +78,12 @@ pub enum Reuse {
 /// suite skips; panics with the gate's message under `CI`.
 ///
 /// Reads `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` (when `reuse` allows),
-/// `RESTATE_SERVER_BIN` and `CI`.
+/// `RESTATE_SERVER_BIN` and `CI`; an empty variable is unset (a
+/// `RESTATE_ADMIN_URL=` in a CI matrix is not a server to wait 90 s on).
 pub fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
+    let non_empty = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let reusable = match reuse {
-        Reuse::Allowed => std::env::var("RESTATE_ADMIN_URL")
-            .ok()
-            .zip(std::env::var("RESTATE_INGRESS_URL").ok()),
+        Reuse::Allowed => non_empty("RESTATE_ADMIN_URL").zip(non_empty("RESTATE_INGRESS_URL")),
         Reuse::Never => None,
     };
     let binary = std::env::var_os("RESTATE_SERVER_BIN")

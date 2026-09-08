@@ -51,7 +51,9 @@ pub struct RunPatterns {
 }
 
 impl RunPatterns {
-    /// The patterns of `paths`.
+    /// The patterns of `paths`. Panics on a parametrized name with no fixed
+    /// prefix (`{number}` alone): it would read every journaled name as
+    /// itself, and the pin would explain anything.
     #[must_use]
     pub fn of(paths: &[RunPath]) -> Self {
         let mut parametrized: Vec<(&str, &str)> = paths
@@ -61,6 +63,12 @@ impl RunPatterns {
                 pattern
                     .split_once('{')
                     .map(|(prefix, _)| (prefix, *pattern))
+            })
+            .inspect(|(prefix, pattern)| {
+                assert!(
+                    !prefix.is_empty(),
+                    "a parametrized run name needs a fixed prefix before its `{{`: {pattern:?}"
+                );
             })
             .collect();
         parametrized.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
@@ -170,6 +178,19 @@ mod tests {
         ] {
             assert_eq!(patterns.pattern(name), pattern, "{name}");
         }
+    }
+
+    /// A parameter with nothing before it would match every name; the table
+    /// is refused when built, naming the pattern.
+    #[test]
+    fn a_parametrized_name_without_a_prefix_is_refused() {
+        let bare = [RunPath::new("Svc", "h", &["namespace", "{number}"])];
+        let outcome = std::panic::catch_unwind(|| RunPatterns::of(&bare));
+        let message = outcome
+            .expect_err("refused")
+            .downcast::<String>()
+            .expect("a message");
+        assert!(message.contains("{number}"), "{message}");
     }
 
     /// An observed sequence is explained by a path when it is a prefix of it:
