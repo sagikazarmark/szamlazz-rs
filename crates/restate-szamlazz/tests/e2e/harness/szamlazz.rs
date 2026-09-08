@@ -705,10 +705,17 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
                 .expect("create")
         }
     });
-    // The create is received at once; the query in the reply's window finds
-    // the document.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(mock.received_requests().await.expect("requests").len(), 2);
+    // The create is received at once (waited for, not assumed: the spawned
+    // send is not ordered with this task); the query in the reply's window
+    // finds the document.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while mock.received_requests().await.expect("requests").len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "wiremock did not record the create request within the reply's delay"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let (_, body) = query_by(&mock, by_id).await;
     assert!(
         body.contains("<szamlaszam>SZ-6</szamlaszam>"),

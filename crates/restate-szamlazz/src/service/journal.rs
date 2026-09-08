@@ -66,26 +66,33 @@
 //!
 //! # The archive rule
 //!
-//! **Once the first production deployment exists, an archived shape is never
-//! deleted**, and a fixture is never regenerated without its archive: an
-//! archive under `tests/journal/<type>/<variant>.<n>.json` is the only record
-//! of a shape a running deployment may have journaled, and the compatibility
-//! test can hold the current code to it only while the file is there. The
-//! mechanism cannot tell a legitimate deletion from an illegitimate one:
-//! `5ea51f9` (2026-09-07) regenerated `resolution/account.json` without
-//! `mode` and `supplier_id` and committed no `account.1.json`, a removal the
-//! rule forbids, admitted because nothing had been deployed to replay the old
+//! **Once the first production deployment exists, an archived shape of a type
+//! the code still journals is never deleted**, and a fixture is never
+//! regenerated without its archive: an archive under
+//! `tests/journal/<type>/<variant>.<n>.json` is the only record of a shape a
+//! running deployment may have journaled, and the compatibility test can hold
+//! the current code to it only while the file is there. The mechanism cannot
+//! tell a legitimate deletion from an illegitimate one: `5ea51f9`
+//! (2026-09-07) regenerated `resolution/account.json` without `mode` and
+//! `supplier_id` and committed no `account.1.json`, a removal the rule
+//! forbids, admitted because nothing had been deployed to replay the old
 //! shape; the same commit after go-live would have been a killed invocation
 //! for every order in flight across the upgrade. So the rule is the
 //! reviewer's, stated here where the generator's instructions are: before
 //! go-live, a regeneration without an archive is a judgement call recorded in
 //! the commit message; after it, the archive is committed with the new shape
-//! and stays. A shape that must change beyond what additive allows is then a
-//! **new journaled type** under a new directory (and a new run-name row, so a
-//! deploy that drains first), with the old type retired knowingly together
-//! with its directory (the unclaimed-directory check below is what a retired
-//! type answers to); deleting an archive to make the compatibility test pass
-//! is never the way (ADR 0005, the #125 amendment).
+//! and stays for as long as the type is journaled.
+//!
+//! The one way a directory goes is **retirement**: a shape that must change
+//! beyond what additive allows is a *new* journaled type under a new
+//! directory (and a new run-name row), and the old type is dropped from the
+//! `journaled!` list, its directory, archives included, removed in the same
+//! commit, which the unclaimed-directory check below demands. Safe because
+//! that deploy drains first (the flag-day script): once nothing of the
+//! previous deployment is in flight, no invocation can replay the retired
+//! type, and a completed invocation's journal is read by the UI, never
+//! replayed. Deleting an archive of a type still journaled, to make the
+//! compatibility test pass, is never the way (ADR 0005, the #125 amendment).
 
 use std::collections::BTreeSet;
 use std::fs;

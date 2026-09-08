@@ -480,13 +480,44 @@ impl Harness {
     /// its id only with its answer): to cancel it, or to check that a retry
     /// attached to it.
     pub(crate) async fn in_flight_on(&self, key: &str) -> String {
-        let rows = self
-            .sql(&format!(
-                "SELECT id FROM sys_invocation WHERE target_service_key = '{key}' AND status <> 'completed'"
-            ))
-            .await;
-        assert_eq!(rows.len(), 1, "one invocation in flight on {key}: {rows:?}");
-        rows[0]["id"].as_str().expect("id").to_owned()
+        let in_flight = self.in_flight_ids_on(key).await;
+        assert_eq!(
+            in_flight.len(),
+            1,
+            "one invocation in flight on {key}: {in_flight:?}"
+        );
+        in_flight[0].clone()
+    }
+
+    /// Waits until `sys_invocation` holds `count` invocations in flight on
+    /// Virtual Object `key` (accepted by the server, not completed): the
+    /// server-side moment a call made while the key is held is queued behind
+    /// it, which the ingress reports only with the call's answer. The ids.
+    pub(crate) async fn await_in_flight_on(&self, key: &str, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let in_flight = self.in_flight_ids_on(key).await;
+            if in_flight.len() >= count {
+                return in_flight;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{key} never had {count} invocation(s) in flight: {in_flight:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// The ids of the invocations on Virtual Object `key` the server holds and
+    /// has not completed.
+    async fn in_flight_ids_on(&self, key: &str) -> Vec<String> {
+        self.sql(&format!(
+            "SELECT id FROM sys_invocation WHERE target_service_key = '{key}' AND status <> 'completed' ORDER BY id"
+        ))
+        .await
+        .iter()
+        .map(|row| row["id"].as_str().expect("id").to_owned())
+        .collect()
     }
 
     /// `PATCH /invocations/{id}/{action}` on the admin API, asserting success.

@@ -295,10 +295,13 @@ and the generator cannot tell a legitimate deletion from an illegitimate one. `5
 `resolution/account.json` without `mode` and `supplier_id` and committed no `account.1.json`, a removal admitted
 because nothing had been deployed to replay the old shape and recorded in the commit message only; after go-live
 the same commit would kill every order in flight across the upgrade. So: once the first production deployment
-exists, an archive is never deleted and a fixture is never regenerated without its archive; before that, a
-regeneration without an archive is a judgement call recorded in the commit message. A shape that must change
-beyond what additive allows is then a new journaled type under a new directory (and a new run-name row, so a
-deploy that drains first), the old type retired knowingly together with its directory; the #47 amendment's
+exists, an archive of a type the code still journals is never deleted and a fixture is never regenerated without
+its archive; before that, a regeneration without an archive is a judgement call recorded in the commit message.
+The one way a directory goes is retirement: a shape that must change beyond what additive allows is a new
+journaled type under a new directory (and a new run-name row), and the old type is dropped from the `journaled!`
+list with its directory, archives included, in the same commit (the unclaimed-directory check demands it). Safe
+because that deploy drains first: once nothing of the previous deployment is in flight, no invocation can replay
+the retired type, and a completed invocation's journal is read by the UI, never replayed. The #47 amendment's
 *Consequences* ("delete the archived fixture") and the #127 amendment's "a break after go-live is a deleted archive"
 are superseded by this. The rule is stated where the generator's instructions are (`service::journal`'s module
 docs) and in CONTEXT.md's *Journaled type* entry.

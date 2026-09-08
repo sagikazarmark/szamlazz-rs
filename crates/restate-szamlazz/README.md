@@ -637,9 +637,11 @@ Never regenerate away a rename: an in-flight invocation of the previous deployme
 twelve `<variant>.1.json` archives of the pre-#127 document outcomes are the one deliberate break, of the pre-go-live
 window (ADR 0005, #127 amendment): `DELIBERATE_BREAKS` lists them, and the compatibility test asserts each still
 fails to replay. **Once the first production deployment exists, never delete an archived shape
-(`<variant>.<n>.json`) and never regenerate a fixture without its archive**: the archive is the only record of a
-shape a running deployment may have journaled, and no test can tell a legitimate deletion from an illegitimate one
-(the rule and its pre-go-live exceptions are in the `service::journal` module docs).
+(`<variant>.<n>.json`) of a type the code still journals, and never regenerate a fixture without its archive**: the
+archive is the only record of a shape a running deployment may have journaled, and no test can tell a legitimate
+deletion from an illegitimate one. A shape that must change beyond additive is a new journaled type under a new
+directory; the old type is retired with its directory, archives included, in a deploy that drains first (the rule,
+the retirement path and the pre-go-live exceptions are in the `service::journal` module docs).
 
 The registry of pinned types is complete by mechanism: the `Journaled` trait is sealed and implemented through one
 `journaled!` list beside it, which the registry test holds the pins to (a type journaled without pins fails by

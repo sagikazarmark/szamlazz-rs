@@ -171,9 +171,10 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
 /// the document from its lookup. Two creates on the wire, both the first
 /// call's; the same assertions as (xxiii) otherwise. That the second call
 /// arrived *during* the delay, not during the second send, is asserted, not
-/// assumed: the ingress accepted it (its `x-restate-id` is known to the
-/// harness only with its answer, so the moment it was **sent** is what is
-/// stamped) before szamlazz.hu received the second create.
+/// assumed, from the server's side: the second call's row is on
+/// `sys_invocation` (accepted, queued behind the lock, not completed) before
+/// szamlazz.hu receives the second create; the ingress reports the id only
+/// with the answer, so the row is what places the call in time.
 pub(crate) async fn same_key_same_scope_second_call_in_the_first_calls_delay(h: &Harness) {
     h.reset().await;
     h.absent("E2E-L2", &["prepayment", "final", "proforma"])
@@ -194,29 +195,36 @@ pub(crate) async fn same_key_same_scope_second_call_in_the_first_calls_delay(h: 
     let body = create_body(dec!(1000), false);
     let watch = h.watch("E2E-L2");
     let started = Instant::now();
-    let (first, (second_sent, second), second_create_received) = tokio::join!(
+    let (first, second, (second_queued, second_create_received)) = tokio::join!(
         timed(h.call("E2E-L2", "create_invoice", &body, "e2e-l2-k1")),
         async {
             // The first send was received (and answered szlahu_down); the
             // create step's second execution is a second away.
             h.wait_for_creates(1).await;
-            let sent = Instant::now();
-            (
-                sent,
-                timed(h.call("E2E-L2", "create_invoice", &body, "e2e-l2-k2")).await,
-            )
+            timed(h.call("E2E-L2", "create_invoice", &body, "e2e-l2-k2")).await
         },
         async {
+            // The server holds two invocations on the key (the first, and the
+            // second queued behind it) before szamlazz.hu sees a second create.
+            h.wait_for_creates(1).await;
+            let in_flight = h.await_in_flight_on("E2E-L2", 2).await;
+            let queued = Instant::now();
+            assert_eq!(
+                h.create_bodies().await.len(),
+                1,
+                "the second call was queued on the server while the first's create step waits out its delay, \
+                 before the second send: {in_flight:?}"
+            );
             h.wait_for_creates(2).await;
-            Instant::now()
+            (queued, Instant::now())
         },
     );
     let elapsed = started.elapsed();
     let retries = watch.await.expect("watch");
     assert!(
-        second_sent < second_create_received,
-        "the second call was sent during the first's delay, before szamlazz.hu received the second create \
-         (sent {second_sent:?}, second create {second_create_received:?})"
+        second_queued < second_create_received,
+        "the second call was on the server before szamlazz.hu received the second create \
+         (queued {second_queued:?}, second create {second_create_received:?})"
     );
     assert!(
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
@@ -246,7 +254,11 @@ pub(crate) async fn same_key_same_scope_second_call_in_the_first_calls_delay(h: 
 /// one would queue a second invocation behind the lock, as (xxiii) shows.
 /// The completed case (the stored completion replayed) is (ii); that this is
 /// not it is asserted: the retry was sent before the first call was answered,
-/// and its answer came no earlier than the first's.
+/// and it **waited** for the in-flight invocation's answer (a replayed
+/// completion answers in milliseconds; the retry, sent inside the first
+/// second of szamlazz.hu's 3 s delay, waits out the rest). Never the order of
+/// the two answers: one completion releases both, so which client task reads
+/// its reply first is not an event.
 pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h: &Harness) {
     h.reset().await;
     h.absent("E2E-L3", &["prepayment", "final", "proforma"])
@@ -283,12 +295,11 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         "the retry was sent while the first invocation was in flight (sent {retry_sent:?}, first answered {:?})",
         first.done
     );
+    let retry_waited = retry.done.duration_since(retry_sent);
     assert!(
-        retry.done >= first.done,
+        retry_waited >= Duration::from_secs(1),
         "the retry waited for the in-flight invocation's answer, it did not replay a completion \
-         (retry answered {:?}, first answered {:?})",
-        retry.done,
-        first.done
+         (waited {retry_waited:?})"
     );
     assert_eq!(first.reply.status, 200, "{}", first.reply.body);
     assert_eq!(retry.reply.status, 200, "{}", retry.reply.body);
