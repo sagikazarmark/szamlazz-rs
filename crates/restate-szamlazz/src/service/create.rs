@@ -11,9 +11,10 @@
 //! `TerminalError`s; a read that szamlazz.hu never answered is `unavailable`,
 //! a create step that ends without a settled outcome is `outcome_unknown`.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use restate_sdk::errors::HandlerError;
+use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 use szamlazz_agent::ops::query_xml::InvoiceDocument;
@@ -81,6 +82,11 @@ impl Identity {
         let mut response = self.respond(Outcome::Reversed).with_invoice_number(number);
         response.storno_number = storno_number;
         response
+    }
+
+    /// `fault`, about this document of `order`.
+    fn about(&self, order: &OrderKey, fault: Fault) -> Fault {
+        fault.about(order, Some(self.kind), self.external_id.as_str())
     }
 
     /// Step 5 of the create protocol: the settled create step as the caller's
@@ -239,6 +245,240 @@ const fn links_proforma(kind: DocumentKind) -> bool {
     matches!(kind, DocumentKind::Invoice | DocumentKind::Prepayment)
 }
 
+/// Step 1's decision on what the other kind's external id holds
+/// ([`exclusive_with`]), pure: a live document of ours refuses the create as
+/// `conflict{reason, existing_number}`; a document that fails validation is
+/// `conflict{external_id_collision}`, never "absent", because the query
+/// returns the newest holder, so another order's or kind's document may hide
+/// a live document of ours behind it, and refusing to create is the only safe
+/// answer; a reversed document of ours, or nothing, lets the create proceed
+/// (`None`).
+fn decide_exclusivity(
+    found: Lookup,
+    reason: ConflictReason,
+    identity: &Identity,
+) -> Option<CreateResponse> {
+    match found {
+        Lookup::Collision(found) => {
+            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
+        }
+        Lookup::Ours(found) if found.is_live() => {
+            Some(identity.conflict_about(reason, found.number()))
+        }
+        Lookup::Absent | Lookup::Ours(_) => None,
+    }
+}
+
+/// Step 1's decision for a final invoice on what `…:prepayment` holds, pure:
+/// the live prepayment invoice it settles is recorded in `refs` (the
+/// `elolegSzamlaszam` reference, and a number of ours for the hint to
+/// ignore) and the create proceeds (`None`); nothing under the id is
+/// `conflict{prepayment_missing}`, a reversed one
+/// `conflict{prepayment_reversed}`, a document that fails validation
+/// `conflict{external_id_collision}` (see [`decide_exclusivity`] for why a
+/// collision is never treated as absent). Nothing is recorded on a refusal.
+fn decide_prepayment_for_final(
+    found: Lookup,
+    identity: &Identity,
+    refs: &mut Refs,
+) -> Option<CreateResponse> {
+    match found {
+        Lookup::Absent => Some(identity.conflict(ConflictReason::PrepaymentMissing)),
+        Lookup::Collision(found) => {
+            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
+        }
+        Lookup::Ours(found) if !found.is_live() => {
+            Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number()))
+        }
+        Lookup::Ours(found) => {
+            refs.our_numbers.push(found.number().to_owned());
+            refs.prepayment = Some(found.number().to_owned());
+            None
+        }
+    }
+}
+
+/// Step 2's decision under `auto` and `none` on what `…:proforma` holds,
+/// pure. A live proforma of ours is linked under `auto` (recorded in `refs`:
+/// the `dijbekeroSzamlaszam` reference, and a number of ours for the hint to
+/// ignore) and is `conflict{proforma_live}` under `none`, since the server
+/// links by shared order number regardless, so refusing is the only honest
+/// answer; a reversed one, or nothing, links nothing and the create proceeds;
+/// a document that fails validation is `conflict{external_id_collision}` (see
+/// [`decide_exclusivity`] for why a collision is never treated as absent).
+/// Nothing is recorded on a refusal. A `{number}` link is
+/// [`decide_proforma_by_number`]'s: the shell never passes it here, and a
+/// live proforma of ours under it would be linked as under `auto`.
+fn decide_proforma_link(
+    found: Lookup,
+    link: &ProformaLink,
+    identity: &Identity,
+    refs: &mut Refs,
+) -> Option<CreateResponse> {
+    let live = match found {
+        Lookup::Collision(found) => {
+            return Some(
+                identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()),
+            );
+        }
+        Lookup::Ours(found) if found.is_live() => found,
+        Lookup::Absent | Lookup::Ours(_) => return None,
+    };
+    match link {
+        ProformaLink::None => {
+            Some(identity.conflict_about(ConflictReason::ProformaLive, live.number()))
+        }
+        ProformaLink::Auto | ProformaLink::Number(_) => {
+            refs.our_numbers.push(live.number().to_owned());
+            refs.proforma = Some(live.number().to_owned());
+            None
+        }
+    }
+}
+
+/// Step 2's decision under `{number}` on what the verify of `number` found,
+/// pure. The named document is checked like every other document found by
+/// number, in the order the other verifies use: this order's number first
+/// (another order's, or none, is `conflict{not_managed, existing_number}`;
+/// without it a caller could link another order's live proforma into this
+/// order's invoice), then the kind. A proforma of ours is linked as named
+/// (recorded in `refs`) and the create proceeds (`None`); code 7 is
+/// `conflict{proforma_missing, existing_number}`, an outcome, never
+/// `not_found`. Nothing is recorded on a refusal.
+///
+/// # Errors
+///
+/// A document of this order that is not a proforma is `invalid_input`
+/// naming the number and its `tipus`: the caller's request, so it carries
+/// no document identity. Another szamlazz.hu code (`unavailable`) and a
+/// credential code (`credentials_rejected`) are about the document being
+/// created and carry its identity.
+fn decide_proforma_by_number(
+    outcome: QueryOutcome,
+    number: &str,
+    order: &OrderKey,
+    identity: &Identity,
+    namespace: &Namespace,
+    refs: &mut Refs,
+) -> Result<Option<CreateResponse>, Fault> {
+    match outcome {
+        QueryOutcome::Api { code, message } => {
+            Err(identity.about(order, Fault::inconclusive_answer(code, message)))
+        }
+        QueryOutcome::CredentialsRejected { code, message } => {
+            Err(identity.about(order, Fault::credentials_rejected(namespace, code, message)))
+        }
+        QueryOutcome::NotFound => Ok(Some(
+            identity.conflict_about(ConflictReason::ProformaMissing, number),
+        )),
+        QueryOutcome::Found(found) => {
+            if !found.carries_order(order) {
+                return Ok(Some(
+                    identity.conflict_about(ConflictReason::NotManaged, number),
+                ));
+            }
+            if found.info.document_type != "D" {
+                return Err(Fault::invalid_input(format!(
+                    "{number} is not a proforma (tipus {})",
+                    found.info.document_type
+                )));
+            }
+            refs.our_numbers.push(found.number().to_owned());
+            refs.proforma = Some(number.to_owned());
+            Ok(None)
+        }
+    }
+}
+
+/// `correct_invoice`'s decision on the verified base, pure: the base must be
+/// a live invoice carrying this order's number. Another order's, or none, is
+/// `conflict{not_managed, existing_number}` (checked first: a reversed
+/// document of another order is still not this order's); a reversed one of
+/// ours is `conflict{base_reversed, existing_number}`; a live one of ours
+/// proceeds (`None`).
+fn decide_base(
+    found: &InvoiceDocument,
+    order: &OrderKey,
+    number: &str,
+    identity: &Identity,
+) -> Option<CreateResponse> {
+    if !found.carries_order(order) {
+        return Some(identity.conflict_about(ConflictReason::NotManaged, number));
+    }
+    if found.info.reversed == Some(true) {
+        return Some(identity.conflict_about(ConflictReason::BaseReversed, number));
+    }
+    None
+}
+
+/// The fault of a create step whose run ended without a settled outcome:
+/// the issue policy exhausted (500, carrying the last `Unconfirmed`'s
+/// display) or the invocation cancelled (409). `outcome_unknown` about the
+/// document being created: nothing is recorded, and the next invocation's
+/// lookup finds whatever landed.
+fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Identity) -> Fault {
+    identity.about(
+        order,
+        Fault::outcome_unknown(format!(
+            "the create step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
+            error.code(),
+            error.message()
+        )),
+    )
+}
+
+/// Step 3's decision on what the lookup step found, pure: every case that
+/// needs no create is settled as the caller's response (`Break`), and what
+/// proceeds to the create step carries the number of the reversed document
+/// the lookup saw (`Continue(Some)`, a reissue: the one holder the create
+/// step may send past) or nothing (`Continue(None)`).
+///
+/// A live document of ours is `already_issued`, or `conflict{live}` under
+/// `reissue`, so the flag can never cause a duplicate; a reversed one is
+/// `reversed{storno_number}` without `reissue`; a collision or a foreign
+/// document refuses with or without it.
+///
+/// # Errors
+///
+/// The faults an answered lookup can be: another szamlazz.hu code
+/// (`unavailable`, nothing may be concluded) or a credential code
+/// (`credentials_rejected`). The caller attaches the document's identity.
+fn decide_lookup(
+    outcome: LookupOutcome,
+    reissue: bool,
+    identity: &Identity,
+    namespace: &Namespace,
+) -> Result<ControlFlow<CreateResponse, Option<String>>, Fault> {
+    Ok(match outcome {
+        LookupOutcome::Api { code, message } => {
+            return Err(Fault::inconclusive_answer(code, message));
+        }
+        LookupOutcome::CredentialsRejected { code, message } => {
+            return Err(Fault::credentials_rejected(namespace, code, message));
+        }
+        LookupOutcome::Live(found) if reissue => {
+            ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number()))
+        }
+        LookupOutcome::Live(found) => {
+            ControlFlow::Break(identity.found(Outcome::AlreadyIssued, &found))
+        }
+        LookupOutcome::Reversed {
+            document,
+            storno_number,
+        } if !reissue => ControlFlow::Break(identity.reversed(document.number(), storno_number)),
+        LookupOutcome::Reversed { document, .. } => {
+            ControlFlow::Continue(Some(document.number().to_owned()))
+        }
+        LookupOutcome::Collision(found) => ControlFlow::Break(
+            identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()),
+        ),
+        LookupOutcome::Foreign(found) => {
+            ControlFlow::Break(identity.conflict_about(ConflictReason::Foreign, found.number()))
+        }
+        LookupOutcome::Absent => ControlFlow::Continue(None),
+    })
+}
+
 impl Execution {
     // ----- entry points ----------------------------------------------------
 
@@ -323,18 +563,15 @@ impl Execution {
             external_id: ExternalId::for_corrective(&self.config.namespace, &order, &correction_id),
         };
 
-        // The base must be a live invoice carrying this order's number.
-        let about =
-            |fault: Fault| fault.about(&order, Some(identity.kind), identity.external_id.as_str());
+        // The base must be a live invoice carrying this order's number
+        // (`decide_base`).
+        let about = |fault: Fault| identity.about(&order, fault);
         let found = verify(ctx, self, format!("verify-base-{number}"), &number)
             .await
             .map_err(about)?;
         let found = verified_document(found, &number, &self.config.namespace).map_err(about)?;
-        if !found.carries_order(&order) {
-            return Ok(identity.conflict_about(ConflictReason::NotManaged, number));
-        }
-        if found.info.reversed == Some(true) {
-            return Ok(identity.conflict_about(ConflictReason::BaseReversed, number));
+        if let Some(response) = decide_base(&found, &order, &number, &identity) {
+            return Ok(response);
         }
 
         let create = self.build(
@@ -420,12 +657,8 @@ impl Execution {
     // ----- step 1: exclusivity ---------------------------------------------
 
     /// A live document of ours under `other`'s external id refuses the
-    /// create as `conflict{reason, existing_number}` ([`exclusive_with`]).
-    ///
-    /// A document under the other id that fails validation is
-    /// `conflict{external_id_collision}`, never "absent": the query returns
-    /// the newest holder, so a foreign document may hide a live document of
-    /// ours behind it, and refusing to create is the only safe answer.
+    /// create as `conflict{reason, existing_number}` ([`exclusive_with`]);
+    /// the decision is [`decide_exclusivity`].
     async fn exclusivity(
         &self,
         ctx: &ObjectContext<'_>,
@@ -444,18 +677,11 @@ impl Execution {
             other.into(),
         )
         .await?;
-        Ok(match found {
-            Lookup::Collision(found) => {
-                Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
-            }
-            Lookup::Ours(found) if found.is_live() => {
-                Some(identity.conflict_about(reason, found.number()))
-            }
-            Lookup::Absent | Lookup::Ours(_) => None,
-        })
+        Ok(decide_exclusivity(found, reason, identity))
     }
 
-    /// The prepayment a final invoice settles must be live.
+    /// The prepayment a final invoice settles must be live; the decision is
+    /// [`decide_prepayment_for_final`].
     async fn prepayment_for_final(
         &self,
         ctx: &ObjectContext<'_>,
@@ -474,35 +700,16 @@ impl Execution {
             kind.into(),
         )
         .await?;
-        Ok(match found {
-            Lookup::Absent => Some(identity.conflict(ConflictReason::PrepaymentMissing)),
-            Lookup::Collision(found) => {
-                Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
-            }
-            Lookup::Ours(found) if !found.is_live() => {
-                Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number()))
-            }
-            Lookup::Ours(found) => {
-                refs.our_numbers.push(found.number().to_owned());
-                refs.prepayment = Some(found.number().to_owned());
-                None
-            }
-        })
+        Ok(decide_prepayment_for_final(found, identity, refs))
     }
 
     // ----- step 2: the proforma link ---------------------------------------
 
     /// `options.proforma` for an invoice or a prepayment invoice
-    /// ([`links_proforma`]).
-    ///
-    /// Under `auto` and `none` a document under `…:proforma` that fails
-    /// validation is `conflict{external_id_collision}`: see
-    /// [`Self::exclusivity`] for why a collision is never treated as absent.
-    ///
-    /// Under `{number}` the named document is verified and checked like every
-    /// other document found by number: another order's number, or
-    /// none, is `conflict{not_managed, existing_number}`; a document that is
-    /// not a proforma is `invalid_input`.
+    /// ([`links_proforma`]): under `auto` and `none` the `proforma-link`
+    /// lookup of `…:proforma`, decided by [`decide_proforma_link`]; under
+    /// `{number}` the `verify-proforma-{number}` read, decided by
+    /// [`decide_proforma_by_number`].
     async fn proforma_link(
         &self,
         ctx: &ObjectContext<'_>,
@@ -524,73 +731,27 @@ impl Execution {
                     kind.into(),
                 )
                 .await?;
-                let live = match found {
-                    Lookup::Collision(found) => {
-                        return Ok(Some(identity.conflict_about(
-                            ConflictReason::ExternalIdCollision,
-                            found.number(),
-                        )));
-                    }
-                    Lookup::Ours(found) if found.is_live() => found,
-                    Lookup::Absent | Lookup::Ours(_) => return Ok(None),
-                };
-                if prepared.proforma == ProformaLink::None {
-                    // The server links by shared order number regardless, so
-                    // refusing is the only honest answer.
-                    return Ok(Some(
-                        identity.conflict_about(ConflictReason::ProformaLive, live.number()),
-                    ));
-                }
-                refs.our_numbers.push(live.number().to_owned());
-                refs.proforma = Some(live.number().to_owned());
-                Ok(None)
+                Ok(decide_proforma_link(
+                    found,
+                    &prepared.proforma,
+                    identity,
+                    refs,
+                ))
             }
             ProformaLink::Number(number) => {
                 let number = number.as_str();
-                let about = |fault: Fault| {
-                    fault.about(
-                        &prepared.order,
-                        Some(identity.kind),
-                        identity.external_id.as_str(),
-                    )
-                };
-                match verify(ctx, self, format!("verify-proforma-{number}"), number)
+                let found = verify(ctx, self, format!("verify-proforma-{number}"), number)
                     .await
-                    .map_err(about)?
-                {
-                    QueryOutcome::Api { code, message } => {
-                        Err(about(Fault::inconclusive_answer(code, message)).into())
-                    }
-                    QueryOutcome::CredentialsRejected { code, message } => Err(about(
-                        Fault::credentials_rejected(&self.config.namespace, code, message),
-                    )
-                    .into()),
-                    QueryOutcome::NotFound => Ok(Some(
-                        identity.conflict_about(ConflictReason::ProformaMissing, number),
-                    )),
-                    // Checked like every other document found by number,
-                    // in the order the other verifies use: this
-                    // order's number, then the kind. Without the first a
-                    // caller could link another order's live proforma into
-                    // this order's invoice.
-                    QueryOutcome::Found(found) => {
-                        if !found.carries_order(&prepared.order) {
-                            return Ok(Some(
-                                identity.conflict_about(ConflictReason::NotManaged, number),
-                            ));
-                        }
-                        if found.info.document_type != "D" {
-                            return Err(Fault::invalid_input(format!(
-                                "{number} is not a proforma (tipus {})",
-                                found.info.document_type
-                            ))
-                            .into());
-                        }
-                        refs.our_numbers.push(found.number().to_owned());
-                        refs.proforma = Some(number.to_owned());
-                        Ok(None)
-                    }
-                }
+                    .map_err(|fault| identity.about(&prepared.order, fault))?;
+                decide_proforma_by_number(
+                    found,
+                    number,
+                    &prepared.order,
+                    identity,
+                    &self.config.namespace,
+                    refs,
+                )
+                .map_err(HandlerError::from)
             }
         }
     }
@@ -607,44 +768,15 @@ impl Execution {
         intent: Intent,
     ) -> Result<CreateResponse, HandlerError> {
         let identity = &intent.identity;
-        let about =
-            |fault: Fault| fault.about(order, Some(identity.kind), identity.external_id.as_str());
+        let about = |fault: Fault| identity.about(order, fault);
 
-        // Step 3: lookup.
-        let reversed = match self.lookup_step(ctx, order, &intent).await.map_err(about)? {
-            LookupOutcome::Api { code, message } => {
-                return Err(about(Fault::inconclusive_answer(code, message)).into());
-            }
-            LookupOutcome::CredentialsRejected { code, message } => {
-                return Err(about(Fault::credentials_rejected(
-                    &self.config.namespace,
-                    code,
-                    message,
-                ))
-                .into());
-            }
-            LookupOutcome::Live(found) if intent.reissue => {
-                return Ok(identity.conflict_about(ConflictReason::Live, found.number()));
-            }
-            LookupOutcome::Live(found) => {
-                return Ok(identity.found(Outcome::AlreadyIssued, &found));
-            }
-            LookupOutcome::Reversed {
-                document,
-                storno_number,
-            } if !intent.reissue => {
-                return Ok(identity.reversed(document.number(), storno_number));
-            }
-            LookupOutcome::Reversed { document, .. } => Some(document.number().to_owned()),
-            LookupOutcome::Collision(found) => {
-                return Ok(
-                    identity.conflict_about(ConflictReason::ExternalIdCollision, found.number())
-                );
-            }
-            LookupOutcome::Foreign(found) => {
-                return Ok(identity.conflict_about(ConflictReason::Foreign, found.number()));
-            }
-            LookupOutcome::Absent => None,
+        // Step 3: lookup, then decide on what it found.
+        let found = self.lookup_step(ctx, order, &intent).await.map_err(about)?;
+        let reversed = match decide_lookup(found, intent.reissue, identity, &self.config.namespace)
+            .map_err(about)?
+        {
+            ControlFlow::Break(response) => return Ok(response),
+            ControlFlow::Continue(reversed) => reversed,
         };
 
         // Step 4: create.
@@ -688,8 +820,9 @@ impl Execution {
     /// query-first on every execution (the query is inside the closure: a
     /// separate journaled pre-query would replay its stale "nothing" on the
     /// retry and re-send). Any `Err` from the run (exhaustion (500) or
-    /// cancellation (409)) is `outcome_unknown` about this document: nothing
-    /// is recorded, the next invocation's lookup finds whatever landed.
+    /// cancellation (409)) is `outcome_unknown` about this document
+    /// ([`create_outcome_unknown`]): nothing is recorded, the next
+    /// invocation's lookup finds whatever landed.
     async fn create_step(
         &self,
         ctx: &ObjectContext<'_>,
@@ -719,21 +852,14 @@ impl Execution {
             },
         )
         .await
-        .map_err(|error| {
-            Fault::outcome_unknown(format!(
-                "the create step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
-                error.code(),
-                error.message()
-            ))
-            .about(order, Some(kind), intent.identity.external_id.as_str())
-            .into()
-        })
+        .map_err(|error| create_outcome_unknown(&error, order, &intent.identity).into())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use restate_sdk::errors::TerminalError;
+    use rust_decimal::dec;
     use szamlazz_agent::Credentials;
 
     use super::*;
@@ -741,7 +867,7 @@ mod tests {
     use crate::config::WorkerConfig;
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
-    use crate::test_support::open_gateway;
+    use crate::test_support::{Doc, open_gateway};
 
     /// An execution as the prologue would build it for the test account.
     fn order() -> Execution {
@@ -759,10 +885,10 @@ mod tests {
         request
     }
 
+    /// The message of an `invalid_input` fault (400).
     fn invalid_input(fault: Fault) -> String {
-        let error = TerminalError::from(fault);
-        assert_eq!(error.code(), 400);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 400, "{body}");
         assert_eq!(body["code"], TerminalCode::InvalidInput.as_str());
         body["message"].as_str().expect("message").to_owned()
     }
@@ -896,6 +1022,890 @@ mod tests {
         assert!(invalid_input(fault).contains("items[0]"));
     }
 
+    fn namespace() -> Namespace {
+        "acct".parse().expect("namespace")
+    }
+
+    fn invoice_identity() -> Identity {
+        Identity::of_kind(&namespace(), &ord_1(), DocumentKind::Invoice)
+    }
+
+    /// The `{code, message}` body of a fault, with its HTTP status.
+    fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
+        let error = TerminalError::from(fault);
+        let body = serde_json::from_str(error.message()).expect("json body");
+        (error.code(), body)
+    }
+
+    /// The response a lookup decision settled without a create.
+    fn settled(
+        decision: Result<ControlFlow<CreateResponse, Option<String>>, Fault>,
+    ) -> CreateResponse {
+        match decision {
+            Ok(ControlFlow::Break(response)) => response,
+            other => panic!("settled without a create: {other:?}"),
+        }
+    }
+
+    // ----- step 3: the lookup decision -------------------------------------
+
+    /// Step 3, a live document of ours under the external id: the caller
+    /// asked for this document and has it (`already_issued`, with its number
+    /// and totals); with `reissue` the same document is `conflict{live}`
+    /// naming it, so the flag can never cause a duplicate. Nothing proceeds
+    /// to the create step either way.
+    #[test]
+    fn a_live_document_under_the_id_is_already_issued_or_a_live_conflict_under_reissue() {
+        let identity = invoice_identity();
+        let live = Doc::default().boxed();
+
+        let response = settled(decide_lookup(
+            LookupOutcome::Live(live.clone()),
+            false,
+            &identity,
+            &namespace(),
+        ));
+        assert_eq!(response.outcome, Outcome::AlreadyIssued);
+        assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
+        assert_eq!(response.net_total, Some(dec!(1000)));
+        assert_eq!(response.gross_total, Some(dec!(1270)));
+        assert_eq!(response.outstanding, Some(dec!(1270)));
+        assert_eq!(response.external_id, "acct:ORD-1:invoice");
+        assert_eq!(response.kind, IssuedKind::Invoice);
+
+        let response = settled(decide_lookup(
+            LookupOutcome::Live(live),
+            true,
+            &identity,
+            &namespace(),
+        ));
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.conflict_reason, Some(ConflictReason::Live));
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+        assert_eq!(response.invoice_number, None);
+    }
+
+    /// Step 3, a reversed document of ours under the external id: without
+    /// `reissue` the answer is `reversed` naming the document and, when the
+    /// hint named it, its storno; with `reissue` the create proceeds carrying
+    /// the reversed number, the one holder the create step may send past.
+    #[test]
+    fn a_reversed_document_under_the_id_is_reversed_or_proceeds_under_reissue() {
+        let identity = invoice_identity();
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::default()
+        }
+        .boxed();
+
+        let response = settled(decide_lookup(
+            LookupOutcome::Reversed {
+                document: reversed.clone(),
+                storno_number: Some("SS-1".to_owned()),
+            },
+            false,
+            &identity,
+            &namespace(),
+        ));
+        assert_eq!(response.outcome, Outcome::Reversed);
+        assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
+        assert_eq!(response.storno_number.as_deref(), Some("SS-1"));
+
+        // The hint did not name the storno: `reversed` all the same, without
+        // the number.
+        let response = settled(decide_lookup(
+            LookupOutcome::Reversed {
+                document: reversed.clone(),
+                storno_number: None,
+            },
+            false,
+            &identity,
+            &namespace(),
+        ));
+        assert_eq!(response.outcome, Outcome::Reversed);
+        assert_eq!(response.storno_number, None);
+
+        assert_eq!(
+            decide_lookup(
+                LookupOutcome::Reversed {
+                    document: reversed,
+                    storno_number: Some("SS-1".to_owned()),
+                },
+                true,
+                &identity,
+                &namespace(),
+            )
+            .expect("data"),
+            ControlFlow::Continue(Some("SZ-1".to_owned())),
+            "reissue proceeds past the reversed document, carrying its number"
+        );
+    }
+
+    /// Step 3, nothing to settle or something never to create past: `Absent`
+    /// proceeds carrying nothing; a collision (the newest holder of the id is
+    /// another order's or kind's) and a foreign document (another channel's
+    /// live invoice under the order) are conflicts naming the document, with
+    /// or without `reissue`.
+    #[test]
+    fn absent_proceeds_while_a_collision_or_a_foreign_document_refuses() {
+        let identity = invoice_identity();
+        for reissue in [false, true] {
+            assert_eq!(
+                decide_lookup(LookupOutcome::Absent, reissue, &identity, &namespace())
+                    .expect("data"),
+                ControlFlow::Continue(None),
+                "reissue {reissue}"
+            );
+
+            let other_order = Doc {
+                order: Some("ORD-2"),
+                ..Doc::new("SZ-9", "SZ")
+            }
+            .boxed();
+            let response = settled(decide_lookup(
+                LookupOutcome::Collision(other_order),
+                reissue,
+                &identity,
+                &namespace(),
+            ));
+            assert_eq!(response.outcome, Outcome::Conflict, "reissue {reissue}");
+            assert_eq!(
+                response.conflict_reason,
+                Some(ConflictReason::ExternalIdCollision),
+                "reissue {reissue}"
+            );
+            assert_eq!(response.existing_number.as_deref(), Some("SZ-9"));
+
+            let foreign = Doc::new("SZ-77", "SZ").boxed();
+            let response = settled(decide_lookup(
+                LookupOutcome::Foreign(foreign),
+                reissue,
+                &identity,
+                &namespace(),
+            ));
+            assert_eq!(response.outcome, Outcome::Conflict, "reissue {reissue}");
+            assert_eq!(
+                response.conflict_reason,
+                Some(ConflictReason::Foreign),
+                "reissue {reissue}"
+            );
+            assert_eq!(response.existing_number.as_deref(), Some("SZ-77"));
+        }
+    }
+
+    /// Step 3, szamlazz.hu answered the external-id query with a code: another
+    /// code is `unavailable` (503) carrying it in `szamlazz_code`, nothing may
+    /// be concluded; a credential code is `credentials_rejected` (503). Both
+    /// are faults, never outcomes, and neither proceeds.
+    #[test]
+    fn an_answered_code_on_the_lookup_is_a_fault() {
+        let identity = invoice_identity();
+
+        let fault = decide_lookup(
+            LookupOutcome::Api {
+                code: "57".to_owned(),
+                message: "Hibás XML.".to_owned(),
+            },
+            false,
+            &identity,
+            &namespace(),
+        )
+        .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["code"], TerminalCode::Unavailable.as_str(), "{body}");
+        assert_eq!(body["szamlazz_code"], "57", "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message")
+                .contains("nothing may be concluded"),
+            "{body}"
+        );
+
+        let fault = decide_lookup(
+            LookupOutcome::CredentialsRejected {
+                code: "135".to_owned(),
+                message: "Aktív böngésző session.".to_owned(),
+            },
+            true,
+            &identity,
+            &namespace(),
+        )
+        .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body["code"],
+            TerminalCode::CredentialsRejected.as_str(),
+            "{body}"
+        );
+        assert_eq!(body["szamlazz_code"], "135", "{body}");
+    }
+
+    // ----- step 1: exclusivity ---------------------------------------------
+
+    /// Step 1, what the other kind's external id holds: a live document of
+    /// ours refuses the create with the table's reason (`prepaid_chain` for
+    /// the other chain, `order_invoiced` for a proforma after the invoice),
+    /// naming it; a document that fails validation is
+    /// `conflict{external_id_collision}`, never "absent", since the newest
+    /// holder may hide a live document of ours; a **reversed** document of
+    /// ours and nothing at all let the create proceed (the negative case the
+    /// table exists for: a reversed `ES` is what lets a plain `SZ` land).
+    #[test]
+    fn exclusivity_refuses_a_live_other_kind_and_a_collision_and_passes_a_reversed_one() {
+        let identity = invoice_identity();
+
+        let live_prepayment = Doc::new("ES-1", "ES").boxed();
+        let response = decide_exclusivity(
+            Lookup::Ours(live_prepayment),
+            ConflictReason::PrepaidChain,
+            &identity,
+        )
+        .expect("refused");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.conflict_reason, Some(ConflictReason::PrepaidChain));
+        assert_eq!(response.existing_number.as_deref(), Some("ES-1"));
+        assert_eq!(
+            response.kind,
+            IssuedKind::Invoice,
+            "about the create, not the other kind"
+        );
+        assert_eq!(response.external_id, "acct:ORD-1:invoice");
+
+        let proforma_identity = Identity::of_kind(&namespace(), &ord_1(), DocumentKind::Proforma);
+        let response = decide_exclusivity(
+            Lookup::Ours(Doc::default().boxed()),
+            ConflictReason::OrderInvoiced,
+            &proforma_identity,
+        )
+        .expect("refused");
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::OrderInvoiced)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+
+        let other_order = Doc {
+            order: Some("ORD-2"),
+            ..Doc::new("ES-9", "ES")
+        }
+        .boxed();
+        let response = decide_exclusivity(
+            Lookup::Collision(other_order),
+            ConflictReason::PrepaidChain,
+            &identity,
+        )
+        .expect("refused");
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::ExternalIdCollision),
+            "never the table's reason: the holder is not ours"
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("ES-9"));
+
+        let reversed_prepayment = Doc {
+            reversed: true,
+            ..Doc::new("ES-1", "ES")
+        }
+        .boxed();
+        assert_eq!(
+            decide_exclusivity(
+                Lookup::Ours(reversed_prepayment),
+                ConflictReason::PrepaidChain,
+                &identity
+            ),
+            None,
+            "a reversed other-kind document does not refuse"
+        );
+        assert_eq!(
+            decide_exclusivity(Lookup::Absent, ConflictReason::PrepaidChain, &identity),
+            None
+        );
+    }
+
+    /// Step 1 for a final invoice, what `…:prepayment` holds: the live
+    /// prepayment invoice it settles is carried as the `elolegSzamlaszam`
+    /// reference and as a number of ours for the hint to ignore; nothing
+    /// under the id is `conflict{prepayment_missing}` (no number to name); a
+    /// reversed one is `conflict{prepayment_reversed}` naming it; a document
+    /// that fails validation is `conflict{external_id_collision}`. Nothing is
+    /// recorded on a refusal.
+    #[test]
+    fn a_final_invoice_settles_a_live_prepayment_and_refuses_everything_else() {
+        let identity = Identity::of_kind(&namespace(), &ord_1(), DocumentKind::Final);
+
+        let mut refs = Refs::default();
+        let live = Doc::new("ES-1", "ES").boxed();
+        assert_eq!(
+            decide_prepayment_for_final(Lookup::Ours(live), &identity, &mut refs),
+            None
+        );
+        assert_eq!(refs.prepayment.as_deref(), Some("ES-1"));
+        assert_eq!(refs.our_numbers, ["ES-1"]);
+        assert_eq!(refs.proforma, None);
+
+        let mut refs = Refs::default();
+        let response =
+            decide_prepayment_for_final(Lookup::Absent, &identity, &mut refs).expect("refused");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::PrepaymentMissing)
+        );
+        assert_eq!(response.existing_number, None);
+        assert_eq!(response.kind, IssuedKind::Final);
+        assert_eq!(response.external_id, "acct:ORD-1:final");
+
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::new("ES-1", "ES")
+        }
+        .boxed();
+        let response = decide_prepayment_for_final(Lookup::Ours(reversed), &identity, &mut refs)
+            .expect("refused");
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::PrepaymentReversed)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("ES-1"));
+
+        let other_kind = Doc::new("SZ-9", "SZ").boxed();
+        let response =
+            decide_prepayment_for_final(Lookup::Collision(other_kind), &identity, &mut refs)
+                .expect("refused");
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::ExternalIdCollision)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-9"));
+
+        assert_eq!(refs.prepayment, None, "nothing recorded on a refusal");
+        assert!(refs.our_numbers.is_empty());
+    }
+
+    // ----- step 2: the proforma link ---------------------------------------
+
+    /// Step 2 under `auto`, what `…:proforma` holds: a live proforma of ours
+    /// is linked (the `dijbekeroSzamlaszam` reference, and a number of ours
+    /// for the hint to ignore); a reversed one, or nothing, links nothing and
+    /// the create proceeds; a document that fails validation is
+    /// `conflict{external_id_collision}`.
+    #[test]
+    fn under_auto_a_live_proforma_is_linked_and_anything_else_links_nothing() {
+        let identity = invoice_identity();
+
+        let mut refs = Refs::default();
+        let live = Doc::new("D-1", "D").boxed();
+        assert_eq!(
+            decide_proforma_link(
+                Lookup::Ours(live),
+                &ProformaLink::Auto,
+                &identity,
+                &mut refs
+            ),
+            None
+        );
+        assert_eq!(refs.proforma.as_deref(), Some("D-1"));
+        assert_eq!(refs.our_numbers, ["D-1"]);
+        assert_eq!(refs.prepayment, None);
+
+        let mut refs = Refs::default();
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::new("D-1", "D")
+        }
+        .boxed();
+        assert_eq!(
+            decide_proforma_link(
+                Lookup::Ours(reversed),
+                &ProformaLink::Auto,
+                &identity,
+                &mut refs
+            ),
+            None
+        );
+        assert_eq!(
+            decide_proforma_link(Lookup::Absent, &ProformaLink::Auto, &identity, &mut refs),
+            None
+        );
+        assert_eq!(refs.proforma, None, "nothing linked");
+        assert!(refs.our_numbers.is_empty());
+
+        let other_order = Doc {
+            order: Some("ORD-2"),
+            ..Doc::new("D-9", "D")
+        }
+        .boxed();
+        let response = decide_proforma_link(
+            Lookup::Collision(other_order),
+            &ProformaLink::Auto,
+            &identity,
+            &mut refs,
+        )
+        .expect("refused");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::ExternalIdCollision)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("D-9"));
+        assert_eq!(refs.proforma, None, "nothing recorded on a refusal");
+    }
+
+    /// Step 2 under `none`: a live proforma of ours is
+    /// `conflict{proforma_live}` naming it (szamlazz.hu would link it by
+    /// shared order number regardless, so refusing is the only honest
+    /// answer); a reversed one, or nothing, is what `none` asked for and the
+    /// create proceeds linking nothing; a collision refuses as under `auto`.
+    #[test]
+    fn under_none_a_live_proforma_is_a_conflict_and_anything_else_proceeds() {
+        let identity = invoice_identity();
+        let mut refs = Refs::default();
+
+        let live = Doc::new("D-1", "D").boxed();
+        let response = decide_proforma_link(
+            Lookup::Ours(live),
+            &ProformaLink::None,
+            &identity,
+            &mut refs,
+        )
+        .expect("refused");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.conflict_reason, Some(ConflictReason::ProformaLive));
+        assert_eq!(response.existing_number.as_deref(), Some("D-1"));
+        assert_eq!(refs.proforma, None, "nothing recorded on a refusal");
+
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::new("D-1", "D")
+        }
+        .boxed();
+        assert_eq!(
+            decide_proforma_link(
+                Lookup::Ours(reversed),
+                &ProformaLink::None,
+                &identity,
+                &mut refs
+            ),
+            None
+        );
+        assert_eq!(
+            decide_proforma_link(Lookup::Absent, &ProformaLink::None, &identity, &mut refs),
+            None
+        );
+        assert_eq!(refs.proforma, None);
+        assert!(refs.our_numbers.is_empty());
+
+        let other_order = Doc {
+            order: Some("ORD-2"),
+            ..Doc::new("D-9", "D")
+        }
+        .boxed();
+        let response = decide_proforma_link(
+            Lookup::Collision(other_order),
+            &ProformaLink::None,
+            &identity,
+            &mut refs,
+        )
+        .expect("refused");
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::ExternalIdCollision)
+        );
+    }
+
+    /// Step 2 under `{number}`, the verify's answer checked like every other
+    /// document found by number, in the order the other verifies use: this
+    /// order's number first (another order's proforma, or an order-less one,
+    /// is `conflict{not_managed}` naming it, so a caller cannot link another
+    /// order's live proforma into this order's invoice), then the kind (a
+    /// document of ours that is not a proforma is `invalid_input` naming the
+    /// number and its `tipus`: the caller's request). A proforma of ours is
+    /// linked as named. Code 7 is `conflict{proforma_missing}` naming the
+    /// number: an outcome, never `not_found`.
+    #[test]
+    fn a_proforma_by_number_is_checked_like_every_document_found_by_number() {
+        let identity = invoice_identity();
+        let order = ord_1();
+
+        let mut refs = Refs::default();
+        let ours = Doc::new("D-1", "D").boxed();
+        assert_eq!(
+            decide_proforma_by_number(
+                QueryOutcome::Found(ours),
+                "D-1",
+                &order,
+                &identity,
+                &namespace(),
+                &mut refs
+            )
+            .expect("data"),
+            None
+        );
+        assert_eq!(refs.proforma.as_deref(), Some("D-1"));
+        assert_eq!(refs.our_numbers, ["D-1"]);
+
+        let mut refs = Refs::default();
+        let response = decide_proforma_by_number(
+            QueryOutcome::NotFound,
+            "D-MISSING",
+            &order,
+            &identity,
+            &namespace(),
+            &mut refs,
+        )
+        .expect("data")
+        .expect("refused");
+        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::ProformaMissing)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("D-MISSING"));
+
+        for (label, order_number) in [("another order's", Some("ORD-2")), ("order-less", None)] {
+            let proforma = Doc {
+                order: order_number,
+                ..Doc::new("D-2", "D")
+            }
+            .boxed();
+            let response = decide_proforma_by_number(
+                QueryOutcome::Found(proforma),
+                "D-2",
+                &order,
+                &identity,
+                &namespace(),
+                &mut refs,
+            )
+            .expect("data")
+            .unwrap_or_else(|| panic!("{label}: refused"));
+            assert_eq!(response.outcome, Outcome::Conflict, "{label}");
+            assert_eq!(
+                response.conflict_reason,
+                Some(ConflictReason::NotManaged),
+                "{label}"
+            );
+            assert_eq!(response.existing_number.as_deref(), Some("D-2"), "{label}");
+        }
+
+        // This order's invoice named as the proforma: the order check passes,
+        // the kind check refuses.
+        let invoice = Doc::new("SZ-42", "SZ").boxed();
+        let fault = decide_proforma_by_number(
+            QueryOutcome::Found(invoice),
+            "SZ-42",
+            &order,
+            &identity,
+            &namespace(),
+            &mut refs,
+        )
+        .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["code"], TerminalCode::InvalidInput.as_str(), "{body}");
+        assert_eq!(
+            body["message"].as_str().expect("message"),
+            "SZ-42 is not a proforma (tipus SZ)"
+        );
+        assert_eq!(
+            body.get("order"),
+            None,
+            "about the caller's request, not a document: {body}"
+        );
+
+        assert_eq!(refs.proforma, None, "nothing recorded on a refusal");
+        assert!(refs.our_numbers.is_empty());
+    }
+
+    /// Step 2 under `{number}`, szamlazz.hu answering the verify with a code:
+    /// another code is `unavailable` carrying it, a credential code is
+    /// `credentials_rejected`; both about the document being created.
+    #[test]
+    fn an_answered_code_on_the_proforma_verify_is_a_fault_about_the_create() {
+        let identity = invoice_identity();
+        let mut refs = Refs::default();
+
+        let fault = decide_proforma_by_number(
+            QueryOutcome::Api {
+                code: "57".to_owned(),
+                message: "Hibás XML.".to_owned(),
+            },
+            "D-1",
+            &ord_1(),
+            &identity,
+            &namespace(),
+            &mut refs,
+        )
+        .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["code"], TerminalCode::Unavailable.as_str(), "{body}");
+        assert_eq!(body["szamlazz_code"], "57", "{body}");
+        assert_eq!(body["order"], "ORD-1", "{body}");
+        assert_eq!(body["kind"], "invoice", "{body}");
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
+
+        let fault = decide_proforma_by_number(
+            QueryOutcome::CredentialsRejected {
+                code: "3".to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            },
+            "D-1",
+            &ord_1(),
+            &identity,
+            &namespace(),
+            &mut refs,
+        )
+        .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body["code"],
+            TerminalCode::CredentialsRejected.as_str(),
+            "{body}"
+        );
+        assert_eq!(body["szamlazz_code"], "3", "{body}");
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
+    }
+
+    // ----- correct_invoice: the base ---------------------------------------
+
+    /// The corrective's base, verified by number: it must be a live invoice
+    /// carrying this order's number. Another order's, or an order-less one,
+    /// is `conflict{not_managed}` naming it (checked first: a reversed
+    /// document of another order is still not this order's); a reversed one
+    /// of ours is `conflict{base_reversed}`; a live one of ours proceeds.
+    #[test]
+    fn a_correctives_base_must_be_a_live_invoice_of_this_order() {
+        let identity = Identity {
+            kind: IssuedKind::Corrective,
+            external_id: ExternalId::for_corrective(
+                &namespace(),
+                &ord_1(),
+                &"c-1".parse().expect("valid id"),
+            ),
+        };
+        let order = ord_1();
+
+        assert_eq!(
+            decide_base(&Doc::default().parse(), &order, "SZ-1", &identity),
+            None
+        );
+
+        for (label, base) in [
+            (
+                "another order's",
+                Doc {
+                    order: Some("ORD-2"),
+                    ..Doc::default()
+                },
+            ),
+            (
+                "order-less",
+                Doc {
+                    order: None,
+                    ..Doc::default()
+                },
+            ),
+            (
+                "another order's, reversed",
+                Doc {
+                    order: Some("ORD-2"),
+                    reversed: true,
+                    ..Doc::default()
+                },
+            ),
+        ] {
+            let response = decide_base(&base.parse(), &order, "SZ-1", &identity)
+                .unwrap_or_else(|| panic!("{label}: refused"));
+            assert_eq!(response.outcome, Outcome::Conflict, "{label}");
+            assert_eq!(
+                response.conflict_reason,
+                Some(ConflictReason::NotManaged),
+                "{label}"
+            );
+            assert_eq!(response.existing_number.as_deref(), Some("SZ-1"), "{label}");
+            assert_eq!(response.kind, IssuedKind::Corrective, "{label}");
+            assert_eq!(response.external_id, "acct:ORD-1:corrective:c-1", "{label}");
+        }
+
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::default()
+        }
+        .parse();
+        let response = decide_base(&reversed, &order, "SZ-1", &identity).expect("refused");
+        assert_eq!(response.conflict_reason, Some(ConflictReason::BaseReversed));
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+    }
+
+    // ----- step 4: the create step's own fault -----------------------------
+
+    /// Step 4, a create step whose run ended without a settled outcome
+    /// (the issue policy exhausted, 500, or the invocation cancelled, 409):
+    /// the `outcome_unknown` fault (500) naming how the run ended and the
+    /// last `Unconfirmed` display, telling the caller to retry with a new
+    /// `Idempotency-Key`, and about the document being created.
+    #[test]
+    fn an_unsettled_create_step_is_outcome_unknown_repeating_the_last_failure() {
+        let identity = invoice_identity();
+
+        let exhausted = TerminalError::new_with_code(
+            500,
+            "open code 55: signing; the re-query that would have settled it failed: HTTP 500",
+        );
+        let (status, body) = fault_body(create_outcome_unknown(&exhausted, &ord_1(), &identity));
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(
+            body["code"],
+            TerminalCode::OutcomeUnknown.as_str(),
+            "{body}"
+        );
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("(500)"),
+            "names how the run ended: {message}"
+        );
+        assert!(
+            message.contains("open code 55"),
+            "the last failure: {message}"
+        );
+        assert!(message.contains("HTTP 500"), "{message}");
+        assert!(
+            message.contains("retry with a new Idempotency-Key"),
+            "{message}"
+        );
+        assert_eq!(body["order"], "ORD-1", "{body}");
+        assert_eq!(body["kind"], "invoice", "{body}");
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
+        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+
+        let cancelled = TerminalError::new_with_code(409, "cancelled");
+        let (status, body) = fault_body(create_outcome_unknown(&cancelled, &ord_1(), &identity));
+        assert_eq!(status, 500, "still outcome_unknown: {body}");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("(409)"), "{message}");
+        assert!(message.contains("cancelled"), "{message}");
+    }
+
+    /// A create reply parsed the way the gateway parses it: the Számla Agent
+    /// crate's result type is `#[non_exhaustive]`, so the wire is the seam,
+    /// and the test states the answer szamlazz.hu gives. `preview` asks for
+    /// the PDF preview, the one create whose reply the agent crate lets
+    /// carry no number (the worker never asks for one).
+    fn creation_result(
+        preview: bool,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> szamlazz_agent::ops::invoice::InvoiceCreationResult {
+        use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+
+        let mut create = order()
+            .build(
+                IssuedKind::Invoice,
+                &sample_document(),
+                &ord_1(),
+                &ExternalId::new("acct:ORD-1:invoice"),
+                DocumentRefs::default(),
+            )
+            .expect("build");
+        create.header.preview_pdf = Some(preview);
+        create
+            .parse(&RawResponse::new(
+                headers.iter().copied(),
+                body.as_bytes().to_vec(),
+            ))
+            .expect("xmlszamlavalasz parses")
+    }
+
+    /// Step 5, the create step's `Issued`: szamlazz.hu issued the document,
+    /// and the response carries its number, totals and the buyer's account
+    /// URL, with no warning. A success szamlazz.hu answered with code 56 (the
+    /// invoice was issued, its notification not delivered) is `issued` all
+    /// the same with the `notification_delivery_failed` warning; the gateway
+    /// reports it with a number, and its totals as szamlazz.hu managed to
+    /// send them.
+    #[test]
+    fn an_issued_document_is_issued_with_the_notification_warning_when_56_said_so() {
+        let identity = invoice_identity();
+        let respond = |outcome: CreateOutcome| identity.respond_to(outcome, &namespace());
+
+        let issued = creation_result(
+            false,
+            &[("szlahu_id", "924307747")],
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>SZ-2</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg><vevoifiokurl>https://www.szamlazz.hu/szamla/fiok/example</vevoifiokurl></xmlszamlavalasz>"#,
+        );
+        assert!(!issued.notification_delivery_failed);
+        let response = respond(CreateOutcome::Issued(issued)).expect("data");
+        assert_eq!(response.outcome, Outcome::Issued);
+        assert_eq!(response.invoice_number.as_deref(), Some("SZ-2"));
+        assert_eq!(response.net_total, Some(dec!(1000)));
+        assert_eq!(response.gross_total, Some(dec!(1270)));
+        assert_eq!(response.outstanding, Some(dec!(1270)));
+        assert_eq!(
+            response.customer_account_url.as_deref(),
+            Some("https://www.szamlazz.hu/szamla/fiok/example")
+        );
+        assert!(response.warnings.is_empty(), "{:?}", response.warnings);
+        assert_eq!(response.external_id, "acct:ORD-1:invoice");
+
+        // Code 56 with a number: issued, notification not delivered.
+        let issued = creation_result(
+            false,
+            &[
+                ("szlahu_error_code", "56"),
+                ("szlahu_error", "notification failed"),
+                ("szlahu_szamlaszam", "SZ-3"),
+                ("szlahu_nettovegosszeg", "1000"),
+                ("szlahu_bruttovegosszeg", "1270"),
+                ("szlahu_kintlevoseg", "1270"),
+            ],
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>SZ-3</szamlaszam></xmlszamlavalasz>"#,
+        );
+        assert!(issued.notification_delivery_failed);
+        let response = respond(CreateOutcome::Issued(issued)).expect("data");
+        assert_eq!(response.outcome, Outcome::Issued, "issued, not rejected");
+        assert_eq!(response.invoice_number.as_deref(), Some("SZ-3"));
+        assert_eq!(response.gross_total, Some(dec!(1270)));
+        assert_eq!(response.warnings, [Warning::NotificationDeliveryFailed]);
+        assert_eq!(response.code, None, "56 is not a rejection code here");
+    }
+
+    /// Step 5, an `Issued` without a document number: the gateway reports
+    /// `Issued` only with a number (a success without one is re-queried and
+    /// `Unconfirmed` when nothing landed), so a bare result here is a gateway
+    /// bug, answered as the `outcome_unknown` fault (500) about the document,
+    /// never as `issued` without a number, and never a panic.
+    #[test]
+    fn an_issued_without_a_number_is_outcome_unknown() {
+        let identity = invoice_identity();
+
+        let preview = creation_result(
+            true,
+            &[],
+            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#,
+        );
+        assert_eq!(preview.invoice_number, None);
+        let fault = identity
+            .respond_to(CreateOutcome::Issued(preview), &namespace())
+            .expect_err("a fault");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(
+            body["code"],
+            TerminalCode::OutcomeUnknown.as_str(),
+            "{body}"
+        );
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("without a document number"), "{message}");
+        assert!(
+            message.contains("retry with a new Idempotency-Key"),
+            "{message}"
+        );
+    }
+
     /// Step 5: every settled create outcome as the caller's response, in
     /// particular the two the create step settles when its leading query or
     /// re-query finds something the lookup did not see: a document reversed
@@ -903,8 +1913,6 @@ mod tests {
     /// and the lookup's reversed document reported live is `conflict{live}`.
     #[test]
     fn a_settled_create_step_maps_onto_the_response() {
-        use crate::test_support::Doc;
-
         let namespace: Namespace = "acct".parse().expect("namespace");
         let order = OrderKey::parse("ORD-1").expect("order");
         let identity = Identity::of_kind(&namespace, &order, DocumentKind::Invoice);
@@ -972,9 +1980,8 @@ mod tests {
             message: "login".to_owned(),
         })
         .expect_err("a fault");
-        let error = TerminalError::from(fault);
-        assert_eq!(error.code(), 503);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], TerminalCode::CredentialsRejected.as_str());
 
         // The leading query's answers (#63): `unavailable` at once, the shape
@@ -985,9 +1992,8 @@ mod tests {
             message: "Hibás XML.".to_owned(),
         })
         .expect_err("a fault");
-        let error = TerminalError::from(fault);
-        assert_eq!(error.code(), 503);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], TerminalCode::Unavailable.as_str());
         assert_eq!(body["szamlazz_code"], "57");
         let message = body["message"].as_str().expect("message");
@@ -1001,9 +2007,8 @@ mod tests {
             message: "maintenance".to_owned(),
         })
         .expect_err("a fault");
-        let error = TerminalError::from(fault);
-        assert_eq!(error.code(), 503);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], TerminalCode::Unavailable.as_str());
         assert!(body.get("szamlazz_code").is_none(), "{body}");
         let message = body["message"].as_str().expect("message");

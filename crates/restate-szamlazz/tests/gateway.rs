@@ -1213,6 +1213,65 @@ fn created_without_a_number() -> ResponseTemplate {
     )
 }
 
+/// Code 56 with a number: szamlazz.hu issued `number` but could not deliver
+/// its notification. The error code in the headers and the body, the number
+/// and the totals in the headers: the shape the agent crate accepts;
+/// szamlazz.hu's own shape for 56 (header or body, with or without the
+/// number) is unverified, since the test account never produced the code.
+fn created_but_notification_failed(number: &str, net: &str, gross: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("szlahu_error_code", "56")
+        .insert_header("szlahu_error", "notification failed")
+        .insert_header("szlahu_szamlaszam", number)
+        .insert_header("szlahu_id", "924307747")
+        .insert_header("szlahu_nettovegosszeg", net)
+        .insert_header("szlahu_bruttovegosszeg", gross)
+        .insert_header("szlahu_kintlevoseg", gross)
+        .set_body_raw(
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>{number}</szamlaszam></xmlszamlavalasz>"#
+            ),
+            "application/xml",
+        )
+}
+
+/// Code 56 **with** a number is not an open code: szamlazz.hu issued the
+/// document and says which, so the step is `Issued` with
+/// `notification_delivery_failed` set, the number and the totals, after
+/// exactly one query and one send: no re-query, nothing unconfirmed. (Only
+/// 56 without a number is open, the case below.)
+#[tokio::test]
+async fn create_answered_56_with_a_number_is_issued_with_the_notification_flag() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created_but_notification_failed("SZ-2", "1000", "1270"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    match h.create(None).await {
+        Ok(CreateOutcome::Issued(issued)) => {
+            assert_eq!(number_of(&issued), Some("SZ-2"));
+            assert!(issued.notification_delivery_failed);
+            assert_eq!(issued.net_total, Some(dec!(1000)));
+            assert_eq!(issued.gross_total, Some(dec!(1270)));
+            assert_eq!(issued.outstanding, Some(dec!(1270)));
+            assert_eq!(issued.document_id, Some(924_307_747));
+        }
+        other => panic!("expected Issued, got {other:?}"),
+    }
+    assert_eq!(
+        h.bodies().await.len(),
+        2,
+        "the leading query, then the create; no re-query"
+    );
+}
+
 #[tokio::test]
 async fn create_with_an_open_outcome_re_queries_once_and_is_unconfirmed_when_nothing_landed() {
     let cases: [(&str, ResponseTemplate, Unconfirmed); 4] = [
