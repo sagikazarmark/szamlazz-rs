@@ -749,10 +749,11 @@ skipping.
 
 **Ports.** A server the harness starts binds ports chosen free at launch, never fixed ones: for the spawned binary
 a listener on port 0 for each of its ingress, admin and node ports (bound, read, released and passed through
-`RESTATE_*`), for the container docker-assigned host ports (`-p 0:8080`, read back with `docker port`). So two
-runs on one host (`cargo test -p restate-szamlazz --all-features --test e2e -- --ignored` twice, concurrently),
-another Restate on 8080/9070, or anything else on a port collide with nothing; the wiremock and the SDK endpoint
-take ephemeral ports likewise. A port chosen free and taken before the server bound it shows as the server
+`RESTATE_*`), for the container docker-assigned ports of the loopback (`-p 127.0.0.1:0:8080`, read back with
+`docker port`; the admin API has no authentication, so nothing is published beyond the loopback). So two runs on
+one host (`cargo test -p restate-szamlazz --all-features --test e2e -- --ignored` twice, concurrently), another
+Restate on 8080/9070, or anything else on a port collide with nothing; the wiremock and the SDK endpoint take
+ephemeral ports likewise. A port chosen free and taken before the server bound it shows as the server
 failing to start, which the harness reports at once with the ports it chose and the last lines of the server's
 log, instead of waiting out the 90 s health deadline. The start-up line names the ports of every server. A reused
 server's ports are whatever its URLs say.

@@ -164,9 +164,11 @@ pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
 /// The host ports of a server the harness started, chosen free at launch: a
 /// listener on port 0 for each of the spawned binary's (bound, read, released
 /// and passed through `RESTATE_*`), a docker-assigned host port for the
-/// container's (`-p 0:8080`, read back with `docker port`). Nothing here is
-/// fixed, so a second run on the host, another Restate or anything else on a
-/// port collides with nothing.
+/// container's (`-p 127.0.0.1:0:8080`, read back with `docker port`). Nothing
+/// here is fixed, so a second run on the host, another Restate or anything
+/// else on a port collides with nothing; and nothing is published beyond the
+/// loopback, where the harness connects: the admin API has no
+/// authentication, and a suite is no reason to offer it to the network.
 #[derive(Debug, Clone, Copy)]
 struct Ports {
     ingress: u16,
@@ -473,9 +475,9 @@ impl Restate {
     }
 
     /// A container of [`IMAGE`] with `spec`'s flags, its ingress and admin
-    /// ports published on docker-assigned host ports, under a name of this
-    /// run (the pid and the shape's name) and the label a stale one is found
-    /// by; the stale containers of earlier runs are removed first.
+    /// ports published on docker-assigned ports of the loopback, under a name
+    /// of this run (the pid and the shape's name) and the label a stale one
+    /// is found by; the stale containers of earlier runs are removed first.
     fn container(spec: &ServerSpec, endpoint_host: String) -> Self {
         remove_stale_containers();
         let name = format!("restate-szamlazz-e2e-{}-{}", std::process::id(), spec.name);
@@ -493,9 +495,9 @@ impl Restate {
             // a Linux daemon needs the alias to reach the endpoint.
             "--add-host=host.docker.internal:host-gateway".to_owned(),
             "-p".to_owned(),
-            "0:8080".to_owned(),
+            "127.0.0.1:0:8080".to_owned(),
             "-p".to_owned(),
-            "0:9070".to_owned(),
+            "127.0.0.1:0:9070".to_owned(),
         ];
         for flag in spec.flags {
             args.push("-e".to_owned());
@@ -638,8 +640,8 @@ impl Restate {
     }
 }
 
-/// The host port docker published `container_port` of `name` on: the first
-/// line of `docker port` (`0.0.0.0:32768`, then the IPv6 twin).
+/// The loopback port docker published `container_port` of `name` on: the
+/// `docker port` line (`127.0.0.1:32768`).
 fn published_port(name: &str, container_port: u16) -> u16 {
     let output = Command::new("docker")
         .args(["port", name, &container_port.to_string()])
