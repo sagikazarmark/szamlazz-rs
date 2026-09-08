@@ -21,7 +21,7 @@
 pub(crate) mod accounts;
 pub(crate) mod admin;
 pub(crate) mod gate;
-mod ingress;
+pub(crate) mod ingress;
 pub(crate) mod introspection;
 pub(crate) mod run_names;
 pub(crate) mod szamlazz;
@@ -37,7 +37,7 @@ use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, Payme
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
-use wiremock::MockServer;
+use wiremock::{MockServer, ResponseTemplate};
 
 use crate::harness::accounts::{
     MutableAccounts, ScriptedAccounts, multi_account_services, services,
@@ -47,8 +47,8 @@ use crate::harness::gate::{FEATURES, Restate};
 use crate::harness::ingress::Reply;
 use crate::harness::introspection::{Invocation, JournalEntry};
 use crate::harness::szamlazz::{
-    Doc, create_lands_but_reply_lost, external_id_query, holds, holds_after_misses,
-    loses_reply_once, not_found,
+    Doc, Sends, create_lands_but_reply_lost, create_lands_on_the_second_send, create_lands_slowly,
+    external_id_query, holds, holds_after_misses, loses_reply_once, not_found,
 };
 
 // ----- the harness's own HTTP client -----------------------------------------------
@@ -112,12 +112,19 @@ pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
 ///   `expect(1)`, and `doc` holds its external id from the moment the create
 ///   request is received; the transition is the create stub being matched,
 ///   not a query count. Code 7 on the external id before.
+/// - [`Harness::create_lands_slowly`]: the same transition at the create's
+///   receipt, but the create is answered `created` after a delay: the window
+///   a second caller or a cancellation arrives in while the first send's
+///   reply is in flight, opened to the scenario by the returned [`Sends`].
+/// - [`Harness::create_lands_on_the_second_send`]: the first create answered
+///   without landing (`szlahu_down`, a 500), the second landing: what a
+///   create step meets when it re-executes after an *Unconfirmed* send.
 /// - The raw builders (`number_query`, `order_query`, `external_id_query`,
 ///   `create`, `storno`), `expect(n)` and `up_to_n_times(n)`: a stub the
 ///   scenario asserts on (`expect`), a non-document answer (7, 500, an API
 ///   code) or an ordering-dependent shape stays explicit, byte for byte.
 ///
-/// The three document helpers are checked against wiremock alone by the
+/// The five document helpers are checked against wiremock alone by the
 /// non-ignored tests in [`szamlazz`].
 pub(crate) struct Harness {
     restate: Restate,
@@ -458,6 +465,61 @@ impl Harness {
         self.patch_invocation(invocation_id, "kill").await;
     }
 
+    /// Cancels an invocation (`PATCH /invocations/{id}/cancel`): the
+    /// cooperative stop. The server signals the running handler, whose next
+    /// awaited step ends with the SDK's 409; the handler answers as it sees
+    /// fit (a write step's 409 is `outcome_unknown`) and the invocation
+    /// completes with that answer. A kill ends it without one.
+    pub(crate) async fn cancel(&self, invocation_id: &str) {
+        self.patch_invocation(invocation_id, "cancel").await;
+    }
+
+    /// The one invocation in flight on Virtual Object `key`: its id, from
+    /// `sys_invocation`; panics on none or more than one. How a scenario
+    /// names an invocation the ingress has not answered yet (`call` returns
+    /// its id only with its answer): to cancel it, or to check that a retry
+    /// attached to it.
+    pub(crate) async fn in_flight_on(&self, key: &str) -> String {
+        let in_flight = self.in_flight_ids_on(key).await;
+        assert_eq!(
+            in_flight.len(),
+            1,
+            "one invocation in flight on {key}: {in_flight:?}"
+        );
+        in_flight[0].clone()
+    }
+
+    /// Waits until `sys_invocation` holds `count` invocations in flight on
+    /// Virtual Object `key` (accepted by the server, not completed): the
+    /// server-side moment a call made while the key is held is queued behind
+    /// it, which the ingress reports only with the call's answer. The ids.
+    pub(crate) async fn await_in_flight_on(&self, key: &str, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let in_flight = self.in_flight_ids_on(key).await;
+            if in_flight.len() >= count {
+                return in_flight;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{key} never had {count} invocation(s) in flight: {in_flight:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// The ids of the invocations on Virtual Object `key` the server holds and
+    /// has not completed.
+    async fn in_flight_ids_on(&self, key: &str) -> Vec<String> {
+        self.sql(&format!(
+            "SELECT id FROM sys_invocation WHERE target_service_key = '{key}' AND status <> 'completed' ORDER BY id"
+        ))
+        .await
+        .iter()
+        .map(|row| row["id"].as_str().expect("id").to_owned())
+        .collect()
+    }
+
     /// `PATCH /invocations/{id}/{action}` on the admin API, asserting success.
     async fn patch_invocation(&self, invocation_id: &str, action: &str) {
         let response = self
@@ -699,5 +761,23 @@ impl Harness {
     /// external id from that moment on: see [`create_lands_but_reply_lost`].
     pub(crate) async fn create_lands_but_reply_lost(&self, doc: &Doc<'_>) {
         create_lands_but_reply_lost(&self.mock, doc).await;
+    }
+
+    /// The create lands at once but its reply takes `delay`, and `doc` is the
+    /// holder of its external id from the request's receipt: see
+    /// [`create_lands_slowly`]. The [`Sends`] signals the receipt.
+    pub(crate) async fn create_lands_slowly(&self, doc: &Doc<'_>, delay: Duration) -> Sends {
+        create_lands_slowly(&self.mock, doc, delay).await
+    }
+
+    /// The first create is answered `first` without landing, the second lands
+    /// and `doc` is the holder from then on: see
+    /// [`create_lands_on_the_second_send`]. The [`Sends`] counts both.
+    pub(crate) async fn create_lands_on_the_second_send(
+        &self,
+        doc: &Doc<'_>,
+        first: ResponseTemplate,
+    ) -> Sends {
+        create_lands_on_the_second_send(&self.mock, doc, first).await
     }
 }

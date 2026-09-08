@@ -6,7 +6,9 @@ read from that journaled `Account` (below); amended by #47, every journaled type
 by fixtures (the *Journal compatibility* section); amended by #70; widening a field to `Option<T>` is the one
 retype the rule admits (the *Widening* paragraph); amended by #127; every journaled type is crate-owned, a
 `szamlazz_agent` response type is never journaled directly (the *Crate-owned projections* section), the one
-deliberate break of the pre-go-live window.
+deliberate break of the pre-go-live window; amended by #125; the registry is complete by mechanism, and after
+go-live an archived fixture of a type still journaled is never deleted: a shape that must break is a new type and
+the old one retired with its directory (the *Completeness by mechanism, and the archive rule* section).
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,
@@ -201,9 +203,10 @@ first.
 **Consequences.** An upgrade with in-flight invocations is safe by construction, and the endpoint README's
 rolling-update guidance says so with this section as the reason: the drain-first roll is still recommended to
 avoid stalling in-flight orders for a retry interval, but it is not what keeps them alive. A change that *must*
-break a journaled shape is a deliberate act: delete the archived fixture, and drain before deploying (the
-flag-day script) so that nothing is in flight to be killed. `Journaled` is `pub(super)` to `service`; a new run
-site outside `service::support` would have to bypass the helpers to journal an unpinned type.
+break a journaled shape is a deliberate act: drain before deploying (the flag-day script) so that nothing is in
+flight to be killed, and, once a production deployment exists, retire the type rather than delete its archive
+(the #125 amendment below). `Journaled` is `pub(super)` to `service` and sealed (#125); a new run site outside
+`service::support` would have to bypass the helpers to journal an unpinned type.
 
 **Widening (#70).** One retype is additive in the sense the rule cares about: a field `T` becoming `Option<T>`,
 when every value the old type ever wrote decodes to `Some` and re-encodes byte for byte. `InvoiceInfo::test`
@@ -278,3 +281,28 @@ projection with a serde default (additive), read from the agent type in the `Fro
 renames costs one line there. The journal fixtures shrink from ~170 lines per document to ~35, and pin what an
 entry holds field by field rather than through the agent crate's layout. `InvoiceDocumentExt` is gone; the design
 doc's and CONTEXT.md's references to it name `FoundDocument`'s methods instead.
+
+## Amended (#125): completeness by mechanism, and the archive rule
+
+Two parts of the enforcement above were discipline. A new `impl Journaled` was caught only if its author also added its pins to `registry()` (the unclaimed-directory
+check runs fixture directory → registry, never implementors → registry), and a new enum variant compiled once
+*named* in the exhaustive match, nothing requiring a *sample* for it. Both are mechanism now: the trait is
+sealed and implemented through the `journaled!` list beside it, the one place it can be implemented, which also
+yields the list of implementors the registry test holds `registry()` to (a type journaled without pins fails by
+name); and each enum's pins name its variants through `variants!`, whose list `pins` checks the samples against
+(a variant that compiles but has no fixture fails by name). What no mechanism can decide is the **archive rule**:
+an archived shape (`<variant>.<n>.json`) is the only record of a shape a running deployment may have journaled,
+and the generator cannot tell a legitimate deletion from an illegitimate one. `5ea51f9` (2026-09-07) regenerated
+`resolution/account.json` without `mode` and `supplier_id` and committed no `account.1.json`, a removal admitted
+because nothing had been deployed to replay the old shape and recorded in the commit message only; after go-live
+the same commit would kill every order in flight across the upgrade. So: once the first production deployment
+exists, an archive of a type the code still journals is never deleted and a fixture is never regenerated without
+its archive; before that, a regeneration without an archive is a judgement call recorded in the commit message.
+The one way a directory goes is retirement: a shape that must change beyond what additive allows is a new
+journaled type under a new directory (and a new run-name row), and the old type is dropped from the `journaled!`
+list with its directory, archives included, in the same commit (the unclaimed-directory check demands it). Safe
+because that deploy drains first: once nothing of the previous deployment is in flight, no invocation can replay
+the retired type, and a completed invocation's journal is read by the UI, never replayed. The #47 amendment's
+*Consequences* ("delete the archived fixture") and the #127 amendment's "a break after go-live is a deleted archive"
+are superseded by this. The rule is stated where the generator's instructions are (`service::journal`'s module
+docs) and in CONTEXT.md's *Journaled type* entry.
