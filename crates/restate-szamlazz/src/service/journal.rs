@@ -305,8 +305,8 @@ fn query_outcome_pins() -> Pins {
         &variants!(QueryOutcome {
             Found(_) => "found",
             NotFound => "not-found",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -333,8 +333,8 @@ fn lookup_outcome_pins() -> Pins {
             Reversed { .. } => "reversed",
             Collision(_) => "collision",
             Foreign(_) => "foreign",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -369,9 +369,9 @@ fn create_outcome_pins() -> Pins {
             Reconciled(_) => "reconciled",
             Collision(_) => "collision",
             DuplicateOrderNumber { .. } => "duplicate-order-number",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
             Unavailable { .. } => "unavailable",
         }),
     )
@@ -392,8 +392,8 @@ fn storno_lookup_outcome_pins() -> Pins {
         &variants!(StornoLookupOutcome {
             Absent => "absent",
             AlreadyReversed { .. } => "already-reversed",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -422,9 +422,9 @@ fn storno_outcome_pins() -> Pins {
             Reversed(_) => "reversed",
             AlreadyReversed { .. } => "already-reversed",
             NotStornoable => "not-stornoable",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
             Unavailable { .. } => "unavailable",
         }),
     )
@@ -444,8 +444,8 @@ fn delete_outcome_pins() -> Pins {
         &variants!(DeleteOutcome {
             Deleted => "deleted",
             AlreadyGone => "already-gone",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
             Transport(_) => "transport",
         }),
     )
@@ -469,8 +469,8 @@ fn set_payments_outcome_pins() -> Pins {
         ],
         &variants!(SetPaymentsOutcome {
             Done { .. } => "done",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
             Transport(_) => "transport",
         }),
     )
@@ -486,7 +486,7 @@ fn probe_outcome_pins() -> Pins {
         ],
         &variants!(ProbeOutcome {
             Accepted => "accepted",
-            CredentialsRejected { .. } => "credentials-rejected",
+            CredentialsRejected(_) => "credentials-rejected",
         }),
     )
 }
@@ -502,8 +502,8 @@ fn taxpayer_outcome_pins() -> Pins {
         ],
         &variants!(TaxpayerOutcome {
             Found(_) => "found",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -1357,8 +1357,8 @@ mod harness_tests {
             &variants!(QueryOutcome {
                 Found(_) => "found",
                 NotFound => "not-found",
-                CredentialsRejected { .. } => "credentials-rejected",
-                Api { .. } => "api",
+                CredentialsRejected(_) => "credentials-rejected",
+                Api(_) => "api",
             }),
         );
     }

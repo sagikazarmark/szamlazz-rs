@@ -740,7 +740,7 @@ endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
 All three policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
 server would spend the handler's `invocation_retry_policy` instead. Durations are `"90s"`, `"2m"`, `"1h"` or a bare
 non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
-invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and `factor ≥ 1` on all
+invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and a finite `factor ≥ 1` on all
 three) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
 `REQUEST_TIMEOUT` (60 s) plus a 30 s margin, a create or storno step re-executed sooner would query for the cut execution's
 send while it may still be in flight (the ~90 s rule of ADR 0002 and the behaviour notes, in code since #61; the read

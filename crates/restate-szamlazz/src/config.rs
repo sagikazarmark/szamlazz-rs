@@ -231,9 +231,9 @@ pub enum WorkerConfigError {
         /// The configured maximum delay.
         max: Duration,
     },
-    /// A policy's `factor` is below 1 (the delay would shrink) or not a
-    /// number.
-    #[error("{policy}.factor ({factor}) must be a number of at least 1")]
+    /// A policy's `factor` is below 1 (the delay would shrink), or not a
+    /// finite number (`nan`, `inf`; TOML and YAML accept both as floats).
+    #[error("{policy}.factor ({factor}) must be a finite number of at least 1")]
     InvalidFactor {
         /// The policy.
         policy: Policy,
@@ -496,7 +496,8 @@ impl<T: Table> RetryPolicyConfig<T> {
                 max: self.max_delay,
             });
         }
-        if self.factor.is_nan() || self.factor < 1.0 {
+        // `inf` is a float to TOML and YAML: finite, and at least 1.
+        if !self.factor.is_finite() || self.factor < 1.0 {
             return Err(WorkerConfigError::InvalidFactor {
                 policy: T::POLICY,
                 factor: self.factor,
@@ -984,7 +985,73 @@ mod tests {
                 "{table}"
             );
             assert_eq!(verdict(config(json!({"factor": 1.0}))), Ok(()), "{table}");
+            assert_eq!(
+                verdict(config(json!({"factor": 0.5})))
+                    .expect_err("error")
+                    .to_string(),
+                format!("{table}.factor (0.5) must be a finite number of at least 1")
+            );
         }
+    }
+
+    /// `inf` is a float to TOML (`factor = inf`) and is at least 1, so the
+    /// order check alone would pass it on to Restate as a non-finite
+    /// exponentiation factor; it is refused as not finite, like `nan`. JSON
+    /// cannot write either, so the check is exercised on the struct.
+    #[test]
+    fn a_non_finite_factor_is_refused_on_every_table() {
+        for non_finite in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let config = WorkerConfig {
+                issue: IssueConfig {
+                    factor: non_finite,
+                    ..IssueConfig::default()
+                },
+                read: ReadConfig {
+                    factor: non_finite,
+                    ..ReadConfig::default()
+                },
+                resolve: ResolveConfig {
+                    factor: non_finite,
+                    ..ResolveConfig::default()
+                },
+                ..WorkerConfig::new("acct".parse().expect("namespace"))
+            };
+            let error = config
+                .validate()
+                .expect_err("a non-finite factor is refused");
+            assert!(
+                matches!(
+                    error,
+                    WorkerConfigError::InvalidFactor {
+                        policy: Policy::Issue,
+                        factor
+                    } if factor.is_nan() == non_finite.is_nan()
+                ),
+                "{non_finite}: {error:?}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be a finite number of at least 1"),
+                "{error}"
+            );
+        }
+        // The check is per table: a finite issue factor and an infinite read
+        // one is the read table's error.
+        let config = WorkerConfig {
+            read: ReadConfig {
+                factor: f32::INFINITY,
+                ..ReadConfig::default()
+            },
+            ..WorkerConfig::new("acct".parse().expect("namespace"))
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(WorkerConfigError::InvalidFactor {
+                policy: Policy::Read,
+                ..
+            })
+        ));
     }
 
     /// `issue.initial_delay` is floored at [`IssueConfig::MIN_INITIAL_DELAY`],

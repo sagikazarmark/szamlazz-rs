@@ -305,7 +305,7 @@ accepted and queryable) because its parts are bounded (namespace 16, order key, 
   `account` step, by default with no attempt cap, `1s` → `10s`, bounded by `1m`.
 
 Each policy's `run_retry_policy()` is the `RunRetryPolicy` its steps run under. `validate()` checks the
-cross-field invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay`, `factor ≥ 1`) and one floor:
+cross-field invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay`, a finite `factor ≥ 1`) and one floor:
 `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported `REQUEST_TIMEOUT`
 (60 s) plus a 30 s margin (90 s), because a create or storno step re-executed sooner would re-check while its send
 may still be in flight; the error names the rule. It yields the `ValidatedWorkerConfig` that `Order::from_parts`

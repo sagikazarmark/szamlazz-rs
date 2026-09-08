@@ -102,8 +102,11 @@ impl Account {
     }
 }
 
-/// Document defaults; [`DocumentOverrides`](crate::contract::DocumentOverrides)
-/// may change the first seven per call.
+/// Document defaults. [`DocumentOverrides`](crate::contract::DocumentOverrides)
+/// may change `e_invoice`, `language`, `currency`, `template`, `send_email`
+/// and `number_prefix` per call, and `exchange_rate_bank` through its
+/// `exchange_rate.bank`; `extra_logo`, `aggregator` and `guardian` are the
+/// account's alone.
 ///
 /// Journaled inside the [`Account`], so
 /// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
