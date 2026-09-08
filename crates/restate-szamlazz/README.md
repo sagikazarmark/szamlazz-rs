@@ -636,7 +636,15 @@ writes missing fixtures and archives a differing one beside the new shape. Revie
 Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on upgrade. The
 twelve `<variant>.1.json` archives of the pre-#127 document outcomes are the one deliberate break, of the pre-go-live
 window (ADR 0005, #127 amendment): `DELIBERATE_BREAKS` lists them, and the compatibility test asserts each still
-fails to replay.
+fails to replay. **Once the first production deployment exists, never delete an archived shape
+(`<variant>.<n>.json`) and never regenerate a fixture without its archive**: the archive is the only record of a
+shape a running deployment may have journaled, and no test can tell a legitimate deletion from an illegitimate one
+(the rule and its pre-go-live exceptions are in the `service::journal` module docs).
+
+The registry of pinned types is complete by mechanism: the `Journaled` trait is sealed and implemented through one
+`journaled!` list beside it, which the registry test holds the pins to (a type journaled without pins fails by
+name), and each enum's pins name its variants through `variants!`, whose list the pins check the samples against
+(a variant that compiles but has no fixture fails by name).
 
 The same module's leak guard builds every journaled type around an account whose agent key is a sentinel (the
 `account` entry through the static resolver, the two `Transport` write outcomes through a gateway opened with the
@@ -673,10 +681,20 @@ for szamlazz.hu, in two phases on one server.
   and zero szamlazz.hu requests; a create under an untrimmed key (a `%20` before or after the order number)
   answered 400 `invalid_input` naming the rule likewise;
 - an exhausted create step answering a structured `outcome_unknown` within the run policy's delays with the run's
-  retries visible on `sys_invocation` while it is in flight; a lookup whose reply is lost once retried under the
-  read policy and completing `issued` in one invocation with exactly one create on the wire; a lookup that never
-  answers as a structured `unavailable` naming the order, kind and external id with zero creates; `get`
-  completing after one of its reads is retried;
+  retries visible on `sys_invocation` while it is in flight; a cancellation (`PATCH /invocations/{id}/cancel`)
+  while the create's reply is in flight answered the same `outcome_unknown` naming the SDK's 409, the completion
+  releasing the order key and the next call finding the document that landed; a lookup whose reply is lost once
+  retried under the read policy and completing `issued` in one invocation with exactly one create on the wire; a
+  lookup that never answers as a structured `unavailable` naming the order, kind and external id with zero
+  creates; `get` completing after one of its reads is retried;
+- the order-key lock, same key, same scope (#125): two `create_invoice` with distinct `Idempotency-Key`s, the
+  second started the moment szamlazz.hu has received the first's create and three seconds before it answers →
+  `issued` + `already_issued`, one create on the wire, the second answered after the first with its runs ending
+  at `lookup-invoice`; the same with the second call arriving in the first's create-step `initial_delay` after
+  a `szlahu_down` send (two sends, both the first call's; that the second call was sent before szamlazz.hu
+  received the second create is asserted); and the **same** `Idempotency-Key` sent while the first invocation
+  is in flight attaching to it (sent before the first was answered, answered no earlier: one invocation id on
+  both replies, one invocation on the order, one create);
 - a scoped call answered `unknown_account` with zero szamlazz.hu requests; `check_account` unscoped answering the
   account with `credentials: ok` after one sentinel query (and `rejected` as data on code 3); a purged invocation
   querying szamlazz.hu again; a flaky resolver retried under the resolve policy; a failing credential store as a

@@ -1,8 +1,10 @@
 //! The issue and read policies at the two durable steps of issuing, driven
 //! through `create_invoice`: an exhausted create step as a structured
-//! `outcome_unknown` and the next call's `already_issued`, a flaky and an
-//! exhausted lookup read, and a szamlazz.hu code answered to the create
-//! step's leading query or to the lookup's hint (#63).
+//! `outcome_unknown` and the next call's `already_issued`, a cancellation
+//! while the create's reply is in flight as the same fault (the other `Err` a
+//! write run can end with), a flaky and an exhausted lookup read, and a
+//! szamlazz.hu code answered to the create step's leading query or to the
+//! lookup's hint (#63).
 
 use std::time::{Duration, Instant};
 
@@ -173,6 +175,121 @@ pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issue
     assert!(h.create_bodies().await.is_empty(), "nothing sent");
     eprintln!(
         "(xi-a) after outcome_unknown: the same key replays the fault; a new key → already_issued from the lookup, nothing sent: pass"
+    );
+}
+
+/// (xi-a') the other `Err` a write run can end with: a **cancellation**
+/// (`PATCH /invocations/{id}/cancel`, the SDK's 409) while the create step is
+/// mid-send is `outcome_unknown` like an exhausted policy (#142, #125). The
+/// send is delayed by szamlazz.hu; the cancel arrives while the reply is in
+/// flight; the SDK does not interrupt the closure, so the step's own send
+/// completes, and the cancel is what the step's result await sees. The
+/// invocation completes with the fault (never `issued`, never a kill), the
+/// order key is released by that completion, and the next call with a new key
+/// finds the document that landed and answers `already_issued` from its lookup
+/// with nothing sent. The cancelled invocation's runs are the full create
+/// path (the step's command was journaled before the cancel arrived), so no
+/// `RUN_NAMES` row is added: a cancellation anywhere on the path leaves a
+/// prefix, which the pin admits.
+pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-L4", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-L4")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    h.create_lands_slowly(
+        &Doc {
+            external_id: Some("acct:E2E-L4:invoice"),
+            ..Doc::new("SZ-L4", "SZ", "E2E-L4")
+        },
+        Duration::from_secs(4),
+    )
+    .await;
+
+    let body = create_body(dec!(1000), false);
+    let started = Instant::now();
+    let (reply, cancelled) = tokio::join!(
+        h.call("E2E-L4", "create_invoice", &body, "e2e-l4-k1"),
+        async {
+            // szamlazz.hu has the create; its reply is four seconds away.
+            h.wait_for_creates(1).await;
+            let in_flight = h.in_flight_on("E2E-L4").await;
+            h.cancel(&in_flight).await;
+            in_flight
+        },
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(
+        reply.invocation_id(),
+        cancelled,
+        "the cancelled invocation answered"
+    );
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-L4"));
+    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-L4:invoice"));
+    assert!(
+        fault.message.contains("(409)") && fault.message.contains("cancelled"),
+        "the fault names how the run ended: {fault:?}"
+    );
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "answered when the send's reply came, not after a handler retry: {elapsed:?}"
+    );
+    let invocation = h.invocation(&cancelled).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("outcome_unknown")),
+        "the completion is the fault, not a kill: {invocation:?}"
+    );
+    assert_eq!(
+        h.runs(&cancelled).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ],
+        "the create step's command was journaled; the cancel ended its await"
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "the one send that landed");
+
+    // The key is released by the completion: the next call runs at once and
+    // finds what landed.
+    let started = Instant::now();
+    let next = h.call("E2E-L4", "create_invoice", &body, "e2e-l4-k2").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the key was released by the cancelled invocation's completion"
+    );
+    assert_eq!(next.status, 200, "{}", next.body);
+    assert_eq!(next.body["outcome"], "already_issued", "{}", next.body);
+    assert_eq!(next.body["invoice_number"], "SZ-L4");
+    assert_eq!(
+        h.runs(next.invocation_id())
+            .await
+            .last()
+            .map(String::as_str),
+        Some("lookup-invoice"),
+        "the next call answered from its lookup"
+    );
+    assert_eq!(h.create_bodies().await.len(), 1, "nothing more was sent");
+    eprintln!(
+        "(xi-a') a cancellation while the create's reply is in flight → outcome_unknown (409 named), the key released, the next call → already_issued: pass"
     );
 }
 

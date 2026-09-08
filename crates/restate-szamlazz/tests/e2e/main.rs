@@ -26,13 +26,14 @@
 //! other module is one handler family's scenarios: the creates
 //! ([`create_invoice`], [`create_proforma`], [`create_prepayment`],
 //! [`create_final`], [`correct_invoice`]), [`storno`] and [`delete_proforma`],
-//! [`get`], the issue and read policies at the two steps of issuing
-//! ([`policies`]), the `Szamlazz.Agent` reads and writes ([`agent_reads`],
-//! [`agent_writes`]), the contract's refusals ([`faults`]), the prologue's
-//! account steps ([`prologue`]), the flag day and scope isolation
-//! ([`multi_account`]) and the run-wide pins ([`pins`]). A scenario is a
-//! `pub(crate) async fn` taking the harness; a family file is where a new
-//! scenario of that handler goes.
+//! [`get`], the issue and read policies at the two steps of issuing, and a
+//! cancellation mid-send ([`policies`]), the order-key lock and the in-flight
+//! `Idempotency-Key` under one scope ([`concurrency`]), the `Szamlazz.Agent`
+//! reads and writes ([`agent_reads`], [`agent_writes`]), the contract's
+//! refusals ([`faults`]), the prologue's account steps ([`prologue`]), the
+//! flag day and scope isolation ([`multi_account`]) and the run-wide pins
+//! ([`pins`]). A scenario is a `pub(crate) async fn` taking the harness; a
+//! family file is where a new scenario of that handler goes.
 //!
 //! The main run has two phases on one Restate server. The first registers a
 //! **single-account** deployment (the static resolver's `[account]` behind a
@@ -69,6 +70,7 @@ mod harness;
 
 mod agent_reads;
 mod agent_writes;
+mod concurrency;
 mod correct_invoice;
 mod create_final;
 mod create_invoice;
@@ -128,8 +130,12 @@ async fn e2e_order_protocol() {
     faults::a_malformed_body_is_a_structured_invalid_input(&h).await;
     faults::an_untrimmed_order_key_is_refused(&h).await;
     faults::bounded_inputs_are_refused_and_disturb_no_other_invocation(&h).await;
+    concurrency::same_key_same_scope_concurrent_creates_issue_once(&h).await;
+    concurrency::same_key_same_scope_second_call_in_the_first_calls_delay(&h).await;
+    concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation(&h).await;
     policies::exhausted_create_step_is_a_structured_outcome_unknown(&h).await;
     policies::after_an_outcome_unknown_the_next_call_answers_already_issued(&h).await;
+    policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key(&h).await;
     policies::flaky_lookup_read_is_retried_by_the_read_policy(&h).await;
     policies::exhausted_lookup_read_is_a_structured_unavailable(&h).await;
     policies::answered_code_on_the_create_leading_query_is_an_immediate_unavailable(&h).await;

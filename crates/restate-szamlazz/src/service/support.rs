@@ -30,20 +30,57 @@ use crate::identity::{ExternalId, OrderKey};
 /// The promise is checked by the fixtures under `tests/journal/<type>/`
 /// (`service::journal`), one per variant: a new implementor is pinned there
 /// before it is journaled, and a new variant of one of these enums fails to
-/// compile until its sample is listed.
-pub(super) trait Journaled: Serialize + DeserializeOwned {}
+/// compile until it is named in the pins' `variants!` list, and fails the
+/// generator by name until it has a sample.
+///
+/// Implemented through [`journaled!`] only: the trait is sealed (its
+/// supertrait lives in a private module, so nothing outside this file can
+/// implement it), and the macro also exposes the list of implementors as
+/// [`journaled_types`], so `service::journal`'s registry is checked against
+/// the trait's implementors rather than trusted to list them: a type
+/// journaled without pins fails that test.
+pub(super) trait Journaled: sealed::Sealed + Serialize + DeserializeOwned {}
 
-impl Journaled for Namespace {}
-impl Journaled for Resolution {}
-impl Journaled for QueryOutcome {}
-impl Journaled for LookupOutcome {}
-impl Journaled for CreateOutcome {}
-impl Journaled for StornoLookupOutcome {}
-impl Journaled for GatewayStornoOutcome {}
-impl Journaled for DeleteOutcome {}
-impl Journaled for SetPaymentsOutcome {}
-impl Journaled for ProbeOutcome {}
-impl Journaled for TaxpayerOutcome {}
+/// The seal on [`Journaled`]: a supertrait only this file can implement, so
+/// the `journaled!` list is the one place a type becomes journalable.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Implements [`Journaled`] (and its seal) for each listed type and writes
+/// their names into [`journaled_types`]. The one place the trait is
+/// implemented.
+macro_rules! journaled {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl sealed::Sealed for $ty {}
+            impl Journaled for $ty {}
+        )+
+
+        /// The names of every [`Journaled`] implementor (the `journaled!`
+        /// list), as [`std::any::type_name`] writes them, so an alias
+        /// (`GatewayStornoOutcome`) names its type: what `service::journal`'s
+        /// registry is checked against.
+        #[cfg(test)]
+        pub(super) fn journaled_types() -> Vec<&'static str> {
+            vec![$(::std::any::type_name::<$ty>()),+]
+        }
+    };
+}
+
+journaled!(
+    Namespace,
+    Resolution,
+    QueryOutcome,
+    LookupOutcome,
+    CreateOutcome,
+    StornoLookupOutcome,
+    GatewayStornoOutcome,
+    DeleteOutcome,
+    SetPaymentsOutcome,
+    ProbeOutcome,
+    TaxpayerOutcome,
+);
 
 /// A fault raised as a `TerminalError`: never a domain outcome.
 ///
