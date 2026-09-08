@@ -597,8 +597,8 @@ consequences (nothing journaled, nothing sent), by the handler's own check rathe
 a request **the operation cannot take**: `options.proforma` on any kind but `create_invoice`, a `{number}` proforma
 link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3), a sixth credit entry on
 `set_payments` (the Számla Agent wire contract takes five, so the gateway refuses it before anything is sent, the
-`request` pseudo-code of its `Rejected` outcome, which the handler maps here rather than to `szamlazz_error`, since
-szamlazz.hu answered nothing). These are raised after the prologue, by the handler's own validation or the gateway's.
+`RejectionCode::Request` of its `Rejected` outcome's `Rejection`, serialised as the `request` pseudo-code, which the
+handler maps here rather than to `szamlazz_error`, since szamlazz.hu answered nothing). These are raised after the prologue, by the handler's own validation or the gateway's.
 
 `not_found`: the request names a document **by number** that szamlazz.hu does not know, code 7 on
 `Szamlazz.Agent.query`'s selector, on the invoice of `Szamlazz.Agent.storno` or `Szamlazz.Order.storno_invoice`, on the
@@ -690,12 +690,19 @@ carries the same rules for an embedder. The rules:
 
 ## 9. Configuration (deployment-constant; never in payloads)
 
-Two configuration types, both serde-`Deserialize` only (the host chooses the format). `WorkerConfig` is the
-deployment-level part the services hold, the namespace and the three run retry policies; `StaticConfig` is the static resolver's account, and everything
-account-shaped (credentials, endpoint, document defaults, seller block) lives on the `Account`
-it produces (read by the services through `Gateway::account()`). The endpoint binary reads one file with both side by
-side: its own layout type has one explicit field per top-level key and assembles the two library types from them,
-so a parse error keeps the key path and the source figment attaches (a `#[serde(flatten)]` would drop both):
+Two configuration types, both serde-`Deserialize` only (the host chooses the format) and closed at every level
+(`#[serde(deny_unknown_fields)]`). `WorkerConfig` is the deployment-level part the services hold, the namespace
+(`identity::Namespace`) and the three run retry policies, one `RetryPolicyConfig<T: Table>` each (`IssueConfig`,
+`ReadConfig`, `ResolveConfig` are its three instantiations; the table names the policy in an error and carries its
+defaults; `max_attempts` is optional on every table, unset by default on `[resolve]`); `WorkerConfig::validate`
+yields the `ValidatedWorkerConfig` the services are built from, the one constructor a deployment has (#128).
+`StaticConfig` is the static resolver's account, read through closed input types (`StaticAccount`, `StaticDefaults`,
+`StaticSeller`, `StaticSellerEmail`) distinct from the journaled value types they are built into
+(`account::{Defaults, SellerConfig, SellerEmailConfig}`, permissive for replay), and everything account-shaped
+(credentials, endpoint, document defaults, seller block) lives on the `Account` it produces (read by the services
+through `Gateway::account()`). The endpoint binary reads one file with both side by side: its own layout type has one
+explicit field per top-level key and assembles the two library types from them, so a parse error keeps the key path
+and the source figment attaches (a `#[serde(flatten)]` would drop both, and admits no `deny_unknown_fields`):
 
 ```toml
 identity_keys = ["publickeyv1_…"]   # the Restate server's request identity public keys (§10); `[]` written out is the local-development opt-out, the key unmentioned a start-up warn
@@ -715,7 +722,7 @@ factor = 2.0
 max_delay = "60s"
 max_duration = "5m"           # the hard bound; a szamlazz.hu outage is tolerated for this long, not for the handlers' attempts
 
-[resolve]    # the resolve policy: the run retry policy of the prologue's `account` step; no attempt cap; the duration is the bound
+[resolve]    # the resolve policy: the run retry policy of the prologue's `account` step; max_attempts unset by default: the duration is the bound
 initial_delay = "1s"
 factor = 2.0
 max_delay = "10s"
@@ -899,7 +906,7 @@ show: the durable sequence, replay, the per-key lock and the journal.
   before their class; 71/152 the duplicate; seven `Rejected`-class codes and 7 as `Rejected`; 1, 55, 56 and an
   unknown code as `Unknown` through the arm a class the agent
   crate adds later falls into; `szlahu_down` as `Unavailable`; a request the wire contract refused as `Rejected`
-  under the `request` pseudo-code; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
+  under `RejectionCode::Request`; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
   credential code and another code are answers, `szlahu_down` and a transport failure `Unanswered`) with the
   `outcome` fold every read fn applies, and the send rule of the two write steps as a function of what the leading
   or re-query saw against the number the lookup saw reversed: `settle_create` (nothing, or exactly the lookup's

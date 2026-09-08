@@ -30,10 +30,10 @@ use crate::contract::{
     StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    FoundDocument, ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome, TaxpayerOutcome,
+    FoundDocument, ProbeOutcome, QueryOutcome, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer,
+    TaxpayerOutcome,
 };
-use crate::identity::ExternalId;
-use crate::identity::Namespace;
+use crate::identity::{ExternalId, Namespace};
 
 /// The prefix `query_taxpayer` asks NAV about, or the `invalid_input` fault
 /// for a tax number in neither accepted form. Decided before the prologue:
@@ -59,9 +59,10 @@ pub(super) fn taxpayer_step(prefix: &TaxpayerPrefix) -> String {
 pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
     match outcome {
         ProbeOutcome::Accepted => CredentialsCheck::Ok,
-        ProbeOutcome::CredentialsRejected { code, message } => {
-            CredentialsCheck::Rejected { code, message }
-        }
+        ProbeOutcome::CredentialsRejected(answer) => CredentialsCheck::Rejected {
+            code: answer.code,
+            message: answer.message,
+        },
     }
 }
 
@@ -90,10 +91,10 @@ fn query_response(outcome: QueryOutcome, namespace: &Namespace) -> Result<QueryR
         QueryOutcome::NotFound => Err(Fault::not_found(
             "szamlazz.hu does not know the document (code 7)",
         )),
-        QueryOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
-        QueryOutcome::Api { code, message } => Err(Fault::szamlazz_error(code, message)),
+        QueryOutcome::Api(answer) => Err(Fault::szamlazz_error(answer)),
     }
 }
 
@@ -107,17 +108,17 @@ fn taxpayer_response(
 ) -> Result<QueryTaxpayerResponse, Fault> {
     match outcome {
         TaxpayerOutcome::Found(taxpayer) => Ok(taxpayer),
-        TaxpayerOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        TaxpayerOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
-        TaxpayerOutcome::Api { code, message } => Err(Fault::szamlazz_error(code, message)),
+        TaxpayerOutcome::Api(answer) => Err(Fault::szamlazz_error(answer)),
     }
 }
 
 /// What `set_payments` answers from what its one step settled: the totals on
 /// success; a rejection that never reached szamlazz.hu (the wire contract
 /// takes at most five entries, and a replacing request with none would clear
-/// the invoice's payments, [`REQUEST_CODE`]) as `invalid_input`, the
+/// the invoice's payments, [`RejectionCode::Request`]) as `invalid_input`, the
 /// caller's request; szamlazz.hu refusing the entries passed through as
 /// `szamlazz_error` (422) naming the invoice; a credential code as
 /// `credentials_rejected`; a lost reply as `outcome_unknown`, conditional on
@@ -135,17 +136,21 @@ fn set_payments_response(
             response.gross_total = gross;
             Ok(response)
         }
-        SetPaymentsOutcome::Rejected { code, message } if code == REQUEST_CODE => {
-            Err(Fault::invalid_input(format!(
-                "the credit entries cannot be sent: {message}; nothing was sent"
-            )))
-        }
-        SetPaymentsOutcome::Rejected { code, message } => Err(Fault::szamlazz_error(
-            code,
-            format!("the credit entries on invoice {invoice_number} were refused: {message}"),
-        )),
-        SetPaymentsOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        SetPaymentsOutcome::Rejected(rejection) => Err(match rejection.code {
+            RejectionCode::Request => Fault::invalid_input(format!(
+                "the credit entries cannot be sent: {}; nothing was sent",
+                rejection.message
+            )),
+            RejectionCode::Szamlazz(code) => Fault::szamlazz_error(SzamlazzAnswer::new(
+                code,
+                format!(
+                    "the credit entries on invoice {invoice_number} were refused: {}",
+                    rejection.message
+                ),
+            )),
+        }),
+        SetPaymentsOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
         SetPaymentsOutcome::Transport(message) => Err(set_payments_unknown(additive, &message)),
     }
@@ -344,7 +349,7 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::identity::Namespace;
+    use crate::gateway::Rejection;
     use crate::test_support::Doc;
 
     fn namespace() -> Namespace {
@@ -363,10 +368,9 @@ mod tests {
     /// pass-through: szamlazz.hu answered nothing.
     #[test]
     fn a_sixth_credit_entry_is_invalid_input() {
-        let outcome = SetPaymentsOutcome::Rejected {
-            code: crate::gateway::REQUEST_CODE.to_owned(),
-            message: "a credit-entry request can contain at most five entries".to_owned(),
-        };
+        let outcome = SetPaymentsOutcome::Rejected(Rejection::request(
+            "a credit-entry request can contain at most five entries",
+        ));
         let fault = set_payments_response(outcome, "SZ-1".to_owned(), false, &namespace())
             .expect_err("a fault");
         let (status, body) = fault_body(fault);
@@ -382,10 +386,10 @@ mod tests {
     /// (never in `code`, which is the symbolic token), and its message.
     #[test]
     fn a_refused_credit_entry_is_a_szamlazz_error_carrying_the_code() {
-        let outcome = SetPaymentsOutcome::Rejected {
-            code: "259".to_owned(),
-            message: "A számla nem található.".to_owned(),
-        };
+        let outcome = SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
+            "259",
+            "A számla nem található.",
+        )));
         let fault = set_payments_response(outcome, "SZ-1".to_owned(), false, &namespace())
             .expect_err("a fault");
         let (status, body) = fault_body(fault);
@@ -409,10 +413,7 @@ mod tests {
         assert_eq!(body["code"], "not_found", "{body}");
         assert_eq!(body.get("szamlazz_code"), None, "{body}");
 
-        let outcome = QueryOutcome::Api {
-            code: "57".to_owned(),
-            message: "Hibás számlaszám.".to_owned(),
-        };
+        let outcome = QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám."));
         let (status, body) =
             fault_body(query_response(outcome, &namespace()).expect_err("a fault"));
         assert_eq!(status, 422, "{body}");
@@ -426,10 +427,10 @@ mod tests {
             "{body}"
         );
 
-        let outcome = QueryOutcome::CredentialsRejected {
-            code: "3".to_owned(),
-            message: "Sikertelen bejelentkezés.".to_owned(),
-        };
+        let outcome = QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
+            "3",
+            "Sikertelen bejelentkezés.",
+        ));
         let (status, body) =
             fault_body(query_response(outcome, &namespace()).expect_err("a fault"));
         assert_eq!(status, 503, "{body}");
@@ -441,10 +442,10 @@ mod tests {
     /// one) is the same 422 pass-through, the code in `szamlazz_code`.
     #[test]
     fn query_taxpayer_passes_a_nav_code_through() {
-        let outcome = TaxpayerOutcome::Api {
-            code: "NAV_ERROR".to_owned(),
-            message: "A NAV szolgáltatás nem elérhető.".to_owned(),
-        };
+        let outcome = TaxpayerOutcome::Api(SzamlazzAnswer::new(
+            "NAV_ERROR",
+            "A NAV szolgáltatás nem elérhető.",
+        ));
         let (status, body) =
             fault_body(taxpayer_response(outcome, &namespace()).expect_err("a fault"));
         assert_eq!(status, 422, "{body}");
@@ -679,10 +680,10 @@ mod tests {
             CredentialsCheck::Ok
         );
         assert_eq!(
-            credentials_check(ProbeOutcome::CredentialsRejected {
-                code: "3".to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            }),
+            credentials_check(ProbeOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                "3",
+                "Sikertelen bejelentkezés."
+            ))),
             CredentialsCheck::Rejected {
                 code: "3".to_owned(),
                 message: "Sikertelen bejelentkezés.".to_owned(),

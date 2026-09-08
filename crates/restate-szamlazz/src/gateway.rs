@@ -58,8 +58,19 @@
 //! marker trait the run helpers require is the link from the `ctx.run` sites
 //! to that directory.
 //!
+//! What szamlazz.hu answers with when it answers a code is one type wherever
+//! it appears: [`SzamlazzAnswer`] (`code`, `message`) in every
+//! `CredentialsRejected` and `Api` variant and flattened into
+//! [`CreateOutcome::DuplicateOrderNumber`]; a write's `Rejected` carries a
+//! [`Rejection`], whose [`RejectionCode`] tells szamlazz.hu's refusal from the
+//! wire contract's (the `request` pseudo-code, never sent). Both serialise to
+//! the two string fields the variants carried before them, so the journal
+//! layout is unchanged (#128).
+//!
 //! [`FoundDocument`]'s methods are the checks the services make on a queried
 //! document before trusting or acting on it.
+
+use std::fmt;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -89,16 +100,153 @@ pub mod document;
 pub use build::{DocumentRefs, InputError, gross_total};
 pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 
-/// The pseudo-code of a rejection that never reached szamlazz.hu: the request
-/// violates the Számla Agent wire contract (a sixth credit entry; a replacing
-/// credit-entry request with no entries, which would clear the invoice's
-/// payments; a document without line items). Stands beside szamlazz.hu's
-/// numeric codes in the `Rejected { code }` outcomes. On a create or storno
-/// it is the `rejected` outcome like any other code;
-/// `Szamlazz.Agent.set_payments` tells it apart and answers the caller's
-/// request as `invalid_input`, since szamlazz.hu answered nothing to pass
-/// through.
-pub const REQUEST_CODE: &str = "request";
+/// What szamlazz.hu answered with when the answer is a code rather than a
+/// document: the code (numeric for szamlazz.hu's own, `OPERATION_FAILED`-like
+/// for a NAV code the taxpayer query relays) and the message beside it, as
+/// the outcome variants carry them (`CredentialsRejected`, `Api`, the
+/// duplicate-order-number answer). Journaled inside those outcomes, so
+/// additive-only; serialises as the two fields, which is what the variants
+/// carried before it existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SzamlazzAnswer {
+    /// The code as szamlazz.hu wrote it.
+    pub code: String,
+    /// The message beside it.
+    pub message: String,
+}
+
+impl SzamlazzAnswer {
+    /// An answer of `code` and `message`.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// A szamlazz.hu API error as the answer it is.
+impl From<ApiError> for SzamlazzAnswer {
+    fn from(api: ApiError) -> Self {
+        Self::new(api.code.code(), api.message)
+    }
+}
+
+impl fmt::Display for SzamlazzAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+/// A refusal of a write: szamlazz.hu's, or the wire contract's before
+/// anything was sent ([`RejectionCode::Request`]). What the `Rejected`
+/// variants of [`CreateOutcome`], [`StornoOutcome`] and [`SetPaymentsOutcome`]
+/// carry; serialises as `code` and `message`, the code as its wire string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Rejection {
+    /// Who refused, and with what.
+    pub code: RejectionCode,
+    /// The message: szamlazz.hu's, or the wire contract's rule.
+    pub message: String,
+}
+
+impl Rejection {
+    /// The wire contract's refusal, before anything was sent.
+    pub fn request(message: impl Into<String>) -> Self {
+        Self {
+            code: RejectionCode::Request,
+            message: message.into(),
+        }
+    }
+}
+
+/// szamlazz.hu's refusal.
+impl From<SzamlazzAnswer> for Rejection {
+    fn from(answer: SzamlazzAnswer) -> Self {
+        Self {
+            code: RejectionCode::Szamlazz(answer.code),
+            message: answer.message,
+        }
+    }
+}
+
+impl From<ApiError> for Rejection {
+    fn from(api: ApiError) -> Self {
+        SzamlazzAnswer::from(api).into()
+    }
+}
+
+/// The code of a [`Rejection`]: szamlazz.hu's, or the pseudo-code of a
+/// rejection that never reached szamlazz.hu because the request violates the
+/// Számla Agent wire contract (a sixth credit entry; a replacing credit-entry
+/// request with no entries, which would clear the invoice's payments; a
+/// document without line items). On a create or storno the pseudo-code is
+/// the `rejected` outcome like any other code; `Szamlazz.Agent.set_payments`
+/// tells it apart and answers the caller's request as `invalid_input`, since
+/// szamlazz.hu answered nothing to pass through.
+///
+/// Serialises as the wire string: the szamlazz.hu code as written, or
+/// [`RejectionCode::REQUEST`], so the journaled shape is the one string
+/// field it always was.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RejectionCode {
+    /// A szamlazz.hu code.
+    Szamlazz(String),
+    /// The wire contract's refusal; nothing was sent.
+    Request,
+}
+
+impl RejectionCode {
+    /// The wire string of [`RejectionCode::Request`]. Never a szamlazz.hu
+    /// code: those are numeric, or upper-case NAV tokens.
+    pub const REQUEST: &'static str = "request";
+
+    /// The code as its wire string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Szamlazz(code) => code,
+            Self::Request => Self::REQUEST,
+        }
+    }
+}
+
+impl fmt::Display for RejectionCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RejectionCode> for String {
+    fn from(code: RejectionCode) -> Self {
+        match code {
+            RejectionCode::Szamlazz(code) => code,
+            RejectionCode::Request => RejectionCode::REQUEST.to_owned(),
+        }
+    }
+}
+
+/// Serializes as the wire string.
+impl Serialize for RejectionCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Deserializes from the wire string: [`RejectionCode::REQUEST`] is the
+/// pseudo-code, anything else szamlazz.hu's.
+impl<'de> Deserialize<'de> for RejectionCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        Ok(if code == Self::REQUEST {
+            Self::Request
+        } else {
+            Self::Szamlazz(code)
+        })
+    }
+}
 
 /// The module that speaks to szamlazz.hu for one account: the Számla Agent
 /// client plus the [`Account`] it is opened for.
@@ -168,22 +316,12 @@ pub enum LookupOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// external-id query or the hint; nothing may be concluded and nothing
     /// will be created. See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered the external-id query with another code: an
     /// answer the step cannot conclude from, and nothing will be created. (On
     /// the hint the same answer says nothing about foreign documents and the
     /// lookup continues.)
-    Api {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Api(SzamlazzAnswer),
 }
 
 /// The create step: query the external id, then send the
@@ -250,10 +388,10 @@ pub enum CreateOutcome {
     /// order-number check: their unresolved 71/152 is
     /// [`CreateOutcome::Rejected`].
     DuplicateOrderNumber {
-        /// The szamlazz.hu code (`71` or `152`).
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
+        /// The szamlazz.hu answer (`71` or `152` and its message), flattened:
+        /// `code` and `message` beside `existing_number`.
+        #[serde(flatten)]
+        answer: SzamlazzAnswer,
         /// The newest document under the order, when it is a live document of
         /// the kind being issued; absent when a document of another kind (or a
         /// reversed one) is newest, when the order-number query knows nothing
@@ -262,22 +400,12 @@ pub enum CreateOutcome {
         existing_number: Option<String>,
     },
     /// szamlazz.hu refused the document; nothing was created.
-    Rejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// leading query, the create or a re-query; this execution issued
     /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
     /// key would only repeat the answer. See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered the **leading** query with another code (neither
     /// 7 nor a credential code): an answer the step cannot conclude from, so
     /// nothing was sent. Settled data, as [`LookupOutcome::Api`] is for the
@@ -285,12 +413,7 @@ pub enum CreateOutcome {
     /// issue policy, sized for the post-send window, on a read and report an
     /// answer as silence. The same code on a post-send re-query is
     /// [`Unconfirmed::ReQueryFailed`]: there a send happened.
-    Api {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Api(SzamlazzAnswer),
     /// szamlazz.hu reported unavailability (`szlahu_down`) to the **leading**
     /// query: nothing was sent. Settled data for the same reason as
     /// [`CreateOutcome::Api`]. (The lookup step, under the read policy sized
@@ -409,6 +532,7 @@ pub enum Unanswered {
 /// ([`Gateway::verify`], [`Gateway::query`], [`Gateway::hint`]). A query
 /// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum QueryOutcome {
     /// The document.
     Found(Box<FoundDocument>),
@@ -417,20 +541,10 @@ pub enum QueryOutcome {
     NotFound,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
     /// check was not made. See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered with another code: an answer the caller cannot
     /// conclude a document from.
-    Api {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Api(SzamlazzAnswer),
 }
 
 /// What the account probe of `Szamlazz.Agent.check_account` learned from one
@@ -451,12 +565,7 @@ pub enum ProbeOutcome {
     Accepted,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
     /// [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
 }
 
 /// What the taxpayer query of `Szamlazz.Agent.query_taxpayer` learned from
@@ -477,48 +586,29 @@ pub enum TaxpayerOutcome {
     Found(QueryTaxpayerResponse),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
     /// [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered with another code: its own, or NAV's
     /// `errorCode` relayed under `funcCode ERROR`.
-    Api {
-        /// The code.
-        code: String,
-        /// The message.
-        message: String,
-    },
+    Api(SzamlazzAnswer),
 }
 
 /// Why a raw query returned no document: szamlazz.hu's answers as the
 /// gateway classifies them internally, before each read fn splits them into
 /// its outcome (the answers: 7, a credential code, another code) and
-/// [`Unanswered`] (the rest).
+/// [`Unanswered`] (the rest). Crate-private: it appears in no public
+/// signature; the read fns answer [`Unanswered`], the write steps
+/// [`Unconfirmed`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum QueryError {
+pub(crate) enum QueryError {
     /// szamlazz.hu does not know the selector (code 7).
     #[error("szamlazz.hu does not know the document (code 7)")]
     NotFound,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164).
-    #[error("szamlazz.hu rejected the agent credentials ({code}): {message}")]
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    #[error("szamlazz.hu rejected the agent credentials ({0})")]
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu reported another error.
-    #[error("szamlazz.hu error {code}: {message}")]
-    Api {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    #[error("szamlazz.hu error {0}")]
+    Api(SzamlazzAnswer),
     /// szamlazz.hu reported unavailability (`szlahu_down`).
     #[error("szamlazz.hu is unavailable: {0}")]
     Unavailable(String),
@@ -534,9 +624,9 @@ enum Answer {
     /// Code 7.
     NotFound,
     /// A credential code (3, 135, 136, 164).
-    CredentialsRejected { code: String, message: String },
+    CredentialsRejected(SzamlazzAnswer),
     /// Any other code.
-    Api { code: String, message: String },
+    Api(SzamlazzAnswer),
 }
 
 impl QueryError {
@@ -546,10 +636,8 @@ impl QueryError {
     fn answered(self) -> Result<Answer, Unanswered> {
         match self {
             Self::NotFound => Ok(Answer::NotFound),
-            Self::CredentialsRejected { code, message } => {
-                Ok(Answer::CredentialsRejected { code, message })
-            }
-            Self::Api { code, message } => Ok(Answer::Api { code, message }),
+            Self::CredentialsRejected(answer) => Ok(Answer::CredentialsRejected(answer)),
+            Self::Api(answer) => Ok(Answer::Api(answer)),
             Self::Unavailable(message) => Err(Unanswered::Unavailable(message)),
             Self::Transport(message) => Err(Unanswered::Transport(message)),
         }
@@ -574,20 +662,10 @@ pub enum StornoLookupOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// may be concluded and nothing will be sent. See
     /// [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered with another code: an answer the step cannot
     /// conclude from, and nothing will be sent.
-    Api {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Api(SzamlazzAnswer),
 }
 
 /// The storno step: what identifies the storno to send.
@@ -633,31 +711,16 @@ pub enum StornoOutcome {
     NotStornoable,
     /// szamlazz.hu refused (14: the document is itself a storno; 221: it has a
     /// corrective; …).
-    Rejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// leading query, the storno or a re-query; this execution issued
     /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
     /// key would only repeat the answer. See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered the **leading** query with another code (neither
     /// 7 nor a credential code): nothing was sent. Settled data, as
     /// [`CreateOutcome::Api`] is for the create step.
-    Api {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Api(SzamlazzAnswer),
     /// szamlazz.hu reported unavailability (`szlahu_down`) to the **leading**
     /// query: nothing was sent. Settled data, as [`CreateOutcome::Unavailable`]
     /// is for the create step.
@@ -669,6 +732,7 @@ pub enum StornoOutcome {
 
 /// The result of a proforma deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DeleteOutcome {
     /// Deleted now.
     Deleted,
@@ -676,20 +740,10 @@ pub enum DeleteOutcome {
     /// consumed.
     AlreadyGone,
     /// szamlazz.hu refused.
-    Rejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// was deleted. See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// The HTTP exchange, the response parse or the service failed.
     Transport(String),
 }
@@ -702,21 +756,16 @@ impl From<ApiError> for DeleteOutcome {
         if api.code == ErrorCode::ProformaNotFound {
             Self::AlreadyGone
         } else if api.code.is_credential_error() {
-            Self::CredentialsRejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }
+            Self::CredentialsRejected(api.into())
         } else {
-            Self::Rejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }
+            Self::Rejected(api.into())
         }
     }
 }
 
 /// The result of registering credit entries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SetPaymentsOutcome {
     /// The entries are registered.
     Done {
@@ -726,21 +775,10 @@ pub enum SetPaymentsOutcome {
         gross: Option<Decimal>,
     },
     /// szamlazz.hu (or the wire contract: more than five entries) refused.
-    Rejected {
-        /// The szamlazz.hu code, or [`REQUEST_CODE`] for a wire-contract
-        /// violation that never reached szamlazz.hu.
-        code: String,
-        /// The message.
-        message: String,
-    },
+    Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// was registered. See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        /// The szamlazz.hu code.
-        code: String,
-        /// The szamlazz.hu message.
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// The HTTP exchange, the response parse or the service failed.
     Transport(String),
 }
@@ -761,15 +799,9 @@ impl From<CreditEntryResult> for SetPaymentsOutcome {
 impl From<ApiError> for SetPaymentsOutcome {
     fn from(api: ApiError) -> Self {
         if api.code.is_credential_error() {
-            Self::CredentialsRejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }
+            Self::CredentialsRejected(api.into())
         } else {
-            Self::Rejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }
+            Self::Rejected(api.into())
         }
     }
 }
@@ -783,6 +815,16 @@ impl Gateway {
     /// default `reqwest::Client` keeps szamlazz.hu's `JSESSIONID` cookie, so
     /// a client shared between accounts would carry one account's session
     /// into another account's request.
+    ///
+    /// The client is the Számla Agent crate's default one, with its
+    /// [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT): the
+    /// issue policy's floor
+    /// ([`IssueConfig::MIN_INITIAL_DELAY`](crate::config::IssueConfig::MIN_INITIAL_DELAY))
+    /// is derived from that constant, and holds because this constructor,
+    /// the one the prologue opens every execution's gateway with, never
+    /// supplies a client of its own. [`Gateway::open_with_http`] does, and
+    /// the timeout on it is the caller's; a deployment that opened its
+    /// gateways that way would have to size the floor itself.
     ///
     /// # Errors
     ///
@@ -884,12 +926,12 @@ impl Gateway {
                 // `seen` maps code 7 to `Seen::Absent`; the arm keeps the
                 // match exhaustive.
                 Answer::NotFound => None,
-                Answer::CredentialsRejected { code, message } => {
-                    return Ok(LookupOutcome::CredentialsRejected { code, message });
+                Answer::CredentialsRejected(answer) => {
+                    return Ok(LookupOutcome::CredentialsRejected(answer));
                 }
-                Answer::Api { code, message } => {
-                    tracing::warn!(code = %code, "the external-id query was answered with another code");
-                    return Ok(LookupOutcome::Api { code, message });
+                Answer::Api(answer) => {
+                    tracing::warn!(code = %answer.code, "the external-id query was answered with another code");
+                    return Ok(LookupOutcome::Api(answer));
                 }
             },
         };
@@ -915,12 +957,12 @@ impl Gateway {
                     }
                 }
                 Err(error) => match error.answered()? {
-                    Answer::CredentialsRejected { code, message } => {
-                        return Ok(LookupOutcome::CredentialsRejected { code, message });
+                    Answer::CredentialsRejected(answer) => {
+                        return Ok(LookupOutcome::CredentialsRejected(answer));
                     }
                     // A miss or another code says nothing about foreign
                     // documents.
-                    Answer::NotFound | Answer::Api { .. } => {}
+                    Answer::NotFound | Answer::Api(_) => {}
                 },
             }
         }
@@ -988,17 +1030,17 @@ impl Gateway {
             // reversed: send. (`seen` settles 7 as `Absent`; the `NotFound`
             // arm keeps the match exhaustive and is right if reached.)
             Ok(None) | Err(QueryError::NotFound) => {}
-            Err(QueryError::Api { code, message }) => {
-                tracing::warn!(code = %code, "the leading query was answered with another code");
-                return Ok(CreateOutcome::Api { code, message });
+            Err(QueryError::Api(answer)) => {
+                tracing::warn!(code = %answer.code, "the leading query was answered with another code");
+                return Ok(CreateOutcome::Api(answer));
             }
             Err(QueryError::Unavailable(message)) => {
                 tracing::warn!("the leading query was answered with szlahu_down");
                 return Ok(CreateOutcome::Unavailable { message });
             }
             // `settled_by_query` settles the credential codes; likewise.
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                return Ok(CreateOutcome::CredentialsRejected { code, message });
+            Err(QueryError::CredentialsRejected(answer)) => {
+                return Ok(CreateOutcome::CredentialsRejected(answer));
             }
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
@@ -1019,18 +1061,18 @@ impl Gateway {
                 }
             },
             Err(error) => match classify_failure(error) {
-                Failure::Rejected { code, message } => {
-                    tracing::info!(code = %code, "document rejected");
-                    Ok(CreateOutcome::Rejected { code, message })
+                Failure::Rejected(rejection) => {
+                    tracing::info!(code = %rejection.code, "document rejected");
+                    Ok(CreateOutcome::Rejected(rejection))
                 }
-                Failure::CredentialsRejected { code, message } => {
-                    Ok(CreateOutcome::CredentialsRejected { code, message })
+                Failure::CredentialsRejected(answer) => {
+                    Ok(CreateOutcome::CredentialsRejected(answer))
                 }
-                Failure::Unknown { code, message } => {
-                    tracing::warn!(code = %code, "open code; re-querying");
+                Failure::Unknown(answer) => {
+                    tracing::warn!(code = %answer.code, "open code; re-querying");
                     let open = Unconfirmed::Open {
-                        code: Some(code),
-                        message,
+                        code: Some(answer.code),
+                        message: answer.message,
                     };
                     self.settle_or(request, open).await
                 }
@@ -1044,9 +1086,9 @@ impl Gateway {
                     self.settle_or(request, Unconfirmed::Transport(message))
                         .await
                 }
-                Failure::Duplicate { code, message } => {
-                    tracing::info!(code = %code, "duplicate order number; re-querying");
-                    self.after_duplicate(request, code, message).await
+                Failure::Duplicate(answer) => {
+                    tracing::info!(code = %answer.code, "duplicate order number; re-querying");
+                    self.after_duplicate(request, answer).await
                 }
             },
         }
@@ -1085,8 +1127,7 @@ impl Gateway {
     async fn after_duplicate(
         &self,
         request: &CreateStepRequest<'_>,
-        code: String,
-        message: String,
+        answer: SzamlazzAnswer,
     ) -> Result<CreateOutcome, Unconfirmed> {
         match self.settled_by_query(request).await {
             Ok(Some(CreateOutcome::Found(found))) => {
@@ -1099,15 +1140,15 @@ impl Gateway {
             // settle; unconfirmed, naming the refusal it was resolving.
             Err(error) => {
                 return Err(Unconfirmed::ReQueryFailed {
-                    sent: format!("duplicate order number {code}: {message}"),
+                    sent: format!("duplicate order number {answer}"),
                     re_query: error.to_string(),
                 });
             }
         }
 
         if request.kind == IssuedKind::Corrective {
-            tracing::info!(code = %code, "duplicate order number on a corrective: rejected");
-            return Ok(CreateOutcome::Rejected { code, message });
+            tracing::info!(code = %answer.code, "duplicate order number on a corrective: rejected");
+            return Ok(CreateOutcome::Rejected(answer.into()));
         }
 
         let existing_number = match self.hint_raw(request.order).await {
@@ -1122,14 +1163,14 @@ impl Gateway {
                 // knows nothing under it), but still a refusal it has already
                 // given: settled, not re-sent.
                 tracing::warn!(
-                    code = %code,
+                    code = %answer.code,
                     order = %request.order,
                     "duplicate order number reported but nothing is under the order"
                 );
                 None
             }
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                return Ok(CreateOutcome::CredentialsRejected { code, message });
+            Err(QueryError::CredentialsRejected(answer)) => {
+                return Ok(CreateOutcome::CredentialsRejected(answer));
             }
             Err(error) => {
                 tracing::warn!(error = %error, "could not name the duplicate");
@@ -1137,8 +1178,7 @@ impl Gateway {
             }
         };
         Ok(CreateOutcome::DuplicateOrderNumber {
-            code,
-            message,
+            answer,
             existing_number,
         })
     }
@@ -1280,12 +1320,12 @@ impl Gateway {
             }
             Err(error) => match error.answered()? {
                 Answer::NotFound => Ok(ProbeOutcome::Accepted),
-                Answer::Api { code, .. } => {
-                    tracing::debug!(code, "the probe was answered with a non-credential code");
+                Answer::Api(answer) => {
+                    tracing::debug!(code = %answer.code, "the probe was answered with a non-credential code");
                     Ok(ProbeOutcome::Accepted)
                 }
-                Answer::CredentialsRejected { code, message } => {
-                    Ok(ProbeOutcome::CredentialsRejected { code, message })
+                Answer::CredentialsRejected(answer) => {
+                    Ok(ProbeOutcome::CredentialsRejected(answer))
                 }
             },
         }
@@ -1315,15 +1355,9 @@ impl Gateway {
                 Ok(TaxpayerOutcome::Found(QueryTaxpayerResponse::from(info)))
             }
             Err(ClientError::Api(api)) if api.code.is_credential_error() => {
-                Ok(TaxpayerOutcome::CredentialsRejected {
-                    code: api.code.code().to_owned(),
-                    message: api.message,
-                })
+                Ok(TaxpayerOutcome::CredentialsRejected(api.into()))
             }
-            Err(ClientError::Api(api)) => Ok(TaxpayerOutcome::Api {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }),
+            Err(ClientError::Api(api)) => Ok(TaxpayerOutcome::Api(api.into())),
             Err(ClientError::ServiceUnavailable(message)) => Err(Unanswered::Unavailable(message)),
             Err(error) => Err(Unanswered::Transport(error.to_string())),
         }
@@ -1361,12 +1395,12 @@ impl Gateway {
                 // `storno_seen` maps code 7 to `None`; the arm keeps the
                 // match exhaustive.
                 Answer::NotFound => Ok(StornoLookupOutcome::Absent),
-                Answer::CredentialsRejected { code, message } => {
-                    Ok(StornoLookupOutcome::CredentialsRejected { code, message })
+                Answer::CredentialsRejected(answer) => {
+                    Ok(StornoLookupOutcome::CredentialsRejected(answer))
                 }
-                Answer::Api { code, message } => {
-                    tracing::warn!(code = %code, "the storno lookup was answered with another code");
-                    Ok(StornoLookupOutcome::Api { code, message })
+                Answer::Api(answer) => {
+                    tracing::warn!(code = %answer.code, "the storno lookup was answered with another code");
+                    Ok(StornoLookupOutcome::Api(answer))
                 }
             },
         }
@@ -1424,17 +1458,17 @@ impl Gateway {
             // as `None`; the `NotFound` arm keeps the match exhaustive and is
             // right if reached.)
             Ok(None) | Err(QueryError::NotFound) => {}
-            Err(QueryError::Api { code, message }) => {
-                tracing::warn!(code = %code, "the leading query was answered with another code");
-                return Ok(StornoOutcome::Api { code, message });
+            Err(QueryError::Api(answer)) => {
+                tracing::warn!(code = %answer.code, "the leading query was answered with another code");
+                return Ok(StornoOutcome::Api(answer));
             }
             Err(QueryError::Unavailable(message)) => {
                 tracing::warn!("the leading query was answered with szlahu_down");
                 return Ok(StornoOutcome::Unavailable { message });
             }
             // `storno_settled_by_query` settles the credential codes; likewise.
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                return Ok(StornoOutcome::CredentialsRejected { code, message });
+            Err(QueryError::CredentialsRejected(answer)) => {
+                return Ok(StornoOutcome::CredentialsRejected(answer));
             }
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
@@ -1461,18 +1495,22 @@ impl Gateway {
                 Ok(StornoOutcome::NotStornoable)
             }
             Err(error) => match classify_failure(error) {
-                Failure::Rejected { code, message } | Failure::Duplicate { code, message } => {
-                    tracing::info!(code = %code, "storno rejected");
-                    Ok(StornoOutcome::Rejected { code, message })
+                Failure::Rejected(rejection) => {
+                    tracing::info!(code = %rejection.code, "storno rejected");
+                    Ok(StornoOutcome::Rejected(rejection))
                 }
-                Failure::CredentialsRejected { code, message } => {
-                    Ok(StornoOutcome::CredentialsRejected { code, message })
+                Failure::Duplicate(answer) => {
+                    tracing::info!(code = %answer.code, "storno rejected");
+                    Ok(StornoOutcome::Rejected(answer.into()))
                 }
-                Failure::Unknown { code, message } => {
-                    tracing::warn!(code = %code, "open code; re-querying");
+                Failure::CredentialsRejected(answer) => {
+                    Ok(StornoOutcome::CredentialsRejected(answer))
+                }
+                Failure::Unknown(answer) => {
+                    tracing::warn!(code = %answer.code, "open code; re-querying");
                     let open = Unconfirmed::Open {
-                        code: Some(code),
-                        message,
+                        code: Some(answer.code),
+                        message: answer.message,
                     };
                     self.storno_settle_or(&request, open).await
                 }
@@ -1590,10 +1628,7 @@ impl Gateway {
         let credit_entries = match CreditEntries::try_from(credit_entries) {
             Ok(entries) => entries,
             Err(error) => {
-                return SetPaymentsOutcome::Rejected {
-                    code: REQUEST_CODE.to_owned(),
-                    message: error.to_string(),
-                };
+                return SetPaymentsOutcome::Rejected(Rejection::request(error.to_string()));
             }
         };
         let request = RegisterCreditEntry {
@@ -1609,10 +1644,9 @@ impl Gateway {
                 SetPaymentsOutcome::from(result)
             }
             Err(ClientError::Api(api)) => SetPaymentsOutcome::from(api),
-            Err(ClientError::Request(error)) => SetPaymentsOutcome::Rejected {
-                code: REQUEST_CODE.to_owned(),
-                message: error.to_string(),
-            },
+            Err(ClientError::Request(error)) => {
+                SetPaymentsOutcome::Rejected(Rejection::request(error.to_string()))
+            }
             Err(error) => SetPaymentsOutcome::Transport(error.to_string()),
         }
     }
@@ -1633,15 +1667,9 @@ impl Gateway {
                 Err(QueryError::NotFound)
             }
             Err(ClientError::Api(api)) if api.code.is_credential_error() => {
-                Err(QueryError::CredentialsRejected {
-                    code: api.code.code().to_owned(),
-                    message: api.message,
-                })
+                Err(QueryError::CredentialsRejected(api.into()))
             }
-            Err(ClientError::Api(api)) => Err(QueryError::Api {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }),
+            Err(ClientError::Api(api)) => Err(QueryError::Api(api.into())),
             Err(ClientError::ServiceUnavailable(message)) => Err(QueryError::Unavailable(message)),
             Err(error) => Err(QueryError::Transport(error.to_string())),
         }
@@ -1703,28 +1731,17 @@ enum Seen {
 #[derive(Debug, PartialEq, Eq)]
 enum Failure {
     /// [`OutcomeClass::Rejected`] or [`OutcomeClass::NotFound`]: szamlazz.hu
-    /// refused before acting; on a write, 7 is a missing field.
-    Rejected {
-        code: String,
-        message: String,
-    },
+    /// refused before acting (on a write, 7 is a missing field), or the wire
+    /// contract refused before anything was sent.
+    Rejected(Rejection),
     /// [`OutcomeClass::DuplicateOrderNumber`] (71/152).
-    Duplicate {
-        code: String,
-        message: String,
-    },
+    Duplicate(SzamlazzAnswer),
     /// See [`ErrorCode::is_credential_error`].
-    CredentialsRejected {
-        code: String,
-        message: String,
-    },
+    CredentialsRejected(SzamlazzAnswer),
     /// [`OutcomeClass::Unknown`]: 1, 55, 56 without a number, a code the
     /// agent crate does not know, or any class added to the crate later: the
     /// outcome is open, re-query.
-    Unknown {
-        code: String,
-        message: String,
-    },
+    Unknown(SzamlazzAnswer),
     /// `szlahu_down`: whether szamlazz.hu acted before answering is not
     /// known, re-query.
     Unavailable(String),
@@ -1733,29 +1750,19 @@ enum Failure {
 
 fn classify_failure(error: ClientError) -> Failure {
     match error {
-        ClientError::Api(api) if api.code.is_credential_error() => Failure::CredentialsRejected {
-            code: api.code.code().to_owned(),
-            message: api.message,
-        },
-        ClientError::Api(api) => {
-            let code = api.code.code().to_owned();
-            let message = api.message;
-            match api.code.outcome_class() {
-                OutcomeClass::DuplicateOrderNumber => Failure::Duplicate { code, message },
-                OutcomeClass::Rejected | OutcomeClass::NotFound => {
-                    Failure::Rejected { code, message }
-                }
-                // `Unknown`, and any class the agent crate adds later: a
-                // document may exist, so the step re-queries rather than
-                // claims `rejected`.
-                _ => Failure::Unknown { code, message },
-            }
+        ClientError::Api(api) if api.code.is_credential_error() => {
+            Failure::CredentialsRejected(api.into())
         }
-        ClientError::ServiceUnavailable(message) => Failure::Unavailable(message),
-        ClientError::Request(error) => Failure::Rejected {
-            code: REQUEST_CODE.to_owned(),
-            message: error.to_string(),
+        ClientError::Api(api) => match api.code.outcome_class() {
+            OutcomeClass::DuplicateOrderNumber => Failure::Duplicate(api.into()),
+            OutcomeClass::Rejected | OutcomeClass::NotFound => Failure::Rejected(api.into()),
+            // `Unknown`, and any class the agent crate adds later: a
+            // document may exist, so the step re-queries rather than
+            // claims `rejected`.
+            _ => Failure::Unknown(api.into()),
         },
+        ClientError::ServiceUnavailable(message) => Failure::Unavailable(message),
+        ClientError::Request(error) => Failure::Rejected(Rejection::request(error.to_string())),
         other => Failure::Transport(other.to_string()),
     }
 }
@@ -1777,10 +1784,8 @@ fn outcome(result: Result<FoundDocument, QueryError>) -> Result<QueryOutcome, Un
         Ok(document) => Ok(QueryOutcome::Found(Box::new(document))),
         Err(error) => Ok(match error.answered()? {
             Answer::NotFound => QueryOutcome::NotFound,
-            Answer::CredentialsRejected { code, message } => {
-                QueryOutcome::CredentialsRejected { code, message }
-            }
-            Answer::Api { code, message } => QueryOutcome::Api { code, message },
+            Answer::CredentialsRejected(answer) => QueryOutcome::CredentialsRejected(answer),
+            Answer::Api(answer) => QueryOutcome::Api(answer),
         }),
     }
 }
@@ -1825,8 +1830,8 @@ fn settle_create(
         // Nothing (code 7), or the document the lookup saw reversed, still
         // reversed.
         Ok(Seen::Reversed(_) | Seen::Absent) => Ok(None),
-        Err(QueryError::CredentialsRejected { code, message }) => {
-            Ok(Some(CreateOutcome::CredentialsRejected { code, message }))
+        Err(QueryError::CredentialsRejected(answer)) => {
+            Ok(Some(CreateOutcome::CredentialsRejected(answer)))
         }
         Err(error) => Err(error),
     }
@@ -1848,8 +1853,8 @@ fn settle_storno(
     match seen {
         Ok(Some(storno_number)) => Ok(Some(StornoOutcome::AlreadyReversed { storno_number })),
         Ok(None) => Ok(None),
-        Err(QueryError::CredentialsRejected { code, message }) => {
-            Ok(Some(StornoOutcome::CredentialsRejected { code, message }))
+        Err(QueryError::CredentialsRejected(answer)) => {
+            Ok(Some(StornoOutcome::CredentialsRejected(answer)))
         }
         Err(error) => Err(error),
     }
@@ -1914,17 +1919,11 @@ mod tests {
         };
         assert_eq!(
             DeleteOutcome::from(malformed.clone()),
-            DeleteOutcome::Rejected {
-                code: "57".to_owned(),
-                message: "xml".to_owned(),
-            }
+            DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "xml")))
         );
         assert_eq!(
             SetPaymentsOutcome::from(malformed),
-            SetPaymentsOutcome::Rejected {
-                code: "57".to_owned(),
-                message: "xml".to_owned(),
-            }
+            SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "xml")))
         );
 
         for code in [
@@ -1940,17 +1939,17 @@ mod tests {
             };
             assert_eq!(
                 DeleteOutcome::from(login.clone()),
-                DeleteOutcome::CredentialsRejected {
-                    code: code.code().to_owned(),
-                    message: "login".to_owned(),
-                }
+                DeleteOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                    code.code().to_owned(),
+                    "login"
+                ))
             );
             assert_eq!(
                 SetPaymentsOutcome::from(login),
-                SetPaymentsOutcome::CredentialsRejected {
-                    code: code.code().to_owned(),
-                    message: "login".to_owned(),
-                }
+                SetPaymentsOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                    code.code().to_owned(),
+                    "login"
+                ))
             );
         }
         for code in [
@@ -2065,10 +2064,7 @@ mod tests {
             );
             assert_eq!(
                 classified(code.clone()),
-                Failure::CredentialsRejected {
-                    code: code.code().to_owned(),
-                    message: "üzenet".to_owned(),
-                },
+                Failure::CredentialsRejected(SzamlazzAnswer::new(code.code().to_owned(), "üzenet")),
                 "{code:?}"
             );
         }
@@ -2084,10 +2080,10 @@ mod tests {
             );
             assert_eq!(
                 classified(code.clone()),
-                Failure::Duplicate {
-                    code: code.code().to_owned(),
-                    message: "üzenet".to_owned(),
-                },
+                Failure::Duplicate(SzamlazzAnswer::new(
+                    code.code().to_owned(),
+                    "üzenet".to_owned()
+                )),
                 "{code:?}"
             );
         }
@@ -2115,10 +2111,10 @@ mod tests {
             );
             assert_eq!(
                 classified(code.clone()),
-                Failure::Rejected {
-                    code: code.code().to_owned(),
-                    message: "üzenet".to_owned(),
-                },
+                Failure::Rejected(Rejection::from(SzamlazzAnswer::new(
+                    code.code().to_owned(),
+                    "üzenet"
+                ))),
                 "{code:?}"
             );
         }
@@ -2132,10 +2128,10 @@ mod tests {
             assert_eq!(code.outcome_class(), OutcomeClass::Unknown, "{code:?}");
             assert_eq!(
                 classified(code.clone()),
-                Failure::Unknown {
-                    code: code.code().to_owned(),
-                    message: "üzenet".to_owned(),
-                },
+                Failure::Unknown(SzamlazzAnswer::new(
+                    code.code().to_owned(),
+                    "üzenet".to_owned()
+                )),
                 "{code:?}"
             );
         }
@@ -2159,10 +2155,7 @@ mod tests {
         let message = request.to_string();
         assert_eq!(
             classify_failure(request),
-            Failure::Rejected {
-                code: REQUEST_CODE.to_owned(),
-                message,
-            }
+            Failure::Rejected(Rejection::request(message))
         );
 
         let parse = ClientError::Parse(ParseError::Missing("szamlaszam"));
@@ -2187,29 +2180,22 @@ mod tests {
     /// answers are the three outcome variants, the rest is `Err`.
     #[test]
     fn a_query_error_is_an_answer_or_unanswered_and_the_outcome_folds_it() {
-        let rejected = || QueryError::CredentialsRejected {
-            code: "3".to_owned(),
-            message: "Sikertelen bejelentkezés.".to_owned(),
+        let rejected = || {
+            QueryError::CredentialsRejected(SzamlazzAnswer::new("3", "Sikertelen bejelentkezés."))
         };
-        let other = || QueryError::Api {
-            code: "57".to_owned(),
-            message: "Hibás XML.".to_owned(),
-        };
+        let other = || QueryError::Api(SzamlazzAnswer::new("57", "Hibás XML."));
 
         assert_eq!(QueryError::NotFound.answered(), Ok(Answer::NotFound));
         assert_eq!(
             rejected().answered(),
-            Ok(Answer::CredentialsRejected {
-                code: "3".to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            })
+            Ok(Answer::CredentialsRejected(SzamlazzAnswer::new(
+                "3",
+                "Sikertelen bejelentkezés."
+            )))
         );
         assert_eq!(
             other().answered(),
-            Ok(Answer::Api {
-                code: "57".to_owned(),
-                message: "Hibás XML.".to_owned(),
-            })
+            Ok(Answer::Api(SzamlazzAnswer::new("57", "Hibás XML.")))
         );
         assert_eq!(
             QueryError::Unavailable("szlahu_down".to_owned()).answered(),
@@ -2231,17 +2217,14 @@ mod tests {
         );
         assert_eq!(
             outcome(Err(rejected())),
-            Ok(QueryOutcome::CredentialsRejected {
-                code: "3".to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            })
+            Ok(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                "3",
+                "Sikertelen bejelentkezés."
+            )))
         );
         assert_eq!(
             outcome(Err(other())),
-            Ok(QueryOutcome::Api {
-                code: "57".to_owned(),
-                message: "Hibás XML.".to_owned(),
-            })
+            Ok(QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")))
         );
         assert_eq!(
             outcome(Err(QueryError::Unavailable("szlahu_down".to_owned()))),
@@ -2260,10 +2243,7 @@ mod tests {
     fn unplaced_query_errors() -> [QueryError; 4] {
         [
             QueryError::NotFound,
-            QueryError::Api {
-                code: "57".to_owned(),
-                message: "xml".to_owned(),
-            },
+            QueryError::Api(SzamlazzAnswer::new("57", "xml")),
             QueryError::Unavailable("szlahu_down".to_owned()),
             QueryError::Transport("reset".to_owned()),
         ]
@@ -2348,16 +2328,14 @@ mod tests {
         for lookup_saw in [None, Some("SZ-1")] {
             assert_eq!(
                 settle_create(
-                    Err(QueryError::CredentialsRejected {
-                        code: "3".to_owned(),
-                        message: "login".to_owned(),
-                    }),
+                    Err(QueryError::CredentialsRejected(SzamlazzAnswer::new(
+                        "3", "login"
+                    ))),
                     lookup_saw,
                 ),
-                Ok(Some(CreateOutcome::CredentialsRejected {
-                    code: "3".to_owned(),
-                    message: "login".to_owned(),
-                })),
+                Ok(Some(CreateOutcome::CredentialsRejected(
+                    SzamlazzAnswer::new("3", "login")
+                ))),
                 "lookup saw {lookup_saw:?}"
             );
             for error in unplaced_query_errors() {
@@ -2385,14 +2363,12 @@ mod tests {
         );
         assert_eq!(settle_storno(Ok(None)), Ok(None));
         assert_eq!(
-            settle_storno(Err(QueryError::CredentialsRejected {
-                code: "135".to_owned(),
-                message: "session".to_owned(),
-            })),
-            Ok(Some(StornoOutcome::CredentialsRejected {
-                code: "135".to_owned(),
-                message: "session".to_owned(),
-            }))
+            settle_storno(Err(QueryError::CredentialsRejected(SzamlazzAnswer::new(
+                "135", "session"
+            )))),
+            Ok(Some(StornoOutcome::CredentialsRejected(
+                SzamlazzAnswer::new("135", "session")
+            )))
         );
         for error in unplaced_query_errors() {
             assert_eq!(

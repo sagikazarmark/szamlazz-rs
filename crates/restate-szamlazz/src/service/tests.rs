@@ -12,6 +12,7 @@ use serde_json::json;
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
 use crate::config::{IssueConfig, ValidatedWorkerConfig, WorkerConfig};
+use crate::gateway::SzamlazzAnswer;
 use crate::identity::Namespace;
 use crate::test_support::{Doc, ORIGINAL_TELJ, open_gateway};
 
@@ -526,13 +527,17 @@ fn faults_serialise_their_code_and_status() {
         (Fault::unavailable("x"), 503, "unavailable"),
         (Fault::missing_fulfillment_date("SZ-1"), 503, "unavailable"),
         (
-            Fault::credentials_rejected(&namespace(), "3", "x"),
+            Fault::credentials_rejected(&namespace(), SzamlazzAnswer::new("3", "x")),
             503,
             "credentials_rejected",
         ),
         (Fault::unknown_account("x"), 400, "unknown_account"),
         (Fault::not_found("x"), 404, "not_found"),
-        (Fault::szamlazz_error("152", "x"), 422, "szamlazz_error"),
+        (
+            Fault::szamlazz_error(SzamlazzAnswer::new("152", "x")),
+            422,
+            "szamlazz_error",
+        ),
     ];
     for (fault, status, code) in cases {
         let error = TerminalError::from(fault);
@@ -554,10 +559,10 @@ fn a_szamlazz_code_travels_in_its_own_field() {
 
     use super::support::Fault;
 
-    let error = TerminalError::from(Fault::szamlazz_error(
+    let error = TerminalError::from(Fault::szamlazz_error(SzamlazzAnswer::new(
         "152",
         "Már létezik ilyen rendelésszámú számla.",
-    ));
+    )));
     assert_eq!(error.code(), 422);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "szamlazz_error");
@@ -569,12 +574,15 @@ fn a_szamlazz_code_travels_in_its_own_field() {
         "{message}"
     );
 
-    let error = TerminalError::from(Fault::credentials_rejected(&namespace(), "3", "x"));
+    let error = TerminalError::from(Fault::credentials_rejected(
+        &namespace(),
+        SzamlazzAnswer::new("3", "x"),
+    ));
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "credentials_rejected");
     assert_eq!(body["szamlazz_code"], "3");
 
-    let error = TerminalError::from(Fault::inconclusive_answer("57", "x"));
+    let error = TerminalError::from(Fault::inconclusive_answer(SzamlazzAnswer::new("57", "x")));
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["code"], "unavailable");
     assert_eq!(body["szamlazz_code"], "57");
@@ -608,11 +616,11 @@ fn credentials_rejected_fault_names_the_code_and_the_document() {
     use crate::identity::OrderKey;
 
     let order = OrderKey::parse("ORD-1").expect("order");
-    let fault = Fault::credentials_rejected(&namespace(), "136", "Bejelentkezés letiltva").about(
-        &order,
-        Some(IssuedKind::Invoice),
-        "acct:ORD-1:invoice",
-    );
+    let fault = Fault::credentials_rejected(
+        &namespace(),
+        SzamlazzAnswer::new("136", "Bejelentkezés letiltva"),
+    )
+    .about(&order, Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
     let error = TerminalError::from(fault);
     assert_eq!(error.code(), 503);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
@@ -666,8 +674,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     // `LogCapture`). The warm-up event is told apart by its namespace.
     drop(Fault::credentials_rejected(
         &"warmup".parse().expect("namespace"),
-        "0",
-        "warm-up",
+        SzamlazzAnswer::new("0", "warm-up"),
     ));
     LogCapture::rebuild_interest();
 
@@ -677,14 +684,13 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
     let gateway = open_gateway(account, credentials);
     let outcome = gateway.verify("SZ-1").await;
-    let Ok(QueryOutcome::CredentialsRejected { code, message }) = outcome.clone() else {
+    let Ok(QueryOutcome::CredentialsRejected(answer)) = outcome.clone() else {
         panic!("expected CredentialsRejected, got {outcome:?}");
     };
-    assert_eq!(code, "3");
+    assert_eq!(answer.code, "3");
     let error = TerminalError::from(Fault::credentials_rejected(
         &order.config().namespace,
-        code,
-        message,
+        answer,
     ));
     drop(guard);
 
@@ -746,8 +752,7 @@ async fn the_execution_span_attributes_every_log_line_under_it() {
         let _entered = span.enter();
         drop(Fault::credentials_rejected(
             &"warmup".parse().expect("namespace"),
-            "0",
-            "warm-up",
+            SzamlazzAnswer::new("0", "warm-up"),
         ));
     }
     LogCapture::rebuild_interest();
@@ -762,8 +767,7 @@ async fn the_execution_span_attributes_every_log_line_under_it() {
         record_account(gateway.account());
         drop(Fault::credentials_rejected(
             &namespace(),
-            "3",
-            "Sikertelen bejelentkezés.",
+            SzamlazzAnswer::new("3", "Sikertelen bejelentkezés."),
         ));
         let outcome = gateway
             .lookup(LookupRequest {
@@ -868,10 +872,10 @@ fn lookup_classifies_query_outcomes() {
     }
     // Another szamlazz.hu code is an answer the handler cannot conclude from:
     // the `unavailable` fault naming the code, as before the read policy.
-    let fault = classify(QueryOutcome::Api {
-        code: "57".to_owned(),
-        message: "Ismeretlen hiba".to_owned(),
-    })
+    let fault = classify(QueryOutcome::Api(SzamlazzAnswer::new(
+        "57",
+        "Ismeretlen hiba",
+    )))
     .expect_err("a fault");
     let error = restate_sdk::errors::TerminalError::from(fault);
     assert_eq!(error.code(), 503);
@@ -882,10 +886,9 @@ fn lookup_classifies_query_outcomes() {
     assert!(message.contains("Ismeretlen hiba"), "{message}");
 
     // Rejected credentials are a fault of their own, not `unavailable`.
-    let fault = classify(QueryOutcome::CredentialsRejected {
-        code: "3".to_owned(),
-        message: "login".to_owned(),
-    })
+    let fault = classify(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
+        "3", "login",
+    )))
     .expect_err("a fault");
     let error = restate_sdk::errors::TerminalError::from(fault);
     assert_eq!(error.code(), 503);
@@ -914,11 +917,8 @@ fn a_settled_storno_step_maps_its_leading_query_answers_onto_faults() {
     .expect("data");
     assert_eq!(response.storno_number.as_deref(), Some("SS-1"));
 
-    let fault = respond(StornoOutcome::Api {
-        code: "57".to_owned(),
-        message: "Hibás XML.".to_owned(),
-    })
-    .expect_err("a fault");
+    let fault =
+        respond(StornoOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML."))).expect_err("a fault");
     let error = TerminalError::from(fault);
     assert_eq!(error.code(), 503);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
@@ -940,10 +940,9 @@ fn a_settled_storno_step_maps_its_leading_query_answers_onto_faults() {
     assert!(message.contains("szlahu_down"), "{message}");
     assert!(message.contains("nothing was sent"), "{message}");
 
-    let fault = respond(StornoOutcome::CredentialsRejected {
-        code: "3".to_owned(),
-        message: "login".to_owned(),
-    })
+    let fault = respond(StornoOutcome::CredentialsRejected(SzamlazzAnswer::new(
+        "3", "login",
+    )))
     .expect_err("a fault");
     let error = TerminalError::from(fault);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
@@ -1062,10 +1061,8 @@ fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
         assert_eq!(body["code"], "credentials_rejected", "{body}");
         assert_eq!(body["szamlazz_code"], "3", "{body}");
     };
-    let rejected = || QueryOutcome::CredentialsRejected {
-        code: "3".to_owned(),
-        message: "Sikertelen bejelentkezés.".to_owned(),
-    };
+    let rejected =
+        || QueryOutcome::CredentialsRejected(SzamlazzAnswer::new("3", "Sikertelen bejelentkezés."));
 
     let storno = Doc {
         referenced_invoice: Some("SZ-1"),
@@ -1088,10 +1085,7 @@ fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
             .boxed(),
         ),
         QueryOutcome::NotFound,
-        QueryOutcome::Api {
-            code: "57".to_owned(),
-            message: "Hibás számlaszám.".to_owned(),
-        },
+        QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám.")),
     ] {
         assert_eq!(
             storno_number_from_hint(not_its_storno.clone(), "SZ-1", &namespace).expect("data"),
@@ -1115,10 +1109,7 @@ fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
     );
     for unknown in [
         StornoLookupOutcome::Absent,
-        StornoLookupOutcome::Api {
-            code: "57".to_owned(),
-            message: "Hibás számlaszám.".to_owned(),
-        },
+        StornoLookupOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám.")),
     ] {
         assert_eq!(
             storno_number_from_lookup(unknown.clone(), &namespace).expect("data"),
@@ -1126,15 +1117,12 @@ fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
             "{unknown:?}"
         );
     }
-    let QueryOutcome::CredentialsRejected { code, message } = rejected() else {
+    let QueryOutcome::CredentialsRejected(answer) = rejected() else {
         unreachable!()
     };
     rejected_body(TerminalError::from(
-        storno_number_from_lookup(
-            StornoLookupOutcome::CredentialsRejected { code, message },
-            &namespace,
-        )
-        .expect_err("a fault"),
+        storno_number_from_lookup(StornoLookupOutcome::CredentialsRejected(answer), &namespace)
+            .expect_err("a fault"),
     ));
 }
 
@@ -1367,10 +1355,10 @@ fn the_storno_lookup_answers_an_existing_storno_and_faults_on_a_code() {
 
     let (status, body) = fault_body(
         after_storno_lookup(
-            StornoLookupOutcome::CredentialsRejected {
-                code: "3".to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            },
+            StornoLookupOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                "3",
+                "Sikertelen bejelentkezés.",
+            )),
             "SZ-1",
             &namespace,
         )
@@ -1382,10 +1370,7 @@ fn the_storno_lookup_answers_an_existing_storno_and_faults_on_a_code() {
 
     let (status, body) = fault_body(
         after_storno_lookup(
-            StornoLookupOutcome::Api {
-                code: "57".to_owned(),
-                message: "Hibás számlaszám.".to_owned(),
-            },
+            StornoLookupOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám.")),
             "SZ-1",
             &namespace,
         )

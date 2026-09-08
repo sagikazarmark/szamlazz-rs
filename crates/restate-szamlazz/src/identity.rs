@@ -481,6 +481,7 @@ impl<'de> Deserialize<'de> for CorrectionId {
 }
 
 #[cfg(feature = "schemars")]
+#[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
 impl schemars::JsonSchema for CorrectionId {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "CorrectionId".into()
@@ -633,6 +634,7 @@ impl<'de> Deserialize<'de> for InvoiceNumber {
 }
 
 #[cfg(feature = "schemars")]
+#[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
 impl schemars::JsonSchema for InvoiceNumber {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "InvoiceNumber".into()

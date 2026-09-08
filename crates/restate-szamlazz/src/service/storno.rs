@@ -323,9 +323,9 @@ fn delete_response(
         DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone => {
             Ok(DeleteProformaResponse::deleted())
         }
-        DeleteOutcome::Rejected { code, .. } => Ok(DeleteProformaResponse::not_deleted(code)),
-        DeleteOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        DeleteOutcome::Rejected(answer) => Ok(DeleteProformaResponse::not_deleted(answer.code)),
+        DeleteOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
         DeleteOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
             "proforma deletion outcome unknown: {message}; retry with a new Idempotency-Key"
@@ -340,6 +340,7 @@ mod tests {
     use rust_decimal::dec;
 
     use super::*;
+    use crate::gateway::{Rejection, SzamlazzAnswer};
     use crate::test_support::{CreditRecord, Doc};
 
     fn ord_1() -> OrderKey {
@@ -536,10 +537,7 @@ mod tests {
         );
         assert_eq!(
             delete_response(
-                DeleteOutcome::Rejected {
-                    code: "57".to_owned(),
-                    message: "Hibás XML.".to_owned(),
-                },
+                DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "Hibás XML."))),
                 &namespace,
             )
             .expect("data"),
@@ -548,10 +546,10 @@ mod tests {
 
         let (status, body) = fault_body(
             delete_response(
-                DeleteOutcome::CredentialsRejected {
-                    code: "3".to_owned(),
-                    message: "Sikertelen bejelentkezés.".to_owned(),
-                },
+                DeleteOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                    "3",
+                    "Sikertelen bejelentkezés.",
+                )),
                 &namespace,
             )
             .expect_err("a fault"),

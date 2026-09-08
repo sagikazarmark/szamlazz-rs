@@ -12,6 +12,7 @@ use crate::account::Account;
 use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
     FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
+    SzamlazzAnswer,
 };
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
@@ -122,13 +123,12 @@ impl Fault {
     /// szamlazz.hu answered with an error code the handler passes through
     /// rather than concludes from: the `szamlazz_error` fault (422) with the
     /// code in `szamlazz_code` and a message that repeats szamlazz.hu's.
-    pub(super) fn szamlazz_error(code: impl Into<String>, message: impl Into<String>) -> Self {
-        let code = code.into();
+    pub(super) fn szamlazz_error(answer: SzamlazzAnswer) -> Self {
         Self::new(
             TerminalCode::SzamlazzError,
-            format!("szamlazz.hu error {code}: {}", message.into()),
+            format!("szamlazz.hu error {answer}"),
         )
-        .with_szamlazz_code(code)
+        .with_szamlazz_code(answer.code)
     }
 
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
@@ -139,13 +139,11 @@ impl Fault {
     /// document from (neither 7 nor a credential code). An answer, so it is
     /// journaled and never retried by the read policy; still a fault, since
     /// nothing may be concluded from it.
-    pub(super) fn inconclusive_answer(code: impl Into<String>, message: impl Into<String>) -> Self {
-        let code = code.into();
+    pub(super) fn inconclusive_answer(answer: SzamlazzAnswer) -> Self {
         Self::unavailable(format!(
-            "szamlazz.hu answered the query with code {code}: {}; nothing may be concluded; retry with a new Idempotency-Key or read get",
-            message.into()
+            "szamlazz.hu answered the query with code {answer}; nothing may be concluded; retry with a new Idempotency-Key or read get"
         ))
-        .with_szamlazz_code(code)
+        .with_szamlazz_code(answer.code)
     }
 
     /// szamlazz.hu reported unavailability (`szlahu_down`) to a write step's
@@ -189,25 +187,19 @@ impl Fault {
     /// answers these codes before acting, so the request it rejected was not
     /// acted on, but the rejection may be a post-send re-query's after a send
     /// with an open code, and an earlier execution's send may have landed.
-    pub(super) fn credentials_rejected(
-        namespace: &Namespace,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        let code = code.into();
-        let message = message.into();
+    pub(super) fn credentials_rejected(namespace: &Namespace, answer: SzamlazzAnswer) -> Self {
         tracing::warn!(
             namespace = %namespace,
-            code = %code,
+            code = %answer.code,
             "szamlazz.hu rejected the agent credentials; fix the account's agent key"
         );
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
-                "szamlazz.hu rejected the agent credentials (code {code}: {message}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
+                "szamlazz.hu rejected the agent credentials (code {answer}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
             ),
         )
-        .with_szamlazz_code(code)
+        .with_szamlazz_code(answer.code)
     }
 
     /// The SDK's terminal error carrying this fault: the code's status and
@@ -319,9 +311,9 @@ pub(super) fn verified_document(
         QueryOutcome::NotFound => Err(Fault::not_found(format!(
             "invoice {number} is not known to szamlazz.hu (code 7)"
         ))),
-        QueryOutcome::Api { code, message } => Err(Fault::inconclusive_answer(code, message)),
-        QueryOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
     }
 }
@@ -427,12 +419,10 @@ pub(super) fn after_storno_lookup(
         StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(ControlFlow::Break(
             reversed_response(number, Some(storno_number)),
         )),
-        StornoLookupOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        StornoLookupOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
-        StornoLookupOutcome::Api { code, message } => {
-            Err(Fault::inconclusive_answer(code, message))
-        }
+        StornoLookupOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
     }
 }
 
@@ -463,16 +453,16 @@ pub(super) fn storno_response(
             .with_message(
                 "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
             ),
-        GatewayStornoOutcome::Rejected { code, message } => {
+        GatewayStornoOutcome::Rejected(rejection) => {
             StornoResponse::new(StornoOutcome::Rejected, number)
-                .with_code(code)
-                .with_message(message)
+                .with_code(rejection.code)
+                .with_message(rejection.message)
         }
-        GatewayStornoOutcome::CredentialsRejected { code, message } => {
-            return Err(Fault::credentials_rejected(namespace, code, message));
+        GatewayStornoOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
         }
-        GatewayStornoOutcome::Api { code, message } => {
-            return Err(Fault::inconclusive_answer(code, message));
+        GatewayStornoOutcome::Api(answer) => {
+            return Err(Fault::inconclusive_answer(answer));
         }
         GatewayStornoOutcome::Unavailable { message } => {
             return Err(Fault::szlahu_down_answer(message));
@@ -497,9 +487,9 @@ pub(super) fn storno_number_from_hint(
 ) -> Result<Option<String>, Fault> {
     match outcome {
         QueryOutcome::Found(found) if found.is_storno_of(number) => Ok(Some(found.number)),
-        QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api { .. } => Ok(None),
-        QueryOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api(_) => Ok(None),
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
     }
 }
@@ -520,9 +510,9 @@ pub(super) fn storno_number_from_lookup(
 ) -> Result<Option<String>, Fault> {
     match outcome {
         StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(Some(storno_number)),
-        StornoLookupOutcome::Absent | StornoLookupOutcome::Api { .. } => Ok(None),
-        StornoLookupOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        StornoLookupOutcome::Absent | StornoLookupOutcome::Api(_) => Ok(None),
+        StornoLookupOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
     }
 }
@@ -559,9 +549,9 @@ impl Lookup {
     ) -> Result<Self, Fault> {
         match outcome {
             QueryOutcome::NotFound => Ok(Self::Absent),
-            QueryOutcome::Api { code, message } => Err(Fault::inconclusive_answer(code, message)),
-            QueryOutcome::CredentialsRejected { code, message } => {
-                Err(Fault::credentials_rejected(namespace, code, message))
+            QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+            QueryOutcome::CredentialsRejected(answer) => {
+                Err(Fault::credentials_rejected(namespace, answer))
             }
             QueryOutcome::Found(found) => {
                 if found.is_ours(order, kind) {

@@ -10,9 +10,9 @@ use restate_szamlazz::contract::{
 };
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway, LookupOutcome,
-    LookupRequest, ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome,
-    StornoLookupOutcome, StornoOutcome, StornoStepRequest, TaxpayerOutcome, Unanswered,
-    Unconfirmed,
+    LookupRequest, ProbeOutcome, QueryOutcome, Rejection, RejectionCode, SetPaymentsOutcome,
+    StornoLookupOutcome, StornoOutcome, StornoStepRequest, SzamlazzAnswer, TaxpayerOutcome,
+    Unanswered, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -770,10 +770,10 @@ async fn lookup_answered_with_another_code_is_data() {
         .await;
     assert_eq!(
         h.try_lookup(&[]).await,
-        Ok(LookupOutcome::Api {
-            code: "57".to_owned(),
-            message: "Ismeretlen hiba".to_owned(),
-        })
+        Ok(LookupOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Ismeretlen hiba"
+        )))
     );
 
     let h = Harness::start().await;
@@ -1152,10 +1152,10 @@ async fn create_leading_query_answered_with_another_code_or_szlahu_down_is_settl
         .await;
     assert_eq!(
         h.create(None).await,
-        Ok(CreateOutcome::Api {
-            code: "57".to_owned(),
-            message: "Ismeretlen hiba".to_owned(),
-        })
+        Ok(CreateOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Ismeretlen hiba"
+        )))
     );
     assert_eq!(h.bodies().await.len(), 1, "the leading query only");
 
@@ -1194,10 +1194,9 @@ async fn create_rejection_is_settled_without_a_re_query() {
 
     assert_eq!(
         h.create(None).await,
-        Ok(CreateOutcome::Rejected {
-            code: "259".to_owned(),
-            message: "net".to_owned(),
-        })
+        Ok(CreateOutcome::Rejected(Rejection::from(
+            SzamlazzAnswer::new("259", "net")
+        )))
     );
 }
 
@@ -1615,8 +1614,7 @@ async fn duplicate_order_number_names_the_existing_document_when_our_kind_is_new
         assert_eq!(
             h.create(reversed).await,
             Ok(CreateOutcome::DuplicateOrderNumber {
-                code: "152".to_owned(),
-                message: "Már létező rendelésszám".to_owned(),
+                answer: SzamlazzAnswer::new("152", "Már létező rendelésszám"),
                 existing_number: Some("SZ-77".to_owned()),
             }),
             "{label}"
@@ -1648,8 +1646,7 @@ async fn duplicate_order_number_has_no_existing_number_when_another_kind_is_newe
         assert_eq!(
             h.create(None).await,
             Ok(CreateOutcome::DuplicateOrderNumber {
-                code: "152".to_owned(),
-                message: "Már létező rendelésszám".to_owned(),
+                answer: SzamlazzAnswer::new("152", "Már létező rendelésszám"),
                 existing_number: None,
             }),
             "{label}"
@@ -1673,8 +1670,7 @@ async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_
     assert_eq!(
         h.create(None).await,
         Ok(CreateOutcome::DuplicateOrderNumber {
-            code: "152".to_owned(),
-            message: "Már létező rendelésszám".to_owned(),
+            answer: SzamlazzAnswer::new("152", "Már létező rendelésszám"),
             existing_number: None,
         })
     );
@@ -1731,10 +1727,9 @@ async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_que
     assert_eq!(
         h.create_kind(IssuedKind::Corrective, &corrective_id, None)
             .await,
-        Ok(CreateOutcome::Rejected {
-            code: "71".to_owned(),
-            message: "duplicate".to_owned(),
-        })
+        Ok(CreateOutcome::Rejected(Rejection::from(
+            SzamlazzAnswer::new("71", "duplicate")
+        )))
     );
 
     let h = Harness::start().await;
@@ -1779,10 +1774,7 @@ async fn credential_codes_on_the_lookup_external_id_query_are_credentials_reject
 
         assert_eq!(
             h.lookup(&[]).await,
-            LookupOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            },
+            LookupOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
             "{code}"
         );
         assert_eq!(
@@ -1812,10 +1804,7 @@ async fn credential_codes_on_the_lookup_hint_are_credentials_rejected() {
 
         assert_eq!(
             h.lookup(&[]).await,
-            LookupOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            },
+            LookupOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
             "{code}"
         );
     }
@@ -1838,10 +1827,10 @@ async fn credential_codes_on_the_create_leading_query_never_send() {
 
         assert_eq!(
             h.create(None).await,
-            Ok(CreateOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            }),
+            Ok(CreateOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                code.to_owned(),
+                "login"
+            ))),
             "{code}"
         );
     }
@@ -1867,10 +1856,10 @@ async fn credential_codes_on_the_create_send_are_settled_without_a_re_query() {
 
         assert_eq!(
             h.create(None).await,
-            Ok(CreateOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            }),
+            Ok(CreateOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                code.to_owned(),
+                "login"
+            ))),
             "{code}"
         );
     }
@@ -1932,10 +1921,10 @@ async fn verify_query_and_hint() {
     // Another szamlazz.hu code is an answer: data.
     assert_eq!(
         h.gateway.verify("SZ-57").await,
-        Ok(QueryOutcome::Api {
-            code: "57".to_owned(),
-            message: "Ismeretlen hiba".to_owned(),
-        })
+        Ok(QueryOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Ismeretlen hiba"
+        )))
     );
     match h.gateway.hint(&order()).await {
         Ok(QueryOutcome::Found(found)) => {
@@ -2022,10 +2011,10 @@ async fn credential_codes_on_a_query_are_credentials_rejected() {
             .mount(&h.server)
             .await;
 
-        let expected = Ok(QueryOutcome::CredentialsRejected {
-            code: code.to_owned(),
-            message: "login".to_owned(),
-        });
+        let expected = Ok(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
+            code.to_owned(),
+            "login",
+        )));
         assert_eq!(h.gateway.verify("SZ-1").await, expected, "verify {code}");
         assert_eq!(h.gateway.hint(&order()).await, expected, "hint {code}");
         assert_eq!(
@@ -2106,10 +2095,10 @@ async fn probe_reports_a_wrong_key_as_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.probe(&probe_id()).await,
-            Ok(ProbeOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            }),
+            Ok(ProbeOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                code.to_owned(),
+                "Sikertelen bejelentkezés."
+            ))),
             "{code}"
         );
         assert_eq!(h.bodies().await.len(), 1, "{code}");
@@ -2240,10 +2229,9 @@ async fn storno_lookup_reports_rejected_credentials_another_code_and_no_answer()
             .await;
         assert_eq!(
             h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-            Ok(StornoLookupOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            }),
+            Ok(StornoLookupOutcome::CredentialsRejected(
+                SzamlazzAnswer::new(code.to_owned(), "login")
+            )),
             "{code}"
         );
     }
@@ -2256,10 +2244,10 @@ async fn storno_lookup_reports_rejected_credentials_another_code_and_no_answer()
         .await;
     assert_eq!(
         h.gateway.lookup_storno(&storno_id(), "SZ-1").await,
-        Ok(StornoLookupOutcome::Api {
-            code: "57".to_owned(),
-            message: "Ismeretlen hiba".to_owned(),
-        })
+        Ok(StornoLookupOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Ismeretlen hiba"
+        )))
     );
 
     // No answer is the read's retryable error.
@@ -2436,10 +2424,9 @@ async fn storno_rejections_are_typed() {
             .await;
         assert_eq!(
             h.gateway.storno(storno_request(&storno_id)).await,
-            Ok(StornoOutcome::Rejected {
-                code: code.to_owned(),
-                message: message.to_owned(),
-            })
+            Ok(StornoOutcome::Rejected(Rejection::from(
+                SzamlazzAnswer::new(code.to_owned(), message.to_owned())
+            )))
         );
     }
 }
@@ -2493,10 +2480,10 @@ async fn storno_leading_query_answered_with_another_code_or_szlahu_down_is_settl
         .await;
     assert_eq!(
         h.gateway.storno(storno_request(&storno_id)).await,
-        Ok(StornoOutcome::Api {
-            code: "57".to_owned(),
-            message: "Ismeretlen hiba".to_owned(),
-        })
+        Ok(StornoOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Ismeretlen hiba"
+        )))
     );
     assert_eq!(h.bodies().await.len(), 1, "the leading query only");
 
@@ -2539,10 +2526,10 @@ async fn credential_codes_on_the_storno_are_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.storno(storno_request(&storno_id)).await,
-            Ok(StornoOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            }),
+            Ok(StornoOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                code.to_owned(),
+                "login"
+            ))),
             "leading query {code}"
         );
 
@@ -2558,10 +2545,10 @@ async fn credential_codes_on_the_storno_are_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.storno(storno_request(&storno_id)).await,
-            Ok(StornoOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            }),
+            Ok(StornoOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                code.to_owned(),
+                "login"
+            ))),
             "send {code}"
         );
     }
@@ -2736,10 +2723,7 @@ async fn delete_proforma_outcomes() {
     );
     assert_eq!(
         h.gateway.delete_proforma("D-3").await,
-        DeleteOutcome::CredentialsRejected {
-            code: "3".to_owned(),
-            message: "login".to_owned(),
-        }
+        DeleteOutcome::CredentialsRejected(SzamlazzAnswer::new("3", "login"))
     );
     assert!(matches!(
         h.gateway.delete_proforma("D-4").await,
@@ -2747,10 +2731,7 @@ async fn delete_proforma_outcomes() {
     ));
     assert_eq!(
         h.gateway.delete_proforma("D-5").await,
-        DeleteOutcome::Rejected {
-            code: "57".to_owned(),
-            message: "malformed".to_owned(),
-        }
+        DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "malformed")))
     );
 }
 
@@ -2765,10 +2746,7 @@ async fn credential_codes_on_the_delete_are_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.delete_proforma("D-1").await,
-            DeleteOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            },
+            DeleteOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
             "{code}"
         );
     }
@@ -2793,10 +2771,7 @@ async fn credential_codes_on_set_payments_are_credentials_rejected() {
             h.gateway
                 .set_payments("SZ-1", std::slice::from_ref(&entry), false)
                 .await,
-            SetPaymentsOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "login".to_owned(),
-            },
+            SetPaymentsOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
             "{code}"
         );
     }
@@ -2849,10 +2824,7 @@ async fn set_payments_outcomes() {
         h.gateway
             .set_payments("SZ-2", std::slice::from_ref(&entry), false)
             .await,
-        SetPaymentsOutcome::Rejected {
-            code: "463".to_owned(),
-            message: "reversed".to_owned(),
-        }
+        SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("463", "reversed")))
     );
     assert!(matches!(
         h.gateway
@@ -2863,13 +2835,17 @@ async fn set_payments_outcomes() {
     let six = vec![entry; 6];
     assert!(matches!(
         h.gateway.set_payments("SZ-9", &six, false).await,
-        SetPaymentsOutcome::Rejected { code, .. } if code == REQUEST_CODE
+        SetPaymentsOutcome::Rejected(Rejection {
+            code: RejectionCode::Request,
+            ..
+        })
     ));
     // A replacing call with no entries would clear the invoice's payments:
     // refused by the agent crate before the wire, the caller's request.
     match h.gateway.set_payments("SZ-9", &[], false).await {
-        SetPaymentsOutcome::Rejected { code, message } => {
-            assert_eq!(code, REQUEST_CODE);
+        SetPaymentsOutcome::Rejected(Rejection { code, message, .. }) => {
+            assert_eq!(code, RejectionCode::Request);
+            assert_eq!(code.as_str(), RejectionCode::REQUEST);
             assert!(message.contains("at least one entry"), "{message}");
         }
         other => panic!("expected Rejected, got {other:?}"),
@@ -3106,10 +3082,10 @@ async fn taxpayer_query_reports_a_wrong_key_as_credentials_rejected() {
             .await;
         assert_eq!(
             h.gateway.query_taxpayer(&prefix()).await,
-            Ok(TaxpayerOutcome::CredentialsRejected {
-                code: code.to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            }),
+            Ok(TaxpayerOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                code.to_owned(),
+                "Sikertelen bejelentkezés."
+            ))),
             "{code}"
         );
         assert_eq!(h.bodies().await.len(), 1, "{code}");
@@ -3129,10 +3105,10 @@ async fn taxpayer_query_answered_with_another_code_is_api_data() {
         .await;
     assert_eq!(
         h.gateway.query_taxpayer(&prefix()).await,
-        Ok(TaxpayerOutcome::Api {
-            code: "57".to_owned(),
-            message: "Synthetic XML parsing error".to_owned(),
-        })
+        Ok(TaxpayerOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Synthetic XML parsing error"
+        )))
     );
     assert_eq!(h.bodies().await.len(), 1);
 
@@ -3144,10 +3120,10 @@ async fn taxpayer_query_answered_with_another_code_is_api_data() {
         .await;
     assert_eq!(
         h.gateway.query_taxpayer(&prefix()).await,
-        Ok(TaxpayerOutcome::Api {
-            code: "57".to_owned(),
-            message: "Rendszerhiba".to_owned(),
-        })
+        Ok(TaxpayerOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Rendszerhiba"
+        )))
     );
 }
 

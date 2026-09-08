@@ -171,9 +171,15 @@
 //! ```
 //!
 //! Domain outcomes (`issued`, `already_issued`, `reconciled`, `reversed`, `rejected`,
-//! `conflict{reason}`) are returned as data with HTTP 200. A `TerminalError` carries a
-//! [`contract::TerminalCode`] and always means "outcome unknown: retry with a new
-//! `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no document exists".
+//! `conflict{reason}`) are returned as data with HTTP 200. A `TerminalError` is a fault, whose body
+//! is a [`contract::Fault`] with a [`contract::TerminalCode`]. Three of the seven codes mean
+//! "outcome unknown: retry with a new `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no
+//! document exists": `outcome_unknown`, `unavailable`, `credentials_rejected`. The other four are
+//! settled and are not retried as they are: `invalid_input`, `unknown_account` and `not_found` are
+//! the caller's request (fix it), `szamlazz_error` is szamlazz.hu's own answer passed through.
+//! [`contract::TerminalCode`] says which is which.
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod account;
 pub mod config;
