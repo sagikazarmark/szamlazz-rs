@@ -131,11 +131,44 @@ pub const FLAG_SCOPED_VIRTUAL_OBJECTS: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServerSpec {
     /// A short name for the shape (`main`, `canary`), in the node name and
-    /// the base dir.
+    /// the base dir: one path component of `[a-z0-9-]`, non-empty
+    /// ([`ServerSpec::validate`]), since the base dir is removed recursively
+    /// on drop and a name with a `/` or a `..` in it would name a directory
+    /// that is not the harness's.
     pub name: &'static str,
     /// The environment the server runs with, `NAME=value` pairs; the three
     /// experimental flags among them are what `/version` is checked against.
     pub flags: &'static [&'static str],
+}
+
+impl ServerSpec {
+    /// Whether `name` is one safe path component: non-empty, `[a-z0-9-]`.
+    #[must_use]
+    pub const fn is_valid_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        if bytes.is_empty() {
+            return false;
+        }
+        let mut i = 0;
+        while i < bytes.len() {
+            if !(bytes[i].is_ascii_lowercase() || bytes[i].is_ascii_digit() || bytes[i] == b'-') {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// Panics, naming the rule, unless [`Self::name`] is one safe path
+    /// component ([`Self::is_valid_name`]). Run by [`Launcher::launch`]
+    /// before anything touches the filesystem.
+    pub fn validate(&self) {
+        assert!(
+            Self::is_valid_name(self.name),
+            "a ServerSpec name is one path component of [a-z0-9-], non-empty: {:?}",
+            self.name
+        );
+    }
 }
 
 impl Launcher {
@@ -149,6 +182,7 @@ impl Launcher {
     /// process's endpoint at: `127.0.0.1` for a spawned server,
     /// `host.docker.internal` for a reused one (a container of `compose.yaml`).
     pub async fn launch(self, spec: &ServerSpec) -> Restate {
+        spec.validate();
         let endpoint_host = |default: &str| {
             std::env::var("RESTATE_ENDPOINT_HOST").unwrap_or_else(|_| default.to_owned())
         };
@@ -191,6 +225,27 @@ mod tests {
             server_gate(None, binary, Some(OsStr::new("true"))),
             Ok(Some(Launcher::Binary(PathBuf::from("/opt/restate-server")))),
             "the binary suffices under CI too"
+        );
+    }
+
+    /// The name is one path component: what keeps the base dir, removed
+    /// recursively on drop, under the temp directory.
+    #[test]
+    fn a_server_spec_name_is_one_safe_path_component() {
+        for name in ["main", "canary", "smoke-2", "a"] {
+            assert!(ServerSpec::is_valid_name(name), "{name}");
+        }
+        for name in ["", "../x", "a/b", "Main", "with space", "dot.", "é"] {
+            assert!(!ServerSpec::is_valid_name(name), "{name:?}");
+        }
+        let bad = ServerSpec {
+            name: "../escape",
+            flags: &[],
+        };
+        let outcome = std::panic::catch_unwind(|| bad.validate());
+        assert!(
+            outcome.is_err(),
+            "validate refuses the name before any spawn"
         );
     }
 

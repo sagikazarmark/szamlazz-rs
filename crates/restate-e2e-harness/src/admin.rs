@@ -31,6 +31,15 @@ const DRAIN_DEADLINE: Duration = Duration::from_secs(60);
 /// How long [`Admin::register`] retries the registration.
 const REGISTER_DEADLINE: Duration = Duration::from_secs(60);
 
+/// `text` as a SQL string literal, quotes included: a `'` doubled. Every
+/// value the harness interpolates into a query (a Virtual Object key, which
+/// is the caller's arbitrary data; an invocation id) goes through this, so a
+/// key such as `O'Brien` is a valid key and never a broken predicate.
+#[must_use]
+pub fn sql_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
 /// Polls `probe` every `interval` until it answers `Ok`, or panics with
 /// `describe` of the last `Err` once `deadline` has passed: the one shape of
 /// every wait on the server (a row to appear or go, a status to be reached,
@@ -237,7 +246,8 @@ impl Admin {
             || async {
                 let rows = self
                     .sql_or_panic(&format!(
-                        "SELECT id FROM sys_invocation WHERE id = '{invocation_id}'"
+                        "SELECT id FROM sys_invocation WHERE id = {}",
+                        sql_literal(invocation_id)
                     ))
                     .await;
                 if rows.is_empty() { Ok(()) } else { Err(()) }
@@ -256,7 +266,8 @@ impl Admin {
             || async {
                 let rows = self
                     .sql_or_panic(&format!(
-                        "SELECT status FROM sys_invocation WHERE id = '{invocation_id}'"
+                        "SELECT status FROM sys_invocation WHERE id = {}",
+                        sql_literal(invocation_id)
                     ))
                     .await;
                 let status = rows
@@ -279,7 +290,8 @@ impl Admin {
     /// has not completed, in id order.
     pub async fn in_flight_ids_on(&self, key: &str) -> Vec<String> {
         self.sql_or_panic(&format!(
-            "SELECT id FROM sys_invocation WHERE target_service_key = '{key}' AND status <> 'completed' ORDER BY id"
+            "SELECT id FROM sys_invocation WHERE target_service_key = {} AND status <> 'completed' ORDER BY id",
+            sql_literal(key)
         ))
         .await
         .iter()
@@ -327,7 +339,8 @@ impl Admin {
     pub async fn journal(&self, invocation_id: &str) -> Vec<JournalEntry> {
         let rows = self
             .sql_or_panic(&format!(
-                "SELECT index, entry_type, name, raw FROM sys_journal WHERE id = '{invocation_id}' ORDER BY index"
+                "SELECT index, entry_type, name, raw FROM sys_journal WHERE id = {} ORDER BY index",
+                sql_literal(invocation_id)
             ))
             .await;
         rows.iter().map(JournalEntry::from_row).collect()
@@ -348,8 +361,9 @@ impl Admin {
     pub async fn invocation(&self, invocation_id: &str) -> Invocation {
         let rows = self
             .sql_or_panic(&format!(
-                "SELECT {} FROM sys_invocation WHERE id = '{invocation_id}'",
-                Invocation::COLUMNS
+                "SELECT {} FROM sys_invocation WHERE id = {}",
+                Invocation::COLUMNS,
+                sql_literal(invocation_id)
             ))
             .await;
         let row = rows
@@ -409,7 +423,8 @@ const POLL: Duration = Duration::from_millis(100);
 fn retries_query(key: &str) -> String {
     format!(
         "SELECT status, retry_count, last_failure, last_failure_related_command_name \
-         FROM sys_invocation WHERE target_service_key = '{key}'"
+         FROM sys_invocation WHERE target_service_key = {}",
+        sql_literal(key)
     )
 }
 
@@ -597,6 +612,17 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    /// A Virtual Object key is the caller's data: a quote in it is doubled,
+    /// so the predicate stays the predicate.
+    #[test]
+    fn a_sql_literal_doubles_its_quotes() {
+        assert_eq!(sql_literal("ORD-1"), "'ORD-1'");
+        assert_eq!(sql_literal("O'Brien"), "'O''Brien'");
+        assert_eq!(sql_literal("x' OR '1'='1"), "'x'' OR ''1''=''1'");
+        assert_eq!(sql_literal(""), "''");
+        assert!(retries_query("O'Brien").ends_with("target_service_key = 'O''Brien'"));
+    }
 
     /// A `sys_invocation` row as the sampler reads it.
     fn row(

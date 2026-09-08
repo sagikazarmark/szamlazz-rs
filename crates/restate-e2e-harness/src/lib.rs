@@ -88,18 +88,25 @@ compile_error!(
      with killpg(2), and the stop signals are SIGINT and SIGTERM"
 );
 
+// The two modules that spawn and signal are unix; gated so that a non-unix
+// build's one diagnostic is the `compile_error!` above, not a page of
+// unresolved `std::os::unix` and `nix` paths beside it.
 pub mod admin;
+#[cfg(unix)]
 pub mod gate;
 pub mod ingress;
 pub mod introspection;
 pub mod run_names;
+#[cfg(unix)]
 pub mod server;
 
-pub use admin::{Admin, Retries, Watch};
+pub use admin::{Admin, Retries, Watch, sql_literal};
+#[cfg(unix)]
 pub use gate::{Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::Reply;
 pub use introspection::{Invocation, JournalEntry, run_result};
 pub use run_names::{RunPath, RunPatterns, is_prefix_of_path};
+#[cfg(unix)]
 pub use server::{Deployment, Restate};
 
 /// A [`reqwest::ClientBuilder`] for a harness's own traffic, all of it plain

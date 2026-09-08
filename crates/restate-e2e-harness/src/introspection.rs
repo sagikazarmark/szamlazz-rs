@@ -47,12 +47,15 @@ impl JournalEntry {
         self.entry_type == "Command: Run"
     }
 
-    /// Whether the entry's bytes contain `needle`.
+    /// Whether the entry's bytes contain `needle`; the empty needle is
+    /// contained in everything (`windows(0)` would panic).
     #[must_use]
     pub fn raw_contains(&self, needle: &str) -> bool {
-        self.raw
-            .windows(needle.len())
-            .any(|window| window == needle.as_bytes())
+        needle.is_empty()
+            || self
+                .raw
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
     }
 }
 
@@ -146,6 +149,8 @@ mod tests {
         assert_eq!(result.index, 2);
         assert_eq!(result.raw, b"{}");
         assert!(result.raw_contains("{}"));
+        assert!(result.raw_contains(""), "the empty needle is in everything");
+        assert!(!result.raw_contains("{}}"), "longer than the bytes");
         assert!(run_result(&journal, "other").is_none());
         assert_eq!(decode_hex("abc"), None, "an odd length is not hex");
         assert_eq!(decode_hex("zz"), None);

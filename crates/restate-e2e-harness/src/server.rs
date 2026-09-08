@@ -255,7 +255,9 @@ impl Restate {
     /// A `restate-server` process from `binary` with `spec`'s flags, bound to
     /// the loopback on three ports chosen free ([`free_ports`]), its data and
     /// log under a directory of its own in the temp dir
-    /// (`restate-e2e-{pid}-{name}`), leading a process group of its own so
+    /// (`restate-e2e-{pid}-{name}-{admin port}`: the port is unique per
+    /// launch on the host, so two launches of one spec in one test binary
+    /// share nothing), leading a process group of its own so
     /// that the group is what gets killed. Configured through Restate's
     /// environment (`RESTATE_<SECTION>__<KEY>`), so no config file is written.
     pub(crate) fn spawn(binary: &Path, spec: &ServerSpec, endpoint_host: String) -> Self {
@@ -265,8 +267,11 @@ impl Restate {
             admin,
             node,
         };
-        let base_dir =
-            std::env::temp_dir().join(format!("restate-e2e-{}-{}", std::process::id(), spec.name));
+        let base_dir = std::env::temp_dir().join(format!(
+            "restate-e2e-{}-{}-{admin}",
+            std::process::id(),
+            spec.name
+        ));
         fs::create_dir_all(&base_dir).expect("the server's base dir");
         let log = fs::File::create(base_dir.join("restate-server.log")).expect("the server log");
         let mut command = Command::new(binary);
