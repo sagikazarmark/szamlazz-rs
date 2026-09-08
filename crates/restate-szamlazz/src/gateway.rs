@@ -429,9 +429,17 @@ pub trait InvoiceDocumentExt {
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.
     fn payment_amounts(&self) -> Vec<Decimal>;
 
-    /// Whether the document carries `order` as its order number
-    /// (`rendelesszam`, trimmed as szamlazz.hu matches it). What makes a
-    /// document found by number this order's to act on or link.
+    /// The order number the document carries (`rendelesszam`), trimmed as
+    /// szamlazz.hu matches it; `None` when the element is absent, empty or
+    /// whitespace only: a document issued outside any order. The one reading
+    /// of the element: what `Szamlazz.Agent.storno` answers as
+    /// `managed_by_order`'s `order_key`, and what [`Self::carries_order`]
+    /// compares with the key.
+    fn order_number(&self) -> Option<&str>;
+
+    /// Whether the document carries `order` as its [order
+    /// number](Self::order_number). What makes a document found by number
+    /// this order's to act on or link.
     fn carries_order(&self, order: &OrderKey) -> bool;
 
     /// Whether the document is ours: it [carries
@@ -471,8 +479,16 @@ impl InvoiceDocumentExt for InvoiceDocument {
         self.payments.iter().map(|payment| payment.amount).collect()
     }
 
+    fn order_number(&self) -> Option<&str> {
+        self.info
+            .order_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|order| !order.is_empty())
+    }
+
     fn carries_order(&self, order: &OrderKey) -> bool {
-        self.info.order_number.as_deref().map(str::trim) == Some(order.as_str())
+        self.order_number() == Some(order.as_str())
     }
 
     fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool {
@@ -2009,6 +2025,75 @@ mod tests {
         .parse();
         assert_eq!(unknown_mode.info.test, None);
         assert!(unknown_mode.is_ours(&order, IssuedKind::Invoice));
+    }
+
+    /// The order number a document carries is `rendelesszam` trimmed, as
+    /// szamlazz.hu matches it, and nothing when the element is absent,
+    /// empty or whitespace only: a document issued outside any order.
+    /// `carries_order` is that reading compared with the key, so a padded
+    /// `rendelesszam` carries the order and an empty one carries none. The
+    /// agent crate's parser trims the element and reads an empty one as
+    /// `None` already, so the rendered cases prove the pair end to end and
+    /// the assigned ones prove the worker's own reading, which does not lean
+    /// on the parser's.
+    #[test]
+    fn the_order_number_is_the_trimmed_rendelesszam_or_none() {
+        let order = OrderKey::parse("ORD-1").expect("order");
+
+        let plain = Doc::default().parse();
+        assert_eq!(plain.order_number(), Some("ORD-1"));
+        assert!(plain.carries_order(&order));
+
+        let padded = Doc {
+            order: Some("  ORD-1 "),
+            ..Doc::default()
+        }
+        .parse();
+        assert_eq!(padded.order_number(), Some("ORD-1"), "trimmed");
+        assert!(padded.carries_order(&order));
+
+        for outside_any_order in [None, Some(""), Some("   "), Some("\t\n")] {
+            let document = Doc {
+                order: outside_any_order,
+                ..Doc::default()
+            }
+            .parse();
+            assert_eq!(
+                document.order_number(),
+                None,
+                "rendelesszam {outside_any_order:?}"
+            );
+            assert!(
+                !document.carries_order(&order),
+                "rendelesszam {outside_any_order:?}"
+            );
+            assert!(
+                !document.is_ours(&order, IssuedKind::Invoice),
+                "rendelesszam {outside_any_order:?}"
+            );
+        }
+
+        // The worker's own reading of the parsed value, with the parser's
+        // normalisation out of the way.
+        let mut assigned = Doc::default().parse();
+        for (raw, read) in [
+            ("ORD-1", Some("ORD-1")),
+            ("  ORD-1 ", Some("ORD-1")),
+            ("", None),
+            ("   ", None),
+            ("\t\n", None),
+        ] {
+            assigned.info.order_number = Some(raw.to_owned());
+            assert_eq!(assigned.order_number(), read, "order_number {raw:?}");
+            assert_eq!(
+                assigned.carries_order(&order),
+                read.is_some(),
+                "order_number {raw:?}"
+            );
+        }
+        assigned.info.order_number = None;
+        assert_eq!(assigned.order_number(), None);
+        assert!(!assigned.carries_order(&order));
     }
 
     #[test]

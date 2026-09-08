@@ -1317,3 +1317,103 @@ fn the_storno_intent_lifts_eszamla_from_the_original_not_the_default() {
     );
     assert!(!intent(0, &account), "not an invoice: the account default");
 }
+
+/// Step 2 of both storno protocols, decided once for both services: a storno
+/// of ours already under the storno external id answers `reversed` with its
+/// number before anything is sent; nothing under the id proceeds to the
+/// storno step; rejected credentials are the `credentials_rejected` fault and
+/// another code the `unavailable` one (nothing may be concluded, nothing was
+/// sent), each carrying the szamlazz.hu code beside the token, never in it.
+#[test]
+fn the_storno_lookup_answers_an_existing_storno_and_faults_on_a_code() {
+    use std::ops::ControlFlow;
+
+    use restate_sdk::errors::TerminalError;
+
+    use super::support::after_storno_lookup;
+    use crate::contract::StornoOutcome;
+    use crate::gateway::StornoLookupOutcome;
+
+    let namespace = namespace();
+    let fault_body = |fault: super::support::Fault| {
+        let error = TerminalError::from(fault);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        (error.code(), body)
+    };
+
+    assert_eq!(
+        after_storno_lookup(StornoLookupOutcome::Absent, "SZ-1", &namespace).expect("data"),
+        ControlFlow::Continue(()),
+        "nothing under the id: on to the storno step"
+    );
+
+    let ControlFlow::Break(response) = after_storno_lookup(
+        StornoLookupOutcome::AlreadyReversed {
+            storno_number: "SS-1".to_owned(),
+        },
+        "SZ-1",
+        &namespace,
+    )
+    .expect("data") else {
+        panic!("a storno of ours under the id is the answer");
+    };
+    assert_eq!(response.outcome, StornoOutcome::Reversed);
+    assert_eq!(response.invoice_number, "SZ-1");
+    assert_eq!(response.storno_number.as_deref(), Some("SS-1"));
+    assert_eq!(response.conflict_reason, None);
+
+    let (status, body) = fault_body(
+        after_storno_lookup(
+            StornoLookupOutcome::CredentialsRejected {
+                code: "3".to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            },
+            "SZ-1",
+            &namespace,
+        )
+        .expect_err("a fault"),
+    );
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["code"], "credentials_rejected", "{body}");
+    assert_eq!(body["szamlazz_code"], "3", "{body}");
+
+    let (status, body) = fault_body(
+        after_storno_lookup(
+            StornoLookupOutcome::Api {
+                code: "57".to_owned(),
+                message: "Hibás számlaszám.".to_owned(),
+            },
+            "SZ-1",
+            &namespace,
+        )
+        .expect_err("a fault"),
+    );
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["code"], "unavailable", "{body}");
+    assert_eq!(body["szamlazz_code"], "57", "{body}");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("code 57"), "{message}");
+    assert!(message.contains("Hibás számlaszám."), "{message}");
+    assert!(message.contains("nothing may be concluded"), "{message}");
+}
+
+/// The `reversed` answer both storno handlers give once a verify found the
+/// document already reversed: the storno number as the best-effort read
+/// named it, or absent when that read could not name one.
+#[test]
+fn the_reversed_answer_carries_the_storno_number_when_known() {
+    use super::support::reversed_response;
+    use crate::contract::StornoOutcome;
+
+    let known = reversed_response("SZ-1", Some("SS-1".to_owned()));
+    assert_eq!(known.outcome, StornoOutcome::Reversed);
+    assert_eq!(known.invoice_number, "SZ-1");
+    assert_eq!(known.storno_number.as_deref(), Some("SS-1"));
+
+    let unknown = reversed_response("SZ-1", None);
+    assert_eq!(unknown.outcome, StornoOutcome::Reversed);
+    assert_eq!(unknown.invoice_number, "SZ-1");
+    assert_eq!(unknown.storno_number, None);
+    assert_eq!(unknown.conflict_reason, None);
+    assert_eq!(unknown.code, None);
+}
