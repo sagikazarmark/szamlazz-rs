@@ -852,7 +852,9 @@ functions they are extracted into.
 
 - `gateway`: wiremock tests using upstream-shaped responses; the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
-  (`Issued`, `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
+  (`Issued`, code 56 *with* a number as `Issued` with `notification_delivery_failed` after one send and no re-query
+  (in the shape the agent crate accepts; szamlazz.hu's own shape for 56 is unverified),
+  `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
   landed, a code the agent crate does not know among them, on the create and the storno send , an answered code
   or `szlahu_down` on the leading query settled as `Api` / `Unavailable` with the create and storno mocks seeing
   zero requests (#63), a failed post-send re-query as `ReQueryFailed` naming both causes, the `Unconfirmed`
@@ -915,7 +917,22 @@ functions they are extracted into.
   decodes, a misspelt option / a wrong type / a missing field / an empty body each leave the handler as the 400
   `invalid_input` fault naming the field, and its schema and input metadata are `Json<T>`'s, in the discovery
   manifest too) `prepare` refusing
-  `options.proforma` on every kind but `create_invoice`, the issue and read policies' field-for-field mapping onto
+  `options.proforma` on every kind but `create_invoice`, the create-side decisions of `Szamlazz.Order` as pure
+  functions of the journaled outcome beside their async shells (`service::create`, #137): `decide_lookup` (a live
+  document as `already_issued` or `conflict{live}` under `reissue`, a reversed one as `reversed{storno_number}` or
+  proceeding under `reissue` carrying its number, `Absent` proceeding, a collision and a foreign document refusing
+  either way, an answered code as the `unavailable` / `credentials_rejected` fault), `decide_exclusivity` (a live
+  other-kind document with the table's reason, a collision as `external_id_collision`, a *reversed* other-kind
+  document and `Absent` passing), `decide_prepayment_for_final` (live recorded as the reference, `Absent`, reversed,
+  collision), `decide_proforma_link` under `auto` and `none` (live linked or `proforma_live`, reversed and `Absent`
+  linking nothing, collision), `decide_proforma_by_number` (a proforma of ours linked, 7 as `proforma_missing`,
+  another order's or an order-less one as `not_managed`, this order's non-proforma as `invalid_input` without a
+  document identity, an answered code as a fault about the create), `decide_base` (`not_managed` before
+  `base_reversed`), `create_outcome_unknown` (exhaustion and cancellation as `outcome_unknown` repeating the last
+  failure) and `respond_to`'s `Issued` arms (56 as the `notification_delivery_failed` warning on an `issued`, a
+  number-less success as `outcome_unknown`), found documents built with `test_support::Doc`, create replies parsed
+  off the wire as the gateway parses them, and nothing recorded in the references on a refusal; the
+  issue and read policies' field-for-field mapping onto
   `RunRetryPolicy` and `WorkerConfig::validate` on all three tables, the fault → status mapping incl. the exhausted
   read → `unavailable{step, last failure}` about the document and the missing-`telj` fault as a 503 `unavailable`,
   the storno intent built from a verified document (`telj` present → `fulfillment_date` equals it with `e_invoice`
