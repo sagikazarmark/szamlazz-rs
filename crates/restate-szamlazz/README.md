@@ -626,7 +626,16 @@ through the current types.
 
 After an additive change, regenerate with `UPDATE_JOURNAL_FIXTURES=1 cargo test -p restate-szamlazz journal`; it
 writes missing fixtures and archives a differing one beside the new shape. Review the diff as a contract change.
-Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on upgrade.
+Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on upgrade. Once
+a production deployment exists, an archived fixture is never deleted and a fixture is never regenerated without its
+archive: the archive is the only record of what an in-flight invocation of an earlier deployment may hold, and
+deleting one is the deliberate journal break, done with a drain and stated in the commit (before go-live nothing
+replays, and the mechanism cannot tell the two cases apart, so the rule is the reviewer's).
+
+The list is complete by mechanism: a type is made journalable through the `journaled!` list in
+`service::support`, which writes its `Journaled` impl and its fixture directory together, and a test compares the
+registry against that list; another requires a sample for every variant the type's exhaustive `stems!` match
+names. A new journaled type without pins, or a new variant without a fixture, fails CI.
 
 The same module's leak guard builds every journaled type around an account whose agent key is a sentinel (the
 `account` entry through the static resolver, the two `Transport` write outcomes through a gateway opened with the
@@ -641,7 +650,11 @@ for szamlazz.hu, in two phases on one server.
 
 **The single-account phase** covers, among others:
 
-- issued → already_issued, `Idempotency-Key` replay, 152 → reconciled;
+- issued → already_issued, `Idempotency-Key` replay, 152 → reconciled; two concurrent creates on one key under
+  one scope with distinct keys → one `issued` and one `already_issued` with exactly one create on the wire and
+  both invocations on the server while the create is (the per-key lock); the same `Idempotency-Key` sent while
+  the first invocation is in flight → attached to it (one invocation id on both replies, one create, one
+  `sys_invocation` row);
 - storno → reversed (the storno mock matched on `<teljesitesDatum>` equal to the original's `telj`, no
   `<keltDatum>`) → stale create → `reissue`; a `telj`-less original answered 503 `unavailable` naming the order,
   kind and storno external id with only the verify journaled and the storno mock `expect(0)`, after a `telj`-less

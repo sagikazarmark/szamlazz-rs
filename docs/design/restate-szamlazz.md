@@ -937,9 +937,15 @@ functions they are extracted into.
   archives a differing one as `<variant>.<n>.json` before writing the new shape; the compatibility test replays
   every fixture in every directory (current and archived) through the current types, requiring each to decode
   and re-encode to a superset of itself, and refuses a fixture directory no journaled type claims. The `Journaled`
-  marker trait bounds the run helpers, and each enum's pins name its variants exhaustively, so a new variant
-  fails to compile until pinned. Harness tests cover the superset check and the verify / update / archive
-  behaviour on a scratch directory. The same module's leak guard serialises every variant of every journaled type
+  marker trait bounds the run helpers, and the list is complete by mechanism (#125): a type is made journalable
+  through the `journaled!` list, which writes its impl and its fixture directory (`Journaled::DIR`) on
+  `JOURNALED_DIRS` together, and a test compares the registry against that list; each enum's `stems!` list is at
+  once the exhaustive `match` that files a sample and the stems a second test requires a sample for, so a new
+  variant fails to compile until named and fails the test until sampled. Harness tests cover the superset check,
+  the coverage check and the verify / update / archive
+  behaviour on a scratch directory. The archive rule (once a production deployment exists, an archive is never
+  deleted and a fixture never regenerated without one) is stated in the module docs; the mechanism cannot enforce
+  it. The same module's leak guard serialises every variant of every journaled type
   built around an account whose agent key is a sentinel: the `account` step's entry through the static resolver
   from configuration carrying the key, `DeleteOutcome::Transport` and `SetPaymentsOutcome::Transport` from a gateway
   opened with the sentinel credentials against an endpoint that refuses connections, the registry's samples for the

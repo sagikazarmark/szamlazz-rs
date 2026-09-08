@@ -29,22 +29,55 @@ use crate::identity::{ExternalId, OrderKey};
 /// Implementing it is a promise that the type's serde layout is
 /// **additive-only**, as the [`gateway`](crate::gateway) module docs state.
 /// The promise is checked by the fixtures under `tests/journal/<type>/`
-/// (`service::journal`), one per variant: a new implementor is pinned there
-/// before it is journaled, and a new variant of one of these enums fails to
-/// compile until its sample is listed.
-pub(super) trait Journaled: Serialize + DeserializeOwned {}
+/// (`service::journal`), one per variant, and the check is complete by
+/// mechanism: a type is made journalable through the `journaled!` list
+/// below, which writes its `impl` and puts its [`DIR`](Self::DIR) on
+/// `JOURNALED_DIRS`, the list the registry test compares its pins against, so
+/// a new implementor fails that test until its samples are registered; and a
+/// new variant of one of these enums fails to compile until its `stems!`
+/// arm is named, which puts its stem on the list the coverage test requires
+/// a sample for. (An `impl` written by hand beside the list would escape
+/// `JOURNALED_DIRS`; the list is where an implementor goes.)
+pub(super) trait Journaled: Serialize + DeserializeOwned {
+    /// The type's fixture directory under `tests/journal/`: the name the
+    /// registry and the fixtures know the type by.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by `service::journal`, a test-only module")
+    )]
+    const DIR: &'static str;
+}
 
-impl Journaled for Namespace {}
-impl Journaled for Resolution {}
-impl Journaled for QueryOutcome {}
-impl Journaled for LookupOutcome {}
-impl Journaled for CreateOutcome {}
-impl Journaled for StornoLookupOutcome {}
-impl Journaled for GatewayStornoOutcome {}
-impl Journaled for DeleteOutcome {}
-impl Journaled for SetPaymentsOutcome {}
-impl Journaled for ProbeOutcome {}
-impl Journaled for TaxpayerOutcome {}
+/// The journaled types, each with its fixture directory: the one list. It
+/// writes the [`Journaled`] impls and `JOURNALED_DIRS`, so the two cannot
+/// disagree; a type is added here and nowhere else.
+macro_rules! journaled {
+    ($($ty:ty => $dir:literal),+ $(,)?) => {
+        $(impl Journaled for $ty {
+            const DIR: &'static str = $dir;
+        })+
+
+        /// The fixture directory of every [`Journaled`] type, in the order
+        /// of the `journaled!` list: what `service::journal`'s registry test
+        /// checks the registry against.
+        #[cfg(test)]
+        pub(super) const JOURNALED_DIRS: &[&str] = &[$($dir),+];
+    };
+}
+
+journaled! {
+    Namespace => "namespace",
+    Resolution => "resolution",
+    QueryOutcome => "query-outcome",
+    LookupOutcome => "lookup-outcome",
+    CreateOutcome => "create-outcome",
+    StornoLookupOutcome => "storno-lookup-outcome",
+    GatewayStornoOutcome => "storno-outcome",
+    DeleteOutcome => "delete-outcome",
+    SetPaymentsOutcome => "set-payments-outcome",
+    ProbeOutcome => "probe-outcome",
+    TaxpayerOutcome => "taxpayer-outcome",
+}
 
 /// A fault raised as a `TerminalError`: never a domain outcome.
 ///

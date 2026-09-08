@@ -30,7 +30,11 @@
 //!
 //! The main run has two phases on one Restate server. The first registers a
 //! **single-account** deployment (the static resolver's `[account]` behind a
-//! scripted resolver and store) and runs the order protocol unscoped. The
+//! scripted resolver and store) and runs the order protocol unscoped,
+//! including the two pins the exactly-once argument rests on: two concurrent
+//! creates on one key serialised by the Virtual Object's lock into one
+//! `issued` and one `already_issued`, and the same `Idempotency-Key` sent
+//! while the first invocation is in flight attaching to it. The
 //! second performs the documented single → multi **flag day** (private,
 //! drain, register the **multi-account** deployment (two accounts, reachable
 //! by scope only, behind a test-local mutable resolver and store), public)
@@ -93,6 +97,8 @@ async fn e2e_order_protocol() {
     // Phase 1: the single-account deployment, unscoped.
     create_invoice::issued_then_already_issued(&h).await;
     create_invoice::idempotency_key_replays_without_calling_szamlazz(&h).await;
+    create_invoice::concurrent_creates_on_one_key_issue_once(&h).await;
+    create_invoice::same_idempotency_key_in_flight_attaches_to_the_invocation(&h).await;
     create_invoice::duplicate_order_number_reconciles(&h).await;
     create_invoice::duplicate_order_number_with_nothing_of_ours_is_a_settled_conflict(&h).await;
     storno::storno_then_stale_create_then_reissue(&h).await;

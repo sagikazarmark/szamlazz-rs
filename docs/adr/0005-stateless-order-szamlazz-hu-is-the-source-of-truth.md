@@ -4,7 +4,8 @@ Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scope
 szamlazz.hu is the source of truth is the one the invocation's scope resolved to, and the validation pins are
 read from that journaled `Account` (below); amended by #47, every journaled type is additive-only and pinned
 by fixtures (the *Journal compatibility* section); amended by #70; widening a field to `Option<T>` is the one
-retype the rule admits (the *Widening* paragraph).
+retype the rule admits (the *Widening* paragraph); amended by #125, the fixture registry is complete by
+mechanism and the archive rule is stated (the *Complete by mechanism, and the archive rule* paragraph).
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,
@@ -208,3 +209,27 @@ invocations would kill them on that entry. The rule was always forward-only (it 
 decodes what the previous one wrote, never the reverse), so nothing new is given up; but a widening is still a
 contract change to review, not a free refactor, and the compatibility test (not the type signature) is what says
 it is admitted. Narrowing (`Option<T>` → `T`) is a retype like any other.
+
+**Complete by mechanism, and the archive rule (#125).** Two things the #47 amendment left to discipline. A new
+`impl Journaled` was caught only if someone also added its pins to the registry: the unclaimed-directory check runs
+fixture directory → registry, and a type journaled with no fixture directory at all had nothing to be unclaimed.
+And a new variant compiled once *named* in the exhaustive `match`, with nothing requiring a *sample* for it. Now a
+type is made journalable through the `journaled!` list in `service::support`, which writes the `impl` (with
+the type's fixture directory as `Journaled::DIR`) and `JOURNALED_DIRS` from one list, and a test compares the
+registry's directories against it; and each type's `stems!` list is at once the exhaustive `match` that files a
+sample and the list of every stem it names, which a second test requires a sample for. A new implementor without
+pins, or a new variant without a fixture, fails CI. Two residual gaps, accepted: an `impl Journaled` written by hand
+beside the list compiles and escapes `JOURNALED_DIRS` (the list is where an implementor goes, and `Journaled` is
+`pub(super)` to `service`, so the surface is one module's), and a wildcard arm in an enum's `stems!` would compile
+(the macro admits one for the `Namespace` newtype) and absorb future variants; both are review items, not
+mechanism.
+
+The archive rule, which the #47 text implied and the review of 2026-09-08 asked to be written down: an archived
+fixture (`<variant>.<n>.json`) is the only record of what an in-flight invocation of an earlier deployment may
+hold, so **once the first production deployment exists, an archived fixture is never deleted, and a fixture is never
+regenerated without its archive**. Deleting one is the deliberate journal break of the *Consequences* paragraph
+above, done together with a drain and stated in the commit. Before go-live nothing replays, and a regeneration may
+skip the archive: `resolution/account.json` was regenerated so when the account pins were dropped (`5ea51f9`,
+ADR 0006's account-pin amendment, 2026-09-07), with the reason in the commit message. The mechanism sees only files
+and cannot tell the two cases apart, so this rule is the reviewer's: a regenerated fixture in a diff without a new
+`<variant>.<n>.json` beside it, or a deleted archive, is a journal break to be justified, never a formatting change.

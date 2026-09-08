@@ -24,6 +24,14 @@
 //!   built around an account whose agent key is a sentinel and asserts the
 //!   sentinel is in none of them: the cheap, server-less complement to the
 //!   e2e scan of every journal byte.
+//! - the **registry** tests make the list complete by mechanism rather than
+//!   discipline: the registry pins exactly the directories of the
+//!   `Journaled` implementors (`JOURNALED_DIRS`, written by the same
+//!   `journaled!` list as the impls), and every stem a type's exhaustive
+//!   `stems!` match names has a sample. Without them a new implementor was
+//!   caught only if someone also registered its pins (the unclaimed-directory
+//!   check runs fixture directory → registry, not impl → registry), and a new
+//!   variant compiled once *named*, with nothing asking for its sample.
 //!
 //! The sequence of run *names* a handler journals is pinned separately, by
 //! the e2e suite's run-name pin (`tests/e2e/harness/run_names.rs`, `RUN_NAMES`).
@@ -47,6 +55,22 @@
 //! contract change. A generator failure while the compatibility test passes
 //! is a formatting change and not a journal break (a dependency upgrade that
 //! prints a number or a date differently), and regenerates the same way.
+//!
+//! # The archive rule
+//!
+//! An archived shape is the only record of what an in-flight invocation of an
+//! earlier deployment may hold, so **once the first production deployment
+//! exists, an archived fixture is never deleted**, and a fixture is never
+//! regenerated without its archive: deleting one is the deliberate act of
+//! breaking a journaled shape, done together with a drain (the flag-day
+//! script) so that nothing is in flight to be killed, and stated in the
+//! commit. Before go-live nothing replays, and a regeneration may legitimately
+//! skip the archive (`resolution/account.json` was regenerated so when the
+//! account pins were dropped, 2026-09-07, with the reason in the commit
+//! message); the mechanism cannot tell the two cases apart, since it only
+//! sees the files, so the rule is the reviewer's to hold: a regenerated
+//! fixture in a diff without a new `<variant>.<n>.json` beside it, or a
+//! deleted one, is a journal break to be justified, not a formatting change.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -81,7 +105,7 @@ use crate::gateway::{
 use crate::test_support::open_gateway;
 
 use super::prologue::Resolution;
-use super::support::Journaled;
+use super::support::{JOURNALED_DIRS, Journaled};
 
 /// The fixture root: `crates/restate-szamlazz/tests/journal`.
 fn fixtures() -> PathBuf {
@@ -96,12 +120,14 @@ fn rel(path: &Path) -> String {
         .to_string()
 }
 
-/// The pins of one journaled type: its directory under `tests/journal/`, the
-/// JSON the current code writes for each variant, and how to replay a fixture
-/// through the current type.
+/// The pins of one journaled type: its directory under `tests/journal/`
+/// ([`Journaled::DIR`]), the JSON the current code writes for each variant,
+/// every stem its `stems!` match names, and how to replay a fixture through
+/// the current type.
 struct Pins {
     dir: &'static str,
     variants: Vec<Variant>,
+    named_stems: &'static [&'static str],
     replay: fn(&str) -> Result<Value, serde_json::Error>,
 }
 
@@ -112,36 +138,72 @@ struct Variant {
     json: String,
 }
 
-/// Pins `samples` as the fixtures of `T` under `tests/journal/<dir>/`, one
-/// per variant, each filed under the stem `variant` gives it. `variant` is an
-/// exhaustive `match` in every enum's pins, so a variant added to a journaled
-/// enum fails to compile until it is named, and then the generator asks for
-/// its fixture. Only a [`Journaled`] type can be pinned, and only a
-/// `Journaled` type can be the result of a run: the trait is the link from
-/// the `ctx.run` sites to this directory.
-fn pins<T: Journaled>(dir: &'static str, samples: &[T], variant: fn(&T) -> &'static str) -> Pins {
+/// The stems of one journaled type: the `match` that files a sample under
+/// its variant's fixture stem, and every stem that match names. Built by
+/// `stems!` only, so the two cannot disagree.
+struct Stems<T> {
+    of: fn(&T) -> &'static str,
+    named: &'static [&'static str],
+}
+
+/// The [`Stems`] of `T` from one list of `pattern => "stem"` arms. The arms
+/// are the `match`, which the compiler keeps exhaustive (no wildcard arm on
+/// an enum: the wildcard would hide a new variant from both the compiler and
+/// the coverage test), so a variant added to a journaled enum fails to
+/// compile until it is named here; and naming it puts its stem on `named`,
+/// the list `every_variant_of_every_journaled_type_has_a_sample` requires a
+/// sample for.
+macro_rules! stems {
+    ($T:ty { $($pat:pat => $stem:literal),+ $(,)? }) => {
+        Stems::<$T> {
+            of: |sample| match sample {
+                $($pat => $stem,)+
+            },
+            named: &[$($stem),+],
+        }
+    };
+}
+
+/// Pins `samples` as the fixtures of `T` under `tests/journal/<T::DIR>/`,
+/// one per variant, each filed under the stem `stems` gives it. Only a
+/// [`Journaled`] type can be pinned, and only a `Journaled` type can be the
+/// result of a run: the trait is the link from the `ctx.run` sites to this
+/// directory.
+fn pins<T: Journaled>(samples: &[T], stems: &Stems<T>) -> Pins {
     let mut variants: Vec<Variant> = Vec::with_capacity(samples.len());
     for sample in samples {
-        let stem = variant(sample);
+        let stem = (stems.of)(sample);
         assert!(
             !variants.iter().any(|seen| seen.stem == stem),
-            "{dir}: two samples of variant {stem}"
+            "{}: two samples of variant {stem}",
+            T::DIR
         );
         let mut json = serde_json::to_string_pretty(sample).expect("journaled types serialize");
         json.push('\n');
         variants.push(Variant { stem, json });
     }
     Pins {
-        dir,
+        dir: T::DIR,
         variants,
+        named_stems: stems.named,
         replay: |text| {
             serde_json::from_str::<T>(text).and_then(|value| serde_json::to_value(value))
         },
     }
 }
 
+/// The stems `pins` names (its `stems!` arms) that no sample produces.
+fn unsampled(pins: &Pins) -> Vec<&'static str> {
+    pins.named_stems
+        .iter()
+        .copied()
+        .filter(|stem| !pins.variants.iter().any(|variant| variant.stem == *stem))
+        .collect()
+}
+
 /// Every type the services journal as a `ctx.run` result, with a sample of
-/// every variant.
+/// every variant. Checked complete against `JOURNALED_DIRS` by
+/// `the_registry_pins_every_journaled_type`.
 fn registry() -> Vec<Pins> {
     vec![
         namespace_pins(),
@@ -160,13 +222,12 @@ fn registry() -> Vec<Pins> {
 
 /// The namespace the prologue pins (`namespace` step).
 fn namespace_pins() -> Pins {
-    pins("namespace", &[namespace()], |_| "value")
+    pins(&[namespace()], &stems!(Namespace { _ => "value" }))
 }
 
 /// The `account` step: the resolved account, or why the request names none.
 fn resolution_pins() -> Pins {
     pins(
-        "resolution",
         &[
             Resolution::Account(Box::new(account())),
             Resolution::Unscoped,
@@ -174,11 +235,11 @@ fn resolution_pins() -> Pins {
                 scope: "acme-events".to_owned(),
             },
         ],
-        |resolution| match resolution {
+        &stems!(Resolution {
             Resolution::Account(_) => "account",
             Resolution::Unscoped => "unscoped",
             Resolution::Unknown { .. } => "unknown",
-        },
+        }),
     )
 }
 
@@ -187,7 +248,6 @@ fn resolution_pins() -> Pins {
 /// hint and `Szamlazz.Agent.query`.
 fn query_outcome_pins() -> Pins {
     pins(
-        "query-outcome",
         &[
             QueryOutcome::Found(document("SZ-1", false)),
             QueryOutcome::NotFound,
@@ -200,19 +260,18 @@ fn query_outcome_pins() -> Pins {
                 message: API.message(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(QueryOutcome {
             QueryOutcome::Found(_) => "found",
             QueryOutcome::NotFound => "not-found",
             QueryOutcome::CredentialsRejected { .. } => "credentials-rejected",
             QueryOutcome::Api { .. } => "api",
-        },
+        }),
     )
 }
 
 /// The lookup step of issuing (`lookup-{kind}`).
 fn lookup_outcome_pins() -> Pins {
     pins(
-        "lookup-outcome",
         &[
             LookupOutcome::Absent,
             LookupOutcome::Live(document("SZ-1", false)),
@@ -231,7 +290,7 @@ fn lookup_outcome_pins() -> Pins {
                 message: API.message(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(LookupOutcome {
             LookupOutcome::Absent => "absent",
             LookupOutcome::Live(_) => "live",
             LookupOutcome::Reversed { .. } => "reversed",
@@ -239,14 +298,13 @@ fn lookup_outcome_pins() -> Pins {
             LookupOutcome::Foreign(_) => "foreign",
             LookupOutcome::CredentialsRejected { .. } => "credentials-rejected",
             LookupOutcome::Api { .. } => "api",
-        },
+        }),
     )
 }
 
 /// The create step of issuing (`create-{kind}`).
 fn create_outcome_pins() -> Pins {
     pins(
-        "create-outcome",
         &[
             CreateOutcome::Issued(creation_result()),
             CreateOutcome::Found(document("SZ-1", false)),
@@ -275,7 +333,7 @@ fn create_outcome_pins() -> Pins {
                 message: DOWN.to_owned(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(CreateOutcome {
             CreateOutcome::Issued(_) => "issued",
             CreateOutcome::Found(_) => "found",
             CreateOutcome::Reversed(_) => "reversed",
@@ -287,14 +345,13 @@ fn create_outcome_pins() -> Pins {
             CreateOutcome::CredentialsRejected { .. } => "credentials-rejected",
             CreateOutcome::Api { .. } => "api",
             CreateOutcome::Unavailable { .. } => "unavailable",
-        },
+        }),
     )
 }
 
 /// The storno lookup step (`lookup-storno-{number}`).
 fn storno_lookup_outcome_pins() -> Pins {
     pins(
-        "storno-lookup-outcome",
         &[
             StornoLookupOutcome::Absent,
             StornoLookupOutcome::AlreadyReversed {
@@ -309,19 +366,18 @@ fn storno_lookup_outcome_pins() -> Pins {
                 message: API.message(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(StornoLookupOutcome {
             StornoLookupOutcome::Absent => "absent",
             StornoLookupOutcome::AlreadyReversed { .. } => "already-reversed",
             StornoLookupOutcome::CredentialsRejected { .. } => "credentials-rejected",
             StornoLookupOutcome::Api { .. } => "api",
-        },
+        }),
     )
 }
 
 /// The storno step (`storno-{number}`).
 fn storno_outcome_pins() -> Pins {
     pins(
-        "storno-outcome",
         &[
             StornoOutcome::Reversed(created_invoice()),
             StornoOutcome::AlreadyReversed {
@@ -344,7 +400,7 @@ fn storno_outcome_pins() -> Pins {
                 message: DOWN.to_owned(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(StornoOutcome {
             StornoOutcome::Reversed(_) => "reversed",
             StornoOutcome::AlreadyReversed { .. } => "already-reversed",
             StornoOutcome::NotStornoable => "not-stornoable",
@@ -352,14 +408,13 @@ fn storno_outcome_pins() -> Pins {
             StornoOutcome::CredentialsRejected { .. } => "credentials-rejected",
             StornoOutcome::Api { .. } => "api",
             StornoOutcome::Unavailable { .. } => "unavailable",
-        },
+        }),
     )
 }
 
 /// The proforma deletion (`delete-proforma-{number}`).
 fn delete_outcome_pins() -> Pins {
     pins(
-        "delete-outcome",
         &[
             DeleteOutcome::Deleted,
             DeleteOutcome::AlreadyGone,
@@ -373,20 +428,19 @@ fn delete_outcome_pins() -> Pins {
             },
             DeleteOutcome::Transport(TRANSPORT.to_owned()),
         ],
-        |outcome| match outcome {
+        &stems!(DeleteOutcome {
             DeleteOutcome::Deleted => "deleted",
             DeleteOutcome::AlreadyGone => "already-gone",
             DeleteOutcome::Rejected { .. } => "rejected",
             DeleteOutcome::CredentialsRejected { .. } => "credentials-rejected",
             DeleteOutcome::Transport(_) => "transport",
-        },
+        }),
     )
 }
 
 /// The credit-entry registration (`set-payments-{number}`).
 fn set_payments_outcome_pins() -> Pins {
     pins(
-        "set-payments-outcome",
         &[
             SetPaymentsOutcome::Done {
                 outstanding: Some(dec!(0)),
@@ -402,19 +456,18 @@ fn set_payments_outcome_pins() -> Pins {
             },
             SetPaymentsOutcome::Transport(TRANSPORT.to_owned()),
         ],
-        |outcome| match outcome {
+        &stems!(SetPaymentsOutcome {
             SetPaymentsOutcome::Done { .. } => "done",
             SetPaymentsOutcome::Rejected { .. } => "rejected",
             SetPaymentsOutcome::CredentialsRejected { .. } => "credentials-rejected",
             SetPaymentsOutcome::Transport(_) => "transport",
-        },
+        }),
     )
 }
 
 /// The `check_account` probe (`probe`).
 fn probe_outcome_pins() -> Pins {
     pins(
-        "probe-outcome",
         &[
             ProbeOutcome::Accepted,
             ProbeOutcome::CredentialsRejected {
@@ -422,17 +475,16 @@ fn probe_outcome_pins() -> Pins {
                 message: CREDENTIALS.message(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(ProbeOutcome {
             ProbeOutcome::Accepted => "accepted",
             ProbeOutcome::CredentialsRejected { .. } => "credentials-rejected",
-        },
+        }),
     )
 }
 
 /// The taxpayer lookup (`taxpayer-{prefix}`).
 fn taxpayer_outcome_pins() -> Pins {
     pins(
-        "taxpayer-outcome",
         &[
             TaxpayerOutcome::Found(taxpayer()),
             TaxpayerOutcome::CredentialsRejected {
@@ -444,11 +496,11 @@ fn taxpayer_outcome_pins() -> Pins {
                 message: NAV.message(),
             },
         ],
-        |outcome| match outcome {
+        &stems!(TaxpayerOutcome {
             TaxpayerOutcome::Found(_) => "found",
             TaxpayerOutcome::CredentialsRejected { .. } => "credentials-rejected",
             TaxpayerOutcome::Api { .. } => "api",
-        },
+        }),
     )
 }
 
@@ -728,7 +780,8 @@ regenerate with
 which writes the missing fixtures and keeps a differing one beside the new shape as <variant>.<n>.json, \
 then run the tests again and review the diff as a contract change. If a field or variant was renamed, \
 removed or retyped, every in-flight invocation of the previous deployment will be killed on upgrade: \
-do not regenerate; keep the old name (see the gateway module docs).";
+do not regenerate; keep the old name (see the gateway module docs). Once a production deployment exists, \
+an archived fixture is never deleted and a fixture is never regenerated without its archive (the module docs).";
 
 /// The generator: the JSON the current code writes for every variant of every
 /// journaled type equals its committed fixture byte for byte. Never writes
@@ -841,6 +894,57 @@ fn every_pinned_fixture_replays_through_the_current_types() {
         failures.join("\n  ")
     );
     assert!(replayed > 0, "no fixture was replayed");
+}
+
+/// The registry is complete by mechanism, not by discipline: the directories
+/// it pins are exactly the directories of every [`Journaled`] implementor
+/// (`JOURNALED_DIRS`, written by the same `journaled!` list as the impls), so a
+/// type made journalable without pins fails here rather than going unpinned.
+/// The unclaimed-directory check of the compatibility test runs the other way
+/// (fixture directory → registry).
+#[test]
+fn the_registry_pins_every_journaled_type() {
+    let registry = registry();
+    let registered: Vec<&str> = registry.iter().map(|pins| pins.dir).collect();
+    let mut declared: Vec<&str> = JOURNALED_DIRS.to_vec();
+    declared.sort_unstable();
+    let mut sorted = registered.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted, declared,
+        "the registry pins these directories: {registered:?}; the Journaled implementors are these: \
+         {JOURNALED_DIRS:?}. A type added to `journaled!` needs its `*_pins()` in `registry()` (and a \
+         type pinned twice is pinned once)"
+    );
+}
+
+/// Every variant of every journaled enum has a sample: the stems the type's
+/// exhaustive `match` names (which the compiler keeps complete) are exactly
+/// the stems the samples produce. Naming a new variant in the match, which
+/// the compiler forces, is what makes its sample mandatory; before this test
+/// a variant compiled once named and could go without a fixture.
+#[test]
+fn every_variant_of_every_journaled_type_has_a_sample() {
+    let mut problems = Vec::new();
+    for pins in registry() {
+        for stem in unsampled(&pins) {
+            problems.push(format!("{}/{stem}: named, no sample", pins.dir));
+        }
+        if pins.variants.len() != pins.named_stems.len() {
+            problems.push(format!(
+                "{}: {} samples for {} variants",
+                pins.dir,
+                pins.variants.len(),
+                pins.named_stems.len()
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "journaled variants without a sample:\n  {}\n\nAdd the variant's sample to its `*_pins()` \
+         in this module, then regenerate ({UPDATE_VAR}=1) to write its fixture.",
+        problems.join("\n  ")
+    );
 }
 
 /// The leak guard on the journaled types, without a server: every variant of
@@ -1087,6 +1191,23 @@ mod harness_tests {
             !is_covered_by(&json!("acct"), &json!("other")),
             "scalars compare"
         );
+    }
+
+    /// The coverage check behind `every_variant_of_every_journaled_type_has_a_sample`:
+    /// a stem the `stems!` match names without a sample is reported; the
+    /// stems the samples produce are not.
+    #[test]
+    fn a_named_stem_without_a_sample_is_unsampled() {
+        let pins = pins(
+            &[ProbeOutcome::Accepted],
+            &stems!(ProbeOutcome {
+                ProbeOutcome::Accepted => "accepted",
+                ProbeOutcome::CredentialsRejected { .. } => "credentials-rejected",
+            }),
+        );
+        assert_eq!(unsampled(&pins), ["credentials-rejected"]);
+        assert_eq!(pins.dir, "probe-outcome", "the directory is the type's");
+        assert!(unsampled(&probe_outcome_pins()).is_empty());
     }
 
     /// A fresh, empty directory under the system temp dir for one test.

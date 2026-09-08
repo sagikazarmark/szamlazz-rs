@@ -34,7 +34,7 @@ use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, Payme
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
-use wiremock::MockServer;
+use wiremock::{MockServer, ResponseTemplate};
 
 use crate::harness::accounts::{
     MutableAccounts, ScriptedAccounts, multi_account_services, services,
@@ -43,8 +43,8 @@ use crate::harness::gate::{FEATURES, Restate};
 use crate::harness::ingress::Reply;
 use crate::harness::introspection::{Invocation, JournalEntry, Retries};
 use crate::harness::szamlazz::{
-    Doc, create_lands_but_reply_lost, external_id_query, holds, holds_after_misses,
-    loses_reply_once, not_found,
+    Doc, create_lands_answering, create_lands_but_reply_lost, external_id_query, holds,
+    holds_after_misses, loses_reply_once, not_found,
 };
 
 // ----- the harness's own HTTP client -----------------------------------------------
@@ -717,9 +717,23 @@ impl Harness {
 
     /// Every `sys_invocation` row the server still holds.
     pub(crate) async fn all_invocations(&self) -> Vec<(String, Invocation)> {
+        self.invocation_rows("").await
+    }
+
+    /// The `sys_invocation` rows on Virtual Object `key`, completed or not:
+    /// what the server holds for one order, including a call queued behind
+    /// the key's lock.
+    pub(crate) async fn invocations_on(&self, key: &str) -> Vec<(String, Invocation)> {
+        self.invocation_rows(&format!("WHERE target_service_key = '{key}'"))
+            .await
+    }
+
+    /// The `sys_invocation` rows `filter` (a `WHERE` clause, or nothing)
+    /// selects, with their ids, in id order.
+    async fn invocation_rows(&self, filter: &str) -> Vec<(String, Invocation)> {
         let rows = self
             .sql(&format!(
-                "SELECT id, {} FROM sys_invocation ORDER BY id",
+                "SELECT id, {} FROM sys_invocation {filter} ORDER BY id",
                 Invocation::COLUMNS
             ))
             .await;
@@ -765,5 +779,13 @@ impl Harness {
     /// external id from that moment on: see [`create_lands_but_reply_lost`].
     pub(crate) async fn create_lands_but_reply_lost(&self, doc: &Doc<'_>) {
         create_lands_but_reply_lost(&self.mock, doc).await;
+    }
+
+    /// The create lands and is answered with `reply` (a delayed one keeps the
+    /// invocation in flight for the delay), and `doc` is the holder of its
+    /// external id from the moment the create is received: see
+    /// [`create_lands_answering`].
+    pub(crate) async fn create_lands_answering(&self, doc: &Doc<'_>, reply: ResponseTemplate) {
+        create_lands_answering(&self.mock, doc, reply).await;
     }
 }

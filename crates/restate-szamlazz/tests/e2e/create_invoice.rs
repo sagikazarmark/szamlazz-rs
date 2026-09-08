@@ -1,9 +1,13 @@
 //! `Szamlazz.Order.create_invoice`: issued and already issued, the
-//! `Idempotency-Key` replay, the duplicate order number (152) reconciled or
+//! `Idempotency-Key` replay, two concurrent creates on one key and the same
+//! `Idempotency-Key` sent while the first is in flight, the duplicate order
+//! number (152) reconciled or
 //! settled as a conflict, `reissue` on a live document, a reversal seen by
 //! the lookup or between two executions of the create step, a lost create
 //! reply settled by the immediate re-query, the proforma link and the
 //! secondary-lookup collision.
+
+use std::time::{Duration, Instant};
 
 use rust_decimal::dec;
 use serde_json::{Value, json};
@@ -129,6 +133,216 @@ pub(crate) async fn idempotency_key_replays_without_calling_szamlazz(h: &Harness
     // The create mock's `expect(1)` is verified by the next scenario's
     // `reset`.
     eprintln!("(ii) same key → identical response, no szamlazz.hu call: pass");
+}
+
+/// How long the create's reply is held back in the two concurrency
+/// scenarios below: the window in which the first invocation is in flight
+/// (its create is on the wire, unanswered) while the second call is made;
+/// each scenario reads the first's `sys_invocation` row inside the window
+/// and asserts it is not completed, so "in flight" is asserted, not assumed.
+/// Well under the Számla Agent client's request timeout and the handler's
+/// inactivity timeout, and the one cost these scenarios add to the run.
+const IN_FLIGHT: Duration = Duration::from_secs(2);
+
+/// (i-b) two `create_invoice` calls on the **same key under the same scope**,
+/// concurrently, with distinct `Idempotency-Key`s: the Virtual Object's
+/// per-key lock serialises them, so one is `issued` and the other
+/// `already_issued` from its lookup step, in either order, with exactly one
+/// create on the wire and both invocations completed. What the exactly-once
+/// argument rests on; the cross-scope scenario (xvii) is the contrast (two
+/// objects, two documents). While the first's create is on the wire, both
+/// invocations are on the server and neither is completed: the second is
+/// queued behind the lock, not attached to the first (that is the same key's
+/// case, (ii-b)).
+pub(crate) async fn concurrent_creates_on_one_key_issue_once(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-2", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-2")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    // The document is the holder from the moment the create is received, so
+    // whichever call runs second finds it in its lookup, however the two
+    // were ordered by the lock; the create's reply is held back so the first
+    // invocation is in flight while the other is queued.
+    h.create_lands_answering(
+        &Doc {
+            external_id: Some("acct:E2E-2:invoice"),
+            ..Doc::new("SZ-2", "SZ", "E2E-2")
+        },
+        created("SZ-2", "1000", "1270").set_delay(IN_FLIGHT),
+    )
+    .await;
+
+    let body = create_body(dec!(1000), false);
+    let both = async {
+        tokio::join!(
+            h.call("E2E-2", "create_invoice", &body, "e2e-2-k1"),
+            h.call("E2E-2", "create_invoice", &body, "e2e-2-k2"),
+        )
+    };
+    let during = async {
+        h.wait_for_creates(1).await;
+        // Both calls reached the server before the create did (they were
+        // sent together, the create came after the first's reads), and
+        // neither can complete while the create's reply is held back.
+        let on_key = h.invocations_on("E2E-2").await;
+        (on_key, h.create_bodies().await.len())
+    };
+    let ((first, second), (on_key, creates_during)) = tokio::join!(both, during);
+
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert_eq!(second.status, 200, "{}", second.body);
+    let mut outcomes = [
+        first.body["outcome"].as_str().unwrap_or_default(),
+        second.body["outcome"].as_str().unwrap_or_default(),
+    ];
+    outcomes.sort_unstable();
+    assert_eq!(
+        outcomes,
+        ["already_issued", "issued"],
+        "one issued, one already issued, in either order: {} / {}",
+        first.body,
+        second.body
+    );
+    for reply in [&first, &second] {
+        assert_eq!(reply.body["invoice_number"], "SZ-2", "{}", reply.body);
+        assert_eq!(reply.body["external_id"], "acct:E2E-2:invoice");
+    }
+    assert_ne!(
+        first.invocation_id(),
+        second.invocation_id(),
+        "two keys, two invocations"
+    );
+    assert_eq!(
+        h.create_bodies().await.len(),
+        1,
+        "exactly one create on the wire"
+    );
+
+    assert_eq!(creates_during, 1, "the barrier fired on the one create");
+    assert_eq!(
+        on_key.len(),
+        2,
+        "both invocations were on the server while the create was on the wire: {on_key:?}"
+    );
+    assert!(
+        on_key.iter().all(|(_, row)| row.status != "completed"),
+        "neither had completed while the create's reply was held back: {on_key:?}"
+    );
+
+    // Both completed; the `issued` one walked the whole path, the
+    // `already_issued` one stopped at its lookup, both prefixes of the pinned
+    // `create_invoice` path.
+    for reply in [&first, &second] {
+        let invocation = h.invocation(reply.invocation_id()).await;
+        assert_eq!(invocation.status, "completed", "{invocation:?}");
+        let runs = h.runs(reply.invocation_id()).await;
+        let expected_last = if reply.body["outcome"] == "issued" {
+            "create-invoice"
+        } else {
+            "lookup-invoice"
+        };
+        assert_eq!(
+            runs.last().map(String::as_str),
+            Some(expected_last),
+            "{}: {runs:?}",
+            reply.body["outcome"]
+        );
+    }
+    eprintln!(
+        "(i-b) two concurrent creates on one key → one issued, one already_issued, one create on the wire: pass"
+    );
+}
+
+/// (ii-b) the **same** `Idempotency-Key` sent while the first invocation is
+/// still in flight (its create is on the wire, unanswered) attaches to that
+/// invocation and receives its outcome: one invocation id on both replies,
+/// one create on the wire, one `sys_invocation` row on the key. The "no
+/// answer" half of the `Idempotency-Key` rule: a caller that timed out keeps
+/// its key, and the retry gets the in-flight outcome instead of queueing a
+/// second invocation behind the lock (which a new key would, (i-b)). The
+/// completed half is (ii).
+pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h: &Harness) {
+    h.reset().await;
+    h.absent("E2E-2B", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-2B")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    h.create_lands_answering(
+        &Doc {
+            external_id: Some("acct:E2E-2B:invoice"),
+            ..Doc::new("SZ-2B", "SZ", "E2E-2B")
+        },
+        created("SZ-2B", "1000", "1270").set_delay(IN_FLIGHT),
+    )
+    .await;
+
+    let body = create_body(dec!(1000), false);
+    let first = h.call("E2E-2B", "create_invoice", &body, "e2e-2b-shared");
+    let retry = async {
+        // The first is in flight for `IN_FLIGHT` from here: its create is on
+        // the wire, its reply held back. Read its row before the retry, so
+        // "in flight" is asserted, not assumed: a retry after completion
+        // would be the replay of (ii), which every assertion below also
+        // holds for.
+        h.wait_for_creates(1).await;
+        let in_flight = h.invocations_on("E2E-2B").await;
+        let sent = Instant::now();
+        let reply = h
+            .call("E2E-2B", "create_invoice", &body, "e2e-2b-shared")
+            .await;
+        (in_flight, sent.elapsed(), reply)
+    };
+    let (first, (in_flight, waited, retry)) = tokio::join!(first, retry);
+
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert_eq!(retry.status, 200, "{}", retry.body);
+    assert_eq!(first.body["outcome"], "issued", "{}", first.body);
+    assert_eq!(first.body["invoice_number"], "SZ-2B");
+    assert_eq!(
+        in_flight.len(),
+        1,
+        "one invocation on the key when the retry was sent: {in_flight:?}"
+    );
+    assert_eq!(in_flight[0].0, first.invocation_id());
+    assert_ne!(
+        in_flight[0].1.status, "completed",
+        "the retry was sent while the first was in flight: {:?}",
+        in_flight[0].1
+    );
+    assert!(
+        waited >= IN_FLIGHT / 2,
+        "the retry waited for the in-flight outcome rather than reading a stored one: {waited:?}"
+    );
+    assert_eq!(
+        retry.body, first.body,
+        "the retry received the in-flight invocation's outcome"
+    );
+    assert_eq!(
+        retry.invocation_id(),
+        first.invocation_id(),
+        "the same key while in flight attaches: one invocation"
+    );
+    assert_eq!(
+        h.create_bodies().await.len(),
+        1,
+        "exactly one create on the wire"
+    );
+    let on_key = h.invocations_on("E2E-2B").await;
+    assert_eq!(
+        on_key.len(),
+        1,
+        "one invocation on the key, not a second queued behind the lock: {on_key:?}"
+    );
+    assert_eq!(on_key[0].0, first.invocation_id());
+    assert_eq!(on_key[0].1.status, "completed", "{:?}", on_key[0].1);
+    eprintln!(
+        "(ii-b) same Idempotency-Key while in flight → attached: one invocation id, one create on the wire: pass"
+    );
 }
 
 /// (iii) 152 on create, then the external-id re-query finds the document ⇒
