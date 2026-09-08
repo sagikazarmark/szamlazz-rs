@@ -151,9 +151,10 @@ impl Default for BodyLimit {
 ///   stays retryable instead of being dropped.
 /// - **`400`**: an authenticated push whose body is not the pushed document
 ///   at all: an element outside the document's namespace, XML the typed
-///   parse cannot read (truncated, an `alap/id` missing, a date that is not a
-///   date). Never a document that merely omits what the XSD requires, carries
-///   an unknown `irany` or a PDF that does not decode; [`Document::parse`]
+///   parse cannot read (truncated, an `alap/id` missing, an `<osszeg>` that
+///   is not a number). Never a document that merely omits what the XSD
+///   requires, carries an unknown `irany`, a date that is not a date or a
+///   PDF that does not decode; [`Document::parse`]
 ///   reads those leniently and the push is Acked, because szamlazz.hu retries
 ///   a `400` identically for 72 hours and then drops the record. A receiver
 ///   that wants the XSD's verdict calls [`Document::validate`] from its

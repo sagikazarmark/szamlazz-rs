@@ -19,9 +19,9 @@
 //! identically for 72 hours loses the record. So [`Document::parse`] refuses
 //! only what the receiver cannot Ack (shape, never content): an element the
 //! XSD requires but the push omits is `None`, an unknown enumeration token is
-//! kept, a PDF that does not decode is `None` beside the raw XML. The XSD's
-//! verdict is a signal a receiver can ask for ([`Document::validate`]) or
-//! make a gate of ([`Document::parse_strict`]).
+//! kept, a date that is not a date and a PDF that does not decode are `None`
+//! beside the raw XML. The XSD's verdict is a signal a receiver can ask for
+//! ([`Document::validate`]) or make a gate of ([`Document::parse_strict`]).
 //!
 //! The core is framework-free and `wasm32`-clean: [`Document::parse`] takes
 //! raw body bytes, ack types render response bodies. Implement [`Handler`]

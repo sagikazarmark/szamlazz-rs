@@ -457,6 +457,26 @@ async fn undecodable_pdf_does_not_fail_the_push() {
     assert!(!response.contains("hibakod"), "{response}");
 }
 
+// A date whose text is not a date is content too: the push is Acked with the
+// date read as absent. The text's bytes must not matter: the timezone strip
+// once split the text six bytes from its end and panicked inside a multi-byte
+// character, after the key had been verified, and nothing in the router
+// catches a panic, so szamlazz.hu got no answer at all.
+#[tokio::test]
+async fn date_that_is_not_a_date_is_acked_whatever_its_bytes() {
+    for kelt in ["é12345", "éé€", "12345é", "2015-12-01junk"] {
+        let body = std::str::from_utf8(OUTGOING_INVOICE)
+            .expect("fixture UTF-8")
+            .replace("<kelt>2015-12-01</kelt>", &format!("<kelt>{kelt}</kelt>"));
+
+        let (status, response) = call(Some("secret-key"), body.as_bytes(), false).await;
+        assert_eq!(status, StatusCode::OK, "{kelt:?}: {response}");
+        assert!(response.contains("<szamlavalasz"), "{kelt:?}: {response}");
+        assert!(response.contains("<id>123456</id>"), "{kelt:?}: {response}");
+        assert!(!response.contains("hibakod"), "{kelt:?}: {response}");
+    }
+}
+
 // The authenticated 400 is for a body that is not the pushed document at all:
 // szamlazz.hu would retry it identically for 72 hours and then drop it, so
 // it must never be the answer to a document that merely omits what the XSD
