@@ -1721,18 +1721,27 @@ pub(crate) mod de {
         }
     }
 
-    /// Whether `suffix` is exactly an `xs:date` `±hh:mm` offset. A slice
-    /// pattern over the bytes, so a suffix of any other length or content
-    /// is simply `false`.
+    /// Whether `suffix` is exactly an `xs:date` `±hh:mm` offset as XML Schema
+    /// bounds it: `-14:00..=+14:00`, the hour `14` with the minute `00` only.
+    /// A slice pattern over the bytes, so a suffix of any other length or
+    /// content is simply `false`; a suffix of the right form outside the
+    /// range is not the schema's timezone but text that is not a date.
     fn is_xs_timezone_offset(suffix: &str) -> bool {
-        matches!(
-            suffix.as_bytes(),
-            [b'+' | b'-', h1, h2, b':', m1, m2]
-                if h1.is_ascii_digit()
-                    && h2.is_ascii_digit()
-                    && m1.is_ascii_digit()
-                    && m2.is_ascii_digit()
-        )
+        let &[
+            b'+' | b'-',
+            h1 @ b'0'..=b'9',
+            h2 @ b'0'..=b'9',
+            b':',
+            m1 @ b'0'..=b'5',
+            m2 @ b'0'..=b'9',
+        ] = suffix.as_bytes()
+        else {
+            return false;
+        };
+        let hours = (h1 - b'0') * 10 + (h2 - b'0');
+        let minutes = (m1 - b'0') * 10 + (m2 - b'0');
+
+        hours < 14 || (hours == 14 && minutes == 0)
     }
 
     /// Deserializes an optional `xs:date`, reading empty elements as absent
@@ -2045,5 +2054,38 @@ mod tests {
             Some(jiff::civil::date(2024, 1, 1))
         );
         assert_eq!(read_opt_date("").expect("empty is absent"), None);
+    }
+
+    #[test]
+    fn xs_date_timezone_offset_is_the_schemas_range() {
+        // XML Schema bounds the offset to -14:00..=+14:00, the hour 14 with
+        // the minute 00 only. Inside it the suffix is the schema's timezone
+        // and is discarded; outside it the text is not a date.
+        for text in [
+            "2024-01-01+14:00",
+            "2024-01-01-14:00",
+            "2024-01-01+13:59",
+            "2024-01-01-00:00",
+            "2024-01-01+00:00",
+        ] {
+            assert_eq!(
+                read_opt_date(text).unwrap_or_else(|error| panic!("{text:?}: {error}")),
+                Some(jiff::civil::date(2024, 1, 1)),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "2024-01-01+14:01",
+            "2024-01-01-14:30",
+            "2024-01-01+15:00",
+            "2024-01-01+99:99",
+            "2024-01-01+01:60",
+        ] {
+            assert_eq!(
+                read_opt_date(text).unwrap_or_else(|error| panic!("{text:?}: {error}")),
+                None,
+                "{text:?}"
+            );
+        }
     }
 }
