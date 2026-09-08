@@ -295,7 +295,7 @@ accepted and queryable) because its parts are bounded (namespace 16, order key, 
 
 `WorkerConfig` is the deployment-level configuration the services hold:
 
-- `namespace` (the `config::Namespace`): the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`,
+- `namespace` (the `identity::Namespace`): the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`,
   permanent.
 - `[issue]` (`IssueConfig`): the issue policy of the create and storno steps. `max_attempts`, `initial_delay`,
   `factor`, `max_delay`, `max_duration`; by default `5` executions, `2m` → `10m`, bounded by `1h`.

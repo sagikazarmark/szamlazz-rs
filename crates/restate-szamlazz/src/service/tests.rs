@@ -11,7 +11,8 @@ use serde_json::json;
 
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
-use crate::config::{IssueConfig, Namespace, WorkerConfig};
+use crate::config::{IssueConfig, WorkerConfig};
+use crate::identity::Namespace;
 use crate::test_support::{Doc, ORIGINAL_TELJ, open_gateway};
 
 /// [`IssueConfig::MIN_INITIAL_DELAY`] in the unit discovery reports

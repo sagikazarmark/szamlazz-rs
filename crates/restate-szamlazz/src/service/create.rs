@@ -21,7 +21,6 @@ use szamlazz_agent::ops::invoice::CreateInvoice;
 use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
 use super::support::{Fault, Lookup, verified_document};
-use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
     IssuedKind, Outcome, ProformaLink, Warning, outstanding,
@@ -30,6 +29,7 @@ use crate::gateway::{
     CreateOutcome, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
     QueryOutcome,
 };
+use crate::identity::Namespace;
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
 /// The identity fields every [`CreateResponse`] carries.

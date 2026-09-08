@@ -48,12 +48,13 @@
 //! deserialize it) and set fields.
 
 use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 use restate_sdk::context::RunRetryPolicy;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
+
+use crate::identity::Namespace;
 
 /// The deployment-level settings the Restate services hold: what is not
 /// account-shaped and therefore does not route through the gateway.
@@ -219,102 +220,6 @@ impl fmt::Display for Policy {
             Self::Resolve => "resolve",
         })
     }
-}
-
-/// The namespace: the external-id prefix of this deployment, 1–16 bytes of
-/// `[a-z0-9-]`.
-///
-/// Chosen by the operator, opaque to szamlazz.hu and permanent: every
-/// external id the deployment issues starts with it, so changing it would
-/// hide every document issued so far. `:` is excluded because it is the
-/// external-id separator.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Namespace(String);
-
-impl Namespace {
-    /// The maximum length in bytes.
-    pub const MAX_LEN: usize = 16;
-
-    /// The namespace as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn validate(value: &str) -> Result<(), InvalidNamespace> {
-        if value.is_empty() {
-            return Err(InvalidNamespace::Empty);
-        }
-        if value.len() > Self::MAX_LEN {
-            return Err(InvalidNamespace::TooLong(value.len()));
-        }
-        if let Some(invalid) = value
-            .chars()
-            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
-        {
-            return Err(InvalidNamespace::InvalidChar(invalid));
-        }
-        Ok(())
-    }
-}
-
-impl FromStr for Namespace {
-    type Err = InvalidNamespace;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::validate(value)?;
-        Ok(Self(value.to_owned()))
-    }
-}
-
-impl TryFrom<String> for Namespace {
-    type Error = InvalidNamespace;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-}
-
-impl fmt::Display for Namespace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Namespace {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Serializes as the plain string.
-impl Serialize for Namespace {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-/// Deserializes from a string, rejecting invalid namespaces.
-impl<'de> Deserialize<'de> for Namespace {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-/// A string that is not a valid [`Namespace`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum InvalidNamespace {
-    /// The namespace is empty.
-    #[error("namespace must not be empty")]
-    Empty,
-    /// The namespace exceeds [`Namespace::MAX_LEN`] bytes.
-    #[error("namespace is {0} bytes long, at most {max} are allowed", max = Namespace::MAX_LEN)]
-    TooLong(usize),
-    /// A character is outside `[a-z0-9-]`.
-    #[error("namespace may only contain lowercase ASCII letters, digits and '-', found {0:?}")]
-    InvalidChar(char),
 }
 
 /// A secret string whose `Debug` output is redacted.
@@ -903,38 +808,27 @@ mod tests {
         );
     }
 
-    /// The namespace is 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it
-    /// is the external-id separator.
+    /// The namespace is validated where it is parsed (`identity`); the
+    /// configuration's `namespace` key takes the validated type, so a value
+    /// outside its alphabet fails the parse rather than the first request.
     #[test]
-    fn namespace_rule_is_enforced_at_parse_time() {
+    fn namespace_key_is_validated_at_parse_time() {
         for accepted in ["a", "acct", "acct-1", "0", "a".repeat(16).as_str()] {
-            let namespace: Namespace = accepted.parse().expect(accepted);
-            assert_eq!(namespace.as_str(), accepted);
-            assert_eq!(namespace.to_string(), accepted);
             let config: WorkerConfig =
                 serde_json::from_value(json!({ "namespace": accepted })).expect(accepted);
-            assert_eq!(config.namespace, namespace);
+            assert_eq!(config.namespace.as_str(), accepted);
         }
-
-        let too_long = "a".repeat(17);
-        let rejected = [
-            ("", InvalidNamespace::Empty),
-            ("Acct", InvalidNamespace::InvalidChar('A')),
-            ("acct_1", InvalidNamespace::InvalidChar('_')),
-            ("acct 1", InvalidNamespace::InvalidChar(' ')),
-            ("acct:1", InvalidNamespace::InvalidChar(':')),
-            ("ácct", InvalidNamespace::InvalidChar('á')),
-            (too_long.as_str(), InvalidNamespace::TooLong(17)),
-        ];
-        for (input, expected) in rejected {
-            assert_eq!(
-                input.parse::<Namespace>(),
-                Err(expected.clone()),
-                "{input:?}"
-            );
-            assert_eq!(Namespace::try_from(input.to_owned()), Err(expected));
-            let result = serde_json::from_value::<WorkerConfig>(json!({ "namespace": input }));
-            assert!(result.is_err(), "{input:?} should be rejected");
+        for rejected in [
+            "",
+            "Acct",
+            "acct_1",
+            "acct 1",
+            "acct:1",
+            "ácct",
+            &"a".repeat(17),
+        ] {
+            let result = serde_json::from_value::<WorkerConfig>(json!({ "namespace": rejected }));
+            assert!(result.is_err(), "{rejected:?} should be rejected");
         }
     }
 

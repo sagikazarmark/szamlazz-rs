@@ -10,11 +10,11 @@ use serde::Serialize;
 use szamlazz_agent::Date;
 
 use crate::account::Account;
-use crate::config::Namespace;
 use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
     FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
 };
+use crate::identity::Namespace;
 use crate::identity::{ExternalId, OrderKey};
 
 pub(super) use self::journaled::Journaled;
@@ -30,12 +30,12 @@ mod journaled {
     use serde::Serialize;
     use serde::de::DeserializeOwned;
 
-    use crate::config::Namespace;
     use crate::gateway::{
         CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
         SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
         TaxpayerOutcome,
     };
+    use crate::identity::Namespace;
     use crate::service::prologue::Resolution;
 
     /// A type the services journal as the result of a `ctx.run`: the bound

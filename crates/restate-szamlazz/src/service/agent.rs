@@ -24,7 +24,6 @@ use super::support::{
     Fault, StornoIntent, StornoVerdict, after_storno_lookup, reversed_response, storno_response,
     verified_document,
 };
-use crate::config::Namespace;
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
@@ -34,6 +33,7 @@ use crate::gateway::{
     FoundDocument, ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome, TaxpayerOutcome,
 };
 use crate::identity::ExternalId;
+use crate::identity::Namespace;
 
 /// The prefix `query_taxpayer` asks NAV about, or the `invalid_input` fault
 /// for a tax number in neither accepted form. Decided before the prologue:
@@ -344,7 +344,7 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::config::Namespace;
+    use crate::identity::Namespace;
     use crate::test_support::Doc;
 
     fn namespace() -> Namespace {

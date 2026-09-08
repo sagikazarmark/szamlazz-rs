@@ -120,7 +120,7 @@ use szamlazz_agent::Credentials;
 use crate::account::{
     Account, AccountResolver as _, CredentialStore as _, Endpoint, StaticConfig, StaticResolver,
 };
-use crate::config::{Defaults, Namespace, SellerConfig, SellerEmailConfig};
+use crate::config::{Defaults, SellerConfig, SellerEmailConfig};
 use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
@@ -128,6 +128,7 @@ use crate::gateway::{
     CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, ProbeOutcome,
     QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
 };
+use crate::identity::Namespace;
 use crate::test_support::open_gateway;
 
 use super::prologue::Resolution;

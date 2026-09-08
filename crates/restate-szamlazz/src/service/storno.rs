@@ -12,12 +12,12 @@ use super::support::{
     storno_response, verified_document,
 };
 use super::support::{object, shared};
-use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
     DocumentStatus, IssuedKind, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{DeleteOutcome, FoundDocument, issued_kind_of};
+use crate::identity::Namespace;
 use crate::identity::{ExternalId, OrderKey};
 
 impl Execution {

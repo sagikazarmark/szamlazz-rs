@@ -99,7 +99,7 @@ The `invoice_number` of the by-number requests (`Szamlazz.Agent.query`'s selecto
 _Avoid_: `InvoiceNumberInput` (the `*Input` types mirror agent structs; this one mirrors nothing), an unbounded `String` in a request type
 
 **Namespace**:
-The external-id prefix of this deployment (`{namespace}:{order}:{kind}`); chosen by the operator, opaque to szamlazz.hu, permanent: changing it would hide every document issued so far. 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it is the separator. One per deployment, shared by every *Account* it serves. Configured as the top-level `namespace` key of the deployment configuration, beside `[issue]`, `[read]` and `[resolve]` on `WorkerConfig`; it is not part of any account. Pinned per invocation in the *Prologue*. Type: `restate_szamlazz::config::Namespace`.
+The external-id prefix of this deployment (`{namespace}:{order}:{kind}`); chosen by the operator, opaque to szamlazz.hu, permanent: changing it would hide every document issued so far. 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it is the separator. One per deployment, shared by every *Account* it serves. Configured as the top-level `namespace` key of the deployment configuration, beside `[issue]`, `[read]` and `[resolve]` on `WorkerConfig`; it is not part of any account. Pinned per invocation in the *Prologue*. Type: `restate_szamlazz::identity::Namespace` (the deployment settings hold it).
 _Avoid_: slug (the pre-#20 name), prefix (ambiguous with the invoice number prefix), tenant prefix
 
 **Account**:
