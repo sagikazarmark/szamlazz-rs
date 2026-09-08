@@ -153,8 +153,9 @@ impl TryFrom<WorkerConfig> for ValidatedWorkerConfig {
 ///
 /// There is no other constructor: a policy the floor refuses (the e2e suite's
 /// one-second issue delay against a mock that answers at once) is built with
-/// [`ValidatedWorkerConfig::unchecked`], behind the `test-util` feature,
-/// which a deployment never enables.
+/// `ValidatedWorkerConfig::unchecked`, behind the `test-util` feature, which
+/// a deployment never enables (and which this documentation is built without,
+/// so the method is not linked here).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedWorkerConfig(WorkerConfig);
 
