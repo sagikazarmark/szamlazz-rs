@@ -167,7 +167,7 @@ pub enum LookupOutcome {
     Foreign(Box<FoundDocument>),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// external-id query or the hint; nothing may be concluded and nothing
-    /// will be created. See [`is_credentials_rejected`].
+    /// will be created. See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -271,7 +271,7 @@ pub enum CreateOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// leading query, the create or a re-query; this execution issued
     /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
-    /// key would only repeat the answer. See [`is_credentials_rejected`].
+    /// key would only repeat the answer. See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -416,7 +416,7 @@ pub enum QueryOutcome {
     /// number or external id, or a deleted / consumed proforma.
     NotFound,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
-    /// check was not made. See [`is_credentials_rejected`].
+    /// check was not made. See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -450,7 +450,7 @@ pub enum ProbeOutcome {
     /// 7, a document, or any other non-credential code).
     Accepted,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
-    /// [`is_credentials_rejected`].
+    /// [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -476,7 +476,7 @@ pub enum TaxpayerOutcome {
     /// NAV answered: the taxpayer as registered, or `valid: false`.
     Found(QueryTaxpayerResponse),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
-    /// [`is_credentials_rejected`].
+    /// [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -573,7 +573,7 @@ pub enum StornoLookupOutcome {
     },
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// may be concluded and nothing will be sent. See
-    /// [`is_credentials_rejected`].
+    /// [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -642,7 +642,7 @@ pub enum StornoOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// leading query, the storno or a re-query; this execution issued
     /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
-    /// key would only repeat the answer. See [`is_credentials_rejected`].
+    /// key would only repeat the answer. See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -683,7 +683,7 @@ pub enum DeleteOutcome {
         message: String,
     },
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
-    /// was deleted. See [`is_credentials_rejected`].
+    /// was deleted. See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -701,7 +701,7 @@ impl From<ApiError> for DeleteOutcome {
     fn from(api: ApiError) -> Self {
         if api.code == ErrorCode::ProformaNotFound {
             Self::AlreadyGone
-        } else if is_credentials_rejected(&api.code) {
+        } else if api.code.is_credential_error() {
             Self::CredentialsRejected {
                 code: api.code.code().to_owned(),
                 message: api.message,
@@ -734,7 +734,7 @@ pub enum SetPaymentsOutcome {
         message: String,
     },
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
-    /// was registered. See [`is_credentials_rejected`].
+    /// was registered. See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         /// The szamlazz.hu code.
         code: String,
@@ -760,7 +760,7 @@ impl From<CreditEntryResult> for SetPaymentsOutcome {
 /// credential code.
 impl From<ApiError> for SetPaymentsOutcome {
     fn from(api: ApiError) -> Self {
-        if is_credentials_rejected(&api.code) {
+        if api.code.is_credential_error() {
             Self::CredentialsRejected {
                 code: api.code.code().to_owned(),
                 message: api.message,
@@ -1314,7 +1314,7 @@ impl Gateway {
                 tracing::debug!(prefix = %prefix.as_str(), valid = info.valid, "taxpayer answered");
                 Ok(TaxpayerOutcome::Found(QueryTaxpayerResponse::from(info)))
             }
-            Err(ClientError::Api(api)) if is_credentials_rejected(&api.code) => {
+            Err(ClientError::Api(api)) if api.code.is_credential_error() => {
                 Ok(TaxpayerOutcome::CredentialsRejected {
                     code: api.code.code().to_owned(),
                     message: api.message,
@@ -1632,7 +1632,7 @@ impl Gateway {
             Err(ClientError::Api(api)) if api.code == ErrorCode::MissingData => {
                 Err(QueryError::NotFound)
             }
-            Err(ClientError::Api(api)) if is_credentials_rejected(&api.code) => {
+            Err(ClientError::Api(api)) if api.code.is_credential_error() => {
                 Err(QueryError::CredentialsRejected {
                     code: api.code.code().to_owned(),
                     message: api.message,
@@ -1646,23 +1646,6 @@ impl Gateway {
             Err(error) => Err(QueryError::Transport(error.to_string())),
         }
     }
-}
-
-/// Whether `code` means szamlazz.hu rejected the agent credentials: 3 invalid
-/// credentials, 135 browser session active, 136 login blocked, 164 multiple
-/// accounts. szamlazz.hu answers these before it acts on the request (its
-/// documentation; unverified on the probe account), so the request that
-/// draws one was not acted on: the worker's configuration is wrong, not the
-/// request.
-#[must_use]
-pub fn is_credentials_rejected(code: &ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::InvalidCredentials
-            | ErrorCode::BrowserSessionActive
-            | ErrorCode::LoginBlocked
-            | ErrorCode::MultipleAccounts
-    )
 }
 
 /// The `tipus` code the documents of `kind` carry.
@@ -1730,7 +1713,7 @@ enum Failure {
         code: String,
         message: String,
     },
-    /// See [`is_credentials_rejected`].
+    /// See [`ErrorCode::is_credential_error`].
     CredentialsRejected {
         code: String,
         message: String,
@@ -1750,12 +1733,10 @@ enum Failure {
 
 fn classify_failure(error: ClientError) -> Failure {
     match error {
-        ClientError::Api(api) if is_credentials_rejected(&api.code) => {
-            Failure::CredentialsRejected {
-                code: api.code.code().to_owned(),
-                message: api.message,
-            }
-        }
+        ClientError::Api(api) if api.code.is_credential_error() => Failure::CredentialsRejected {
+            code: api.code.code().to_owned(),
+            message: api.message,
+        },
         ClientError::Api(api) => {
             let code = api.code.code().to_owned();
             let message = api.message;
@@ -1952,7 +1933,7 @@ mod tests {
             ErrorCode::LoginBlocked,
             ErrorCode::MultipleAccounts,
         ] {
-            assert!(is_credentials_rejected(&code), "{code:?}");
+            assert!(code.is_credential_error(), "{code:?}");
             let login = ApiError {
                 code: code.clone(),
                 message: "login".to_owned(),
@@ -1978,7 +1959,7 @@ mod tests {
             ErrorCode::ProformaNotFound,
             ErrorCode::Unknown("999".to_owned()),
         ] {
-            assert!(!is_credentials_rejected(&code), "{code:?}");
+            assert!(!code.is_credential_error(), "{code:?}");
         }
     }
 
