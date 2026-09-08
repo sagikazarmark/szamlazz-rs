@@ -23,6 +23,9 @@ pub(crate) mod admin;
 pub(crate) mod gate;
 pub(crate) mod ingress;
 pub(crate) mod introspection;
+/// The run-name pin's table and matching, one file shared with the crate's
+/// unit tests (`src/service/run_names.rs`; see its module docs).
+#[path = "../../../src/service/run_names.rs"]
 pub(crate) mod run_names;
 pub(crate) mod szamlazz;
 

@@ -585,12 +585,19 @@ impl IssueConfig {
     /// 2 s and the duration at 50 s.
     #[must_use]
     pub fn run_retry_policy(&self) -> RunRetryPolicy {
-        RunRetryPolicy::new()
-            .initial_delay(self.initial_delay)
-            .exponentiation_factor(self.factor)
-            .max_delay(self.max_delay)
-            .max_attempts(self.max_attempts)
-            .max_duration(self.max_duration)
+        self.step_policy().into_sdk()
+    }
+
+    /// The policy as the worker's own readable [`StepPolicy`], what the
+    /// create and storno steps run under.
+    pub(crate) fn step_policy(&self) -> StepPolicy {
+        StepPolicy {
+            initial_delay: self.initial_delay,
+            factor: self.factor,
+            max_delay: Some(self.max_delay),
+            max_attempts: Some(self.max_attempts),
+            max_duration: Some(self.max_duration),
+        }
     }
 }
 
@@ -657,12 +664,19 @@ impl ReadConfig {
     /// as [`IssueConfig::run_retry_policy`].
     #[must_use]
     pub fn run_retry_policy(&self) -> RunRetryPolicy {
-        RunRetryPolicy::new()
-            .initial_delay(self.initial_delay)
-            .exponentiation_factor(self.factor)
-            .max_delay(self.max_delay)
-            .max_attempts(self.max_attempts)
-            .max_duration(self.max_duration)
+        self.step_policy().into_sdk()
+    }
+
+    /// The policy as the worker's own readable [`StepPolicy`], what every
+    /// read-only step runs under.
+    pub(crate) fn step_policy(&self) -> StepPolicy {
+        StepPolicy {
+            initial_delay: self.initial_delay,
+            factor: self.factor,
+            max_delay: Some(self.max_delay),
+            max_attempts: Some(self.max_attempts),
+            max_duration: Some(self.max_duration),
+        }
     }
 }
 
@@ -713,11 +727,81 @@ impl ResolveConfig {
     /// from this configuration, no attempt cap (the duration is the bound).
     #[must_use]
     pub fn run_retry_policy(&self) -> RunRetryPolicy {
-        RunRetryPolicy::new()
+        self.step_policy().into_sdk()
+    }
+
+    /// The policy as the worker's own readable [`StepPolicy`], what the
+    /// `account` step runs under.
+    pub(crate) fn step_policy(&self) -> StepPolicy {
+        StepPolicy {
+            initial_delay: self.initial_delay,
+            factor: self.factor,
+            max_delay: Some(self.max_delay),
+            max_attempts: None,
+            max_duration: Some(self.max_duration),
+        }
+    }
+}
+
+/// The run retry policy of one durable step as the worker reads it: the five
+/// fields of the SDK's [`RunRetryPolicy`], whose own fields are private.
+///
+/// What every `ctx.run` of both services is handed through the `Runner`
+/// seam (`service::runner`): the SDK-backed runner maps it onto
+/// [`RunRetryPolicy`] field for field ([`into_sdk`](Self::into_sdk)), and
+/// the offline suite's fake reads it to decide, as the server does, whether a
+/// failed step is re-executed after `initial_delay × factor^(n-1)` (capped at
+/// `max_delay`) or has exhausted `max_attempts` executions or
+/// `max_duration`. The three policies of the deployment configuration
+/// ([`IssueConfig`], [`ReadConfig`], [`ResolveConfig`]) each produce theirs;
+/// [`ONCE`](Self::ONCE) is the policy of a step that runs at most once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct StepPolicy {
+    /// Delay before the first re-execution.
+    pub(crate) initial_delay: Duration,
+    /// Multiplier of the delay after each re-execution.
+    pub(crate) factor: f32,
+    /// Cap of the delay; `None` caps nothing.
+    pub(crate) max_delay: Option<Duration>,
+    /// Executions of the step, including the first; `None` caps nothing.
+    pub(crate) max_attempts: Option<u32>,
+    /// Hard bound on the time spent re-executing the step; `None` bounds
+    /// nothing.
+    pub(crate) max_duration: Option<Duration>,
+}
+
+impl StepPolicy {
+    /// The policy of a step executed at most once per journal entry: the
+    /// pure `namespace` pin and the writes that have no retry of their own
+    /// (`delete-proforma-*`, `set-payments-*`), whose every outcome is data,
+    /// so a closure failure is a bug, not a retry. The delay fields are
+    /// [`RunRetryPolicy::new`]'s, never consulted.
+    pub(crate) const ONCE: Self = Self {
+        initial_delay: Duration::from_millis(100),
+        factor: 1.0,
+        max_delay: None,
+        max_attempts: Some(1),
+        max_duration: None,
+    };
+
+    /// The policy as the SDK's, every field set from this one. Built on
+    /// [`RunRetryPolicy::new`], whose factor is 1.0 and which caps nothing,
+    /// not on `default()`, which caps the delay at 2 s and the duration at
+    /// 50 s.
+    pub(crate) fn into_sdk(self) -> RunRetryPolicy {
+        let mut policy = RunRetryPolicy::new()
             .initial_delay(self.initial_delay)
-            .exponentiation_factor(self.factor)
-            .max_delay(self.max_delay)
-            .max_duration(self.max_duration)
+            .exponentiation_factor(self.factor);
+        if let Some(max_delay) = self.max_delay {
+            policy = policy.max_delay(max_delay);
+        }
+        if let Some(max_attempts) = self.max_attempts {
+            policy = policy.max_attempts(max_attempts);
+        }
+        if let Some(max_duration) = self.max_duration {
+            policy = policy.max_duration(max_duration);
+        }
+        policy
     }
 }
 

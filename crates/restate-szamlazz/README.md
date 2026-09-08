@@ -615,7 +615,18 @@ reversal without the number after a `warn`, while a cancellation of the invocati
   `check_account` probe as exactly one query of the sentinel id with a wrong key as data; and the taxpayer query
   answering a known prefix as `Found` with NAV's registered data, an unknown one as `Found{valid: false}`, a wrong
   key as `CredentialsRejected`, NAV's relayed `funcCode ERROR` or a szamlazz.hu code as `Api`, and a 500, an
-  unparseable body or `szlahu_down` as `Err(Unanswered)`.
+  unparseable body or `szlahu_down` as `Err(Unanswered)`;
+- the **offline handler suite** (`service::paths`): every handler of both services driven without a Restate
+  server, through the `Runner` seam (`service::runner`: an object-safe trait over `ctx.run` the SDK's three
+  context types implement, so the handler bodies are written once and the `#[restate_sdk]` handlers are one line
+  each) over a `FakeRunner` with an in-memory journal, against wiremock, with the prologue, the durable steps and
+  the gateway real. It is about sequence and mapping: which read follows which, that an early answer stops
+  before the next step, what an exhausted step becomes (`unavailable` / `outcome_unknown` about the document,
+  after the policy's executions on a simulated clock), that a cancellation propagates through the best-effort
+  reads, that a previous deployment's `account` entry (the committed fixture) replays through a whole handler
+  and an undecodable one fails retryably; and, on every path, the **offline run-name pin**: the names the fake
+  journaled are a prefix of one of the handler's `RUN_NAMES` paths, and every path is walked in full by one
+  scenario, so a renamed, reordered or dropped step fails `cargo test` without a server.
 
 ### Journal compatibility
 
@@ -729,11 +740,14 @@ for szamlazz.hu, in two phases on one server.
   credential rotation between two executions picked up by the second with the `account` entry byte-identical;
 - that no agent key of the run appears in the hex-decoded `raw` of any journal entry of any invocation, nor in
   any `completion_failure`, while the same scan finds the positive control's sentinel;
-- and, last, the **run-name pin**: `RUN_NAMES` in the harness lists, per handler of both services, the ordered
-  `ctx.run` names of every path it journals, and the scenario asserts over every invocation the server holds that
-  its run sequence is a prefix of one of its handler's paths, that every handler seen is pinned and that every
-  path was walked in full. A renamed, inserted, reordered or dropped step strands every in-flight invocation on
-  replay and fails here instead.
+- and, last, the **run-name pin**: `RUN_NAMES` (`src/service/run_names.rs`, one file shared with the crate's
+  unit tests, where the offline pin reads it) lists, per handler of both services, the ordered `ctx.run` names of
+  every path it journals, and the scenario asserts over every invocation the server holds that its run sequence
+  is a prefix of one of its handler's paths, that every handler seen is pinned and that every path was walked in
+  full. A renamed, inserted, reordered or dropped step strands every in-flight invocation on replay and fails
+  here instead (and offline first). Scenario (i) also holds the raw `Notification: Run` bytes of the `account`
+  and `create-invoice` runs to the committed samples under `tests/e2e/samples/`: what a pre-seam deployment
+  wrote, byte for byte, so the `Runner` seam changed no journal entry.
 
 The harness calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses
 fault bodies out of the ingress envelope (asserting on every fault that the body is
@@ -753,7 +767,7 @@ module per concern:
 - `szamlazz`: the document fixture, the selector matchers and the stub helpers;
 - `ingress`: a reply and its fault;
 - `introspection`: `sys_journal` / `sys_invocation` rows;
-- `run_names`: the `RUN_NAMES` table and its matching.
+- `run_names`: the `RUN_NAMES` table and its matching, included by `#[path]` from `src/service/run_names.rs`.
 
 The harness's own tests (the server gate, the sampler's decision, the fetch hold, the run-pattern matching, the
 stub helpers against wiremock alone) sit beside what they test and run un-ignored. Every other file is one

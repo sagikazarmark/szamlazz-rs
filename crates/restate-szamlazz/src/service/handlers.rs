@@ -1,4 +1,6 @@
-//! The `#[restate_sdk::object]` / `#[restate_sdk::service]` handler surfaces.
+//! The `#[restate_sdk::object]` / `#[restate_sdk::service]` handler surfaces:
+//! one line each, the handler over its context through the `Runner` seam
+//! (`Order::over`, `Agent::over`; the bodies are `entry`).
 //!
 //! Kept in their own module so the `missing_docs` allowance covers only the
 //! macro-generated clients; the handler logic lives in the sibling modules.
@@ -12,14 +14,11 @@ use restate_sdk::errors::HandlerResult;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
-use super::agent::taxpayer_prefix;
-use super::support::order_key;
 use super::{Agent, Body, Order};
 use crate::contract::{
     CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
-    DeleteProformaResponse, DocumentKind, OrderStatus, QueryRequest, QueryResponse,
-    QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
-    StornoRequest, StornoResponse,
+    DeleteProformaResponse, OrderStatus, QueryRequest, QueryResponse, QueryTaxpayerRequest,
+    QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse, StornoRequest, StornoResponse,
 };
 
 /// The `Szamlazz.Order` Virtual Object, keyed by the order number
@@ -61,16 +60,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        // Reborrowed so that the `async move` body captures the reference,
-        // not the context; every handler below does the same.
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Proforma, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).create_proforma(request).await.map(Json)
     }
 
     /// Issues the invoice (`számla`) of the order, converting its live
@@ -93,14 +83,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Invoice, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).create_invoice(request).await.map(Json)
     }
 
     /// Issues the prepayment invoice (`előlegszámla`) of the order; one per
@@ -131,14 +114,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Prepayment, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).create_prepayment(request).await.map(Json)
     }
 
     /// Issues the final invoice (`végszámla`) settling the order's live
@@ -169,14 +145,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.issue_kind(ctx, order, DocumentKind::Final, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).create_final(request).await.map(Json)
     }
 
     /// Issues a corrective invoice (`helyesbítő számla`) for an invoice of
@@ -199,14 +168,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.correct(ctx, order, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).correct_invoice(request).await.map(Json)
     }
 
     /// Reverses (`sztornó`) an invoice of this order; idempotent.
@@ -228,14 +190,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.storno(ctx, order, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).storno_invoice(request).await.map(Json)
     }
 
     /// Deletes the order's proforma.
@@ -257,14 +212,7 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
-        let request = request.into_request()?;
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            Box::pin(execution.delete(ctx, order, request)).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).delete_proforma(request).await.map(Json)
     }
 
     /// What szamlazz.hu holds under the order's external ids right now: four
@@ -281,13 +229,7 @@ impl Order {
         journal_retention = "1d"
     )]
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
-        let order = order_key(ctx.key())?;
-        let ctx = &ctx;
-        self.execute_shared(ctx, |execution| async move {
-            execution.status(ctx, order).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).get().await.map(Json)
     }
 }
 
@@ -321,12 +263,7 @@ impl Agent {
         journal_retention = "1d"
     )]
     async fn check_account(&self, ctx: Context<'_>) -> HandlerResult<Json<CheckAccountResponse>> {
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            execution.check_account_request(ctx).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).check_account().await.map(Json)
     }
 
     /// Queries a document by number, order number or external id. The
@@ -350,13 +287,7 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
-        let request = request.into_request()?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            execution.query_request(ctx, request).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).query(request).await.map(Json)
     }
 
     /// Looks a Hungarian taxpayer up through NAV (`xmltaxpayer`) by tax
@@ -385,15 +316,7 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<QueryTaxpayerRequest>,
     ) -> HandlerResult<Json<QueryTaxpayerResponse>> {
-        // Both refusals precede the prologue: nothing journaled, nothing sent.
-        let request = request.into_request()?;
-        let prefix = taxpayer_prefix(&request)?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            execution.query_taxpayer_request(ctx, prefix).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).query_taxpayer(request).await.map(Json)
     }
 
     /// Registers credit entries (`jóváírás`) on an invoice.
@@ -425,13 +348,7 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<SetPaymentsRequest>,
     ) -> HandlerResult<Json<SetPaymentsResponse>> {
-        let request = request.into_request()?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            execution.set_payments_request(ctx, request).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).set_payments(request).await.map(Json)
     }
 
     /// Reverses an invoice that no `Order` manages. The storno step is the
@@ -461,12 +378,6 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        let request = request.into_request()?;
-        let ctx = &ctx;
-        self.execute(ctx, |execution| async move {
-            execution.storno_request(ctx, request).await
-        })
-        .await
-        .map(Json)
+        self.over(&ctx).storno(request).await.map(Json)
     }
 }

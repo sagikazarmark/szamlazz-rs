@@ -1,9 +1,18 @@
 //! The *run-name pin*'s table and matching: the durable steps of every
 //! handler of both services as the `ctx.run` names they journal
 //! ([`RUN_NAMES`]), a journaled name read as its pattern ([`run_pattern`])
-//! and the prefix rule ([`is_prefix_of_path`]). The pin itself (over every
-//! invocation of the run) is the last scenario (`pins`); the matching's own
-//! tests close this file.
+//! and the prefix rule ([`is_prefix_of_path`]); the matching's own tests
+//! close this file.
+//!
+//! **One home, two pins.** This file is compiled into the crate's unit tests
+//! (`service::run_names`, where the offline pin of `service::paths` holds
+//! every handler driven over the `FakeRunner` to it, without a server) and,
+//! by `#[path]`, into the e2e harness (`tests/e2e/harness/mod.rs`, where the
+//! pin over every invocation of the run against a live `sys_journal` is the
+//! last scenario, `pins`, and stays the authority). A `#[cfg(test)]` module
+//! is invisible to a `tests/` crate and a `test-support` feature would be
+//! public semver surface, so the file itself is shared; it therefore names
+//! nothing of either crate.
 
 use std::sync::LazyLock;
 
@@ -41,7 +50,7 @@ impl RunPath {
 /// only; see [`is_prefix_of_path`]) and every path is observed in full at
 /// least once in the run. The parameter of a parametrized name is pinned by
 /// its prefix only: a number that itself began with a pinned stem (`storno-1`)
-/// would read as the longer pattern; none of the suite's do.
+/// would read as the longer pattern; none of the suites' do.
 pub(crate) const RUN_NAMES: &[RunPath] = &[
     RunPath::new(
         "Szamlazz.Order",

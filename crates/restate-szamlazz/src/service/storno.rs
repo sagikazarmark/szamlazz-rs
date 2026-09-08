@@ -4,14 +4,14 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
-use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
 
+use super::durable::{lookup, lookup_storno, run_once, storno_number_of, storno_step, verify};
 use super::prologue::Execution;
+use super::runner::Runner;
 use super::support::{
     Fault, Lookup, StornoIntent, StornoVerdict, after_storno_lookup, reversed_response,
     storno_response, verified_document,
 };
-use super::support::{object, shared};
 use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
@@ -26,7 +26,7 @@ impl Execution {
     /// `storno_invoice`, on the `order` the handler parsed from its key.
     pub(super) async fn storno(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: OrderKey,
         request: StornoRequest,
     ) -> Result<StornoResponse, HandlerError> {
@@ -41,7 +41,7 @@ impl Execution {
 
         // Step 1: verify the document.
         let found = match self
-            .verify_for_storno(ctx, &order, &number, &storno_id)
+            .verify_for_storno(runner, &order, &number, &storno_id)
             .await?
         {
             ControlFlow::Continue(found) => found,
@@ -63,9 +63,7 @@ impl Execution {
         .map_err(about)?;
 
         // Step 2: lookup: a storno of ours already under the id.
-        let looked_up = object::lookup_storno(ctx, self, &intent)
-            .await
-            .map_err(about)?;
+        let looked_up = lookup_storno(runner, self, &intent, about).await?;
         if let ControlFlow::Break(response) =
             after_storno_lookup(looked_up, &number, namespace).map_err(about)?
         {
@@ -76,15 +74,15 @@ impl Execution {
         // run (exhaustion (500) or cancellation (409)) is `outcome_unknown`
         // about this storno: nothing is recorded, the next invocation's
         // verify and lookup find whatever landed.
-        let outcome = object::storno_step(ctx, self, &intent)
-            .await
-            .map_err(|error| {
+        let outcome = storno_step(runner, self, &intent).await.map_err(|error| {
+            error.or_fault(|terminal| {
                 about(Fault::outcome_unknown(format!(
                     "the storno step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
-                    error.code(),
-                    error.message()
+                    terminal.code(),
+                    terminal.message()
                 )))
-            })?;
+            })
+        })?;
 
         // Step 4: branch on data.
         storno_response(outcome, number, namespace).map_err(|fault| about(fault).into())
@@ -98,16 +96,21 @@ impl Execution {
     /// fault.
     async fn verify_for_storno(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: &OrderKey,
         number: &str,
         storno_id: &ExternalId,
     ) -> Result<ControlFlow<StornoResponse, Box<FoundDocument>>, HandlerError> {
         let namespace = &self.config.namespace;
         let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
-        let found = object::verify(ctx, self, format!("verify-storno-{number}"), number)
-            .await
-            .map_err(about)?;
+        let found = verify(
+            runner,
+            self,
+            format!("verify-storno-{number}"),
+            number,
+            about,
+        )
+        .await?;
         let found = verified_document(found, number, namespace).map_err(about)?;
         match storno_verdict(&found, order, number) {
             StornoVerdict::Proceed => Ok(ControlFlow::Continue(found)),
@@ -116,7 +119,7 @@ impl Execution {
                 // Idempotent: already reversed by anyone. The storno number is
                 // best effort; a cancelled invocation propagates as such.
                 let storno_number =
-                    object::storno_number_of(ctx, self, order, number, storno_id).await?;
+                    storno_number_of(runner, self, order, number, storno_id).await?;
                 Ok(ControlFlow::Break(reversed_response(number, storno_number)))
             }
         }
@@ -130,14 +133,14 @@ impl Execution {
     /// settled.
     pub(super) async fn delete(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: OrderKey,
         request: DeleteProformaRequest,
     ) -> Result<DeleteProformaResponse, HandlerError> {
         let kind = DocumentKind::Proforma;
         let proforma_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
-        let found = object::lookup(
-            ctx,
+        let found = lookup(
+            runner,
             self,
             "proforma-for-delete",
             &proforma_id,
@@ -153,8 +156,8 @@ impl Execution {
         let outcome = {
             let gateway = Arc::clone(&self.gateway);
             let number = found.number;
-            object::run_once(
-                ctx,
+            run_once(
+                runner,
                 format!("delete-proforma-{number}"),
                 move || async move { gateway.delete_proforma(&number).await },
             )
@@ -174,14 +177,14 @@ impl Execution {
     /// what they found.
     pub(super) async fn status(
         &self,
-        ctx: &SharedObjectContext<'_>,
+        runner: &dyn Runner,
         order: OrderKey,
     ) -> Result<OrderStatus, HandlerError> {
         let mut found = Vec::new();
         for kind in DocumentKind::ALL {
             let external_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
-            let looked_up = shared::lookup(
-                ctx,
+            let looked_up = lookup(
+                runner,
                 self,
                 format!("get-{kind}"),
                 &external_id,

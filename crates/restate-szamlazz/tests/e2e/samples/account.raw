@@ -1,0 +1,2 @@
+*‘
+Ž{"Account":{"id":"acct","endpoint":"http://127.0.0.1:34653","defaults":{"e_invoice":false,"language":"hu","currency":"HUF","exchange_rate_bank":"MNB","template":null,"send_email":null,"number_prefix":null,"extra_logo":null,"aggregator":null,"guardian":null},"seller":{"bank":null,"bank_account":null,"signer_name":null,"email":{"reply_to":null,"subject":null,"body":null}},"credential_ref":"acct"}}

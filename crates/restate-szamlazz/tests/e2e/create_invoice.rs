@@ -11,7 +11,7 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 
 use crate::harness::accounts::AGENT_KEY;
-use crate::harness::introspection::run_result;
+use crate::harness::introspection::{SAMPLE_MOCK_URI, run_result, sample, sample_with};
 use crate::harness::szamlazz::{
     Doc, api_error, create, created, duplicate_order_number, external_id_query, not_found,
     number_query, order_query,
@@ -19,7 +19,9 @@ use crate::harness::szamlazz::{
 use crate::harness::{Harness, create_body, document};
 
 /// (i) create ⇒ `issued`; a second call with a **new** key ⇒
-/// `already_issued` from the lookup step.
+/// `already_issued` from the lookup step. Beside it, the raw run-result
+/// bytes of `account` and `create-invoice` against the committed pre-seam
+/// samples (#133).
 pub(crate) async fn issued_then_already_issued(h: &Harness) {
     h.reset().await;
     h.absent("E2E-1", &["prepayment", "final", "proforma"])
@@ -90,6 +92,24 @@ pub(crate) async fn issued_then_already_issued(h: &Harness) {
     assert!(
         !journal.iter().any(|entry| entry.raw_contains(AGENT_KEY)),
         "the agent key is in no journal entry"
+    );
+    // The `Runner` seam (#133) changed no journal entry: the raw
+    // `Notification: Run` bytes of the `account` and `create-invoice` runs are
+    // what the pre-seam deployment wrote for this scenario, byte for byte
+    // (`tests/e2e/samples/`; the account's endpoint carries the wiremock's
+    // port, substituted for this run's).
+    assert_eq!(
+        account.raw,
+        sample_with(&sample("account"), SAMPLE_MOCK_URI, &h.mock.uri()),
+        "the account run result: {}",
+        String::from_utf8_lossy(&account.raw)
+    );
+    let create = run_result(&journal, "create-invoice").expect("the create result");
+    assert_eq!(
+        create.raw,
+        sample("create-invoice"),
+        "the create run result: {}",
+        String::from_utf8_lossy(&create.raw)
     );
 
     let again = h

@@ -106,3 +106,124 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
         .collect()
 }
+
+// ----- run-result samples ----------------------------------------------------------
+
+/// The wiremock's URI on the run that wrote the committed samples: what the
+/// `account` sample's endpoint carries, substituted for this run's by
+/// [`sample_with`]. Re-dump the samples and this together (a pre-seam run of
+/// scenario (i) on `main`, `a7dbc2a`).
+pub(crate) const SAMPLE_MOCK_URI: &str = "http://127.0.0.1:34653";
+
+/// A committed run-result sample (`tests/e2e/samples/<name>.raw`: the raw
+/// `Notification: Run` bytes a pre-seam deployment wrote, #133).
+pub(crate) fn sample(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/e2e/samples")
+        .join(format!("{name}.raw"));
+    std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// The sample re-enveloped for this run: `from` replaced by `to` in its JSON
+/// payload (the account's endpoint carries the wiremock's port, different on
+/// every run) and the two protobuf length prefixes recomputed. The layout is
+/// the server's `RunCompletionNotificationMessage` under journal v2
+/// (verified against 1.7.8): `08 <completion id> 2a <len> 0a <len> <payload>`;
+/// a sample of another shape is a panic naming it.
+pub(crate) fn sample_with(sample: &[u8], from: &str, to: &str) -> Vec<u8> {
+    fn varint(bytes: &[u8], at: &mut usize) -> u64 {
+        let mut value = 0u64;
+        let mut shift = 0;
+        loop {
+            let byte = *bytes
+                .get(*at)
+                .unwrap_or_else(|| panic!("the sample ends inside a varint at {at}: {bytes:?}"));
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte < 0x80 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "each pushed byte is masked to seven bits first"
+    )]
+    fn encode_varint(mut value: usize, into: &mut Vec<u8>) {
+        while value >= 0x80 {
+            into.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        into.push(value as u8);
+    }
+    fn expect_tag(sample: &[u8], at: usize, tag: u8, field: &str) {
+        assert_eq!(
+            sample.get(at),
+            Some(&tag),
+            "{field} expected at byte {at} of the sample: {sample:?}"
+        );
+    }
+
+    let mut at = 0;
+    expect_tag(sample, at, 0x08, "field 1 (completion id)");
+    at += 1;
+    let completion_id = varint(sample, &mut at);
+    expect_tag(sample, at, 0x2a, "field 5 (result)");
+    at += 1;
+    let _outer = varint(sample, &mut at);
+    expect_tag(sample, at, 0x0a, "field 1 of the result (value)");
+    at += 1;
+    let inner = varint(sample, &mut at);
+    let payload = sample.get(at..).unwrap_or_default();
+    assert_eq!(
+        usize::try_from(inner).expect("a small length"),
+        payload.len(),
+        "the inner length is the payload's"
+    );
+
+    let payload = String::from_utf8(payload.to_vec())
+        .expect("a JSON payload")
+        .replace(from, to)
+        .into_bytes();
+    let mut value = Vec::new();
+    value.push(0x0a);
+    encode_varint(payload.len(), &mut value);
+    value.extend_from_slice(&payload);
+
+    let mut raw = vec![0x08];
+    encode_varint(
+        usize::try_from(completion_id).expect("a small id"),
+        &mut raw,
+    );
+    raw.push(0x2a);
+    encode_varint(value.len(), &mut raw);
+    raw.extend_from_slice(&value);
+    raw
+}
+
+/// `sample_with` on the committed `account` sample rebuilds the sample
+/// itself when nothing is substituted, and a substitution of a different
+/// length re-encodes both prefixes.
+#[test]
+fn sample_with_re_envelopes_the_payload() {
+    let account = sample("account");
+    assert!(
+        String::from_utf8_lossy(&account).contains(&format!("\"endpoint\":\"{SAMPLE_MOCK_URI}\"")),
+        "the sample carries SAMPLE_MOCK_URI: {}",
+        String::from_utf8_lossy(&account)
+    );
+    assert_eq!(sample_with(&account, "nothing", "nothing"), account);
+    let longer = format!("{SAMPLE_MOCK_URI}0");
+    let re_enveloped = sample_with(&account, SAMPLE_MOCK_URI, &longer);
+    assert_eq!(re_enveloped.len(), account.len() + 1);
+    assert!(
+        String::from_utf8_lossy(&re_enveloped).contains(&format!("\"endpoint\":\"{longer}\"")),
+        "{}",
+        String::from_utf8_lossy(&re_enveloped)
+    );
+    assert_eq!(
+        sample_with(&re_enveloped, &longer, SAMPLE_MOCK_URI),
+        account
+    );
+}

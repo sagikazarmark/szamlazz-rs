@@ -173,7 +173,7 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
 
 The four steps and the handler body run inside one tracing span, **`execution{scope, order, restate.invocation.id,
-account.id}`** (`support::{object, shared, service}::execute`): `scope` is what the SDK saw (`<unscoped>` when none),
+account.id}`** (`durable::execute`): `scope` is what the SDK saw (`<unscoped>` when none),
 `order` the Virtual Object key (absent on `Szamlazz.Agent`), `restate.invocation.id` the value the ingress returns as
 `x-restate-id`, and `account.id` the resolved account's id, recorded once the `account` step has answered. Every log
 line the execution emits, the prologue's warnings, the gateway steps' `gateway.*` spans and events, the paging
@@ -193,13 +193,16 @@ unsupported in multi-account mode: the server's `kafka_scope` flag can scope a r
 record header, so "arrives unscoped" is not the reason, no scenario exercises it, and the record's scope would be
 set outside the gateway of the safety contract (ADR 0006).
 
-Handler-level behaviour is observable only under Restate (the SDK has no mock context), so the prologue's decisions
-are functions of their inputs with unit tests (`service::prologue`; the resolution is a pure function of the
-resolver's answer, the pre-amendment `warn` on a scoped request resolving to an account without a `supplier_id`, #43,
-went with the pin, and the two deadlines run under a paused tokio clock: a resolver that never answers is the
-retryable error at exactly `CALL_DEADLINE`, a store that never answers is the terminal fault after three bounded
-attempts, its text naming neither the account nor the reference) and the durable behaviour is asserted end to end
-(§11).
+The prologue's decisions are functions of their inputs with unit tests (`service::prologue`; the resolution is a
+pure function of the resolver's answer, the pre-amendment `warn` on a scoped request resolving to an account without
+a `supplier_id`, #43, went with the pin, and the two deadlines run under a paused tokio clock: a resolver that never
+answers is the retryable error at exactly `CALL_DEADLINE`, a store that never answers is the terminal fault after
+three bounded attempts, its text naming neither the account nor the reference). Its durable steps, like every
+handler's, run over the **`Runner` seam** (§11): an object-safe trait (`invocation_id`, `scope`, `key`, and `run`:
+journal the bytes a step produces under a name and a policy) the three SDK context types implement, so the prologue
+and the handler bodies are written once (`durable`, `entry`) and the `#[restate_sdk]` handlers are one line each
+over their context; the offline suite (`service::paths`) drives the very same fns over a `FakeRunner`, and the
+durable behaviour under a server is asserted end to end (§11).
 
 ### `Szamlazz.Agent` (stateless Service, `#[restate_sdk::service(name = "Szamlazz.Agent")]`)
 
@@ -226,10 +229,12 @@ corrupt.
 ### Durable step names
 
 Every `ctx.run` of both services, per handler path, in the order the handler journals them. **The authority is the
-run-name pin**: `RUN_NAMES` in the e2e harness (`tests/e2e/harness/run_names.rs`), verified against a live
-`sys_journal` whenever the suite runs (§11; CI, on every pull request), and this table follows it: a step added,
-renamed or reordered in the code fails the pin first, and the table is then brought to match, never the other way
-round. The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
+run-name pin**: `RUN_NAMES` (`src/service/run_names.rs`, one file compiled into the crate's unit tests and, by
+`#[path]`, into the e2e harness), verified twice: **offline** on every `cargo test`, against what the `FakeRunner`
+journaled for every handler driven in `service::paths` (every path walked in full by one scenario), and against a
+live `sys_journal` whenever the e2e runs (§11; CI, on every pull request), which stays the authority. This table
+follows the pin: a step added, renamed or reordered in the code fails the offline pin first, and the table is then
+brought to match, never the other way round. The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
 what an `unavailable` fault's message means by "the step". `{kind}` is the document kind the handler issues or reads:
 `proforma | invoice | prepayment | final`, and `corrective` on `correct_invoice`'s lookup and create; `{number}` is an
 invoice number, the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
@@ -846,18 +851,27 @@ flipped by the create stub's responder and read by the external id's). Raw selec
 `up_to_n_times(n)` stay where a scenario is about a specific wire sequence. The layer holds no state beyond that flag
 and does not grow into a fake. A stateful fake would be reconsidered for one capability only: property tests of
 the exactly-once invariant (random handler sequences under two scopes, "at most one live document per kind per
-order, the newest holder under every external id"), which no stub can express. Neither approach exercises a handler
-without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested in the **decision layer**,
-the decide fns: each handler body is `read → decide → (answer | proceed) → next read`, where every `decide` is a pure
-function of the journaled outcome the read returned and the request, beside its async shell, and the shell is held to
-holding no `match` on a gateway outcome that returns a response. On `main` the storno, delete and `get` shells
-(`service/storno.rs`), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup decision and the responses
-(`service/support.rs`) and the prologue's (`service/prologue.rs`) are in that shape; the create side's
-(`service/create.rs`) has `respond_to`, `exclusive_with` and `prepare` pure and the rest of its decisions in flight
-(#137). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
-classifiers (which answer is settled, which document is foreign, which failure is which class) are the same kind of
-function one layer down, table-tested in `gateway`'s unit tests; and the e2e is left with what only a server can
-show: the durable sequence, replay, the per-key lock and the journal.
+order, the newest holder under every external id"), which no stub can express. Handler decisions are tested in the
+**decision layer**, the decide fns (#124): each handler body is `read → decide → (answer | proceed) → next read`,
+where every `decide` is a pure function of the journaled outcome the read returned and the request, beside its async
+shell, and the shell is held to holding no `match` on a gateway outcome that returns a response; the decision
+functions are unit-tested branch by branch with `test_support::Doc`, and the gateway's own classifiers (which answer
+is settled, which document is foreign, which failure is which class) are the same kind of function one layer down,
+table-tested in `gateway`'s unit tests. The **shells** are tested offline through the **`Runner` seam** (#133): the
+SDK has no `ObjectContext` harness, so `ctx.run` is reached through an object-safe trait (`service::runner::Runner`)
+the three context types implement, and a `FakeRunner` with an in-memory journal drives the real handler bodies
+(`entry`, the fns the `#[restate_sdk]` handlers are one line over) against a wiremock szamlazz.hu without a server
+(`service::paths`): it journals a step's bytes and replays them on a re-execution, ends the execution on a retryable
+failure and re-executes the handler from its first line after the policy's delay on a **simulated clock** (never
+sleeping, and never paused tokio time, which auto-advances into a real timeout while a wiremock round trip is in
+flight), spends `max_attempts` / `max_duration` by the server's rule, and can seed a completion by name (a previous
+deployment's entry), inject a retryable failure on a step's first *n* executions, exhaust a step, or cancel the
+invocation at a step (the SDK's 409 before the closure runs). What the seam changes in the journal is nothing: a run
+completion is journaled as exactly the bytes the SDK's `Serialize` produces, and `Json<T>` produces
+`serde_json::to_vec(&t)`, so a runner journaling a `Vec<u8>` holding `serde_json::to_vec(&t)` writes the
+byte-identical entry (the e2e asserts it on the raw `Notification: Run` bytes against samples a pre-seam
+deployment wrote). The e2e is left with what only a server can show: the durable sequence as the server drives it,
+replay, the per-key lock and the journal.
 
 - `gateway`: wiremock tests using upstream-shaped responses; the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
@@ -973,6 +987,40 @@ show: the durable sequence, replay, the per-key lock and the journal.
   pause; a store that never answers is bounded per attempt by `CALL_DEADLINE`; and one that recovers within the
   attempts (unavailable, then silent, then the key) answers the credentials it gave after two pauses and one
   deadline.
+- `service::paths` (the offline handler suite, over the `FakeRunner`): every handler of both services, driven through
+  `Order::over` / `Agent::over` against a wiremock szamlazz.hu with the prologue, the durable steps and the gateway
+  real (the gateway opened over a client with no root certificates, #136), one scenario per path of `RUN_NAMES` and
+  one per early stop, about sequence and mapping, never truth tables: `create_proforma` issuing after its three
+  exclusivity reads and stopping at the first on `order_invoiced`; `create_invoice` through `proforma-link` and
+  through `verify-proforma-{number}` (the create carrying `dijbekeroSzamlaszam`), refusing a malformed body and an
+  untrimmed key before the prologue with nothing journaled, `already_issued` from the lookup with no create, an
+  exhausted create step as `outcome_unknown` about the document after five executions 2 m → 4 m → 8 m → 10 m apart
+  with every earlier step replayed, an exhausted lookup as `unavailable` naming the step after 5 → 10 → 20 → 40 s
+  with no create, a lookup that fails once re-executed after 5 s with the record showing what replayed;
+  `create_prepayment` on both link shapes; `create_final` after a live `ES` and `prepayment_missing` after the one
+  read; `correct_invoice` through `verify-base-{number}` and 404 `not_found` carrying the corrective's identity;
+  `storno_invoice` reversing through verify, lookup and storno (the send repeating `telj`), reading the hint when the
+  verify saw the reversal, a **cancellation at the best-effort hint propagating as the 409** (never `reversed`), an
+  exhausted hint swallowed as `reversed` without the number, an exhausted storno step as `outcome_unknown` about the
+  storno, `not_managed` after the verify alone; `delete_proforma` deleting and stopping on absent; `get` reading the
+  four slots, and with every read failing once answering in the fifth execution (4 × 5 s); `check_account`
+  probing the sentinel id and `unknown_account` after the prologue's two steps on a scoped request; `query` found and
+  404; `query_taxpayer` by prefix and the malformed number refused before the prologue; `set_payments` in one step;
+  `Szamlazz.Agent.storno` reversing an unmanaged invoice, `managed_by_order` after the verify, the best-effort
+  by-number lookup when already reversed. Then the replays: the committed `account` fixture
+  (`tests/journal/resolution/account.json`, its endpoint pointed at the mock) and the `namespace` fixture seeded and
+  replayed through `check_account`, which answers from the **journaled** account (its id the fixture's, its
+  credentials fetched by the fixture's reference); and an `account` entry the current types cannot decode failing
+  the execution **retryably**, never as a fault, with nothing after it run (ADR 0005). And, read off the record:
+  every step's policy (`namespace` once, `account` the resolve policy, every read the read policy, `create-*` and
+  `storno-*` the issue policy, `set-payments-*` once), and the journaled bytes as `serde_json::to_vec` of the
+  journaled type (the `namespace` entry the committed fixture byte for byte, the `account` entry a `Resolution`
+  that re-encodes to itself, the key in neither). Each scenario is one `#[tokio::test]` asserting the **offline
+  run-name pin** on what it journaled (a prefix of one of the handler's `RUN_NAMES` paths) and one row of the table
+  a coverage test walks, asserting every path walked in full. The `FakeRunner`'s own tests (`service::runner::fake`)
+  pin its miniature of the server: journal and replay, the delays and the exhaustion by `max_attempts` and by
+  `max_duration` on the simulated clock, `fail_first`, the 409 of `cancel_at`, a seeded entry replayed and a renamed
+  step at its position the journal mismatch.
 - `service::journal` (journal compatibility, ADR 0005 #47): one pinned JSON fixture per variant of every type the
   services journal as a `ctx.run` result, `Namespace`, `Resolution` (with an `Account` carrying every optional
   field), `QueryOutcome`, `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`,
@@ -1135,10 +1183,16 @@ show: the durable sequence, replay, the per-key lock and the journal.
   positive control's sentinel; and, last, the **run-name pin**: for every invocation the server holds, the `ctx.run`
   names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES` (the durable steps of
   every handler of both services, parametrized names, `verify-storno-{number}`, `taxpayer-{prefix}`, pinned by
-  their prefix), every handler seen is in the table, and every path in the table was walked in full by at least one
-  invocation. The type fixtures pin what an entry holds; this pins which entries a handler writes and in what order,
-  the other half of what an in-flight invocation replays across a deploy (ADR 0005). A renamed, inserted, reordered
-  or dropped step fails here rather than stranding the invocation.
+  their prefix; the same table the offline pin of `service::paths` reads), every handler seen is in the table, and
+  every path in the table was walked in full by at least one invocation. The type fixtures pin what an entry holds;
+  this pins which entries a handler writes and in what order, the other half of what an in-flight invocation replays
+  across a deploy (ADR 0005). A renamed, inserted, reordered or dropped step fails here rather than stranding the
+  invocation. Beside it, in scenario (i), the **raw run-result bytes**: the `Notification: Run` rows of the
+  `account` and `create-invoice` runs hold, byte for byte, the JSON the pre-seam deployment wrote for the same
+  scenario (`tests/e2e/samples/`, dumped from `main` at `a7dbc2a`, post-#127; the account's endpoint substituted for
+  the mock's port, `SAMPLE_MOCK_URI`), so the `Runner` seam (#133) is shown to change no journal entry. A journaled
+  type that changes shape (an additive field) changes these samples too: re-dump them from the pre-change commit
+  together with the constant.
   The harness (`tests/e2e/harness/`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, submits
   without waiting through `/restate/send/…`, returns the
   `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes, run results are bytes and
@@ -1154,7 +1208,8 @@ show: the durable sequence, replay, the per-key lock and the journal.
   other file is one handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`,
   `create_final`, `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`,
   `faults`, `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
-  scenario of a handler goes into that handler's file and is called from `main.rs` in sequence.
+  scenario of a handler goes into that handler's file and is called from `main.rs` in sequence. `run_names` is not
+  the harness's own: it is `src/service/run_names.rs` included by `#[path]`, so the table has one home.
 - The protocol-v7 canary (`tests/e2e/main.rs`, a second ignored test on a server of its own, on its own ports, with
   vqueues and scoped Virtual Objects on and protocol v7 **off**): the ingress accepts a scoped path and the server
   keys the invocation by the scope (`sys_invocation.scope = acme`), but the SDK never sees it, a scoped

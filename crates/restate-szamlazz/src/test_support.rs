@@ -21,7 +21,9 @@
 //! `all-features`, and a public feature is semver surface). The e2e `Doc`
 //! also carries a harness-only `external_id` selector that is not part of any
 //! document body. Two small renderers of one verified XML shape were judged
-//! cheaper than that surface.
+//! cheaper than that surface. The same holds for the wiremock stubs the
+//! offline handler suite (`service::paths`) mounts ([`stubs`]): the selector
+//! matchers and response templates mirror the two harnesses'.
 //!
 //! `service::journal`'s `document()` is not a fixture of this kind and stays
 //! where it is: it renders *every* element the `szamla` XML can carry, so
@@ -51,6 +53,8 @@ use szamlazz_agent::{Credentials, InvoiceNumber, reqwest};
 
 use crate::account::Account;
 use crate::gateway::{FoundDocument, Gateway};
+
+pub(crate) mod stubs;
 
 /// The HTTP client [`open_gateway`] opens a gateway over: the default client
 /// (see `szamlazz_agent::client`) minus the root certificates (see the module

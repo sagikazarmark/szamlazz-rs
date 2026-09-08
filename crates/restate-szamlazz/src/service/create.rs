@@ -15,11 +15,11 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
-use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
+use super::durable::{lookup, run_reading, run_retrying, verify};
 use super::prologue::Execution;
-use super::support::object::{lookup, run_reading, run_retrying, verify};
+use super::runner::Runner;
 use super::support::{Fault, Lookup, verified_document};
 use crate::config::Namespace;
 use crate::contract::{
@@ -475,7 +475,7 @@ impl Execution {
     /// `create_final`, on the `order` the handler parsed from its key.
     pub(super) async fn issue_kind(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: OrderKey,
         kind: DocumentKind,
         request: CreateRequest,
@@ -489,7 +489,7 @@ impl Execution {
         // this create), then, for a final invoice, its prepayment.
         for &(other, reason) in exclusive_with(kind) {
             if let Some(response) = self
-                .exclusivity(ctx, &prepared, &identity, other, reason)
+                .exclusivity(runner, &prepared, &identity, other, reason)
                 .await?
             {
                 return Ok(response);
@@ -497,7 +497,7 @@ impl Execution {
         }
         if kind == DocumentKind::Final
             && let Some(response) = self
-                .prepayment_for_final(ctx, &prepared, &identity, &mut refs)
+                .prepayment_for_final(runner, &prepared, &identity, &mut refs)
                 .await?
         {
             return Ok(response);
@@ -507,7 +507,7 @@ impl Execution {
         // (`links_proforma`): the invoice and the prepayment invoice.
         if links_proforma(kind)
             && let Some(response) = self
-                .proforma_link(ctx, &prepared, &identity, &mut refs)
+                .proforma_link(runner, &prepared, &identity, &mut refs)
                 .await?
         {
             return Ok(response);
@@ -530,13 +530,13 @@ impl Execution {
             reissue: prepared.reissue,
             our_numbers: refs.our_numbers,
         };
-        self.issue(ctx, &prepared.order, intent).await
+        self.issue(runner, &prepared.order, intent).await
     }
 
     /// `correct_invoice`, on the `order` the handler parsed from its key.
     pub(super) async fn correct(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: OrderKey,
         request: CorrectRequest,
     ) -> Result<CreateResponse, HandlerError> {
@@ -555,9 +555,14 @@ impl Execution {
         // The base must be a live invoice carrying this order's number
         // (`decide_base`).
         let about = |fault: Fault| identity.about(&order, fault);
-        let found = verify(ctx, self, format!("verify-base-{number}"), &number)
-            .await
-            .map_err(about)?;
+        let found = verify(
+            runner,
+            self,
+            format!("verify-base-{number}"),
+            &number,
+            about,
+        )
+        .await?;
         let found = verified_document(found, &number, &self.config.namespace).map_err(about)?;
         if let Some(response) = decide_base(&found, &order, &number, &identity) {
             return Ok(response);
@@ -579,7 +584,7 @@ impl Execution {
             reissue: false,
             our_numbers: Vec::new(),
         };
-        self.issue(ctx, &order, intent).await
+        self.issue(runner, &order, intent).await
     }
 
     // ----- step 0: validation ----------------------------------------------
@@ -650,7 +655,7 @@ impl Execution {
     /// the decision is [`decide_exclusivity`].
     async fn exclusivity(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         prepared: &Prepared,
         identity: &Identity,
         other: DocumentKind,
@@ -658,7 +663,7 @@ impl Execution {
     ) -> Result<Option<CreateResponse>, HandlerError> {
         let other_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, other);
         let found = lookup(
-            ctx,
+            runner,
             self,
             format!("exclusivity-{other}"),
             &other_id,
@@ -673,7 +678,7 @@ impl Execution {
     /// [`decide_prepayment_for_final`].
     async fn prepayment_for_final(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         prepared: &Prepared,
         identity: &Identity,
         refs: &mut Refs,
@@ -681,7 +686,7 @@ impl Execution {
         let kind = DocumentKind::Prepayment;
         let prepayment_id = ExternalId::for_kind(&self.config.namespace, &prepared.order, kind);
         let found = lookup(
-            ctx,
+            runner,
             self,
             "prepayment-for-final",
             &prepayment_id,
@@ -701,7 +706,7 @@ impl Execution {
     /// [`decide_proforma_by_number`].
     async fn proforma_link(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         prepared: &Prepared,
         identity: &Identity,
         refs: &mut Refs,
@@ -712,7 +717,7 @@ impl Execution {
                 let proforma_id =
                     ExternalId::for_kind(&self.config.namespace, &prepared.order, kind);
                 let found = lookup(
-                    ctx,
+                    runner,
                     self,
                     "proforma-link",
                     &proforma_id,
@@ -729,9 +734,14 @@ impl Execution {
             }
             ProformaLink::Number(number) => {
                 let number = number.as_str();
-                let found = verify(ctx, self, format!("verify-proforma-{number}"), number)
-                    .await
-                    .map_err(|fault| identity.about(&prepared.order, fault))?;
+                let found = verify(
+                    runner,
+                    self,
+                    format!("verify-proforma-{number}"),
+                    number,
+                    |fault| identity.about(&prepared.order, fault),
+                )
+                .await?;
                 decide_proforma_by_number(
                     found,
                     number,
@@ -752,7 +762,7 @@ impl Execution {
     /// is branched on as data.
     async fn issue(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: &OrderKey,
         intent: Intent,
     ) -> Result<CreateResponse, HandlerError> {
@@ -760,7 +770,7 @@ impl Execution {
         let about = |fault: Fault| identity.about(order, fault);
 
         // Step 3: lookup, then decide on what it found.
-        let found = self.lookup_step(ctx, order, &intent).await.map_err(about)?;
+        let found = self.lookup_step(runner, order, &intent, about).await?;
         let reversed = match decide_lookup(found, intent.reissue, identity, &self.config.namespace)
             .map_err(about)?
         {
@@ -769,7 +779,7 @@ impl Execution {
         };
 
         // Step 4: create.
-        let outcome = self.create_step(ctx, order, &intent, reversed).await?;
+        let outcome = self.create_step(runner, order, &intent, reversed).await?;
 
         // Step 5: branch on data.
         Ok(identity
@@ -779,29 +789,36 @@ impl Execution {
 
     /// Step 3: one read-only durable step under the read policy, querying the
     /// external id and, for every kind but correctives, the order-number
-    /// hint. A lookup szamlazz.hu never answered is `unavailable`; the caller
-    /// attaches the document.
+    /// hint. A lookup szamlazz.hu never answered is `unavailable`, about the
+    /// document `about` names.
     async fn lookup_step(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: &OrderKey,
         intent: &Intent,
-    ) -> Result<LookupOutcome, Fault> {
+        about: impl FnOnce(Fault) -> Fault,
+    ) -> Result<LookupOutcome, HandlerError> {
         let gateway = Arc::clone(&self.gateway);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
-        run_reading(ctx, format!("lookup-{kind}"), self, move || async move {
-            gateway
-                .lookup(LookupRequest {
-                    external_id: &external_id,
-                    kind,
-                    order: &order,
-                    our_numbers: &our_numbers,
-                })
-                .await
-        })
+        run_reading(
+            runner,
+            format!("lookup-{kind}"),
+            self,
+            about,
+            move || async move {
+                gateway
+                    .lookup(LookupRequest {
+                        external_id: &external_id,
+                        kind,
+                        order: &order,
+                        our_numbers: &our_numbers,
+                    })
+                    .await
+            },
+        )
         .await
     }
 
@@ -814,7 +831,7 @@ impl Execution {
     /// invocation's lookup finds whatever landed.
     async fn create_step(
         &self,
-        ctx: &ObjectContext<'_>,
+        runner: &dyn Runner,
         order: &OrderKey,
         intent: &Intent,
         reversed: Option<String>,
@@ -825,9 +842,9 @@ impl Execution {
         let order_key = order.clone();
         let create = intent.create.clone();
         run_retrying(
-            ctx,
+            runner,
             format!("create-{kind}"),
-            self.config.issue.run_retry_policy(),
+            self.config.issue.step_policy(),
             move || async move {
                 gateway
                     .create(CreateStepRequest {
@@ -841,7 +858,9 @@ impl Execution {
             },
         )
         .await
-        .map_err(|error| create_outcome_unknown(&error, order, &intent.identity).into())
+        .map_err(|error| {
+            error.or_fault(|terminal| create_outcome_unknown(terminal, order, &intent.identity))
+        })
     }
 }
 

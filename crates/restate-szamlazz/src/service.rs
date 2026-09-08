@@ -26,16 +26,18 @@
 //! client. The handler body then runs on that execution (`prologue::Execution`);
 //! nothing of it (gateway, client, credentials) outlives the execution.
 //!
+//! Every durable step runs over the `Runner` seam (`runner`): an
+//! object-safe trait the three SDK context types implement, so the
+//! `#[restate_sdk]` handlers (`handlers`) are one line each over their context
+//! and the handler bodies (`entry`, `create`, `storno`, `agent`, `durable`)
+//! are written once, and the offline suite (`paths`) drives them over a fake
+//! runner without a server.
+//!
 //! - [`Order`]: keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.
 //! - [`Agent`]: by-number operations (`query`, `set_payments`, `storno`), the
 //!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
 //!   probe, registered as `Szamlazz.Agent`.
-
-use std::future::Future;
-
-use restate_sdk::errors::HandlerError;
-use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 
 use crate::account::Accounts;
 use crate::config::WorkerConfig;
@@ -43,17 +45,26 @@ use crate::config::WorkerConfig;
 mod agent;
 mod body;
 mod create;
+mod durable;
+mod entry;
 mod handlers;
 #[cfg(test)]
 mod journal;
+#[cfg(test)]
+mod paths;
 mod prologue;
+#[cfg(test)]
+pub(crate) mod run_names;
+pub(crate) mod runner;
 mod storno;
 mod support;
 
 pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
 
-use prologue::Execution;
+use entry::{AgentHandlers, OrderHandlers};
+use prologue::Opener;
+use runner::Runner;
 
 /// The `Order` Virtual Object: one instance per order number. Registered as
 /// `Szamlazz.Order`.
@@ -64,6 +75,7 @@ use prologue::Execution;
 pub struct Order {
     accounts: Accounts,
     config: WorkerConfig,
+    opener: Opener,
 }
 
 impl Order {
@@ -71,7 +83,20 @@ impl Order {
     /// `accounts` and the deployment-level `config`.
     #[must_use]
     pub fn from_parts(accounts: Accounts, config: WorkerConfig) -> Self {
-        Self { accounts, config }
+        Self {
+            accounts,
+            config,
+            opener: Opener::default(),
+        }
+    }
+
+    /// The same object opening every execution's gateway through `opener`
+    /// instead of `Gateway::open`: the offline suite's, over a client that
+    /// loads no root certificates.
+    #[cfg(test)]
+    pub(crate) fn with_opener(mut self, opener: Opener) -> Self {
+        self.opener = opener;
+        self
     }
 
     /// The account resolver and credential store.
@@ -86,29 +111,11 @@ impl Order {
         &self.config
     }
 
-    /// Runs an exclusive handler's execution: the prologue (pin → resolve →
-    /// fetch → open), then `body` on the execution it built, inside the
-    /// execution span carrying the scope, the key, the invocation id and the
-    /// account id.
-    async fn execute<T, F, Fut>(&self, ctx: &ObjectContext<'_>, body: F) -> Result<T, HandlerError>
-    where
-        F: FnOnce(Execution) -> Fut + Send,
-        Fut: Future<Output = Result<T, HandlerError>> + Send,
-    {
-        support::object::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
-    }
-
-    /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
-    async fn execute_shared<T, F, Fut>(
-        &self,
-        ctx: &SharedObjectContext<'_>,
-        body: F,
-    ) -> Result<T, HandlerError>
-    where
-        F: FnOnce(Execution) -> Fut + Send,
-        Fut: Future<Output = Result<T, HandlerError>> + Send,
-    {
-        support::shared::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
+    /// The object's handlers over `runner`: what each `#[restate_sdk]`
+    /// handler does with its context, and what the offline suite drives over
+    /// a fake.
+    fn over<'a>(&'a self, runner: &'a dyn Runner) -> OrderHandlers<'a> {
+        OrderHandlers::new(self, runner)
     }
 }
 
@@ -131,6 +138,7 @@ impl Order {
 pub struct Agent {
     accounts: Accounts,
     config: WorkerConfig,
+    opener: Opener,
 }
 
 impl Agent {
@@ -138,7 +146,19 @@ impl Agent {
     /// `accounts` and the deployment-level `config`.
     #[must_use]
     pub fn from_parts(accounts: Accounts, config: WorkerConfig) -> Self {
-        Self { accounts, config }
+        Self {
+            accounts,
+            config,
+            opener: Opener::default(),
+        }
+    }
+
+    /// The same service opening every execution's gateway through `opener`
+    /// instead of `Gateway::open`; see [`Order::with_opener`].
+    #[cfg(test)]
+    pub(crate) fn with_opener(mut self, opener: Opener) -> Self {
+        self.opener = opener;
+        self
     }
 
     /// The account resolver and credential store.
@@ -153,15 +173,9 @@ impl Agent {
         &self.config
     }
 
-    /// Runs a handler's execution: the prologue (pin → resolve → fetch →
-    /// open), then `body` on the execution it built, inside the execution
-    /// span carrying the scope, the invocation id and the account id.
-    async fn execute<T, F, Fut>(&self, ctx: &Context<'_>, body: F) -> Result<T, HandlerError>
-    where
-        F: FnOnce(Execution) -> Fut + Send,
-        Fut: Future<Output = Result<T, HandlerError>> + Send,
-    {
-        support::service::execute(ctx, None, &self.accounts, &self.config, body).await
+    /// The service's handlers over `runner`; see [`Order::over`].
+    fn over<'a>(&'a self, runner: &'a dyn Runner) -> AgentHandlers<'a> {
+        AgentHandlers::new(self, runner)
     }
 }
 

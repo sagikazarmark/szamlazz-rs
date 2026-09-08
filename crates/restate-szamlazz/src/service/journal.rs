@@ -33,7 +33,9 @@
 //!   Completeness is a mechanism here, not a discipline.
 //!
 //! The sequence of run *names* a handler journals is pinned separately, by
-//! the e2e suite's run-name pin (`tests/e2e/harness/run_names.rs`, `RUN_NAMES`).
+//! the run-name pin (`src/service/run_names.rs`, `RUN_NAMES`): offline over
+//! the `FakeRunner` (`service::paths`) and against a live `sys_journal` by
+//! the e2e suite.
 //!
 //! # Regenerating
 //!

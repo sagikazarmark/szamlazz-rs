@@ -9,17 +9,18 @@
 //! policy; `set_payments` is a write without a retry of its own, and with
 //! `additive: true` an at-least-once one (see [`SetPaymentsRequest::additive`]).
 
+use std::convert::identity;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
-use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
-use super::prologue::Execution;
-use super::support::service::{
+use super::durable::{
     lookup_storno, run_once, run_reading, storno_number_of_unmanaged, storno_step,
 };
+use super::prologue::Execution;
+use super::runner::Runner;
 use super::support::{
     Fault, StornoIntent, StornoVerdict, after_storno_lookup, reversed_response, storno_response,
     verified_document,
@@ -182,18 +183,18 @@ impl Execution {
     /// forward the scope. Issues nothing.
     pub(super) async fn check_account_request(
         &self,
-        ctx: &Context<'_>,
+        runner: &dyn Runner,
     ) -> Result<CheckAccountResponse, HandlerError> {
         let outcome = {
             let gateway = Arc::clone(&self.gateway);
             let external_id = ExternalId::for_probe(&self.config.namespace);
-            run_reading(ctx, "probe", self, move || async move {
+            run_reading(runner, "probe", self, identity, move || async move {
                 gateway.probe(&external_id).await
             })
             .await?
         };
         Ok(CheckAccountResponse::new(
-            ctx.scope().map(str::to_owned),
+            runner.scope().map(str::to_owned),
             CheckedAccount::from(self.gateway.account()),
             self.config.namespace.as_str(),
             credentials_check(outcome),
@@ -207,12 +208,12 @@ impl Execution {
     /// document here, since the worker compares it with nothing.
     pub(super) async fn query_request(
         &self,
-        ctx: &Context<'_>,
+        runner: &dyn Runner,
         request: QueryRequest,
     ) -> Result<QueryResponse, HandlerError> {
         let gateway = Arc::clone(&self.gateway);
         let selector = request.selector;
-        let outcome = run_reading(ctx, "query", self, move || async move {
+        let outcome = run_reading(runner, "query", self, identity, move || async move {
             gateway.query(&selector).await
         })
         .await?;
@@ -229,12 +230,12 @@ impl Execution {
     /// caller may retry with a new `Idempotency-Key`.
     pub(super) async fn query_taxpayer_request(
         &self,
-        ctx: &Context<'_>,
+        runner: &dyn Runner,
         prefix: TaxpayerPrefix,
     ) -> Result<QueryTaxpayerResponse, HandlerError> {
         let gateway = Arc::clone(&self.gateway);
         let step = taxpayer_step(&prefix);
-        let outcome = run_reading(ctx, step, self, move || async move {
+        let outcome = run_reading(runner, step, self, identity, move || async move {
             gateway.query_taxpayer(&prefix).await
         })
         .await?;
@@ -247,7 +248,7 @@ impl Execution {
     /// the send does not, and a credit entry is not a legal document.
     pub(super) async fn set_payments_request(
         &self,
-        ctx: &Context<'_>,
+        runner: &dyn Runner,
         request: SetPaymentsRequest,
     ) -> Result<SetPaymentsResponse, HandlerError> {
         let SetPaymentsRequest {
@@ -259,7 +260,7 @@ impl Execution {
         let gateway = Arc::clone(&self.gateway);
         let number = invoice_number.clone();
         let outcome = run_once(
-            ctx,
+            runner,
             format!("set-payments-{invoice_number}"),
             move || async move { gateway.set_payments(&number, &entries, additive).await },
         )
@@ -276,7 +277,7 @@ impl Execution {
     /// (ours when we issued the storno, unknown otherwise).
     pub(super) async fn storno_request(
         &self,
-        ctx: &Context<'_>,
+        runner: &dyn Runner,
         request: StornoRequest,
     ) -> Result<StornoResponse, HandlerError> {
         let StornoRequest {
@@ -289,9 +290,13 @@ impl Execution {
         let found = {
             let gateway = Arc::clone(&self.gateway);
             let number = number.clone();
-            run_reading(ctx, format!("verify-{number}"), self, move || async move {
-                gateway.verify(&number).await
-            })
+            run_reading(
+                runner,
+                format!("verify-{number}"),
+                self,
+                identity,
+                move || async move { gateway.verify(&number).await },
+            )
             .await?
         };
         let found = verified_document(found, &number, &self.config.namespace)?;
@@ -303,7 +308,7 @@ impl Execution {
                 // best effort: ours when a storno of ours holds the by-number
                 // storno id, unknown otherwise; a cancelled invocation
                 // propagates as such.
-                let storno_number = storno_number_of_unmanaged(ctx, self, &number).await?;
+                let storno_number = storno_number_of_unmanaged(runner, self, &number).await?;
                 return Ok(reversed_response(&number, storno_number));
             }
         }
@@ -318,7 +323,7 @@ impl Execution {
         )?;
 
         // The lookup step: a storno of ours already under the id.
-        let looked_up = lookup_storno(ctx, self, &intent).await?;
+        let looked_up = lookup_storno(runner, self, &intent, identity).await?;
         if let ControlFlow::Break(response) =
             after_storno_lookup(looked_up, &number, &self.config.namespace)?
         {
@@ -328,12 +333,14 @@ impl Execution {
         // The storno step, under the issue policy: query-first on every
         // execution; any `Err` from the run (exhaustion or cancellation) is
         // `outcome_unknown`, and the next call's lookup finds whatever landed.
-        let outcome = storno_step(ctx, self, &intent).await.map_err(|error| {
-            Fault::outcome_unknown(format!(
-                "the storno step ended without a confirmed outcome ({}): {}; call storno again",
-                error.code(),
-                error.message()
-            ))
+        let outcome = storno_step(runner, self, &intent).await.map_err(|error| {
+            error.or_fault(|terminal| {
+                Fault::outcome_unknown(format!(
+                    "the storno step ended without a confirmed outcome ({}): {}; call storno again",
+                    terminal.code(),
+                    terminal.message()
+                ))
+            })
         })?;
         storno_response(outcome, number, &self.config.namespace).map_err(Into::into)
     }

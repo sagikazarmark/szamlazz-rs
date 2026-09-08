@@ -1,15 +1,18 @@
 //! The prologue every handler runs after parsing its key: pin the
 //! namespace, resolve the account, fetch its credentials, open the gateway.
 //! This module holds the decisions of those steps: functions of their inputs
-//! whose only effect is a log line, which is what can be unit-tested (the SDK
-//! has no mock context; the durable behaviour is asserted end to end), and
-//! the prologue's two calls into an embedder's trait objects, each under the
+//! whose only effect is a log line, unit-tested on their own, and the
+//! prologue's two calls into an embedder's trait objects, each under the
 //! worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of the
 //! `account` step's closure, and the credential fetch, the one step that runs
-//! outside the journal. The durable steps themselves are stamped per context
-//! type in `support::{object, shared, service}::prologue`.
+//! outside the journal. The durable steps themselves are `durable::prologue`,
+//! written once over the `Runner` seam, driven offline by `service::paths`
+//! and asserted under a server end to end. The [`Opener`] is how an
+//! execution's gateway is opened: `Gateway::open` in a deployment, the test
+//! client in the offline suite.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +20,7 @@ use std::time::Duration;
 use restate_sdk::errors::TerminalError;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
+use szamlazz_agent::client::BuildError;
 
 use super::support::Fault;
 use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
@@ -316,15 +320,54 @@ pub(super) fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
     ))
 }
 
-/// Opens the gateway for this execution over a fresh client.
-pub(super) fn open(account: Account, credentials: Credentials) -> Result<Arc<Gateway>, Fault> {
-    Gateway::open(account, credentials)
-        .map(Arc::new)
-        .map_err(|error| {
-            Fault::unavailable(format!(
-                "the szamlazz.hu client could not be built: {error}"
-            ))
-        })
+/// How the prologue opens the gateway of an execution: [`Gateway::open`],
+/// over a fresh default client, in a deployment ([`Opener::default`]); the
+/// offline suite's over a client that loads no root certificates, so that no
+/// test under `cargo test` parses the system CA store for a plain-`http://`
+/// mock (#136). Held by both services and handed to every execution; the
+/// account and the credentials are the prologue's, the client is the
+/// opener's. A plain fn pointer: both openers capture nothing.
+#[derive(Clone, Copy)]
+pub(crate) struct Opener(fn(Account, Credentials) -> Result<Gateway, BuildError>);
+
+impl Opener {
+    /// An opener over `open`, called once per handler execution with the
+    /// resolved account and its freshly fetched credentials.
+    pub(crate) const fn new(open: fn(Account, Credentials) -> Result<Gateway, BuildError>) -> Self {
+        Self(open)
+    }
+
+    /// Opens the gateway for this execution.
+    ///
+    /// # Errors
+    ///
+    /// `unavailable` when the szamlazz.hu client cannot be built.
+    pub(super) fn open(
+        self,
+        account: Account,
+        credentials: Credentials,
+    ) -> Result<Arc<Gateway>, Fault> {
+        (self.0)(account, credentials)
+            .map(Arc::new)
+            .map_err(|error| {
+                Fault::unavailable(format!(
+                    "the szamlazz.hu client could not be built: {error}"
+                ))
+            })
+    }
+}
+
+impl Default for Opener {
+    /// [`Gateway::open`]: a fresh default client per execution.
+    fn default() -> Self {
+        Self::new(Gateway::open)
+    }
+}
+
+impl fmt::Debug for Opener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Opener")
+    }
 }
 
 #[cfg(test)]
