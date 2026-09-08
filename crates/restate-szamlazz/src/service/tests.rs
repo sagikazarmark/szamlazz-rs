@@ -12,8 +12,7 @@ use serde_json::json;
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
 use crate::config::{IssueConfig, Namespace, WorkerConfig};
-use crate::gateway::Gateway;
-use crate::test_support::{Doc, ORIGINAL_TELJ};
+use crate::test_support::{Doc, ORIGINAL_TELJ, open_gateway};
 
 /// [`IssueConfig::MIN_INITIAL_DELAY`] in the unit discovery reports
 /// (milliseconds): the floor the write handlers' `initial_interval` clears.
@@ -670,7 +669,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     // observes the code and the fault is built.
     let account = order.accounts().resolve(None).await.expect("account");
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
-    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let gateway = open_gateway(account, credentials);
     let outcome = gateway.verify("SZ-1").await;
     let Ok(QueryOutcome::CredentialsRejected { code, message }) = outcome.clone() else {
         panic!("expected CredentialsRejected, got {outcome:?}");
@@ -752,7 +751,7 @@ async fn the_execution_span_attributes_every_log_line_under_it() {
 
     let account = order.accounts().resolve(None).await.expect("account");
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
-    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let gateway = open_gateway(account, credentials);
     let order_key = OrderKey::parse("ORD-1").expect("order key");
     let external_id = ExternalId::for_kind(&namespace(), &order_key, DocumentKind::Invoice);
     async {

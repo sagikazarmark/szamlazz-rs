@@ -630,7 +630,7 @@ mod tests {
             matches!(&credentials, Credentials::AgentKey(key) if key.expose() == KEY),
             "the key is really in play"
         );
-        let gateway = crate::gateway::Gateway::open(account.clone(), credentials).expect("gateway");
+        let gateway = crate::test_support::open_gateway(account.clone(), credentials);
 
         let renderings = [
             ("Account Debug", format!("{account:?}")),

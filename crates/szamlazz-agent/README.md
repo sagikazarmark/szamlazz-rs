@@ -178,7 +178,7 @@ The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP
 
 No features are enabled by default. The [crate documentation](https://docs.rs/szamlazz-agent/latest/szamlazz_agent/#features) is authoritative for feature semantics and platform constraints.
 
-- **`client-reqwest`** provides the ready-made async `Client` on native Rust and browser wasm.
+- **`client-reqwest`** provides the ready-made async `Client` on native Rust and browser wasm, and re-exports `reqwest`, so a caller supplying its own HTTP client (`ClientBuilder::http_client`: a proxy, a custom TLS setup) names the one version this crate is built against.
 
 ## Operations
 
