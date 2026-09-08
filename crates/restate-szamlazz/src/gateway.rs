@@ -1239,7 +1239,10 @@ impl Gateway {
 
     /// The external-id query of the create step, decided by
     /// [`settle_create`] against `request.reversed`: `Some` when it settles
-    /// the step, `None` when the send may proceed.
+    /// the step, `None` when the send may proceed. The two settlements that
+    /// are worth an operator's attention (the lookup's reversed document
+    /// live again, a document reversed since the lookup) are logged here,
+    /// so the decision itself has no effect but its answer.
     ///
     /// # Errors
     ///
@@ -1251,11 +1254,27 @@ impl Gateway {
         &self,
         request: &CreateStepRequest<'_>,
     ) -> Result<Option<CreateOutcome>, QueryError> {
-        settle_create(
+        let settled = settle_create(
             self.seen(request.external_id, request.order, request.kind)
                 .await,
             request.reversed,
-        )
+        );
+        match &settled {
+            // The document the lookup saw reversed, reported live: a server
+            // inconsistency the step never sends past.
+            Ok(Some(CreateOutcome::LiveAgain(found))) => tracing::warn!(
+                number = %found.number(),
+                "the document the lookup saw reversed is reported live"
+            ),
+            // A reversed document the lookup did not see: issued and reversed
+            // since. Never sent past: the caller has not acknowledged it.
+            Ok(Some(CreateOutcome::Reversed(found))) => tracing::warn!(
+                number = %found.number(),
+                "a document reversed since the lookup holds the external id"
+            ),
+            _ => {}
+        }
+        settled
     }
 
     /// The external-id query of both steps, validated against this gateway's
@@ -1886,7 +1905,9 @@ fn outcome(result: Result<InvoiceDocument, QueryError>) -> Result<QueryOutcome, 
 /// issued and reversed since the lookup), `reversed` reported live
 /// ([`CreateOutcome::LiveAgain`], the server contradicting itself), an
 /// invalid holder ([`CreateOutcome::Collision`]) and rejected credentials
-/// ([`CreateOutcome::CredentialsRejected`]).
+/// ([`CreateOutcome::CredentialsRejected`]). A function of its two inputs
+/// with no other effect; the wrapper that queries logs the settlements worth
+/// noting.
 ///
 /// # Errors
 ///
@@ -1905,20 +1926,10 @@ fn settle_create(
         }
         // The document the lookup saw reversed, reported live: a server
         // inconsistency. Never send past it.
-        Ok(Seen::Live(found)) => {
-            tracing::warn!(
-                number = %found.number(),
-                "the document the lookup saw reversed is reported live"
-            );
-            Ok(Some(CreateOutcome::LiveAgain(found)))
-        }
+        Ok(Seen::Live(found)) => Ok(Some(CreateOutcome::LiveAgain(found))),
         // A reversed document the lookup did not see: issued and reversed
         // since. Never send past a reversal the caller has not acknowledged.
         Ok(Seen::Reversed(found)) if Some(found.number()) != reversed => {
-            tracing::warn!(
-                number = %found.number(),
-                "a document reversed since the lookup holds the external id"
-            );
             Ok(Some(CreateOutcome::Reversed(found)))
         }
         // Nothing (code 7), or the document the lookup saw reversed, still
@@ -2277,13 +2288,15 @@ mod tests {
     }
 
     /// A szamlazz.hu code on a create-like send, classified for the step by
-    /// its outcome class: the credential codes first, before their class
-    /// (`Rejected`, as asserted); 71 and 152 as the duplicate; every code
-    /// szamlazz.hu refuses before acting as `Rejected`, and 7 among them (on
-    /// a write it is a missing field, not a missing document; the `NotFound`
-    /// class); the open codes 1, 55, 56 and a code the agent crate does not
-    /// know as `Unknown`, through the wildcard arm that a class the crate
-    /// adds later falls into too.
+    /// its outcome class, on representative codes of each class (the
+    /// exhaustive code → class table is the agent crate's, under its own
+    /// tests; every code here asserts its class first): the credential codes
+    /// before their class (`Rejected`); 71 and 152 as the duplicate; the
+    /// `Rejected` class as `Rejected`, and 7 with it (on a write it is a
+    /// missing field, not a missing document; the `NotFound` class); the
+    /// open codes 1, 55, 56 and a code the agent crate does not know as
+    /// `Unknown`, through the wildcard arm that a class the crate adds later
+    /// falls into too.
     #[test]
     fn a_failed_send_is_classified_by_its_code_class_with_the_credential_codes_first() {
         let api = |code: ErrorCode| {

@@ -882,8 +882,10 @@ show: the durable sequence, replay, the per-key lock and the journal.
   account it was opened for. The classifiers behind the async steps are pure functions with a table test each in
   the module's unit tests (#124), so a branch is pinned without a wire exchange: `is_foreign` (a live `SZ`/`ES`/`VS`
   that is neither the document seen under our id nor a number known to be ours; a reversed one, and `D`, `HS`, `SS`,
-  `SL`, are not), `classify_failure` (the credential codes before their class; 71/152 the duplicate; every
-  `Rejected` code and 7 as `Rejected`; 1, 55, 56 and an unknown code as `Unknown` through the arm a class the agent
+  `SL`, are not), `classify_failure` (on representative codes of each outcome class, each asserting its class
+  first, since the exhaustive code → class table is `szamlazz-agent`'s under its own tests: the credential codes
+  before their class; 71/152 the duplicate; eight `Rejected`-class codes and 7 as `Rejected`; 1, 55, 56 and an
+  unknown code as `Unknown` through the arm a class the agent
   crate adds later falls into; `szlahu_down` as `Unavailable`; a request the wire contract refused as `Rejected`
   under the `request` pseudo-code; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
   credential code and another code are answers, `szlahu_down` and a transport failure `Unanswered`) with the
