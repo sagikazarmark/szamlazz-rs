@@ -847,8 +847,17 @@ flipped by the create stub's responder and read by the external id's). Raw selec
 and does not grow into a fake. A stateful fake would be reconsidered for one capability only: property tests of
 the exactly-once invariant (random handler sequences under two scopes, "at most one live document per kind per
 order, the newest holder under every external id"), which no stub can express. Neither approach exercises a handler
-without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested end to end or as the pure
-functions they are extracted into.
+without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested in the **decision layer**,
+the decide fns: each handler body is `read → decide → (answer | proceed) → next read`, where every `decide` is a pure
+function of the journaled outcome the read returned and the request, beside its async shell, and the shell is held to
+holding no `match` on a gateway outcome that returns a response. On `main` the storno, delete and `get` shells
+(`service/storno.rs`), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup decision and the responses
+(`service/support.rs`) and the prologue's (`service/prologue.rs`) are in that shape; the create side's
+(`service/create.rs`) has `respond_to`, `exclusive_with` and `prepare` pure and the rest of its decisions in flight
+(#137). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
+classifiers (which answer is settled, which document is foreign, which failure is which class) are the same kind of
+function one layer down, table-tested in `gateway`'s unit tests; and the e2e is left with what only a server can
+show: the durable sequence, replay, the per-key lock and the journal.
 
 - `gateway`: wiremock tests using upstream-shaped responses; the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
@@ -872,7 +881,22 @@ functions they are extracted into.
   sentinel id and nothing else, with a wrong key as data; the taxpayer query as exactly one `xmltaxpayer` request of
   the prefix, a known prefix `Found` with NAV's registered data, an unknown one `Found{valid: false}`, NAV's relayed
   `funcCode ERROR` and a szamlazz.hu header code both `Api`; the gateway validates found documents against the
-  account it was opened for.
+  account it was opened for. The classifiers behind the async steps are pure functions with a table test each in
+  the module's unit tests (#124), so a branch is pinned without a wire exchange: `is_foreign` (a live `SZ`/`ES`/`VS`
+  that is neither the document seen under our id nor a number known to be ours; a reversed one, and `D`, `HS`, `SS`,
+  `SL`, are not), `classify_failure` (on representative codes of each outcome class, each asserting its class
+  first, since the exhaustive code → class table is `szamlazz-agent`'s under its own tests: the credential codes
+  before their class; 71/152 the duplicate; seven `Rejected`-class codes and 7 as `Rejected`; 1, 55, 56 and an
+  unknown code as `Unknown` through the arm a class the agent
+  crate adds later falls into; `szlahu_down` as `Unavailable`; a request the wire contract refused as `Rejected`
+  under the `request` pseudo-code; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
+  credential code and another code are answers, `szlahu_down` and a transport failure `Unanswered`) with the
+  `outcome` fold every read fn applies, and the send rule of the two write steps as a function of what the leading
+  or re-query saw against the number the lookup saw reversed: `settle_create` (nothing, or exactly the lookup's
+  reversed document still reversed, proceeds; a live document that is not it is `Found`, it live again `LiveAgain`,
+  a reversed one that is not it `Reversed`, a collision and rejected credentials settle; every other failure is
+  handed back for the caller to place) and `settle_storno` (the `SS` settles as `AlreadyReversed`, nothing proceeds,
+  rejected credentials settle, the rest is handed back).
 - `contract`: every request type and every object it nests refuses one unknown top-level and one unknown nested field
   with serde's error naming the field, the externally tagged enums refuse a second key, and every documented body
   (the endpoint README's curl example, the e2e scenarios' literal bodies) still deserializes; under `schemars`, every
@@ -941,8 +965,14 @@ functions they are extracted into.
   `additive`, `Lookup::classify` on `Api`, the probe outcome →
   `credentials` mapping, the handler's key parsing refusing a key with leading
   or trailing whitespace (`" ORD-1"`, `"ORD-1 "`, `"\tORD-1"`) as `invalid_input` naming the rule while
-  `OrderKey::parse` itself still trims, and two sentinel tests that the agent key reaches
-  neither the `credentials_rejected` warning nor its fault body.
+  `OrderKey::parse` itself still trims, two sentinel tests that the agent key reaches
+  neither the `credentials_rejected` warning nor its fault body, and the prologue's credential fetch through a
+  scripted store under a paused tokio clock (#124): a store reporting itself unavailable is asked `FETCH_ATTEMPTS`
+  times `FETCH_PAUSE` apart with no deadline spent and then the terminal `unavailable` fault naming the cause and
+  neither the store's message, the account nor the reference; a gone reference is the fault after one fetch and no
+  pause; a store that never answers is bounded per attempt by `CALL_DEADLINE`; and one that recovers within the
+  attempts (unavailable, then silent, then the key) answers the credentials it gave after two pauses and one
+  deadline.
 - `service::journal` (journal compatibility, ADR 0005 #47): one pinned JSON fixture per variant of every type the
   services journal as a `ctx.run` result, `Namespace`, `Resolution` (with an `Account` carrying every optional
   field), `QueryOutcome`, `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`,
