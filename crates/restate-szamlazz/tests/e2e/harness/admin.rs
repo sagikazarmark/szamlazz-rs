@@ -9,11 +9,12 @@
 //! The sampling decision ([`Sampler`]) is a pure function of the rows, tested
 //! here without a server.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 /// The admin API of one Restate server, owned (a detached task carries its
 /// own copy).
@@ -189,7 +190,11 @@ impl Watch {
     }
 
     /// The sampler over `sample`, one call per sample: the seam the tests
-    /// drive with scripted rows.
+    /// drive with scripted rows. The stop is selected against the sample as
+    /// well as against the interval, so a stop cancels a query in flight (an
+    /// admin API that stalls would otherwise hold `finish` for the client's
+    /// timeout) instead of waiting for its answer, which a stopped watch has
+    /// no use for.
     fn over<S, F>(mut sample: S) -> Self
     where
         S: FnMut() -> F + Send + 'static,
@@ -200,7 +205,12 @@ impl Watch {
             let mut sampler = Sampler::default();
             loop {
                 let sampled_at = Instant::now();
-                match sample().await {
+                let answer = tokio::select! {
+                    biased;
+                    _ = stopped.changed() => break,
+                    answer = sample() => answer,
+                };
+                match answer {
                     Ok(rows) => {
                         if sampler.observe(&rows) == Progress::Done {
                             break;
@@ -208,12 +218,10 @@ impl Watch {
                     }
                     Err(error) => sampler.query_failed(error),
                 }
-                if *stopped.borrow() {
-                    break;
-                }
                 tokio::select! {
-                    () = tokio::time::sleep_until((sampled_at + POLL).into()) => {}
+                    biased;
                     _ = stopped.changed() => break,
+                    () = tokio::time::sleep_until(sampled_at + POLL) => {}
                 }
             }
             sampler.into_retries()
@@ -222,7 +230,8 @@ impl Watch {
     }
 
     /// Stops sampling (the call has returned, so the invocation is complete
-    /// and its in-flight columns gone) and returns what was seen.
+    /// and its in-flight columns gone) and returns what was seen; a sample in
+    /// flight is cancelled, not awaited.
     pub(crate) async fn finish(mut self) -> Retries {
         let _ = self.stop.send(true);
         (&mut self.task).await.expect("the watch task")
@@ -384,8 +393,12 @@ async fn the_watch_ends_on_its_own_when_the_invocation_completes() {
 }
 
 /// `finish` stops a watch whose key it never saw in flight (a call answered
-/// between two samples) at once, with what it saw.
-#[tokio::test]
+/// between two samples) at once, with what it saw: under tokio's paused
+/// clock the interval sleep is cancelled rather than waited out, so no time
+/// passes in `finish` at all (a waited-out interval would auto-advance the
+/// clock to the sleep's deadline). `finish` is called halfway through an
+/// interval, so that a sleep that is not cancelled has half of it to go.
+#[tokio::test(start_paused = true)]
 async fn finish_stops_a_watch_that_saw_nothing_in_flight() {
     let sampled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sampled_for_watch = sampled.clone();
@@ -396,13 +409,15 @@ async fn finish_stops_a_watch_that_saw_nothing_in_flight() {
             Ok(vec![row("completed", None, None, None)])
         }
     });
-    tokio::time::sleep(POLL * 3).await;
+    tokio::time::sleep(POLL * 2 + POLL / 2).await;
     let started = Instant::now();
-    let retries = watch.finish().await;
-    assert!(
-        started.elapsed() < POLL,
-        "finish does not wait out a poll interval: {:?}",
-        started.elapsed()
+    let retries = tokio::time::timeout(Duration::from_secs(1), watch.finish())
+        .await
+        .expect("finish returns");
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "finish does not wait out a poll interval"
     );
     assert!(retries.samples >= 2, "{retries:?}");
     assert!(!retries.observed_completion, "{retries:?}");
@@ -413,4 +428,23 @@ async fn finish_stops_a_watch_that_saw_nothing_in_flight() {
         u64::try_from(sampled.load(std::sync::atomic::Ordering::SeqCst)).expect("count"),
         "every sample answered"
     );
+}
+
+/// `finish` cancels a sample in flight instead of awaiting its answer: a
+/// sample that never answers (an admin API that stalls) does not hold
+/// `finish` for the client's timeout.
+#[tokio::test(start_paused = true)]
+async fn finish_cancels_a_sample_in_flight() {
+    let watch = Watch::over(std::future::pending::<Result<Vec<Value>, String>>);
+    tokio::time::sleep(POLL).await;
+    let started = Instant::now();
+    let retries = tokio::time::timeout(Duration::from_secs(1), watch.finish())
+        .await
+        .expect("finish returns without the sample's answer");
+    assert_eq!(started.elapsed(), Duration::ZERO, "{retries:?}");
+    assert_eq!(
+        retries.samples, 0,
+        "the one sample never answered: {retries:?}"
+    );
+    assert!(!retries.observed_completion);
 }

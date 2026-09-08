@@ -18,7 +18,6 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::net::TcpListener;
-#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -253,21 +252,32 @@ enum Wait {
 }
 
 impl Stopper {
+    /// Stops the server; a failure to do so is reported on stderr (the next
+    /// run removes a container left behind by its label; a process group is
+    /// the operator's to find), never swallowed.
     fn stop(&self, wait: Wait) {
         match self {
             Self::Container(name) => {
+                // stderr stays inherited: docker's own diagnostic, if any,
+                // reaches the terminal.
                 let mut rm = Command::new("docker");
                 rm.args(["rm", "-f", name])
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                match wait {
-                    Wait::ForRemoval => {
-                        let _ = rm.status();
-                    }
-                    Wait::No => {
-                        let _ = rm.spawn();
-                    }
+                    .stdout(Stdio::null());
+                let outcome = match wait {
+                    Wait::ForRemoval => rm.status().map(|status| status.success()),
+                    Wait::No => rm.spawn().map(|_| true),
+                };
+                match outcome {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!(
+                        "WARNING: `docker rm -f {name}` failed; the container may be left behind \
+                         (the next run removes it by its label)"
+                    ),
+                    Err(error) => eprintln!(
+                        "WARNING: could not run `docker rm -f {name}` ({error}); the container is \
+                         left behind (the next run removes it by its label)"
+                    ),
                 }
             }
             Self::ProcessGroup(pid) => kill_group(*pid),
@@ -275,34 +285,36 @@ impl Stopper {
     }
 }
 
-#[cfg(unix)]
+/// `SIGKILL` to the process group `pid` leads; a group already gone
+/// (`ESRCH`) is the wanted state, any other failure is reported.
 fn kill_group(pid: u32) {
+    use nix::errno::Errno;
     use nix::sys::signal::{Signal, killpg};
     use nix::unistd::Pid;
-    if let Ok(pid) = i32::try_from(pid) {
-        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    let Ok(pid) = i32::try_from(pid) else {
+        eprintln!(
+            "WARNING: the pid {pid} does not fit `killpg(2)`; the restate-server is left behind"
+        );
+        return;
+    };
+    match killpg(Pid::from_raw(pid), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(error) => eprintln!(
+            "WARNING: killpg({pid}, SIGKILL) failed ({error}); the restate-server may be left \
+             behind (`pkill restate-server`)"
+        ),
     }
 }
 
-#[cfg(not(unix))]
-fn kill_group(_pid: u32) {}
-
 /// Whether the process `pid` is alive: what tells a stale container (its
 /// test process gone) from a concurrent run's live one.
-#[cfg(unix)]
 fn process_alive(pid: i32) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
-    // Signal 0: no signal is sent, the check is made. EPERM is a live
-    // process of another user.
+    // No signal is sent, the check is made. EPERM is a live process of
+    // another user.
     !matches!(kill(Pid::from_raw(pid), None), Err(Errno::ESRCH))
-}
-
-/// Without a way to ask, a container is assumed live and left alone.
-#[cfg(not(unix))]
-fn process_alive(_pid: i32) -> bool {
-    true
 }
 
 /// Removes every container of [`CONTAINER_LABEL`] whose starting process is
@@ -400,7 +412,6 @@ fn stop_on_signal() {
 }
 
 /// The first of SIGINT and SIGTERM, with the exit status convention for it.
-#[cfg(unix)]
 async fn stop_signal() -> std::io::Result<(&'static str, i32)> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -409,12 +420,6 @@ async fn stop_signal() -> std::io::Result<(&'static str, i32)> {
         _ = interrupt.recv() => ("SIGINT", 130),
         _ = terminate.recv() => ("SIGTERM", 143),
     })
-}
-
-#[cfg(not(unix))]
-async fn stop_signal() -> std::io::Result<(&'static str, i32)> {
-    tokio::signal::ctrl_c().await?;
-    Ok(("Ctrl-C", 130))
 }
 
 impl Launcher {
@@ -569,9 +574,8 @@ impl Restate {
             .env("RESTATE_ADMIN__BIND_ADDRESS", format!("127.0.0.1:{admin}"))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone().expect("the server log")))
-            .stderr(Stdio::from(log));
-        #[cfg(unix)]
-        command.process_group(0);
+            .stderr(Stdio::from(log))
+            .process_group(0);
         for flag in spec.flags {
             let (name, value) = flag.split_once('=').expect("NAME=value");
             command.env(name, value);
@@ -660,8 +664,7 @@ impl Drop for Restate {
             started().retain(|started| *started != stopper);
         }
         if let Some(process) = &mut self.process {
-            // The group is killed above; this reaps the leader (and is the
-            // stop where there is no process group).
+            // The group is killed above; this reaps the leader.
             let _ = process.kill();
             let _ = process.wait();
         }

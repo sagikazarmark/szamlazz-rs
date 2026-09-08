@@ -14,7 +14,9 @@
 //! a skipped run in CI proves nothing. A server the harness starts binds
 //! ports chosen free at launch, none fixed, so two runs on one host collide
 //! with nothing; it is stopped when the run ends and on a SIGINT or SIGTERM to
-//! the test process.
+//! the test process. Unix only, as `restate-server` itself is: the server's
+//! process group, the stop signals and the liveness check behind the stale
+//! container removal are.
 //! The harness's own tests (the server gate, the sampler's decision, the
 //! fetch hold, the run-pattern matching, the stub helpers) live beside what
 //! they test under [`harness`], need only wiremock and run un-ignored.
@@ -60,6 +62,8 @@
 //! answers every selector the document is reachable by; every mock's
 //! `expect(n)` is verified at the next scenario's [`harness::Harness::reset`]
 //! (the last scenario's when the harness is dropped).
+
+#![cfg(unix)]
 
 mod harness;
 
