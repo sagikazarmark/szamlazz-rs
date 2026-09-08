@@ -245,7 +245,7 @@ impl Harness {
         }
     }
 
-    /// The single → multi flag day, as the endpoint README scripts it: make
+    /// The single → multi flag day, as ADR 0006 and design §9 script it: make
     /// both services private, poll `sys_invocation` until nothing is in
     /// flight, register the multi-account deployment (the same namespace, the
     /// same szamlazz.hu account now under scope `acme` plus a second one under

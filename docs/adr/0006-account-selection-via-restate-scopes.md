@@ -369,8 +369,8 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   szamlazz.hu sends. What replaces the pins is a documented **go-live check**, last line of the deploy checklist:
   under each scope, `Szamlazz.Agent.query` a document known to be the account's (a number from its szamlazz.hu
   UI; issue one in the UI first on a fresh live account) and read `test` and the seller block (name, tax number)
-  on the answer. **The residual risk is accepted and stated** in the endpoint README (*Accounts are yours to
-  verify*), the library README, `Account`'s rustdoc and CONTEXT.md: a key pasted into the wrong scope, a live key
+  on the answer. **The residual risk is accepted and stated** in the library README (*Go-live*), `Account`'s
+  rustdoc and CONTEXT.md: a key pasted into the wrong scope, a live key
   where a test one was meant or the reverse, issues there, answers `issued`, and nothing in the worker fails.
   Considered and not taken: pinning the seller **tax number** instead of `szallito/id` (documented, legally
   mandatory on every invoice, operator-known independently of szamlazz.hu, and what `action-agent_ceg_mb` itself
@@ -418,7 +418,7 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   `[accounts.<scope>]` keeping the namespace, point callers at scoped paths, make the services public, probe
   every scope. The first scoped create for an already-invoiced order finds it under the unchanged external
   id (verified: `flag_day_keeps_the_documents_and_refuses_unscoped_calls`). The same drain–switch–resume
-  applies to any change of mapping (rule 2). Scripted in the endpoint README.
+  applies to any change of mapping (rule 2). Scripted in design §9.
 - Two new terminal codes: `unknown_account` (400), raised by the prologue before anything is issued, and
   `credentials_rejected` (503), whose raising execution issued nothing. `contract::TerminalCode` had six codes
   at this point: the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` kept
@@ -437,9 +437,10 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
 - A caller's `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under the scope
   the call was made under; `external_id` is the only namespace marker in any response, and no response
   names the account.
-- Caller guidance, with the Pretix integration as the worked example, lives in the endpoint README: the
-  account is a first-class entity in the caller, scope = the caller's account id, order key = event slug +
-  order code, the webhook notification id as `Idempotency-Key`, limit keys for per-event throttling.
+- Caller guidance: the account is a first-class entity in the caller, scope = the caller's account id, order
+  key = event slug + order code, the webhook notification id as `Idempotency-Key`, limit keys for per-event
+  throttling. (The Pretix worked example lived in the endpoint README, removed with the crate on 2026-09-08;
+  the rules are the library README's *Caller Contract*.)
 - The e2e suite runs against Restate with the three flags and asserts the secrecy guarantee, not assumes it.
 
 ## Superseded and amended sections of ADRs 0001–0005

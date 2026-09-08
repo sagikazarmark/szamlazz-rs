@@ -33,7 +33,7 @@
 //!
 //! The types implement `Deserialize` only and are **closed**
 //! (`#[serde(deny_unknown_fields)]`): a misspelt table or key is a parse
-//! error naming it, never a policy left at its default. The endpoint binary
+//! error naming it, never a policy left at its default. The host
 //! chooses the file format and environment merging, and reads the static
 //! resolver's account configuration
 //! ([`StaticConfig`](crate::account::StaticConfig)) beside these keys.

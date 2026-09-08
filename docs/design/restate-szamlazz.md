@@ -23,7 +23,11 @@ key, and the worker is the one place that holds one (§4, `Szamlazz.Agent.query_
 | Crate | Kind | Purpose |
 |---|---|---|
 | `restate-szamlazz` | library | Contract types, deployment config, the account model with the resolver and credential-store traits and the static resolver, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
-| `restate-szamlazz-endpoint` | binary `restate-szamlazz`, container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config in the single-account (`[account]`) or multi-account (`[accounts.<scope>]`) shape |
+
+A deployment binds the two services to a Restate endpoint of its own (the library README's *Quick Start*); the
+workspace ships no binary. (A `restate-szamlazz-endpoint` crate, a clap + figment binary with a container image,
+existed until 2026-09-08 and was removed to keep the focus on the library; its README carried the caller reference,
+the deploy checklist and the flag-day script, now folded into the library README, ADR 0006 and this document.)
 
 `restate-sdk` is an unconditional dependency; the features are `schemars` and `test-util` (the unchecked configuration
 constructor the e2e harness builds its sub-floor policies with; never enabled by a deployment).
@@ -565,12 +569,10 @@ other channel, so the worker serialises the fault into the message and the calle
 `contract::Fault` (`Serialize + Deserialize`, open like every response type, `#[non_exhaustive]`, built with
 `Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::credentials_rejected`, …, are
 a crate-private inherent impl in `service::support`), so a Rust caller decodes `message` into it rather than
-re-declaring the shape: the e2e harness (`Reply::fault`) and the endpoint crate's `tests/readme.rs` both did until
-#128. A caller reading the envelope's `code` sees the HTTP status, never the token. The endpoint README (*Faults*)
-shows one body per case, a structured fault, a killed invocation (the same envelope with the last retryable error's
-text in `message`), an ingress error (`source: ingress`), held to the contract types by `tests/readme.rs` (a fault
-example must re-serialise from `Fault` to exactly what it shows); the e2e harness asserts the envelope on every fault
-it receives.
+re-declaring the shape: the e2e harness (`Reply::fault`) did until #128. A caller reading the envelope's `code` sees
+the HTTP status, never the token. The library README (*Faults*) documents the envelope and its three cases, a
+structured fault, a killed invocation (the same envelope with the last retryable error's text in `message`), an
+ingress error (`source: ingress`); the e2e harness asserts the envelope on every fault it receives.
 
 `invalid_input`: the caller's request, which the same request never gets past, a 400 and "fix the request". Three
 sources. A **malformed body**: every request type and every object it nests (`CreateRequest`, `CreateOptions`,
@@ -645,13 +647,11 @@ which is why it is the third "outcome unknown" code and never `rejected`; its me
 says the outcome is not known, never "this attempt issued nothing" (#63). Every
 occurrence is logged at `warn` with the namespace and the code (never the key).
 
-## 8. Caller contract (documented in the crate READMEs)
+## 8. Caller contract (documented in the library README)
 
-The **endpoint README** is the canonical caller reference, the request and response reference with one example per
-outcome, the `conflict_reason` table, the fault envelope, the guidance for calling from a webhook handler and what a
-caller stores per order; its
-JSON examples and tables are held to the contract types by the endpoint crate's `tests/readme.rs`. The library README
-carries the same rules for an embedder. The rules:
+The **library README** is the caller reference: the request and response types (their serde shape is the wire shape,
+published into the discovery manifest under `schemars`), the `conflict_reason` table, the fault envelope and the
+rules below, which are also the rules for an embedder. The rules:
 
 1. Send an `Idempotency-Key` per logical request; Restate dedupes retries and attaches concurrent duplicates to the
    in-flight invocation. Deduplication is per scope: the same key under two scopes is two invocations.
@@ -700,12 +700,9 @@ yields the `ValidatedWorkerConfig` the services are built from, the one construc
 `StaticSeller`, `StaticSellerEmail`) distinct from the journaled value types they are built into
 (`account::{Defaults, SellerConfig, SellerEmailConfig}`, permissive for replay), and everything account-shaped
 (credentials, endpoint, document defaults, seller block) lives on the `Account` it produces (read by the services
-through `Gateway::account()`). The endpoint binary reads one file with both side by side: its own layout type has one
-explicit field per top-level key and assembles the two library types from them, so a parse error keeps the key path
-and the source figment attaches (a `#[serde(flatten)]` would drop both, and admits no `deny_unknown_fields`):
+through `Gateway::account()`). A host reads the two side by side from one file of its own layout, for instance:
 
 ```toml
-identity_keys = ["publickeyv1_…"]   # the Restate server's request identity public keys (§10); `[]` written out is the local-development opt-out, the key unmentioned a start-up warn
 namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
 
 [issue]      # the issue policy: the run retry policy of the create (§5 step 4) and storno (§6 step 3) steps; shapes no journal entry
@@ -730,7 +727,7 @@ max_duration = "1m"
 
 [account]
 id = "acme"                   # the resolver's identifier of the account; journaled with every invocation, never a resolution input
-agent_key = "..."             # or env RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY; inline in the static resolver, credential_ref = id
+agent_key = "..."             # inline in the static resolver, credential_ref = id; a host may layer it in from the environment
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
 
 [account.defaults]   # as v1: e_invoice, language, currency, exchange_rate_bank, template?, send_email?, number_prefix?, extra_logo?, aggregator?, guardian?
@@ -749,23 +746,17 @@ and resolve policies have no floor, and the e2e suite's 1 s policies are built w
 one way to the `ValidatedWorkerConfig` that `Order::from_parts` / `Agent::from_parts` take, #128);
 `StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint).
 
-**The endpoint's loader is strict.** The layout and every library type it is made of are closed
+**The configuration types are closed.** Every library type a host's loader is made of refuses unknown keys
 (`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount` and
-its `StaticDefaults` / `StaticSeller` / `StaticSellerEmail`), so an unknown key at any level is a parse error that
-figment attaches the key path and the source to (the file, or the environment variable that set it); a typo such as
-`mod = "test"` or `[isue]` fails at start-up instead of silently running a test account as live or leaving a policy at
-its default. The input types are distinct from the journaled value types they are built into (`Defaults`,
-`SellerConfig`, `SellerEmailConfig` in `account`, which stay permissive so that an `account` entry of an earlier
-deployment replays), mirror them field for field and convert with `From`; a round-trip test holds the two sides to each
-other (#128; the pre-#128 loader kept a hand-maintained key tree instead, J-05-15). The one shape rule serde cannot
-express is checked first, on the merged figment value: both account shapes present is refused naming each with its
-source (a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` on a multi-account file would otherwise surface as the partial
-account's `missing field id`). The pre-release layout (`account.slug`, top-level `[defaults]` / `[seller]`) is refused
-as any unknown key is: the crate has never been released, there is no compatibility shim and no longer a named
-refusal. Environment override values are
-read as **strings** and the field's type decides (`extract_lossy`: `"3"` is `3` on a count, `"true"` on a flag), so an
-all-digit agent key keeps its leading zeros; figment's own environment provider would parse it as a number.
-`--check-config` runs the loader and builds the endpoint, then exits 0 without listening.
+its `StaticDefaults` / `StaticSeller` / `StaticSellerEmail`), so an unknown key at any level is a parse error the host's
+deserializer reports with the key path; a typo such as `mod = "test"` or `[isue]` fails at start-up instead of silently
+running a test account as live or leaving a policy at its default. The input types are distinct from the journaled
+value types they are built into (`Defaults`, `SellerConfig`, `SellerEmailConfig` in `account`, which stay permissive so
+that an `account` entry of an earlier deployment replays), mirror them field for field and convert with `From`; a
+round-trip test holds the two sides to each other (#128). `StaticConfig` is one of two mutually exclusive shapes
+(`[account]` or `[accounts.<scope>]`; both present is refused by `StaticResolver::try_from`, `BothShapes`). A host that
+layers environment overrides over a file should read them as **strings** and let the field's type decide, so an
+all-digit agent key keeps its leading zeros (a provider that parses values as numbers first would drop them).
 
 **Multi-account shape.** Instead of `[account]`, a table of `[accounts.<scope>]` with the same fields; the two are
 mutually exclusive (both present is a load error) and there is no default account. Each account is reachable under
@@ -780,13 +771,12 @@ am I?", `check_account` finds no document, and a found document exposes no accou
 against configuration (0.3's optional `supplier_id` pin on `szallito/id` is gone: ADR 0006, account-pin amendment),
 so a key under the wrong scope is the operator's go-live check to catch: under each scope, `Szamlazz.Agent.query` a
 document known to be the account's and read its seller block. Scope keys are `[a-z0-9_]`, 1–36 bytes: a strict subset of Restate's scope format (`[a-zA-Z0-9_.-]`,
-non-empty, at most 36 characters; ASCII, so bytes; a dashed UUID is exactly 36) chosen so that environment overrides can address them
-(`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`; figment lowercases the segment). This is the documented constraint
+non-empty, at most 36 characters; ASCII, so bytes; a dashed UUID is exactly 36) chosen so that a host's environment overrides can address them
+(an `…_ACCOUNTS__<SCOPE>__AGENT_KEY` variable, with the segment lowercased). This is the documented constraint
 on the account identifiers a caller uses as scopes with the static resolver. The namespace is one per deployment and
 shared by every account.
 
 ```toml
-identity_keys = ["publickeyv1_…"]   # required in this shape (§10): the scope inside an unsigned request selects any account
 namespace = "acct"
 
 [accounts.acme]
@@ -804,46 +794,44 @@ already-invoiced order finds it under the unchanged external id): make both serv
 `sys_invocation` until no row has `status <> 'completed'`, register the new revision with the switched configuration
 (a new deployment URI), point callers at scoped paths, make the services public. The drain is what keeps one
 szamlazz.hu account from being reachable unscoped and under its scope at the same time. The same drain–switch–resume
-applies to any change of the scope → account mapping, which is append-only. Scripted in the endpoint README and
-performed by the e2e suite (§11).
+applies to any change of the scope → account mapping, which is append-only. Scripted in ADR 0006 and performed by
+the e2e suite (§11).
 
 The order-number hint runs on every lookup except for correctives; it is not configurable.
 
 Per-call inputs (`DocumentInput`) as v1: `buyer`, `items`, `fulfillment_date`, `due_date`, `payment_method`, `paid`,
 `comment?`, `issue_date?`, overrides.
 
-## 10. Endpoint
+## 10. Hosting
 
-`restate-szamlazz --config <file> --bind 0.0.0.0 --port 9080`; `RESTATE_SZAMLAZZ_*` env with `__` nesting
-(`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY`, `RESTATE_SZAMLAZZ_ACCOUNT__DEFAULTS__CURRENCY`;
-`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY` in the multi-account shape), every value a string the key's type
-reads; `identity_keys`; tracing; `--check-config` for CI and init containers (loads, validates, builds the endpoint,
-logs the start-up summary, exits 0 without listening, non-zero with the error otherwise);
-container image on `v*` tags, running as a non-root user (uid 65532) with `STOPSIGNAL SIGTERM`. The start-up log
-names the namespace, whether the deployment is scoped, and per account its scope (or `<unscoped>`), id and
-endpoint (never the key), then whether request identity verification is on, then the bound address
-and the signals that stop the process. An
-account's `endpoint` is an `http` or `https` URL with a host and no userinfo (`user:password@` is a load error: the
-endpoint is journaled with the account and printed here); plain `http` is allowed (a local mock, a proxy), and one
-on a host other than loopback is logged at `warn` as sending the agent key in cleartext (`Endpoint::is_cleartext`;
-#65). Request identity is read as a three-way decision (`RequestIdentity`; #96): `identity_keys` with at least one
-key is `Verified` (the SDK refuses unsigned requests; `info … enabled keys=N`); the empty list **written out**
-(`identity_keys = []`) is `Unsigned { deliberate: true }`; the local-development opt-out, an `info`; the key not
-mentioned is `Unsigned { deliberate: false }`, a `warn` naming the consequence (any client reaching `{bind}:{port}`
-can invoke the services under any scope; the scope is protocol data inside the request, and identity keys are what
-enforce ADR 0006's assumption that only the Restate runtime speaks to the endpoint) and the two remedies. A delimited
-string yielding no key (an empty `RESTATE_SZAMLAZZ_IDENTITY_KEYS`) is folded to "not mentioned" by the
-deserializer, because that is what a template with a missing secret renders, and it overrides a file's keys or its
-`[]` the same way; only the list literal opts out. The endpoint does not refuse to start without keys: the warn, the
-README's deploy checklist (keys required wherever anything but the runtime reaches the port, and in the multi-account
-shape) and `--check-config`, which prints the same line, are the guards. `SIGTERM`
-or `SIGINT` stops it cleanly through the SDK's `serve_with_cancel` (the SDK's own `serve` waits for `SIGINT` alone,
-and an unhandled `SIGTERM` would end PID 1 on the spot): accepting stops, open connections get the SDK's 10 s connection
-drain, the process exits 0. An invocation the drain cuts resumes on Restate's next dispatch after the handler's retry
-interval, query-first (ADR 0004); the README's Running section gives the grace-period recommendation and the
-drain-first rolling update. The endpoint README also carries the caller guidance with the Pretix integration as the
-worked example (ADR 0006), the deploy checklist around `check_account`, and the flag-day and drain–switch–resume
-scripts.
+The workspace ships no binary: a deployment binds `Order` and `Agent` to a `restate_sdk` `Endpoint` of its own (the
+library README's *Quick Start*, and the crate root's custom-wiring example for a resolver and store of the embedder's
+own). What a host is responsible for, and what the library cannot do for it:
+
+- **Request identity.** Register the Restate server's `publickeyv1_…` public keys on the endpoint builder
+  (`Endpoint::builder().identity_key(…)`); with at least one key the SDK refuses unsigned requests. The scope is
+  protocol data inside the request, so an endpoint accepting unsigned requests lets any client reaching its port invoke
+  either service under any scope, on every account the deployment serves: identity keys are what enforce ADR 0006's
+  assumption that only the Restate runtime speaks to the endpoint. Required wherever anything but the runtime can reach
+  the port and **required in the multi-account shape**. They authenticate the runtime to the endpoint, never callers
+  (that is the ingress gateway's job, ADR 0006 rule 6).
+- **Configuration loading.** The library types are `Deserialize`-only and closed (§9); the host chooses the format,
+  the environment merging and how a load error is reported, and calls `WorkerConfig::validate` and
+  `StaticResolver::try_from` before building the services. Nothing about the account but its id and endpoint should
+  reach a log; the agent key never.
+- **Shutdown.** Serve through the SDK's `serve_with_cancel` on `SIGTERM` as well as `SIGINT` (the SDK's own `serve`
+  waits for `SIGINT` alone, and an unhandled `SIGTERM` ends PID 1 on the spot): accepting stops, open connections get
+  the SDK's 10 s connection drain, the process exits 0. An invocation the drain cuts resumes on Restate's next dispatch
+  after the handler's retry interval, query-first (ADR 0004), so a rolling update is safe; a drain-first update (make
+  the services private, wait for `sys_invocation` to settle, register the new revision) is the quieter one.
+- **Go-live.** After a deploy, `Szamlazz.Agent.check_account` under each configured scope (§4), then
+  `Szamlazz.Agent.query` a document known to be the account's and read its `test` and seller block: the worker holds no
+  account pin (ADR 0006, account-pin amendment), so the right key under the right scope is verified here and nowhere
+  else. The szamlazz.hu-side steps are the go-live checklist of `docs/szamlazz-hu-behaviour.md`.
+
+A `restate-szamlazz-endpoint` crate (a clap + figment binary with `--check-config`, a `RequestIdentity` three-way
+decision that warned on unmentioned keys, and a container image on `ghcr.io`) carried all of this until 2026-09-08
+and was removed to keep the workspace's focus on the library; its history is in git.
 
 ## 11. Testing
 
@@ -916,7 +904,7 @@ show: the durable sequence, replay, the per-key lock and the journal.
   rejected credentials settle, the rest is handed back).
 - `contract`: every request type and every object it nests refuses one unknown top-level and one unknown nested field
   with serde's error naming the field, the externally tagged enums refuse a second key, and every documented body
-  (the endpoint README's curl example, the e2e scenarios' literal bodies) still deserializes; under `schemars`, every
+  (the library README's and the rustdoc's examples, the e2e scenarios' literal bodies) still deserializes; under `schemars`, every
   request schema and each of its `$defs` objects carries `additionalProperties: false` while the response schemas
   carry none.
 - `service`: discovery test (names, handler set incl. `check_account`: read-only, `max_attempts = 3`, kill, explicit
@@ -941,20 +929,7 @@ show: the durable sequence, replay, the per-key lock and the journal.
   rejected credentials; a lost reply → `outcome_unknown`), the `get` projection (`live` / `reversed{None}`, totals,
   credit entry amounts, `referenced_proforma`, `e_invoice` as the storno lifts it) and the `get` fold (ours fills
   the slot, absent and a collision leave it empty, an absent proforma referenced by the invoice, by the prepayment,
-  by both (the invoice's) or by neither, and a returned proforma never derived), an
-  endpoint build smoke test, two integration tests of the
-  endpoint binary (spawned on an ephemeral port with an environment-only configuration, `SIGTERM` and `SIGINT` each
-  end it with status 0 within seconds, the start-up log names both and honours `--bind`; `--check-config` on each
-  fixture exits 0 with the start-up summary and without listening, and on an unknown key (in the file and in the
-  environment) an invalid identity key or a missing file exits non-zero with the error), the loader (every unknown
-  key at every level named with its path and source (`[isue]`, `mod`, `supplyer_id`, `curency`, `bnk`, a misspelt
-  environment variable), and every one at once; a wrong type naming key and source; both shapes naming both sources
-  rather than the partial account's missing field; environment values as strings the type reads, the all-digit agent
-  key byte-exact through to a wiremock szamlazz.hu; the known-key tree matched field for field against the library
-  types' `Serialize` output; every TOML example of the endpoint README, design §9 and `fixtures/` loading and building
-  its accounts; the request-identity decision, keys as a list or a delimited string are `Verified`, `identity_keys`
-  unmentioned is unsigned by omission, `[]` written out in TOML, JSON or YAML is deliberate, and a blank string or a
-  blank `RESTATE_SZAMLAZZ_IDENTITY_KEYS` is not the opt-out even over a file's keys or its `[]`), `Body<T>` (a well-formed body
+  by both (the invoice's) or by neither, and a returned proforma never derived), `Body<T>` (a well-formed body
   decodes, a misspelt option / a wrong type / a missing field / an empty body each leave the handler as the 400
   `invalid_input` fault naming the field, and its schema and input metadata are `Json<T>`'s, in the discovery
   manifest too) `prepare` refusing

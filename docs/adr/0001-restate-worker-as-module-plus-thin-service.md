@@ -23,10 +23,12 @@ they read through `Gateway::account()`. Since #25 neither service holds a gatewa
 (namespace; the issue, read and resolve policies, the read policy since #37), and every handler's prologue resolves its account and opens a
 gateway for its own execution ([ADR 0006](0006-account-selection-via-restate-scopes.md)).
 
-The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, the identity
+The crate pair mirrored email-rs: `restate-szamlazz` is the library (contract types, config, the identity
 types, the module, both services, no state, ADR 0005; `restate-sdk` is an unconditional dependency), and
-`restate-szamlazz-endpoint` is the binary `restate-szamlazz` that hosts the services over HTTP and
-ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
+`restate-szamlazz-endpoint` was the binary `restate-szamlazz` that hosted the services over HTTP and
+shipped as `ghcr.io/sagikazarmark/restate-szamlazz`. The endpoint crate was removed on 2026-09-08 to keep the
+focus on the library: a deployment binds the two services to an endpoint of its own (design §10), and the
+layering below is unchanged by that.
 
 ## Considered options
 

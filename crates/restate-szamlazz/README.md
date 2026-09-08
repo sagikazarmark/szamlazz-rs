@@ -20,9 +20,6 @@ caller serialises per invoice on its side, or sends `additive: true` and lets sz
 Both services are projections of the Számla Agent model: deployment constants live in configuration, line totals
 are computed, domain outcomes are returned as data.
 
-A ready-made binary and container image live in [`restate-szamlazz-endpoint`](../restate-szamlazz-endpoint);
-its README is the caller reference (request and response bodies, faults, the deploy checklist).
-
 ## Quick Start
 
 Bind both services to a Restate endpoint of your own:
@@ -46,7 +43,7 @@ async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<d
 ```
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
-(the endpoint binary uses figment).
+(a TOML file layered with environment overrides through figment, for instance).
 
 - `WorkerConfig` is the deployment-level part: the `namespace` of the external ids and the three run retry
   policies, `[issue]`, `[read]` and `[resolve]`. Call `validate()` after parsing.
@@ -63,8 +60,9 @@ Both configuration types only implement `Deserialize`; the host chooses the file
   resolver of your own must guarantee is on the `AccountResolver` and `CredentialStore` rustdoc.
 
 Neither service holds a gateway or a client: every handler resolves its account and opens a `Gateway` for its own
-execution. Going from `[account]` to `[accounts.<scope>]` is a flag day with no data migration, scripted in the
-[endpoint README](../restate-szamlazz-endpoint/README.md#single--multi-flag-day).
+execution. Going from `[account]` to `[accounts.<scope>]` is a flag day with no data migration, scripted in
+[ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md) and the
+[design document](../../docs/design/restate-szamlazz.md).
 
 ## Compatibility
 
@@ -205,16 +203,16 @@ response.
 
 Every request type, and every object it nests, is closed (`#[serde(deny_unknown_fields)]`,
 `additionalProperties: false` in the schema): a field the contract does not know is refused as `invalid_input`
-naming the field, never silently dropped. Response types stay open. One example body per outcome, with the
-`conflict_reason` table, is in the [endpoint README](../restate-szamlazz-endpoint/README.md#response-reference).
+naming the field, never silently dropped. Response types stay open. The `conflict_reason` table is below; the
+`schemars` feature puts the full request and response schemas into the discovery manifest.
 
 `service::Body<T>` is how every handler takes its input: a `Json<T>` whose decode runs in the handler, so a
 malformed body is the structured `invalid_input` fault instead of the SDK's plain-text 400. Same discovery schema
 as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
 
 `contract::Outcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
-`conflict` with a reason. Both carry `ALL` and `as_str` (the snake-case token), which the endpoint README's
-response reference is held to, and both are `#[non_exhaustive]`: a client branches with a default arm. The
+`conflict` with a reason. Both carry `ALL` and `as_str` (the snake-case token, what a caller branches on), and
+both are `#[non_exhaustive]`: a client branches with a default arm. The
 reasons:
 
 | Reason | When |
@@ -421,10 +419,9 @@ worker; callers authenticate to Restate ingress separately.
 
 ## Caller Contract
 
-The [endpoint README](../restate-szamlazz-endpoint/README.md#services) is the canonical caller reference: every
-request and response body with one example per outcome, the `conflict_reason` table, the fault envelope, guidance
-for calling from a webhook handler and what to store per order, held to the contract types by its
-`tests/readme.rs`. The rules, for an embedder:
+The request and response bodies are the `contract` types above (their `serde` shape is the wire shape; the
+`schemars` feature publishes it in the discovery manifest); the fault envelope is under *Faults* below. The rules,
+for a caller:
 
 1. Send an **`Idempotency-Key`** per logical request. Restate dedupes retries and attaches concurrent duplicates
    to the in-flight invocation.
@@ -769,8 +766,8 @@ goes into its handler's file and is called from `main.rs` in sequence.
 **The protocol-v7 canary** (`e2e_check_account_without_protocol_v7`) runs in the same command on a server of its
 own with `protocol_v7` off: the ingress accepts the scoped path and keys the invocation by the scope, but the SDK
 sees none, so a scoped `check_account` answers `scope: null` with the account on the single-account deployment
-and `unknown_account` on the multi-account one. This is what the deploy-time check in the endpoint README looks
-for, provoked once.
+and `unknown_account` on the multi-account one. This is what the deploy-time `check_account` under each scope
+looks for, provoked once.
 
 **Where the server comes from.** The harness decides once from the environment:
 
@@ -816,9 +813,11 @@ way.
 
 ### Go-live
 
-The deploy checklist in the [endpoint README](../restate-szamlazz-endpoint/README.md#deploy-checklist)
-re-establishes the verified szamlazz.hu facts on a target account before the worker is enabled; every step issues
-real documents there.
+The [go-live checklist](../../docs/szamlazz-hu-behaviour.md#go-live-checklist) re-establishes the verified
+szamlazz.hu facts on a target account before the worker is enabled; every step issues real documents there. After
+a deploy, call `Szamlazz.Agent.check_account` under each configured scope, then `Szamlazz.Agent.query` a document
+known to be the account's and read its `test` and seller block: that is what tells the right key under the right
+scope, since the worker holds no account pin.
 
 ## License
 

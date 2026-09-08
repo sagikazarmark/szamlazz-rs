@@ -681,8 +681,8 @@ mod tests {
         // tests/e2e/: the literal bodies of the e2e scenarios.
         serde_json::from_value::<QueryRequest>(json!({"selector": {"invoice_number": "SZ-12"}}))
             .expect("a query body");
-        // crates/restate-szamlazz-endpoint/README.md's handler table and the
-        // e2e taxpayer scenario: the full tax number and the bare stem.
+        // The crate README's `QueryTaxpayerRequest` forms and the e2e
+        // taxpayer scenario: the full tax number and the bare stem.
         for tax_number in ["12345678-2-42", "12345678"] {
             let request =
                 serde_json::from_value::<QueryTaxpayerRequest>(json!({"tax_number": tax_number}))

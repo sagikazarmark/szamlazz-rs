@@ -138,8 +138,8 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// Every outcome, in the order the endpoint README shows one example of
-    /// each (`issued` in its quick start, the rest in the response reference).
+    /// Every outcome, in the order the crate README lists them (`issued`
+    /// first, then the answers that issue nothing).
     pub const ALL: [Self; 6] = [
         Self::Issued,
         Self::AlreadyIssued,
@@ -217,7 +217,7 @@ pub enum ConflictReason {
 }
 
 impl ConflictReason {
-    /// Every reason, in the order of the endpoint README's `conflict_reason`
+    /// Every reason, in the order of the crate README's `conflict_reason`
     /// table.
     pub const ALL: [Self; 12] = [
         Self::Live,
@@ -551,7 +551,8 @@ mod tests {
     /// nothing documented carries a field the contract does not know.
     #[test]
     fn documented_bodies_deserialize() {
-        // crates/restate-szamlazz-endpoint/README.md: the curl example.
+        // The canonical create body a caller sends over the ingress (once the
+        // endpoint README's curl example).
         let readme_curl = r#"{
     "document": {
       "buyer": { "name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23." },
@@ -637,7 +638,7 @@ mod tests {
     }
 
     /// Every reason is in `ALL`, and its `as_str` token is the snake-case
-    /// serde token, what a caller branches on and what the endpoint README's
+    /// serde token, what a caller branches on and what the crate README's
     /// `conflict_reason` table is held to.
     #[test]
     fn every_conflict_reason_is_snake_case() {

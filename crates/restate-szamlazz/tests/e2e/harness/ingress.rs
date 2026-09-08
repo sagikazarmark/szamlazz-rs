@@ -24,7 +24,7 @@ impl Reply {
     }
 
     /// The structured fault inside the ingress error envelope, asserting the
-    /// envelope the endpoint README documents (*Faults*): the body is
+    /// envelope the crate README documents (*Faults*): the body is
     /// Restate's `{"code": <HTTP status>, "message": "<string>", "source":
     /// "invocation"}`, `x-restate-error-source` is `invocation`, and the
     /// worker's fault is the JSON **string** in `message` (the handler's

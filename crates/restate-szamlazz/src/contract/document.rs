@@ -579,7 +579,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The wire tokens the endpoint README's request reference lists.
+    /// The wire tokens of `payment_method`, as a caller sends them.
     #[test]
     fn payment_method_wire_shapes() {
         for (method, token) in [

@@ -200,7 +200,7 @@ by the same fixtures (`tests/journal/taxpayer-outcome/`), so either route ends i
 land at all, and every future change to an agent response type had to be checked against this crate's fixtures
 first.
 
-**Consequences.** An upgrade with in-flight invocations is safe by construction, and the endpoint README's
+**Consequences.** An upgrade with in-flight invocations is safe by construction, and design §10's
 rolling-update guidance says so with this section as the reason: the drain-first roll is still recommended to
 avoid stalling in-flight orders for a retry interval, but it is not what keeps them alive. A change that *must*
 break a journaled shape is a deliberate act: drain before deploying (the flag-day script) so that nothing is in
