@@ -65,7 +65,7 @@
 //! breaking a journaled shape, done together with a drain (the flag-day
 //! script) so that nothing is in flight to be killed, and stated in the
 //! commit. Before go-live nothing replays, and a regeneration may legitimately
-//! skip the archive (`resolution/account.json` was regenerated so when the
+//! skip the archive (`resolution/account.json` was regenerated without one when the
 //! account pins were dropped, 2026-09-07, with the reason in the commit
 //! message); the mechanism cannot tell the two cases apart, since it only
 //! sees the files, so the rule is the reviewer's to hold: a regenerated
@@ -147,14 +147,18 @@ struct Stems<T> {
 }
 
 /// The [`Stems`] of `T` from one list of `pattern => "stem"` arms. The arms
-/// are the `match`, which the compiler keeps exhaustive (no wildcard arm on
-/// an enum: the wildcard would hide a new variant from both the compiler and
-/// the coverage test), so a variant added to a journaled enum fails to
-/// compile until it is named here; and naming it puts its stem on `named`,
-/// the list `every_variant_of_every_journaled_type_has_a_sample` requires a
-/// sample for.
+/// are the `match`, which the compiler keeps exhaustive, so a variant added
+/// to a journaled enum fails to compile until it is named here; and naming it
+/// puts its stem on `named`, the list
+/// `every_variant_of_every_journaled_type_has_a_sample` requires a sample
+/// for. One arm is one variant: a pattern is a `pat_param`, so a top-level
+/// `A | B` (two variants under one stem, one sample passing for both) does
+/// not parse. What the macro cannot refuse is a wildcard or binding arm on an
+/// enum (`_` is what the `Namespace` newtype's one arm is), which would hide
+/// a new variant from the compiler and the coverage test alike; that is a
+/// review item.
 macro_rules! stems {
-    ($T:ty { $($pat:pat => $stem:literal),+ $(,)? }) => {
+    ($T:ty { $($pat:pat_param => $stem:literal),+ $(,)? }) => {
         Stems::<$T> {
             of: |sample| match sample {
                 $($pat => $stem,)+

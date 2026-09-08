@@ -651,10 +651,11 @@ for szamlazz.hu, in two phases on one server.
 **The single-account phase** covers, among others:
 
 - issued → already_issued, `Idempotency-Key` replay, 152 → reconciled; two concurrent creates on one key under
-  one scope with distinct keys → one `issued` and one `already_issued` with exactly one create on the wire and
-  both invocations on the server while the create is (the per-key lock); the same `Idempotency-Key` sent while
-  the first invocation is in flight → attached to it (one invocation id on both replies, one create, one
-  `sys_invocation` row);
+  one scope with distinct `Idempotency-Key`s → one `issued` and one `already_issued` with exactly one create on
+  the wire, both rows on the server while the first is held in its `account` step by the scripted resolver's
+  gate, one running and one queued behind the per-key lock; the same `Idempotency-Key` sent while the first
+  invocation is held → unanswered until the gate opens, then attached to it (one invocation id on both replies,
+  one create, one `sys_invocation` row);
 - storno → reversed (the storno mock matched on `<teljesitesDatum>` equal to the original's `telj`, no
   `<keltDatum>`) → stale create → `reissue`; a `telj`-less original answered 503 `unavailable` naming the order,
   kind and storno external id with only the verify journaled and the storno mock `expect(0)`, after a `telj`-less

@@ -229,7 +229,7 @@ fixture (`<variant>.<n>.json`) is the only record of what an in-flight invocatio
 hold, so **once the first production deployment exists, an archived fixture is never deleted, and a fixture is never
 regenerated without its archive**. Deleting one is the deliberate journal break of the *Consequences* paragraph
 above, done together with a drain and stated in the commit. Before go-live nothing replays, and a regeneration may
-skip the archive: `resolution/account.json` was regenerated so when the account pins were dropped (`5ea51f9`,
+skip the archive: `resolution/account.json` was regenerated without one when the account pins were dropped (`5ea51f9`,
 ADR 0006's account-pin amendment, 2026-09-07), with the reason in the commit message. The mechanism sees only files
 and cannot tell the two cases apart, so this rule is the reviewer's: a regenerated fixture in a diff without a new
 `<variant>.<n>.json` beside it, or a deleted archive, is a journal break to be justified, never a formatting change.

@@ -297,14 +297,7 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     let stuck = h.submit("E2E-K", "delete_proforma", &json!({})).await;
     // The hung resolution is the next one asked for; nothing else resolves
     // until it is.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while h.script.resolutions() == resolutions_before {
-        assert!(
-            Instant::now() < deadline,
-            "the hung invocation never resolved"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    h.script.await_resolutions(resolutions_before + 1).await;
     h.await_status(&stuck, &["running"]).await;
 
     // The queued call: submitted while the lock is held, answered after the

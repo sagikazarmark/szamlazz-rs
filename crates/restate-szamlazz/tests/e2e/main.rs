@@ -34,7 +34,9 @@
 //! including the two pins the exactly-once argument rests on: two concurrent
 //! creates on one key serialised by the Virtual Object's lock into one
 //! `issued` and one `already_issued`, and the same `Idempotency-Key` sent
-//! while the first invocation is in flight attaching to it. The
+//! while the first invocation is in flight attaching to it (the first held in
+//! its `account` step by the scripted resolver's gate until the test has seen
+//! the second call reach the server, so neither pin rests on timing). The
 //! second performs the documented single → multi **flag day** (private,
 //! drain, register the **multi-account** deployment (two accounts, reachable
 //! by scope only, behind a test-local mutable resolver and store), public)

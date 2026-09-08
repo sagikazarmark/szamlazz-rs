@@ -34,7 +34,7 @@ use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, Payme
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
-use wiremock::{MockServer, ResponseTemplate};
+use wiremock::MockServer;
 
 use crate::harness::accounts::{
     MutableAccounts, ScriptedAccounts, multi_account_services, services,
@@ -43,8 +43,8 @@ use crate::harness::gate::{FEATURES, Restate};
 use crate::harness::ingress::Reply;
 use crate::harness::introspection::{Invocation, JournalEntry, Retries};
 use crate::harness::szamlazz::{
-    Doc, create_lands_answering, create_lands_but_reply_lost, external_id_query, holds,
-    holds_after_misses, loses_reply_once, not_found,
+    Doc, create_lands_but_reply_lost, external_id_query, holds, holds_after_misses,
+    loses_reply_once, not_found,
 };
 
 // ----- the harness's own HTTP client -----------------------------------------------
@@ -728,6 +728,29 @@ impl Harness {
             .await
     }
 
+    /// Waits until the server holds at least `count` invocations on Virtual
+    /// Object `key` (a call sent concurrently with another has reached the
+    /// ingress once its row is there); the rows.
+    pub(crate) async fn await_invocations_on(
+        &self,
+        key: &str,
+        count: usize,
+    ) -> Vec<(String, Invocation)> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let rows = self.invocations_on(key).await;
+            if rows.len() >= count {
+                return rows;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} invocation(s) on {key}, not {count}: {rows:?}",
+                rows.len()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// The `sys_invocation` rows `filter` (a `WHERE` clause, or nothing)
     /// selects, with their ids, in id order.
     async fn invocation_rows(&self, filter: &str) -> Vec<(String, Invocation)> {
@@ -779,13 +802,5 @@ impl Harness {
     /// external id from that moment on: see [`create_lands_but_reply_lost`].
     pub(crate) async fn create_lands_but_reply_lost(&self, doc: &Doc<'_>) {
         create_lands_but_reply_lost(&self.mock, doc).await;
-    }
-
-    /// The create lands and is answered with `reply` (a delayed one keeps the
-    /// invocation in flight for the delay), and `doc` is the holder of its
-    /// external id from the moment the create is received: see
-    /// [`create_lands_answering`].
-    pub(crate) async fn create_lands_answering(&self, doc: &Doc<'_>, reply: ResponseTemplate) {
-        create_lands_answering(&self.mock, doc, reply).await;
     }
 }

@@ -1,13 +1,15 @@
 //! The accounts the two deployments serve and the resolver and store behind
 //! them: the single-account phase over [`ScriptedAccounts`] (a static resolver
-//! whose next resolutions can fail or hang and whose store can be taken
-//! down), the multi-account phase over [`MutableAccounts`] (accounts and keys
+//! whose next resolutions can fail or hang, whose resolutions can be held
+//! until the test releases them, and whose store can be taken down), the
+//! multi-account phase over [`MutableAccounts`] (accounts and keys
 //! the test changes while invocations are in flight), and the agent keys the
 //! run puts on the wire, sentinels the leak scan looks for.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use restate_szamlazz::account::{
     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
@@ -17,6 +19,7 @@ use restate_szamlazz::config::WorkerConfig;
 use restate_szamlazz::{Agent, Order};
 use serde_json::json;
 use szamlazz_agent::Credentials;
+use tokio::sync::watch;
 
 /// The agent key of the test account (and of `acme` after the flag day): a
 /// sentinel that must never appear in a journal entry.
@@ -37,10 +40,12 @@ pub(crate) const BANK_ACCOUNT: &str = "11111111-22222222-33333333";
 pub(crate) const BANK_ACCOUNT_CHANGED: &str = "44444444-55555555-66666666";
 
 /// The static resolver and store behind a script: the resolver fails the
-/// next N resolutions with `unavailable` or hangs the next N forever, and the
-/// store can be taken down. What the prologue's e2e drives (a resolver that
-/// fails then succeeds, one that never answers, a store that always fails)
-/// on the one deployment the harness registers.
+/// next N resolutions with `unavailable`, hangs the next N forever, or holds
+/// every resolution until the test releases it, and the store can be taken
+/// down. What the prologue's e2e drives (a resolver that fails then succeeds,
+/// one that never answers, a store that always fails) and what the
+/// concurrency scenarios hold an invocation in flight with, on the one
+/// deployment the harness registers.
 #[derive(Debug)]
 pub(crate) struct ScriptedAccounts {
     inner: StaticResolver,
@@ -49,6 +54,14 @@ pub(crate) struct ScriptedAccounts {
     /// Resolutions left to hang: a future that never completes, so the
     /// invocation is stuck in its `account` step until it is killed.
     resolver_hangs: AtomicU32,
+    /// The gate every resolution passes: closed (`false`) while
+    /// [`hold_resolutions`](Self::hold_resolutions) is in effect, so the
+    /// invocation is in flight in its `account` step until
+    /// [`release_resolutions`](Self::release_resolutions) opens it. Unlike a
+    /// hang, the test ends it; and it holds a re-executed resolve too, so a
+    /// resolve the prologue's deadline cut is held again rather than let
+    /// through.
+    gate: watch::Sender<bool>,
     /// How many times the resolver was asked.
     resolutions: AtomicU32,
     /// Whether every fetch fails with `unavailable`.
@@ -63,6 +76,7 @@ impl ScriptedAccounts {
             inner,
             resolver_failures: AtomicU32::new(0),
             resolver_hangs: AtomicU32::new(0),
+            gate: watch::Sender::new(true),
             resolutions: AtomicU32::new(0),
             store_down: AtomicBool::new(false),
             fetches: AtomicU32::new(0),
@@ -77,12 +91,43 @@ impl ScriptedAccounts {
         self.resolver_hangs.store(count, Ordering::SeqCst);
     }
 
+    /// Closes the gate: every resolution asked for from now on is counted
+    /// (see [`await_resolutions`](Self::await_resolutions)) and then held
+    /// until [`release_resolutions`](Self::release_resolutions). The
+    /// invocation is in flight in its `account` step for as long as the test
+    /// wants, and cannot complete on its own: the deterministic way to keep an
+    /// invocation in flight while a concurrent call is made.
+    pub(crate) fn hold_resolutions(&self) {
+        self.gate.send_replace(false);
+    }
+
+    /// Opens the gate: every held resolution proceeds, and later ones are not
+    /// held.
+    pub(crate) fn release_resolutions(&self) {
+        self.gate.send_replace(true);
+    }
+
     pub(crate) fn set_store_down(&self, down: bool) {
         self.store_down.store(down, Ordering::SeqCst);
     }
 
     pub(crate) fn resolutions(&self) -> u32 {
         self.resolutions.load(Ordering::SeqCst)
+    }
+
+    /// Waits until the resolver has been asked at least `count` times in
+    /// total: with the gate closed, the moment an invocation is held in its
+    /// `account` step.
+    pub(crate) async fn await_resolutions(&self, count: u32) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.resolutions() < count {
+            assert!(
+                Instant::now() < deadline,
+                "the resolver was asked {} times, not {count}",
+                self.resolutions()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     pub(crate) fn fetches(&self) -> u32 {
@@ -101,6 +146,12 @@ impl AccountResolver for ScriptedAccounts {
             if hanging > 0 {
                 self.resolver_hangs.store(hanging - 1, Ordering::SeqCst);
                 std::future::pending::<()>().await;
+            }
+            let mut gate = self.gate.subscribe();
+            while !*gate.borrow_and_update() {
+                gate.changed()
+                    .await
+                    .expect("the gate's sender lives as long as the resolver");
             }
             let outstanding = self.resolver_failures.load(Ordering::SeqCst);
             if outstanding > 0 {

@@ -7,7 +7,8 @@
 //! reply settled by the immediate re-query, the proforma link and the
 //! secondary-lookup collision.
 
-use std::time::{Duration, Instant};
+use std::pin::pin;
+use std::time::Duration;
 
 use rust_decimal::dec;
 use serde_json::{Value, json};
@@ -135,14 +136,14 @@ pub(crate) async fn idempotency_key_replays_without_calling_szamlazz(h: &Harness
     eprintln!("(ii) same key → identical response, no szamlazz.hu call: pass");
 }
 
-/// How long the create's reply is held back in the two concurrency
-/// scenarios below: the window in which the first invocation is in flight
-/// (its create is on the wire, unanswered) while the second call is made;
-/// each scenario reads the first's `sys_invocation` row inside the window
-/// and asserts it is not completed, so "in flight" is asserted, not assumed.
-/// Well under the Számla Agent client's request timeout and the handler's
-/// inactivity timeout, and the one cost these scenarios add to the run.
-const IN_FLIGHT: Duration = Duration::from_secs(2);
+/// How long the retry of (ii-b) must stay unanswered while the first
+/// invocation is held: long enough for a request to reach the ingress on the
+/// loopback many times over, so a retry still unanswered after it is one the
+/// ingress holds, waiting on the in-flight invocation, and its answer after
+/// the release is that invocation's outcome. Well under the ten-second
+/// deadline the prologue puts on a resolve call, so the held `account` step
+/// is never re-executed by it.
+const UNANSWERED: Duration = Duration::from_secs(1);
 
 /// (i-b) two `create_invoice` calls on the **same key under the same scope**,
 /// concurrently, with distinct `Idempotency-Key`s: the Virtual Object's
@@ -150,10 +151,16 @@ const IN_FLIGHT: Duration = Duration::from_secs(2);
 /// `already_issued` from its lookup step, in either order, with exactly one
 /// create on the wire and both invocations completed. What the exactly-once
 /// argument rests on; the cross-scope scenario (xvii) is the contrast (two
-/// objects, two documents). While the first's create is on the wire, both
-/// invocations are on the server and neither is completed: the second is
-/// queued behind the lock, not attached to the first (that is the same key's
-/// case, (ii-b)).
+/// objects, two documents). The first to take the lock is held in its
+/// `account` step by the scripted resolver's gate until both invocations are
+/// on the server, so "concurrent" is observed, not assumed: two rows, one
+/// running, the other queued behind the lock and not attached to the first
+/// (that is the same key's case, (ii-b)); then the gate opens and the two
+/// run one after the other.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two replies, what the server held while the gate was closed, and both completions"
+)]
 pub(crate) async fn concurrent_creates_on_one_key_issue_once(h: &Harness) {
     h.reset().await;
     h.absent("E2E-2", &["prepayment", "final", "proforma"])
@@ -162,19 +169,24 @@ pub(crate) async fn concurrent_creates_on_one_key_issue_once(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    // The document is the holder from the moment the create is received, so
-    // whichever call runs second finds it in its lookup, however the two
-    // were ordered by the lock; the create's reply is held back so the first
-    // invocation is in flight while the other is queued.
-    h.create_lands_answering(
+    // The first's lookup and its create step's leading query miss; the
+    // second's lookup, after the first completed, finds the document.
+    h.holds_after_misses(
+        2,
         &Doc {
             external_id: Some("acct:E2E-2:invoice"),
             ..Doc::new("SZ-2", "SZ", "E2E-2")
         },
-        created("SZ-2", "1000", "1270").set_delay(IN_FLIGHT),
     )
     .await;
+    create()
+        .respond_with(created("SZ-2", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
 
+    let resolutions_before = h.script.resolutions();
+    h.script.hold_resolutions();
     let body = create_body(dec!(1000), false);
     let both = async {
         tokio::join!(
@@ -182,15 +194,16 @@ pub(crate) async fn concurrent_creates_on_one_key_issue_once(h: &Harness) {
             h.call("E2E-2", "create_invoice", &body, "e2e-2-k2"),
         )
     };
-    let during = async {
-        h.wait_for_creates(1).await;
-        // Both calls reached the server before the create did (they were
-        // sent together, the create came after the first's reads), and
-        // neither can complete while the create's reply is held back.
-        let on_key = h.invocations_on("E2E-2").await;
-        (on_key, h.create_bodies().await.len())
+    let while_held = async {
+        // One invocation holds the lock and is held in its `account` step;
+        // the other's row appears once it has reached the ingress. Neither
+        // can complete while the gate is closed.
+        h.script.await_resolutions(resolutions_before + 1).await;
+        let on_key = h.await_invocations_on("E2E-2", 2).await;
+        h.script.release_resolutions();
+        on_key
     };
-    let ((first, second), (on_key, creates_during)) = tokio::join!(both, during);
+    let ((first, second), on_key) = tokio::join!(both, while_held);
 
     assert_eq!(first.status, 200, "{}", first.body);
     assert_eq!(second.status, 200, "{}", second.body);
@@ -221,15 +234,28 @@ pub(crate) async fn concurrent_creates_on_one_key_issue_once(h: &Harness) {
         "exactly one create on the wire"
     );
 
-    assert_eq!(creates_during, 1, "the barrier fired on the one create");
+    // While the gate was closed: the two calls' rows on the server, one
+    // running (the lock holder, in its `account` step), neither completed.
+    let mut statuses: Vec<(&str, &str)> = on_key
+        .iter()
+        .map(|(id, row)| (id.as_str(), row.status.as_str()))
+        .collect();
+    statuses.sort_unstable();
+    let mut replied = [first.invocation_id(), second.invocation_id()];
+    replied.sort_unstable();
     assert_eq!(
-        on_key.len(),
-        2,
-        "both invocations were on the server while the create was on the wire: {on_key:?}"
+        statuses.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        replied,
+        "the two rows are the two calls: {on_key:?}"
     );
     assert!(
-        on_key.iter().all(|(_, row)| row.status != "completed"),
-        "neither had completed while the create's reply was held back: {on_key:?}"
+        statuses.iter().all(|(_, status)| *status != "completed")
+            && statuses
+                .iter()
+                .filter(|(_, status)| *status == "running")
+                .count()
+                == 1,
+        "one ran while the other waited behind the lock, neither completed: {on_key:?}"
     );
 
     // Both completed; the `issued` one walked the whole path, the
@@ -257,13 +283,19 @@ pub(crate) async fn concurrent_creates_on_one_key_issue_once(h: &Harness) {
 }
 
 /// (ii-b) the **same** `Idempotency-Key` sent while the first invocation is
-/// still in flight (its create is on the wire, unanswered) attaches to that
-/// invocation and receives its outcome: one invocation id on both replies,
-/// one create on the wire, one `sys_invocation` row on the key. The "no
-/// answer" half of the `Idempotency-Key` rule: a caller that timed out keeps
-/// its key, and the retry gets the in-flight outcome instead of queueing a
-/// second invocation behind the lock (which a new key would, (i-b)). The
-/// completed half is (ii).
+/// still in flight attaches to that invocation and receives its outcome: one
+/// invocation id on both replies, one create on the wire, one
+/// `sys_invocation` row on the key. The "no answer" half of the
+/// `Idempotency-Key` rule: a caller that timed out keeps its key, and the
+/// retry gets the in-flight outcome instead of queueing a second invocation
+/// behind the lock (which a new key would, (i-b)). The completed half is
+/// (ii). The first is held in its `account` step by the scripted resolver's
+/// gate, so it cannot complete until the test lets it: the retry is sent
+/// while it is held, stays unanswered for [`UNANSWERED`] (nothing could
+/// answer it: no stored completion exists, and a reply would be one Restate
+/// made up), and is answered only once the gate opens and the first
+/// completes. Its answer is therefore the in-flight invocation's, not a
+/// replay's, by the order of events rather than by a timing margin.
 pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h: &Harness) {
     h.reset().await;
     h.absent("E2E-2B", &["prepayment", "final", "proforma"])
@@ -272,51 +304,52 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    h.create_lands_answering(
+    // The lookup and the create step's leading query miss; the retry never
+    // runs the handler, so nothing reads after the create.
+    h.holds_after_misses(
+        2,
         &Doc {
             external_id: Some("acct:E2E-2B:invoice"),
             ..Doc::new("SZ-2B", "SZ", "E2E-2B")
         },
-        created("SZ-2B", "1000", "1270").set_delay(IN_FLIGHT),
     )
     .await;
+    create()
+        .respond_with(created("SZ-2B", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
 
+    let resolutions_before = h.script.resolutions();
+    h.script.hold_resolutions();
     let body = create_body(dec!(1000), false);
     let first = h.call("E2E-2B", "create_invoice", &body, "e2e-2b-shared");
     let retry = async {
-        // The first is in flight for `IN_FLIGHT` from here: its create is on
-        // the wire, its reply held back. Read its row before the retry, so
-        // "in flight" is asserted, not assumed: a retry after completion
-        // would be the replay of (ii), which every assertion below also
-        // holds for.
-        h.wait_for_creates(1).await;
-        let in_flight = h.invocations_on("E2E-2B").await;
-        let sent = Instant::now();
-        let reply = h
-            .call("E2E-2B", "create_invoice", &body, "e2e-2b-shared")
-            .await;
-        (in_flight, sent.elapsed(), reply)
+        h.script.await_resolutions(resolutions_before + 1).await;
+        let held = h.invocations_on("E2E-2B").await;
+        let mut retry = pin!(h.call("E2E-2B", "create_invoice", &body, "e2e-2b-shared"));
+        if let Ok(reply) = tokio::time::timeout(UNANSWERED, retry.as_mut()).await {
+            panic!("the retry was answered while the first invocation was held: {reply:?}");
+        }
+        h.script.release_resolutions();
+        (held, retry.await)
     };
-    let (first, (in_flight, waited, retry)) = tokio::join!(first, retry);
+    let (first, (held, retry)) = tokio::join!(first, retry);
 
     assert_eq!(first.status, 200, "{}", first.body);
     assert_eq!(retry.status, 200, "{}", retry.body);
     assert_eq!(first.body["outcome"], "issued", "{}", first.body);
     assert_eq!(first.body["invoice_number"], "SZ-2B");
     assert_eq!(
-        in_flight.len(),
+        held.len(),
         1,
-        "one invocation on the key when the retry was sent: {in_flight:?}"
+        "one invocation on the key when the retry was sent: {held:?}"
     );
-    assert_eq!(in_flight[0].0, first.invocation_id());
-    assert_ne!(
-        in_flight[0].1.status, "completed",
-        "the retry was sent while the first was in flight: {:?}",
-        in_flight[0].1
-    );
-    assert!(
-        waited >= IN_FLIGHT / 2,
-        "the retry waited for the in-flight outcome rather than reading a stored one: {waited:?}"
+    assert_eq!(held[0].0, first.invocation_id());
+    assert_eq!(
+        held[0].1.status, "running",
+        "the first was in flight when the retry was sent: {:?}",
+        held[0].1
     );
     assert_eq!(
         retry.body, first.body,

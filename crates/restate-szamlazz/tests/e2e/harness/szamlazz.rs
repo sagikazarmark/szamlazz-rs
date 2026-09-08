@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 use jiff::civil::{Date, date};
 use serde_json::{Value, json};
@@ -400,38 +399,24 @@ pub(crate) async fn holds_after_misses(mock: &MockServer, misses: u64, doc: &Doc
         .await;
 }
 
-/// The create lands on szamlazz.hu but its reply is lost:
-/// [`create_lands_answering`] with a 500 and no body.
-pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>) {
-    create_lands_answering(mock, doc, ResponseTemplate::new(500)).await;
-}
-
-/// The create lands on szamlazz.hu and is answered with `reply`, `expect(1)`;
-/// `doc` is the holder of its external id from the moment the create request
-/// is received (code 7 before, the document after). The transition is the
-/// create stub being matched (one flag, flipped by the create's responder and
-/// read by the external id's), so how many queries precede the send is not
-/// the test's to know. Failure-injection sequencing, not a model of
-/// szamlazz.hu: one flag for one document. With a `reply` that carries a
-/// `set_delay`, the invocation is in flight for that long after the create
-/// reached the wire (wiremock records the request on receipt and waits out
-/// the delay before answering): the window a concurrent call on the same
-/// key, or the same `Idempotency-Key`, is sent in. `doc` must state its
+/// The create lands on szamlazz.hu but its reply is lost: `create()` answers
+/// 500, `expect(1)`, and `doc` is the holder of its external id from the
+/// moment the create request is received (code 7 before, the document after).
+/// The transition is the create stub being matched (one flag, flipped by the
+/// create's responder and read by the external id's), so how many queries
+/// precede the send is not the test's to know. Failure-injection sequencing,
+/// not a model of szamlazz.hu: one flag for one document. `doc` must state its
 /// external id; the number and order selectors are not mounted.
-pub(crate) async fn create_lands_answering(
-    mock: &MockServer,
-    doc: &Doc<'_>,
-    reply: ResponseTemplate,
-) {
+pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>) {
     let id = doc
         .external_id
-        .expect("create_lands_answering needs the document's external id");
+        .expect("create_lands_but_reply_lost needs the document's external id");
     let landed = Arc::new(AtomicBool::new(false));
     let flip = Arc::clone(&landed);
     create()
         .respond_with(move |_: &Request| {
             flip.store(true, Ordering::SeqCst);
-            reply.clone()
+            ResponseTemplate::new(500)
         })
         .expect(1)
         .mount(mock)
@@ -618,63 +603,4 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
             "query {query} after the create: {body}"
         );
     }
-}
-
-/// `create_lands_answering(doc, reply)` with a delayed `reply`: the document
-/// is the holder from the moment the create is *received*, while the create's
-/// reply arrives only after the delay, so a query made during the delay finds
-/// the document; the reply is `reply`, not a 500.
-#[tokio::test]
-async fn create_lands_answering_flips_the_holder_on_receipt_and_replies_after_the_delay() {
-    let mock = MockServer::start().await;
-    let delay = Duration::from_millis(500);
-    create_lands_answering(
-        &mock,
-        &Doc {
-            external_id: Some("acct:ORD-6:invoice"),
-            ..Doc::new("SZ-6", "SZ", "ORD-6")
-        },
-        created("SZ-6", "1000", "1270").set_delay(delay),
-    )
-    .await;
-
-    let by_id = "<szamlaKulsoAzon>acct:ORD-6:invoice</szamlaKulsoAzon>";
-    let (_, body) = query_by(&mock, by_id).await;
-    assert!(
-        body.contains("<hibakod><![CDATA[7]]></hibakod>"),
-        "before the create: {body}"
-    );
-
-    let started = Instant::now();
-    let create = http()
-        .post(mock.uri())
-        .body("name=\"action-xmlagentxmlfile\"\n<xmlszamla/>")
-        .send();
-    let during = async {
-        // Well inside the delay: the create has been received, its reply has
-        // not been sent.
-        tokio::time::sleep(delay / 4).await;
-        query_by(&mock, by_id).await
-    };
-    let (response, (status, body)) = tokio::join!(create, during);
-    assert_eq!(status, 200);
-    assert!(
-        body.contains("<szamlaszam>SZ-6</szamlaszam>"),
-        "during the delay, the document is the holder: {body}"
-    );
-    let response = response.expect("create");
-    assert!(
-        started.elapsed() >= delay,
-        "the create's reply waited out the delay: {:?}",
-        started.elapsed()
-    );
-    assert_eq!(response.status().as_u16(), 200);
-    assert_eq!(
-        response
-            .headers()
-            .get("szlahu_szamlaszam")
-            .and_then(|value| value.to_str().ok()),
-        Some("SZ-6"),
-        "the reply is the stated one"
-    );
 }
