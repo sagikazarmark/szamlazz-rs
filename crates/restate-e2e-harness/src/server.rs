@@ -259,7 +259,10 @@ impl Restate {
     /// launch on the host, so two launches of one spec in one test binary
     /// share nothing), leading a process group of its own so
     /// that the group is what gets killed. Configured through Restate's
-    /// environment (`RESTATE_<SECTION>__<KEY>`), so no config file is written.
+    /// environment (`RESTATE_<SECTION>__<KEY>`), so no config file is written;
+    /// `spec.flags` are set first and the harness's own values last, so a
+    /// flag cannot move the base dir out of the temp directory or a bind
+    /// address off the loopback (the admin API has no authentication).
     pub(crate) fn spawn(binary: &Path, spec: &ServerSpec, endpoint_host: String) -> Self {
         let [ingress, admin, node] = free_ports::<3>();
         let ports = Ports {
@@ -275,8 +278,14 @@ impl Restate {
         fs::create_dir_all(&base_dir).expect("the server's base dir");
         let log = fs::File::create(base_dir.join("restate-server.log")).expect("the server log");
         let mut command = Command::new(binary);
+        command.arg("--no-logo");
+        for flag in spec.flags {
+            let (name, value) = flag
+                .split_once('=')
+                .unwrap_or_else(|| panic!("a server flag is NAME=value: {flag:?}"));
+            command.env(name, value);
+        }
         command
-            .arg("--no-logo")
             .env("RESTATE_BASE_DIR", &base_dir)
             .env("RESTATE_NODE_NAME", format!("e2e-{}", spec.name))
             .env("RESTATE_LISTEN_MODE", "tcp")
@@ -294,12 +303,6 @@ impl Restate {
             .stdout(Stdio::from(log.try_clone().expect("the server log")))
             .stderr(Stdio::from(log))
             .process_group(0);
-        for flag in spec.flags {
-            let (name, value) = flag
-                .split_once('=')
-                .unwrap_or_else(|| panic!("a server flag is NAME=value: {flag:?}"));
-            command.env(name, value);
-        }
         let child = command
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {}: {error}", binary.display()));
@@ -333,11 +336,17 @@ impl Restate {
         // process gone, read off `&mut self.process` between probes.
         let deadline = Instant::now() + READY_DEADLINE;
         loop {
-            if let Ok(response) = self
-                .http
-                .get(format!("{}/health", self.admin.base()))
-                .send()
-                .await
+            // Bounded by the deadline, not the client's 120 s timeout: a
+            // server that accepts the connection and stalls does not defer
+            // the liveness check below.
+            let health = tokio::time::timeout_at(
+                deadline.into(),
+                self.http
+                    .get(format!("{}/health", self.admin.base()))
+                    .send(),
+            )
+            .await;
+            if let Ok(Ok(response)) = health
                 && response.status().is_success()
             {
                 break;

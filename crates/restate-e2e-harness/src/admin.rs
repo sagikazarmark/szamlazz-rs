@@ -43,8 +43,11 @@ pub fn sql_literal(text: &str) -> String {
 /// Polls `probe` every `interval` until it answers `Ok`, or panics with
 /// `describe` of the last `Err` once `deadline` has passed: the one shape of
 /// every wait on the server (a row to appear or go, a status to be reached,
-/// an endpoint to register). The deadline is checked after a failed probe,
-/// so a probe that takes long is not followed by another after it.
+/// an endpoint to register). The deadline bounds the wait as a whole: a probe
+/// still running at it is cut (the HTTP client's own timeout, 120 s, would
+/// otherwise outlast a 30 s wait on one stalled request) and reported as the
+/// probe that did not answer; a failed probe is not followed by another
+/// after the deadline.
 pub(crate) async fn poll_until<T, E, Fut>(
     deadline: Duration,
     interval: Duration,
@@ -56,11 +59,64 @@ where
 {
     let deadline = Instant::now() + deadline;
     loop {
-        match probe().await {
+        let Ok(answer) = tokio::time::timeout_at(deadline, probe()).await else {
+            panic!("the wait's deadline passed while a probe was in flight: {deadline:?}")
+        };
+        match answer {
             Ok(answer) => return answer,
             Err(last) => assert!(Instant::now() < deadline, "{}", describe(&last)),
         }
         tokio::time::sleep(interval).await;
+    }
+}
+
+/// One Virtual Object as `sys_invocation` identifies it: the service, the
+/// key, and the scope under scoped Virtual Objects. A key alone is not an
+/// identity: two services, or two scopes, may hold the same key, and a read
+/// by key alone would merge their invocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target<'a> {
+    /// `target_service_name`.
+    pub service: &'a str,
+    /// `target_service_key`.
+    pub key: &'a str,
+    /// `scope`: `Some` selects the object under that scope alone, `None`
+    /// does not filter on the scope (the unscoped object, or every scope's,
+    /// for a suite that keys uniquely across them).
+    pub scope: Option<&'a str>,
+}
+
+impl<'a> Target<'a> {
+    /// The object `key` of `service`, in whatever scope.
+    #[must_use]
+    pub const fn object(service: &'a str, key: &'a str) -> Self {
+        Self {
+            service,
+            key,
+            scope: None,
+        }
+    }
+
+    /// The same object under `scope` alone.
+    #[must_use]
+    pub const fn scoped(self, scope: &'a str) -> Self {
+        Self {
+            scope: Some(scope),
+            ..self
+        }
+    }
+
+    /// The SQL predicate selecting this object's invocations.
+    fn predicate(&self) -> String {
+        let object = format!(
+            "target_service_name = {} AND target_service_key = {}",
+            sql_literal(self.service),
+            sql_literal(self.key)
+        );
+        match self.scope {
+            Some(scope) => format!("{object} AND scope = {}", sql_literal(scope)),
+            None => object,
+        }
     }
 }
 
@@ -286,12 +342,12 @@ impl Admin {
         .await
     }
 
-    /// The ids of the invocations on Virtual Object `key` the server holds and
-    /// has not completed, in id order.
-    pub async fn in_flight_ids_on(&self, key: &str) -> Vec<String> {
+    /// The ids of the invocations on Virtual Object `target` the server holds
+    /// and has not completed, in id order.
+    pub async fn in_flight_ids_on(&self, target: &Target<'_>) -> Vec<String> {
         self.sql_or_panic(&format!(
-            "SELECT id FROM sys_invocation WHERE target_service_key = {} AND status <> 'completed' ORDER BY id",
-            sql_literal(key)
+            "SELECT id FROM sys_invocation WHERE {} AND status <> 'completed' ORDER BY id",
+            target.predicate()
         ))
         .await
         .iter()
@@ -299,38 +355,40 @@ impl Admin {
         .collect()
     }
 
-    /// The one invocation in flight on Virtual Object `key`: its id, from
+    /// The one invocation in flight on Virtual Object `target`: its id, from
     /// `sys_invocation`; panics on none or more than one. How a scenario
     /// names an invocation the ingress has not answered yet (a call returns
     /// its id only with its answer): to cancel it, or to check that a retry
     /// attached to it.
-    pub async fn in_flight_on(&self, key: &str) -> String {
-        let in_flight = self.in_flight_ids_on(key).await;
+    pub async fn in_flight_on(&self, target: &Target<'_>) -> String {
+        let in_flight = self.in_flight_ids_on(target).await;
         assert_eq!(
             in_flight.len(),
             1,
-            "one invocation in flight on {key}: {in_flight:?}"
+            "one invocation in flight on {target:?}: {in_flight:?}"
         );
         in_flight[0].clone()
     }
 
     /// Waits until `sys_invocation` holds `count` invocations in flight on
-    /// Virtual Object `key` (accepted by the server, not completed): the
+    /// Virtual Object `target` (accepted by the server, not completed): the
     /// server-side moment a call made while the key is held is queued behind
     /// it, which the ingress reports only with the call's answer. The ids.
-    pub async fn await_in_flight_on(&self, key: &str, count: usize) -> Vec<String> {
+    pub async fn await_in_flight_on(&self, target: &Target<'_>, count: usize) -> Vec<String> {
         poll_until(
             POLL_DEADLINE,
             Duration::from_millis(25),
             || async {
-                let in_flight = self.in_flight_ids_on(key).await;
+                let in_flight = self.in_flight_ids_on(target).await;
                 if in_flight.len() >= count {
                     Ok(in_flight)
                 } else {
                     Err(in_flight)
                 }
             },
-            |in_flight| format!("{key} never had {count} invocation(s) in flight: {in_flight:?}"),
+            |in_flight| {
+                format!("{target:?} never had {count} invocation(s) in flight: {in_flight:?}")
+            },
         )
         .await
     }
@@ -418,13 +476,13 @@ impl Admin {
 /// once, never by a full interval's sleep.
 const POLL: Duration = Duration::from_millis(100);
 
-/// The query [`Watch`] runs on `key`: every invocation on the Virtual Object,
-/// its status and its in-flight columns.
-fn retries_query(key: &str) -> String {
+/// The query [`Watch`] runs on `target`: every invocation on the Virtual
+/// Object, its status and its in-flight columns.
+fn retries_query(target: &Target<'_>) -> String {
     format!(
         "SELECT status, retry_count, last_failure, last_failure_related_command_name \
-         FROM sys_invocation WHERE target_service_key = {}",
-        sql_literal(key)
+         FROM sys_invocation WHERE {}",
+        target.predicate()
     )
 }
 
@@ -534,14 +592,14 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Samples `admin`'s `sys_invocation` for the invocations on `key` every
-    /// 100 ms until one of the three ends above. Start it before the call,
-    /// [`finish`](Self::finish) it after: the sampler ends as soon as it
-    /// observes the invocation completed, and `finish` ends one whose call
+    /// Samples `admin`'s `sys_invocation` for the invocations on `target`
+    /// every 100 ms until one of the three ends above. Start it before the
+    /// call, [`finish`](Self::finish) it after: the sampler ends as soon as
+    /// it observes the invocation completed, and `finish` ends one whose call
     /// was answered between two samples.
     #[must_use]
-    pub fn start(admin: Admin, key: &str) -> Self {
-        let query = retries_query(key);
+    pub fn start(admin: Admin, target: &Target<'_>) -> Self {
+        let query = retries_query(target);
         Self::over(move || {
             let admin = admin.clone();
             let query = query.clone();
@@ -621,7 +679,35 @@ mod tests {
         assert_eq!(sql_literal("O'Brien"), "'O''Brien'");
         assert_eq!(sql_literal("x' OR '1'='1"), "'x'' OR ''1''=''1'");
         assert_eq!(sql_literal(""), "''");
-        assert!(retries_query("O'Brien").ends_with("target_service_key = 'O''Brien'"));
+        let target = Target::object("Svc", "O'Brien");
+        assert!(
+            retries_query(&target)
+                .ends_with("target_service_name = 'Svc' AND target_service_key = 'O''Brien'")
+        );
+        assert!(
+            retries_query(&target.scoped("acme")).ends_with(" AND scope = 'acme'"),
+            "a scoped target narrows to its scope"
+        );
+    }
+
+    /// A wait is bounded as a whole: a probe that never answers is cut at
+    /// the deadline, not awaited past it. Under the paused clock the timeout
+    /// fires at once.
+    #[tokio::test(start_paused = true)]
+    async fn poll_until_cuts_a_probe_still_in_flight_at_the_deadline() {
+        let outcome = tokio::spawn(poll_until::<(), (), _>(
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            std::future::pending,
+            |()| String::new(),
+        ))
+        .await;
+        let panic = outcome.expect_err("the deadline panics");
+        let message = panic.into_panic().downcast::<String>().expect("a message");
+        assert!(
+            message.contains("deadline passed while a probe was in flight"),
+            "{message}"
+        );
     }
 
     /// A `sys_invocation` row as the sampler reads it.

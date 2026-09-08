@@ -100,7 +100,7 @@ pub mod run_names;
 #[cfg(unix)]
 pub mod server;
 
-pub use admin::{Admin, Retries, Watch, sql_literal};
+pub use admin::{Admin, Retries, Target, Watch, sql_literal};
 #[cfg(unix)]
 pub use gate::{Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::Reply;

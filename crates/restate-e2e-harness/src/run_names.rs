@@ -53,7 +53,10 @@ pub struct RunPatterns {
 impl RunPatterns {
     /// The patterns of `paths`. Panics on a parametrized name with no fixed
     /// prefix (`{number}` alone): it would read every journaled name as
-    /// itself, and the pin would explain anything.
+    /// itself, and the pin would explain anything. Panics likewise on two
+    /// different patterns with one prefix (`step-{id}` beside
+    /// `step-{number}`): a journaled `step-7` would read as whichever sorted
+    /// first, and the other handler's path would go unexplained.
     #[must_use]
     pub fn of(paths: &[RunPath]) -> Self {
         let mut parametrized: Vec<(&str, &str)> = paths
@@ -73,6 +76,16 @@ impl RunPatterns {
             .collect();
         parametrized.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
         parametrized.dedup();
+        for pair in parametrized.windows(2) {
+            assert!(
+                pair[0].0 != pair[1].0,
+                "two parametrized run names share the prefix {:?}: {:?} and {:?}; a journaled name \
+                 could read as either",
+                pair[0].0,
+                pair[0].1,
+                pair[1].1
+            );
+        }
         Self { parametrized }
     }
 
@@ -191,6 +204,31 @@ mod tests {
             .downcast::<String>()
             .expect("a message");
         assert!(message.contains("{number}"), "{message}");
+    }
+
+    /// Two patterns with one prefix would make a journaled name ambiguous;
+    /// the table is refused when built, naming both. The same pattern on two
+    /// rows is one pattern.
+    #[test]
+    fn two_patterns_with_one_prefix_are_refused() {
+        let same = [
+            RunPath::new("A", "h", &["step-{number}"]),
+            RunPath::new("B", "h", &["step-{number}"]),
+        ];
+        assert_eq!(RunPatterns::of(&same).pattern("step-7"), "step-{number}");
+        let clashing = [
+            RunPath::new("A", "h", &["step-{id}"]),
+            RunPath::new("B", "h", &["step-{number}"]),
+        ];
+        let outcome = std::panic::catch_unwind(|| RunPatterns::of(&clashing));
+        let message = outcome
+            .expect_err("refused")
+            .downcast::<String>()
+            .expect("a message");
+        assert!(
+            message.contains("step-{id}") && message.contains("step-{number}"),
+            "{message}"
+        );
     }
 
     /// An observed sequence is explained by a path when it is a prefix of it:

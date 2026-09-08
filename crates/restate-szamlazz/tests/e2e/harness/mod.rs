@@ -35,7 +35,7 @@ use jiff::civil::date;
 use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
 pub(crate) use restate_e2e_harness::gate::{Reuse, launcher_or_skip};
 pub(crate) use restate_e2e_harness::plain_http;
-use restate_e2e_harness::{Invocation, JournalEntry, Restate, ServerSpec, Watch};
+use restate_e2e_harness::{Invocation, JournalEntry, Restate, ServerSpec, Target, Watch};
 use restate_sdk::prelude::Endpoint;
 use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
 use restate_szamlazz::{Agent, Order};
@@ -73,6 +73,12 @@ pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
 
 /// The two Restate services of the worker, as the admin API names them.
 const SERVICES: [&str; 2] = ["Szamlazz.Order", "Szamlazz.Agent"];
+
+/// The `Szamlazz.Order` object `key`, in whatever scope: the suite's keys are
+/// unique across the run, so no scenario watches one key under two scopes.
+fn order(key: &str) -> Target<'_> {
+    Target::object(SERVICES[0], key)
+}
 
 // ----- request bodies ----------------------------------------------------------
 
@@ -354,7 +360,7 @@ impl Harness {
     /// its id only with its answer): to cancel it, or to check that a retry
     /// attached to it.
     pub(crate) async fn in_flight_on(&self, key: &str) -> String {
-        self.restate.admin().in_flight_on(key).await
+        self.restate.admin().in_flight_on(&order(key)).await
     }
 
     /// Waits until `sys_invocation` holds `count` invocations in flight on
@@ -362,7 +368,10 @@ impl Harness {
     /// server-side moment a call made while the key is held is queued behind
     /// it, which the ingress reports only with the call's answer. The ids.
     pub(crate) async fn await_in_flight_on(&self, key: &str, count: usize) -> Vec<String> {
-        self.restate.admin().await_in_flight_on(key, count).await
+        self.restate
+            .admin()
+            .await_in_flight_on(&order(key), count)
+            .await
     }
 
     /// Waits until `sys_invocation` reports the invocation in one of
@@ -407,7 +416,7 @@ impl Harness {
     /// it observes the invocation completed, and `finish` ends one whose call
     /// was answered between two samples.
     pub(crate) fn watch(&self, key: &str) -> Watch {
-        Watch::start(self.restate.admin().clone(), key)
+        Watch::start(self.restate.admin().clone(), &order(key))
     }
 
     /// Purges a completed invocation (`PATCH /invocations/{id}/purge`), so a
