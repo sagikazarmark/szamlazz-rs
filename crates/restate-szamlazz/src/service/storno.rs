@@ -359,6 +359,24 @@ mod tests {
         (error.code(), body)
     }
 
+    /// The answer for a document szamlazz.hu cannot reverse, as the verdict
+    /// wraps it: `rejected` under the worker's own code `not_stornoable`
+    /// (no szamlazz.hu code: nothing was sent), echoing the number as the
+    /// caller named it, with no storno number and no conflict reason.
+    #[test]
+    fn not_stornoable_is_a_rejection_under_the_workers_own_code() {
+        let response = not_stornoable("D-1".to_owned());
+        assert_eq!(response.outcome, StornoOutcome::Rejected);
+        assert_eq!(response.invoice_number, "D-1");
+        assert_eq!(response.code.as_deref(), Some("not_stornoable"));
+        assert_eq!(
+            response.message.as_deref(),
+            Some("the document cannot be reversed: only invoices can be stornoed")
+        );
+        assert_eq!(response.storno_number, None);
+        assert_eq!(response.conflict_reason, None);
+    }
+
     /// Step 1 of the storno protocol on the verified document: this order's
     /// live invoice kind (`SZ`, `ES`, `VS`, `HS`) proceeds; a document that
     /// does not carry this order's number (another order's, none, an empty

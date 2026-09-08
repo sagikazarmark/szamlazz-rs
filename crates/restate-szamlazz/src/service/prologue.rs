@@ -348,13 +348,11 @@ mod tests {
         (error.code(), body)
     }
 
-    /// A resolver and store whose calls never complete (a database-backed
-    /// embedder's pool that never answers), counting how often each was
-    /// asked.
+    /// A resolver whose calls never complete (a database-backed embedder's
+    /// pool that never answers), counting how often it was asked.
     #[derive(Default)]
     struct Hung {
         resolves: AtomicU32,
-        fetches: AtomicU32,
     }
 
     impl AccountResolver for Hung {
@@ -367,20 +365,88 @@ mod tests {
         }
     }
 
-    impl CredentialStore for Hung {
-        fn fetch<'a>(
-            &'a self,
-            _credential_ref: &'a CredentialRef,
-        ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
-            self.fetches.fetch_add(1, Ordering::SeqCst);
-            Box::pin(std::future::pending())
+    /// An [`Accounts`] over a [`Hung`] resolver; a resolve never reaches the
+    /// store, so an empty script stands in.
+    fn hung() -> (Arc<Hung>, Accounts) {
+        let hung = Arc::new(Hung::default());
+        let accounts = Accounts::new(hung.clone(), Arc::new(Scripted::new([])));
+        (hung, accounts)
+    }
+
+    /// One answer of a [`Scripted`] store to a fetch.
+    #[derive(Debug, Clone, Copy)]
+    enum Fetch {
+        /// The credentials, [`SCRIPTED_KEY`].
+        Credentials,
+        /// `FetchError::Unavailable`, caused by [`STORE_CAUSE`].
+        Unavailable,
+        /// `FetchError::Gone` for the reference asked.
+        Gone,
+        /// No answer, ever: the call is the worker's to drop.
+        Hang,
+    }
+
+    /// The agent key a [`Scripted`] store answers with.
+    const SCRIPTED_KEY: &str = "scripted-agent-key";
+
+    /// The cause a [`Scripted`] store's unavailability carries: what a
+    /// database-backed store would say, and what no fault may echo.
+    const STORE_CAUSE: &str = "connection refused to db.internal:5432 (secret-dsn)";
+
+    /// A store that answers its script in order, one entry per fetch, and
+    /// counts the fetches; a fetch past the script's end is the test's
+    /// mistake and panics.
+    struct Scripted {
+        script: std::sync::Mutex<std::collections::VecDeque<Fetch>>,
+        fetches: AtomicU32,
+    }
+
+    impl Scripted {
+        fn new(script: impl IntoIterator<Item = Fetch>) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script.into_iter().collect()),
+                fetches: AtomicU32::new(0),
+            }
+        }
+
+        fn fetches(&self) -> u32 {
+            self.fetches.load(Ordering::SeqCst)
         }
     }
 
-    fn hung() -> (Arc<Hung>, Accounts) {
-        let hung = Arc::new(Hung::default());
-        let accounts = Accounts::new(hung.clone(), hung.clone());
-        (hung, accounts)
+    impl CredentialStore for Scripted {
+        fn fetch<'a>(
+            &'a self,
+            credential_ref: &'a CredentialRef,
+        ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            let next = self
+                .script
+                .lock()
+                .expect("script")
+                .pop_front()
+                .expect("a fetch past the end of the script");
+            Box::pin(async move {
+                match next {
+                    Fetch::Credentials => Ok(Credentials::agent_key(SCRIPTED_KEY)),
+                    Fetch::Unavailable => {
+                        Err(FetchError::unavailable(std::io::Error::other(STORE_CAUSE)))
+                    }
+                    Fetch::Gone => Err(FetchError::Gone {
+                        credential_ref: credential_ref.clone(),
+                    }),
+                    Fetch::Hang => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// An [`Accounts`] over a [`Scripted`] store; `Accounts::fetch` reaches
+    /// the store only, so a hung resolver stands in.
+    fn scripted(script: impl IntoIterator<Item = Fetch>) -> (Arc<Scripted>, Accounts) {
+        let store = Arc::new(Scripted::new(script));
+        let accounts = Accounts::new(Arc::new(Hung::default()), store.clone());
+        (store, accounts)
     }
 
     #[test]
@@ -487,7 +553,7 @@ mod tests {
         const ACCOUNT: &str = "acct-8e1f";
         const REF: &str = "secrets/kv/accounts/acme/szamlazz";
         let account = Account::new(AccountId::from(ACCOUNT), CredentialRef::from(REF));
-        let (hung, accounts) = hung();
+        let (store, accounts) = scripted([Fetch::Hang; FETCH_ATTEMPTS as usize]);
         let started = tokio::time::Instant::now();
 
         let fault = fetch_credentials(&accounts, &account)
@@ -503,7 +569,7 @@ mod tests {
             "{elapsed:?} > {:?}",
             deadlines + pauses
         );
-        assert_eq!(hung.fetches.load(Ordering::SeqCst), FETCH_ATTEMPTS);
+        assert_eq!(store.fetches(), FETCH_ATTEMPTS);
 
         let (status, body) = fault_body(fault);
         assert_eq!(status, 503);
@@ -517,6 +583,97 @@ mod tests {
         );
         assert!(!message.contains(ACCOUNT), "{message}");
         assert!(!message.contains(REF), "{message}");
+    }
+
+    /// A store that reports itself unavailable is asked `FETCH_ATTEMPTS`
+    /// times, `FETCH_PAUSE` apart, and then the fetch is the terminal
+    /// `unavailable` fault (never a Restate retry): within the one execution,
+    /// with no deadline spent (every answer came at once), naming the cause
+    /// and neither the store's message, the account nor the reference.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_stays_unavailable_is_the_terminal_fault_after_three_fetches() {
+        const ACCOUNT: &str = "acct-8e1f";
+        const REF: &str = "secrets/kv/accounts/acme/szamlazz";
+        let account = Account::new(AccountId::from(ACCOUNT), CredentialRef::from(REF));
+        let (store, accounts) = scripted([Fetch::Unavailable; FETCH_ATTEMPTS as usize]);
+        let started = tokio::time::Instant::now();
+
+        let fault = fetch_credentials(&accounts, &account)
+            .await
+            .expect_err("terminal");
+
+        assert_eq!(store.fetches(), FETCH_ATTEMPTS);
+        assert_eq!(
+            started.elapsed(),
+            FETCH_PAUSE * (FETCH_ATTEMPTS - 1),
+            "one pause between each pair of attempts, no deadline spent"
+        );
+
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503);
+        assert_eq!(body["code"], "unavailable");
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("credential store is unavailable"),
+            "{message}"
+        );
+        assert!(
+            message.contains("retry with a new Idempotency-Key"),
+            "{message}"
+        );
+        assert!(!message.contains(STORE_CAUSE), "{message}");
+        assert!(!message.contains(ACCOUNT), "{message}");
+        assert!(!message.contains(REF), "{message}");
+    }
+
+    /// A reference the store does not know is settled: no attempt of the
+    /// loop would answer differently, so the fetch is the terminal fault at
+    /// once, after one fetch and no pause.
+    #[tokio::test(start_paused = true)]
+    async fn a_gone_reference_is_the_terminal_fault_after_one_fetch() {
+        const REF: &str = "secrets/kv/accounts/acme/szamlazz";
+        let account = Account::new(AccountId::from("acct-8e1f"), CredentialRef::from(REF));
+        let (store, accounts) = scripted([Fetch::Gone]);
+        let started = tokio::time::Instant::now();
+
+        let fault = fetch_credentials(&accounts, &account)
+            .await
+            .expect_err("terminal");
+
+        assert_eq!(store.fetches(), 1, "gone is not retried");
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        let (status, body) = fault_body(fault);
+        assert_eq!(status, 503);
+        assert_eq!(body["code"], "unavailable");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("no credentials"), "{message}");
+        assert!(!message.contains(REF), "{message}");
+    }
+
+    /// A store that recovers within the attempts answers the credentials: a
+    /// reported unavailability and a silent attempt dropped at the deadline
+    /// each spend one attempt and one pause, and the answer of the last
+    /// attempt is the execution's credentials, as the store gave them.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_recovers_within_its_attempts_answers_the_credentials() {
+        let (store, accounts) = scripted([Fetch::Unavailable, Fetch::Hang, Fetch::Credentials]);
+        let started = tokio::time::Instant::now();
+
+        let credentials = fetch_credentials(&accounts, &account())
+            .await
+            .expect("the third attempt's answer");
+
+        assert_eq!(store.fetches(), FETCH_ATTEMPTS);
+        assert_eq!(
+            started.elapsed(),
+            FETCH_PAUSE + CALL_DEADLINE + FETCH_PAUSE,
+            "the reported failure at once, the silent one at the deadline, a pause after each"
+        );
+        let Credentials::AgentKey(key) = credentials else {
+            panic!("the store answers an agent key");
+        };
+        assert_eq!(key.expose(), SCRIPTED_KEY);
     }
 
     #[test]

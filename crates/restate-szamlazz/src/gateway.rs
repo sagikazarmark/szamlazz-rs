@@ -1237,17 +1237,9 @@ impl Gateway {
         })
     }
 
-    /// The external-id query of the create step. `Some` when it settles the
-    /// step: a live document of ours that is not `request.reversed`
-    /// ([`CreateOutcome::Found`]), a reversed document of ours that is not
-    /// `request.reversed` ([`CreateOutcome::Reversed`]), `request.reversed`
-    /// reported live ([`CreateOutcome::LiveAgain`]) or an invalid holder
-    /// ([`CreateOutcome::Collision`]); `None` when the send may proceed:
-    /// nothing under the id, or exactly the document the lookup step saw
-    /// reversed, still reversed.
-    ///
-    /// Rejected credentials settle the step as
-    /// [`CreateOutcome::CredentialsRejected`].
+    /// The external-id query of the create step, decided by
+    /// [`settle_create`] against `request.reversed`: `Some` when it settles
+    /// the step, `None` when the send may proceed.
     ///
     /// # Errors
     ///
@@ -1259,41 +1251,11 @@ impl Gateway {
         &self,
         request: &CreateStepRequest<'_>,
     ) -> Result<Option<CreateOutcome>, QueryError> {
-        match self
-            .seen(request.external_id, request.order, request.kind)
-            .await
-        {
-            Ok(Seen::Collision(found)) => Ok(Some(CreateOutcome::Collision(found))),
-            Ok(Seen::Live(found)) if Some(found.number()) != request.reversed => {
-                Ok(Some(CreateOutcome::Found(found)))
-            }
-            // The document the lookup saw reversed, reported live: a server
-            // inconsistency. Never send past it.
-            Ok(Seen::Live(found)) => {
-                tracing::warn!(
-                    number = %found.number(),
-                    "the document the lookup saw reversed is reported live"
-                );
-                Ok(Some(CreateOutcome::LiveAgain(found)))
-            }
-            // A reversed document the lookup did not see: issued and
-            // reversed since. Never send past a reversal the caller has not
-            // acknowledged.
-            Ok(Seen::Reversed(found)) if Some(found.number()) != request.reversed => {
-                tracing::warn!(
-                    number = %found.number(),
-                    "a document reversed since the lookup holds the external id"
-                );
-                Ok(Some(CreateOutcome::Reversed(found)))
-            }
-            // Nothing (code 7), or the document the lookup saw reversed,
-            // still reversed.
-            Ok(Seen::Reversed(_) | Seen::Absent) => Ok(None),
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                Ok(Some(CreateOutcome::CredentialsRejected { code, message }))
-            }
-            Err(error) => Err(error),
-        }
+        settle_create(
+            self.seen(request.external_id, request.order, request.kind)
+                .await,
+            request.reversed,
+        )
     }
 
     /// The external-id query of both steps, validated against this gateway's
@@ -1617,10 +1579,9 @@ impl Gateway {
         }
     }
 
-    /// The storno-external-id query of the storno step. `Some` when it
-    /// settles the step: the `SS` reversing the invoice
-    /// ([`StornoOutcome::AlreadyReversed`]) or rejected credentials; `None`
-    /// when no storno of ours is there.
+    /// The storno-external-id query of the storno step, decided by
+    /// [`settle_storno`]: `Some` when it settles the step, `None` when no
+    /// storno of ours is there.
     ///
     /// # Errors
     ///
@@ -1632,17 +1593,10 @@ impl Gateway {
         &self,
         request: &StornoStepRequest<'_>,
     ) -> Result<Option<StornoOutcome>, QueryError> {
-        match self
-            .storno_seen(request.external_id, request.invoice_number)
-            .await
-        {
-            Ok(Some(storno_number)) => Ok(Some(StornoOutcome::AlreadyReversed { storno_number })),
-            Ok(None) => Ok(None),
-            Err(QueryError::CredentialsRejected { code, message }) => {
-                Ok(Some(StornoOutcome::CredentialsRejected { code, message }))
-            }
-            Err(error) => Err(error),
-        }
+        settle_storno(
+            self.storno_seen(request.external_id, request.invoice_number)
+                .await,
+        )
     }
 
     /// The storno-external-id query of the storno lookup and storno steps:
@@ -1835,6 +1789,7 @@ enum Seen {
 /// [`Failure::CredentialsRejected`] on top (a fault of its configuration, not
 /// of the request) and keeps the transport/parse failures apart from
 /// `szlahu_down` because [`Unconfirmed`] reports them differently.
+#[derive(Debug, PartialEq, Eq)]
 enum Failure {
     /// [`OutcomeClass::Rejected`] or [`OutcomeClass::NotFound`]: szamlazz.hu
     /// refused before acting; on a write, 7 is a missing field.
@@ -1921,6 +1876,84 @@ fn outcome(result: Result<InvoiceDocument, QueryError>) -> Result<QueryOutcome, 
     }
 }
 
+/// The create step's rule on what its external-id query saw (`seen`),
+/// against the number of the document the lookup step saw reversed
+/// (`reversed`): the step sends only when the id holds **nothing**, or
+/// **exactly** that document, still reversed (`Ok(None)`). `Some` settles the
+/// step without a send: a live document of ours that is not `reversed`
+/// ([`CreateOutcome::Found`], an earlier execution created it), a reversed
+/// document of ours that is not `reversed` ([`CreateOutcome::Reversed`],
+/// issued and reversed since the lookup), `reversed` reported live
+/// ([`CreateOutcome::LiveAgain`], the server contradicting itself), an
+/// invalid holder ([`CreateOutcome::Collision`]) and rejected credentials
+/// ([`CreateOutcome::CredentialsRejected`]).
+///
+/// # Errors
+///
+/// Every other failure of the query, unchanged, for the caller to place: on
+/// the leading query an answer (another code, `szlahu_down`) is settled data
+/// and only a transport failure is [`Unconfirmed`]; after a send every
+/// failure leaves the step unconfirmed.
+fn settle_create(
+    seen: Result<Seen, QueryError>,
+    reversed: Option<&str>,
+) -> Result<Option<CreateOutcome>, QueryError> {
+    match seen {
+        Ok(Seen::Collision(found)) => Ok(Some(CreateOutcome::Collision(found))),
+        Ok(Seen::Live(found)) if Some(found.number()) != reversed => {
+            Ok(Some(CreateOutcome::Found(found)))
+        }
+        // The document the lookup saw reversed, reported live: a server
+        // inconsistency. Never send past it.
+        Ok(Seen::Live(found)) => {
+            tracing::warn!(
+                number = %found.number(),
+                "the document the lookup saw reversed is reported live"
+            );
+            Ok(Some(CreateOutcome::LiveAgain(found)))
+        }
+        // A reversed document the lookup did not see: issued and reversed
+        // since. Never send past a reversal the caller has not acknowledged.
+        Ok(Seen::Reversed(found)) if Some(found.number()) != reversed => {
+            tracing::warn!(
+                number = %found.number(),
+                "a document reversed since the lookup holds the external id"
+            );
+            Ok(Some(CreateOutcome::Reversed(found)))
+        }
+        // Nothing (code 7), or the document the lookup saw reversed, still
+        // reversed.
+        Ok(Seen::Reversed(_) | Seen::Absent) => Ok(None),
+        Err(QueryError::CredentialsRejected { code, message }) => {
+            Ok(Some(CreateOutcome::CredentialsRejected { code, message }))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The storno step's rule on what its storno-external-id query saw
+/// (`seen`, the number of the `SS` reversing the invoice when one holds the
+/// id): the `SS` settles the step ([`StornoOutcome::AlreadyReversed`], an
+/// earlier execution sent it), nothing lets the send proceed (`Ok(None)`),
+/// rejected credentials settle it ([`StornoOutcome::CredentialsRejected`]).
+///
+/// # Errors
+///
+/// Every other failure of the query, unchanged, for the caller to place, as
+/// [`settle_create`] hands them back.
+fn settle_storno(
+    seen: Result<Option<String>, QueryError>,
+) -> Result<Option<StornoOutcome>, QueryError> {
+    match seen {
+        Ok(Some(storno_number)) => Ok(Some(StornoOutcome::AlreadyReversed { storno_number })),
+        Ok(None) => Ok(None),
+        Err(QueryError::CredentialsRejected { code, message }) => {
+            Ok(Some(StornoOutcome::CredentialsRejected { code, message }))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn invoice_selector(selector: &Selector) -> InvoiceSelector {
     match selector {
         Selector::InvoiceNumber(number) => {
@@ -1936,6 +1969,7 @@ mod tests {
     use jiff::civil::date;
     use rust_decimal::dec;
     use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+    use szamlazz_agent::{ParseError, RequestError};
 
     use super::*;
     use crate::test_support::{CreditRecord, Doc};
@@ -2170,6 +2204,444 @@ mod tests {
             ErrorCode::Unknown("999".to_owned()),
         ] {
             assert!(!is_credentials_rejected(&code), "{code:?}");
+        }
+    }
+
+    // The pure classifiers behind the async steps, each on its own table.
+    // The wiremock suite (`tests/gateway.rs`) reaches them through HTTP and
+    // keeps one exchange per operation for the header-vs-body parse path;
+    // the branches are pinned here.
+
+    /// Step 2 of the lookup: the order-number hint is foreign when it is a
+    /// **live** document of the invoice family (`SZ`, `ES`, `VS`) that is
+    /// neither the document seen under our external id nor a number the
+    /// exclusivity and proforma checks already saw as ours. A reversed one
+    /// is not (the order is free again), and neither is a proforma, a
+    /// corrective, a storno or a delivery note under the order, whatever it
+    /// references: the order number is what the hint queried by, so it says
+    /// nothing here.
+    #[test]
+    fn a_foreign_document_is_a_live_invoice_kind_that_is_neither_seen_nor_known() {
+        let live = |number: &'static str, tipus: &'static str| Doc::new(number, tipus).parse();
+        let none: &[String] = &[];
+
+        for tipus in ["SZ", "ES", "VS"] {
+            let found = live("X-9", tipus);
+            assert!(is_foreign(&found, none, None), "{tipus}: nothing known");
+            assert!(
+                !is_foreign(&found, none, Some("X-9")),
+                "{tipus}: the document seen under our external id"
+            );
+            assert!(
+                is_foreign(&found, none, Some("X-1")),
+                "{tipus}: another document seen under our external id"
+            );
+            assert!(
+                !is_foreign(&found, &["X-9".to_owned()], None),
+                "{tipus}: a number known to be ours"
+            );
+            assert!(
+                is_foreign(&found, &["X-1".to_owned(), "X-2".to_owned()], None),
+                "{tipus}: other numbers known to be ours"
+            );
+            assert!(
+                !is_foreign(
+                    &Doc {
+                        reversed: true,
+                        ..Doc::new("X-9", tipus)
+                    }
+                    .parse(),
+                    none,
+                    None
+                ),
+                "{tipus}: reversed is not foreign"
+            );
+        }
+
+        for (tipus, referenced) in [
+            ("D", None),
+            ("HS", Some("X-1")),
+            ("SS", Some("X-1")),
+            ("SL", None),
+        ] {
+            let found = Doc {
+                referenced_invoice: referenced,
+                ..Doc::new("X-9", tipus)
+            }
+            .parse();
+            assert!(
+                !is_foreign(&found, none, None),
+                "{tipus} is not of the invoice family"
+            );
+        }
+    }
+
+    /// A szamlazz.hu code on a create-like send, classified for the step by
+    /// its outcome class: the credential codes first, before their class
+    /// (`Rejected`, as asserted); 71 and 152 as the duplicate; every code
+    /// szamlazz.hu refuses before acting as `Rejected`, and 7 among them (on
+    /// a write it is a missing field, not a missing document; the `NotFound`
+    /// class); the open codes 1, 55, 56 and a code the agent crate does not
+    /// know as `Unknown`, through the wildcard arm that a class the crate
+    /// adds later falls into too.
+    #[test]
+    fn a_failed_send_is_classified_by_its_code_class_with_the_credential_codes_first() {
+        let api = |code: ErrorCode| {
+            ClientError::Api(ApiError {
+                code,
+                message: "üzenet".to_owned(),
+            })
+        };
+        let classified = |code: ErrorCode| classify_failure(api(code));
+
+        for code in [
+            ErrorCode::InvalidCredentials,
+            ErrorCode::BrowserSessionActive,
+            ErrorCode::LoginBlocked,
+            ErrorCode::MultipleAccounts,
+        ] {
+            assert_eq!(
+                code.outcome_class(),
+                OutcomeClass::Rejected,
+                "{code:?}: the class the credential check pre-empts"
+            );
+            assert_eq!(
+                classified(code.clone()),
+                Failure::CredentialsRejected {
+                    code: code.code().to_owned(),
+                    message: "üzenet".to_owned(),
+                },
+                "{code:?}"
+            );
+        }
+
+        for code in [
+            ErrorCode::DuplicateOrderNumber,
+            ErrorCode::DuplicateOrderNumberNamed,
+        ] {
+            assert_eq!(
+                code.outcome_class(),
+                OutcomeClass::DuplicateOrderNumber,
+                "{code:?}"
+            );
+            assert_eq!(
+                classified(code.clone()),
+                Failure::Duplicate {
+                    code: code.code().to_owned(),
+                    message: "üzenet".to_owned(),
+                },
+                "{code:?}"
+            );
+        }
+
+        assert_eq!(
+            ErrorCode::MissingData.outcome_class(),
+            OutcomeClass::NotFound
+        );
+        for code in [
+            ErrorCode::MissingData,
+            ErrorCode::StornoOfReversalInvoice,
+            ErrorCode::MalformedXml,
+            ErrorCode::PrepaymentInvoiceNotIdentifiable,
+            ErrorCode::HasCorrectiveInvoice,
+            ErrorCode::NetValueMismatch,
+            ErrorCode::ProformaNotFound,
+            ErrorCode::IssueDateMustBeToday,
+        ] {
+            assert!(
+                matches!(
+                    code.outcome_class(),
+                    OutcomeClass::Rejected | OutcomeClass::NotFound
+                ),
+                "{code:?}"
+            );
+            assert_eq!(
+                classified(code.clone()),
+                Failure::Rejected {
+                    code: code.code().to_owned(),
+                    message: "üzenet".to_owned(),
+                },
+                "{code:?}"
+            );
+        }
+
+        for code in [
+            ErrorCode::Maintenance,
+            ErrorCode::EInvoiceSigningFailed,
+            ErrorCode::InvoiceNotificationDeliveryFailed,
+            ErrorCode::Unknown("999".to_owned()),
+        ] {
+            assert_eq!(code.outcome_class(), OutcomeClass::Unknown, "{code:?}");
+            assert_eq!(
+                classified(code.clone()),
+                Failure::Unknown {
+                    code: code.code().to_owned(),
+                    message: "üzenet".to_owned(),
+                },
+                "{code:?}"
+            );
+        }
+    }
+
+    /// The failures of a create-like send that carry no szamlazz.hu code:
+    /// `szlahu_down` as `Unavailable`; a request the wire contract refused
+    /// as `Rejected` under the `request` pseudo-code with the contract's
+    /// message; and the two remaining `ClientError`s, a parse failure and a
+    /// `reqwest` error (from a request that cannot be built, the one such
+    /// error a test can make without a wire), as `Transport` with their
+    /// display.
+    #[test]
+    fn a_failed_send_without_a_code_is_unavailable_the_request_or_transport() {
+        assert_eq!(
+            classify_failure(ClientError::ServiceUnavailable("karbantartás".to_owned())),
+            Failure::Unavailable("karbantartás".to_owned())
+        );
+
+        let request = ClientError::Request(RequestError::MissingLineItems);
+        let message = request.to_string();
+        assert_eq!(
+            classify_failure(request),
+            Failure::Rejected {
+                code: REQUEST_CODE.to_owned(),
+                message,
+            }
+        );
+
+        let parse = ClientError::Parse(ParseError::Missing("szamlaszam"));
+        let message = parse.to_string();
+        assert_eq!(classify_failure(parse), Failure::Transport(message));
+
+        let unbuildable = crate::test_support::http_client()
+            .get("http://")
+            .build()
+            .expect_err("an empty host does not build");
+        let reqwest_error = ClientError::Transport(unbuildable);
+        let message = reqwest_error.to_string();
+        assert_eq!(classify_failure(reqwest_error), Failure::Transport(message));
+    }
+
+    /// The one place a query's failure is split into what szamlazz.hu
+    /// answered and what it did not: 7, a credential code and another code
+    /// are answers for the read fn to turn into its outcome; `szlahu_down`
+    /// and a transport failure are the `Unanswered` the read policy
+    /// re-executes, each carrying its message. And the fold every read fn
+    /// (`verify`, `query`, `hint`) applies: a document is `Found`, the
+    /// answers are the three outcome variants, the rest is `Err`.
+    #[test]
+    fn a_query_error_is_an_answer_or_unanswered_and_the_outcome_folds_it() {
+        let rejected = || QueryError::CredentialsRejected {
+            code: "3".to_owned(),
+            message: "Sikertelen bejelentkezés.".to_owned(),
+        };
+        let other = || QueryError::Api {
+            code: "57".to_owned(),
+            message: "Hibás XML.".to_owned(),
+        };
+
+        assert_eq!(QueryError::NotFound.answered(), Ok(Answer::NotFound));
+        assert_eq!(
+            rejected().answered(),
+            Ok(Answer::CredentialsRejected {
+                code: "3".to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            })
+        );
+        assert_eq!(
+            other().answered(),
+            Ok(Answer::Api {
+                code: "57".to_owned(),
+                message: "Hibás XML.".to_owned(),
+            })
+        );
+        assert_eq!(
+            QueryError::Unavailable("szlahu_down".to_owned()).answered(),
+            Err(Unanswered::Unavailable("szlahu_down".to_owned()))
+        );
+        assert_eq!(
+            QueryError::Transport("connection reset".to_owned()).answered(),
+            Err(Unanswered::Transport("connection reset".to_owned()))
+        );
+
+        let document = Doc::default().parse();
+        assert_eq!(
+            outcome(Ok(document.clone())),
+            Ok(QueryOutcome::Found(Box::new(document)))
+        );
+        assert_eq!(
+            outcome(Err(QueryError::NotFound)),
+            Ok(QueryOutcome::NotFound)
+        );
+        assert_eq!(
+            outcome(Err(rejected())),
+            Ok(QueryOutcome::CredentialsRejected {
+                code: "3".to_owned(),
+                message: "Sikertelen bejelentkezés.".to_owned(),
+            })
+        );
+        assert_eq!(
+            outcome(Err(other())),
+            Ok(QueryOutcome::Api {
+                code: "57".to_owned(),
+                message: "Hibás XML.".to_owned(),
+            })
+        );
+        assert_eq!(
+            outcome(Err(QueryError::Unavailable("szlahu_down".to_owned()))),
+            Err(Unanswered::Unavailable("szlahu_down".to_owned()))
+        );
+        assert_eq!(
+            outcome(Err(QueryError::Transport("connection reset".to_owned()))),
+            Err(Unanswered::Transport("connection reset".to_owned()))
+        );
+    }
+
+    /// The query failures [`settle_create`] and [`settle_storno`] hand back
+    /// unchanged for the step to place. `NotFound` is among them for the
+    /// match to be exhaustive only: `seen` and `storno_seen` fold code 7 into
+    /// their "nothing" answer, so the step never passes it; right if reached.
+    fn unplaced_query_errors() -> [QueryError; 4] {
+        [
+            QueryError::NotFound,
+            QueryError::Api {
+                code: "57".to_owned(),
+                message: "xml".to_owned(),
+            },
+            QueryError::Unavailable("szlahu_down".to_owned()),
+            QueryError::Transport("reset".to_owned()),
+        ]
+    }
+
+    /// The create step's rule, as a function of what its external-id query
+    /// saw and the number the lookup step saw reversed: the step sends only
+    /// when the id holds **nothing**, or **exactly** the lookup's reversed
+    /// document, still reversed (`Ok(None)`). A live document that is not
+    /// that one was issued by an earlier execution (`Found`); the lookup's
+    /// reversed document reported live is the server contradicting itself
+    /// (`LiveAgain`); a reversed document that is not the lookup's was
+    /// issued and reversed since (`Reversed`); an invalid holder is a
+    /// `Collision`; rejected credentials settle the step. Every other failure
+    /// of the query is handed back for the caller to place: settled data on
+    /// the leading query, unconfirmed after a send.
+    #[test]
+    fn the_create_step_sends_only_past_nothing_or_the_lookups_reversed_document() {
+        let sz_1 = || Doc::default().boxed();
+        let sz_2 = || Doc::new("SZ-2", "SZ").boxed();
+        let reversed = |number: &'static str| {
+            Doc {
+                reversed: true,
+                ..Doc::new(number, "SZ")
+            }
+            .boxed()
+        };
+        let other = || {
+            Doc {
+                order: Some("ORD-2"),
+                ..Doc::new("SZ-OTHER", "SZ")
+            }
+            .boxed()
+        };
+
+        for lookup_saw in [None, Some("SZ-1")] {
+            assert_eq!(
+                settle_create(Ok(Seen::Absent), lookup_saw),
+                Ok(None),
+                "nothing under the id, lookup saw {lookup_saw:?}"
+            );
+            assert_eq!(
+                settle_create(Ok(Seen::Collision(other())), lookup_saw),
+                Ok(Some(CreateOutcome::Collision(other()))),
+                "a collision, lookup saw {lookup_saw:?}"
+            );
+            assert_eq!(
+                settle_create(Ok(Seen::Live(sz_2())), lookup_saw),
+                Ok(Some(CreateOutcome::Found(sz_2()))),
+                "a live document that is not the lookup's, lookup saw {lookup_saw:?}"
+            );
+            assert_eq!(
+                settle_create(Ok(Seen::Reversed(reversed("SZ-2"))), lookup_saw),
+                Ok(Some(CreateOutcome::Reversed(reversed("SZ-2")))),
+                "a reversed document that is not the lookup's, lookup saw {lookup_saw:?}"
+            );
+        }
+
+        // The lookup saw nothing: any holder settles.
+        assert_eq!(
+            settle_create(Ok(Seen::Live(sz_1())), None),
+            Ok(Some(CreateOutcome::Found(sz_1())))
+        );
+        assert_eq!(
+            settle_create(Ok(Seen::Reversed(reversed("SZ-1"))), None),
+            Ok(Some(CreateOutcome::Reversed(reversed("SZ-1"))))
+        );
+
+        // The lookup saw SZ-1 reversed: still reversed proceeds, live again
+        // is the contradiction.
+        assert_eq!(
+            settle_create(Ok(Seen::Reversed(reversed("SZ-1"))), Some("SZ-1")),
+            Ok(None),
+            "the reissue's one send"
+        );
+        assert_eq!(
+            settle_create(Ok(Seen::Live(sz_1())), Some("SZ-1")),
+            Ok(Some(CreateOutcome::LiveAgain(sz_1())))
+        );
+
+        // The query's failures.
+        for lookup_saw in [None, Some("SZ-1")] {
+            assert_eq!(
+                settle_create(
+                    Err(QueryError::CredentialsRejected {
+                        code: "3".to_owned(),
+                        message: "login".to_owned(),
+                    }),
+                    lookup_saw,
+                ),
+                Ok(Some(CreateOutcome::CredentialsRejected {
+                    code: "3".to_owned(),
+                    message: "login".to_owned(),
+                })),
+                "lookup saw {lookup_saw:?}"
+            );
+            for error in unplaced_query_errors() {
+                assert_eq!(
+                    settle_create(Err(error.clone()), lookup_saw),
+                    Err(error.clone()),
+                    "{error:?} is the caller's to place, lookup saw {lookup_saw:?}"
+                );
+            }
+        }
+    }
+
+    /// The storno step's rule, as a function of what its storno-external-id
+    /// query saw: the `SS` reversing the invoice settles the step
+    /// (`AlreadyReversed`), nothing (or a stray holder, which `storno_seen`
+    /// reads as nothing) lets the send proceed, rejected credentials settle
+    /// it, and every other failure is the caller's to place.
+    #[test]
+    fn the_storno_step_sends_only_when_no_storno_of_ours_is_under_the_id() {
+        assert_eq!(
+            settle_storno(Ok(Some("SS-1".to_owned()))),
+            Ok(Some(StornoOutcome::AlreadyReversed {
+                storno_number: "SS-1".to_owned(),
+            }))
+        );
+        assert_eq!(settle_storno(Ok(None)), Ok(None));
+        assert_eq!(
+            settle_storno(Err(QueryError::CredentialsRejected {
+                code: "135".to_owned(),
+                message: "session".to_owned(),
+            })),
+            Ok(Some(StornoOutcome::CredentialsRejected {
+                code: "135".to_owned(),
+                message: "session".to_owned(),
+            }))
+        );
+        for error in unplaced_query_errors() {
+            assert_eq!(
+                settle_storno(Err(error.clone())),
+                Err(error.clone()),
+                "{error:?} is the caller's to place"
+            );
         }
     }
 }
