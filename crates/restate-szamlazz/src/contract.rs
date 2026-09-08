@@ -3,8 +3,9 @@
 //!
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
 //! returned as values with HTTP 200 (see [`Outcome`] and [`ConflictReason`]),
-//! while the [`TerminalCode`]s are reserved for faults. Three of the seven codes mean "outcome unknown: retry with a
-//! new `Idempotency-Key`, or read `Szamlazz.Order.get`" (`outcome_unknown`,
+//! while the [`TerminalCode`]s are reserved for faults. Three of the seven
+//! codes mean "outcome unknown: retry with a new `Idempotency-Key`, or read
+//! `Szamlazz.Order.get`" (`outcome_unknown`,
 //! `unavailable`, `credentials_rejected`); the rest are settled: the same
 //! request never succeeds, or szamlazz.hu's own answer is passed through
 //! ([`TerminalCode`] says which). The module depends on
@@ -67,6 +68,8 @@ pub use crate::identity::{
     CorrectionId, DocumentKind, InvalidCorrectionId, InvalidInvoiceNumber, InvoiceNumber,
     IssuedKind,
 };
+
+use crate::identity::{ExternalId, OrderKey};
 
 /// The code of a `TerminalError` any handler of either service may raise.
 ///
@@ -248,13 +251,13 @@ impl Fault {
     #[must_use]
     pub fn about(
         mut self,
-        order: impl AsRef<str>,
+        order: &OrderKey,
         kind: Option<IssuedKind>,
-        external_id: impl AsRef<str>,
+        external_id: &ExternalId,
     ) -> Self {
-        self.order = Some(order.as_ref().to_owned());
+        self.order = Some(order.as_str().to_owned());
         self.kind = kind;
-        self.external_id = Some(external_id.as_ref().to_owned());
+        self.external_id = Some(external_id.as_str().to_owned());
         self
     }
 
@@ -375,7 +378,11 @@ mod tests {
 
         let about = Fault::new(TerminalCode::NotFound, "invoice SZ-9 is not known (code 7)")
             .with_szamlazz_code("7")
-            .about("ORD-1", Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
+            .about(
+                &OrderKey::parse("ORD-1").expect("key"),
+                Some(IssuedKind::Invoice),
+                &ExternalId::new("acct:ORD-1:invoice"),
+            );
         let json = serde_json::to_value(&about).expect("json");
         assert_eq!(
             json,

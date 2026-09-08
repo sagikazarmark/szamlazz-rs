@@ -58,11 +58,12 @@ use prologue::Execution;
 
 /// What both services hold: the accounts bundle and the validated
 /// deployment-level settings. One struct, since the two services are built
-/// from the same parts and differ only in their handlers.
+/// from the same parts and differ only in their handlers; what every
+/// handler's execution starts from.
 #[derive(Debug, Clone)]
-struct Deployment {
-    accounts: Accounts,
-    config: ValidatedWorkerConfig,
+pub(crate) struct Deployment {
+    pub(crate) accounts: Accounts,
+    pub(crate) config: ValidatedWorkerConfig,
 }
 
 /// The `Order` Virtual Object: one instance per order number. Registered as
@@ -107,14 +108,7 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::object::execute(
-            ctx,
-            Some(ctx.key()),
-            &self.deployment.accounts,
-            &self.deployment.config,
-            body,
-        )
-        .await
+        support::object::execute(ctx, Some(ctx.key()), &self.deployment, body).await
     }
 
     /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
@@ -127,14 +121,7 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::shared::execute(
-            ctx,
-            Some(ctx.key()),
-            &self.deployment.accounts,
-            &self.deployment.config,
-            body,
-        )
-        .await
+        support::shared::execute(ctx, Some(ctx.key()), &self.deployment, body).await
     }
 }
 
@@ -189,14 +176,7 @@ impl Agent {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::service::execute(
-            ctx,
-            None,
-            &self.deployment.accounts,
-            &self.deployment.config,
-            body,
-        )
-        .await
+        support::service::execute(ctx, None, &self.deployment, body).await
     }
 }
 

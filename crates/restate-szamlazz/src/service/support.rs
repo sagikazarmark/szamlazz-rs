@@ -3,6 +3,7 @@
 //! documents found under our external ids and the account check of documents
 //! found by number.
 
+use std::fmt;
 use std::ops::ControlFlow;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
@@ -131,6 +132,18 @@ impl Fault {
         .with_szamlazz_code(answer.code)
     }
 
+    /// [`Fault::szamlazz_error`] with what the handler was doing named before
+    /// szamlazz.hu's answer (`the credit entries on invoice SZ-1 were
+    /// refused: 259: …`), so the caller reads the subject first; the code
+    /// travels in `szamlazz_code` as on every pass-through.
+    pub(super) fn szamlazz_error_on(subject: impl fmt::Display, answer: SzamlazzAnswer) -> Self {
+        Self::new(
+            TerminalCode::SzamlazzError,
+            format!("{subject}: szamlazz.hu error {answer}"),
+        )
+        .with_szamlazz_code(answer.code)
+    }
+
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
         Self::new(TerminalCode::Unavailable, message)
     }
@@ -201,20 +214,15 @@ impl Fault {
         )
         .with_szamlazz_code(answer.code)
     }
-
-    /// The SDK's terminal error carrying this fault: the code's status and
-    /// the fault JSON as the message.
-    fn into_terminal(self) -> TerminalError {
-        let status = self.status();
-        let body = serde_json::to_string(&self)
-            .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", self.code));
-        TerminalError::new_with_code(status, body)
-    }
 }
 
+/// The SDK's terminal error carrying the fault: the code's status and the
+/// fault JSON as the message, which the ingress wraps in its envelope.
 impl From<Fault> for TerminalError {
     fn from(fault: Fault) -> Self {
-        fault.into_terminal()
+        let body = serde_json::to_string(&fault)
+            .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", fault.code));
+        Self::new_with_code(fault.status(), body)
     }
 }
 
@@ -591,6 +599,7 @@ macro_rules! journal_helpers {
                 StornoStepRequest, Unanswered,
             };
             use crate::identity::{ExternalId, OrderKey};
+            use crate::service::Deployment;
             use crate::service::prologue::{self as decisions, Execution};
             use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
             use restate_sdk::errors::{HandlerError, TerminalError};
@@ -609,8 +618,7 @@ macro_rules! journal_helpers {
             pub(in crate::service) async fn execute<T, F, Fut>(
                 ctx: &$ctx<'_>,
                 key: Option<&str>,
-                accounts: &Accounts,
-                config: &ValidatedWorkerConfig,
+                deployment: &Deployment,
                 body: F,
             ) -> Result<T, HandlerError>
             where
@@ -619,7 +627,8 @@ macro_rules! journal_helpers {
             {
                 let span = decisions::execution_span(ctx.scope(), key, ctx.invocation_id());
                 async move {
-                    let execution = prologue(ctx, accounts, config).await?;
+                    let execution =
+                        prologue(ctx, &deployment.accounts, &deployment.config).await?;
                     body(execution).await
                 }
                 .instrument(span)
@@ -842,7 +851,7 @@ macro_rules! journal_helpers {
                 order: &OrderKey,
                 kind: IssuedKind,
             ) -> Result<Lookup, Fault> {
-                let about = |fault: Fault| fault.about(order, Some(kind), external_id.as_str());
+                let about = |fault: Fault| fault.about(order, Some(kind), &external_id);
                 let outcome = query_external_id(ctx, exec, name, external_id)
                     .await
                     .map_err(about)?;
@@ -938,7 +947,7 @@ macro_rules! journal_helpers {
                     return Ok(None);
                 };
                 super::storno_number_from_hint(outcome, number, &exec.config.namespace)
-                    .map_err(|fault| fault.about(order, None, storno_id.as_str()).into())
+                    .map_err(|fault| fault.about(order, None, &storno_id).into())
             }
 
             /// The storno number of a reversed document no `Order` manages,

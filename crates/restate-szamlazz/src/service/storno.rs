@@ -49,7 +49,7 @@ impl Execution {
         };
         let kind = issued_kind_of(&found.document_type);
         // Every fault from here on is about this storno.
-        let about = |fault: Fault| fault.about(&order, kind, storno_id.as_str());
+        let about = |fault: Fault| fault.about(&order, kind, &storno_id);
         // The intent is a pure function of the verified document: a `telj`
         // it does not carry is a fault after every answer that needs no
         // send.
@@ -104,7 +104,7 @@ impl Execution {
         storno_id: &ExternalId,
     ) -> Result<ControlFlow<StornoResponse, Box<FoundDocument>>, HandlerError> {
         let namespace = &self.config.namespace;
-        let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
+        let about = |fault: Fault| fault.about(order, None, storno_id);
         let found = object::verify(ctx, self, format!("verify-storno-{number}"), number)
             .await
             .map_err(about)?;
@@ -161,8 +161,7 @@ impl Execution {
             .await?
         };
         // Every fault of the settled step is about this proforma.
-        let about =
-            |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), proforma_id.as_str());
+        let about = |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), &proforma_id);
         delete_response(outcome, &self.config.namespace).map_err(|fault| about(fault).into())
     }
 
@@ -323,7 +322,9 @@ fn delete_response(
         DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone => {
             Ok(DeleteProformaResponse::deleted())
         }
-        DeleteOutcome::Rejected(answer) => Ok(DeleteProformaResponse::not_deleted(answer.code)),
+        DeleteOutcome::Rejected(rejection) => {
+            Ok(DeleteProformaResponse::not_deleted(rejection.code))
+        }
         DeleteOutcome::CredentialsRejected(answer) => {
             Err(Fault::credentials_rejected(namespace, answer))
         }

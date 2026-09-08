@@ -141,8 +141,9 @@ impl fmt::Display for SzamlazzAnswer {
 
 /// A refusal of a write: szamlazz.hu's, or the wire contract's before
 /// anything was sent ([`RejectionCode::Request`]). What the `Rejected`
-/// variants of [`CreateOutcome`], [`StornoOutcome`] and [`SetPaymentsOutcome`]
-/// carry; serialises as `code` and `message`, the code as its wire string.
+/// variants of [`CreateOutcome`], [`StornoOutcome`], [`DeleteOutcome`] and
+/// [`SetPaymentsOutcome`] carry; serialises as `code` and `message`, the code
+/// as its wire string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Rejection {
@@ -189,8 +190,10 @@ impl From<ApiError> for Rejection {
 ///
 /// Serialises as the wire string: the szamlazz.hu code as written, or
 /// [`RejectionCode::REQUEST`], so the journaled shape is the one string
-/// field it always was.
+/// field it always was. `#[non_exhaustive]` like the outcomes that carry it:
+/// a pseudo-code added later must not break a caller's match.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RejectionCode {
     /// A szamlazz.hu code.
     Szamlazz(String),

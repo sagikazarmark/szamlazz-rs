@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::Namespace;
 
-pub use table::Table;
+use table::Table;
 
 /// The deployment-level settings the Restate services hold: what is not
 /// account-shaped and therefore does not route through the gateway.

@@ -141,13 +141,10 @@ fn set_payments_response(
                 "the credit entries cannot be sent: {}; nothing was sent",
                 rejection.message
             )),
-            RejectionCode::Szamlazz(code) => Fault::szamlazz_error(SzamlazzAnswer::new(
-                code,
-                format!(
-                    "the credit entries on invoice {invoice_number} were refused: {}",
-                    rejection.message
-                ),
-            )),
+            RejectionCode::Szamlazz(code) => Fault::szamlazz_error_on(
+                format!("the credit entries on invoice {invoice_number} were refused"),
+                SzamlazzAnswer::new(code, rejection.message),
+            ),
         }),
         SetPaymentsOutcome::CredentialsRejected(answer) => {
             Err(Fault::credentials_rejected(namespace, answer))

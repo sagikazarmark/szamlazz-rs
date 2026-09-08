@@ -77,7 +77,7 @@ impl DocumentInput {
 }
 
 /// Per-call overrides of the account's configured document defaults
-/// (`config::Defaults`).
+/// (`account::Defaults`).
 ///
 /// Every field is optional; an absent field keeps the configured value.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -85,7 +85,7 @@ impl Identity {
 
     /// `fault`, about this document of `order`.
     fn about(&self, order: &OrderKey, fault: Fault) -> Fault {
-        fault.about(order, Some(self.kind), self.external_id.as_str())
+        fault.about(order, Some(self.kind), &self.external_id)
     }
 
     /// Step 5 of the create protocol: the settled create step as the caller's

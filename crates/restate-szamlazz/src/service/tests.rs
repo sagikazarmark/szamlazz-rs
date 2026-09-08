@@ -13,7 +13,7 @@ use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
 use crate::config::{IssueConfig, ValidatedWorkerConfig, WorkerConfig};
 use crate::gateway::SzamlazzAnswer;
-use crate::identity::Namespace;
+use crate::identity::{ExternalId, Namespace};
 use crate::test_support::{Doc, ORIGINAL_TELJ, open_gateway};
 
 /// [`IssueConfig::MIN_INITIAL_DELAY`] in the unit discovery reports
@@ -510,7 +510,7 @@ fn faults_serialise_their_code_and_status() {
     let fault = Fault::outcome_unknown("exhausted").about(
         &order,
         Some(IssuedKind::Invoice),
-        "acct:ORD-1:invoice",
+        &ExternalId::new("acct:ORD-1:invoice"),
     );
     let error = TerminalError::from(fault);
     assert_eq!(error.code(), 500);
@@ -620,7 +620,11 @@ fn credentials_rejected_fault_names_the_code_and_the_document() {
         &namespace(),
         SzamlazzAnswer::new("136", "Bejelentkezés letiltva"),
     )
-    .about(&order, Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
+    .about(
+        &order,
+        Some(IssuedKind::Invoice),
+        &ExternalId::new("acct:ORD-1:invoice"),
+    );
     let error = TerminalError::from(fault);
     assert_eq!(error.code(), 503);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
@@ -981,7 +985,11 @@ fn an_exhausted_read_is_a_structured_unavailable() {
     assert_eq!(body.get("order"), None, "nothing attached yet");
 
     let order = OrderKey::parse("ORD-1").expect("order");
-    let about = fault.about(&order, Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
+    let about = fault.about(
+        &order,
+        Some(IssuedKind::Invoice),
+        &ExternalId::new("acct:ORD-1:invoice"),
+    );
     let error = TerminalError::from(about);
     let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
     assert_eq!(body["order"], "ORD-1");
@@ -1252,7 +1260,7 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
     let about = TerminalError::from(fault.about(
         &order,
         Some(IssuedKind::Invoice),
-        "acct:ORD-1:storno:SZ-1",
+        &ExternalId::new("acct:ORD-1:storno:SZ-1"),
     ));
     let body: serde_json::Value = serde_json::from_str(about.message()).expect("json body");
     assert_eq!(body["code"], "unavailable");
