@@ -3,6 +3,8 @@
 //! documents found under our external ids and the account check of documents
 //! found by number.
 
+use std::ops::ControlFlow;
+
 use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -368,6 +370,64 @@ impl StornoIntent {
             comment,
             fulfillment_date,
         })
+    }
+}
+
+/// What a storno handler does next with the document its verify found,
+/// decided before anything else is read or sent. Both storno protocols
+/// answer in this shape (`Szamlazz.Order.storno_invoice`'s `storno_verdict`,
+/// `Szamlazz.Agent.storno`'s `unmanaged_storno_verdict`), and the handler
+/// dispatches on it: proceed, read the storno number, or answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StornoVerdict {
+    /// A live document the handler may reverse: on to the intent and the
+    /// lookup step.
+    Proceed,
+    /// Already reversed, by anyone: the answer is `reversed`, and the storno
+    /// number is what the handler's best-effort read names
+    /// ([`reversed_response`]). The one verdict that needs a further read.
+    AlreadyReversed,
+    /// Answered without a send: `conflict{not_managed}` and
+    /// `rejected{not_stornoable}` at the order's handler,
+    /// `managed_by_order` at the by-number one.
+    Answered(StornoResponse),
+}
+
+/// The `reversed` answer of both storno handlers: `storno_number` as the
+/// read that named it did, absent when a best-effort read could not.
+pub(super) fn reversed_response(number: &str, storno_number: Option<String>) -> StornoResponse {
+    let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
+    response.storno_number = storno_number;
+    response
+}
+
+/// Step 2 of both storno protocols: what the storno lookup step settled,
+/// before the storno step. `Break(response)` when the `SS` reversing `number`
+/// already holds the storno external id (a storno of ours was issued:
+/// `reversed{storno_number}`, nothing sent); `Continue(())` when nothing
+/// does.
+///
+/// # Errors
+///
+/// Rejected credentials (`credentials_rejected`), and another code
+/// (`unavailable`: nothing may be concluded from it, and nothing was sent).
+/// The caller attaches the identity it knows.
+pub(super) fn after_storno_lookup(
+    outcome: StornoLookupOutcome,
+    number: &str,
+    namespace: &Namespace,
+) -> Result<ControlFlow<StornoResponse>, Fault> {
+    match outcome {
+        StornoLookupOutcome::Absent => Ok(ControlFlow::Continue(())),
+        StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(ControlFlow::Break(
+            reversed_response(number, Some(storno_number)),
+        )),
+        StornoLookupOutcome::CredentialsRejected { code, message } => {
+            Err(Fault::credentials_rejected(namespace, code, message))
+        }
+        StornoLookupOutcome::Api { code, message } => {
+            Err(Fault::inconclusive_answer(code, message))
+        }
     }
 }
 

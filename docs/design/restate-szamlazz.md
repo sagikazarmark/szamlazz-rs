@@ -884,7 +884,21 @@ functions they are extracted into.
   `initial_interval = 2m` on both `Szamlazz.Agent` writes and every `Szamlazz.Order` write, asserted to clear
   `IssueConfig::MIN_INITIAL_DELAY`), the
   taxpayer decisions (the stem and the full number name one `taxpayer-{prefix}` step; a number in neither form is the
-  400 `invalid_input` fault naming it and the accepted forms; an exhausted read is `unavailable` naming the step), an
+  400 `invalid_input` fault naming it and the accepted forms; an exhausted read is `unavailable` naming the step), the
+  storno, delete and `get` decisions as the pure functions their handlers call after each read (#138): the
+  order's storno verdict on the verified document (`SZ`/`ES`/`VS`/`HS` proceed; another order's, an absent, empty or
+  whitespace-only `rendelesszam` → `conflict{not_managed}` before anything else is read; reversed by anyone →
+  the hint is read, whatever the kind; `D`, `SL` and `SS` → `rejected{not_stornoable}`), the by-number storno's
+  verdict (a trimmed non-empty `rendelesszam` → `managed_by_order` with that number as `order_key`; an empty or
+  whitespace-only one is no order; reversed → the by-number lookup is read; no kind pre-check), the after-lookup
+  decision both services share (`Absent` proceeds, `AlreadyReversed` answers `reversed{storno_number}`, a credential
+  code and another code are the two faults carrying `szamlazz_code`), the delete guard (absent → `absent`; a
+  collision → `external_id_collision` with or without `force`; a credit entry → `proforma_paid` without `force` and
+  the document to delete with it) and the delete response (deleted and 335 → `deleted`; a refusal → its code;
+  rejected credentials; a lost reply → `outcome_unknown`), the `get` projection (`live` / `reversed{None}`, totals,
+  credit entry amounts, `referenced_proforma`, `e_invoice` as the storno lifts it) and the `get` fold (ours fills
+  the slot, absent and a collision leave it empty, an absent proforma referenced by the invoice, by the prepayment,
+  by both (the invoice's) or by neither, and a returned proforma never derived), an
   endpoint build smoke test, two integration tests of the
   endpoint binary (spawned on an ephemeral port with an environment-only configuration, `SIGTERM` and `SIGINT` each
   end it with status 0 within seconds, the start-up log names both and honours `--bind`; `--check-config` on each
