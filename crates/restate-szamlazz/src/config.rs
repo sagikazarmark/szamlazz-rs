@@ -496,7 +496,8 @@ impl<T: Table> RetryPolicyConfig<T> {
                 max: self.max_delay,
             });
         }
-        // `inf` is a float to TOML and YAML: finite, and at least 1.
+        // The factor is finite and at least 1: `inf` is a float to TOML and
+        // YAML and would otherwise clear the `< 1.0` check.
         if !self.factor.is_finite() || self.factor < 1.0 {
             return Err(WorkerConfigError::InvalidFactor {
                 policy: T::POLICY,

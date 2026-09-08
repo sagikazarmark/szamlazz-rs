@@ -781,10 +781,7 @@ async fn the_execution_span_attributes_every_log_line_under_it() {
                 our_numbers: &[],
             })
             .await;
-        assert!(
-            matches!(outcome, Ok(LookupOutcome::Api { .. })),
-            "{outcome:?}"
-        );
+        assert!(matches!(outcome, Ok(LookupOutcome::Api(_))), "{outcome:?}");
     }
     .instrument(execution_span(
         Some("acme-events"),
