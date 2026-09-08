@@ -16,13 +16,13 @@ use http::Uri;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
 
-use crate::config::{Defaults, SellerConfig};
+use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 
 pub mod static_resolver;
 
 pub use static_resolver::{
-    AccountTable, InvalidScope, MAX_SCOPE_LEN, StaticAccount, StaticConfig, StaticConfigError,
-    StaticResolver,
+    AccountTable, InvalidScope, MAX_SCOPE_LEN, Secret, StaticAccount, StaticConfig,
+    StaticConfigError, StaticDefaults, StaticResolver, StaticSeller, StaticSellerEmail,
 };
 
 /// One szamlazz.hu account as the worker knows it, never the agent key.
@@ -99,6 +99,132 @@ impl Account {
             seller: SellerConfig::default(),
             credential_ref: credential_ref.into(),
         }
+    }
+}
+
+/// Document defaults; [`DocumentOverrides`](crate::contract::DocumentOverrides)
+/// may change the first seven per call.
+///
+/// Journaled inside the [`Account`], so
+/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// and set fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Defaults {
+    /// Issue e-invoices (`e-számla`). Default `false`.
+    pub e_invoice: bool,
+    /// Document language code. Default `hu`.
+    pub language: String,
+    /// Currency code. Default `HUF`.
+    pub currency: String,
+    /// Quoting bank for non-HUF documents without an explicit rate. Default
+    /// `MNB`.
+    pub exchange_rate_bank: String,
+    /// PDF template token.
+    pub template: Option<String>,
+    /// Whether szamlazz.hu should email documents to buyers.
+    pub send_email: Option<bool>,
+    /// Invoice number prefix (`számlaszám előtag`).
+    pub number_prefix: Option<String>,
+    /// Additional logo token configured on the account.
+    pub extra_logo: Option<String>,
+    /// Aggregator identifier for contracted integrations; not overridable per
+    /// call.
+    pub aggregator: Option<String>,
+    /// Guardian processing flag for contracted integrations; not overridable
+    /// per call.
+    pub guardian: Option<bool>,
+}
+
+impl Default for Defaults {
+    fn default() -> Self {
+        Self {
+            e_invoice: false,
+            language: "hu".to_owned(),
+            currency: "HUF".to_owned(),
+            exchange_rate_bank: "MNB".to_owned(),
+            template: None,
+            send_email: None,
+            number_prefix: None,
+            extra_logo: None,
+            aggregator: None,
+            guardian: None,
+        }
+    }
+}
+
+/// The seller (`eladó`) block; the account's own data is used where absent.
+///
+/// Journaled inside the [`Account`], so
+/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// and set fields.
+///
+/// Deliberately not the agent crate's [`Seller`], although the fields mirror
+/// it: the account's journal shape is this crate's contract with every
+/// in-flight invocation, and a crate-owned type keeps a `Seller`
+/// change in `szamlazz-agent` (a field renamed, retyped, or made required)
+/// from altering what an `account` entry replays as. The same reason
+/// `Szamlazz.Agent.query_taxpayer` journals the crate-owned
+/// `QueryTaxpayerResponse` projection rather than the agent crate's
+/// `TaxpayerInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct SellerConfig {
+    /// Bank name.
+    pub bank: Option<String>,
+    /// Bank account number.
+    pub bank_account: Option<String>,
+    /// Name of the signer shown on documents.
+    pub signer_name: Option<String>,
+    /// The notification email szamlazz.hu sends to buyers.
+    pub email: SellerEmailConfig,
+}
+
+impl SellerConfig {
+    /// The Agent seller block. The email block is present only when at least
+    /// one of its fields is set.
+    #[must_use]
+    pub fn to_seller(&self) -> Seller {
+        Seller {
+            bank: self.bank.clone(),
+            bank_account: self.bank_account.clone(),
+            signer_name: self.signer_name.clone(),
+            email: self.email.to_seller_email(),
+        }
+    }
+}
+
+/// Settings of the notification email szamlazz.hu sends to buyers.
+///
+/// Journaled inside the [`Account`] through
+/// [`SellerConfig`], so additive-only and `#[non_exhaustive]`: start from
+/// [`Default::default`] and set fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct SellerEmailConfig {
+    /// Reply-to address.
+    pub reply_to: Option<String>,
+    /// Subject.
+    pub subject: Option<String>,
+    /// Body; supports `BBCode`.
+    pub body: Option<String>,
+}
+
+impl SellerEmailConfig {
+    /// The Agent email block, or `None` when nothing is configured.
+    #[must_use]
+    pub fn to_seller_email(&self) -> Option<SellerEmail> {
+        if self.reply_to.is_none() && self.subject.is_none() && self.body.is_none() {
+            return None;
+        }
+        Some(SellerEmail {
+            reply_to: self.reply_to.clone(),
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+        })
     }
 }
 
@@ -703,8 +829,8 @@ mod tests {
         assert_eq!(account, Account::new("acme", "acme"));
         assert_eq!(account.endpoint, Endpoint::production());
         assert_eq!(account.endpoint.as_str(), "https://www.szamlazz.hu/szamla/");
-        assert_eq!(account.defaults, crate::config::Defaults::default());
-        assert_eq!(account.seller, crate::config::SellerConfig::default());
+        assert_eq!(account.defaults, Defaults::default());
+        assert_eq!(account.seller, SellerConfig::default());
     }
 
     #[test]
@@ -964,5 +1090,34 @@ mod tests {
             .to_string(),
             "no account is reachable under scope \"x\""
         );
+    }
+
+    #[test]
+    fn seller_config_projects_to_the_agent_seller_block() {
+        let seller: SellerConfig = serde_json::from_value(json!({
+            "bank": "Bank",
+            "bank_account": "1234",
+            "signer_name": "Signer",
+            "email": {"reply_to": "r@e.hu", "subject": "S", "body": "B"},
+        }))
+        .expect("parse");
+        let block = seller.to_seller();
+        assert_eq!(block.bank.as_deref(), Some("Bank"));
+        assert_eq!(block.bank_account.as_deref(), Some("1234"));
+        assert_eq!(block.signer_name.as_deref(), Some("Signer"));
+        let email = block.email.expect("email block");
+        assert_eq!(email.reply_to.as_deref(), Some("r@e.hu"));
+        assert_eq!(email.subject.as_deref(), Some("S"));
+        assert_eq!(email.body.as_deref(), Some("B"));
+
+        assert_eq!(
+            SellerConfig::default().to_seller().email,
+            None,
+            "no email block unless a field is set"
+        );
+        assert_eq!(Defaults::default().language, "hu");
+        assert_eq!(Defaults::default().currency, "HUF");
+        assert_eq!(Defaults::default().exchange_rate_bank, "MNB");
+        assert!(!Defaults::default().e_invoice);
     }
 }

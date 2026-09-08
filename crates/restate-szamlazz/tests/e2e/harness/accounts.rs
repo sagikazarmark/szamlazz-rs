@@ -15,7 +15,7 @@ use restate_szamlazz::account::{
     Account, AccountResolver, Accounts, BoxFuture, CredentialRef, CredentialStore, FetchError,
     ResolveError, StaticConfig, StaticResolver,
 };
-use restate_szamlazz::config::WorkerConfig;
+use restate_szamlazz::config::{ValidatedWorkerConfig, WorkerConfig};
 use restate_szamlazz::{Agent, Order};
 use serde_json::json;
 use szamlazz_agent::Credentials;
@@ -184,13 +184,14 @@ pub(crate) fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) 
 /// sampler's 100 ms interval (ten samples per window), and a missed one is
 /// diagnosable by the sample count in `Retries`.
 ///
-/// Built in Rust and handed to `from_parts`, never through
-/// `WorkerConfig::validate`: the 1 s issue delay is under the floor `validate`
-/// holds a deployment to (`IssueConfig::MIN_INITIAL_DELAY`, the client timeout
-/// plus a margin), which the endpoint's loader enforces and this suite (whose
-/// szamlazz.hu is a scripted mock that answers at once) has no use for.
-fn worker_config() -> WorkerConfig {
-    serde_json::from_value(json!({
+/// Built with `ValidatedWorkerConfig::unchecked` (the `test-util` feature),
+/// never through `WorkerConfig::validate`: the 1 s issue delay is under the
+/// floor `validate` holds a deployment to (`IssueConfig::MIN_INITIAL_DELAY`,
+/// the client timeout plus a margin), which `from_parts` demands and this
+/// suite (whose szamlazz.hu is a scripted mock that answers at once) has no
+/// use for.
+fn worker_config() -> ValidatedWorkerConfig {
+    let config: WorkerConfig = serde_json::from_value(json!({
         "namespace": "acct",
         "issue": {
             "max_attempts": 2,
@@ -213,7 +214,8 @@ fn worker_config() -> WorkerConfig {
             "max_duration": "30s",
         },
     }))
-    .expect("config")
+    .expect("config");
+    ValidatedWorkerConfig::unchecked(config)
 }
 
 /// A resolver and store whose accounts and keys the test can change while

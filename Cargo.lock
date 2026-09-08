@@ -2307,6 +2307,7 @@ dependencies = [
  "nix",
  "reqwest",
  "restate-sdk",
+ "restate-szamlazz",
  "rust_decimal",
  "schemars 1.2.2",
  "serde",

@@ -120,7 +120,7 @@ use szamlazz_agent::Credentials;
 use crate::account::{
     Account, AccountResolver as _, CredentialStore as _, Endpoint, StaticConfig, StaticResolver,
 };
-use crate::config::{Defaults, SellerConfig, SellerEmailConfig};
+use crate::account::{Defaults, SellerConfig, SellerEmailConfig};
 use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };

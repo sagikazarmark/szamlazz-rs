@@ -55,7 +55,7 @@
 //! use restate_szamlazz::account::StaticResolver;
 //! use restate_szamlazz::{Accounts, Agent, Order};
 //!
-//! worker.validate()?;
+//! let worker = worker.validate()?;
 //! let accounts = Accounts::from(StaticResolver::try_from(accounts)?);
 //! let order = Order::from_parts(accounts.clone(), worker.clone());
 //! let agent = Agent::from_parts(accounts, worker);
@@ -156,6 +156,7 @@
 //! }
 //!
 //! # async fn serve(db: Db, keys: Keys, worker: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
+//! let worker = worker.validate()?;
 //! let accounts = Accounts::new(Arc::new(db), Arc::new(keys));
 //! let endpoint = Endpoint::builder()
 //!     .bind(Order::from_parts(accounts.clone(), worker.clone()))
@@ -188,7 +189,7 @@ pub use szamlazz_agent;
 pub use szamlazz_agent::{AgentKey, Credentials};
 
 pub use account::{Account, AccountResolver, Accounts, CredentialStore};
-pub use config::WorkerConfig;
+pub use config::{ValidatedWorkerConfig, WorkerConfig};
 pub use contract::{CorrectionId, CreateRequest, CreateResponse, DocumentKind, InvoiceNumber};
 pub use gateway::Gateway;
 pub use identity::{ExternalId, OrderKey};

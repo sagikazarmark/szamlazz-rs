@@ -645,7 +645,7 @@ macro_rules! journal_helpers {
 
             use super::{Fault, Journaled, Lookup, StornoIntent};
             use crate::account::Accounts;
-            use crate::config::WorkerConfig;
+            use crate::config::{ValidatedWorkerConfig, WorkerConfig};
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{
                 QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
@@ -671,7 +671,7 @@ macro_rules! journal_helpers {
                 ctx: &$ctx<'_>,
                 key: Option<&str>,
                 accounts: &Accounts,
-                config: &WorkerConfig,
+                config: &ValidatedWorkerConfig,
                 body: F,
             ) -> Result<T, HandlerError>
             where
@@ -708,16 +708,19 @@ macro_rules! journal_helpers {
             async fn prologue(
                 ctx: &$ctx<'_>,
                 accounts: &Accounts,
-                config: &WorkerConfig,
+                config: &ValidatedWorkerConfig,
             ) -> Result<Execution, HandlerError> {
                 // 1. Pin.
                 let pinned = {
                     let namespace = config.namespace.clone();
                     run_once(ctx, "namespace", move || async move { namespace }).await?
                 };
+                // The pin replaces the namespace alone, which no policy
+                // invariant reads: the execution's settings are the validated
+                // ones with the journaled namespace.
                 let config = WorkerConfig {
                     namespace: pinned,
-                    ..config.clone()
+                    ..WorkerConfig::clone(config)
                 };
 
                 // 2. Resolve.

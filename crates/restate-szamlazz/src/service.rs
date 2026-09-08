@@ -16,9 +16,10 @@
 //! the ingress wraps them in its envelope.
 //!
 //! Each service holds exactly two things: the [`Accounts`] bundle (the
-//! account resolver and the credential store), and a [`WorkerConfig`] with the
-//! deployment-level settings (the namespace of the external ids; the issue,
-//! read and resolve policies). Every handler runs the same prologue after parsing
+//! account resolver and the credential store), and a [`ValidatedWorkerConfig`]
+//! with the deployment-level settings (the namespace of the external ids; the
+//! issue, read and resolve policies), validated because a service cannot be
+//! built over an issue policy below its floor. Every handler runs the same prologue after parsing
 //! its key: **pin** the namespace in a pure durable step, **resolve** the
 //! request's scope to its account in a durable step named `account` under the
 //! resolve policy, **fetch** the account's credentials outside the journal on
@@ -38,7 +39,7 @@ use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 
 use crate::account::Accounts;
-use crate::config::WorkerConfig;
+use crate::config::ValidatedWorkerConfig;
 
 mod agent;
 mod body;
@@ -55,6 +56,15 @@ pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressCli
 
 use prologue::Execution;
 
+/// What both services hold: the accounts bundle and the validated
+/// deployment-level settings. One struct, since the two services are built
+/// from the same parts and differ only in their handlers.
+#[derive(Debug, Clone)]
+struct Deployment {
+    accounts: Accounts,
+    config: ValidatedWorkerConfig,
+}
+
 /// The `Order` Virtual Object: one instance per order number. Registered as
 /// `Szamlazz.Order`.
 ///
@@ -62,28 +72,30 @@ use prologue::Execution;
 /// The object holds no state.
 #[derive(Debug, Clone)]
 pub struct Order {
-    accounts: Accounts,
-    config: WorkerConfig,
+    deployment: Deployment,
 }
 
 impl Order {
     /// Builds the object over the account resolver and credential store in
-    /// `accounts` and the deployment-level `config`.
+    /// `accounts` and the validated deployment-level `config`
+    /// ([`WorkerConfig::validate`](crate::config::WorkerConfig::validate)).
     #[must_use]
-    pub fn from_parts(accounts: Accounts, config: WorkerConfig) -> Self {
-        Self { accounts, config }
+    pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
+        Self {
+            deployment: Deployment { accounts, config },
+        }
     }
 
     /// The account resolver and credential store.
     #[must_use]
     pub fn accounts(&self) -> &Accounts {
-        &self.accounts
+        &self.deployment.accounts
     }
 
     /// The deployment-level settings.
     #[must_use]
-    pub fn config(&self) -> &WorkerConfig {
-        &self.config
+    pub fn config(&self) -> &ValidatedWorkerConfig {
+        &self.deployment.config
     }
 
     /// Runs an exclusive handler's execution: the prologue (pin → resolve →
@@ -95,7 +107,14 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::object::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
+        support::object::execute(
+            ctx,
+            Some(ctx.key()),
+            &self.deployment.accounts,
+            &self.deployment.config,
+            body,
+        )
+        .await
     }
 
     /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
@@ -108,7 +127,14 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::shared::execute(ctx, Some(ctx.key()), &self.accounts, &self.config, body).await
+        support::shared::execute(
+            ctx,
+            Some(ctx.key()),
+            &self.deployment.accounts,
+            &self.deployment.config,
+            body,
+        )
+        .await
     }
 }
 
@@ -129,28 +155,30 @@ impl Order {
 /// invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
 #[derive(Debug, Clone)]
 pub struct Agent {
-    accounts: Accounts,
-    config: WorkerConfig,
+    deployment: Deployment,
 }
 
 impl Agent {
     /// Builds the service over the account resolver and credential store in
-    /// `accounts` and the deployment-level `config`.
+    /// `accounts` and the validated deployment-level `config`
+    /// ([`WorkerConfig::validate`](crate::config::WorkerConfig::validate)).
     #[must_use]
-    pub fn from_parts(accounts: Accounts, config: WorkerConfig) -> Self {
-        Self { accounts, config }
+    pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
+        Self {
+            deployment: Deployment { accounts, config },
+        }
     }
 
     /// The account resolver and credential store.
     #[must_use]
     pub fn accounts(&self) -> &Accounts {
-        &self.accounts
+        &self.deployment.accounts
     }
 
     /// The deployment-level settings.
     #[must_use]
-    pub fn config(&self) -> &WorkerConfig {
-        &self.config
+    pub fn config(&self) -> &ValidatedWorkerConfig {
+        &self.deployment.config
     }
 
     /// Runs a handler's execution: the prologue (pin → resolve → fetch →
@@ -161,7 +189,14 @@ impl Agent {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::service::execute(ctx, None, &self.accounts, &self.config, body).await
+        support::service::execute(
+            ctx,
+            None,
+            &self.deployment.accounts,
+            &self.deployment.config,
+            body,
+        )
+        .await
     }
 }
 

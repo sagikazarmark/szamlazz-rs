@@ -3,11 +3,13 @@
 //! `[read]`, `[resolve]`), the static resolver's accounts
 //! ([`StaticConfig`](restate_szamlazz::account::StaticConfig): `[account]` or
 //! `[accounts.<scope>]`) and what only the hosting process cares about
-//! (`identity_keys`, read as the [`RequestIdentity`] decision). Strict: a key
-//! the configuration does not know, at any level, is refused with its path
-//! and source ([`schema`]).
+//! (`identity_keys`, read as the [`RequestIdentity`] decision). Strict: the
+//! layout and every library type it is made of are closed
+//! (`#[serde(deny_unknown_fields)]`), so a key the configuration does not
+//! know, at any level, is a parse error naming the key, its path and its
+//! source; the one shape rule serde cannot express is [`shape`]'s.
 
-mod schema;
+mod shape;
 mod sources;
 
 use std::collections::BTreeMap;
@@ -16,9 +18,11 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use figment::Figment;
 use figment::providers::{Format, Json, Toml, Yaml};
-use restate_szamlazz::WorkerConfig;
 use restate_szamlazz::account::{StaticAccount, StaticConfig};
-use restate_szamlazz::config::{IssueConfig, Namespace, ReadConfig, ResolveConfig};
+use restate_szamlazz::config::{
+    IssueConfig, ReadConfig, ResolveConfig, ValidatedWorkerConfig, WorkerConfig,
+};
+use restate_szamlazz::identity::Namespace;
 use serde::Deserialize;
 
 pub use sources::{EnvOverrides, PlainKeys};
@@ -62,13 +66,14 @@ pub fn figment(path: Option<&Path>) -> Result<Figment> {
 /// `[account]` or a table of `[accounts.<scope>]` (each with its `defaults`
 /// and `seller`), plus `identity_keys`, all at the top level (see
 /// [`Layout`]). Load it with [`EndpointConfig::load`], which refuses unknown
-/// keys and both shapes at once; the accounts' own rules (a non-blank id and
-/// key, the multi-account uniqueness rules) are checked when the static
-/// resolver is built from `accounts`.
+/// keys and both shapes at once and validates the deployment-level
+/// invariants; the accounts' own rules (a non-blank id and key, the
+/// multi-account uniqueness rules) are checked when the static resolver is
+/// built from `accounts`.
 #[derive(Debug, Clone)]
 pub struct EndpointConfig {
-    /// The deployment-level settings of the services.
-    pub worker: WorkerConfig,
+    /// The deployment-level settings of the services, validated.
+    pub worker: ValidatedWorkerConfig,
     /// The accounts of the static resolver.
     pub accounts: StaticConfig,
     /// What the endpoint does with a request's signature, as `identity_keys`
@@ -113,12 +118,13 @@ impl Default for RequestIdentity {
     }
 }
 
-/// The file layout, one explicit field per top-level key. The library's
-/// [`WorkerConfig`] and [`StaticConfig`] are assembled from it rather than
-/// flattened into it, so a parse error keeps the key path and the source
-/// figment attaches; `#[serde(flatten)]` deserializes through a buffer that
-/// drops both.
+/// The file layout, one explicit field per top-level key, closed. The
+/// library's [`WorkerConfig`] and [`StaticConfig`] are assembled from it
+/// rather than flattened into it, so a parse error keeps the key path and the
+/// source figment attaches; `#[serde(flatten)]` deserializes through a buffer
+/// that drops both (and admits no `deny_unknown_fields`).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Layout {
     namespace: Namespace,
     #[serde(default)]
@@ -137,8 +143,21 @@ struct Layout {
     identity_keys: RequestIdentity,
 }
 
-impl From<Layout> for EndpointConfig {
-    fn from(layout: Layout) -> Self {
+impl EndpointConfig {
+    /// Extracts the configuration from `figment` and validates the
+    /// deployment-level invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the figment holds both account shapes at once
+    /// (each named with its source); when it does not parse, a key the
+    /// configuration does not know at any level included (named with its
+    /// path and its source); or when [`WorkerConfig::validate`] fails. The
+    /// accounts themselves are validated when the static resolver is built.
+    pub fn load(figment: &Figment) -> Result<Self> {
+        shape::check(figment).context("invalid configuration")?;
+        // Lossy: an environment value is a string, and the field's type
+        // decides how it is read (`"3"` → `3` where a number is expected).
         let Layout {
             namespace,
             issue,
@@ -147,43 +166,22 @@ impl From<Layout> for EndpointConfig {
             account,
             accounts,
             identity_keys,
-        } = layout;
-        Self {
-            worker: WorkerConfig {
-                namespace,
-                issue,
-                read,
-                resolve,
-            },
-            accounts: StaticConfig { account, accounts },
-            request_identity: identity_keys,
-        }
-    }
-}
-
-impl EndpointConfig {
-    /// Extracts the configuration from `figment` and validates the
-    /// deployment-level invariants.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the figment holds a key the configuration does
-    /// not know, at any level (every such key is named with its path and its
-    /// source); the pre-release layout's moved keys (`account.slug`, top-level
-    /// `[defaults]` / `[seller]`) with where they went, or both account
-    /// shapes at once (each named with its source); when it does not parse;
-    /// or when [`WorkerConfig::validate`] fails. The accounts themselves are
-    /// validated when the static resolver is built.
-    pub fn load(figment: &Figment) -> Result<Self> {
-        schema::check(figment).context("invalid configuration")?;
-        // Lossy: an environment value is a string, and the field's type
-        // decides how it is read (`"3"` → `3` where a number is expected).
-        let layout: Layout = figment
+        } = figment
             .extract_lossy()
             .context("failed to parse configuration")?;
-        let config = Self::from(layout);
-        config.worker.validate().context("invalid configuration")?;
-        Ok(config)
+        let worker = WorkerConfig {
+            namespace,
+            issue,
+            read,
+            resolve,
+        }
+        .validate()
+        .context("invalid configuration")?;
+        Ok(Self {
+            worker,
+            accounts: StaticConfig { account, accounts },
+            request_identity: identity_keys,
+        })
     }
 }
 
@@ -395,16 +393,17 @@ mod tests {
         let config = load(FULL_EXAMPLE).expect("configuration should load");
 
         assert_eq!(config.worker.namespace.as_str(), "acct");
-        assert_eq!(config.worker.issue.max_attempts, 5);
+        assert_eq!(config.worker.issue.max_attempts, Some(5));
         assert_eq!(config.worker.issue.initial_delay, Duration::from_secs(120));
         assert_eq!(config.worker.issue.factor.to_bits(), 2.0f32.to_bits());
         assert_eq!(config.worker.issue.max_delay, Duration::from_secs(600));
         assert_eq!(config.worker.issue.max_duration, Duration::from_secs(3600));
-        assert_eq!(config.worker.read.max_attempts, 5);
+        assert_eq!(config.worker.read.max_attempts, Some(5));
         assert_eq!(config.worker.read.initial_delay, Duration::from_secs(5));
         assert_eq!(config.worker.read.factor.to_bits(), 2.0f32.to_bits());
         assert_eq!(config.worker.read.max_delay, Duration::from_secs(60));
         assert_eq!(config.worker.read.max_duration, Duration::from_secs(300));
+        assert_eq!(config.worker.resolve.max_attempts, None);
         assert_eq!(config.worker.resolve.initial_delay, Duration::from_secs(1));
         assert_eq!(config.worker.resolve.max_delay, Duration::from_secs(10));
         assert_eq!(config.worker.resolve.max_duration, Duration::from_secs(60));
@@ -506,10 +505,10 @@ mod tests {
             assert_eq!(account.agent_key.expose(), "0071234", "byte-exact");
             assert_eq!(account.defaults.currency, "EUR");
             assert!(account.defaults.e_invoice);
-            assert_eq!(config.worker.issue.max_attempts, 3);
+            assert_eq!(config.worker.issue.max_attempts, Some(3));
             assert_eq!(config.worker.issue.factor.to_bits(), 1.5f32.to_bits());
             assert_eq!(config.worker.issue.initial_delay, Duration::from_secs(90));
-            assert_eq!(config.worker.read.max_attempts, 4);
+            assert_eq!(config.worker.read.max_attempts, Some(4));
             assert_eq!(config.worker.namespace.as_str(), "from-env");
             // Untouched values survive the merge.
             assert_eq!(account.id.as_str(), "acme");
@@ -891,48 +890,13 @@ mod tests {
         });
     }
 
-    /// The pre-release layout (`account.slug`, top-level `[defaults]` and
-    /// `[seller]`) is refused by name rather than silently ignored.
-    #[test]
-    fn pre_release_layout_fails_with_a_clear_error() {
-        let error = load(
-            r#"
-            [account]
-            slug = "acct"
-            agent_key = "agent-key"
-
-            [defaults]
-            currency = "EUR"
-
-            [seller]
-            bank_account = "1234"
-
-            [issue]
-            max_attempts = 5
-            "#,
-        )
-        .expect_err("the old layout must not load");
-        let message = format!("{error:#}");
-        assert!(message.contains("pre-release layout"), "{message}");
-        assert!(message.contains("`account.slug`"), "{message}");
-        assert!(message.contains("`namespace`"), "{message}");
-        assert!(message.contains("`[account.defaults]`"), "{message}");
-        assert!(message.contains("`[account.seller]`"), "{message}");
-
-        // A single moved key is enough, and only it is named.
-        let error = load(&format!("{}\n[seller]\nbank = \"B\"", minimal()))
-            .expect_err("a top-level seller table must not load");
-        let message = format!("{error:#}");
-        assert!(message.contains("`[account.seller]`"), "{message}");
-        assert!(!message.contains("`account.slug`"), "{message}");
-        assert!(!message.contains("`[account.defaults]`"), "{message}");
-    }
-
     /// An unknown key is refused at every level (the top level, a policy,
     /// an account table and its `defaults` / `seller` / `seller.email`
-    /// sub-tables, in either shape) with an error naming the key, its path
-    /// and where it came from, instead of being ignored and leaving the
-    /// setting at its default.
+    /// sub-tables, in either shape) with an error naming the key, its path,
+    /// where it came from and the keys accepted there, instead of being
+    /// ignored and leaving the setting at its default. The rule is serde's
+    /// (every type of the layout is closed), so the first unknown key is
+    /// reported; the path and the source are figment's.
     #[test]
     fn unknown_keys_are_refused_with_their_path_and_source() {
         const MULTI: &str = r#"
@@ -947,48 +911,59 @@ mod tests {
             (
                 format!("{}\n[isue]\nmax_attempts = 1", minimal()),
                 "isue",
+                "isue",
                 "issue",
             ),
             // A misspelt `endpoint` posts to production.
             (
                 format!("{}\nendpont = \"http://127.0.0.1:1/\"", minimal()),
+                "endpont",
                 "account.endpont",
                 "endpoint",
             ),
             (
                 format!("{}\n[account.defaults]\ncurency = \"EUR\"", minimal()),
+                "curency",
                 "account.defaults.curency",
                 "currency",
             ),
             (
                 format!("{MULTI}\n[accounts.acme.seller]\nbnk = \"B\""),
+                "bnk",
                 "accounts.acme.seller.bnk",
                 "bank",
             ),
             (
                 format!("{MULTI}\n[accounts.acme.seller.email]\nsubjet = \"S\""),
+                "subjet",
                 "accounts.acme.seller.email.subjet",
                 "subject",
             ),
             (
                 format!("{}\n[read]\nmax_atempts = 1", minimal()),
+                "max_atempts",
                 "read.max_atempts",
                 "max_attempts",
             ),
             (
-                format!("{}\n[resolve]\nmax_attempts = 1", minimal()),
-                "resolve.max_attempts",
-                "max_delay",
+                format!("{}\n[resolve]\nattempts = 1", minimal()),
+                "attempts",
+                "resolve.attempts",
+                "max_attempts",
             ),
         ];
-        for (toml, path, expected) in cases {
+        for (toml, key, path, expected) in cases {
             let error = load(&toml)
                 .err()
                 .unwrap_or_else(|| panic!("`{path}` must not load"));
             let message = format!("{error:#}");
             assert!(
-                message.contains(&format!("unknown key `{path}`")),
-                "the error names the key and its path: {message}"
+                message.contains(&format!("unknown field: found `{key}`")),
+                "the error names the key: {message}"
+            );
+            assert!(
+                message.contains(&format!("for key \"{path}\"")),
+                "the error names the path: {message}"
             );
             assert!(
                 message.contains("TOML source string"),
@@ -1000,13 +975,6 @@ mod tests {
             );
         }
 
-        // Every unknown key is reported, not just the first.
-        let error = load(&format!("{}\nmod = \"test\"\n[isue]\nx = 1", minimal()))
-            .expect_err("two unknown keys");
-        let message = format!("{error:#}");
-        assert!(message.contains("unknown key `isue`"), "{message}");
-        assert!(message.contains("unknown key `account.mod`"), "{message}");
-
         // The value under an unknown key is never echoed: a misspelt
         // `agent_key` holds the secret.
         let error = load(&format!(
@@ -1016,20 +984,25 @@ mod tests {
         .expect_err("a misspelt agent_key");
         let message = format!("{error:#}");
         assert!(
-            message.contains("unknown key `account.agent_kye`"),
+            message.contains("unknown field: found `agent_kye`"),
             "{message}"
         );
         assert!(!message.contains("sentinel-secret-9f1c"), "{message}");
 
-        // The environment is a source like any other.
+        // The environment is a source like any other: the key renders as the
+        // variable that set it.
         Jail::expect_with(|jail| {
             jail.set_env("RESTATE_SZAMLAZZ_ACOUNT__ID", "acme");
             let error = load_with_env(minimal())
                 .expect_err("a misspelt environment override must not load");
             let message = format!("{error:#}");
             assert!(
-                message.contains("unknown key `acount` (RESTATE_SZAMLAZZ_ACOUNT__ID)"),
-                "the error names the key and the variable that set it: {message}"
+                message.contains("unknown field: found `acount`"),
+                "the error names the key: {message}"
+            );
+            assert!(
+                message.contains("for key \"RESTATE_SZAMLAZZ_ACOUNT\""),
+                "the error names the variable that set it: {message}"
             );
             assert!(message.contains("in environment variables"), "{message}");
             Ok(())

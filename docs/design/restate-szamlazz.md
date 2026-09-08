@@ -25,7 +25,8 @@ key, and the worker is the one place that holds one (§4, `Szamlazz.Agent.query_
 | `restate-szamlazz` | library | Contract types, deployment config, the account model with the resolver and credential-store traits and the static resolver, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
 | `restate-szamlazz-endpoint` | binary `restate-szamlazz`, container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config in the single-account (`[account]`) or multi-account (`[accounts.<scope>]`) shape |
 
-`restate-sdk` is an unconditional dependency; the only feature is `schemars`.
+`restate-sdk` is an unconditional dependency; the features are `schemars` and `test-util` (the unchecked configuration
+constructor the e2e harness builds its sub-floor policies with; never enabled by a deployment).
 
 Layering (ADR 0001): the `gateway` is a Rust module that speaks to szamlazz.hu on behalf of one account; it owns the
 `szamlazz_agent::Client` (the transport it wraps; it is not a second client) and the account, and exposes one plain
@@ -727,25 +728,29 @@ endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
 All three policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
 server would spend the handler's `invocation_retry_policy` instead. Durations are `"90s"`, `"2m"`, `"1h"` or a bare
 non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
-invariants (`max_attempts ≥ 1` on the issue and read policies, `initial_delay ≤ max_delay` and `factor ≥ 1` on all
+invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and `factor ≥ 1` on all
 three) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
 `REQUEST_TIMEOUT` (60 s) plus a 30 s margin, a create or storno step re-executed sooner would query for the cut execution's
 send while it may still be in flight (the ~90 s rule of ADR 0002 and the behaviour notes, in code since #61; the read
-and resolve policies have no floor, and the e2e suite's 1 s policies are built in Rust and never pass through
-`validate`);
+and resolve policies have no floor, and the e2e suite's 1 s policies are built with
+`ValidatedWorkerConfig::unchecked` behind the `test-util` feature and never pass through `validate`; `validate` is the
+one way to the `ValidatedWorkerConfig` that `Order::from_parts` / `Agent::from_parts` take, #128);
 `StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint).
 
-**The endpoint's loader is strict.** Before the typed extraction it walks the merged figment value against the known
-key tree (the top level, the policies, each account table and its `defaults` / `seller` / `seller.email`), and
-refuses every unknown key at once, naming the key, its path, its source (the file, or the environment variable that
-set it) and what is accepted there; a typo such as `mod = "test"` or `[isue]` fails at start-up instead of silently
-running a test account as live or leaving a policy at its default. The refusal lives in the loader rather than as
-`#[serde(deny_unknown_fields)]` on the library types because the account-shaped value types are journaled inside
-`Account` and must stay permissive for replay; a test checks the tree against the `Serialize` output of the library
-types so it cannot drift. The same walk names both account shapes with their sources when both are present (a stray
-`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` on a multi-account file would otherwise surface as the partial account's
-`missing field id`), and refuses the pre-release layout (`account.slug`, top-level `[defaults]` / `[seller]`) with each
-moved key named: the crate has never been released, there is no compatibility shim. Environment override values are
+**The endpoint's loader is strict.** The layout and every library type it is made of are closed
+(`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount` and
+its `StaticDefaults` / `StaticSeller` / `StaticSellerEmail`), so an unknown key at any level is a parse error that
+figment attaches the key path and the source to (the file, or the environment variable that set it); a typo such as
+`mod = "test"` or `[isue]` fails at start-up instead of silently running a test account as live or leaving a policy at
+its default. The input types are distinct from the journaled value types they are built into (`Defaults`,
+`SellerConfig`, `SellerEmailConfig` in `account`, which stay permissive so that an `account` entry of an earlier
+deployment replays), mirror them field for field and convert with `From`; a round-trip test holds the two sides to each
+other (#128; the pre-#128 loader kept a hand-maintained key tree instead, J-05-15). The one shape rule serde cannot
+express is checked first, on the merged figment value: both account shapes present is refused naming each with its
+source (a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` on a multi-account file would otherwise surface as the partial
+account's `missing field id`). The pre-release layout (`account.slug`, top-level `[defaults]` / `[seller]`) is refused
+as any unknown key is: the crate has never been released, there is no compatibility shim and no longer a named
+refusal. Environment override values are
 read as **strings** and the field's type decides (`extract_lossy`: `"3"` is `3` on a count, `"true"` on a flag), so an
 all-digit agent key keeps its leading zeros; figment's own environment provider would parse it as a number.
 `--check-config` runs the loader and builds the endpoint, then exits 0 without listening.

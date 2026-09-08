@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::{Agent, Order};
 use crate::account::{Accounts, ResolveError, StaticConfig, StaticResolver};
-use crate::config::{IssueConfig, WorkerConfig};
+use crate::config::{IssueConfig, ValidatedWorkerConfig, WorkerConfig};
 use crate::identity::Namespace;
 use crate::test_support::{Doc, ORIGINAL_TELJ, open_gateway};
 
@@ -44,6 +44,11 @@ fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
 
 fn namespace() -> Namespace {
     "acct".parse().expect("namespace")
+}
+
+/// The default deployment settings under `acct`, validated.
+fn worker_config() -> ValidatedWorkerConfig {
+    WorkerConfig::new(namespace()).validate().expect("valid")
 }
 
 #[test]
@@ -275,7 +280,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
 /// settings, and nothing else: no gateway, no client.
 #[tokio::test]
 async fn services_bind_to_an_endpoint() {
-    let worker = WorkerConfig::new(namespace());
+    let worker = WorkerConfig::new(namespace()).validate().expect("valid");
     let order = Order::from_parts(accounts("http://127.0.0.1:1/", "key"), worker.clone());
     let agent = Agent::from_parts(order.accounts().clone(), order.config().clone());
     assert_eq!(order.config(), agent.config());
@@ -354,8 +359,8 @@ fn a_leaky_store_does_not_print_its_keys_through_accounts_order_or_agent() {
     );
 
     let accounts = Accounts::new(leaky.clone() as Arc<dyn AccountResolver>, leaky);
-    let order = Order::from_parts(accounts.clone(), WorkerConfig::new(namespace()));
-    let agent = Agent::from_parts(accounts.clone(), WorkerConfig::new(namespace()));
+    let order = Order::from_parts(accounts.clone(), worker_config());
+    let agent = Agent::from_parts(accounts.clone(), worker_config());
     for (label, rendering) in [
         ("Accounts", format!("{accounts:?}")),
         ("Order", format!("{order:?}")),
@@ -652,7 +657,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
         .expect(1)
         .mount(&server)
         .await;
-    let order = Order::from_parts(accounts(&server.uri(), KEY), WorkerConfig::new(namespace()));
+    let order = Order::from_parts(accounts(&server.uri(), KEY), worker_config());
 
     let capture = LogCapture::default();
     let guard = capture.subscribe();
@@ -730,10 +735,7 @@ async fn the_execution_span_attributes_every_log_line_under_it() {
         .expect(1)
         .mount(&server)
         .await;
-    let order = Order::from_parts(
-        accounts(&server.uri(), "key"),
-        WorkerConfig::new(namespace()),
-    );
+    let order = Order::from_parts(accounts(&server.uri(), "key"), worker_config());
 
     let capture = LogCapture::default();
     let guard = capture.subscribe();
