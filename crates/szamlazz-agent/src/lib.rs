@@ -48,7 +48,10 @@
 //! - `client-reqwest` adds the ready-made async `Client`. It supports native
 //!   and browser wasm targets. On native targets it manages the session cookie,
 //!   timeout (`client::REQUEST_TIMEOUT`), TLS, and redirect policy; on wasm the
-//!   browser controls cookies and redirects.
+//!   browser controls cookies and redirects. The feature re-exports [`reqwest`]
+//!   so that a caller supplying its own HTTP client
+//!   ([`client::ClientBuilder::http_client`]) names the one version this crate
+//!   is built against.
 // docs.rs builds with all features on nightly and sets `--cfg docsrs`;
 // current rustdoc's doc_cfg automatically annotates feature- and target gates.
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -65,6 +68,14 @@ mod xml;
 
 #[cfg(feature = "client-reqwest")]
 pub use client::{Client, ClientError};
+/// The HTTP crate the ready-made [`Client`] is built on, re-exported so that a
+/// caller building the client's transport itself
+/// ([`client::ClientBuilder::http_client`]: a proxy, a custom TLS setup) has
+/// the one version this crate compiles against without a second dependency.
+/// No new coupling: `reqwest::Client` and `reqwest::Error` are already in this
+/// crate's public API through that method and `ClientError::Transport`.
+#[cfg(feature = "client-reqwest")]
+pub use reqwest;
 
 /// The README's examples, compiled as doctests: the quick start (issue, query
 /// by external id, fetch the PDF) and the failure branch need `client-reqwest`,

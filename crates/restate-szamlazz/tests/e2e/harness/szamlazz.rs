@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, Request, ResponseTemplate};
 
+use crate::harness::plain_http;
+
 /// The `szallito/id` the rendered documents carry: the seller record's id as
 /// szamlazz.hu prints it in a query body (972720 on the test account). Wire
 /// realism only: the worker holds no account pin; the scenario that renders
@@ -434,11 +436,16 @@ pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>
 
 // ----- the harness's stub helpers, against wiremock alone -----------------------
 
+/// The client the raw posts below go through: [`plain_http`], built.
+fn http() -> reqwest::Client {
+    plain_http().build().expect("http client")
+}
+
 /// A query as the Számla Agent client puts it on the wire, reduced to what
 /// the selector matchers read: the operation's field name and the one
 /// selector element.
 async fn query_by(mock: &MockServer, selector: &str) -> (u16, String) {
-    let response = reqwest::Client::new()
+    let response = http()
         .post(mock.uri())
         .body(format!("name=\"action-szamla_agent_xml\"\n{selector}"))
         .send()
@@ -581,7 +588,7 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
             "query {query} before the create: {body}"
         );
     }
-    let response = reqwest::Client::new()
+    let response = http()
         .post(mock.uri())
         .body("name=\"action-xmlagentxmlfile\"\n<xmlszamla/>")
         .send()

@@ -73,6 +73,7 @@ use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{
     ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, OutcomeClass,
+    reqwest,
 };
 use tracing::Instrument as _;
 
@@ -99,7 +100,8 @@ pub const REQUEST_CODE: &str = "request";
 /// client plus the [`Account`] it is opened for.
 ///
 /// Opened with [`Gateway::open`] for one handler execution from a resolved
-/// account and freshly fetched credentials.
+/// account and freshly fetched credentials, or with
+/// [`Gateway::open_with_http`] over a caller-built HTTP client.
 #[derive(Debug, Clone)]
 pub struct Gateway {
     client: Client,
@@ -863,6 +865,45 @@ impl Gateway {
         let client = Client::builder()
             .credentials(credentials)
             .endpoint(account.endpoint.as_str())
+            .build()?;
+        Ok(Self { client, account })
+    }
+
+    /// Opens the gateway as [`Gateway::open`] does, over the caller's own
+    /// [`reqwest::Client`] instead of a default one: the embedder's hook for a
+    /// proxy or a custom TLS setup. The Számla Agent crate's
+    /// [`ClientBuilder::http_client`](szamlazz_agent::client::ClientBuilder::http_client)
+    /// is the same hook one level down, and what the default client sets is
+    /// then the caller's to set: `.cookie_store(true)` so the `JSESSIONID`
+    /// session is reused, a timeout (the default client's
+    /// [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT) is not
+    /// applied to a supplied client), and `redirect(Policy::none())`, since
+    /// following a redirect would turn the multipart POST into a body-less
+    /// GET.
+    ///
+    /// The fresh-client-per-execution boundary of [`Gateway::open`] becomes
+    /// the caller's to keep: two gateways of two accounts opened over one
+    /// `http` share its cookie jar, and with it one account's session.
+    ///
+    /// This crate's own unit and wiremock tests open every gateway through it,
+    /// over a client with no root certificates, so that none of them parses
+    /// the system CA store for a plain-`http://` mock; the e2e suite's
+    /// deployment opens its gateways through the prologue's [`Gateway::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Számla Agent client cannot be built; nothing
+    /// on this path constructs an HTTP client, so the error is the builder's
+    /// contract rather than an outcome this crate has seen.
+    pub fn open_with_http(
+        account: Account,
+        credentials: Credentials,
+        http: reqwest::Client,
+    ) -> Result<Self, BuildError> {
+        let client = Client::builder()
+            .credentials(credentials)
+            .endpoint(account.endpoint.as_str())
+            .http_client(http)
             .build()?;
         Ok(Self { client, account })
     }

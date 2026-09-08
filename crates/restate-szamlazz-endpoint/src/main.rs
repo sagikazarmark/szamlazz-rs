@@ -256,6 +256,8 @@ mod tests {
     use restate_szamlazz::Gateway;
     use restate_szamlazz::contract::Selector;
     use restate_szamlazz::gateway::QueryOutcome;
+    use restate_szamlazz::szamlazz_agent::client::REQUEST_TIMEOUT;
+    use restate_szamlazz::szamlazz_agent::reqwest;
     use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
@@ -440,13 +442,23 @@ mod tests {
     }
 
     /// What every handler's prologue does with the loaded accounts: resolve
-    /// the unscoped account, fetch its credentials, open the gateway.
+    /// the unscoped account, fetch its credentials, open the gateway. Opened
+    /// over an HTTP client with no root certificates, so the test never parses
+    /// the system CA store for a plain-`http://` wiremock (#136); the
+    /// prologue's own `Gateway::open` is exercised by the e2e suite.
     async fn gateway(config: EndpointConfig) -> Gateway {
         let accounts = Accounts::from(
             StaticResolver::try_from(config.accounts).expect("accounts should build"),
         );
         let account = accounts.resolve(None).await.expect("the unscoped account");
         let credentials = accounts.fetch(&account).await.expect("its credentials");
-        Gateway::open(account, credentials).expect("gateway should build")
+        let http = reqwest::Client::builder()
+            .tls_certs_only(std::iter::empty())
+            .cookie_store(true)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("http client should build");
+        Gateway::open_with_http(account, credentials, http).expect("gateway should build")
     }
 }

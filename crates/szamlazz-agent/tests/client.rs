@@ -6,13 +6,36 @@
 
 use jiff::civil::date;
 use rust_decimal::dec;
+use szamlazz_agent::client::REQUEST_TIMEOUT;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::{
     Client, ClientError, Credentials, Currency, Language, LineItem, OutcomeClass, PaymentMethod,
-    VatRate,
+    VatRate, reqwest,
 };
 use wiremock::matchers::{header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// A client for `endpoint` with the test key, over the default client's
+/// settings (a cookie jar, `REQUEST_TIMEOUT`, no redirects) with **no root
+/// certificates**: building the default client parses the system CA store,
+/// which a test whose every endpoint is plain `http://` needs nothing of
+/// (#136). `Client::send` is what these tests are about; the default client's
+/// construction is the live tests' to exercise.
+fn client_for(endpoint: impl Into<String>) -> Client {
+    let http = reqwest::Client::builder()
+        .tls_certs_only(std::iter::empty())
+        .cookie_store(true)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client");
+    Client::builder()
+        .credentials(Credentials::agent_key("key"))
+        .endpoint(endpoint)
+        .http_client(http)
+        .build()
+        .expect("client")
+}
 
 fn sample_invoice() -> CreateInvoice {
     CreateInvoice::new(
@@ -53,11 +76,7 @@ async fn sends_multipart_and_parses_success() {
         .mount(&server)
         .await;
 
-    let client = Client::builder()
-        .credentials(Credentials::agent_key("key"))
-        .endpoint(server.uri())
-        .build()
-        .expect("client");
+    let client = client_for(server.uri());
 
     let created = client.send(&sample_invoice()).await.expect("success");
     assert_eq!(
@@ -88,11 +107,7 @@ async fn maps_header_errors() {
         .mount(&server)
         .await;
 
-    let client = Client::builder()
-        .credentials(Credentials::agent_key("key"))
-        .endpoint(server.uri())
-        .build()
-        .expect("client");
+    let client = client_for(server.uri());
 
     let error = client.send(&sample_invoice()).await.expect_err("error");
     match error {
@@ -112,11 +127,7 @@ async fn maps_system_unavailability() {
         .mount(&server)
         .await;
 
-    let client = Client::builder()
-        .credentials(Credentials::agent_key("key"))
-        .endpoint(server.uri())
-        .build()
-        .expect("client");
+    let client = client_for(server.uri());
 
     assert!(matches!(
         client.send(&sample_invoice()).await,
@@ -126,11 +137,7 @@ async fn maps_system_unavailability() {
 
 #[tokio::test]
 async fn maps_transport_errors() {
-    let client = Client::builder()
-        .credentials(Credentials::agent_key("key"))
-        .endpoint("not a valid URL")
-        .build()
-        .expect("client");
+    let client = client_for("not a valid URL");
 
     let error = client.send(&sample_invoice()).await.expect_err("error");
     assert!(matches!(error, ClientError::Transport(_)));
@@ -139,11 +146,7 @@ async fn maps_transport_errors() {
 #[tokio::test]
 async fn rejects_invalid_request_before_http() {
     let server = MockServer::start().await;
-    let client = Client::builder()
-        .credentials(Credentials::agent_key("key"))
-        .endpoint(server.uri())
-        .build()
-        .expect("client");
+    let client = client_for(server.uri());
     let mut request = sample_invoice();
     request.items.clear();
 
@@ -168,30 +171,19 @@ async fn rejects_invalid_request_before_http() {
 /// `Unknown`.
 #[tokio::test]
 async fn classifies_every_failure_by_outcome() {
-    fn client_for(server: &MockServer) -> Client {
-        Client::builder()
-            .credentials(Credentials::agent_key("key"))
-            .endpoint(server.uri())
-            .build()
-            .expect("client")
-    }
     async fn send_to(response: ResponseTemplate) -> ClientError {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(response)
             .mount(&server)
             .await;
-        client_for(&server)
+        client_for(server.uri())
             .send(&sample_invoice())
             .await
             .expect_err("error")
     }
 
-    let transport = Client::builder()
-        .credentials(Credentials::agent_key("key"))
-        .endpoint("not a valid URL")
-        .build()
-        .expect("client")
+    let transport = client_for("not a valid URL")
         .send(&sample_invoice())
         .await
         .expect_err("error");
@@ -244,7 +236,7 @@ async fn classifies_every_failure_by_outcome() {
     let server = MockServer::start().await;
     let mut request = sample_invoice();
     request.items.clear();
-    let never_sent = client_for(&server)
+    let never_sent = client_for(server.uri())
         .send(&request)
         .await
         .expect_err("invalid request");

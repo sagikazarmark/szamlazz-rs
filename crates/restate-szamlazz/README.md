@@ -346,8 +346,13 @@ expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may
 
 It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
 configuration by the services goes through `Gateway::account()`; a gateway is opened per handler execution by the
-prologue (`Gateway::open`) and never outlives it. `Szamlazz.Order` calls it inside `ctx.run`; the `Szamlazz.Agent`
-Restate service is a thin facade over the same module. No Restate service calls another.
+prologue (`Gateway::open`) and never outlives it. `Gateway::open_with_http` opens one over a caller-built
+`reqwest::Client` (re-exported as `szamlazz_agent::reqwest`): the embedder's hook for a proxy or a custom TLS
+setup, and what this crate's unit and wiremock tests open their gateways with, over a client that loads no root
+certificates, so that none of them parses the system CA store for a plain-`http://` mock; a fresh client per
+gateway is then the caller's to keep, since two gateways over one client share its cookie jar. `Szamlazz.Order`
+calls it inside `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate
+service calls another.
 
 `Order` / `Agent` are the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
 registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other

@@ -1,5 +1,6 @@
-//! The unit tests' shared fixtures: [`Doc`], a queried document, and
-//! [`LogCapture`], a `tracing` capture.
+//! The unit tests' shared fixtures: [`Doc`], a queried document,
+//! [`LogCapture`], a `tracing` capture, and [`open_gateway`], a gateway over
+//! an HTTP client that loads no root certificates.
 //!
 //! [`Doc`] renders szamlazz.hu's `<szamla>` response XML and parses it into
 //! an [`InvoiceDocument`] the way the gateway parses a query answer. The Számla
@@ -27,12 +28,45 @@
 //!
 //! [`LogCapture`] is what the sentinel tests assert a warning through: what
 //! it says, and that no agent key is in it.
+//!
+//! [`open_gateway`] is how every unit test opens a [`Gateway`]: as the
+//! prologue does, but over [`http_client`], the default client's settings
+//! (a cookie jar, the request timeout, no redirects) with **no root
+//! certificates**. Building a default `reqwest::Client` parses the system CA
+//! store (about 28 ms of CPU per client through the platform verifier, and a
+//! failure on a host without a store), for tests whose every endpoint is plain
+//! `http://` (a wiremock, `127.0.0.1:1`). The wiremock and e2e harnesses
+//! build the same client for themselves; the e2e deployment's gateways are
+//! the prologue's own `Gateway::open`.
 
 use jiff::civil::{Date, date};
-use szamlazz_agent::InvoiceNumber;
+use szamlazz_agent::client::REQUEST_TIMEOUT;
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
+use szamlazz_agent::{Credentials, InvoiceNumber, reqwest};
+
+use crate::account::Account;
+use crate::gateway::Gateway;
+
+/// The HTTP client [`open_gateway`] opens a gateway over: the default client
+/// (see `szamlazz_agent::client`) minus the root certificates (see the module
+/// docs).
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .tls_certs_only(std::iter::empty())
+        .cookie_store(true)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client")
+}
+
+/// A gateway for `account` with `credentials`, opened as the prologue opens
+/// one per execution, over a fresh [`http_client`].
+pub(crate) fn open_gateway(account: Account, credentials: Credentials) -> Gateway {
+    Gateway::open_with_http(account, credentials, http_client()).expect("gateway")
+}
 
 /// The `szallito/id` of the documents [`Doc`] renders unless a test says
 /// otherwise: the seller record's id as szamlazz.hu prints it in a query body

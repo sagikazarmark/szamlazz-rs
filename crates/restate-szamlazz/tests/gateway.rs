@@ -16,9 +16,10 @@ use restate_szamlazz::gateway::{
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
+use szamlazz_agent::client::REQUEST_TIMEOUT;
 use szamlazz_agent::ops::invoice::InvoiceCreationResult;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
-use szamlazz_agent::{Credentials, InvoiceNumber};
+use szamlazz_agent::{Credentials, InvoiceNumber, reqwest};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
@@ -33,11 +34,25 @@ const CREDENTIAL_CODES: [&str; 4] = ["3", "135", "136", "164"];
 
 // ----- fixtures --------------------------------------------------------------
 
+/// The HTTP client every gateway here is opened over: the default client's
+/// settings (a cookie jar of its own, the request timeout, no redirects) with
+/// **no root certificates**, so building it never parses the system CA store
+/// for a test whose every endpoint is plain `http://` (#136).
+fn http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .tls_certs_only(std::iter::empty())
+        .cookie_store(true)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+}
+
+fn http_client() -> reqwest::Client {
+    http_builder().build().expect("http client")
+}
+
 /// A gateway for the test account, opened as the prologue would open it.
 fn gateway(server: &MockServer) -> Gateway {
-    let mut account = Account::new("acct", "acct");
-    account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
-    Gateway::open(account, Credentials::agent_key("key")).expect("gateway")
+    open(server, "acct", "key")
 }
 
 fn order() -> OrderKey {
@@ -2810,19 +2825,60 @@ async fn set_payments_outcomes() {
     );
 }
 
-// ----- Gateway::open ---------------------------------------------------------
+// ----- Gateway::open_with_http -----------------------------------------------
 
-/// An [`Account`] on `server`, and the gateway opened for it with `key`.
+/// An [`Account`] on `server`, and the gateway opened for it with `key` over
+/// a fresh [`http_client`], as the prologue opens one per execution.
 fn open(server: &MockServer, id: &str, key: &str) -> Gateway {
     let mut account = Account::new(id, id);
     account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
-    Gateway::open(account, Credentials::agent_key(key)).expect("gateway")
+    Gateway::open_with_http(account, Credentials::agent_key(key), http_client()).expect("gateway")
 }
 
 fn agent_key_on_the_wire(body: &str) -> Option<&str> {
     let start = body.find("<szamlaagentkulcs>")? + "<szamlaagentkulcs>".len();
     let end = body[start..].find("</szamlaagentkulcs>")? + start;
     Some(&body[start..end])
+}
+
+/// The caller-built client is the transport: what it is configured with (a
+/// header here; a proxy or a TLS setup in an embedder) is on every request
+/// the gateway sends. The embedder's hook of `Gateway::open_with_http`.
+#[tokio::test]
+async fn a_gateway_opened_over_a_caller_built_client_sends_through_it() {
+    let server = MockServer::start().await;
+    external_id_query("acme:ORD-1:invoice")
+        .respond_with(not_found())
+        .mount(&server)
+        .await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-embedder", "proxy-of-acme".parse().expect("header"));
+    let http = http_builder()
+        .default_headers(headers)
+        .build()
+        .expect("http client");
+    let mut account = Account::new("acme", "acme");
+    account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+    let gateway = Gateway::open_with_http(account, Credentials::agent_key("key-acme"), http)
+        .expect("gateway");
+
+    let outcome = gateway
+        .query(&Selector::ExternalId("acme:ORD-1:invoice".to_owned()))
+        .await;
+    assert!(matches!(outcome, Ok(QueryOutcome::NotFound)), "{outcome:?}");
+
+    let sent = server.received_requests().await.expect("requests");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]
+            .headers
+            .get("x-embedder")
+            .map(|value| value.to_str().expect("ascii")),
+        Some("proxy-of-acme"),
+        "the request went through the caller's client"
+    );
+    let body = String::from_utf8_lossy(&sent[0].body);
+    assert_eq!(agent_key_on_the_wire(&body), Some("key-acme"));
 }
 
 #[tokio::test]
@@ -2848,9 +2904,10 @@ async fn a_gateway_opened_from_an_account_sends_that_accounts_key() {
 
 /// Two accounts on one szamlazz.hu: each gateway's requests carry its own
 /// key, and a session cookie szamlazz.hu sets for the first never travels
-/// with the second: a fresh client per gateway. The first gateway's second
-/// request *does* carry the cookie, proving the cookie store is live and the
-/// test would catch a shared client.
+/// with the second: a fresh client per gateway, here the one [`open`] builds
+/// per call, as the prologue builds one per execution. The first gateway's
+/// second request *does* carry the cookie, proving the cookie store is live
+/// and the test would catch a client shared between the two.
 #[tokio::test]
 async fn two_gateways_opened_from_two_accounts_share_no_key_and_no_session() {
     let server = MockServer::start().await;

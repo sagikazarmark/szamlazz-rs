@@ -230,6 +230,7 @@ mod tests {
     use crate::config::{Defaults, SellerConfig};
     use crate::contract::document::tests::sample_document;
     use crate::contract::{DocumentKind, ExchangeRateInput, LineItemInput};
+    use crate::test_support::open_gateway;
 
     /// A gateway for the test account with `defaults` and a fixed seller
     /// block, as the prologue would open it.
@@ -241,7 +242,7 @@ mod tests {
             json!({"bank": "Bank", "bank_account": "1234", "email": {"subject": "Hi"}}),
         )
         .expect("seller");
-        Gateway::open(account, Credentials::agent_key("key")).expect("gateway")
+        open_gateway(account, Credentials::agent_key("key"))
     }
 
     fn order() -> OrderKey {

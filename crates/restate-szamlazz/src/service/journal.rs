@@ -75,9 +75,10 @@ use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
 use crate::gateway::{
-    CreateOutcome, DeleteOutcome, Gateway, LookupOutcome, ProbeOutcome, QueryOutcome,
-    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
+    CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome, SetPaymentsOutcome,
+    StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
 };
+use crate::test_support::open_gateway;
 
 use super::prologue::Resolution;
 use super::support::Journaled;
@@ -900,7 +901,7 @@ async fn no_journaled_type_serialises_the_agent_key() {
 
     // The two outcomes that journal a transport failure's text, from a
     // gateway holding the sentinel credentials.
-    let gateway = Gateway::open(account, credentials).expect("gateway");
+    let gateway = open_gateway(account, credentials);
     let delete = gateway.delete_proforma("D-1").await;
     assert!(matches!(delete, DeleteOutcome::Transport(_)), "{delete:?}");
     let entries = [PaymentEntry::new(

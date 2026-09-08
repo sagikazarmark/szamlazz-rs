@@ -47,6 +47,17 @@ use crate::harness::szamlazz::{
     loses_reply_once, not_found,
 };
 
+// ----- the harness's own HTTP client -----------------------------------------------
+
+/// A [`reqwest::ClientBuilder`] for the harness's own traffic, all of it plain
+/// `http://` on the loopback (the Restate admin and ingress APIs, a raw post at
+/// the wiremock): **no root certificates**, so building it never parses the
+/// system CA store (#136). The gateways the deployment's prologue opens are
+/// the production `Gateway::open`, untouched.
+pub(crate) fn plain_http() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().tls_certs_only(std::iter::empty())
+}
+
 // ----- request bodies ----------------------------------------------------------
 
 pub(crate) fn document(unit_price: Decimal) -> DocumentInput {
@@ -119,7 +130,7 @@ impl Harness {
     /// serves and registers the single-account deployment.
     pub(crate) async fn start(restate: Restate) -> Self {
         let mock = MockServer::start().await;
-        let http = reqwest::Client::builder()
+        let http = plain_http()
             .timeout(Duration::from_secs(120))
             .build()
             .expect("client");

@@ -741,16 +741,14 @@ mod tests {
     use crate::config::WorkerConfig;
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
-    use crate::gateway::Gateway;
+    use crate::test_support::open_gateway;
 
     /// An execution as the prologue would build it for the test account.
     fn order() -> Execution {
         let mut account = Account::new("acct", "acct");
         account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
         Execution {
-            gateway: Arc::new(
-                Gateway::open(account, Credentials::agent_key("key")).expect("gateway"),
-            ),
+            gateway: Arc::new(open_gateway(account, Credentials::agent_key("key"))),
             config: WorkerConfig::new("acct".parse().expect("namespace")),
         }
     }
