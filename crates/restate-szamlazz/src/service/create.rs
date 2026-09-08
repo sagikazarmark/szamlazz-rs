@@ -17,7 +17,6 @@ use std::sync::Arc;
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
-use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
@@ -28,8 +27,8 @@ use crate::contract::{
     IssuedKind, Outcome, ProformaLink, Warning, outstanding,
 };
 use crate::gateway::{
-    CreateOutcome, CreateStepRequest, DocumentRefs, InvoiceDocumentExt as _, LookupOutcome,
-    LookupRequest, QueryOutcome,
+    CreateOutcome, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
+    QueryOutcome,
 };
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
@@ -67,10 +66,10 @@ impl Identity {
     }
 
     /// A response carrying the found document's number and totals.
-    fn found(&self, outcome: Outcome, found: &InvoiceDocument) -> CreateResponse {
-        let gross = Some(found.totals.total.gross);
-        let mut response = self.respond(outcome).with_invoice_number(found.number());
-        response.net_total = Some(found.totals.total.net);
+    fn found(&self, outcome: Outcome, found: &FoundDocument) -> CreateResponse {
+        let gross = Some(found.gross_total);
+        let mut response = self.respond(outcome).with_invoice_number(&found.number);
+        response.net_total = Some(found.net_total);
         response.gross_total = gross;
         response.outstanding = outstanding(gross, &found.payment_amounts());
 
@@ -94,11 +93,10 @@ impl Identity {
     ///
     /// # Errors
     ///
-    /// The faults a settled step can still be: rejected credentials; the
+    /// The faults a settled step can still be: rejected credentials, and the
     /// leading query answered with another code or `szlahu_down`
     /// (`unavailable`, as the lookup step answers the same; nothing was
-    /// sent); and an `Issued` without a number (a gateway bug, answered as
-    /// `outcome_unknown`). The caller attaches the document's identity.
+    /// sent). The caller attaches the document's identity.
     fn respond_to(
         &self,
         outcome: CreateOutcome,
@@ -106,16 +104,9 @@ impl Identity {
     ) -> Result<CreateResponse, Fault> {
         Ok(match outcome {
             CreateOutcome::Issued(issued) => {
-                // The gateway reports `Issued` only with a number; a bare
-                // result here would be a bug, answered as a fault.
-                let Some(number) = issued.invoice_number else {
-                    return Err(Fault::outcome_unknown(
-                        "issued without a document number; retry with a new Idempotency-Key",
-                    ));
-                };
                 let mut response = self
                     .respond(Outcome::Issued)
-                    .with_invoice_number(number.as_str());
+                    .with_invoice_number(issued.number);
                 response.net_total = issued.net_total;
                 response.gross_total = issued.gross_total;
                 response.outstanding = issued.outstanding;
@@ -133,15 +124,15 @@ impl Identity {
             // `reversed`, and a new document needs an explicit `reissue`.
             // The storno number is not looked up here; the next call's lookup
             // reports it.
-            CreateOutcome::Reversed(found) => self.reversed(found.number(), None),
+            CreateOutcome::Reversed(found) => self.reversed(&found.number, None),
             // The document the lookup saw reversed is reported live: what
             // the lookup would have answered under `reissue`.
             CreateOutcome::LiveAgain(found) => {
-                self.conflict_about(ConflictReason::Live, found.number())
+                self.conflict_about(ConflictReason::Live, found.number)
             }
             CreateOutcome::Reconciled(found) => self.found(Outcome::Reconciled, &found),
             CreateOutcome::Collision(found) => {
-                self.conflict_about(ConflictReason::ExternalIdCollision, found.number())
+                self.conflict_about(ConflictReason::ExternalIdCollision, found.number)
             }
             CreateOutcome::DuplicateOrderNumber {
                 code,
@@ -260,10 +251,10 @@ fn decide_exclusivity(
 ) -> Option<CreateResponse> {
     match found {
         Lookup::Collision(found) => {
-            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
+            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
         }
         Lookup::Ours(found) if found.is_live() => {
-            Some(identity.conflict_about(reason, found.number()))
+            Some(identity.conflict_about(reason, found.number))
         }
         Lookup::Absent | Lookup::Ours(_) => None,
     }
@@ -285,14 +276,14 @@ fn decide_prepayment_for_final(
     match found {
         Lookup::Absent => Some(identity.conflict(ConflictReason::PrepaymentMissing)),
         Lookup::Collision(found) => {
-            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()))
+            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
         }
         Lookup::Ours(found) if !found.is_live() => {
-            Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number()))
+            Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number))
         }
         Lookup::Ours(found) => {
-            refs.our_numbers.push(found.number().to_owned());
-            refs.prepayment = Some(found.number().to_owned());
+            refs.our_numbers.push(found.number.clone());
+            refs.prepayment = Some(found.number);
             None
         }
     }
@@ -318,7 +309,7 @@ fn decide_proforma_link(
     let live = match found {
         Lookup::Collision(found) => {
             return Some(
-                identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()),
+                identity.conflict_about(ConflictReason::ExternalIdCollision, found.number),
             );
         }
         Lookup::Ours(found) if found.is_live() => found,
@@ -326,11 +317,11 @@ fn decide_proforma_link(
     };
     match link {
         ProformaLink::None => {
-            Some(identity.conflict_about(ConflictReason::ProformaLive, live.number()))
+            Some(identity.conflict_about(ConflictReason::ProformaLive, live.number))
         }
         ProformaLink::Auto | ProformaLink::Number(_) => {
-            refs.our_numbers.push(live.number().to_owned());
-            refs.proforma = Some(live.number().to_owned());
+            refs.our_numbers.push(live.number.clone());
+            refs.proforma = Some(live.number);
             None
         }
     }
@@ -377,13 +368,13 @@ fn decide_proforma_by_number(
                     identity.conflict_about(ConflictReason::NotManaged, number),
                 ));
             }
-            if found.info.document_type != "D" {
+            if found.document_type != "D" {
                 return Err(Fault::invalid_input(format!(
                     "{number} is not a proforma (tipus {})",
-                    found.info.document_type
+                    found.document_type
                 )));
             }
-            refs.our_numbers.push(found.number().to_owned());
+            refs.our_numbers.push(found.number);
             refs.proforma = Some(number.to_owned());
             Ok(None)
         }
@@ -397,7 +388,7 @@ fn decide_proforma_by_number(
 /// ours is `conflict{base_reversed, existing_number}`; a live one of ours
 /// proceeds (`None`).
 fn decide_base(
-    found: &InvoiceDocument,
+    found: &FoundDocument,
     order: &OrderKey,
     number: &str,
     identity: &Identity,
@@ -405,7 +396,7 @@ fn decide_base(
     if !found.carries_order(order) {
         return Some(identity.conflict_about(ConflictReason::NotManaged, number));
     }
-    if found.info.reversed == Some(true) {
+    if found.reversed == Some(true) {
         return Some(identity.conflict_about(ConflictReason::BaseReversed, number));
     }
     None
@@ -457,7 +448,7 @@ fn decide_lookup(
             return Err(Fault::credentials_rejected(namespace, code, message));
         }
         LookupOutcome::Live(found) if reissue => {
-            ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number()))
+            ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number))
         }
         LookupOutcome::Live(found) => {
             ControlFlow::Break(identity.found(Outcome::AlreadyIssued, &found))
@@ -465,15 +456,13 @@ fn decide_lookup(
         LookupOutcome::Reversed {
             document,
             storno_number,
-        } if !reissue => ControlFlow::Break(identity.reversed(document.number(), storno_number)),
-        LookupOutcome::Reversed { document, .. } => {
-            ControlFlow::Continue(Some(document.number().to_owned()))
-        }
+        } if !reissue => ControlFlow::Break(identity.reversed(&document.number, storno_number)),
+        LookupOutcome::Reversed { document, .. } => ControlFlow::Continue(Some(document.number)),
         LookupOutcome::Collision(found) => ControlFlow::Break(
-            identity.conflict_about(ConflictReason::ExternalIdCollision, found.number()),
+            identity.conflict_about(ConflictReason::ExternalIdCollision, found.number),
         ),
         LookupOutcome::Foreign(found) => {
-            ControlFlow::Break(identity.conflict_about(ConflictReason::Foreign, found.number()))
+            ControlFlow::Break(identity.conflict_about(ConflictReason::Foreign, found.number))
         }
         LookupOutcome::Absent => ControlFlow::Continue(None),
     })
@@ -867,6 +856,7 @@ mod tests {
     use crate::config::WorkerConfig;
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
+    use crate::gateway::IssuedDocument;
     use crate::test_support::{Doc, open_gateway};
 
     /// An execution as the prologue would build it for the test account.
@@ -1790,19 +1780,14 @@ mod tests {
         assert!(message.contains("cancelled"), "{message}");
     }
 
-    /// A create reply parsed the way the gateway parses it: the Számla Agent
-    /// crate's result type is `#[non_exhaustive]`, so the wire is the seam,
-    /// and the test states the answer szamlazz.hu gives. `preview` asks for
-    /// the PDF preview, the one create whose reply the agent crate lets
-    /// carry no number (the worker never asks for one).
-    fn creation_result(
-        preview: bool,
-        headers: &[(&str, &str)],
-        body: &str,
-    ) -> szamlazz_agent::ops::invoice::InvoiceCreationResult {
+    /// A create reply parsed the way the gateway parses it and projected the
+    /// way the create step projects it: the Számla Agent crate's result type
+    /// is `#[non_exhaustive]`, so the wire is the seam, and the test states
+    /// the answer szamlazz.hu gives.
+    fn issued_reply(headers: &[(&str, &str)], body: &str) -> IssuedDocument {
         use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 
-        let mut create = order()
+        let create = order()
             .build(
                 IssuedKind::Invoice,
                 &sample_document(),
@@ -1811,13 +1796,13 @@ mod tests {
                 DocumentRefs::default(),
             )
             .expect("build");
-        create.header.preview_pdf = Some(preview);
-        create
+        let result = create
             .parse(&RawResponse::new(
                 headers.iter().copied(),
                 body.as_bytes().to_vec(),
             ))
-            .expect("xmlszamlavalasz parses")
+            .expect("xmlszamlavalasz parses");
+        IssuedDocument::try_from(result).expect("a numbered reply")
     }
 
     /// Step 5, the create step's `Issued`: szamlazz.hu issued the document,
@@ -1832,8 +1817,7 @@ mod tests {
         let identity = invoice_identity();
         let respond = |outcome: CreateOutcome| identity.respond_to(outcome, &namespace());
 
-        let issued = creation_result(
-            false,
+        let issued = issued_reply(
             &[("szlahu_id", "924307747")],
             r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>SZ-2</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg><vevoifiokurl>https://www.szamlazz.hu/szamla/fiok/example</vevoifiokurl></xmlszamlavalasz>"#,
         );
@@ -1852,8 +1836,7 @@ mod tests {
         assert_eq!(response.external_id, "acct:ORD-1:invoice");
 
         // Code 56 with a number: issued, notification not delivered.
-        let issued = creation_result(
-            false,
+        let issued = issued_reply(
             &[
                 ("szlahu_error_code", "56"),
                 ("szlahu_error", "notification failed"),
@@ -1871,39 +1854,6 @@ mod tests {
         assert_eq!(response.gross_total, Some(dec!(1270)));
         assert_eq!(response.warnings, [Warning::NotificationDeliveryFailed]);
         assert_eq!(response.code, None, "56 is not a rejection code here");
-    }
-
-    /// Step 5, an `Issued` without a document number: the gateway reports
-    /// `Issued` only with a number (a success without one is re-queried and
-    /// `Unconfirmed` when nothing landed), so a bare result here is a gateway
-    /// bug, answered as the `outcome_unknown` fault (500) about the document,
-    /// never as `issued` without a number, and never a panic.
-    #[test]
-    fn an_issued_without_a_number_is_outcome_unknown() {
-        let identity = invoice_identity();
-
-        let preview = creation_result(
-            true,
-            &[],
-            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#,
-        );
-        assert_eq!(preview.invoice_number, None);
-        let fault = identity
-            .respond_to(CreateOutcome::Issued(preview), &namespace())
-            .expect_err("a fault");
-        let (status, body) = fault_body(fault);
-        assert_eq!(status, 500, "{body}");
-        assert_eq!(
-            body["code"],
-            TerminalCode::OutcomeUnknown.as_str(),
-            "{body}"
-        );
-        let message = body["message"].as_str().expect("message");
-        assert!(message.contains("without a document number"), "{message}");
-        assert!(
-            message.contains("retry with a new Idempotency-Key"),
-            "{message}"
-        );
     }
 
     /// Step 5: every settled create outcome as the caller's response, in

@@ -4,7 +4,9 @@ Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scope
 szamlazz.hu is the source of truth is the one the invocation's scope resolved to, and the validation pins are
 read from that journaled `Account` (below); amended by #47, every journaled type is additive-only and pinned
 by fixtures (the *Journal compatibility* section); amended by #70; widening a field to `Option<T>` is the one
-retype the rule admits (the *Widening* paragraph).
+retype the rule admits (the *Widening* paragraph); amended by #127; every journaled type is crate-owned, a
+`szamlazz_agent` response type is never journaled directly (the *Crate-owned projections* section), the one
+deliberate break of the pre-go-live window.
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,
@@ -61,7 +63,8 @@ reissued document becomes the newest holder of the same id; the stornoed origina
 and through the storno's `hivszamlaszam`. Nothing needs a suffix.
 
 **Every `Found` document is validated before it is trusted**: `rendelesszam == order ∧ tipus ∈ kind-set`;
-anything else is `conflict{external_id_collision}` (`InvoiceDocumentExt::is_ours`). External ids are not unique
+anything else is `conflict{external_id_collision}` (`FoundDocument::is_ours`, first `InvoiceDocumentExt::is_ours`
+on the agent crate's document). External ids are not unique
 server-side (verified), so this is the only protection against adopting a stranger's document. *Amended (ADR 0006):*
 the formula gained `teszt == account.mode`, `account` being the invocation's journaled `Account`, resolved from the
 scope, `mode` defaulting to `live`. *Amended (ADR 0006, XPRB amendment, then account-pin amendment):* a
@@ -155,8 +158,9 @@ layout had no such rule, and the `Szamlazz.Agent.query` handler's run enum had a
 accepted then for a one-step read-only handler with a one-day retention.
 
 **Decision.** Every journaled type is **additive-only**: a new field carries a serde default, a new variant may be
-added, and no field or variant is renamed, removed or retyped. The rule covers the agent crate's response types
-the outcomes carry, whose JSON layout is thereby part of this crate's journal contract, and is stated once, in the
+added, and no field or variant is renamed, removed or retyped. The rule covered the agent crate's response types
+the outcomes carried, whose JSON layout was thereby part of this crate's journal contract, until the #127
+amendment below took them out of the journal; it is stated once, in the
 `gateway` module docs. It is enforced in CI by `service::journal`:
 
 - **the generator** pins one JSON fixture per variant of every journaled type under
@@ -183,13 +187,16 @@ passes the compatibility test, fails the generator on the one changed fixture, a
 
 **Considered: crate-owned projections instead of the agent's types.** The document outcomes could carry
 restate-szamlazz's own `JournaledDocument` / `JournaledCreation` structs mapped from the agent's, decoupling the
-journal from the agent crate's layout. Rejected for them: it duplicates some twenty-five fields across three types
+journal from the agent crate's layout. Rejected for them at the time: it duplicates some twenty-five fields across three types
 plus a mapping layer that can itself drift, for a coupling the fixtures already make visible; a change to the agent
 types fails this crate's CI through the workspace, which is the wanted outcome. The agent crate's `query_xml` module
 already promises its response types round-trip through JSON "for journaling or caching"; the fixtures hold it to
 that. `TaxpayerOutcome` (#49) is the one journaled type that took the projection route (`QueryTaxpayerResponse`
 is crate-owned and doubles as the handler's response, so there is no second type to keep in step), and it is pinned
-by the same fixtures (`tests/journal/taxpayer-outcome/`), so either route ends in the same check.
+by the same fixtures (`tests/journal/taxpayer-outcome/`), so either route ends in the same check. *Reversed by the
+#127 amendment below*, once the coupling's cost had shown: the `teszt` widening (#70) needed a rule exception to
+land at all, and every future change to an agent response type had to be checked against this crate's fixtures
+first.
 
 **Consequences.** An upgrade with in-flight invocations is safe by construction, and the endpoint README's
 rolling-update guidance says so with this section as the reason: the drain-first roll is still recommended to
@@ -208,3 +215,61 @@ invocations would kill them on that entry. The rule was always forward-only (it 
 decodes what the previous one wrote, never the reverse), so nothing new is given up; but a widening is still a
 contract change to review, not a free refactor, and the compatibility test (not the type signature) is what says
 it is admitted. Narrowing (`Option<T>` → `T`) is a retype like any other.
+
+## Amended (#127): journaled types are crate-owned; a `szamlazz_agent` response type is never journaled directly
+
+The #47 amendment let the document outcomes carry the agent crate's `InvoiceDocument`, `InvoiceCreationResult` and
+`CreatedInvoice` as they were, and made the agent crate's serde layout part of this crate's journal contract. The
+cost showed within weeks: `teszt` going to `Option<bool>` (#70) needed the *Widening* exception to land at all,
+every further change to an agent response type (a rename, a retype, a field the receiver-side model wants) had to
+be checked against this crate's fixtures first, and the crate contradicted itself: `TaxpayerOutcome` journaled a
+crate-owned projection and `SellerConfig` existed beside `Seller` for exactly this reason (#68), while the document
+outcomes did not. The journaled document also carried the buyer block, the seller block, the line items and the
+base64 PDF, none of which any handler reads, into an entry the Restate UI shows for the retention period.
+
+**Decision.** Every journaled type is **crate-owned**. The document outcomes carry the worker's projections of
+what the handlers read, and nothing else (`restate_szamlazz::gateway::document`):
+
+- `FoundDocument`, from a queried `InvoiceDocument`: `document_id` (`alap/id`), `number`, `document_type`
+  (`tipus`), `order_number` (`rendelesszam` trimmed, empty read as none: the one reading of the element, made
+  once, in the projection), `reversed` (`sztornozott`), `referenced_invoice_number` (`hivszamlaszam`),
+  `referenced_proforma_number` (`hivdijbekszam`), `appearance` (the `eszamla` code as an integer; the agent
+  crate's `InvoiceAppearance` reads it, so a code the crate learns later is read on replay), `issue_date`
+  (`kelt`), `fulfillment_date` (`telj`), `due_date` (`fizh`), `currency`, `test` (`teszt`), the grand total
+  (`net_total`, `vat_total`, `gross_total`) and `payments` (`RecordedCreditEntry`: date, title, amount, comment,
+  bank account). `LookupOutcome`, `CreateOutcome` and `QueryOutcome` carry it boxed where they carried
+  `Box<InvoiceDocument>`. The checks the services make on a found document (`is_live`, `is_ours`,
+  `carries_order`, `is_storno_of`, `e_invoice`, `payment_amounts`) are its methods; `InvoiceDocumentExt` is gone.
+  `Szamlazz.Agent.query`'s `QueryResponse` (a caller contract, unchanged) is projected from it.
+- `IssuedDocument`, from a create reply (`InvoiceCreationResult`, `TryFrom`: a reply without a number is not an
+  issued document, and the create step re-queries as before) and from a storno reply (`CreatedInvoice`, `From`):
+  `number`, `document_id`, `net_total`, `gross_total`, `outstanding`, `customer_account_url`,
+  `notification_delivery_failed`; never the PDF. `CreateOutcome::Issued` and `StornoOutcome::Reversed` carry it.
+
+The projection is made at the gateway's one wire boundary (`Gateway::query_raw`, the create and storno sends);
+nothing past it holds an agent response type. The rule is stated in the `gateway` module docs and checked by
+`service::journal` as before, plus a guard that no variant of any journaled type serialises a `supplier`, `buyer`,
+`items`, `financial_items`, `labels` or `pdf` key at any depth (the archived pre-#127 shape is its positive
+control). The projection types are `#[non_exhaustive]` and additive-only like every journaled type; a change to an
+agent response type now reaches the worker as a compile error in the `From` impls, never as a journal entry the
+next deployment cannot decode.
+
+**The archived shapes are the one deliberate break of the pre-go-live window.** The old `InvoiceDocument`-shaped
+entries do not decode into the flat projection, and were not made to: a legacy mirror struct with a custom
+`Deserialize` plus a carve-out in the compatibility test's superset check (for the keys the projection drops) would
+be permanent complexity for a scenario that cannot occur, there having been no production deployment before the
+change and so nothing in flight to be killed. The generator archived the twelve replaced shapes as
+`<variant>.1.json` (`lookup-outcome/{live,reversed,collision,foreign}`,
+`create-outcome/{issued,found,reversed,live-again,reconciled,collision}`, `query-outcome/found`,
+`storno-outcome/reversed`); `service::journal::DELIBERATE_BREAKS` lists them, and the compatibility test skips
+each and asserts it still fails to replay, so the list cannot outlive its reason. The archives are the record of the
+shape that was replaced, not a mechanism: a break after go-live is a deleted archive and a drained deploy (the
+#47 amendment's *Consequences*), and the endpoint README's rolling-update guidance names this release as the one
+whose drain is mandatory.
+
+**Consequences.** The agent crate's response types are free to evolve without a journal review; the worker's
+journal contract is the projections' and the crate's own. A field a handler comes to need is added to the
+projection with a serde default (additive), read from the agent type in the `From` impl; a field the agent crate
+renames costs one line there. The journal fixtures shrink from ~170 lines per document to ~35, and pin what an
+entry holds field by field rather than through the agent crate's layout. `InvoiceDocumentExt` is gone; the design
+doc's and CONTEXT.md's references to it name `FoundDocument`'s methods instead.

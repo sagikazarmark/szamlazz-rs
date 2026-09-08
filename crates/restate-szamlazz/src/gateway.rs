@@ -25,7 +25,7 @@
 //! Tracing events carry external ids, kinds, numbers and codes, never buyer
 //! data.
 //!
-//! # Journaled types are additive-only
+//! # Journaled types are crate-owned and additive-only
 //!
 //! The outcome types derive `serde` so that the Restate services can journal
 //! them as the result of a `ctx.run`. An in-flight invocation replays the
@@ -37,26 +37,28 @@
 //! or variant is renamed, removed or retyped, with one admitted widening: a
 //! field `T` may become `Option<T>` when every value the old type wrote decodes
 //! to `Some` and re-encodes byte for byte, which the compatibility test proves
-//! on the committed fixtures (`InvoiceInfo::test`).
+//! on the committed fixtures.
 //! This holds for the outcomes here
 //! ([`LookupOutcome`], [`CreateOutcome`], [`QueryOutcome`],
 //! [`StornoLookupOutcome`], [`StornoOutcome`], [`DeleteOutcome`],
 //! [`SetPaymentsOutcome`], [`ProbeOutcome`], [`TaxpayerOutcome`]), for the
-//! prologue's journaled [`Account`] and pinned namespace, and for the agent
-//! crate's response types the document outcomes carry **as they are**
-//! ([`InvoiceDocument`], [`InvoiceCreationResult`], [`CreatedInvoice`] and
-//! everything they nest), whose JSON layout is thereby part of this crate's
-//! journal contract. [`TaxpayerOutcome`] carries the crate-owned
-//! [`QueryTaxpayerResponse`] instead: a projection that is additive-only by
-//! the same rule, so a change to the agent crate's `TaxpayerInfo` cannot reach
-//! a journaled taxpayer answer. The rule is checked in CI: `service::journal`
-//! pins one JSON fixture per variant of every journaled type under
-//! `tests/journal/` and replays every fixture ever committed through the
-//! current types; the `Journaled` marker trait the run helpers require is the
-//! link from the `ctx.run` sites to that directory. A journaled document
-//! therefore includes the buyer block szamlazz.hu returned with it.
+//! prologue's journaled [`Account`] and pinned namespace, and for what the
+//! outcomes carry, which is **crate-owned, never a `szamlazz_agent` response
+//! type**: the document outcomes carry the worker's projections
+//! [`FoundDocument`] (of a queried `InvoiceDocument`) and [`IssuedDocument`]
+//! (of a create or storno reply), [`TaxpayerOutcome`] the crate-owned
+//! [`QueryTaxpayerResponse`]. A projection holds what the handlers read and
+//! nothing else, so a change to the agent crate's response types cannot reach
+//! a journal entry, and what the worker never reads of a document (the buyer
+//! block, the seller block, the line items, the PDF) is not in the journal
+//! for the retention period (ADR 0005, the crate-owned projection amendment,
+//! #127). The rule is checked in CI: `service::journal` pins one JSON fixture
+//! per variant of every journaled type under `tests/journal/` and replays
+//! every fixture ever committed through the current types; the `Journaled`
+//! marker trait the run helpers require is the link from the `ctx.run` sites
+//! to that directory.
 //!
-//! [`InvoiceDocumentExt`] adds the checks the services make on a queried
+//! [`FoundDocument`]'s methods are the checks the services make on a queried
 //! document before trusting or acting on it.
 
 use rust_decimal::Decimal;
@@ -65,10 +67,10 @@ use szamlazz_agent::client::BuildError;
 use szamlazz_agent::ops::credit_entry::{
     CreditEntries, CreditEntry, CreditEntryResult, RegisterCreditEntry,
 };
-use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, InvoiceCreationResult};
+use szamlazz_agent::ops::invoice::CreateInvoice;
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
-use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
+use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{
@@ -82,8 +84,10 @@ use crate::contract::{IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector}
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
+pub mod document;
 
 pub use build::{DocumentRefs, InputError, gross_total};
+pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry, Unnumbered};
 
 /// The pseudo-code of a rejection that never reached szamlazz.hu: the request
 /// violates the Számla Agent wire contract (a sixth credit entry; a replacing
@@ -133,9 +137,9 @@ pub struct LookupRequest<'a> {
 /// the create step. A lookup szamlazz.hu did not answer is [`Unanswered`],
 /// never an outcome.
 ///
-/// Documents are boxed: a queried [`InvoiceDocument`] is large next to the
-/// unit variants.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Documents are boxed: a [`FoundDocument`] is large next to the unit
+/// variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum LookupOutcome {
     /// Nothing under the external id (code 7), and the hint saw nothing
@@ -143,24 +147,24 @@ pub enum LookupOutcome {
     Absent,
     /// A live document of ours under the external id. The hint is not taken:
     /// nothing will be created.
-    Live(Box<InvoiceDocument>),
+    Live(Box<FoundDocument>),
     /// A reversed document of ours under the external id, and the hint saw
     /// nothing foreign.
     Reversed {
         /// The reversed document.
-        document: Box<InvoiceDocument>,
+        document: Box<FoundDocument>,
         /// Its storno's number, when the newest document under the order is
         /// the `SS` referencing it; absent otherwise and for correctives.
         storno_number: Option<String>,
     },
     /// The external id resolves to a document that fails validation (another
     /// order or kind).
-    Collision(Box<InvoiceDocument>),
+    Collision(Box<FoundDocument>),
     /// A live invoice-kind document under the order number that is neither
     /// in `our_numbers` nor the document seen under the external id: another
     /// channel's. Reported even when our own document under the id is
     /// reversed: no create (reissue or not) may proceed past it.
-    Foreign(Box<InvoiceDocument>),
+    Foreign(Box<FoundDocument>),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// external-id query or the hint; nothing may be concluded and nothing
     /// will be created. See [`is_credentials_rejected`].
@@ -209,38 +213,37 @@ pub struct CreateStepRequest<'a> {
 /// What is *not* settled is an [`Unconfirmed`] error, which the run retry
 /// policy re-executes.
 ///
-/// Documents are boxed: a queried [`InvoiceDocument`] is large next to the
+/// Documents are boxed: a [`FoundDocument`] is large next to the
 /// code-and-message variants.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CreateOutcome {
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
-    /// create, indistinguishable and reported either way). The result
-    /// carries a number.
-    Issued(InvoiceCreationResult),
+    /// create, indistinguishable and reported either way), numbered.
+    Issued(IssuedDocument),
     /// A live document of ours is under the external id, found by the
     /// leading query (an earlier execution of this step created it) or by the
     /// re-query after a lost reply. Nothing was sent, or what was sent landed.
-    Found(Box<InvoiceDocument>),
+    Found(Box<FoundDocument>),
     /// A **reversed** document of ours that the lookup step did not see is
     /// under the external id: an earlier execution of this step (or anyone)
     /// issued it and it was reversed since. Nothing was sent: a reversal
     /// the lookup did not see must be answered as `reversed`, never issued
     /// past (a new document needs an explicit `reissue`).
-    Reversed(Box<InvoiceDocument>),
+    Reversed(Box<FoundDocument>),
     /// The document the lookup step saw **reversed** is reported **live**
     /// by the leading query or the re-query: the server contradicts itself.
     /// Nothing was sent: sending is the least safe answer to an
     /// inconsistency; the caller sees `conflict{live}` as the lookup would
     /// have reported.
-    LiveAgain(Box<InvoiceDocument>),
+    LiveAgain(Box<FoundDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found a live document of ours: an earlier send
     /// had landed.
-    Reconciled(Box<InvoiceDocument>),
+    Reconciled(Box<FoundDocument>),
     /// The external id resolves to a document that fails validation (another
     /// order or kind). Nothing was created.
-    Collision(Box<InvoiceDocument>),
+    Collision(Box<FoundDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found no live document of ours: the duplicate is
     /// not ours. Never reported for correctives, which are exempt from the
@@ -402,107 +405,13 @@ pub enum Unanswered {
     Unavailable(String),
 }
 
-/// The checks the services make on a queried document before trusting or
-/// acting on it.
-pub trait InvoiceDocumentExt {
-    /// The document number.
-    fn number(&self) -> &str;
-
-    /// Whether the document is live: `reversed != Some(true)`.
-    fn is_live(&self) -> bool;
-
-    /// Whether the document is the storno invoice (`SS`) reversing `number`.
-    fn is_storno_of(&self, number: &str) -> bool;
-
-    /// Whether it is an e-invoice; `None` for non-invoices (proformas) and
-    /// unknown `eszamla` codes, where the account default applies.
-    ///
-    /// What the storno handlers send as the storno's `eszamla`. szamlazz.hu
-    /// does not require a storno's form to match its original's: a mismatch
-    /// is accepted silently and the storno document takes the request's flag
-    /// (P73), so this derivation, not the server, is what keeps a reversal
-    /// in its original's form. `1` is paper and `2`/`3` are e-invoice codes,
-    /// as the vendor annotation says and the test account confirmed (`3` for
-    /// an invoice created with `eszamla=true`).
-    fn e_invoice(&self) -> Option<bool>;
-
-    /// Registered credit entry amounts, in the order szamlazz.hu lists them.
-    fn payment_amounts(&self) -> Vec<Decimal>;
-
-    /// The order number the document carries (`rendelesszam`), trimmed as
-    /// szamlazz.hu matches it; `None` when the element is absent, empty or
-    /// whitespace only: a document issued outside any order. The one reading
-    /// of the element: what `Szamlazz.Agent.storno` answers as
-    /// `managed_by_order`'s `order_key`, and what [`Self::carries_order`]
-    /// compares with the key.
-    fn order_number(&self) -> Option<&str>;
-
-    /// Whether the document carries `order` as its [order
-    /// number](Self::order_number). What makes a document found by number
-    /// this order's to act on or link.
-    fn carries_order(&self, order: &OrderKey) -> bool;
-
-    /// Whether the document is ours: it [carries
-    /// `order`](Self::carries_order) and the `tipus` of `kind`. Nothing about
-    /// the account: the worker holds no account pin (`teszt` and `szallito/id`
-    /// are parsed, never compared).
-    fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool;
-}
-
-impl InvoiceDocumentExt for InvoiceDocument {
-    fn number(&self) -> &str {
-        self.info.invoice_number.as_str()
-    }
-
-    fn is_live(&self) -> bool {
-        self.info.reversed != Some(true)
-    }
-
-    fn is_storno_of(&self, number: &str) -> bool {
-        self.info.document_type == "SS"
-            && self
-                .info
-                .referenced_invoice_number
-                .as_ref()
-                .is_some_and(|referenced| referenced.as_str() == number)
-    }
-
-    fn e_invoice(&self) -> Option<bool> {
-        match self.info.e_invoice {
-            InvoiceAppearance::Paper => Some(false),
-            InvoiceAppearance::Electronic(_) => Some(true),
-            _ => None,
-        }
-    }
-
-    fn payment_amounts(&self) -> Vec<Decimal> {
-        self.payments.iter().map(|payment| payment.amount).collect()
-    }
-
-    fn order_number(&self) -> Option<&str> {
-        self.info
-            .order_number
-            .as_deref()
-            .map(str::trim)
-            .filter(|order| !order.is_empty())
-    }
-
-    fn carries_order(&self, order: &OrderKey) -> bool {
-        self.order_number() == Some(order.as_str())
-    }
-
-    fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool {
-        self.carries_order(order) && self.info.document_type == document_type_of(kind)
-    }
-}
-
 /// The answered result of a query by number, external id or order number
 /// ([`Gateway::verify`], [`Gateway::query`], [`Gateway::hint`]). A query
 /// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryOutcome {
     /// The document.
-    Found(Box<InvoiceDocument>),
+    Found(Box<FoundDocument>),
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
     /// number or external id, or a deleted / consumed proforma.
     NotFound,
@@ -703,13 +612,14 @@ pub struct StornoStepRequest<'a> {
 /// The settled result of the storno step: szamlazz.hu's answer is known.
 /// What is *not* settled is an [`Unconfirmed`] error, which the run retry
 /// policy re-executes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum StornoOutcome {
     /// The invoice is reversed by the storno invoice szamlazz.hu issued (now,
     /// or echoed by an idempotent repeat), validated with
-    /// [`CreatedInvoice::reverses`] by [`Gateway::storno`].
-    Reversed(CreatedInvoice),
+    /// [`CreatedInvoice::reverses`](szamlazz_agent::ops::invoice::CreatedInvoice::reverses)
+    /// by [`Gateway::storno`].
+    Reversed(IssuedDocument),
     /// The storno invoice is under the storno external id, found by the
     /// leading query (an earlier execution of this step, or the lookup step's
     /// race, sent it) or by the re-query after a lost reply. Nothing was
@@ -931,11 +841,6 @@ impl Gateway {
         &self.account
     }
 
-    /// Whether `found` is ours for `order` and `kind`.
-    fn is_ours(found: &InvoiceDocument, order: &OrderKey, kind: IssuedKind) -> bool {
-        found.is_ours(order, kind)
-    }
-
     /// The lookup step, read-only.
     ///
     /// 1. Query by external id: a validated live hit is
@@ -994,19 +899,19 @@ impl Gateway {
         if request.kind != IssuedKind::Corrective {
             match self.hint_raw(request.order).await {
                 Ok(hint) => {
-                    let seen = reversed.as_deref().map(InvoiceDocumentExt::number);
+                    let seen = reversed.as_deref().map(|found| found.number.as_str());
                     if is_foreign(&hint, request.our_numbers, seen) {
                         tracing::warn!(
-                            number = %hint.number(),
-                            tipus = %hint.info.document_type,
+                            number = %hint.number,
+                            tipus = %hint.document_type,
                             "foreign document under the order"
                         );
                         return Ok(LookupOutcome::Foreign(Box::new(hint)));
                     }
                     if let Some(reversed) = &reversed
-                        && hint.is_storno_of(reversed.number())
+                        && hint.is_storno_of(&reversed.number)
                     {
-                        storno_number = Some(hint.number().to_owned());
+                        storno_number = Some(hint.number.clone());
                     }
                 }
                 Err(error) => match error.answered()? {
@@ -1100,17 +1005,19 @@ impl Gateway {
 
         // Step 2: create.
         match self.client.send(request.create).await {
-            Ok(result) => {
-                let Some(number) = &result.invoice_number else {
+            Ok(result) => match IssuedDocument::try_from(result) {
+                Ok(issued) => {
+                    tracing::info!(number = %issued.number, "document issued");
+                    Ok(CreateOutcome::Issued(issued))
+                }
+                Err(unnumbered) => {
                     let open = Unconfirmed::Open {
                         code: None,
-                        message: "create succeeded without a document number".to_owned(),
+                        message: unnumbered.to_string(),
                     };
-                    return self.settle_or(request, open).await;
-                };
-                tracing::info!(number = %number, "document issued");
-                Ok(CreateOutcome::Issued(result))
-            }
+                    self.settle_or(request, open).await
+                }
+            },
             Err(error) => match classify_failure(error) {
                 Failure::Rejected { code, message } => {
                     tracing::info!(code = %code, "document rejected");
@@ -1183,7 +1090,7 @@ impl Gateway {
     ) -> Result<CreateOutcome, Unconfirmed> {
         match self.settled_by_query(request).await {
             Ok(Some(CreateOutcome::Found(found))) => {
-                tracing::info!(number = %found.number(), "reconciled after duplicate");
+                tracing::info!(number = %found.number, "reconciled after duplicate");
                 return Ok(CreateOutcome::Reconciled(found));
             }
             Ok(Some(settled)) => return Ok(settled),
@@ -1205,10 +1112,9 @@ impl Gateway {
 
         let existing_number = match self.hint_raw(request.order).await {
             Ok(newest)
-                if newest.is_live()
-                    && newest.info.document_type == document_type_of(request.kind) =>
+                if newest.is_live() && newest.document_type == document_type_of(request.kind) =>
             {
-                Some(newest.number().to_owned())
+                Some(newest.number)
             }
             Ok(_) => None,
             Err(QueryError::NotFound) => {
@@ -1263,13 +1169,13 @@ impl Gateway {
             // The document the lookup saw reversed, reported live: a server
             // inconsistency the step never sends past.
             Ok(Some(CreateOutcome::LiveAgain(found))) => tracing::warn!(
-                number = %found.number(),
+                number = %found.number,
                 "the document the lookup saw reversed is reported live"
             ),
             // A reversed document the lookup did not see: issued and reversed
             // since. Never sent past: the caller has not acknowledged it.
             Ok(Some(CreateOutcome::Reversed(found))) => tracing::warn!(
-                number = %found.number(),
+                number = %found.number,
                 "a document reversed since the lookup holds the external id"
             ),
             _ => {}
@@ -1292,16 +1198,16 @@ impl Gateway {
     ) -> Result<Seen, QueryError> {
         let selector = InvoiceSelector::ExternalId(external_id.as_str().to_owned());
         match self.query_raw(selector).await {
-            Ok(found) if !Self::is_ours(&found, order, kind) => {
-                tracing::warn!(number = %found.number(), "external id collision");
+            Ok(found) if !found.is_ours(order, kind) => {
+                tracing::warn!(number = %found.number, "external id collision");
                 Ok(Seen::Collision(Box::new(found)))
             }
             Ok(found) if found.is_live() => {
-                tracing::info!(number = %found.number(), "found live under external id");
+                tracing::info!(number = %found.number, "found live under external id");
                 Ok(Seen::Live(Box::new(found)))
             }
             Ok(found) => {
-                tracing::info!(number = %found.number(), "found reversed under external id");
+                tracing::info!(number = %found.number, "found reversed under external id");
                 Ok(Seen::Reversed(Box::new(found)))
             }
             Err(QueryError::NotFound) => Ok(Seen::Absent),
@@ -1367,7 +1273,7 @@ impl Gateway {
             Ok(found) => {
                 tracing::warn!(
                     external_id = %external_id,
-                    number = %found.number(),
+                    number = %found.number,
                     "a document carries the probe's sentinel external id; it was not issued by this service"
                 );
                 Ok(ProbeOutcome::Accepted)
@@ -1480,7 +1386,8 @@ impl Gateway {
     ///    `teljesitesDatum` (the verified original's `telj`, which NAV
     ///    requires the storno to repeat), and **no issue date**
     ///    (352 otherwise): a response validated with
-    ///    [`CreatedInvoice::reverses`] is [`StornoOutcome::Reversed`], an
+    ///    [`CreatedInvoice::reverses`](szamlazz_agent::ops::invoice::CreatedInvoice::reverses)
+    ///    is [`StornoOutcome::Reversed`], an
     ///    echo of the requested number [`StornoOutcome::NotStornoable`], a
     ///    refusal [`StornoOutcome::Rejected`], rejected credentials
     ///    [`StornoOutcome::CredentialsRejected`]. A lost reply, an open code
@@ -1547,7 +1454,7 @@ impl Gateway {
         match self.client.send(&storno).await {
             Ok(created) if created.reverses(&storno.invoice_number) => {
                 tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
-                Ok(StornoOutcome::Reversed(created))
+                Ok(StornoOutcome::Reversed(IssuedDocument::from(created)))
             }
             Ok(created) => {
                 tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
@@ -1635,14 +1542,13 @@ impl Gateway {
         let selector = InvoiceSelector::ExternalId(external_id.as_str().to_owned());
         match self.query_raw(selector).await {
             Ok(document) if document.is_storno_of(invoice_number) => {
-                let storno_number = document.number().to_owned();
-                tracing::info!(storno_number = %storno_number, "storno already issued");
-                Ok(Some(storno_number))
+                tracing::info!(storno_number = %document.number, "storno already issued");
+                Ok(Some(document.number))
             }
             Ok(document) => {
                 tracing::warn!(
-                    number = %document.number(),
-                    tipus = %document.info.document_type,
+                    number = %document.number,
+                    tipus = %document.document_type,
                     "the storno external id holds another document"
                 );
                 Ok(None)
@@ -1712,14 +1618,17 @@ impl Gateway {
     }
 
     /// The order-number hint as a raw query result.
-    async fn hint_raw(&self, order: &OrderKey) -> Result<InvoiceDocument, QueryError> {
+    async fn hint_raw(&self, order: &OrderKey) -> Result<FoundDocument, QueryError> {
         self.query_raw(InvoiceSelector::OrderNumber(order.as_str().to_owned()))
             .await
     }
 
-    async fn query_raw(&self, selector: InvoiceSelector) -> Result<InvoiceDocument, QueryError> {
+    /// One `xmlszamlaxml` query, its answer projected onto the worker's
+    /// [`FoundDocument`] at this boundary: nothing past it holds the agent
+    /// crate's document.
+    async fn query_raw(&self, selector: InvoiceSelector) -> Result<FoundDocument, QueryError> {
         match self.client.send(&QueryInvoiceXml::new(selector)).await {
-            Ok(document) => Ok(document),
+            Ok(document) => Ok(FoundDocument::from(document)),
             Err(ClientError::Api(api)) if api.code == ErrorCode::MissingData => {
                 Err(QueryError::NotFound)
             }
@@ -1795,11 +1704,11 @@ enum Seen {
     /// Code 7.
     Absent,
     /// A live document of ours.
-    Live(Box<InvoiceDocument>),
+    Live(Box<FoundDocument>),
     /// A reversed document of ours.
-    Reversed(Box<InvoiceDocument>),
+    Reversed(Box<FoundDocument>),
     /// A document that fails validation. Never trusted.
-    Collision(Box<InvoiceDocument>),
+    Collision(Box<FoundDocument>),
 }
 
 /// A failed create-like call, classified for the outcome enums.
@@ -1873,16 +1782,16 @@ fn classify_failure(error: ClientError) -> Failure {
 /// Step 2 of [`Gateway::lookup`]: whether the order-number hint is a live
 /// invoice-kind document that is neither known to be ours nor the document
 /// seen under our external id.
-fn is_foreign(found: &InvoiceDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
-    is_invoice_family(&found.info.document_type)
+fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
+    is_invoice_family(&found.document_type)
         && found.is_live()
-        && Some(found.number()) != seen
-        && !our_numbers.iter().any(|known| known == found.number())
+        && Some(found.number.as_str()) != seen
+        && !our_numbers.contains(&found.number)
 }
 
 /// A raw query result as the read's outcome: every answer is data, no answer
 /// is [`Unanswered`].
-fn outcome(result: Result<InvoiceDocument, QueryError>) -> Result<QueryOutcome, Unanswered> {
+fn outcome(result: Result<FoundDocument, QueryError>) -> Result<QueryOutcome, Unanswered> {
     match result {
         Ok(document) => Ok(QueryOutcome::Found(Box::new(document))),
         Err(error) => Ok(match error.answered()? {
@@ -1921,7 +1830,7 @@ fn settle_create(
 ) -> Result<Option<CreateOutcome>, QueryError> {
     match seen {
         Ok(Seen::Collision(found)) => Ok(Some(CreateOutcome::Collision(found))),
-        Ok(Seen::Live(found)) if Some(found.number()) != reversed => {
+        Ok(Seen::Live(found)) if Some(found.number.as_str()) != reversed => {
             Ok(Some(CreateOutcome::Found(found)))
         }
         // The document the lookup saw reversed, reported live: a server
@@ -1929,7 +1838,7 @@ fn settle_create(
         Ok(Seen::Live(found)) => Ok(Some(CreateOutcome::LiveAgain(found))),
         // A reversed document the lookup did not see: issued and reversed
         // since. Never send past a reversal the caller has not acknowledged.
-        Ok(Seen::Reversed(found)) if Some(found.number()) != reversed => {
+        Ok(Seen::Reversed(found)) if Some(found.number.as_str()) != reversed => {
             Ok(Some(CreateOutcome::Reversed(found)))
         }
         // Nothing (code 7), or the document the lookup saw reversed, still
@@ -1977,13 +1886,12 @@ fn invoice_selector(selector: &Selector) -> InvoiceSelector {
 
 #[cfg(test)]
 mod tests {
-    use jiff::civil::date;
     use rust_decimal::dec;
     use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
     use szamlazz_agent::{ParseError, RequestError};
 
     use super::*;
-    use crate::test_support::{CreditRecord, Doc};
+    use crate::test_support::Doc;
 
     /// A successful `xmlszamlavalasz` body, as create, storno and credit-entry
     /// responses share it.
@@ -1995,150 +1903,6 @@ mod tests {
 
     fn response(body: &str) -> RawResponse {
         RawResponse::new([("szlahu_id", "924307747")], body.as_bytes().to_vec())
-    }
-
-    #[test]
-    fn document_ext_reads_the_checks_off_a_queried_document() {
-        let order = OrderKey::parse("ORD-1").expect("order");
-        let live = Doc {
-            payments: &[
-                CreditRecord::new(date(2026, 7, 4), "transfer", "500"),
-                CreditRecord::new(date(2026, 7, 5), "transfer", "770"),
-            ],
-            ..Doc::new("SZ-1", "SZ")
-        }
-        .parse();
-        assert_eq!(live.number(), "SZ-1");
-        assert!(live.is_live());
-        assert_eq!(live.e_invoice(), Some(true));
-        assert_eq!(live.payment_amounts(), [dec!(500), dec!(770)]);
-        assert!(live.carries_order(&order));
-        assert!(
-            !live.carries_order(&OrderKey::parse("ORD-2").expect("order")),
-            "another order's number"
-        );
-        assert!(
-            !live.carries_order(&OrderKey::parse("ord-1").expect("order")),
-            "case is significant, as on the server"
-        );
-        assert!(live.is_ours(&order, IssuedKind::Invoice));
-        assert!(!live.is_ours(&order, IssuedKind::Proforma));
-        assert!(
-            !live.is_ours(
-                &OrderKey::parse("ORD-2").expect("order"),
-                IssuedKind::Invoice
-            ),
-            "another order's"
-        );
-        assert!(!live.is_storno_of("SZ-0"));
-
-        let reversed = Doc {
-            reversed: true,
-            ..Doc::new("SZ-1", "SZ")
-        }
-        .parse();
-        assert!(!reversed.is_live());
-        assert!(reversed.is_ours(&order, IssuedKind::Invoice));
-
-        let storno = Doc {
-            referenced_invoice: Some("SZ-1"),
-            ..Doc::new("SS-1", "SS")
-        }
-        .parse();
-        assert!(storno.is_live(), "the storno invoice carries no marker");
-        assert!(storno.is_storno_of("SZ-1"));
-        assert!(!storno.is_storno_of("SZ-2"));
-
-        let proforma = Doc::new("D-1", "D").parse();
-        assert_eq!(proforma.e_invoice(), None, "eszamla 0 is not an invoice");
-        assert!(proforma.is_ours(&order, IssuedKind::Proforma));
-
-        // No account pin: neither `teszt` nor the seller record's id is read:
-        // not a live marker, and not a missing one either (the agent crate
-        // reports an absent `<teszt>` as `None` since #70; the worker has
-        // nothing to compare it with).
-        let other_account = Doc {
-            test: Some(false),
-            ..Doc::new("SZ-1", "SZ")
-        }
-        .parse();
-        assert!(other_account.is_ours(&order, IssuedKind::Invoice));
-        let unknown_mode = Doc {
-            test: None,
-            ..Doc::new("SZ-1", "SZ")
-        }
-        .parse();
-        assert_eq!(unknown_mode.info.test, None);
-        assert!(unknown_mode.is_ours(&order, IssuedKind::Invoice));
-    }
-
-    /// The order number a document carries is `rendelesszam` trimmed, as
-    /// szamlazz.hu matches it, and nothing when the element is absent,
-    /// empty or whitespace only: a document issued outside any order.
-    /// `carries_order` is that reading compared with the key, so a padded
-    /// `rendelesszam` carries the order and an empty one carries none. The
-    /// agent crate's parser trims the element and reads an empty one as
-    /// `None` already, so the rendered cases prove the pair end to end and
-    /// the assigned ones prove the worker's own reading, which does not lean
-    /// on the parser's.
-    #[test]
-    fn the_order_number_is_the_trimmed_rendelesszam_or_none() {
-        let order = OrderKey::parse("ORD-1").expect("order");
-
-        let plain = Doc::default().parse();
-        assert_eq!(plain.order_number(), Some("ORD-1"));
-        assert!(plain.carries_order(&order));
-
-        let padded = Doc {
-            order: Some("  ORD-1 "),
-            ..Doc::default()
-        }
-        .parse();
-        assert_eq!(padded.order_number(), Some("ORD-1"), "trimmed");
-        assert!(padded.carries_order(&order));
-
-        for outside_any_order in [None, Some(""), Some("   "), Some("\t\n")] {
-            let document = Doc {
-                order: outside_any_order,
-                ..Doc::default()
-            }
-            .parse();
-            assert_eq!(
-                document.order_number(),
-                None,
-                "rendelesszam {outside_any_order:?}"
-            );
-            assert!(
-                !document.carries_order(&order),
-                "rendelesszam {outside_any_order:?}"
-            );
-            assert!(
-                !document.is_ours(&order, IssuedKind::Invoice),
-                "rendelesszam {outside_any_order:?}"
-            );
-        }
-
-        // The worker's own reading of the parsed value, with the parser's
-        // normalisation out of the way.
-        let mut assigned = Doc::default().parse();
-        for (raw, read) in [
-            ("ORD-1", Some("ORD-1")),
-            ("  ORD-1 ", Some("ORD-1")),
-            ("", None),
-            ("   ", None),
-            ("\t\n", None),
-        ] {
-            assigned.info.order_number = Some(raw.to_owned());
-            assert_eq!(assigned.order_number(), read, "order_number {raw:?}");
-            assert_eq!(
-                assigned.carries_order(&order),
-                read.is_some(),
-                "order_number {raw:?}"
-            );
-        }
-        assigned.info.order_number = None;
-        assert_eq!(assigned.order_number(), None);
-        assert!(!assigned.carries_order(&order));
     }
 
     #[test]

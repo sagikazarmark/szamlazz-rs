@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::Context;
-use szamlazz_agent::ops::query_xml::InvoiceDocument;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
@@ -32,8 +31,7 @@ use crate::contract::{
     StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    InvoiceDocumentExt as _, ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome,
-    TaxpayerOutcome,
+    FoundDocument, ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome, TaxpayerOutcome,
 };
 use crate::identity::ExternalId;
 
@@ -161,8 +159,8 @@ fn set_payments_response(
 /// [`StornoVerdict::AlreadyReversed`] (the storno number is the by-number
 /// lookup's, which the handler reads best effort); a live unmanaged document
 /// proceeds. No document type pre-check: szamlazz.hu's echo tells.
-fn unmanaged_storno_verdict(found: &InvoiceDocument, number: &str) -> StornoVerdict {
-    if let Some(order) = found.order_number() {
+fn unmanaged_storno_verdict(found: &FoundDocument, number: &str) -> StornoVerdict {
+    if let Some(order) = &found.order_number {
         return StornoVerdict::Answered(
             StornoResponse::new(StornoOutcome::ManagedByOrder, number).with_order_key(order),
         );
@@ -521,17 +519,23 @@ mod tests {
             );
         }
 
-        let mut assigned = Doc::default().parse();
+        // The projection's own reading of the parsed value, with the parser's
+        // normalisation out of the way.
+        let assigned = |raw: &str| {
+            let mut wire = Doc::default().wire();
+            wire.info.order_number = Some(raw.to_owned());
+            FoundDocument::from(wire)
+        };
         for raw in ["", "   "] {
-            assigned.info.order_number = Some(raw.to_owned());
             assert_eq!(
-                unmanaged_storno_verdict(&assigned, "SZ-1"),
+                unmanaged_storno_verdict(&assigned(raw), "SZ-1"),
                 StornoVerdict::Proceed,
                 "order_number {raw:?}: the worker's own reading"
             );
         }
-        assigned.info.order_number = Some(" ORD-1 ".to_owned());
-        let StornoVerdict::Answered(response) = unmanaged_storno_verdict(&assigned, "SZ-1") else {
+        let StornoVerdict::Answered(response) =
+            unmanaged_storno_verdict(&assigned(" ORD-1 "), "SZ-1")
+        else {
             panic!("a padded order number is answered");
         };
         assert_eq!(response.order_key.as_deref(), Some("ORD-1"));

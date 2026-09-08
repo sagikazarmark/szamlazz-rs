@@ -9,15 +9,14 @@ use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use szamlazz_agent::Date;
-use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Resolution;
 use crate::account::Account;
 use crate::config::Namespace;
 use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
-    CreateOutcome, DeleteOutcome, InvoiceDocumentExt as _, LookupOutcome, ProbeOutcome,
-    QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
+    CreateOutcome, DeleteOutcome, FoundDocument, LookupOutcome, ProbeOutcome, QueryOutcome,
+    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
     TaxpayerOutcome,
 };
 use crate::identity::{ExternalId, OrderKey};
@@ -307,7 +306,7 @@ pub(super) fn verified_document(
     outcome: QueryOutcome,
     number: &str,
     namespace: &Namespace,
-) -> Result<Box<InvoiceDocument>, Fault> {
+) -> Result<Box<FoundDocument>, Fault> {
     match outcome {
         QueryOutcome::Found(found) => Ok(found),
         QueryOutcome::NotFound => Err(Fault::not_found(format!(
@@ -353,14 +352,13 @@ impl StornoIntent {
     /// [`Fault::missing_fulfillment_date`] when the document carries no
     /// `telj`; the callers raise it after every answer that needs no send.
     pub(super) fn from_verified(
-        found: &InvoiceDocument,
+        found: &FoundDocument,
         account: &Account,
         number: String,
         storno_id: ExternalId,
         comment: Option<String>,
     ) -> Result<Self, Fault> {
         let fulfillment_date = found
-            .info
             .fulfillment_date
             .ok_or_else(|| Fault::missing_fulfillment_date(&number))?;
         Ok(Self {
@@ -447,8 +445,7 @@ pub(super) fn storno_response(
 ) -> Result<StornoResponse, Fault> {
     Ok(match outcome {
         GatewayStornoOutcome::Reversed(storno) => {
-            StornoResponse::new(StornoOutcome::Reversed, number)
-                .with_storno_number(storno.invoice_number.as_str())
+            StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno.number)
         }
         GatewayStornoOutcome::AlreadyReversed { storno_number } => {
             StornoResponse::new(StornoOutcome::Reversed, number)
@@ -492,9 +489,7 @@ pub(super) fn storno_number_from_hint(
     namespace: &Namespace,
 ) -> Result<Option<String>, Fault> {
     match outcome {
-        QueryOutcome::Found(found) if found.is_storno_of(number) => {
-            Ok(Some(found.number().to_owned()))
-        }
+        QueryOutcome::Found(found) if found.is_storno_of(number) => Ok(Some(found.number)),
         QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api { .. } => Ok(None),
         QueryOutcome::CredentialsRejected { code, message } => {
             Err(Fault::credentials_rejected(namespace, code, message))
@@ -537,10 +532,10 @@ pub(super) enum Lookup {
     /// szamlazz.hu holds nothing under the id (code 7).
     Absent,
     /// A document that passed validation: ours, live or reversed.
-    Ours(Box<InvoiceDocument>),
+    Ours(Box<FoundDocument>),
     /// A document that fails validation: another order or kind. Never
     /// trusted.
-    Collision(Box<InvoiceDocument>),
+    Collision(Box<FoundDocument>),
 }
 
 impl Lookup {
@@ -565,7 +560,7 @@ impl Lookup {
                 if found.is_ours(order, kind) {
                     Ok(Self::Ours(found))
                 } else {
-                    tracing::warn!(number = %found.number(), kind = %kind, "external id collision");
+                    tracing::warn!(number = %found.number, kind = %kind, "external id collision");
                     Ok(Self::Collision(found))
                 }
             }
@@ -595,8 +590,8 @@ macro_rules! journal_helpers {
             use crate::config::WorkerConfig;
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{
-                InvoiceDocumentExt as _, QueryOutcome, StornoLookupOutcome,
-                StornoOutcome as GatewayStornoOutcome, StornoStepRequest, Unanswered,
+                QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
+                StornoStepRequest, Unanswered,
             };
             use crate::identity::{ExternalId, OrderKey};
             use crate::service::prologue::{self as decisions, Execution};

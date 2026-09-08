@@ -47,6 +47,14 @@
 //! contract change. A generator failure while the compatibility test passes
 //! is a formatting change and not a journal break (a dependency upgrade that
 //! prints a number or a date differently), and regenerates the same way.
+//!
+//! The one exception on disk is the pre-go-live break of #127, when the
+//! document outcomes went from the agent crate's types to the worker's
+//! projections: its archives are kept as the record of the shape that was
+//! replaced and listed in [`DELIBERATE_BREAKS`], which the compatibility test
+//! skips and asserts still fail to replay. Nothing was in flight to be
+//! killed. It is a record, not a mechanism: a break after go-live deletes
+//! the archive and drains before deploying.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -55,11 +63,9 @@ use std::path::{Path, PathBuf};
 
 use rust_decimal::dec;
 use serde_json::Value;
-use szamlazz_agent::ops::invoice::{
-    Buyer, CreateInvoice, CreatedInvoice, InvoiceCreationResult, InvoiceHeader, InvoiceKind,
-};
+use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
-use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
+use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
@@ -75,8 +81,8 @@ use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
 use crate::gateway::{
-    CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome, SetPaymentsOutcome,
-    StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
+    CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, ProbeOutcome,
+    QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
 };
 use crate::test_support::open_gateway;
 
@@ -504,9 +510,10 @@ const DOWN: &str = "Karbantartás miatt a szolgáltatás átmenetileg nem elérh
 
 /// The reply of a create, with every field the `xmlszamlavalasz` body and
 /// the `szlahu_id` header can carry: `SZ-1`, its totals, the buyer's account
-/// URL and a PDF. Parsed the way the gateway parses it, since the agent's
-/// types are `#[non_exhaustive]`.
-fn creation_result() -> InvoiceCreationResult {
+/// URL and a PDF (which the projection drops). Parsed the way the gateway
+/// parses it and projected the way the create step projects it, since the
+/// agent's types are `#[non_exhaustive]`.
+fn creation_result() -> IssuedDocument {
     let create = CreateInvoice::new(
         InvoiceKind::invoice(),
         InvoiceHeader::new(
@@ -529,14 +536,18 @@ fn creation_result() -> InvoiceCreationResult {
     create
         .parse(&reply("SZ-1", "10000", "12700", "12700"))
         .expect("xmlszamlavalasz parses")
+        .try_into()
+        .expect("a numbered reply")
 }
 
 /// The reply of a storno of `SZ-1`: the storno invoice `SS-1` with negative
-/// totals, parsed the way the gateway parses it.
-fn created_invoice() -> CreatedInvoice {
+/// totals, parsed the way the gateway parses it and projected the way the
+/// storno step projects it.
+fn created_invoice() -> IssuedDocument {
     StornoInvoice::new("SZ-1")
         .parse(&reply("SS-1", "-10000", "-12700", "0"))
         .expect("xmlszamlavalasz parses")
+        .into()
 }
 
 /// NAV's record of a valid taxpayer with every field the `xmltaxpayer`
@@ -582,14 +593,15 @@ fn reply(number: &str, net: &str, gross: &str, outstanding: &str) -> RawResponse
 }
 
 /// A queried invoice (`SZ`) with every element szamlazz.hu's `szamla` XML can
-/// carry, so that a rename anywhere in [`InvoiceDocument`] and its nested
-/// types is caught: a test-account e-invoice of `ORD-1` whose seller block
-/// carries `szallito/id` 972720 (parsed, never read), with postal addresses,
-/// ledger blocks, a financial item, labels, two payments and a PDF. Parsed the
-/// way the gateway parses a query answer, since the agent's types are
-/// `#[non_exhaustive]`. The kind does not change the shape, so one kind is
-/// enough.
-fn document(number: &str, reversed: bool) -> Box<InvoiceDocument> {
+/// carry, projected onto [`FoundDocument`] the way the gateway projects a
+/// query answer, so that the fixture pins every field the projection reads
+/// with a value (a test-account e-invoice of `ORD-1` referencing `SZ-0` and
+/// the proforma `D-1`, with two payments) and shows what it drops (the
+/// seller block with `szallito/id` 972720, the buyer block, the line items,
+/// the ledger blocks, the labels, the PDF). Parsed through the agent crate,
+/// since its types are `#[non_exhaustive]`. The kind does not change the
+/// shape, so one kind is enough.
+fn document(number: &str, reversed: bool) -> Box<FoundDocument> {
     let sztornozott = if reversed {
         "<sztornozott>true</sztornozott>"
     } else {
@@ -629,11 +641,11 @@ fn document(number: &str, reversed: bool) -> Box<InvoiceDocument> {
             <bankszamlaszam>11111111-22222222-33333333</bankszamlaszam><banktranzid>100</banktranzid><devizaarf>1</devizaarf></kifizetes></kifizetesek>
           <pdf>JVBERi0=</pdf></szamla>"#
     );
-    Box::new(
+    Box::new(FoundDocument::from(
         QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(number)))
             .parse(&RawResponse::new::<&str, &str>([], xml.into_bytes()))
             .expect("szamla XML parses"),
-    )
+    ))
 }
 
 /// The namespace the prologue pins (`namespace` step).
@@ -730,6 +742,44 @@ then run the tests again and review the diff as a contract change. If a field or
 removed or retyped, every in-flight invocation of the previous deployment will be killed on upgrade: \
 do not regenerate; keep the old name (see the gateway module docs).";
 
+/// The archived shapes the current types deliberately do **not** replay, as
+/// `(directory, file)` under `tests/journal/`: the record of the one break
+/// the pre-go-live window allowed (#127; ADR 0005, the crate-owned
+/// projection amendment). Before it, the document outcomes journaled the
+/// Számla Agent crate's `InvoiceDocument`, `InvoiceCreationResult` and
+/// `CreatedInvoice` as they were; since it they journal the worker's own
+/// [`FoundDocument`] and [`IssuedDocument`], a flat shape the nested one
+/// does not decode into. Nothing was in flight to be killed: there was no
+/// production deployment before the change. The compatibility test skips
+/// these and asserts each still fails to replay, so an entry cannot outlive
+/// its reason; the archives stay committed as the shape that was replaced.
+///
+/// A break after go-live is not listed here: it is a drained deploy and a
+/// deleted archive (the module docs).
+const DELIBERATE_BREAKS: &[(&str, &str)] = &[
+    ("lookup-outcome", "live.1.json"),
+    ("lookup-outcome", "reversed.1.json"),
+    ("lookup-outcome", "collision.1.json"),
+    ("lookup-outcome", "foreign.1.json"),
+    ("create-outcome", "issued.1.json"),
+    ("create-outcome", "found.1.json"),
+    ("create-outcome", "reversed.1.json"),
+    ("create-outcome", "live-again.1.json"),
+    ("create-outcome", "reconciled.1.json"),
+    ("create-outcome", "collision.1.json"),
+    ("query-outcome", "found.1.json"),
+    ("storno-outcome", "reversed.1.json"),
+];
+
+/// Whether `path` (a fixture under `tests/journal/<dir>/`) is one of the
+/// [`DELIBERATE_BREAKS`].
+fn is_deliberate_break(dir: &str, path: &Path) -> bool {
+    let file = path.file_name().and_then(|name| name.to_str());
+    DELIBERATE_BREAKS
+        .iter()
+        .any(|(broken_dir, broken_file)| *broken_dir == dir && Some(*broken_file) == file)
+}
+
 /// The generator: the JSON the current code writes for every variant of every
 /// journaled type equals its committed fixture byte for byte. Never writes
 /// unless `UPDATE_JOURNAL_FIXTURES=1` (see the module docs).
@@ -774,7 +824,10 @@ fn every_variant_of_every_journaled_type_is_pinned() {
 /// The compatibility test: every fixture under every journaled type's
 /// directory (the current shape and every shape archived before it)
 /// decodes through the current type and re-encodes to a superset of itself.
-/// What a replay of an in-flight invocation needs from the new code.
+/// What a replay of an in-flight invocation needs from the new code. The
+/// verdict on an archived shape is explicit either way: it replays, or it is
+/// one of the [`DELIBERATE_BREAKS`], which must still fail to replay and is
+/// otherwise skipped.
 #[test]
 fn every_pinned_fixture_replays_through_the_current_types() {
     let registry = registry();
@@ -799,6 +852,7 @@ fn every_pinned_fixture_replays_through_the_current_types() {
 
     let mut failures = Vec::new();
     let mut replayed = 0;
+    let mut broken = 0;
     for pins in &registry {
         let dir = fixtures().join(pins.dir);
         let mut files: Vec<PathBuf> = match fs::read_dir(&dir) {
@@ -821,14 +875,24 @@ fn every_pinned_fixture_replays_through_the_current_types() {
                     continue;
                 }
             };
-            match (pins.replay)(&text) {
-                Err(error) => failures.push(format!("{}: does not decode: {error}", rel(&path))),
-                Ok(current) if !is_covered_by(&fixture, &current) => failures.push(format!(
-                    "{}: decodes, but re-encodes without part of the fixture; a field was renamed \
-                     or retyped and decoded to its default",
+            let replays = match (pins.replay)(&text) {
+                Err(error) => Err(format!("does not decode: {error}")),
+                Ok(current) if !is_covered_by(&fixture, &current) => Err(
+                    "decodes, but re-encodes without part of the fixture; a field was renamed or \
+                     retyped and decoded to its default"
+                        .to_owned(),
+                ),
+                Ok(_) => Ok(()),
+            };
+            match (is_deliberate_break(pins.dir, &path), replays) {
+                (false, Ok(())) => replayed += 1,
+                (false, Err(why)) => failures.push(format!("{}: {why}", rel(&path))),
+                (true, Err(_)) => broken += 1,
+                (true, Ok(())) => failures.push(format!(
+                    "{}: is listed in DELIBERATE_BREAKS but replays through the current types; the \
+                     entry has outlived its reason: remove it",
                     rel(&path)
                 )),
-                Ok(_) => replayed += 1,
             }
         }
     }
@@ -841,6 +905,11 @@ fn every_pinned_fixture_replays_through_the_current_types() {
         failures.join("\n  ")
     );
     assert!(replayed > 0, "no fixture was replayed");
+    assert_eq!(
+        broken,
+        DELIBERATE_BREAKS.len(),
+        "every listed break is an archived fixture on disk"
+    );
 }
 
 /// The leak guard on the journaled types, without a server: every variant of
@@ -934,6 +1003,82 @@ async fn no_journaled_type_serialises_the_agent_key() {
             assert!(
                 !contains_sentinel(&variant.json),
                 "{}/{}: {}",
+                pins.dir,
+                variant.stem,
+                variant.json
+            );
+            scanned += 1;
+        }
+    }
+    assert!(scanned > 0, "no variant was scanned");
+}
+
+/// The keys a `szamlazz_agent` response type would bring into a journal entry
+/// and the worker's projections leave out: the seller block, the buyer block
+/// (the buyer's name, addresses, email and tax numbers under it), the line
+/// items, the financial items, the labels and the PDF of a queried document,
+/// and the PDF of a create reply. Personal data of the buyer and the largest
+/// parts of a document, none of which any handler reads. (The `Account`'s
+/// seller block carries an `email` block of its own: the operator's
+/// configuration, not a document's.)
+const NEVER_JOURNALED: &[&str] = &[
+    "supplier",
+    "buyer",
+    "items",
+    "financial_items",
+    "labels",
+    "pdf",
+];
+
+/// Every object key in `value`, at any depth.
+fn keys_of(value: &Value, into: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                into.insert(key.clone());
+                keys_of(value, into);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| keys_of(item, into)),
+        _ => {}
+    }
+}
+
+/// The guard behind "no `szamlazz_agent` response type is journaled": every
+/// variant of every journaled type serialises without any of the
+/// [`NEVER_JOURNALED`] keys, at any depth. What the projections exist for
+/// (#127): a journal entry is visible in the Restate UI for the retention
+/// period, and holds what the handlers read, not the document. The archived
+/// pre-#127 shape of a found document is the positive control: it carries
+/// every one of the keys, so the scan reads.
+#[test]
+fn no_journaled_type_carries_the_buyer_the_seller_the_items_or_the_pdf() {
+    let scan = |json: &str| -> Vec<&'static str> {
+        let value: Value = serde_json::from_str(json).expect("json");
+        let mut keys = BTreeSet::new();
+        keys_of(&value, &mut keys);
+        NEVER_JOURNALED
+            .iter()
+            .copied()
+            .filter(|never| keys.contains(*never))
+            .collect()
+    };
+
+    let archived = fs::read_to_string(fixtures().join("lookup-outcome/live.1.json"))
+        .expect("the archived pre-#127 shape is committed");
+    assert_eq!(
+        scan(&archived),
+        NEVER_JOURNALED,
+        "the archived document carries every key the projection drops: the scan reads"
+    );
+
+    let mut scanned = 0;
+    for pins in registry() {
+        for variant in &pins.variants {
+            let carried = scan(&variant.json);
+            assert!(
+                carried.is_empty(),
+                "{}/{}: journals {carried:?}: {}",
                 pins.dir,
                 variant.stem,
                 variant.json

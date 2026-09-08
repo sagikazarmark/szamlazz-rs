@@ -8,7 +8,6 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::credit_entry::CreditEntry;
-use szamlazz_agent::ops::query_xml::{InvoiceDocument, RecordedPayment};
 use szamlazz_agent::ops::taxpayer::{
     TaxpayerAddress as AgentTaxpayerAddress, TaxpayerInfo, TaxpayerPrefix,
 };
@@ -16,6 +15,7 @@ use szamlazz_agent::ops::taxpayer::{
 use super::document::PaymentMethod;
 use super::{InvoiceNumber, outstanding};
 use crate::account::Account;
+use crate::gateway::{FoundDocument, RecordedCreditEntry};
 
 /// Input of `Szamlazz.Agent.query`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,8 +87,8 @@ impl PaymentRecord {
     }
 }
 
-impl From<&RecordedPayment> for PaymentRecord {
-    fn from(payment: &RecordedPayment) -> Self {
+impl From<&RecordedCreditEntry> for PaymentRecord {
+    fn from(payment: &RecordedCreditEntry) -> Self {
         let mut record = Self::new(payment.amount);
         record.date = Some(payment.date);
         record.title = Some(payment.title.clone());
@@ -98,7 +98,8 @@ impl From<&RecordedPayment> for PaymentRecord {
     }
 }
 
-/// Output of `Szamlazz.Agent.query`: a projection of the queried document.
+/// Output of `Szamlazz.Agent.query`: a projection of the queried document,
+/// read off the `FoundDocument` the handler's one step journaled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -183,38 +184,31 @@ impl QueryResponse {
     }
 }
 
-/// The projection of a queried document: identity, references, dates,
-/// totals and payments; no buyer data. `outstanding` is `gross − Σ payments`;
-/// `test` is `teszt` exactly as reported, `None` included.
-impl From<&InvoiceDocument> for QueryResponse {
-    fn from(document: &InvoiceDocument) -> Self {
-        let info = &document.info;
-        let mut response = Self::new(info.invoice_number.as_str(), info.document_type.clone());
-        response.reversed = info.reversed;
-        response.referenced_invoice_number = info
+/// The projection of a found document: identity, references, dates, totals
+/// and payments; no buyer data (the journaled document carries none either).
+/// `outstanding` is `gross − Σ payments`; `test` is `teszt` exactly as
+/// reported, `None` included.
+impl From<&FoundDocument> for QueryResponse {
+    fn from(document: &FoundDocument) -> Self {
+        let mut response = Self::new(&document.number, &document.document_type);
+        response.reversed = document.reversed;
+        response
             .referenced_invoice_number
-            .as_ref()
-            .map(|number| number.as_str().to_owned());
-        response.referenced_proforma_number = info
+            .clone_from(&document.referenced_invoice_number);
+        response
             .referenced_proforma_number
-            .as_ref()
-            .map(|number| number.as_str().to_owned());
-        response.order_number.clone_from(&info.order_number);
-        response.issue_date = info.issue_date;
-        response.fulfillment_date = info.fulfillment_date;
-        response.due_date = info.due_date;
-        response.currency.clone_from(&info.currency);
-        response.net_total = Some(document.totals.total.net);
-        response.vat_total = Some(document.totals.total.vat);
-        response.gross_total = Some(document.totals.total.gross);
+            .clone_from(&document.referenced_proforma_number);
+        response.order_number.clone_from(&document.order_number);
+        response.issue_date = document.issue_date;
+        response.fulfillment_date = document.fulfillment_date;
+        response.due_date = document.due_date;
+        response.currency.clone_from(&document.currency);
+        response.net_total = Some(document.net_total);
+        response.vat_total = Some(document.vat_total);
+        response.gross_total = Some(document.gross_total);
         response.payments = document.payments.iter().map(PaymentRecord::from).collect();
-        let amounts: Vec<_> = document
-            .payments
-            .iter()
-            .map(|payment| payment.amount)
-            .collect();
-        response.outstanding = outstanding(response.gross_total, &amounts);
-        response.test = info.test;
+        response.outstanding = outstanding(response.gross_total, &document.payment_amounts());
+        response.test = document.test;
         response
     }
 }
