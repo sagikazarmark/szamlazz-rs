@@ -149,13 +149,12 @@ pub struct QueryResponse {
     /// Outstanding amount: gross total minus the sum of payments.
     #[serde(default)]
     pub outstanding: Option<Decimal>,
-    /// Issued from a test account (`teszt`), as szamlazz.hu reported it —
+    /// Issued from a test account (`teszt`), as szamlazz.hu reported it:
     /// what the go-live check reads off a known document, since the worker
-    /// compares it with nothing (ADR 0006, account-pin amendment). `None`
-    /// (`null`) is a document that does not say: the schema has the element
-    /// mandatory, so it is szamlazz.hu breaking its schema, never a live
-    /// document — a reader deciding "is this scope live?" must not read it as
-    /// `false` (#70).
+    /// compares it with nothing. `None` (`null`) is a document that does not
+    /// say: the schema has the element mandatory, so it is szamlazz.hu
+    /// breaking its schema, never a live document; a reader deciding "is this
+    /// scope live?" must not read it as `false`.
     #[serde(default)]
     pub test: Option<bool>,
 }
@@ -185,7 +184,7 @@ impl QueryResponse {
 }
 
 /// The projection of a queried document: identity, references, dates,
-/// totals and payments — no buyer data. `outstanding` is `gross − Σ payments`;
+/// totals and payments; no buyer data. `outstanding` is `gross − Σ payments`;
 /// `test` is `teszt` exactly as reported, `None` included.
 impl From<&InvoiceDocument> for QueryResponse {
     fn from(document: &InvoiceDocument) -> Self {
@@ -227,7 +226,7 @@ impl From<&InvoiceDocument> for QueryResponse {
 pub struct QueryTaxpayerRequest {
     /// The Hungarian tax number to look up: the bare eight-digit stem
     /// (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`).
-    /// Nothing else — no whitespace, no other separator — is accepted; the
+    /// Nothing else (no whitespace, no other separator) is accepted; the
     /// handler refuses anything else as `invalid_input`.
     pub tax_number: String,
 }
@@ -283,17 +282,17 @@ pub struct InvalidTaxNumber(String);
 /// Output of `Szamlazz.Agent.query_taxpayer`: a taxpayer as NAV registers
 /// it, looked up through szamlazz.hu's `xmltaxpayer` operation.
 ///
-/// `valid: false` is a normal answer — NAV knows no taxpayer under the
-/// prefix — not a fault; the optional fields are then absent.
+/// `valid: false` is a normal answer (NAV knows no taxpayer under the
+/// prefix), not a fault; the optional fields are then absent.
 ///
 /// A crate-owned projection of the Számla Agent crate's `TaxpayerInfo`, not
 /// the agent type as it
 /// is: it is what the handler's read step journals, so its layout is
-/// **additive-only** — a field may be added with a default; nothing is
-/// renamed, removed or retyped — and the agent crate's serde layout never
-/// rides in the journal. Not cached by the worker (ADR 0005: szamlazz.hu is
-/// the source of truth); a caller that looks a buyer up repeatedly caches
-/// this response itself, with a TTL on the order of a day.
+/// **additive-only** (a field may be added with a default; nothing is
+/// renamed, removed or retyped), and the agent crate's serde layout never
+/// rides in the journal. Not cached by the worker (szamlazz.hu is the source
+/// of truth); a caller that looks a buyer up repeatedly caches this response
+/// itself, with a TTL on the order of a day.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -397,14 +396,14 @@ pub struct SetPaymentsRequest {
     /// The invoice to register credit entries on.
     pub invoice_number: InvoiceNumber,
     /// The credit entries (`jóváírások`); szamlazz.hu accepts at most five,
-    /// and a replacing request (`additive: false`) needs at least one — with
+    /// and a replacing request (`additive: false`) needs at least one: with
     /// none it would clear the invoice's payments, and is refused as
     /// `invalid_input` with nothing sent.
     pub entries: Vec<PaymentEntry>,
     /// Add to the existing entries instead of replacing them.
     ///
-    /// **At-least-once.** Replacing is idempotent — a repeat sends the same
-    /// final state — but additive entries are appended by every send that
+    /// **At-least-once.** Replacing is idempotent (a repeat sends the same
+    /// final state), but additive entries are appended by every send that
     /// reaches szamlazz.hu, and the handler cannot tell a lost reply from a
     /// lost request: an `outcome_unknown` fault, or the handler's one retry
     /// after a crash, may have landed the entries already. A caller that sees
@@ -494,16 +493,15 @@ impl SetPaymentsResponse {
 
 /// Output of `Szamlazz.Agent.check_account`: what the deploy pipeline needs
 /// to prove, per scope, that the scope reaches the worker, resolves to the
-/// intended account and its credentials work — without issuing anything.
+/// intended account and its credentials work, without issuing anything.
 ///
 /// Credential acceptance is the only szamlazz.hu-verified fact here; the
 /// account field echoes the *configured* account's id. *Which* szamlazz.hu
-/// account the key opens — and whether it is a test account — is not in the
-/// answer and is checked nowhere in the worker (ADR 0006, account-pin
-/// amendment): a not-found probe has no document to read, and no operation
-/// answers "which account am I?". That is the operator's go-live check: query
-/// a document known to be the account's under the scope and read its `test`
-/// and seller block.
+/// account the key opens (and whether it is a test account) is not in the
+/// answer and is checked nowhere in the worker: a not-found probe has no
+/// document to read, and no operation answers "which account am I?". That is
+/// the operator's go-live check: query a document known to be the account's
+/// under the scope and read its `test` and seller block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -686,7 +684,7 @@ mod tests {
     /// nothing documented carries a field the contract does not know.
     #[test]
     fn documented_bodies_deserialize() {
-        // tests/e2e/ — the literal bodies of the e2e scenarios.
+        // tests/e2e/: the literal bodies of the e2e scenarios.
         serde_json::from_value::<QueryRequest>(json!({"selector": {"invoice_number": "SZ-12"}}))
             .expect("a query body");
         // crates/restate-szamlazz-endpoint/README.md's handler table and the
@@ -804,7 +802,7 @@ mod tests {
         assert_eq!(json["test"], true);
         assert!(
             json.get("supplier_id").is_none(),
-            "the seller block is not projected (ADR 0006, account-pin amendment): {json}"
+            "the seller block is not projected: {json}"
         );
         assert_eq!(json["payments"][0]["amount"], "10000");
 
@@ -973,8 +971,8 @@ mod tests {
             })
         );
 
-        // The minimal shape — what an earlier version of the type, or NAV's
-        // `valid: false`, journals — still decodes.
+        // The minimal shape (what an earlier version of the type, or NAV's
+        // `valid: false`, journals) still decodes.
         let minimal: QueryTaxpayerResponse =
             serde_json::from_value(json!({"valid": false})).expect("deserialize");
         assert!(!minimal.valid);

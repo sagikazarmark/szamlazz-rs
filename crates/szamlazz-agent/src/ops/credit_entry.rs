@@ -105,7 +105,7 @@ pub enum CreditEntriesError {
 /// Registers up to five payments against the invoice named by
 /// [`RegisterCreditEntry::invoice_number`]. Unless
 /// [`RegisterCreditEntry::additive`] is set, the entries *replace* the
-/// invoice's existing credit entries — so a replacing request with no
+/// invoice's existing credit entries, so a replacing request with no
 /// entries would clear them, and is refused by [`validate`](AgentRequest::validate)
 /// ([`RequestError::EmptyCreditEntryReplace`]).
 #[doc(alias = "xmlszamlakifiz")]
@@ -368,7 +368,7 @@ mod tests {
     }
 
     /// A body that is not szamlazz.hu's answer is quoted as a bounded
-    /// excerpt with the length noted — a proxy's page or a stack trace never
+    /// excerpt with the length noted: a proxy's page or a stack trace never
     /// travels whole into a consumer's logs or journal.
     #[test]
     fn unexpected_body_is_quoted_as_a_bounded_excerpt() {
@@ -402,7 +402,7 @@ mod tests {
     }
 
     /// A credit entry on a reversed invoice is rejected with 463 in the body
-    /// only — szamlazz.hu sets no `szlahu_error_code` header on this path.
+    /// only: szamlazz.hu sets no `szlahu_error_code` header on this path.
     #[test]
     fn body_only_error_is_typed() {
         let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[463]]></hibakod><hibauzenet><![CDATA[Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ.]]></hibauzenet></xmlszamlavalasz>"#;

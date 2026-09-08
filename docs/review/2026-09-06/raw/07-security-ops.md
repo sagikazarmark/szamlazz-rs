@@ -1,4 +1,4 @@
-# Review 07 — Security and operational readiness
+# Review 07, Security and operational readiness
 
 Repository: `/home/laborant/szamlazz-rs2` at `0e4238c` (workspace v0.3.0).
 Scope: credential handling, multi-account isolation, inbound receivers, the Restate endpoint binary, container, config/secrets, supply chain, error/observability hygiene, data handling. Read-only review; no cargo commands were run.
@@ -18,16 +18,16 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 1. Endpoint accepts unsigned Restate requests by default, with no warning
 
 - **Severity:** high
-- **Confidence:** high — read the code path and the SDK verifier.
+- **Confidence:** high, read the code path and the SDK verifier.
 - **Location:** `crates/restate-szamlazz-endpoint/src/main.rs:184-195`; `~/.cargo/registry/.../restate-sdk-shared-core-7.0.3/src/request_identity.rs:132-134`; README `crates/restate-szamlazz-endpoint/README.md:331`.
-- **Evidence:** `if !identity_keys.is_empty() { tracing::info!(... "request identity verification enabled") }` — there is no `warn!` for the empty case. SDK: `if self.keys.is_empty() { return Ok(()); }`. README: "Without `identity_keys` the endpoint accepts unsigned requests."
+- **Evidence:** `if !identity_keys.is_empty() { tracing::info!(... "request identity verification enabled") }`: there is no `warn!` for the empty case. SDK: `if self.keys.is_empty() { return Ok(()); }`. README: "Without `identity_keys` the endpoint accepts unsigned requests."
 - **Impact:** ADR 0006 rule 6 ("the scope is routing, not authorization") assumes the *only* way in is the Restate ingress behind an authenticating gateway. Without identity keys, anything that can open a TCP connection to `{bind}:{port}` (default `0.0.0.0:9080`, `EXPOSE 9080` in the Dockerfile) can speak the Restate service protocol directly to `/invoke/Szamlazz.Order/create_invoice` with **any scope it chooses**, since the scope arrives as a protocol header from whoever plays the server. That is a full bypass of the multi-account boundary and of Restate's idempotency/locking, and it would let an attacker issue legal documents on every configured account. The single-account shape is exposed the same way for its one account.
 - **Recommendation:** (a) Log at `warn!` on start-up (and in `--check-config`) when `identity_keys` is empty, stating that any client reaching the port can invoke handlers. (b) Consider an explicit opt-out (`allow_unsigned_requests = true`) and otherwise refuse to start without keys, at least in the multi-account shape. (c) Move the Request Identity section of the README into the multi-account/deploy checklist as a hard requirement and mention that the bind address should be the Restate server's network only.
 
 ### 2. The end-to-end journal leak scan is `#[ignore]`d and not evidently run in CI
 
 - **Severity:** high
-- **Confidence:** medium — the dagger `check` module is remote (`sagikazarmark/daggerverse-beta/rust`); I could not read what it runs, but nothing in the repo passes `--ignored` or provisions Docker for it.
+- **Confidence:** medium: the dagger `check` module is remote (`sagikazarmark/daggerverse-beta/rust`); I could not read what it runs, but nothing in the repo passes `--ignored` or provisions Docker for it.
 - **Location:** `crates/restate-szamlazz/tests/service.rs:1458` (`#[ignore = "needs docker"]`), `:4148-4201` (the scan); `.github/workflows/dagger.yaml`; `dagger.toml`; `crates/restate-szamlazz/README.md:403`.
 - **Evidence:** CONTEXT.md and ADR 0006 both say "`AgentKey::expose()` is one line from journalable; the e2e journal scan is the real guarantee". The scan itself is sound (hex-decodes `raw` of every `sys_journal` row, checks `completion_failure`, has a positive control). But the only invocation path documented is a manual `cargo test -p restate-szamlazz -- --ignored e2e`, and the compile-time guard `assert_not_impl_any!` lives inside `#[cfg(test)] mod tests` (`crates/restate-szamlazz/src/account.rs:424-436`), so it too only fires under `cargo test`, not `cargo build`.
 - **Impact:** The guarantee that no agent key is ever journaled is verified only when a developer remembers to run the ignored suite locally with Docker. A regression (e.g. a future `String` field populated from `expose()` in a journaled outcome) would ship undetected.
@@ -36,7 +36,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 3. Two of four GitHub Actions workflows are tag-pinned, not SHA-pinned
 
 - **Severity:** medium
-- **Confidence:** high — read the files.
+- **Confidence:** high, read the files.
 - **Location:** `.github/workflows/dagger.yaml:8,10`; `.github/workflows/release.yml:59,69,85,119,134,161,178,183,190,208,228,233,240,253,260,293`.
 - **Evidence:** `uses: actions/checkout@v7.0.1`, `uses: dagger/dagger-for-github@v8.4.1` (dagger.yaml); `uses: actions/checkout@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8` (release.yml). `container.yaml` and `analysis-scorecard.yaml` *are* SHA-pinned. Dependabot explicitly excludes `release.yml` and `dagger*.yaml` (`.github/dependabot.yaml`), so they also receive no automated updates.
 - **Impact:** Tag references are mutable; a compromised upstream tag runs arbitrary code in the release job, which holds `contents: write` and publishes binaries and installers. Both files are generated (cargo-dist, dagger-gha), which explains but does not remove the exposure.
@@ -45,25 +45,25 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 4. Adatkapcsolat router: no body limit by default, and the full XML is tokenized twice before authentication
 
 - **Severity:** medium
-- **Confidence:** high — read `axum.rs` and `document.rs`.
+- **Confidence:** high, read `axum.rs` and `document.rs`.
 - **Location:** `crates/szamlazz-adatkapcsolat/src/axum.rs:138-158` (`DefaultBodyLimit::disable()` when no limit given; `router()` and `router_with_resolver()` pass `None`), `:245-260` (preflight runs before the key header is read); `crates/szamlazz-adatkapcsolat/src/document.rs:54-60, 94-125, 156-170` (two full passes: `root_kind` then `validate_element_namespaces`).
 - **Evidence:** "Számlázz.hu publishes no maximum size and receipt batches are unbounded, so this router disables axum's default body limit." and `let root = match Document::preflight(&body) { ... }` precedes `headers.get(KEY_HEADER)`.
 - **Impact:** An unauthenticated client can post an arbitrarily large body and force it to be buffered in memory (`Bytes`) and tokenized end-to-end twice, before any key check. Memory exhaustion / CPU DoS against a public receiver. The CLI `listen` command (`crates/szamlazz-cli/src/commands/listen.rs:109`) uses the unlimited `router()`, though it binds `127.0.0.1` by default.
-- **Recommendation:** Make the default a generous but finite cap (e.g. 64 MiB) and provide `router_without_body_limit` as the explicit opt-out; document the trade-off. Check the `X-Szamlazzhu-Key` header *before* any parsing — the protocol needs the root element only to choose the KEY_ERR ack shape, so on key mismatch parse only far enough to find the root (or, if the header is missing entirely, return 401 without parsing at all). Consider `tower::limit`/`timeout` layers in the README example.
+- **Recommendation:** Make the default a generous but finite cap (e.g. 64 MiB) and provide `router_without_body_limit` as the explicit opt-out; document the trade-off. Check the `X-Szamlazzhu-Key` header *before* any parsing: the protocol needs the root element only to choose the KEY_ERR ack shape, so on key mismatch parse only far enough to find the root (or, if the header is missing entirely, return 401 without parsing at all). Consider `tower::limit`/`timeout` layers in the README example.
 
 ### 5. Upstream szamlazz.hu response bodies can be echoed verbatim into caller-facing faults and journaled outcomes
 
 - **Severity:** medium
-- **Confidence:** high — traced the string from parser to fault.
+- **Confidence:** high, traced the string from parser to fault.
 - **Location:** `crates/szamlazz-agent/src/xml.rs:69-71, 77-81`; `crates/szamlazz-agent/src/ops/query_xml.rs:539, 601, 608, 615-617`; `crates/restate-szamlazz/src/gateway.rs:1105, 1251, 1417, 1471, 1510, 1537` (`error.to_string()` into `Unanswered::Transport`, `Unconfirmed::Transport`, `DeleteOutcome::Transport`, `SetPaymentsOutcome::Transport`, `QueryError::Transport`); `crates/restate-szamlazz/src/service/support.rs:185-191` (`read_exhausted` puts `error.message()` into the 503 body).
-- **Evidence:** `ParseError::UnexpectedBody(format!("expected {expected_root} in namespace {expected_namespace}, got {local}: {text}"))` — `text` is the whole response body. On read-policy exhaustion `read_exhausted` formats the last `Unanswered` message into the `unavailable` fault returned to the caller and stored as `completion_failure`; `DeleteOutcome::Transport(String)` and `SetPaymentsOutcome::Transport(String)` are journaled data.
-- **Impact:** If szamlazz.hu (or a WAF/CDN in front of it) answers with an HTML error page, or a well-formed XML with an unexpected root, that body — potentially kilobytes of HTML, or a document body with buyer data — ends up in (a) the HTTP 503 body the caller receives, (b) `sys_invocation.completion_failure`, visible in the Restate UI, and (c) for delete/set_payments, the journal itself. The agent key is *not* at risk here (it is in the request, never the response), but it is uncontrolled upstream content in error channels.
+- **Evidence:** `ParseError::UnexpectedBody(format!("expected {expected_root} in namespace {expected_namespace}, got {local}: {text}"))`; `text` is the whole response body. On read-policy exhaustion `read_exhausted` formats the last `Unanswered` message into the `unavailable` fault returned to the caller and stored as `completion_failure`; `DeleteOutcome::Transport(String)` and `SetPaymentsOutcome::Transport(String)` are journaled data.
+- **Impact:** If szamlazz.hu (or a WAF/CDN in front of it) answers with an HTML error page, or a well-formed XML with an unexpected root, that body (potentially kilobytes of HTML, or a document body with buyer data) ends up in (a) the HTTP 503 body the caller receives, (b) `sys_invocation.completion_failure`, visible in the Restate UI, and (c) for delete/set_payments, the journal itself. The agent key is *not* at risk here (it is in the request, never the response), but it is uncontrolled upstream content in error channels.
 - **Recommendation:** Truncate and sanitize `UnexpectedBody` (e.g. first 256 bytes, control characters stripped), or carry only a hash/length plus the root element name. In `read_exhausted`/`Unanswered::Transport`, keep the full text for `tracing` and give the caller a short classification.
 
 ### 6. `/health` is behind identity verification; no `HEALTHCHECK`, no docs
 
 - **Severity:** medium
-- **Confidence:** high — SDK code order is explicit.
+- **Confidence:** high: SDK code order is explicit.
 - **Location:** `~/.cargo/registry/.../restate-sdk-0.12.0/src/endpoint/mod.rs:242-250`; `Dockerfile` (no `HEALTHCHECK`); `crates/restate-szamlazz-endpoint/README.md` (no mention of `/health`).
 - **Evidence:** `if let Err(e) = identity_verifier.verify_identity(&headers, path) { return error_response(...) }` executes before `if parts.last() == Some(&"health")`.
 - **Impact:** Once an operator follows finding 1 and sets `identity_keys`, an unsigned Kubernetes `httpGet /health` probe is rejected and the pod flaps; without keys, `/health` works but is unmentioned so operators will not use it. Either way the readiness story is undocumented.
@@ -78,7 +78,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 - **Impact:** Non-root and digest-pinned is good, but the image still ships a shell, `apt`, and libc tooling that a compromised process could use for lateral movement. reqwest is built with `rustls` + platform verifier (`crates/szamlazz-agent/Cargo.toml:24`), so only CA roots are needed.
 - **Recommendation:** `gcr.io/distroless/cc-debian13:nonroot` (or `static` with a musl build) as the final stage; keep the digest pin. Add `--read-only` / `readOnlyRootFilesystem` guidance to the README since the binary needs no writable FS.
 
-### 8. Agent key is available only via inline TOML or environment variable — no file-based secret source
+### 8. Agent key is available only via inline TOML or environment variable, no file-based secret source
 
 - **Severity:** low
 - **Confidence:** high.
@@ -108,10 +108,10 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 11. Duplicate-credentials fan-in check can be defeated by an account that has several agent keys
 
 - **Severity:** low
-- **Confidence:** medium — relies on szamlazz.hu allowing multiple agent keys per account ("Számla Agent kulcsok", plural, `credentials.rs:7`), which the code comments themselves state.
+- **Confidence:** medium, relies on szamlazz.hu allowing multiple agent keys per account ("Számla Agent kulcsok", plural, `credentials.rs:7`), which the code comments themselves state.
 - **Location:** `crates/restate-szamlazz/src/account/static_resolver.rs:363-408`; ADR 0006 `docs/adr/0006-...md:125-130`.
 - **Evidence:** Load-time uniqueness is on `id`, `supplier_id`, and `(endpoint, agent_key)`. Two scopes configured with two *different* keys of the *same* szamlazz.hu account and two different (one wrong) `supplier_id`s pass every check; `check_account` cannot verify `supplier_id` (README `:177`).
-- **Impact:** Rule 1 (one account ⇔ one scope) is then violated silently. Safety still holds in practice because the first found document fails the supplier pin (`Collision`/`account_mismatch`) and szamlazz.hu's order-number-repetition toggle stops concurrent duplicates — but this is the *second* guard, and the ADR presents the load-time check as enforcing "the checkable half".
+- **Impact:** Rule 1 (one account ⇔ one scope) is then violated silently. Safety still holds in practice because the first found document fails the supplier pin (`Collision`/`account_mismatch`) and szamlazz.hu's order-number-repetition toggle stops concurrent duplicates, but this is the *second* guard, and the ADR presents the load-time check as enforcing "the checkable half".
 - **Recommendation:** Say so explicitly in the ADR/README ("two keys of one account are not detected at load; a wrong `supplier_id` is detected on the first found document"). Consider a one-time optional probe at start-up that issues nothing but *queries* a known document number per account to learn `szallito/id` and compare it against config (opt-in, since it needs a number).
 
 ### 12. Requests flowing into journal step names and external ids are not length-bounded
@@ -128,7 +128,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 - **Severity:** low
 - **Confidence:** high.
 - **Location:** `crates/restate-szamlazz/src/gateway.rs:813-818, 914-921, 1190, 1233, 1271, 1324` (spans carry `external_id`, `kind`, `number`, `prefix`); `crates/restate-szamlazz-endpoint/src/main.rs:65-66` (`tracing_subscriber::fmt()` text only).
-- **Evidence:** `tracing::info_span!("gateway.create", external_id = %request.external_id, kind = %request.kind, reversed = ...)` — no `account`/`scope` field; the `credentials_rejected` warning tags `namespace` and `code` only (`support.rs:119-123`).
+- **Evidence:** `tracing::info_span!("gateway.create", external_id = %request.external_id, kind = %request.kind, reversed = ...)`, no `account`/`scope` field; the `credentials_rejected` warning tags `namespace` and `code` only (`support.rs:119-123`).
 - **Impact:** In a multi-account deployment a `warn` like "szamlazz.hu rejected the agent credentials" cannot be attributed to an account from the endpoint's logs alone; the operator has to cross-reference the Restate invocation. The `Account.id` and scope are already journaled and deemed safe to show in the UI, so they are safe to log. No JSON log format is offered for log aggregation.
 - **Recommendation:** Add `account = %account.id` and `scope` to the prologue's span (and propagate it through the gateway spans); add a `--log-format json` / `LOG_FORMAT` switch using `tracing_subscriber::fmt().json()`.
 
@@ -138,7 +138,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 - **Confidence:** high.
 - **Location:** `crates/szamlazz-adatkapcsolat/src/axum.rs:249, 279` (`error.to_string()` into the 400 body); `crates/szamlazz-adatkapcsolat/src/error.rs:36-37, 42-50` (`UnknownRoot(String)`, `WrongNamespace { root, actual }`); `crates/szamlazz-ipn/src/axum.rs:56-63`.
 - **Evidence:** `Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response()`.
-- **Impact:** Reflected attacker-controlled text (element names, namespaces, quick-xml position messages) in a `text/plain` response. Not exploitable as XSS given the content type, and useful for the legitimate sender's logs — but it is unauthenticated reflection.
+- **Impact:** Reflected attacker-controlled text (element names, namespaces, quick-xml position messages) in a `text/plain` response. Not exploitable as XSS given the content type, and useful for the legitimate sender's logs, but it is unauthenticated reflection.
 - **Recommendation:** Keep the detailed error in a server-side log; send a fixed short body. At minimum cap the echoed element/namespace length.
 
 ### 15. IPN receiver mitigation guidance is thin
@@ -153,7 +153,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 16. `RawResponse` `Debug` includes response headers (may contain `Set-Cookie: JSESSIONID`)
 
 - **Severity:** low
-- **Confidence:** high — no production Debug print of `RawResponse` was found, so this is a latent hazard.
+- **Confidence:** high, no production Debug print of `RawResponse` was found, so this is a latent hazard.
 - **Location:** `crates/szamlazz-agent/src/wire.rs:141-145` (`#[derive(Debug, Clone)] pub struct RawResponse { headers, body }`); `crates/szamlazz-agent/src/client.rs:191-203` (all response headers copied in).
 - **Evidence:** Contrast with `WireRequest`, whose hand-written `Debug` prints only `body_len` and `has_session_cookie` (`wire.rs:39-49`).
 - **Impact:** The `JSESSIONID` is a 90-minute session credential for the account. A future `tracing::debug!(?raw)` would leak it and the whole body.
@@ -162,7 +162,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 17. Configuration `Cli` types hold secrets as plain `String` with derived `Debug`
 
 - **Severity:** info
-- **Confidence:** high — no `{:?}` of these structs exists today.
+- **Confidence:** high, no `{:?}` of these structs exists today.
 - **Location:** `crates/szamlazz-cli/src/main.rs:10, 16-22` (`#[derive(Debug, Parser)] struct Cli { agent_key: Option<String> }`); `crates/szamlazz-cli/src/commands/listen.rs:20, 30-31` (`adatkapcsolat_key: Option<String>`).
 - **Evidence:** Both correctly use `hide_env_values = true` and steer users to env vars.
 - **Impact:** A stray `dbg!(&cli)` or clap error path would print the key.
@@ -173,7 +173,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 - **Severity:** info
 - **Confidence:** high.
 - **Location:** `crates/szamlazz-agent/src/credentials.rs:12, 51-63`; `crates/restate-szamlazz/src/config.rs:316`.
-- **Evidence:** `pub struct AgentKey(String);`, `password: String` — no `Zeroize`/`ZeroizeOnDrop`.
+- **Evidence:** `pub struct AgentKey(String);`, `password: String`, no `Zeroize`/`ZeroizeOnDrop`.
 - **Impact:** Keys linger in freed heap pages; relevant only for memory-dump attackers. The static resolver necessarily keeps all keys in memory for the process lifetime anyway.
 - **Recommendation:** Optional `zeroize` feature on `AgentKey`/`Secret`; low priority.
 
@@ -192,7 +192,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 - **Confidence:** high.
 - **Location:** `crates/restate-szamlazz/src/gateway.rs:50-51` ("A journaled document therefore includes the buyer block szamlazz.hu returned with it"); `docs/adr/0001-...md:39, 71-75`; `crates/restate-szamlazz/src/service/handlers.rs:54-55` (`journal_retention = "3d"`, `idempotency_retention = "30d"`); `tests/journal/resolution/*.json` (`seller.bank_account` in the journaled `Account`).
 - **Evidence:** Every issuing handler's input (buyer name/address/tax number) and every `InvoiceDocument` outcome is journaled for 3 days and visible in the Restate UI / SQL API; responses carry no buyer data (`contract/response.rs:560, 596`), so the 30-day idempotency store holds only numbers and totals.
-- **Impact:** This is a reasonable design (short retention, no PII in stored completions), but the endpoint README — the operator-facing document — never says "the Restate journal holds buyer PII for 3 days; treat the Restate data volume and UI as in-scope for GDPR".
+- **Impact:** This is a reasonable design (short retention, no PII in stored completions), but the endpoint README (the operator-facing document), never says "the Restate journal holds buyer PII for 3 days; treat the Restate data volume and UI as in-scope for GDPR".
 - **Recommendation:** One paragraph in the endpoint README's operations section; note that `journal_retention` is fixed in code, not configurable.
 
 ### 21. `--check-config` tests do not assert the key is absent from output
@@ -207,7 +207,7 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 ### 22. `cargo-deny` is installed in the dev shell but has no `deny.toml`
 
 - **Severity:** info
-- **Confidence:** medium — the remote dagger module may run `cargo audit` (advisory-db is pinned in `dagger.lock`), but nothing configures license/ban/source checks.
+- **Confidence:** medium: the remote dagger module may run `cargo audit` (advisory-db is pinned in `dagger.lock`), but nothing configures license/ban/source checks.
 - **Location:** `devenv.nix:12`; repo root (no `deny.toml`); `.cargo/audit.toml` (two justified ignores).
 - **Impact:** License and duplicate-crate policy are unenforced.
 - **Recommendation:** Add a minimal `deny.toml` (licenses allow-list, `sources` restricted to crates.io) and run `cargo deny check` in the dagger check.
@@ -234,6 +234,6 @@ The gaps are mostly operational rather than cryptographic: **the Restate endpoin
 1. **Does the dagger `check` pipeline run the ignored e2e suite (with Docker) and `cargo clippy -D warnings`/`cargo audit`?** The module is remote (`github.com/sagikazarmark/daggerverse-beta/rust`); nothing in the repo shows the commands. Finding 2 assumes it does not.
 2. **Panic containment.** If a handler future panics (e.g. an `expect` in a rarely hit path), does the Restate SDK's `HttpServer`/hyper connection task swallow it and keep the process alive, or does the runtime exit? Not verified in `restate-sdk-0.12.0/src/http_server.rs`; a `catch_unwind` or an explicit panic hook is absent from `main.rs`.
 3. **Deep-nesting behaviour of `quick_xml::de`** on the Adatkapcsolat receiver: whether a pathologically nested body causes recursion proportional to depth (stack) or is skipped iteratively. Relevant only together with finding 4.
-4. **Whether szamlazz.hu actually allows several active agent keys per account** (finding 11) — the crate docs imply yes; not observed.
+4. **Whether szamlazz.hu actually allows several active agent keys per account** (finding 11), the crate docs imply yes; not observed.
 5. **What `x-restate-*` headers Restate 1.7.8's ingress forwards under protocol v7** beyond `x-restate-ingress-path`; the ADR's header-stripping rule is defence in depth, but the concrete header list was not re-verified here.
-6. **Restate ingress default request-body limit**, which bounds finding 12 — not checked against the 1.7.8 source.
+6. **Restate ingress default request-body limit**, which bounds finding 12, not checked against the 1.7.8 source.

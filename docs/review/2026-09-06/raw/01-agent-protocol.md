@@ -1,4 +1,4 @@
-# Review 01 — `szamlazz-agent`: Számla Agent protocol & Hungarian invoicing correctness
+# Review 01, `szamlazz-agent`: Számla Agent protocol & Hungarian invoicing correctness
 
 Reviewer scope: `crates/szamlazz-agent` (src, tests, README), compared against `fixtures/upstream/agent/**`
 (szamlazz.hu docs examples + XSDs, provenance in `fixtures/SOURCES.md`), `docs/szamlazz-hu-behaviour.md`,
@@ -26,10 +26,10 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 
 ## Findings
 
-### 1. `ErrorCode::is_retryable()` marks codes 1 and 55 retryable regardless of operation — unsafe for creates
+### 1. `ErrorCode::is_retryable()` marks codes 1 and 55 retryable regardless of operation, unsafe for creates
 
 - **Severity:** medium
-- **Confidence:** high — code is unambiguous; `CONTEXT.md` (*Unconfirmed*) itself classifies 1 and 55 on a
+- **Confidence:** high, code is unambiguous; `CONTEXT.md` (*Unconfirmed*) itself classifies 1 and 55 on a
   create as "answer not known" (the document may or may not have been issued).
 - **Location:** `crates/szamlazz-agent/src/error.rs:192-201` (`is_retryable`), `error.rs:24-25`, `error.rs:51-53`.
 - **Evidence:**
@@ -46,7 +46,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
   query-first re-execution, but the agent crate is a standalone published API and the CLI/other users will
   read this flag literally.
 - **Recommendation:** Either (a) document that the flag is safe only for read-only operations (queries,
-  taxpayer, PDF) and that on creates it means "outcome unknown — query by external id / order number before
+  taxpayer, PDF) and that on creates it means "outcome unknown: query by external id / order number before
   re-sending", or (b) replace it with `retry_class() -> {Safe, OutcomeUnknown, Terminal}` so the
   create/read distinction is in the type.
 
@@ -73,7 +73,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 3. `LineItem::calculated_for_currency` performs no rounding for non-HUF currencies
 
 - **Severity:** medium
-- **Confidence:** medium — behaviour verified in code and unit tests; whether szamlazz.hu accepts or
+- **Confidence:** medium, behaviour verified in code and unit tests; whether szamlazz.hu accepts or
   silently rounds 5-decimal EUR VAT values is not verifiable here.
 - **Location:** `crates/szamlazz-agent/src/item.rs:129-163` (esp. `139-146`), tests `item.rs:253-281`.
 - **Evidence:**
@@ -90,18 +90,18 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
   to cents) can drift from the printed document, and the reversed expectation (the *less* currency-aware
   helper rounds, the currency-aware one does not) is a trap. Under Hungarian law amounts on the invoice
   must be stated in the invoice currency, in practice to the currency's minor unit.
-- **Recommendation:** Round to the ISO 4217 minor unit (2 dp by default; a tiny table for 0-dp — HUF, JPY,
-  ISK — and 3-dp currencies such as KWD/BHD), keeping `LineItem::new` as the escape hatch. If the intent
+- **Recommendation:** Round to the ISO 4217 minor unit (2 dp by default; a tiny table for 0-dp, HUF, JPY,
+  ISK, and 3-dp currencies such as KWD/BHD), keeping `LineItem::new` as the escape hatch. If the intent
   really is "exact", rename to make that explicit and warn in docs.
 
 ### 4. `VatRate::Percent` wire token is not normalised (`27.00`, `27.0` are emitted verbatim)
 
 - **Severity:** low–medium
-- **Confidence:** medium — code verified; the upstream request fixtures and XSD comments only ever show
+- **Confidence:** medium, code verified; the upstream request fixtures and XSD comments only ever show
   integer tokens (`<afakulcs>27</afakulcs>`; receipt docs list `0, 5, 10, 27, AAM, …`), acceptance of
   `27.00` is unverified.
 - **Location:** `crates/szamlazz-agent/src/types.rs:239-243` (`as_wire`), `types.rs:294-297` (`From<&str>`).
-- **Evidence:** `Self::Percent(rate) => Cow::Owned(rate.to_string())` — `rust_decimal` preserves scale, so a
+- **Evidence:** `Self::Percent(rate) => Cow::Owned(rate.to_string())`, `rust_decimal` preserves scale, so a
   rate loaded from a `DECIMAL(5,2)` column or `dec!(27.00)` serialises as `27.00`.
 - **Why it matters:** `afakulcs` is an `xsd:string` on the request side (`xmlszamla.xsd:75`), i.e. szamlazz.hu
   string-matches it against a known set. If `27.00` is not in that set the item is rejected (or worse,
@@ -113,7 +113,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 5. HUF line net is rounded to whole forints before the server's `net = unit price × quantity` check
 
 - **Severity:** low
-- **Confidence:** low–medium — the only evidence that szamlazz.hu tolerates the discrepancy is an
+- **Confidence:** low–medium: the only evidence that szamlazz.hu tolerates the discrepancy is an
   `#[ignore]`d live test (`tests/live.rs:82-84`) that I cannot run; the tolerance itself is undocumented in
   the repo.
 - **Location:** `crates/szamlazz-agent/src/item.rs:137-138`, `item.rs:173-176`.
@@ -129,7 +129,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 6. Delivery note silently overrides the caller's template with `SzlaFuvarlevelesAlap`
 
 - **Severity:** low
-- **Confidence:** low–medium — code verified; whether szamlazz.hu *requires* this template for a
+- **Confidence:** low–medium: code verified; whether szamlazz.hu *requires* this template for a
   `szallitolevel` is unverified (a delivery note was created successfully through the crate per the
   behaviour doc, but that only proves the override works, not that it is needed).
 - **Location:** `crates/szamlazz-agent/src/ops/invoice.rs:865-872`.
@@ -150,7 +150,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 7. Taxpayer parser does not recognise a szamlazz.hu `xmlszamlavalasz` error envelope
 
 - **Severity:** low–medium
-- **Confidence:** low — the code path is certain; whether szamlazz.hu ever answers `xmltaxpayer` with an
+- **Confidence:** low: the code path is certain; whether szamlazz.hu ever answers `xmltaxpayer` with an
   `xmlszamlavalasz` body (e.g. for credential codes 3/135/136/164, or 7) is not verifiable from the fixtures
   (`taxpayer_error.xml` shows szamlazz.hu's own code 57 *relayed inside* `QueryTaxpayerResponse`).
 - **Location:** `crates/szamlazz-agent/src/ops/taxpayer.rs:207-220`; contrast `ops/query_xml.rs:534-545`,
@@ -158,7 +158,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 - **Evidence:** `from_body` accepts only `QueryTaxpayerResponse` in the OSA 2.0/3.0 namespaces; anything else
   is `ParseError::UnexpectedBody`.
 - **Why it matters:** A body-only API error (the pattern the crate itself documents for queries, code 7) would
-  surface as a *parse* error, which the worker maps to `Unanswered` and retries under the read policy — a
+  surface as a *parse* error, which the worker maps to `Unanswered` and retries under the read policy, a
   permanent rejection retried until exhaustion. The XML query already solves this; the taxpayer op is
   inconsistent with it.
 - **Recommendation:** Reuse the dual-root dispatch: if the root is `xmlszamlavalasz`, parse it with
@@ -182,7 +182,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 9. Final-invoice docs omit that the caller must supply the negative prepayment line
 
 - **Severity:** low
-- **Confidence:** medium — behaviour doc C6-2 ("The server does **not** net the prepayment into the final:
+- **Confidence:** medium: behaviour doc C6-2 ("The server does **not** net the prepayment into the final:
   `VS` gross 1270, `kintlevoseg` 1270") is explicit; the crate docs are silent.
 - **Location:** `crates/szamlazz-agent/src/ops/invoice.rs:38-44` (`InvoiceKind::Final`), `error.rs:72-83`.
 - **Why it matters:** A Hungarian végszámla must list the full performance and deduct the előleg as a
@@ -194,11 +194,11 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 10. `header_error()` treats a present-but-empty `szlahu_error_code` as an error
 
 - **Severity:** low
-- **Confidence:** low — the behaviour doc says success responses do not carry `szlahu_error_code` at all
+- **Confidence:** low: the behaviour doc says success responses do not carry `szlahu_error_code` at all
   (A6, D1), so this may never fire; noted because the parser is otherwise deliberately lenient about empty
   elements (`<hibakod></hibakod>` → `None`).
 - **Location:** `crates/szamlazz-agent/src/wire.rs:205-211`.
-- **Evidence:** `let code = self.header("szlahu_error_code")?; let code = ErrorCode::from(code);` — `""` →
+- **Evidence:** `let code = self.header("szlahu_error_code")?; let code = ErrorCode::from(code);`, `""` →
   `ErrorCode::Unknown("")`, which `check()` returns as `Err`.
 - **Recommendation:** `.filter(|c| !c.trim().is_empty())` on the header, mirroring `check_available()`.
 
@@ -217,7 +217,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 12. `RegisterCreditEntry` with zero entries and `additive = false` wipes an invoice's payments, no guard
 
 - **Severity:** low
-- **Confidence:** high — XSD allows `kifizetes` `minOccurs="0"`, the crate allows an empty `CreditEntries`,
+- **Confidence:** high, XSD allows `kifizetes` `minOccurs="0"`, the crate allows an empty `CreditEntries`,
   and behaviour doc D7 confirms replace semantics.
 - **Location:** `crates/szamlazz-agent/src/ops/credit_entry.rs:44-93`, `credit_entry.rs:172-195`.
 - **Why it matters:** "Clear all credit entries" is a legitimate operation, but it is one field default away
@@ -228,7 +228,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 13. `InvoiceAppearance` follows the docs (`1` = paper), but `docs/szamlazz-hu-behaviour.md` reads `eszamla=1` as "e-invoicing enabled"
 
 - **Severity:** low for the crate; medium for the design docs that depend on it
-- **Confidence:** medium — `fixtures/upstream/adatkapcsolat/szamla_example.xml:32` states verbatim
+- **Confidence:** medium: `fixtures/upstream/adatkapcsolat/szamla_example.xml:32` states verbatim
   "0: not an invoice, 1: paper invoice, 2: e-invoice, 3: e-invoice"; the behaviour doc (lines 5, 137) says
   the probe account had e-invoicing enabled *because* documents showed `<eszamla>1</eszamla>`.
 - **Location:** `crates/szamlazz-agent/src/ops/query_xml.rs:121-163`; `docs/szamlazz-hu-behaviour.md:5,137`;
@@ -246,8 +246,8 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 - **Confidence:** high
 - **Location:** `crates/szamlazz-agent/src/wire.rs:141-145` (`#[derive(Debug, Clone)] pub struct RawResponse`).
 - **Why it matters:** The crate is careful to redact `AgentKey`, `Credentials` and `WireRequest` bodies
-  (`credentials.rs:27-31, 86-96`; `wire.rs:39-49`), but a `{:?}` of a `RawResponse` — the natural thing to
-  log on a parse failure — leaks a live session cookie, which authenticates as the account for 90 minutes.
+  (`credentials.rs:27-31, 86-96`; `wire.rs:39-49`), but a `{:?}` of a `RawResponse` (the natural thing to
+  log on a parse failure) leaks a live session cookie, which authenticates as the account for 90 minutes.
 - **Recommendation:** Hand-write `Debug` to elide `set-cookie` values (and perhaps truncate the body).
 
 ### 15. `MinimalInvoiceResponse.hibakod` lacks `empty_as_none`; missing `hibakod` becomes `Unknown("0")`
@@ -266,7 +266,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 16. Exchange-rate requirement is stricter than the schema and applies to VAT-free / non-invoice documents
 
 - **Severity:** low
-- **Confidence:** medium — XSD has `arfolyamBank`/`arfolyam` optional (`xmlszamla.xsd:118-119`); the docs'
+- **Confidence:** medium: XSD has `arfolyamBank`/`arfolyam` optional (`xmlszamla.xsd:118-119`); the docs'
   comment ties them to VAT display, so a proforma/delivery note or an AAM/EUFAD37 invoice in EUR does not
   need a rate for VAT purposes. Whether szamlazz.hu itself refuses without one is unverified.
 - **Location:** `crates/szamlazz-agent/src/ops/invoice.rs:776-787`; `ops/receipt.rs:165-175`; `types.rs:379-381`.
@@ -292,7 +292,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 18. `+` in `szlahu_*` header values is decoded as a space, including `szlahu_vevoifiokurl`
 
 - **Severity:** info
-- **Confidence:** medium — correct *if* szamlazz.hu encodes with Java `URLEncoder` (space → `+`, literal `+` →
+- **Confidence:** medium, correct *if* szamlazz.hu encodes with Java `URLEncoder` (space → `+`, literal `+` →
   `%2B`), which the observed `Sikertelen+bejelentkez%C3%A9s` shape suggests; unverified for URLs.
 - **Location:** `crates/szamlazz-agent/src/wire.rs:249-257`.
 - **Recommendation:** Document the assumption; if a URL with a literal `+` is ever observed, decode
@@ -301,7 +301,7 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 ### 19. `TÉTELÁFA` / explicit-VAT items have no representation and `calculated*` would zero their VAT
 
 - **Severity:** info
-- **Confidence:** low — no fixture or XSD in the repo mentions `TÉTELÁFA`; I recall it from szamlazz.hu's
+- **Confidence:** low, no fixture or XSD in the repo mentions `TÉTELÁFA`; I recall it from szamlazz.hu's
   `afakulcs` documentation as "take the VAT amount from `afaErtek` as given" but cannot verify here.
 - **Location:** `crates/szamlazz-agent/src/types.rs:176-231`; `src/item.rs:141-144, 177-180`.
 - **Why it matters:** If the code exists, `VatRate::Other("TÉTELÁFA")` is expressible, but every `calculated*`
@@ -359,15 +359,15 @@ verified in code, server behaviour inferred; *low* = server behaviour not verifi
 
 ## Questions I could not resolve
 
-1. What tolerance does szamlazz.hu apply in the 259/260/261 arithmetic checks (±1 HUF? relative?) — decides
+1. What tolerance does szamlazz.hu apply in the 259/260/261 arithmetic checks (±1 HUF? relative?), decides
    how safe finding 5 is and whether finding 3's sub-cent values are accepted.
 2. Is `<afakulcs>27.0</afakulcs>` / `27.00` accepted as equivalent to `27`? (finding 4)
 3. Does `TÉTELÁFA` exist as an `afakulcs` value and what exactly does it do? (finding 19)
 4. Exact NAV meanings of `TAHK` vs `TEHK` (finding 8).
 5. Is `SzlaFuvarlevelesAlap` required for `szallitolevel=true`, or merely one layout option? (finding 6)
-6. For `xmltaxpayer`, how do szamlazz.hu-side errors 3/135/136/164/7 arrive — headers, `xmlszamlavalasz`
+6. For `xmltaxpayer`, how do szamlazz.hu-side errors 3/135/136/164/7 arrive: headers, `xmlszamlavalasz`
    body, or relayed inside `QueryTaxpayerResponse` like 57 is? (finding 7)
-7. What is `<eszamla>` for a document created with `<eszamla>true</eszamla>` on the probe account — `1`,
+7. What is `<eszamla>` for a document created with `<eszamla>true</eszamla>` on the probe account, `1`,
    `2` or `3`? (finding 13)
 8. Server default for `sendEmail` when omitted but `email` is present (finding 20).
 9. Are `szlahu_*` header values always Java-`URLEncoder`-encoded (so `+` ⇒ space is right for

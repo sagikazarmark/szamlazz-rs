@@ -24,7 +24,7 @@ use crate::xml;
 /// [`CreatedInvoice::reverses`] after every call.
 ///
 /// - **Repeat storno is idempotent.** Reversing an already reversed invoice
-///   returns success echoing the *existing* storno invoice — same number,
+///   returns success echoing the *existing* storno invoice: same number,
 ///   same negative totals, same [`document_id`](CreatedInvoice::document_id).
 ///   No second storno invoice is issued and no error code is raised, so
 ///   "created now" and "already existed" are indistinguishable from the
@@ -58,7 +58,7 @@ pub struct StornoInvoice {
     /// szamlazz.hu does not require it to match the reversed invoice: a paper
     /// storno of an e-invoice and an e-invoice storno of a paper invoice are
     /// both accepted silently, and the storno invoice takes *this* value
-    /// (observed on a test account — its queried
+    /// (observed on a test account; its queried
     /// [`e_invoice`](crate::ops::query_xml::InvoiceInfo::e_invoice) is `3` or
     /// `1` as sent here, whatever the original's). To reverse an invoice in
     /// its own form, read the original's
@@ -104,10 +104,10 @@ pub struct StornoInvoice {
     /// Fulfillment date of the storno invoice (`teljesitesDatum`).
     ///
     /// NAV requires a storno to carry the same fulfillment date as the
-    /// invoice it reverses (no exception — the same-month latitude is for
+    /// invoice it reverses (no exception: the same-month latitude is for
     /// correctives). Observed: with the element omitted, szamlazz.hu sets the
     /// storno's `telj` to the original's; an explicit date equal to the
-    /// original's is accepted silently — and so is one in another month or
+    /// original's is accepted silently, and so is one in another month or
     /// in the future, without any error or warning (the szamlazz.hu UI
     /// warns; the Agent API does not). Set it to the original's `telj`, read
     /// from a query of the original: the explicit value is what fails loudly

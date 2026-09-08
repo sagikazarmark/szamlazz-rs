@@ -1,9 +1,9 @@
 //! Identity of orders and documents: the `Order` key and the deterministic
 //! external id (`szamlaKulsoAzon`).
 //!
-//! See §3 of the design document (ADR 0002, ADR 0005): the order key is the
-//! trimmed order number, and the external id is derived from the key alone so
-//! that *any* invocation can find what an earlier one issued.
+//! The order key is the trimmed order number, and the external id is derived
+//! from the key alone so that *any* invocation can find what an earlier one
+//! issued.
 
 use std::fmt;
 use std::str::FromStr;
@@ -15,13 +15,13 @@ use crate::config::Namespace;
 use crate::contract::{CorrectionId, DocumentKind, InvoiceNumber, IssuedKind};
 
 /// The key of an `Order` Virtual Object: the order number (`rendelésszám`)
-/// trimmed of leading and trailing whitespace, case preserved — exactly what
+/// trimmed of leading and trailing whitespace, case preserved, exactly what
 /// szamlazz.hu matches on.
 ///
 /// The alphabet is strict where the server's behaviour is unverified (ADR
 /// 0002): 1–[`MAX_LEN`](Self::MAX_LEN) bytes after trimming, no control
 /// character, no internal whitespace of any kind, no `:` (the external-id
-/// separator) and Unicode NFC. Nothing is case-folded or normalised — a key
+/// separator) and Unicode NFC. Nothing is case-folded or normalised: a key
 /// outside the alphabet is refused, never rewritten, because a `rendelesszam`
 /// the server stored differently from the key would strand the order behind
 /// `conflict{external_id_collision}`.
@@ -30,7 +30,7 @@ use crate::contract::{CorrectionId, DocumentKind, InvoiceNumber, IssuedKind};
 /// it is written. The `Order` handlers do not: a Virtual Object key that is
 /// not already trimmed is refused as `invalid_input`, because Restate's
 /// per-key lock is on the raw key and ` ORD-1` would be a second instance of
-/// `ORD-1`'s order (design §3).
+/// `ORD-1`'s order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OrderKey(String);
 
@@ -138,7 +138,7 @@ pub enum InvalidOrderKey {
     /// Contains a control character.
     #[error("order number must not contain control characters, found {0:?}")]
     ControlChar(char),
-    /// Contains whitespace after trimming — a space, an NBSP or any other
+    /// Contains whitespace after trimming: a space, an NBSP or any other
     /// `White_Space` character between the first and the last non-whitespace
     /// one. Refused rather than collapsed: the server's handling is
     /// unverified.
@@ -163,12 +163,12 @@ pub enum InvalidOrderKey {
 /// `{namespace}:by-number:{number}:storno` for the storno of a document no
 /// `Order` manages, and the two-segment `{namespace}:check-account` sentinel
 /// that `check_account` probes and nothing the service issues carries. Not
-/// unique server-side — a query returns the newest holder — so every document
+/// unique server-side (a query returns the newest holder), so every document
 /// found by it is validated before it is trusted.
 ///
 /// Every composition stays within [`MAX_LEN`](Self::MAX_LEN) bytes because
-/// its parts are bounded — the namespace at 16, the [`OrderKey`], the
-/// [`CorrectionId`] and the [`InvoiceNumber`] at 40 each — which the
+/// its parts are bounded (the namespace at 16, the [`OrderKey`], the
+/// [`CorrectionId`] and the [`InvoiceNumber`] at 40 each), which the
 /// compile-time assertions below prove for the longest shape of each.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -179,7 +179,7 @@ impl ExternalId {
     /// verified accepted and queryable on szamlazz.hu (behaviour notes,
     /// A2-create-long). szamlazz.hu documents no limit; a longer id might be
     /// truncated or refused, and a truncated id would make every leading
-    /// query by the full id answer "not found" — so the parts are bounded to
+    /// query by the full id answer "not found", so the parts are bounded to
     /// keep every composition inside the verified length.
     pub const MAX_LEN: usize = 110;
 
@@ -266,7 +266,7 @@ impl ExternalId {
 
     /// The sentinel id `Szamlazz.Agent.check_account` queries:
     /// `{namespace}:check-account`. Two segments, where every id the service
-    /// issues has at least three — nothing the service issues carries it, so
+    /// issues has at least three: nothing the service issues carries it, so
     /// the expected answer is "not found" and the query proves only that the
     /// credentials were accepted.
     #[must_use]
@@ -281,7 +281,7 @@ impl ExternalId {
     }
 }
 
-/// The longest shape of each composition fits [`ExternalId::MAX_LEN`] — proven
+/// The longest shape of each composition fits [`ExternalId::MAX_LEN`]: proven
 /// at compile time from the parts' bounds, so a raised bound on any part fails
 /// the build until the budget is re-balanced. The byte counts of the fixed
 /// tokens are spelled out beside the token they count.
@@ -350,13 +350,12 @@ mod tests {
         "acct".parse().expect("valid namespace")
     }
 
-    /// The key's alphabet is what ADR 0002 states: trimmed, 1–40 bytes, case
-    /// preserved, no control character, **no internal whitespace of any
-    /// kind** (a space, an NBSP — the server's handling is unverified, and a
-    /// normalised `rendelesszam` would strand the order behind
-    /// `external_id_collision`), no `:` (the external-id separator) and NFC
-    /// (not normalised — refused, like the whitespace). Non-ASCII text in NFC
-    /// is fine.
+    /// The key's alphabet: trimmed, 1–40 bytes, case preserved, no control
+    /// character, **no internal whitespace of any kind** (a space, an NBSP:
+    /// the server's handling is unverified, and a normalised `rendelesszam`
+    /// would strand the order behind `external_id_collision`), no `:` (the
+    /// external-id separator) and NFC (not normalised: refused, like the
+    /// whitespace). Non-ASCII text in NFC is fine.
     #[test]
     fn order_key_table() {
         let longest = "x".repeat(OrderKey::MAX_LEN);
@@ -464,7 +463,7 @@ mod tests {
         assert_eq!(json, "\"x:y:invoice\"");
     }
 
-    /// Every composable external id stays within [`ExternalId::MAX_LEN`] —
+    /// Every composable external id stays within [`ExternalId::MAX_LEN`],
     /// the 110 bytes verified accepted and queryable on szamlazz.hu
     /// (behaviour notes A2-create-long; the real limit is unknown, probe #5
     /// of the 2026-09-06 review). Built from the longest legal parts: a

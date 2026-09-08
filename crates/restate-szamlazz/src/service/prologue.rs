@@ -1,8 +1,8 @@
-//! The prologue every handler runs after parsing its key (design §4): pin the
+//! The prologue every handler runs after parsing its key: pin the
 //! namespace, resolve the account, fetch its credentials, open the gateway.
-//! This module holds the decisions of those steps — functions of their inputs
+//! This module holds the decisions of those steps: functions of their inputs
 //! whose only effect is a log line, which is what can be unit-tested (the SDK
-//! has no mock context; the durable behaviour is asserted end to end) — and
+//! has no mock context; the durable behaviour is asserted end to end), and
 //! the prologue's two calls into an embedder's trait objects, each under the
 //! worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of the
 //! `account` step's closure, and the credential fetch, the one step that runs
@@ -26,7 +26,7 @@ use crate::gateway::Gateway;
 /// What one handler execution runs on: the gateway opened for this execution
 /// and the deployment settings with the namespace pinned by the journal.
 ///
-/// Built by the prologue, dropped with the execution — no gateway or client
+/// Built by the prologue, dropped with the execution: no gateway or client
 /// outlives one handler execution.
 #[derive(Debug)]
 pub(super) struct Execution {
@@ -38,10 +38,10 @@ pub(super) struct Execution {
 /// its answer: `execution{scope, order, restate.invocation.id, account.id}`.
 ///
 /// Opened before the prologue's first step and left after the handler's last,
-/// so every log line the execution emits — the prologue's own warnings, the
-/// gateway steps' spans and events, the paging `credentials_rejected` warning
-/// — is attributable to a scope, an account and an invocation from the
-/// worker's log alone (#65). `scope` is what the SDK saw (`<unscoped>` when
+/// so every log line the execution emits (the prologue's own warnings, the
+/// gateway steps' spans and events, the paging `credentials_rejected` warning)
+/// is attributable to a scope, an account and an invocation from the
+/// worker's log alone. `scope` is what the SDK saw (`<unscoped>` when
 /// the request carried none, as the start-up log prints it); `order` is the
 /// Virtual Object key, absent on the stateless `Szamlazz.Agent`; `account.id`
 /// is [`tracing::field::Empty`] until the `account` step has answered and
@@ -64,7 +64,7 @@ pub(super) fn execution_span(
     )
 }
 
-/// Records the resolved account's id on the current execution span — a no-op
+/// Records the resolved account's id on the current execution span: a no-op
 /// outside one, since the field is declared there only.
 pub(super) fn record_account(account: &Account) {
     tracing::Span::current().record("account.id", tracing::field::display(&account.id));
@@ -88,13 +88,13 @@ pub(super) enum Resolution {
 }
 
 /// The bound on each call into the account resolver or the credential store
-/// — every `resolve`, every `fetch` attempt — after which the call is dropped
-/// and answered as unavailable (J6, #114). The worker's own constant, not a
-/// setting: the static resolver is in memory and never reaches it, and a
-/// database-backed one that has not answered in ten seconds is not going to
-/// — waiting on would only hold the execution until the handler's inactivity
-/// timeout, spending an invocation attempt on a wait the resolve policy or
-/// the fetch loop is there to retry.
+/// (every `resolve`, every `fetch` attempt), after which the call is dropped
+/// and answered as unavailable. The worker's own constant, not a setting: the
+/// static resolver is in memory and never reaches it, and a database-backed
+/// one that has not answered in ten seconds is not going to; waiting on would
+/// only hold the execution until the handler's inactivity timeout, spending an
+/// invocation attempt on a wait the resolve policy or the fetch loop is there
+/// to retry.
 pub(super) const CALL_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Which of the two calls into an embedder's trait objects the worker bounds.
@@ -126,7 +126,7 @@ pub(super) struct TimedOut {
     call: BoundedCall,
 }
 
-/// Awaits `future` — one `call` into an embedder's trait object — for at most
+/// Awaits `future` (one `call` into an embedder's trait object) for at most
 /// [`CALL_DEADLINE`], dropping it at the deadline.
 ///
 /// # Errors
@@ -161,7 +161,7 @@ pub(super) enum ResolverUnavailable {
 /// # Errors
 ///
 /// [`ResolverUnavailable`]: the resolver answered `Unavailable`, or had not
-/// answered at the deadline. Retryable — the resolve policy re-executes the
+/// answered at the deadline. Retryable: the resolve policy re-executes the
 /// step.
 pub(super) async fn resolve(
     accounts: &Accounts,
@@ -178,10 +178,9 @@ pub(super) async fn resolve(
 ///
 /// Runs inside the step's closure, so it runs once per resolution and not on
 /// a replay. A pure function of its input: the account carries no pin the
-/// worker could advise on here — whether the key under a scope opens the
+/// worker could advise on here; whether the key under a scope opens the
 /// account the scope names is the operator's go-live check, not a runtime
-/// signal (ADR 0006, account-pin amendment; the pre-amendment `warn` on an
-/// unpinned scoped resolution is gone with the pins).
+/// signal.
 pub(super) fn resolution(
     result: Result<Account, ResolveError>,
 ) -> Result<Resolution, ResolverUnavailable> {
@@ -194,7 +193,7 @@ pub(super) fn resolution(
 }
 
 /// The account of a journaled [`Resolution`]: unscoped and unknown are the
-/// terminal fault `unknown_account` (HTTP 400) — the request named no account
+/// terminal fault `unknown_account` (HTTP 400): the request named no account
 /// of this deployment, and no retry with the same request changes that.
 pub(super) fn account_of(resolution: Resolution) -> Result<Account, Fault> {
     match resolution {
@@ -219,7 +218,7 @@ pub(super) fn resolve_exhausted(error: &TerminalError) -> Fault {
 }
 
 /// Fetches of the credential store per handler execution, including the
-/// first. Short by design — a prolonged store outage is a terminal
+/// first. Short by design: a prolonged store outage is a terminal
 /// `unavailable`, not a handler retry.
 const FETCH_ATTEMPTS: u32 = 3;
 /// The pause before each re-fetch.
@@ -257,12 +256,12 @@ impl FetchFailure {
 /// # Errors
 ///
 /// The terminal `unavailable` fault: the store is gone for this reference
-/// or stayed unavailable — reporting so, or not answering in time — through
+/// or stayed unavailable (reporting so, or not answering in time) through
 /// the retries. Terminal by decision: a retryable error would route a
 /// prolonged store outage into the handler's kill-on-five and an unstructured
-/// 500, whereas this is structured and immediate. The cost — an outage during
+/// 500, whereas this is structured and immediate. The cost (an outage during
 /// a replay of an invocation whose create already landed surfaces as
-/// `unavailable` although the document exists — is reconciled by `get` or a
+/// `unavailable` although the document exists) is reconciled by `get` or a
 /// retry with a new `Idempotency-Key`.
 pub(super) async fn fetch_credentials(
     accounts: &Accounts,
@@ -290,12 +289,12 @@ pub(super) async fn fetch_credentials(
 }
 
 /// The terminal fault of a failed credential fetch. The operator's warning
-/// names the account and the reference; the caller's message names neither —
-/// no response names the account (design §7), and a store's reference may be
-/// internal topology (a secret path) — and never echoes the store's own
-/// message. It does tell the causes apart: a reference the store does not
-/// know is configuration, an unavailable store is an outage, a store silent
-/// past the deadline is the worker giving up on it.
+/// names the account and the reference; the caller's message names neither
+/// (no response names the account, and a store's reference may be internal
+/// topology, a secret path), and never echoes the store's own message. It
+/// does tell the causes apart: a reference the store does not know is
+/// configuration, an unavailable store is an outage, a store silent past the
+/// deadline is the worker giving up on it.
 pub(super) fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
     tracing::warn!(
         account = %account.id,
@@ -349,8 +348,8 @@ mod tests {
         (error.code(), body)
     }
 
-    /// A resolver and store whose calls never complete — a database-backed
-    /// embedder's pool that never answers — counting how often each was
+    /// A resolver and store whose calls never complete (a database-backed
+    /// embedder's pool that never answers), counting how often each was
     /// asked.
     #[derive(Default)]
     struct Hung {
@@ -449,8 +448,8 @@ mod tests {
     /// A resolver that never answers is bounded by the worker, not by the
     /// handler's inactivity timeout: at the deadline the `account` step's
     /// closure answers the same retryable error an unavailable resolver
-    /// does, so the resolve policy re-executes the step — and its text names
-    /// the deadline, so the exhausted step's fault says what happened (J6).
+    /// does, so the resolve policy re-executes the step, and its text names
+    /// the deadline, so the exhausted step's fault says what happened.
     #[tokio::test(start_paused = true)]
     async fn a_resolver_that_never_answers_is_unavailable_at_the_deadline() {
         let (hung, accounts) = hung();
@@ -480,9 +479,9 @@ mod tests {
     /// A store that never answers is bounded per attempt: the fetch loop
     /// gives each of its attempts the deadline, pauses between them, and ends
     /// in the terminal `unavailable` fault within `attempts × deadline` plus
-    /// the pauses — never in the handler's inactivity timeout. The fault's
+    /// the pauses, never in the handler's inactivity timeout. The fault's
     /// text names the deadline and neither the account nor the credential
-    /// reference (#65).
+    /// reference.
     #[tokio::test(start_paused = true)]
     async fn a_store_that_never_answers_is_the_terminal_fault_after_its_attempts() {
         const ACCOUNT: &str = "acct-8e1f";
@@ -540,11 +539,10 @@ mod tests {
     /// The `unavailable` fault of a failed credential fetch tells the caller
     /// what to do and nothing about the deployment: neither the store's own
     /// message (a vault token, a DSN), nor the credential reference (a
-    /// database-backed store's ref is internal topology — a secret path), nor
-    /// the account id (no response names the account; design §7). Both cases
-    /// — the store gone for the reference, the store unavailable — are told
-    /// apart in the text. The operator's warning carries the account and the
-    /// reference (#65).
+    /// database-backed store's ref is internal topology, a secret path), nor
+    /// the account id (no response names the account). Both cases (the store
+    /// gone for the reference, the store unavailable) are told apart in the
+    /// text. The operator's warning carries the account and the reference.
     #[test]
     fn a_failed_credential_fetch_is_unavailable_and_names_neither_the_account_nor_the_ref() {
         use crate::test_support::LogCapture;

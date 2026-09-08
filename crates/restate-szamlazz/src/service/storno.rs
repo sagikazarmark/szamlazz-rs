@@ -1,4 +1,4 @@
-//! The storno protocol (design §6), proforma deletion and the `get` live view.
+//! The storno protocol, proforma deletion and the `get` live view.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use crate::gateway::{DeleteOutcome, InvoiceDocumentExt as _, StornoLookupOutcome
 use crate::identity::{ExternalId, OrderKey};
 
 impl Execution {
-    // ----- storno_invoice (§6) ---------------------------------------------
+    // ----- storno_invoice ---------------------------------------------
 
     /// `storno_invoice`, on the `order` the handler parsed from its key.
     pub(super) async fn storno(
@@ -49,7 +49,7 @@ impl Execution {
         let about = |fault: Fault| fault.about(&order, kind, storno_id.as_str());
         // The intent is a pure function of the verified document: a `telj`
         // it does not carry is a fault after every answer that needs no
-        // send (ADR 0007).
+        // send.
         let intent = StornoIntent::from_verified(
             &found,
             gateway.account(),
@@ -59,7 +59,7 @@ impl Execution {
         )
         .map_err(about)?;
 
-        // Step 2: lookup — a storno of ours already under the id.
+        // Step 2: lookup: a storno of ours already under the id.
         match object::lookup_storno(ctx, self, &intent)
             .await
             .map_err(about)?
@@ -78,7 +78,7 @@ impl Execution {
         }
 
         // Step 3: the storno step, under the issue policy. Any `Err` from the
-        // run — exhaustion (500) or cancellation (409) — is `outcome_unknown`
+        // run (exhaustion (500) or cancellation (409)) is `outcome_unknown`
         // about this storno: nothing is recorded, the next invocation's
         // verify and lookup find whatever landed.
         let outcome = object::storno_step(ctx, self, &intent)
@@ -98,7 +98,7 @@ impl Execution {
     /// Step 1 of the storno protocol: the document must be known, carry this
     /// order's number and be a live invoice kind. `Break(response)` is the answer for anything that stops the
     /// storno before it is sent (not managed, already reversed, not
-    /// stornoable) — a domain outcome, not a fault.
+    /// stornoable): a domain outcome, not a fault.
     async fn verify_for_storno(
         &self,
         ctx: &ObjectContext<'_>,
@@ -133,7 +133,7 @@ impl Execution {
         Ok(ControlFlow::Continue(found))
     }
 
-    // ----- delete_proforma (§6 tail) ---------------------------------------
+    // ----- delete_proforma ---------------------------------------
 
     /// `delete_proforma`, on the `order` the handler parsed from its key.
     pub(super) async fn delete(
@@ -154,7 +154,7 @@ impl Execution {
         )
         .await?
         {
-            // Deleted or consumed — `get` tells which.
+            // Deleted or consumed; `get` tells which.
             Lookup::Absent => return Ok(DeleteProformaResponse::absent()),
             Lookup::Collision(_) => {
                 return Ok(DeleteProformaResponse::not_deleted("external_id_collision"));
@@ -198,8 +198,8 @@ impl Execution {
     // ----- get -------------------------------------------------------------
 
     /// The live view: what szamlazz.hu holds under the order's four external
-    /// ids right now (design §6), four read-only steps under the read policy,
-    /// on the `order` the handler parsed from its key.
+    /// ids right now: four read-only steps under the read policy, on the
+    /// `order` the handler parsed from its key.
     ///
     /// A collision under an id leaves its slot `None`: a read must not fail
     /// on an answer, and the issuing handlers are the ones that refuse it.

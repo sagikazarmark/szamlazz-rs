@@ -6,18 +6,18 @@
 //! `cargo test -p restate-szamlazz --test e2e -- --ignored`.
 //! The server comes from the environment, decided once (the server gate,
 //! [`harness::gate`]): `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` reuse a
-//! running server (with the three experimental flags — `compose.yaml` sets
+//! running server (with the three experimental flags; `compose.yaml` sets
 //! them; the main suite only), `RESTATE_SERVER_BIN` names a `restate-server`
 //! binary the harness spawns on the loopback (what the Dagger check does),
 //! otherwise a docker daemon runs a container of the Restate image. With none
-//! of them the suite skips with a message — and fails when `CI` is set, since
-//! a skipped run in CI proves nothing. The harness's own tests — the server
-//! gate, the run-pattern matching, the stub helpers — live beside what they
+//! of them the suite skips with a message, and fails when `CI` is set, since
+//! a skipped run in CI proves nothing. The harness's own tests (the server
+//! gate, the run-pattern matching, the stub helpers) live beside what they
 //! test under [`harness`], need only wiremock and run un-ignored.
 //!
 //! One binary, one tree: this file holds the two tests and the order the
 //! scenarios run in; [`harness`] is everything the scenarios drive; and every
-//! other module is one handler family's scenarios — the creates
+//! other module is one handler family's scenarios: the creates
 //! ([`create_invoice`], [`create_proforma`], [`create_prepayment`],
 //! [`create_final`], [`correct_invoice`]), [`storno`] and [`delete_proforma`],
 //! [`get`], the issue and read policies at the two steps of issuing
@@ -31,15 +31,15 @@
 //! The main run has two phases on one Restate server. The first registers a
 //! **single-account** deployment (the static resolver's `[account]` behind a
 //! scripted resolver and store) and runs the order protocol unscoped. The
-//! second performs the documented single → multi **flag day** — private,
+//! second performs the documented single → multi **flag day** (private,
 //! drain, register the **multi-account** deployment (two accounts, reachable
-//! by scope only, behind a test-local mutable resolver and store), public —
+//! by scope only, behind a test-local mutable resolver and store), public)
 //! and proves the isolation properties multi-account mode leans on: the same
 //! order key issuing concurrently under two scopes with each account's own
 //! key on the wire, the same `Idempotency-Key` under two scopes being two
 //! invocations, credential rotation and account changes between executions,
-//! an order Restate has no memory of, and — over the hex-decoded `raw` of
-//! every journal entry of every invocation in the run — that no agent key
+//! an order Restate has no memory of, and (over the hex-decoded `raw` of
+//! every journal entry of every invocation in the run) that no agent key
 //! was ever journaled; and, last, that every invocation's `ctx.run` names are
 //! a prefix of its handler's pinned path ([`harness::run_names::RUN_NAMES`]).
 //! The second test is the protocol-v7 canary on a server of its own without
@@ -49,14 +49,13 @@
 //! `/restate/scope/{scope}/call/…` ingress paths (and `/restate/send/…` for a
 //! call it does not wait for), reports the invocation id (`x-restate-id`) and
 //! parses fault bodies, reads `sys_journal` / `sys_invocation` through the
-//! SQL introspection API — `raw` hex-decoded to bytes, since run results are
-//! stored as bytes — and purges or kills invocations through the admin API.
+//! SQL introspection API (`raw` hex-decoded to bytes, since run results are
+//! stored as bytes), and purges or kills invocations through the admin API.
 //! What szamlazz.hu holds is stated per document
 //! ([`harness::Harness::holds`] and its siblings), so one `<szamla>` body
-//! answers every selector the document is reachable by (design §11); every
-//! mock's `expect(n)` is verified at the next scenario's
-//! [`harness::Harness::reset`] (the last scenario's when the harness is
-//! dropped).
+//! answers every selector the document is reachable by; every mock's
+//! `expect(n)` is verified at the next scenario's [`harness::Harness::reset`]
+//! (the last scenario's when the harness is dropped).
 
 mod harness;
 
@@ -156,18 +155,18 @@ async fn e2e_order_protocol() {
     pins::every_handler_journals_its_pinned_run_names(&h).await;
 }
 
-/// The deploy-time canary for protocol v7 (design §4, ADR 0006), provoked:
-/// on a server without `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7` the ingress
-/// accepts a scoped path — it does not refuse one for the flag — and the
-/// server keys the invocation by the scope (`sys_invocation.scope`), but the
-/// SDK sees no scope. So a scoped `check_account` reports `scope: null`: on
-/// the single-account deployment with its account and `credentials: ok` as a
-/// 200 — the signal a deploy pipeline reads, since the worker has no
-/// per-request way to tell "unscoped" from "scope not forwarded" — and on the
-/// multi-account deployment as `unknown_account` naming the unscoped case,
-/// with nothing sent: every scoped call fails closed, no account is reached
-/// under the wrong scope. A server of its own, on its own ports; never a
-/// reused one, whose flags are the main suite's.
+/// The deploy-time canary for protocol v7, provoked: on a server without
+/// `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7` the ingress accepts a scoped path
+/// (it does not refuse one for the flag), and the server keys the invocation
+/// by the scope (`sys_invocation.scope`), but the SDK sees no scope. So a
+/// scoped `check_account` reports `scope: null`: on the single-account
+/// deployment with its account and `credentials: ok` as a 200 (the signal a
+/// deploy pipeline reads, since the worker has no per-request way to tell
+/// "unscoped" from "scope not forwarded"), and on the multi-account deployment
+/// as `unknown_account` naming the unscoped case, with nothing sent: every
+/// scoped call fails closed, no account is reached under the wrong scope. A
+/// server of its own, on its own ports; never a reused one, whose flags are
+/// the main suite's.
 #[tokio::test]
 #[ignore = "needs a Restate server: docker or RESTATE_SERVER_BIN"]
 async fn e2e_check_account_without_protocol_v7() {
@@ -177,7 +176,7 @@ async fn e2e_check_account_without_protocol_v7() {
     let mut h = Harness::start(launcher.launch(&WITHOUT_PROTOCOL_V7)).await;
 
     // The single-account deployment: the scoped probe answers the account
-    // and reports the scope it saw — none.
+    // and reports the scope it saw: none.
     probe_with_key(AGENT_KEY)
         .respond_with(not_found())
         .expect(1)
@@ -205,7 +204,7 @@ async fn e2e_check_account_without_protocol_v7() {
     assert_eq!(invocation.handler, "check_account");
     // The hazard, in one row: the server keyed the invocation by the scope
     // (`sys_invocation.scope`, the partition key) and the handler never saw
-    // it — the response above is the only place the discrepancy shows.
+    // it; the response above is the only place the discrepancy shows.
     assert_eq!(
         invocation.scope.as_deref(),
         Some("acme"),
@@ -213,7 +212,7 @@ async fn e2e_check_account_without_protocol_v7() {
     );
 
     // The multi-account deployment on the same server: the scope selects no
-    // account because none arrives — `unknown_account`, nothing sent.
+    // account because none arrives; `unknown_account`, nothing sent.
     h.switch_to_multi_account().await;
     h.reset().await;
     let reply = h.check_account(Some("acme")).await;

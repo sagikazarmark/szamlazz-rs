@@ -90,8 +90,8 @@ pub(crate) async fn proforma_auto_link_and_consumed(h: &Harness) {
 
 /// (x-a) `create_proforma` on an order whose invoice or prepayment invoice is
 /// live: our own document (under `…:invoice` / `…:prepayment`) is
-/// `conflict{order_invoiced, existing_number}` — a proforma after the invoice
-/// makes no sense, but the invoice is ours, not another channel's — while a
+/// `conflict{order_invoiced, existing_number}` (a proforma after the invoice
+/// makes no sense, but the invoice is ours, not another channel's), while a
 /// live invoice under the order number that is under none of our ids stays
 /// `conflict{foreign}`. Nothing is created either way.
 pub(crate) async fn proforma_after_the_orders_invoice_is_order_invoiced_not_foreign(h: &Harness) {

@@ -21,7 +21,7 @@ pub enum Rounding {
     /// places than the currency has (`100.005 EUR` with a five-decimal VAT).
     /// szamlazz.hu then rounds **each value to two decimals on its own** and
     /// does not recompute the gross, so `100.004 / 27.00108 / 127.00508` is
-    /// stored as `100 / 27 / 127.01` — a document whose gross is not net + VAT
+    /// stored as `100 / 27 / 127.01`: a document whose gross is not net + VAT
     /// (observed on the test account, 2026-09-06). Ask for this only when your
     /// business rule requires it and you accept that outcome.
     Exact,
@@ -29,7 +29,7 @@ pub enum Rounding {
 
 impl Rounding {
     /// Round to the currency's minor unit: whole forints for HUF, cents for
-    /// EUR, thousandths for KWD — see [`Currency::minor_unit_digits`].
+    /// EUR, thousandths for KWD; see [`Currency::minor_unit_digits`].
     #[must_use]
     pub fn minor_unit(currency: &Currency) -> Self {
         Self::Scale(currency.minor_unit_digits())
@@ -69,7 +69,7 @@ pub struct LineItemLedger {
 ///
 /// szamlazz.hu verifies the arithmetic server-side: net = unit price ×
 /// quantity, VAT = net × rate / 100, gross = net + VAT (error codes 259–264).
-/// This crate does **not** duplicate that validation — the server is the
+/// This crate does **not** duplicate that validation: the server is the
 /// authority. Use [`LineItem::try_calculated`] to have the values computed
 /// with an explicit [`Rounding`] and no risk of a panic, or [`LineItem::new`]
 /// when your system already computed them and must match.
@@ -155,8 +155,8 @@ impl LineItem {
     ///
     /// # Panics
     ///
-    /// When a derived value overflows a [`Decimal`] — see
-    /// [`ArithmeticError`]. Use [`LineItem::try_calculated`] on values you do
+    /// When a derived value overflows a [`Decimal`] (see
+    /// [`ArithmeticError`]). Use [`LineItem::try_calculated`] on values you do
     /// not control.
     pub fn calculated(
         name: impl Into<String>,
@@ -177,7 +177,7 @@ impl LineItem {
 
     /// Computes net, VAT, and gross using protocol currency rules: whole
     /// forints for HUF (`HUF`/`Ft`), **exact, unrounded** decimal arithmetic
-    /// for every other currency — so a `100.005 EUR` net goes on the wire with
+    /// for every other currency, so a `100.005 EUR` net goes on the wire with
     /// sub-cent VAT and gross values, which szamlazz.hu rounds to two decimals
     /// each on its own, possibly to a gross that is not net + VAT (see
     /// [`Rounding::Exact`]).
@@ -191,8 +191,8 @@ impl LineItem {
     ///
     /// # Panics
     ///
-    /// When a derived value overflows a [`Decimal`] — see
-    /// [`ArithmeticError`].
+    /// When a derived value overflows a [`Decimal`] (see
+    /// [`ArithmeticError`]).
     pub fn calculated_for_currency(
         name: impl Into<String>,
         quantity: Decimal,

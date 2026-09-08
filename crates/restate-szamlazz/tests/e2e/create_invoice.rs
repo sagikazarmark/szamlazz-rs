@@ -173,12 +173,12 @@ pub(crate) async fn duplicate_order_number_reconciles(h: &Harness) {
 /// (iii-b) a duplicate-order-number answer (152) whose external-id re-query
 /// finds nothing of ours is a **settled** `conflict{duplicate_order_number}`
 /// after one send (#41): szamlazz.hu refused the order number, so re-sending
-/// would only repeat the refusal — never `Unconfirmed`, so no run retry is
+/// would only repeat the refusal; never `Unconfirmed`, so no run retry is
 /// spent on it. With nothing under the order at all (the contradiction, logged
 /// at `warn`) the conflict names no `existing_number`; with a live invoice
-/// another channel issued between our lookup step and our create — the very
+/// another channel issued between our lookup step and our create (the very
 /// race the rule exists for; the hint missed, the naming query after the 152
-/// finds it — the conflict names it.
+/// finds it), the conflict names it.
 pub(crate) async fn duplicate_order_number_with_nothing_of_ours_is_a_settled_conflict(h: &Harness) {
     // Nothing under the order at all.
     h.reset().await;
@@ -431,12 +431,12 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
     );
 }
 
-/// (vi-c) the create lands but its reply is lost (design §5 step 4): the
-/// create step's immediate re-query finds the document under the external
-/// id and settles the step as `issued` **within the same execution** — no
-/// run retry, exactly one create on the wire, one create step entry. The
-/// harness drives the transition from the create request itself: how many
-/// queries precede the send is the protocol's, not the test's, to know.
+/// (vi-c) the create lands but its reply is lost: the create step's immediate
+/// re-query finds the document under the external id and settles the step as
+/// `issued` **within the same execution**, no run retry, exactly one create on
+/// the wire, one create step entry. The harness drives the transition from the
+/// create request itself: how many queries precede the send is the protocol's,
+/// not the test's, to know.
 pub(crate) async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Harness) {
     h.reset().await;
     h.absent("E2E-6C", &["prepayment", "final", "proforma"])
@@ -470,7 +470,7 @@ pub(crate) async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Ha
 
     // Settled inside the one execution: no run failed, so no failure and no
     // failing command were recorded, and `retry_count` stayed at the first
-    // execution's 1 (the server's count includes it — (xiv) observed
+    // execution's 1 (the server's count includes it: (xiv) observed
     // failures + 1).
     assert!(retries.max_retry_count <= 1, "{retries:?}");
     assert!(retries.failures.is_empty(), "{retries:?}");
@@ -491,13 +491,12 @@ pub(crate) async fn lost_create_reply_is_settled_by_the_immediate_requery(h: &Ha
 }
 
 /// (vii-b) `options.proforma: {number}` validates the named proforma like
-/// every other document found by number (design §3, §5 step 2): a proforma
-/// carrying another order's number, or none, is `conflict{not_managed,
-/// existing_number}` after the verify alone — another order's live proforma
-/// cannot be linked into this order's invoice, nothing sent; a proforma of
-/// this order proceeds as before and the create carries `dijbekeroSzamlaszam`
-/// — whatever its `teszt` says, since the worker holds no account pin (ADR
-/// 0006, account-pin amendment).
+/// every other document found by number: a proforma carrying another order's
+/// number, or none, is `conflict{not_managed, existing_number}` after the
+/// verify alone (another order's live proforma cannot be linked into this
+/// order's invoice), nothing sent; a proforma of this order proceeds as before
+/// and the create carries `dijbekeroSzamlaszam`, whatever its `teszt` says,
+/// since the worker holds no account pin.
 pub(crate) async fn proforma_by_number_is_checked_like_every_found_document(h: &Harness) {
     let body = |number: &str| {
         json!({
@@ -595,7 +594,7 @@ pub(crate) async fn proforma_by_number_is_checked_like_every_found_document(h: &
 }
 
 /// (ix) a valid-looking document under `…:prepayment` that carries another
-/// order's number — an external-id collision on a *secondary* lookup — ⇒
+/// order's number (an external-id collision on a *secondary* lookup) ⇒
 /// `conflict{external_id_collision}` from `create_invoice`, nothing created:
 /// the newest holder may hide a live prepayment of ours behind it. `get`
 /// reports the same slot as absent (a read must not fail).
@@ -637,16 +636,16 @@ pub(crate) async fn secondary_lookup_collision_refuses_to_create(h: &Harness) {
     eprintln!("(ix) collision on the prepayment lookup → conflict{{external_id_collision}}: pass");
 }
 
-/// (x-g) `create_invoice`'s proforma link (design §5 step 2) settles every
-/// case before anything is sent: `options.proforma: none` while a live
-/// proforma of ours exists is `conflict{proforma_live, existing_number}` from
-/// the `proforma-link` read — szamlazz.hu would link the proforma by shared
-/// order number regardless, so refusing is the honest answer; a named
-/// proforma szamlazz.hu does not know (code 7) is `conflict{proforma_missing,
-/// existing_number}` after the verify — an outcome, never `not_found`; and a
-/// named document of this order that is not a proforma is the `invalid_input`
-/// fault naming the number and its `tipus`. (The prepayment invoice's `none`
-/// is (x); the by-number `not_managed` is (vii-b).)
+/// (x-g) `create_invoice`'s proforma link settles every case before anything
+/// is sent: `options.proforma: none` while a live proforma of ours exists is
+/// `conflict{proforma_live, existing_number}` from the `proforma-link` read;
+/// szamlazz.hu would link the proforma by shared order number regardless, so
+/// refusing is the honest answer; a named proforma szamlazz.hu does not know
+/// (code 7) is `conflict{proforma_missing, existing_number}` after the verify
+/// (an outcome, never `not_found`); and a named document of this order that is
+/// not a proforma is the `invalid_input` fault naming the number and its
+/// `tipus`. (The prepayment invoice's `none` is (x); the by-number
+/// `not_managed` is (vii-b).)
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the conflict, the missing proforma and the invalid link"

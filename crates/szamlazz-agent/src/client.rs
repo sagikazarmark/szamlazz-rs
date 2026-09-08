@@ -1,8 +1,8 @@
 //! Ready-made async client built on [`reqwest`] (feature `client-reqwest`).
 //!
-//! A thin shell around the sans-IO core: every operation goes through
+//! A thin shell around the I/O-free core: every operation goes through
 //! [`Client::send`], which works with any [`AgentRequest`] type. The client
-//! owns what the core leaves to the transport — the endpoint URL, the
+//! owns what the core leaves to the transport: the endpoint URL, the
 //! `JSESSIONID` session (through reqwest's cookie store), timeouts, TLS, and
 //! the redirect policy.
 //!
@@ -50,7 +50,7 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    /// What this failure says about the document the request asked for — may
+    /// What this failure says about the document the request asked for: may
     /// one exist despite the error? See [`OutcomeClass`].
     ///
     /// A request refused before it was sent ([`ClientError::Request`]) is
@@ -98,7 +98,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Overrides the endpoint URL — for pointing tests at a mock server.
+    /// Overrides the endpoint URL, for pointing tests at a mock server.
     /// szamlazz.hu has no separate sandbox host; test mode is an account
     /// setting.
     #[must_use]
@@ -156,7 +156,7 @@ pub enum BuildError {
 ///
 /// szamlazz.hu has been observed to stall for about a minute and still issue
 /// the document, so a caller that re-checks or re-sends after a timeout must
-/// wait at least this long after the send — the request may still be in
+/// wait at least this long after the send: the request may still be in
 /// flight server-side. Exported so that such a floor can be derived from the
 /// timeout rather than copied. A client built with
 /// [`ClientBuilder::http_client`] carries its own timeout instead.

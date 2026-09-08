@@ -12,8 +12,8 @@ use crate::harness::{Harness, create_body, document};
 /// (x) `create_prepayment` consumes the order's proforma like `create_invoice`
 /// does (#69): `options.proforma: none` while a live proforma of ours exists
 /// is `conflict{proforma_live, existing_number}` after the `proforma-link`
-/// read with nothing sent — szamlazz.hu would link it by shared order number
-/// anyway — under the default `auto` the create carries
+/// read with nothing sent (szamlazz.hu would link it by shared order number
+/// anyway); under the default `auto` the create carries
 /// `dijbekeroSzamlaszam` beside the `elolegszamla` flag, and under
 /// `{number}` the named proforma is verified like every found document
 /// (`verify-proforma-{number}` in place of `proforma-link`) and linked.
@@ -131,8 +131,8 @@ pub(crate) async fn prepayment_converts_the_proforma_like_the_invoice(h: &Harnes
         "{runs:?}"
     );
 
-    // Under `{number}` the named proforma is verified by number — this
-    // order's — and linked, on another order.
+    // Under `{number}` the named proforma is verified by number (this
+    // order's) and linked, on another order.
     h.reset().await;
     h.absent("E2E-10p", &["invoice", "prepayment", "final"])
         .await;
@@ -179,13 +179,13 @@ pub(crate) async fn prepayment_converts_the_proforma_like_the_invoice(h: &Harnes
     );
 }
 
-/// (x-f) the two chains refuse each other at the exclusivity step (design §5
-/// step 1): a live prepayment invoice of ours under `…:prepayment` refuses
+/// (x-f) the two chains refuse each other at the exclusivity step: a live
+/// prepayment invoice of ours under `…:prepayment` refuses
 /// `create_invoice`, a live invoice of ours under `…:invoice` refuses
 /// `create_prepayment`, both as `conflict{prepaid_chain, existing_number}`
 /// from the first exclusivity row with nothing read or sent after it. A
 /// **reversed** prepayment invoice refuses nothing: `create_invoice` walks
-/// every step and issues — the storno of the `ES`, the newest document under
+/// every step and issues; the storno of the `ES`, the newest document under
 /// the order, is not an invoice kind and so never foreign.
 #[allow(
     clippy::too_many_lines,

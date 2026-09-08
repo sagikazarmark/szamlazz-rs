@@ -1,4 +1,4 @@
-//! `szamlazz proforma` — proforma (díjbekérő) management.
+//! `szamlazz proforma`: proforma (díjbekérő) management.
 
 use clap::{Args, Subcommand};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};

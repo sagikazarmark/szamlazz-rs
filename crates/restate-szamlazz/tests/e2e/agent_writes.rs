@@ -1,6 +1,5 @@
 //! The `Szamlazz.Agent` writes: `storno` acting on what the verify finds and
-//! repeating the original's `telj` (ADR 0007), and `set_payments` replacing
-//! or appending.
+//! repeating the original's `telj`, and `set_payments` replacing or appending.
 
 use serde_json::{Value, json};
 use wiremock::ResponseTemplate;
@@ -14,11 +13,11 @@ use crate::harness::szamlazz::{
 };
 
 /// (xviii-b) `Szamlazz.Agent.storno` under a scope acts on what the verify
-/// finds and compares it with nothing about the account (ADR 0006,
-/// account-pin amendment): a document whose seller block carries another
-/// `szallito/id` and whose `teszt` says a live account issued it is reversed
-/// with `acme`'s key like any of the account's own; a document carrying an
-/// order number is `managed_by_order` with nothing sent.
+/// finds and compares it with nothing about the account: a document whose
+/// seller block carries another `szallito/id` and whose `teszt` says a live
+/// account issued it is reversed with `acme`'s key like any of the account's
+/// own; a document carrying an order number is `managed_by_order` with
+/// nothing sent.
 pub(crate) async fn agent_storno_acts_on_what_the_verify_finds(h: &Harness) {
     // A document whose `teszt` and seller record id are not what `acme`'s
     // documents carry: nothing compares them, the storno proceeds with
@@ -103,11 +102,11 @@ pub(crate) async fn agent_storno_acts_on_what_the_verify_finds(h: &Harness) {
 /// `set-payments-{number}` with no query before it: a replacing call puts
 /// `<additiv>false</additiv>` on the wire with that account's key and the
 /// entries as sent, an additive one `<additiv>true</additiv>`, and the answer
-/// is the invoice's totals as szamlazz.hu reported them — `outstanding`
+/// is the invoice's totals as szamlazz.hu reported them, `outstanding`
 /// distinct from `gross_total`. A replacing call with no entries would clear
 /// the invoice's payments: refused as `invalid_input` before the wire. A lost
-/// reply is `outcome_unknown` after exactly one send — the step has no retry
-/// of its own — and the fault's advice follows `additive`: a replacing call
+/// reply is `outcome_unknown` after exactly one send (the step has no retry
+/// of its own), and the fault's advice follows `additive`: a replacing call
 /// is repeated as is, an additive one may have landed its entries, so the
 /// caller queries the invoice first (at-least-once).
 #[allow(
@@ -244,8 +243,8 @@ pub(crate) async fn set_payments_replaces_or_appends_and_answers_a_lost_reply(h:
 /// (xviii-e) `Szamlazz.Agent.storno` repeats the original's `telj` too (ADR
 /// 0007), under a scope: a document is reversed with the storno carrying
 /// `teljesitesDatum` and `acme`'s key; one without a `telj` is 503
-/// `unavailable` naming the invoice — without `order`, `kind` or
-/// `external_id`, as this handler's other faults — with only the verify
+/// `unavailable` naming the invoice (without `order`, `kind` or
+/// `external_id`, as this handler's other faults) with only the verify
 /// journaled and nothing sent; and the fault comes after the answers that
 /// need no send: a `telj`-less order-bearing document is still
 /// `managed_by_order`, a reversed one still `reversed`.
@@ -336,9 +335,9 @@ pub(crate) async fn agent_storno_repeats_the_originals_fulfillment_date_or_refus
     assert_eq!(h.requests_seen().await, 1);
 
     // Before the fault: a reversed document is `reversed`, with the storno
-    // number the by-number storno lookup names — nothing under the id (a
+    // number the by-number storno lookup names; nothing under the id (a
     // reversal from the UI) leaves it unknown; the verify and the lookup are
-    // the only requests, nothing is sent (J25, #65).
+    // the only requests, nothing is sent (#65).
     h.reset().await;
     number_query("SZ-35")
         .respond_with(

@@ -9,7 +9,7 @@ use crate::{IpnParseError, PaymentNotification};
 ///
 /// Responds with `400 Bad Request` (or forwards the body-extraction status,
 /// e.g. `413`). szamlazz.hu will retry the delivery, so a malformed message
-/// shows up in your logs up to 10 times — which is the desired signal for a
+/// shows up in your logs up to 10 times, which is the desired signal for a
 /// misconfigured integration. Implements [`Error`](std::error::Error), and
 /// [`IpnRejection::parse_error`] exposes the underlying [`IpnParseError`] when
 /// the body parsed as bytes but not as an IPN message.

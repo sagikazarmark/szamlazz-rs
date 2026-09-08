@@ -1,4 +1,4 @@
-# 03 — Reliable side effects from webhooks, and the Hungarian compliance clock
+# 03, Reliable side effects from webhooks, and the Hungarian compliance clock
 
 Research note for the 2026-09-06 session. Primary sources only; each claim VERIFIED (fetched today) or
 UNVERIFIED; interpretation is marked.
@@ -7,7 +7,7 @@ UNVERIFIED; interpretation is marked.
 
 - **Stripe**: return 2xx *before* complex logic ("you must return a 200 response before updating a customer's
   invoice as paid in your accounting system"); process via an async queue; retries up to 3 days; no ordering
-  guarantee — dedupe by event ID; "use the API to retrieve any missing objects". VERIFIED
+  guarantee, dedupe by event ID; "use the API to retrieve any missing objects". VERIFIED
   (docs.stripe.com/webhooks).
 - **GitHub**: 2xx within 10 s or the delivery fails; queue and process in the background; dedupe on
   `X-GitHub-Delivery`. VERIFIED (docs.github.com, webhook best practices).
@@ -24,8 +24,8 @@ UNVERIFIED; interpretation is marked.
   consumer must be idempotent". VERIFIED (microservices.io, Transactional outbox; Saga).
 - Neither page places the "retry forever vs give up" decision: the pattern guarantees delivery *to the broker*
   and leaves consumer failure handling open. VERIFIED (absence).
-- Helland, "Idempotence Is Not a Medical Condition" (ACM Queue 2012): UNVERIFIED — ACM answered 403.
-- Interpretation: a Restate invocation is durable but *ends* — fault, kill, or stored `unavailable`. What
+- Helland, "Idempotence Is Not a Medical Condition" (ACM Queue 2012): UNVERIFIED, ACM answered 403.
+- Interpretation: a Restate invocation is durable but *ends*, fault, kill, or stored `unavailable`. What
   survives is the caller's record that an invoice *should* exist for order X: the outbox row as intent, keyed by
   order, with a status. A durable downstream removes the need for at-least-once *delivery* (the worker is
   idempotent by external id), not for the row. Without it, "issue X" lives only in Pretix's 3-day retry.
@@ -68,7 +68,7 @@ UNVERIFIED; interpretation is marked.
   | Settled, fix something | `INVALID_ARGUMENT`, `NOT_FOUND`, `PERMISSION_DENIED` | `invalid_input`, `unknown_account`, `not_found`, `account_mismatch`, `szamlazz_error`, `credentials_rejected`, `conflict{…}`, `rejected` |
 
   "Auto-retry the known-transient, surface the rest" is the standard advice (AIP-194, Temporal). For the
-  ambiguous class both agree: never blind-retry a state-changing call — query (AIP `ABORTED`) or retry with the
+  ambiguous class both agree: never blind-retry a state-changing call, query (AIP `ABORTED`) or retry with the
   same token (AWS). The worker's create step already queries first; the caller reads `get`, then decides.
 
 ## 5. Compliance clock (Hungary)
@@ -85,7 +85,7 @@ UNVERIFIED; interpretation is marked.
   card-paid order is in the *immediate* bucket, not the 8-day one. No number for "haladéktalan" found.
 - **Online reporting**: 23/2014 NGM r. §13/A(1): the invoicing program transmits "at issuance, immediately"
   (`kiállításakor azonnal`); done when NAV confirms processing. VERIFIED (net.jogtar.hu). The clock runs from
-  *issuance* — a late invoice is a §163 matter; szamlazz.hu owns reporting once the invoice exists.
+  *issuance*: a late invoice is a §163 matter; szamlazz.hu owns reporting once the invoice exists.
 - **Fines (Art., 2017. évi CL.)**: §228(1) up to **2 000 000 HUF** for failing the invoice obligation; §220(1)
   general cap 400 000 / 1 000 000 HUF (natural / other person), §220(2) lateness is a breach, §220(3) no fine
   for lateness if the duty is performed and the taxpayer acted "as generally expected in the situation"; §229
@@ -96,7 +96,7 @@ UNVERIFIED; interpretation is marked.
 
 Sidekiq: 25 retries over ~20 days, then the **Dead set** ("you must manually retry them via the UI"); Web UI
 tabs *Retries* and *Dead* to run, inspect or delete; capped at 10 000 jobs / 6 months, then discarded;
-`death_handlers` notify; "retries are for unexpected errors" — expected ones belong in a state machine.
+`death_handlers` notify; "retries are for unexpected errors", expected ones belong in a state machine.
 VERIFIED (sidekiq wiki, Error Handling). Stripe: *Event deliveries* tab, `Delivered`/`Pending`/`Failed`, status
 and next retry per attempt; **Resend** up to 15 days. VERIFIED (docs.stripe.com/webhooks). Pretix: 30-day
 delivery log. VERIFIED. Shopify: reconciliation as a button. VERIFIED.
@@ -113,8 +113,8 @@ delivery log. VERIFIED. Shopify: reconciliation as a button. VERIFIED.
   unattended retry targets **hours**; anything unresolved by the next business day must reach a person (§5).
 - A **reconciler** (periodic `get` for orders that should have a document; issue with a fresh key if absent) is
   what every sender recommends and makes ordering/duplicates/misses harmless (§1).
-- UI: Sidekiq's two lists — *retrying* (next attempt) and *dead* (needs a person) — with *retry now*, *view last
+- UI: Sidekiq's two lists, *retrying* (next attempt) and *dead* (needs a person), with *retry now*, *view last
   error*, *discard*, and an age-out rule (§6).
 - Restate `unlimited`/`pause` cannot be the sole owner of "try again": paused invocations hold the order key and
-  are invisible to the organizer — a complement to the intent row, not a replacement (§3).
+  are invisible to the organizer, a complement to the intent row, not a replacement (§3).
 - Keep the attempt/failure log as the §220(3) defence that the taxpayer "acted as expected" if late.

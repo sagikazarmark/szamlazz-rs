@@ -3,7 +3,7 @@
 //! whose next resolutions can fail or hang and whose store can be taken
 //! down), the multi-account phase over [`MutableAccounts`] (accounts and keys
 //! the test changes while invocations are in flight), and the agent keys the
-//! run puts on the wire — sentinels the leak scan looks for.
+//! run puts on the wire, sentinels the leak scan looks for.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -38,15 +38,15 @@ pub(crate) const BANK_ACCOUNT_CHANGED: &str = "44444444-55555555-66666666";
 
 /// The static resolver and store behind a script: the resolver fails the
 /// next N resolutions with `unavailable` or hangs the next N forever, and the
-/// store can be taken down. What the prologue's e2e drives — a resolver that
-/// fails then succeeds, one that never answers, a store that always fails —
+/// store can be taken down. What the prologue's e2e drives (a resolver that
+/// fails then succeeds, one that never answers, a store that always fails)
 /// on the one deployment the harness registers.
 #[derive(Debug)]
 pub(crate) struct ScriptedAccounts {
     inner: StaticResolver,
     /// Resolutions left to fail with `unavailable`.
     resolver_failures: AtomicU32,
-    /// Resolutions left to hang — a future that never completes, so the
+    /// Resolutions left to hang: a future that never completes, so the
     /// invocation is stuck in its `account` step until it is killed.
     resolver_hangs: AtomicU32,
     /// How many times the resolver was asked.
@@ -158,8 +158,8 @@ pub(crate) fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) 
     (scripted, order, agent)
 }
 
-/// The deployment-level settings of both phases — the flag day keeps the
-/// namespace — with short policies: two executions of the create step one
+/// The deployment-level settings of both phases (the flag day keeps the
+/// namespace) with short policies: two executions of the create step one
 /// second apart, so exhaustion and re-execution are observable within the
 /// test; three executions of a read step one second apart, so a retried and
 /// an exhausted read are observable within the `watch` window; and a
@@ -168,8 +168,8 @@ pub(crate) fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) 
 /// Built in Rust and handed to `from_parts`, never through
 /// `WorkerConfig::validate`: the 1 s issue delay is under the floor `validate`
 /// holds a deployment to (`IssueConfig::MIN_INITIAL_DELAY`, the client timeout
-/// plus a margin), which the endpoint's loader enforces and this suite — whose
-/// szamlazz.hu is a scripted mock that answers at once — has no use for.
+/// plus a margin), which the endpoint's loader enforces and this suite (whose
+/// szamlazz.hu is a scripted mock that answers at once) has no use for.
 fn worker_config() -> WorkerConfig {
     serde_json::from_value(json!({
         "namespace": "acct",
@@ -198,7 +198,7 @@ fn worker_config() -> WorkerConfig {
 }
 
 /// A resolver and store whose accounts and keys the test can change while
-/// invocations are in flight — what a database-backed deployment looks like
+/// invocations are in flight: what a database-backed deployment looks like
 /// to the worker, and what the rotation and account-change scenarios drive.
 /// Seeded from the static resolver's multi-account shape, so the shape is
 /// exercised end to end too.
@@ -288,7 +288,7 @@ impl CredentialStore for MutableAccounts {
 }
 
 /// The two services of the multi-account phase at `endpoint`: `acme` is the
-/// szamlazz.hu account of the single-account phase (same key — the flag day
+/// szamlazz.hu account of the single-account phase (same key; the flag day
 /// changes configuration, not the account), `beta` is a second one. Reachable
 /// by scope only.
 pub(crate) async fn multi_account_services(endpoint: &str) -> (Arc<MutableAccounts>, Order, Agent) {

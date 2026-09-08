@@ -12,8 +12,8 @@ use crate::harness::szamlazz::{
 
 /// (xii-b) `check_account` on the single-account deployment: unscoped, the
 /// probe answers the configured account with `scope: null` and
-/// `credentials: ok` after exactly one szamlazz.hu request — the query of the
-/// sentinel id, carrying the account's key — with `probe` as its one step
+/// `credentials: ok` after exactly one szamlazz.hu request (the query of the
+/// sentinel id, carrying the account's key) with `probe` as its one step
 /// after the prologue's; a wrong key is `credentials: rejected` as data, not
 /// a fault. `scope` is what the SDK saw: under a scoped call it is the
 /// deploy-time signal that the server forwards the scope (protocol v7).
@@ -64,7 +64,7 @@ pub(crate) async fn check_account_names_the_account_and_reports_the_credentials(
     assert_eq!(invocation.status, "completed", "{invocation:?}");
 
     // A scoped probe on the single-account deployment: no account to probe,
-    // nothing sent — the scope is refused by the `account` step (xii), and
+    // nothing sent; the scope is refused by the `account` step (xii), and
     // the probe reports it the same way.
     h.reset().await;
     let reply = h.check_account(Some("acme-events")).await;
@@ -83,7 +83,7 @@ pub(crate) async fn check_account_names_the_account_and_reports_the_credentials(
 /// (xvii-c) `check_account` under each scope of the multi-account deployment
 /// names that scope's account with `credentials: ok` and `scope` as the SDK
 /// saw it, and the probe on the wire carries that account's key and nothing
-/// else — the deploy-pipeline proof that a scope reaches the worker, resolves
+/// else: the deploy-pipeline proof that a scope reaches the worker, resolves
 /// to the intended account and its key works. Unscoped it is
 /// `unknown_account` with `namespace` and `account` journaled and no
 /// szamlazz.hu request.
@@ -147,9 +147,9 @@ pub(crate) async fn check_account_under_each_scope_names_its_account(h: &Harness
 }
 
 /// (xviii-c) `Szamlazz.Agent.query` under a scope answers the projection of
-/// whatever it finds — `test` as szamlazz.hu reported it, compared with
-/// nothing (ADR 0006, account-pin amendment: the go-live check reads it off
-/// a known document here), no `supplier_id`; code 7 is 404 `not_found`.
+/// whatever it finds: `test` as szamlazz.hu reported it, compared with
+/// nothing (the go-live check reads it off a known document here), no
+/// `supplier_id`; code 7 is 404 `not_found`.
 pub(crate) async fn agent_query_projects_what_it_finds(h: &Harness) {
     let query_of = |number: &str| json!({ "selector": { "invoice_number": number } });
 
@@ -219,14 +219,14 @@ pub(crate) async fn agent_query_projects_what_it_finds(h: &Harness) {
 /// that scope's account: the `xmltaxpayer` request on the wire carries that
 /// account's key and nothing else reaches szamlazz.hu; the full tax number
 /// and its bare stem are one step, `taxpayer-{prefix}`; `valid: false` is
-/// data; a malformed tax number is `invalid_input` before the prologue —
+/// data; a malformed tax number is `invalid_input` before the prologue,
 /// nothing journaled, nothing sent. The run-wide leak scan (xxi) covers
 /// these invocations too.
 pub(crate) async fn agent_query_taxpayer_runs_on_the_scoped_account(h: &Harness) {
     let request = |tax_number: &str| json!({ "tax_number": tax_number });
 
     // `acme` with its key, the full tax number; `beta` with its key, the
-    // bare stem — the same prefix, the same step name on both.
+    // bare stem: the same prefix, the same step name on both.
     h.reset().await;
     taxpayer_query_with_key("12345678", AGENT_KEY)
         .respond_with(taxpayer_known())

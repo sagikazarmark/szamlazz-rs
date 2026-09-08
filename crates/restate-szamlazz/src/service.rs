@@ -1,22 +1,22 @@
 //! The Restate services: the `Szamlazz.Order` Virtual Object and the stateless
-//! `Szamlazz.Agent` service (design §4–§7).
+//! `Szamlazz.Agent` service.
 //!
 //! Both are thin adapters: every szamlazz.hu call runs inside `ctx.run` through
 //! the [`Gateway`](crate::gateway::Gateway) and domain outcomes are returned as
-//! data. Neither keeps state — szamlazz.hu is the source of truth, reached
+//! data. Neither keeps state: szamlazz.hu is the source of truth, reached
 //! through the order's deterministic external ids. `TerminalError`s carry a
 //! [`TerminalCode`](crate::contract::TerminalCode): three of the codes mean
-//! "outcome unknown — retry with a new `Idempotency-Key`, or read `get`"
+//! "outcome unknown: retry with a new `Idempotency-Key`, or read `get`"
 //! (`outcome_unknown`, `unavailable`, `credentials_rejected`), the rest are
-//! settled — the same request never succeeds, or szamlazz.hu's own answer is
+//! settled: the same request never succeeds, or szamlazz.hu's own answer is
 //! passed through. On the wire a fault is the JSON string inside Restate's
 //! ingress envelope (`{"code": <HTTP status>, "message": "<fault JSON>",
 //! "source": "invocation"}`): the fault → `TerminalError` conversion in
 //! `support` hands the SDK the status and the fault JSON as the message, and
 //! the ingress wraps them in its envelope.
 //!
-//! Each service holds exactly two things: the [`Accounts`] bundle — the
-//! account resolver and the credential store — and a [`WorkerConfig`] with the
+//! Each service holds exactly two things: the [`Accounts`] bundle (the
+//! account resolver and the credential store), and a [`WorkerConfig`] with the
 //! deployment-level settings (the namespace of the external ids; the issue,
 //! read and resolve policies). Every handler runs the same prologue after parsing
 //! its key: **pin** the namespace in a pure durable step, **resolve** the
@@ -24,11 +24,11 @@
 //! resolve policy, **fetch** the account's credentials outside the journal on
 //! every execution, **open** the gateway for this execution over a fresh
 //! client. The handler body then runs on that execution (`prologue::Execution`);
-//! nothing of it — gateway, client, credentials — outlives the execution.
+//! nothing of it (gateway, client, credentials) outlives the execution.
 //!
-//! - [`Order`] — keyed by the order number; its per-key lock serialises
+//! - [`Order`]: keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.
-//! - [`Agent`] — by-number operations (`query`, `set_payments`, `storno`), the
+//! - [`Agent`]: by-number operations (`query`, `set_payments`, `storno`), the
 //!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
 //!   probe, registered as `Szamlazz.Agent`.
 
@@ -114,11 +114,10 @@ impl Order {
 
 /// The stateless `Szamlazz.Agent` service: by-number operations over the
 /// same accounts as [`Order`], the taxpayer lookup and the `check_account`
-/// probe. No handler compares what it finds with the account (ADR 0006,
-/// account-pin amendment).
+/// probe. No handler compares what it finds with the account.
 ///
 /// **Unkeyed.** A stateless service's invocations run concurrently, so two
-/// by-number writes on one invoice — `set_payments`, `storno` — are not
+/// by-number writes on one invoice (`set_payments`, `storno`) are not
 /// serialised by the worker as [`Order`]'s handlers are by its per-key lock.
 /// Two replacing `set_payments` (`additive: false`) race and the last send to
 /// land wins, which under reordered webhook deliveries may be the older

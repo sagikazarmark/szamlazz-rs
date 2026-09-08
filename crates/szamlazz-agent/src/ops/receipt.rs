@@ -23,13 +23,13 @@ use crate::xml::totals::{AfakulcsosszXml, OsszegekXml};
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum ReceiptTemplate {
-    /// `A` — the default A4 page.
+    /// `A`: the default A4 page.
     A4Default,
-    /// `J` — ticket format.
+    /// `J`: ticket format.
     Ticket,
-    /// `L` — ticket format with logo.
+    /// `L`: ticket format with logo.
     TicketWithLogo,
-    /// `N` — 80 mm roll (receipt printer).
+    /// `N`: 80 mm roll (receipt printer).
     Roll80mm,
 }
 
@@ -120,7 +120,7 @@ pub struct CreateReceipt {
     pub items: Vec<LineItem>,
     /// Payment breakdown (`kifizetesek`); optional, but when present the docs
     /// require the amounts to sum to the receipt total. This crate does not
-    /// validate that — the server is the authority.
+    /// validate that: the server is the authority.
     #[serde(default)]
     pub payments: Vec<ReceiptPayment>,
 }
@@ -525,8 +525,8 @@ pub struct Receipt {
     pub ledger_customer: Option<String>,
     /// Whether a test account issued the receipt (`teszt`).
     ///
-    /// Mirrors the wire: the schema has the element mandatory, so `None` —
-    /// absent or empty — is a document that does not say, not a live one.
+    /// Mirrors the wire: the schema has the element mandatory, so `None`
+    /// (absent or empty) is a document that does not say, not a live one.
     /// A reader that pins the account mode treats `None` as a mismatch.
     ///
     /// Breaking change in 0.x: this was a `bool` defaulting to `false` when
@@ -1238,7 +1238,7 @@ mod tests {
 
     /// The totals block's lenient forms: an empty `afatipus` is no VAT type,
     /// and an `osszegek` carrying no `afakulcsossz` at all is a receipt with
-    /// no per-rate subtotals — the grand total stands on its own.
+    /// no per-rate subtotals; the grand total stands on its own.
     #[test]
     fn parses_totals_without_vat_type_or_rate_subtotals() {
         let receipt_with_subtotals = |subtotals: &str| {
@@ -1277,7 +1277,7 @@ mod tests {
     }
 
     /// `<teszt>` mirrors the wire, as on the invoice query: mandatory in the
-    /// schema, so absent or empty is `None` — unknown, never `false` = live.
+    /// schema, so absent or empty is `None` (unknown, never `false` = live).
     #[test]
     fn test_marker_mirrors_the_wire() {
         let receipt_with_teszt = |element: &str| {

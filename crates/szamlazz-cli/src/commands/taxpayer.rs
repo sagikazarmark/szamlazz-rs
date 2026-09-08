@@ -1,4 +1,4 @@
-//! `szamlazz taxpayer` — NAV taxpayer lookup.
+//! `szamlazz taxpayer`: NAV taxpayer lookup.
 
 use clap::Args;
 use szamlazz_agent::ops::taxpayer::QueryTaxpayer;

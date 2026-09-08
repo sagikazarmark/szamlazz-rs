@@ -6,7 +6,7 @@
 //! (`Defaults`, `SellerConfig`, `SellerEmailConfig`) are journaled inside
 //! `Account` and must stay permissive for replay, so serde cannot be the
 //! mechanism there. One walk over the merged figment value against this tree
-//! covers every level the same way, and reports every unknown key at once —
+//! covers every level the same way, and reports every unknown key at once,
 //! with its path, where it came from and what is expected in its place.
 
 use std::fmt;
@@ -38,8 +38,8 @@ enum Node {
     Value,
     /// A table with a fixed key set.
     Table(&'static Table),
-    /// A table whose keys are the author's — the scopes of
-    /// `[accounts.<scope>]` — each holding the same table.
+    /// A table whose keys are the author's (the scopes of
+    /// `[accounts.<scope>]`), each holding the same table.
     Keyed(&'static Table),
 }
 
@@ -112,7 +112,7 @@ pub static SELLER_EMAIL: Table = Table(&[
 ]);
 
 /// The keys of the pre-release layout, each with where it went. The crate has
-/// never been released, so there is no compatibility shim — only a clear
+/// never been released, so there is no compatibility shim, only a clear
 /// refusal: the namespace was `account.slug`, and the document defaults and
 /// the seller block were top-level tables rather than part of `[account]`.
 const MOVED: [(&str, &str); 3] = [
@@ -125,7 +125,7 @@ const MOVED: [(&str, &str); 3] = [
 ];
 
 /// Fails when `figment` holds a key the configuration does not know, at any
-/// level — naming every such key — or both account shapes at once.
+/// level (naming every such key), or both account shapes at once.
 ///
 /// The shape rule is the static resolver's, and it re-checks it; it is
 /// checked here first because the typed layout cannot express it: a stray
@@ -252,7 +252,7 @@ impl Unknown {
 }
 
 /// The paths of the values under `value`: `path` itself for a value, every
-/// leaf below it for a table — what an environment override spells.
+/// leaf below it for a table (what an environment override spells).
 fn leaves(value: &Value, path: &[String]) -> Vec<Vec<String>> {
     match value.as_dict() {
         Some(dict) if !dict.is_empty() => dict
@@ -347,7 +347,7 @@ mod tests {
     /// stands in for: every table whose type serializes is compared field
     /// for field. (`StaticAccount` and the top level have no `Serialize`;
     /// the loader's full-example test covers them in the direction that
-    /// matters — a field the tree does not know fails to load.)
+    /// matters: a field the tree does not know fails to load.)
     #[test]
     fn known_keys_match_the_library_types_field_for_field() {
         assert_eq!(known(&CAPPED_POLICY), fields(&IssueConfig::default()));

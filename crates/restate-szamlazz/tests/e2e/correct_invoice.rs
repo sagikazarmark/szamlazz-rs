@@ -12,8 +12,8 @@ use crate::harness::szamlazz::{
 };
 use crate::harness::{Harness, document};
 
-/// (vii-c) `correct_invoice`: the base is verified by number — it must carry
-/// this order's number — then the corrective is issued
+/// (vii-c) `correct_invoice`: the base is verified by number (it must carry
+/// this order's number); then the corrective is issued
 /// under `{namespace}:{order}:corrective:{correction_id}` with the base named
 /// on the wire (`helyesbitettSzamlaszam`), through `verify-base-{number}`,
 /// `lookup-corrective` and `create-corrective`; the same `correction_id` again
@@ -74,16 +74,16 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
 }
 
 /// (vii-c') `correct_invoice` verifies its base like every document found by
-/// number (design §3) and settles every refusal after the verify alone, with
+/// number and settles every refusal after the verify alone, with
 /// nothing sent: a base szamlazz.hu does not know (code 7) is 404 `not_found`
 /// naming the invoice and carrying the corrective's identity; a reversed base
 /// is `conflict{base_reversed, existing_number}`; a base carrying another
 /// order's number is `conflict{not_managed, existing_number}`. A live base of
 /// this order is corrected under `{namespace}:{order}:corrective:{correction_id}`
 /// on the wire (`szamlaKulsoAzon`), a second `correction_id` is a second
-/// corrective under its own id, and neither takes the order-number hint —
-/// correctives are exempt from it — so a live foreign invoice under the order
-/// is never met (review J23: the verify's arms were pinned by nothing).
+/// corrective under its own id, and neither takes the order-number hint
+/// (correctives are exempt from it), so a live foreign invoice under the order
+/// is never met (the verify's arms were previously pinned by nothing).
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the three refusals of the verify, then two correctives on the wire"
@@ -276,7 +276,7 @@ pub(crate) async fn correctives_verify_their_base_and_take_no_hint(h: &Harness) 
 /// (vii-c'') a duplicate-order-number answer (152) to a corrective's create
 /// is `rejected{152}`, never `conflict{duplicate_order_number}`: storno and
 /// corrective invoices are exempt from the order-number-repetition rule, so
-/// the answer is a plain refusal — the external-id re-query (which could
+/// the answer is a plain refusal; the external-id re-query (which could
 /// still reconcile a corrective that landed) misses, and no order-number
 /// query follows it; one send. (The gateway pins the closure; this pins the
 /// handler's response.)
@@ -327,7 +327,7 @@ pub(crate) async fn a_duplicate_order_number_on_a_corrective_is_rejected(h: &Har
     assert_eq!(
         h.requests_seen().await,
         5,
-        "the verify, the lookup, the leading query, the send and the external-id re-query — no order-number query"
+        "the verify, the lookup, the leading query, the send and the external-id re-query; no order-number query"
     );
     eprintln!("(vii-c'') 152 on a corrective → rejected{{152}}, no order query: pass");
 }

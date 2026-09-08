@@ -1,5 +1,5 @@
 //! Integration tests for the reqwest convenience client against a mock
-//! server. The wire logic itself is covered by the sans-IO unit tests; these
+//! server. The wire logic itself is covered by the `wire` unit tests; these
 //! verify the HTTP shell: multipart shape, header capture, error mapping.
 
 #![cfg(feature = "client-reqwest")]
@@ -163,8 +163,8 @@ async fn rejects_invalid_request_before_http() {
 
 /// Every failure the client can produce, classified by what it says about the
 /// document: a failure that never reached szamlazz.hu or that it refused is
-/// `Rejected`; one after which it may have issued the document — a lost
-/// exchange, `szlahu_down`, a body the crate cannot read, an open code — is
+/// `Rejected`; one after which it may have issued the document (a lost
+/// exchange, `szlahu_down`, a body the crate cannot read, an open code) is
 /// `Unknown`.
 #[tokio::test]
 async fn classifies_every_failure_by_outcome() {

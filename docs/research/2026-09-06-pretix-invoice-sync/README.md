@@ -1,11 +1,11 @@
-# Research — Pretix → szamlazz.hu invoice sync: who owns "try again"? (2026-09-06)
+# Research, Pretix → szamlazz.hu invoice sync: who owns "try again"? (2026-09-06)
 
 A research and design session on one question the worker cannot answer alone: **after `restate-szamlazz`'s own
-retry budgets are exhausted — or when szamlazz.hu refuses — who owns "try again", and how does a failure become
+retry budgets are exhausted (or when szamlazz.hu refuses) who owns "try again", and how does a failure become
 visible to a person?** The owner framed it as "show it on a UI (more application work) vs keep retrying nearly
 indefinitely (a retry loop it can't exit)". The session's answer is that it is neither: a **durable intent** with a
 **durable attempt count and a wall-clock horizon**, held outside the worker, retried on a schedule and *overlaid* by
-a human-facing flag — [`judge.md`](judge.md) §1.
+a human-facing flag, [`judge.md`](judge.md) §1.
 
 ## How it was produced
 
@@ -40,12 +40,12 @@ not findings; read them for the reasoning the judge compresses.
 ## The verdict in three lines
 
 - **A falls** for this owner: intent lives only as an invocation, a paused write holds the order key until an
-  operator acts on an unauthenticated port, and the organizer — who is liable — has neither signal nor lever.
-- **B is the wrong default**: it rebuilds timers, counting, dedup and locking on a Postgres table — the machinery the
-  worker was built on Restate to avoid — and one of its rules (`done` + absent → reopen) would issue a second legal
+  operator acts on an unauthenticated port, and the organizer (who is liable), has neither signal nor lever.
+- **B is the wrong default**: it rebuilds timers, counting, dedup and locking on a Postgres table (the machinery the
+  worker was built on Restate to avoid), and one of its rules (`done` + absent → reopen) would issue a second legal
   invoice. It stays the right call if Pretix is self-hosted (a plugin) or per-organizer audit reporting is demanded.
 - **C survives with four repairs**: send-and-peek instead of a 2 h parent await; an explicit `scoped_send` helper
-  (scope is **not** inherited on service-to-service calls — verified); `Value`-first K/V reads (a decode failure is a
+  (scope is **not** inherited on service-to-service calls; verified); `Value`-first K/V reads (a decode failure is a
   retryable error, so a broken state type would burn every key's attempts); a per-organizer attention map.
 
 **The worker keeps `kill`.** Under C a kill is one failed attempt of twelve; the caller holds the intent, reads `get`,

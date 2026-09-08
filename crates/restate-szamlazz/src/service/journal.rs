@@ -5,25 +5,24 @@
 //! An in-flight invocation replays the entries the *previous* deployment
 //! wrote; an entry the new code cannot decode is a retryable SDK error that
 //! kills the invocation once its attempts are spent, holding the order key
-//! for the duration (ADR 0005, journal compatibility). So every journaled type
-//! is **additive-only** — a new field defaults, a new variant may be added,
-//! nothing is renamed, removed or retyped, save the one widening `T` →
-//! `Option<T>` whose old values all decode to `Some` and re-encode unchanged
-//! (ADR 0005, *Widening*; the compatibility test below is its proof) — and
-//! this module makes a violation fail CI instead of a deploy:
+//! for the duration. So every journaled type is **additive-only** (a new field
+//! defaults, a new variant may be added, nothing is renamed, removed or
+//! retyped, save the one widening `T` → `Option<T>` whose old values all
+//! decode to `Some` and re-encode unchanged; the compatibility test below is
+//! its proof), and this module makes a violation fail CI instead of a deploy:
 //!
 //! - the **generator** test pins every variant of every journaled type: the
 //!   JSON the current code writes must equal `tests/journal/<type>/<variant>.json`
 //!   byte for byte. A missing or differing fixture fails it with the
 //!   instructions below; it never writes on its own.
 //! - the **compatibility** test replays every fixture in every type's
-//!   directory — the current ones and every shape archived before them —
+//!   directory (the current ones and every shape archived before them)
 //!   through the current type: each must decode, and re-encode to a superset
 //!   of itself (so a renamed `Option` field that silently decodes to `None`
 //!   is caught, not only a missing required one).
 //! - the **leak guard** serialises every variant of every journaled type
 //!   built around an account whose agent key is a sentinel and asserts the
-//!   sentinel is in none of them — the cheap, server-less complement to the
+//!   sentinel is in none of them: the cheap, server-less complement to the
 //!   e2e scan of every journal byte.
 //!
 //! The sequence of run *names* a handler journals is pinned separately, by
@@ -42,12 +41,12 @@
 //! `<variant>.<n>.json` before writing `<variant>.json`. The archived shape
 //! stays in the compatibility test forever, so an additive change (a defaulted
 //! field) regenerates cleanly while a rename or removal keeps failing on the
-//! archived file — the only way to make that pass is to delete the file, which
+//! archived file: the only way to make that pass is to delete the file, which
 //! is the explicit acknowledgement that in-flight invocations of the previous
 //! deployment will be killed on upgrade. Review every regenerated diff as a
 //! contract change. A generator failure while the compatibility test passes
-//! is a formatting change and not a journal break — a dependency upgrade that
-//! prints a number or a date differently — and regenerates the same way.
+//! is a formatting change and not a journal break (a dependency upgrade that
+//! prints a number or a date differently), and regenerates the same way.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -115,7 +114,7 @@ struct Variant {
 /// Pins `samples` as the fixtures of `T` under `tests/journal/<dir>/`, one
 /// per variant, each filed under the stem `variant` gives it. `variant` is an
 /// exhaustive `match` in every enum's pins, so a variant added to a journaled
-/// enum fails to compile until it is named — and then the generator asks for
+/// enum fails to compile until it is named, and then the generator asks for
 /// its fixture. Only a [`Journaled`] type can be pinned, and only a
 /// `Journaled` type can be the result of a run: the trait is the link from
 /// the `ctx.run` sites to this directory.
@@ -487,7 +486,7 @@ const REJECTED: Code = Code {
     message: "Nem regisztrált számlaszám előtag: ACME",
 };
 
-/// The NAV code the taxpayer lookup's `Api` sample carries — `funcCode ERROR`
+/// The NAV code the taxpayer lookup's `Api` sample carries: `funcCode ERROR`
 /// relayed by szamlazz.hu.
 const NAV: Code = Code {
     code: "OPERATION_FAILED",
@@ -540,8 +539,8 @@ fn created_invoice() -> CreatedInvoice {
 }
 
 /// NAV's record of a valid taxpayer with every field the `xmltaxpayer`
-/// response can carry — the registered name, the tax number detail and one
-/// detailed and one simple address — projected onto the crate-owned response
+/// response can carry (the registered name, the tax number detail and one
+/// detailed and one simple address), projected onto the crate-owned response
 /// the way the gateway projects it, since the response types are
 /// `#[non_exhaustive]`.
 fn taxpayer() -> QueryTaxpayerResponse {
@@ -584,11 +583,11 @@ fn reply(number: &str, net: &str, gross: &str, outstanding: &str) -> RawResponse
 /// A queried invoice (`SZ`) with every element szamlazz.hu's `szamla` XML can
 /// carry, so that a rename anywhere in [`InvoiceDocument`] and its nested
 /// types is caught: a test-account e-invoice of `ORD-1` whose seller block
-/// carries `szallito/id` 972720 (parsed, never read — ADR 0006, account-pin
-/// amendment), with postal addresses, ledger blocks, a financial item, labels, two
-/// payments and a PDF. Parsed the way the gateway parses a query answer, since
-/// the agent's types are `#[non_exhaustive]`. The kind does not change the
-/// shape, so one kind is enough.
+/// carries `szallito/id` 972720 (parsed, never read), with postal addresses,
+/// ledger blocks, a financial item, labels, two payments and a PDF. Parsed the
+/// way the gateway parses a query answer, since the agent's types are
+/// `#[non_exhaustive]`. The kind does not change the shape, so one kind is
+/// enough.
 fn document(number: &str, reversed: bool) -> Box<InvoiceDocument> {
     let sztornozott = if reversed {
         "<sztornozott>true</sztornozott>"
@@ -643,7 +642,7 @@ fn namespace() -> Namespace {
 
 /// The account the `account` step journals, with every optional field set so
 /// that a rename anywhere in [`Account`], [`Defaults`], [`SellerConfig`] or
-/// [`SellerEmailConfig`] is caught. Never the agent key — the type cannot
+/// [`SellerEmailConfig`] is caught. Never the agent key: the type cannot
 /// carry it.
 fn account() -> Account {
     let mut account = Account::new("acme", "acme-credentials");
@@ -675,8 +674,8 @@ fn account() -> Account {
 
 /// Whether `fixture` is covered by `current`: every object key of the fixture
 /// is present in `current` with a covered value, arrays match element for
-/// element, scalars are equal. Keys only `current` has — fields added since
-/// the fixture was written — are allowed; that is what "additive" means.
+/// element, scalars are equal. Keys only `current` has (fields added since
+/// the fixture was written) are allowed; that is what "additive" means.
 fn is_covered_by(fixture: &Value, current: &Value) -> bool {
     match (fixture, current) {
         (Value::Object(fixture), Value::Object(current)) => fixture.iter().all(|(key, value)| {
@@ -720,7 +719,7 @@ fn describe_first_difference(committed: &str, current: &str) -> String {
 
 /// The instructions every generator failure ends with.
 const HOW_TO_REGENERATE: &str = "\
-A journaled shape changed. If the change is additive — a new variant, or a new field with a serde default — \
+A journaled shape changed. If the change is additive (a new variant, or a new field with a serde default), \
 regenerate with
 
     UPDATE_JOURNAL_FIXTURES=1 cargo test -p restate-szamlazz journal
@@ -728,7 +727,7 @@ regenerate with
 which writes the missing fixtures and keeps a differing one beside the new shape as <variant>.<n>.json, \
 then run the tests again and review the diff as a contract change. If a field or variant was renamed, \
 removed or retyped, every in-flight invocation of the previous deployment will be killed on upgrade: \
-do not regenerate; keep the old name (see the gateway module docs and ADR 0005).";
+do not regenerate; keep the old name (see the gateway module docs).";
 
 /// The generator: the JSON the current code writes for every variant of every
 /// journaled type equals its committed fixture byte for byte. Never writes
@@ -772,7 +771,7 @@ fn every_variant_of_every_journaled_type_is_pinned() {
 }
 
 /// The compatibility test: every fixture under every journaled type's
-/// directory — the current shape and every shape archived before it —
+/// directory (the current shape and every shape archived before it)
 /// decodes through the current type and re-encodes to a superset of itself.
 /// What a replay of an in-flight invocation needs from the new code.
 #[test]
@@ -793,7 +792,7 @@ fn every_pinned_fixture_replays_through_the_current_types() {
         .collect();
     assert!(
         unclaimed.is_empty(),
-        "tests/journal/ holds fixtures of no journaled type: {unclaimed:?} — a type that is no longer \
+        "tests/journal/ holds fixtures of no journaled type: {unclaimed:?}; a type that is no longer \
          journaled is removed knowingly, together with its fixtures"
     );
 
@@ -824,7 +823,7 @@ fn every_pinned_fixture_replays_through_the_current_types() {
             match (pins.replay)(&text) {
                 Err(error) => failures.push(format!("{}: does not decode: {error}", rel(&path))),
                 Ok(current) if !is_covered_by(&fixture, &current) => failures.push(format!(
-                    "{}: decodes, but re-encodes without part of the fixture — a field was renamed \
+                    "{}: decodes, but re-encodes without part of the fixture; a field was renamed \
                      or retyped and decoded to its default",
                     rel(&path)
                 )),
@@ -836,8 +835,8 @@ fn every_pinned_fixture_replays_through_the_current_types() {
         failures.is_empty(),
         "journal entries of the previous deployment would not replay:\n  {}\n\n\
          A renamed, removed or retyped field or variant kills every in-flight invocation on upgrade. \
-         Keep the old name (a new field defaults, a new variant is added; nothing is renamed or removed) — \
-         see the gateway module docs and ADR 0005.",
+         Keep the old name (a new field defaults, a new variant is added; nothing is renamed or removed); \
+         see the gateway module docs.",
         failures.join("\n  ")
     );
     assert!(replayed > 0, "no fixture was replayed");
@@ -847,7 +846,7 @@ fn every_pinned_fixture_replays_through_the_current_types() {
 /// every journaled type, built around an account whose agent key is a
 /// sentinel, serialises without the sentinel. The key has two ways in. The
 /// `account` step's entry is built the way the static resolver builds it from
-/// configuration carrying the key — the one path a key travels next to an
+/// configuration carrying the key: the one path a key travels next to an
 /// `Account`. The two write outcomes that keep a transport failure's text
 /// (`DeleteOutcome::Transport`, `SetPaymentsOutcome::Transport`) are produced
 /// by a gateway opened with the sentinel credentials against an endpoint that
@@ -983,7 +982,7 @@ enum Verdict {
 }
 
 /// Compares the fixture at `path` with `current`, the JSON the current code
-/// writes for the variant, and — under [`Mode::Update`] — writes or archives.
+/// writes for the variant, and (under [`Mode::Update`]) writes or archives.
 fn check(path: &Path, current: &str, mode: Mode) -> io::Result<Verdict> {
     let committed = match fs::read_to_string(path) {
         Ok(text) => Some(text),

@@ -1,4 +1,4 @@
-//! `szamlazz receipt` — receipt (nyugta) operations.
+//! `szamlazz receipt`: receipt (nyugta) operations.
 
 use std::path::{Path, PathBuf};
 

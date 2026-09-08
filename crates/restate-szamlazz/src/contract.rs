@@ -4,28 +4,28 @@
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
 //! returned as values with HTTP 200 (see [`Outcome`] and [`ConflictReason`]),
 //! while the [`TerminalCode`]s are reserved for faults and always mean
-//! "outcome unknown — retry with a new `Idempotency-Key`". The types compile
+//! "outcome unknown: retry with a new `Idempotency-Key`". The types compile
 //! without `restate-sdk`; with the `schemars` feature they also derive JSON
 //! Schemas for the `OpenAPI` export.
 //!
 //! Every request type refuses a field it does not know
 //! (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the
 //! schema): a misspelt `reissue` or `additive` is an error naming the field,
-//! never a silent default. Response types stay open — a client must tolerate
+//! never a silent default. Response types stay open: a client must tolerate
 //! fields added later.
 //!
 //! The submodules mirror the handler modules of [`service`](crate::service),
 //! one per handler family, each holding its requests beside its responses:
 //!
-//! - [`document`] — the per-call document input (buyer, line items, payment
+//! - [`document`]: the per-call document input (buyer, line items, payment
 //!   method, overrides) and its conversion to `szamlazz_agent` types; shared
 //!   by every issuing handler.
-//! - [`create`] — the issuing handlers: `create_proforma`, `create_invoice`,
+//! - [`create`]: the issuing handlers: `create_proforma`, `create_invoice`,
 //!   `create_prepayment`, `create_final` and `correct_invoice`.
-//! - [`storno`] — `storno_invoice`, `delete_proforma` and the `get` live view
+//! - [`storno`]: `storno_invoice`, `delete_proforma` and the `get` live view
 //!   ([`OrderStatus`]); the storno contract is shared with
 //!   `Szamlazz.Agent.storno`.
-//! - [`agent`] — the rest of `Szamlazz.Agent`: `query`, `query_taxpayer`,
+//! - [`agent`]: the rest of `Szamlazz.Agent`: `query`, `query_taxpayer`,
 //!   `set_payments` and `check_account`.
 
 use std::fmt;
@@ -67,7 +67,7 @@ pub use storno::{
 /// contract. The same id finds the corrective it issued.
 ///
 /// Valid ids match `^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$` and are not one of the
-/// tokens external ids are composed of ([`ExternalId::TOKENS`] — `invoice`,
+/// tokens external ids are composed of ([`ExternalId::TOKENS`]: `invoice`,
 /// `storno`, `check-account`, … in any letter case), so no composition reads
 /// as another. The length keeps the longest composed id within
 /// [`ExternalId::MAX_LEN`].
@@ -218,7 +218,7 @@ pub enum InvalidCorrectionId {
 /// Bounded because it flows into step names and into the storno external ids
 /// (`{namespace}:{order}:storno:{number}`, `{namespace}:by-number:{number}:storno`):
 /// 1–[`MAX_LEN`](Self::MAX_LEN) bytes, no whitespace, no control character,
-/// no `:`. Nothing is trimmed — a padded number is refused, never sent, since
+/// no `:`. Nothing is trimmed: a padded number is refused, never sent, since
 /// szamlazz.hu would answer 7 (`not_found`) to it and the rule is the better
 /// diagnosis. szamlazz.hu's own numbers (`E-TST-2026-123`) are far inside the
 /// bound; NAV's `invoiceNumber` allows 50 characters, and the longest composed
@@ -352,7 +352,7 @@ pub enum InvalidInvoiceNumber {
     /// Contains a control character.
     #[error("invoice number must not contain control characters, found {0:?}")]
     ControlChar(char),
-    /// Contains whitespace, anywhere — nothing is trimmed.
+    /// Contains whitespace, anywhere; nothing is trimmed.
     #[error("invoice number must not contain whitespace, found {0:?}")]
     Whitespace(char),
     /// Contains `:`, the separator of the external id's segments.
@@ -483,13 +483,13 @@ impl fmt::Display for IssuedKind {
 ///
 /// Every fault either service raises carries one of these tokens in `code`,
 /// with the HTTP status of [`status`](Self::status). Three of them mean
-/// "outcome unknown — retry with a new `Idempotency-Key`, or read
+/// "outcome unknown: retry with a new `Idempotency-Key`, or read
 /// `Szamlazz.Order.get`": `outcome_unknown`, `unavailable` and
 /// `credentials_rejected`. The rest are settled: the same request never
 /// succeeds (`invalid_input`, `unknown_account`, `not_found`) or
 /// szamlazz.hu's own answer is passed through
 /// (`szamlazz_error`, whose szamlazz.hu code travels in the fault's separate
-/// `szamlazz_code` field — `code` is always one of these tokens).
+/// `szamlazz_code` field; `code` is always one of these tokens).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -511,8 +511,8 @@ pub enum TerminalCode {
     InvalidInput,
     /// szamlazz.hu rejected the account's agent credentials (codes 3, 135,
     /// 136, 164): the worker's configuration is wrong, not the request. The
-    /// request that drew the code was not acted on — szamlazz.hu answers
-    /// these codes before acting — but the code may have come to a post-send
+    /// request that drew the code was not acted on (szamlazz.hu answers
+    /// these codes before acting), but the code may have come to a post-send
     /// re-query, and an earlier execution may have landed with a lost reply,
     /// which is why this is a fault and not a `rejected` outcome. Fix the
     /// key, then retry with a new `Idempotency-Key`. HTTP 503.
@@ -529,7 +529,7 @@ pub enum TerminalCode {
     /// HTTP 404.
     NotFound,
     /// szamlazz.hu answered the request with an error code of its own that
-    /// the handler passes through rather than concludes from — on
+    /// the handler passes through rather than concludes from: on
     /// `Szamlazz.Agent.query`, `query_taxpayer` (szamlazz.hu's code or NAV's
     /// relayed one) and `set_payments` (the credit entries refused). The
     /// szamlazz.hu code is in the fault's `szamlazz_code`, the message is
@@ -538,10 +538,10 @@ pub enum TerminalCode {
 }
 
 impl TerminalCode {
-    /// Every code, in the order of the fault tables the READMEs and design §7
-    /// carry. (`account_mismatch`, 409, was the eighth until ADR 0006's
-    /// account-pin amendment: no handler compares a found document with the
-    /// account any more, so nothing could raise it.)
+    /// Every code, in the order of the fault tables the READMEs carry.
+    /// (`account_mismatch`, 409, was the eighth until the account pins were
+    /// dropped: no handler compares a found document with the account any
+    /// more, so nothing could raise it.)
     pub const ALL: [Self; 7] = [
         Self::InvalidInput,
         Self::UnknownAccount,
@@ -594,7 +594,7 @@ impl fmt::Display for TerminalCode {
 /// `gross − Σ payments`, when the gross total is known and the arithmetic
 /// fits a decimal. The one definition of the outstanding amount both
 /// `create_*` and `query` report. Checked: the amounts are szamlazz.hu's, but
-/// a panic would run on the SDK's connection task (#64).
+/// a panic would run on the SDK's connection task.
 pub(crate) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
     let paid = payments
         .iter()
@@ -681,10 +681,10 @@ mod tests {
     }
 
     /// A correction id equal to one of the tokens the external ids are
-    /// composed of — the kinds, `corrective`, `storno`, `by-number`,
-    /// `check-account` — is refused, in any letter case, so that
+    /// composed of (the kinds, `corrective`, `storno`, `by-number`,
+    /// `check-account`) is refused, in any letter case, so that
     /// `{namespace}:{order}:corrective:{id}` never reads as another
-    /// composition (#64, J11). Belt and braces beside the `:`-free
+    /// composition. Belt and braces beside the `:`-free
     /// [`OrderKey`](crate::identity::OrderKey), which already makes such a
     /// collision impossible.
     #[test]
@@ -720,13 +720,13 @@ mod tests {
         assert!(serde_json::from_str::<CorrectionId>("\"\"").is_err());
     }
 
-    /// A caller-supplied invoice number as the by-number requests take it —
-    /// `Szamlazz.Agent.query`'s selector, `set_payments`, `storno`,
+    /// A caller-supplied invoice number as the by-number requests take it
+    /// (`Szamlazz.Agent.query`'s selector, `set_payments`, `storno`,
     /// `Szamlazz.Order.storno_invoice`, `correct_invoice`'s base and the
-    /// `options.proforma: {number}` link: at most 40 bytes, no whitespace, no
+    /// `options.proforma: {number}` link): at most 40 bytes, no whitespace, no
     /// control character, no `:`. It flows into step names and into the
-    /// storno external ids, so it is bounded like the other segments (#64,
-    /// J-07-12); szamlazz.hu's own numbers (`E-TST-2026-123`) are far inside.
+    /// storno external ids, so it is bounded like the other segments;
+    /// szamlazz.hu's own numbers (`E-TST-2026-123`) are far inside.
     #[test]
     fn invoice_number_table() {
         let longest = "x".repeat(InvoiceNumber::MAX_LEN);
@@ -891,9 +891,9 @@ mod tests {
 
     /// The crate README's fault table lists every code with its status, as a
     /// row `` | `code` | status | ``. A new variant fails here until the
-    /// table carries it. (The endpoint README and design §7 carry the same
-    /// table; the endpoint crate's `config` tests hold them to it — they
-    /// live outside this package, which `cargo package` cannot include.)
+    /// table carries it. (The endpoint README carries the same table; the
+    /// endpoint crate's `config` tests hold it to the codes: it lives outside
+    /// this package, which `cargo package` cannot include.)
     #[test]
     fn every_terminal_code_is_in_the_fault_table() {
         let readme = include_str!("../README.md");
@@ -918,7 +918,7 @@ mod tests {
 
     /// The schema carries the bound the type enforces: the length as
     /// `maxLength`, and a pattern that refuses whitespace, ASCII control
-    /// characters and the separator — the ECMA-262 subset JSON Schema
+    /// characters and the separator, in the ECMA-262 subset JSON Schema
     /// guarantees, so no `\p{…}` class.
     #[cfg(feature = "schemars")]
     #[test]
@@ -970,15 +970,15 @@ mod tests {
         assert!(status["$defs"]["DocumentStatus"].is_object());
     }
 
-    /// Every request type's schema — and every object it nests, the object
-    /// variants of its enums included — is closed (`additionalProperties:
+    /// Every request type's schema (and every object it nests, the object
+    /// variants of its enums included) is closed (`additionalProperties:
     /// false`), so the `OpenAPI` export tightens with the code. Response
     /// schemas stay open: a client must tolerate fields added later.
     #[cfg(feature = "schemars")]
     #[test]
     fn request_schemas_are_closed_and_response_schemas_are_open() {
-        /// Every object schema under `schema` — the root, each `$defs` entry
-        /// and each object variant of a `oneOf` — as `(title, schema)`.
+        /// Every object schema under `schema` (the root, each `$defs` entry
+        /// and each object variant of a `oneOf`) as `(title, schema)`.
         fn objects(schema: &serde_json::Value) -> Vec<(String, &serde_json::Value)> {
             fn is_object(schema: &serde_json::Value) -> bool {
                 schema["type"] == "object" || schema["properties"].is_object()
@@ -1039,8 +1039,8 @@ mod tests {
                 nested.insert(title);
             }
         }
-        // The nested request objects are all there — none slipped through as
-        // a bare `properties` map without the guard — and so are the object
+        // The nested request objects are all there (none slipped through as
+        // a bare `properties` map without the guard), and so are the object
         // variants of the request enums (`{"number": …}`, `{"other": …}`,
         // the selectors).
         for expected in [
@@ -1082,9 +1082,9 @@ mod tests {
 
     /// The doc comments of the contract types become the `description`s of
     /// the discovery manifest and the `OpenAPI` export, which render them as
-    /// prose: rustdoc's link syntax — ``[`Type`]``, ``[text](path)`` — would
-    /// appear verbatim there. Every description of every schema — the root's,
-    /// each property's, each `$defs` entry's and each enum variant's — is
+    /// prose: rustdoc's link syntax, ``[`Type`]``, ``[text](path)``, would
+    /// appear verbatim there. Every description of every schema (the root's,
+    /// each property's, each `$defs` entry's and each enum variant's) is
     /// plain prose.
     #[cfg(feature = "schemars")]
     #[test]

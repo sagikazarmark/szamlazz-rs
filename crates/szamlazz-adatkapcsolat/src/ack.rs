@@ -1,7 +1,7 @@
 //! Acks: the response XML a receiver returns for a pushed document.
 //!
-//! `KEY_ERR` / `KEY_DEL` are deliberate protocol speech — constructors on the
-//! ack types — while transient failures are expressed by *not* acking
+//! `KEY_ERR` / `KEY_DEL` are deliberate protocol speech (constructors on the
+//! ack types), while transient failures are expressed by *not* acking
 //! (non-200), which makes szamlazz.hu retry for up to 72 hours.
 
 use quick_xml::Writer;
@@ -15,13 +15,13 @@ const WRITE_EXPECT: &str = "writing XML to an in-memory buffer cannot fail";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ControlCode {
-    /// `KEY_ERR` — the presented key is unknown to this receiver; szamlazz.hu
+    /// `KEY_ERR`: the presented key is unknown to this receiver; szamlazz.hu
     /// stops sending but keeps the connection. The document answered this way
     /// is **never resent** if it is a bank transaction or a receipt, and an
-    /// invoice only when it next changes — so send it for a definite verdict,
+    /// invoice only when it next changes, so send it for a definite verdict,
     /// never for a check that could not complete (answer a non-200 instead).
     KeyError,
-    /// `KEY_DEL` — sever the connection; the account owner is notified by
+    /// `KEY_DEL`: sever the connection; the account owner is notified by
     /// email. A few in-flight documents may still arrive afterwards.
     Disconnect,
 }

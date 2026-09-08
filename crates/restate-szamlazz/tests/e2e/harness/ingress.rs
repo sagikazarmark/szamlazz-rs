@@ -1,5 +1,5 @@
 //! An ingress reply ([`Reply`]) and the structured fault inside Restate's
-//! error envelope ([`Fault`], design §7).
+//! error envelope ([`Fault`]).
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,8 +26,8 @@ impl Reply {
     /// envelope the endpoint README documents (*Faults*): the body is
     /// Restate's `{"code": <HTTP status>, "message": "<string>", "source":
     /// "invocation"}`, `x-restate-error-source` is `invocation`, and the
-    /// worker's fault is the JSON **string** in `message` — the handler's
-    /// `TerminalError` message — parsed a second time.
+    /// worker's fault is the JSON **string** in `message` (the handler's
+    /// `TerminalError` message), parsed a second time.
     pub(crate) fn fault(&self) -> Fault {
         assert_eq!(
             self.body["code"].as_u64(),
@@ -54,7 +54,7 @@ impl Reply {
     }
 }
 
-/// The fault body of a `TerminalError` (design §7).
+/// The fault body of a `TerminalError`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Fault {
     pub(crate) code: String,

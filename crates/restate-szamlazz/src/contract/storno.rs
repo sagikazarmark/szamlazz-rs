@@ -50,7 +50,7 @@ pub enum StornoOutcome {
     /// `conflict_reason`.
     Conflict,
     /// `Szamlazz.Agent.storno` only: the document carries an order number, so
-    /// it is managed by the `Order` with key `order_key` — call
+    /// it is managed by the `Order` with key `order_key`: call
     /// `Szamlazz.Order.storno_invoice` there instead.
     ManagedByOrder,
 }
@@ -162,7 +162,7 @@ pub struct DeleteProformaResponse {
     pub deleted: bool,
     /// Why it is not deleted (`proforma_paid`, a szamlazz.hu error code, …),
     /// or `absent` when there was nothing to delete (deleted earlier or
-    /// consumed — `get` tells which).
+    /// consumed; `get` tells which).
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -197,7 +197,7 @@ impl DeleteProformaResponse {
 }
 
 /// Output of `Szamlazz.Order.get`: what szamlazz.hu holds under the order's
-/// four external ids right now. Carries numbers and totals — never buyer
+/// four external ids right now. Carries numbers and totals, never buyer
 /// data.
 ///
 /// A slot is `None` when szamlazz.hu holds nothing under its external id
@@ -210,7 +210,7 @@ impl DeleteProformaResponse {
 #[serde(default)]
 #[non_exhaustive]
 pub struct OrderStatus {
-    /// The proforma, when szamlazz.hu holds one — or, when an invoice or
+    /// The proforma, when szamlazz.hu holds one; or, when an invoice or
     /// prepayment of the order references a proforma szamlazz.hu no longer
     /// returns, the consumed proforma.
     pub proforma: Option<DocumentStatus>,

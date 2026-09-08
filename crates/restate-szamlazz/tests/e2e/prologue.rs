@@ -18,9 +18,9 @@ use crate::harness::{Harness, create_body};
 /// (xii) the harness capabilities of #29 that the multi-account tickets
 /// assert through: a scoped call reaches the handler (the scope needs no
 /// Virtual Object routing for `Szamlazz.Agent`, and is on the invocation
-/// either way) — on this single-account deployment the prologue answers it
+/// either way), and on this single-account deployment the prologue answers it
 /// with `unknown_account` and nothing reaches szamlazz.hu; the leak check
-/// has a positive control — a sentinel string in a wiremock rejection is
+/// has a positive control: a sentinel string in a wiremock rejection is
 /// found in the hex-decoded `raw` of the create run's journal entry.
 pub(crate) async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     const SENTINEL: &str = "SENTINEL-8f3a2c-LEAK-CONTROL";
@@ -50,7 +50,7 @@ pub(crate) async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
     assert_eq!(invocation.handler, "query");
 
     // The same through the Virtual Object: the journal has the `account`
-    // entry — the resolution is data — and nothing after it.
+    // entry (the resolution is data), and nothing after it.
     let reply = h
         .call_scoped(
             "acme-events",
@@ -169,7 +169,7 @@ pub(crate) async fn flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness)
         "two failures, then the answer"
     );
     // Two run failures: the server counts at least both (its exact
-    // accounting — 3 was observed — is its own).
+    // accounting is its own; 3 was observed).
     assert!(retries.max_retry_count >= 2, "{retries:?}");
     assert_eq!(retries.failing_commands, ["account"], "{retries:?}");
     assert!(
@@ -280,14 +280,14 @@ pub(crate) async fn failing_credential_store_is_a_terminal_unavailable(h: &Harne
 }
 
 /// (xv-b) a killed invocation releases the order key. An invocation that
-/// will not finish — its `account` step hangs on a resolver that never
-/// answers — holds the Virtual Object's lock; the same order's next exclusive
+/// will not finish (its `account` step hangs on a resolver that never
+/// answers) holds the Virtual Object's lock; the same order's next exclusive
 /// handler queues behind it. The kill (what an operator does to a stuck
 /// invocation, and what `on_max_attempts = kill` does once a handler's
-/// attempts are spent — ADR 0004) ends it as a failed completion, and the
+/// attempts are spent) ends it as a failed completion, and the
 /// queued `delete_proforma` runs at once, answering from szamlazz.hu.
 /// Journaled by the killed one: `namespace`, and the `account` command it
-/// never completed — a prefix of every handler's path. (`get` would prove
+/// never completed, a prefix of every handler's path. (`get` would prove
 /// nothing here: it is shared and never waits for the lock.)
 pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     h.reset().await;

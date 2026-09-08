@@ -39,7 +39,7 @@ impl<P: Provider> Provider for PlainKeys<P> {
 /// Figment's own [`Env`] parses values (`007` becomes the number `7`, `true`
 /// a boolean), which is wrong for a secret: an all-digit agent key must reach
 /// szamlazz.hu exactly as written. Here a value stays the string the operator
-/// set, and the field's type decides how it is read — the loader extracts
+/// set, and the field's type decides how it is read: the loader extracts
 /// with [`Figment::extract_lossy`](figment::Figment::extract_lossy), which reads `"3"` as `3` and `"true"` as
 /// `true` where a number or a boolean is expected and leaves a string field
 /// alone. In errors a key renders as the variable that set it

@@ -12,9 +12,9 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
   `handle_task_error`; `crates/invoker-impl/src/lib.rs` `handle_error_event`;
   `crates/worker/src/partition/state_machine/mod.rs` `end_invocation`; `crates/types/src/schema/invocation_target.rs`
   `compute_retention`). `sys_invocation`: `status = completed`, `completion_result = failure`, `completion_failure =
-  <text>`; the vqueue entry ends `failed`, not `killed` — `killed` is a manual kill only (**V**: `end_invocation`;
+  <text>`; the vqueue entry ends `failed`, not `killed`; `killed` is a manual kill only (**V**: `end_invocation`;
   `crates/storage-query-datafusion/src/context.rs` `SYS_INVOCATION_VIEW`).
-- **Pause on exhausted attempts** stores `InvocationStatus::Paused(metadata)` with the response sinks *untouched* —
+- **Pause on exhausted attempts** stores `InvocationStatus::Paused(metadata)` with the response sinks *untouched*:
   nothing is sent (**V**: `lifecycle/paused.rs` `pause_invocation`). `sys_invocation.status = 'paused'`. A waiting
   `/call` **keeps waiting**: no timeout exists in `crates/ingress-http` or `crates/ingestion-client` (**V**:
   `handler/service_handler.rs` `handle_service_call`; only a 5 s shutdown drain in `server.rs`). The bound is the
@@ -34,7 +34,7 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
   (**V**: `crates/types/src/identifiers.rs` `InvocationId::generate`; `handle_duplicated_requests`;
   `types/src/invocation/mod.rs` `Source`).
 - Outcome: `GET /restate/attach/{id}` (blocks), `GET /restate/output/{id}` (peeks); by key
-  `GET /restate/invocation/{svc}/{key}/{handler}/{idempotency-key}/attach|output` — **but this path form passes
+  `GET /restate/invocation/{svc}/{key}/{handler}/{idempotency-key}/attach|output`, **but this path form passes
   `scope = None`**; scoped invocations need `POST /restate/attach|output` with
   `{"target":"idempotentInvocation","service","key","handler","idempotencyKey","scope"}` (`POST /restate/lookup`
   resolves the id) (**V**: `handler/path_parsing.rs` `parse_restate_api_verb`; `handler/invocation.rs`
@@ -63,7 +63,7 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
   `restate invocations resume <service>` (**V**: `rest_api/invocations.rs`, `mod.rs`).
 - `Paused`/`Suspended` → resumed; `Invoked` with a vqueue id → **a backing-off entry is rescheduled to run now**
   (`vqueue_reschedule_invocation`), a running attempt is a no-op; `Scheduled`/`Inboxed` → `NotStarted`; `Completed`
-  → error (**V**: `lifecycle/manual_resume.rs` `OnManualResumeCommand::apply` 123–240 — confirms #87). Repinning a
+  → error (**V**: `lifecycle/manual_resume.rs` `OnManualResumeCommand::apply` 123–240, confirms #87). Repinning a
   running attempt is refused; `latest` on an unpinned invocation is a no-op (`resolve_pinned_deployment`). **U**:
   whether resume under vqueues restarts the attempt budget (ADR 0004 saw so pre-vqueues).
 
@@ -82,11 +82,11 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
 
 - `PATCH /services/{name}` (`restate services config edit`) takes **only** `public`, `idempotency_retention`,
   `workflow_completion_retention`, `journal_retention`, `inactivity_timeout`, `abort_timeout`. **The retry policy is
-  not runtime-modifiable in 1.7.8** — the brief is wrong here (**V**: `crates/admin-rest-model/src/services.rs`
+  not runtime-modifiable in 1.7.8**: the brief is wrong here (**V**: `crates/admin-rest-model/src/services.rs`
   `ModifyServiceRequest`; `crates/types/src/schema/metadata/updater/mod.rs` `modify_service`; OpenAPI 1.7.8).
   Changing it means a new deployment revision; the server-wide `[invocation.default-retry-policy]` fills only fields
   the code leaves unset, and the worker sets all (**V**: `schema/metadata/mod.rs` `resolve_invocation_retry_policy`).
-- Propagation of what *is* resolvable: re-resolved on every dispatch — active revision at task start, then the
+- Propagation of what *is* resolvable: re-resolved on every dispatch, active revision at task start, then the
   **pinned deployment's** revision once the attempt reports it, `fast_forward`ed by attempts so far; `modify_service`
   mutates the active revision inside its deployment, so a change reaches invocations pinned to the active deployment
   on their next dispatch, not those on an older one (**V**: `invoker-impl/src/lib.rs` `handle_vqueue_invoke`,
@@ -102,12 +102,12 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
   last_failure_error_code, last_failure_related_command_{index,name,type}, status, completion_result,
   completion_failure`. `status` ∈ `pending` (inboxed), `scheduled`, `completed`, `suspended`, `paused`, `running`
   (`in_flight`), `backing-off` (`invoked AND retry_count > 0`), `ready`; **no `killed`** (**V**: `SYS_INVOCATION_VIEW`).
-- Caveat: under vqueues a retry delay ≥ 2 s (`invocation_yield_threshold`) is `RetryViaScheduler` — the invoker drops
+- Caveat: under vqueues a retry delay ≥ 2 s (`invocation_yield_threshold`) is `RetryViaScheduler`, the invoker drops
   its status row (`status_store.on_end`) and the entry waits in the vqueue inbox, so `sys_invocation` shows **`ready`
   with NULL `retry_count`/`last_failure`/`next_retry_at`** for what the docs call backing-off. Truthful tables:
   `sys_vqueues` (`stage='inbox'`, `status='backing-off'`, `run_at`), `sys_vqueue_entry_status` (`retry_attempts`,
   `num_errors`, `next_at`), `sys_journal_events` (**V** by source: `handle_task_error`; `lib.rs` `RetryViaScheduler`
-  arm; `types/src/config/invocation.rs`; **U** end to end — #87 used 1 s delays).
+  arm; `types/src/config/invocation.rs`; **U** end to end, #87 used 1 s delays).
 - `POST /query` on admin port 9070, DataFusion SQL, e.g. `… where target_service_name='Szamlazz.Order' and status in
   ('paused','backing-off')` (**V**: docs introspection). The admin port has **no authentication by design**;
   network-restrict it (**V**: docs server/security). Documented for operators; nothing forbids a reconciler.
@@ -117,18 +117,18 @@ docs). ADR 0004 / #87 facts are not re-verified. **V** = verified (citation); **
 ## 8. Kafka ingress
 
 Per record the subscription appends one `ServiceInvocation` (`Source::Subscription`, no response sink, **no
-idempotency key** — dedup is producer id + offset, retention `compute_retention(false)`), then stores the Kafka offset
+idempotency key**: dedup is producer id + offset, retention `compute_retention(false)`), then stores the Kafka offset
 once the append commits (**V**: `crates/ingress-kafka/src/builder.rs` `InvocationBuilder::create`; `consumer_task.rs`
 `run_inner`). From there the invocation is ordinary: the handler's retry policy applies; a kill completes it as a
 failure nobody reads; a pause holds the VO key (same-key records inbox behind it, other keys proceed). Kafka never
-redelivers — no "retry forever" there; a killed invocation drops the event silently (**V** by source; **U** end to
+redelivers, no "retry forever" there; a killed invocation drops the event silently (**V** by source; **U** end to
 end). Scope comes from an `x-restate-scope` header behind the experimental `kafka_scope` flag (**V**: `builder.rs`
 `extract_scope_limit_key`). The docs say nothing about failure semantics (**U**).
 
 ## 9. Retention interplay
 
 Completion sets a `CleanInvocationStatus` timer at `completion_retention`; it runs `OnPurgeCommand`, freeing the status
-(**V**: `state_machine/mod.rs` `on_timer`; `lifecycle/purge.rs`). The same key afterwards finds `Free` — **a fresh
+(**V**: `state_machine/mod.rs` `on_timer`; `lifecycle/purge.rs`). The same key afterwards finds `Free`, **a fresh
 execution under the same invocation id** (**V**: `handle_duplicated_requests`; `InvocationId::generate`). Manual
 `purge` does the same at once. A reconciler reusing keys re-executes after 30 d (or a purge); `idempotency-expires`
 on a replay says when.
@@ -137,7 +137,7 @@ on a replay says when.
 
 - Pause never answers a waiting caller: a forwarder that `/call`s and hits pause times out, and its fixed-key retries
   attach and block again. Pause needs `/send` plus a poller or a human, not a synchronous dumb caller.
-- `/send` + `/output` by key is the asynchronous shape: 470 in flight, result or fault after, 404 after retention —
+- `/send` + `/output` by key is the asynchronous shape: 470 in flight, result or fault after, 404 after retention;
   scoped keys must use the POST-body `/output`.
 - `restart-as-new` is not a retry under the caller's key (key dropped, pinned deployment inherited). A "retry"
   button re-calls the handler with a new key.
@@ -146,5 +146,5 @@ on a replay says when.
   `ready`; it needs private access to the admin port.
 - Kill's stored 500 under a key the caller repeats for 30 d is kill's real cost; the fix is caller-side (rotate, or
   `/output` + `get`) or a reconciler issuing with fresh keys.
-- Cancel on a paused invocation resumes it for compensation — the operator's clean exit; kill is not.
+- Cancel on a paused invocation resumes it for compensation: the operator's clean exit; kill is not.
 - No push from Restate: state reaches the sync app only by polling SQL or `/output`.

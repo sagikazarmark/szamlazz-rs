@@ -1,14 +1,14 @@
 //! Error types.
 //!
-//! szamlazz.hu signals errors in-band — numeric codes plus Hungarian messages
-//! in `szlahu_*` response headers or the response XML — never via HTTP status
+//! szamlazz.hu signals errors in-band (numeric codes plus Hungarian messages
+//! in `szlahu_*` response headers or the response XML), never via HTTP status
 //! codes. [`ErrorCode`] gives the documented codes typed names with English
 //! documentation; the Hungarian message is kept verbatim in [`ApiError`].
 //!
 //! Two questions are answered per error, and they are different questions:
-//! [`ErrorCode::is_retryable`] — can the same *query* succeed later — and
+//! [`ErrorCode::is_retryable`] (can the same *query* succeed later), and
 //! [`ErrorCode::outcome_class`] (also on [`ResponseError`] and the client's
-//! error) — may a *document* have been created despite the error. A
+//! error): may a *document* have been created despite the error. A
 //! document-issuing integration acts on the second: it re-queries by external
 //! id before it ever re-sends a create.
 //!
@@ -28,48 +28,48 @@
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
-    /// 1 — system maintenance or internal error; retry in a few minutes.
+    /// 1: system maintenance or internal error; retry in a few minutes.
     Maintenance,
-    /// 3 — authentication failed: invalid agent key or username/password.
+    /// 3: authentication failed (invalid agent key or username/password).
     InvalidCredentials,
-    /// 7 — missing data (`Hiányzó adat`): a required field is absent from the
+    /// 7: missing data (`Hiányzó adat`): a required field is absent from the
     /// request, or the referenced document was not found (an unknown invoice
     /// number, order number, or external identifier on PDF/XML queries).
     /// Receipt operations report an unknown receipt number as code 339, which
     /// parses as [`ErrorCode::Unknown`].
     ///
     /// On queries the code is reported in the body only (no `szlahu_error_code`
-    /// header). A proforma that has been converted into an invoice — by an
-    /// explicit reference or by an invoice issued under the same order number —
+    /// header). A proforma that has been converted into an invoice (by an
+    /// explicit reference or by an invoice issued under the same order number)
     /// also returns 7 by number and by external identifier, exactly like a
     /// deleted one.
     MissingData,
-    /// 14 (observed) — the referenced document is itself a storno or credit
+    /// 14 (observed): the referenced document is itself a storno or credit
     /// invoice and cannot be reversed or credited: `Sztornó és jóváíró számlát
     /// nem lehet sem sztornózni, sem jóváírni.` Returned by the storno
     /// operation when [`StornoInvoice::invoice_number`](crate::ops::storno::StornoInvoice::invoice_number)
     /// names a storno invoice.
     StornoOfReversalInvoice,
-    /// 53 — the XML was not received as a proper multipart file field.
+    /// 53: the XML was not received as a proper multipart file field.
     XmlNotAFile,
-    /// 54 — e-invoice issuance not enabled: missing subscription permission or
+    /// 54: e-invoice issuance not enabled; missing subscription permission or
     /// certificate.
     EInvoiceNotEnabled,
-    /// 55 — e-invoice signing failed: certificate expired or the timestamp
+    /// 55: e-invoice signing failed; certificate expired or the timestamp
     /// server is unreachable.
     EInvoiceSigningFailed,
-    /// 56 — the invoice was issued, but its notification could not be
+    /// 56: the invoice was issued, but its notification could not be
     /// delivered. Invoice-issuing operations expose this as a non-fatal flag
     /// when the response also contains the issued invoice number.
     InvoiceNotificationDeliveryFailed,
-    /// 57 — malformed request XML.
+    /// 57: malformed request XML.
     MalformedXml,
-    /// 71 — the order number already exists on another document.
+    /// 71: the order number already exists on another document.
     ///
     /// Fires only when the account setting *Rendelésszám ismétlődés tiltása*
     /// (disable order number repetition) is on. The check is scoped per
-    /// document type — an invoice, a proforma, a prepayment invoice, a final
-    /// invoice, and a delivery note may all carry the same order number — and
+    /// document type (an invoice, a proforma, a prepayment invoice, a final
+    /// invoice, and a delivery note may all carry the same order number), and
     /// storno and corrective invoices are exempt (a storno invoice inherits
     /// its original's order number; a corrective invoice may repeat it).
     /// Reversing an invoice frees its order number for reuse, and a
@@ -81,7 +81,7 @@ pub enum ErrorCode {
     /// a settled refusal even when that query then finds nothing under the
     /// order: re-sending the create only repeats the answer.
     DuplicateOrderNumber,
-    /// 73 (observed) — the referenced prepayment invoice cannot be identified:
+    /// 73 (observed): the referenced prepayment invoice cannot be identified:
     /// `A hivatkozott előlegszámla nem beazonosítható. Rendelésszám: …,
     /// előlegszámla száma: ….` Returned for a
     /// [final invoice](crate::ops::invoice::InvoiceKind::Final) whose
@@ -93,13 +93,13 @@ pub enum ErrorCode {
     /// order number. It is checked before the duplicate-order-number rule
     /// (71/152).
     PrepaymentInvoiceNotIdentifiable,
-    /// 135 — the user is logged into szamlazz.hu in a browser; log out to run
+    /// 135: the user is logged into szamlazz.hu in a browser; log out to run
     /// the Agent.
     BrowserSessionActive,
-    /// 136 — authentication blocked (expired subscription, pending invoice, or
+    /// 136: authentication blocked (expired subscription, pending invoice, or
     /// payment delay); log in via the browser to resolve.
     LoginBlocked,
-    /// 152 — the order number already exists on another document; the message
+    /// 152: the order number already exists on another document; the message
     /// names the offending order number.
     ///
     /// Same rule as [`ErrorCode::DuplicateOrderNumber`]: requires the account
@@ -107,58 +107,58 @@ pub enum ErrorCode {
     /// exempts storno and corrective invoices, and a reversed invoice's order
     /// number becomes reusable. The message (`Már létező rendelésszám: ….
     /// Az ismétlődés engedélyezhető a Beállítások oldalon.`) names the order
-    /// number — whitespace-trimmed — but never the existing invoice number;
+    /// number (whitespace-trimmed), but never the existing invoice number;
     /// recovering that requires a query by order number. Like 71, a settled
     /// refusal: nothing new was created, and re-sending only repeats it.
     DuplicateOrderNumberNamed,
-    /// 164 — the user has access to multiple accounts; the Agent requires
+    /// 164: the user has access to multiple accounts; the Agent requires
     /// single-account access (use an agent key).
     MultipleAccounts,
-    /// 202 — the invoice number prefix (`szamlaszamElotag`) is not registered.
+    /// 202: the invoice number prefix (`szamlaszamElotag`) is not registered.
     UnregisteredPrefix,
-    /// 221 (observed) — the invoice has a corrective invoice and cannot be
+    /// 221 (observed): the invoice has a corrective invoice and cannot be
     /// reversed: `Ez a számla nem sztornózható (van helyesbítő számlája).`
     /// Returned by the storno operation; the corrective invoice remains the
     /// only way to change such an invoice.
     HasCorrectiveInvoice,
-    /// 259 — line item net value must equal unit price × quantity.
+    /// 259: line item net value must equal unit price × quantity.
     NetValueMismatch,
-    /// 260 — line item VAT value must equal net × rate / 100.
+    /// 260: line item VAT value must equal net × rate / 100.
     VatValueMismatch,
-    /// 261 — line item gross value must equal net + VAT.
+    /// 261: line item gross value must equal net + VAT.
     GrossValueMismatch,
-    /// 262 — line item net value error; the offending row is named in the
+    /// 262: line item net value error; the offending row is named in the
     /// message.
     NetValueInvalid,
-    /// 263 — line item VAT value error; the offending row is named in the
+    /// 263: line item VAT value error; the offending row is named in the
     /// message.
     VatValueInvalid,
-    /// 264 — line item gross value error; the offending row is named in the
+    /// 264: line item gross value error; the offending row is named in the
     /// message.
     GrossValueInvalid,
-    /// 335 — proforma not found (or already deleted).
+    /// 335: proforma not found (or already deleted).
     ProformaNotFound,
-    /// 338 — a receipt call identifier has already been used; no duplicate
+    /// 338: a receipt call identifier has already been used; no duplicate
     /// receipt is issued and the prior success is not replayed.
     DuplicateReceiptCallId,
-    /// 352 (observed) — the issue date (`keltDatum`) may only be today:
+    /// 352 (observed): the issue date (`keltDatum`) may only be today:
     /// `A számla kelte csak a mai nap lehet: ….` Observed on a storno request
     /// carrying an earlier `keltDatum`, reversing a paper invoice with a paper
-    /// storno — so not a rule of e-invoices only; omit
+    /// storno, so not a rule of e-invoices only; omit
     /// [`StornoInvoice::issue_date`](crate::ops::storno::StornoInvoice::issue_date)
     /// to let the server date the storno invoice.
     IssueDateMustBeToday,
-    /// 463 (observed) — a credit entry was registered against a reversed or
+    /// 463 (observed): a credit entry was registered against a reversed or
     /// reversing invoice: `Sztornózó vagy sztornózott számlához nem tartozhat
     /// kifizetettségi információ.` Reported in the body only (no
     /// `szlahu_error_code` header). Reversal also removes the original
     /// invoice's recorded payments from its queried XML.
     PaymentOnReversedInvoice,
-    /// 537 — an item reached the maximum of 400 data erasure codes.
+    /// 537: an item reached the maximum of 400 data erasure codes.
     ErasureCodeLimit,
-    /// 538 — data erasure codes are unavailable on demo/test accounts.
+    /// 538: data erasure codes are unavailable on demo/test accounts.
     ErasureCodesUnavailable,
-    /// 539 — data erasure codes are disabled in the account settings.
+    /// 539: data erasure codes are disabled in the account settings.
     ErasureCodesDisabled,
     /// Any code without documented meaning, preserved exactly from the wire.
     Unknown(String),
@@ -209,8 +209,8 @@ impl ErrorCode {
     ///
     /// This is **not** permission to re-send a document-creating request.
     /// Invoice creation has no idempotency key, and 1 and 55 are exactly the
-    /// codes after which a document *may already exist* — 55 in particular
-    /// means "issued, signing failed" — so `while error.is_retryable() {
+    /// codes after which a document *may already exist* (55 in particular
+    /// means "issued, signing failed"), so `while error.is_retryable() {
     /// resend }` on a create can issue a duplicate legal document. Before
     /// re-sending a create, storno or receipt, query by the external id
     /// (`szamlaKulsoAzon`) the request carried and act on
@@ -223,7 +223,7 @@ impl ErrorCode {
         matches!(self, Self::Maintenance | Self::EInvoiceSigningFailed)
     }
 
-    /// What this code says about the document the request asked for — may one
+    /// What this code says about the document the request asked for: may one
     /// exist despite the error? See [`OutcomeClass`] for the caller's action
     /// per class.
     ///
@@ -237,8 +237,8 @@ impl ErrorCode {
     /// | [`Rejected`](OutcomeClass::Rejected) | everything else, the credential codes 3, 135, 136 and 164 included |
     ///
     /// 56 surfaces as an error only when the response carries no document
-    /// number — with one, the parsers report success with
-    /// `notification_delivery_failed` set — so as an error it always leaves
+    /// number (with one, the parsers report success with
+    /// `notification_delivery_failed` set), so as an error it always leaves
     /// the outcome open. An unknown code is classified conservatively: it may
     /// be a refusal, or a new "issued, but…" code like 55 and 56.
     #[must_use]
@@ -284,7 +284,7 @@ impl ErrorCode {
 /// whether one may exist despite the error.
 ///
 /// Answers the question a document-issuing integration must ask before it
-/// retries — *may a document have been created?* — which
+/// retries (*may a document have been created?*), which
 /// [`ErrorCode::is_retryable`] does not: invoice creation has no idempotency
 /// key, so re-sending a create after a code that left the outcome open can
 /// issue a duplicate legal document. Each variant states the caller's action.
@@ -300,7 +300,7 @@ pub enum OutcomeClass {
     /// carried and act on what is there; re-send only when nothing is.
     Unknown,
     /// Another document already carries the order number (71/152); nothing
-    /// new was created. Query by order number to find it — the message names
+    /// new was created. Query by order number to find it: the message names
     /// the order number, never the existing document.
     DuplicateOrderNumber,
     /// The referenced document is not on the query surface (7): on a query
@@ -399,8 +399,8 @@ pub enum RequestError {
     #[error("a final invoice requires a prepayment invoice number or order number")]
     MissingPrepaymentReference,
     /// A replacing credit-entry request (`additiv = false`, the default) with
-    /// no entries would replace the invoice's payments with nothing — clear
-    /// them. The schema allows it, so the crate refuses it before the wire:
+    /// no entries would replace the invoice's payments with nothing (clear
+    /// them). The schema allows it, so the crate refuses it before the wire:
     /// a request built with `RegisterCreditEntry::new` and never given its
     /// entries must not wipe an invoice. Clearing an invoice's credit entries
     /// is not offered as an operation.
@@ -411,7 +411,7 @@ pub enum RequestError {
     /// Foreign-currency documents require the quoting bank and exchange rate.
     ///
     /// Raised for every currency but the forint (`HUF` / `Ft`, any letter
-    /// case) when no `ExchangeRate` is set — on every document kind, since
+    /// case) when no `ExchangeRate` is set, on every document kind, since
     /// whether szamlazz.hu itself accepts a foreign-currency proforma or
     /// delivery note without one is unverified. A caller without a rate to
     /// quote can ask for szamlazz.hu's automatic current MNB rate with
@@ -452,7 +452,7 @@ pub struct ApiError {
 /// An opaque XML-parsing failure.
 ///
 /// Wraps the underlying parser error so the XML backend is not part of this
-/// crate's public API — it can change without a breaking release. The cause is
+/// crate's public API: it can change without a breaking release. The cause is
 /// available through [`Display`](std::fmt::Display) and, type-erased, through
 /// [`Error::source`](std::error::Error::source).
 #[derive(Debug)]
@@ -501,8 +501,8 @@ pub enum ParseError {
     ///
     /// Raised only when the client supplied the status
     /// ([`RawResponse::with_status`](crate::wire::RawResponse::with_status));
-    /// szamlazz.hu's own in-band answer — `szlahu_error_code`, `szlahu_down`
-    /// — is read first whatever the status. Like every parse failure its
+    /// szamlazz.hu's own in-band answer (`szlahu_error_code`, `szlahu_down`)
+    /// is read first whatever the status. Like every parse failure its
     /// [outcome class](ResponseError::outcome_class) is `Unknown`: a gateway
     /// timeout may have cut a request the server went on to act on.
     #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
@@ -516,8 +516,8 @@ pub enum ParseError {
 
 /// The most of a response body an error message quotes.
 ///
-/// An upstream body that is not szamlazz.hu's answer — a proxy's HTML page,
-/// a stack trace — ends up in error displays, and from there in a consumer's
+/// An upstream body that is not szamlazz.hu's answer (a proxy's HTML page,
+/// a stack trace) ends up in error displays, and from there in a consumer's
 /// logs, faults or journal. A bounded prefix keeps those readable and
 /// bounded; the length is noted so the truncation is visible.
 pub const BODY_EXCERPT_LEN: usize = 256;
@@ -528,10 +528,11 @@ pub const BODY_EXCERPT_LEN: usize = 256;
 /// reads as `empty response`.
 ///
 /// Every excerpt this crate's errors quote ([`ParseError::UnexpectedBody`],
-/// [`ParseError::HttpStatus`]) goes through here. Public so that a sans-IO
-/// integration logging a [`RawResponse`](crate::wire::RawResponse) body of
-/// its own — a status its parsers never saw, a body it rejected before
-/// parsing — quotes it under the same bound rather than whole.
+/// [`ParseError::HttpStatus`]) goes through here. Public so that an
+/// integration with its own HTTP client, logging a
+/// [`RawResponse`](crate::wire::RawResponse) body of its own (a status its
+/// parsers never saw, a body it rejected before parsing), quotes it under the
+/// same bound rather than whole.
 #[must_use]
 pub fn body_excerpt(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
@@ -581,7 +582,7 @@ pub enum ResponseError {
 }
 
 impl ResponseError {
-    /// What this failure says about the document the request asked for — may
+    /// What this failure says about the document the request asked for: may
     /// one exist despite the error? See [`OutcomeClass`].
     ///
     /// An API error's class is its [`ErrorCode::outcome_class`]. Unavailability
@@ -657,8 +658,8 @@ mod tests {
     }
 
     /// The excerpt keeps a short body whole, cuts a long one on a character
-    /// boundary — a multi-byte character straddling the limit is dropped, not
-    /// split — and notes the total length.
+    /// boundary (a multi-byte character straddling the limit is dropped, not
+    /// split), and notes the total length.
     #[test]
     fn body_excerpt_is_bounded_and_char_safe() {
         assert_eq!(body_excerpt(b"  short  "), "short");
@@ -726,11 +727,10 @@ mod tests {
         assert!(!ErrorCode::Unknown("999".to_owned()).is_retryable());
     }
 
-    /// The class of every named code, from `docs/szamlazz-hu-behaviour.md`
-    /// ("Error codes and header presence"): the codes after which a document
-    /// may exist are 1, 55 and 56 (the latter surfaces as an error only
-    /// without a number); 71/152 name an existing document; 7 is "not on the
-    /// query surface"; every other code refuses before acting.
+    /// The class of every named code, as observed on szamlazz.hu: the codes
+    /// after which a document may exist are 1, 55 and 56 (the latter surfaces
+    /// as an error only without a number); 71/152 name an existing document;
+    /// 7 is "not on the query surface"; every other code refuses before acting.
     #[test]
     fn every_named_code_has_an_outcome_class() {
         let table: [(ErrorCode, OutcomeClass); 30] = [

@@ -18,7 +18,7 @@ use szamlazz_agent::{ArithmeticError, Currency, LineItem, Rounding, VatRate};
 
 /// One document to issue: everything the caller decides per call.
 ///
-/// The order number is not part of the input — it is the `Order` key. Account
+/// The order number is not part of the input: it is the `Order` key. Account
 /// data, the seller block and the defaults come from the configuration;
 /// `overrides` can change a subset of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,7 +261,7 @@ pub enum TaxpayerStatus {
     HasTaxNumber,
     /// Unknown (`0`).
     Unknown,
-    /// No tax number — a private individual (`-1`).
+    /// No tax number: a private individual (`-1`).
     NoTaxNumber,
 }
 
@@ -281,7 +281,7 @@ impl From<TaxpayerStatus> for szamlazz_agent::TaxpayerStatus {
 ///
 /// Net, VAT and gross values are not part of the input: the service computes
 /// them (the Számla Agent crate's `LineItem::try_calculated`), rounded to the
-/// currency's minor unit — whole forints for HUF, cents for EUR — half away
+/// currency's minor unit (whole forints for HUF, cents for EUR), half away
 /// from zero at each step, so that the arithmetic szamlazz.hu verifies
 /// server-side always holds and the wire carries what the printed document
 /// can state.
@@ -399,8 +399,8 @@ impl From<PaymentMethod> for szamlazz_agent::PaymentMethod {
     }
 }
 
-/// Maps the Agent's known methods to their variants; anything else — including
-/// variants added to the Agent later — becomes [`PaymentMethod::Other`] with
+/// Maps the Agent's known methods to their variants; anything else (including
+/// variants added to the Agent later) becomes [`PaymentMethod::Other`] with
 /// the wire token.
 impl From<szamlazz_agent::PaymentMethod> for PaymentMethod {
     fn from(method: szamlazz_agent::PaymentMethod) -> Self {
@@ -445,7 +445,7 @@ pub(crate) mod tests {
     }
 
     /// Deserializing `body` as `T` is refused with serde's unknown-field
-    /// error naming `field` — what reaches the caller in the `invalid_input`
+    /// error naming `field`: what reaches the caller in the `invalid_input`
     /// fault's message. Shared with the request types' tests.
     pub(crate) fn refuses_unknown_field<T>(body: serde_json::Value, field: &str)
     where

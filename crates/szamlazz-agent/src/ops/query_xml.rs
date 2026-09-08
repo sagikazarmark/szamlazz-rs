@@ -3,8 +3,8 @@
 //!
 //! The public response types carry Rust field names and plain `serde`
 //! derives, so a fetched [`InvoiceDocument`] round-trips through JSON (for
-//! journaling or caching) independently of the XML schema. The wire mapping —
-//! Hungarian element names, list wrappers, lenient empty-element handling —
+//! journaling or caching) independently of the XML schema. The wire mapping
+//! (Hungarian element names, list wrappers, lenient empty-element handling)
 //! lives in the private `*Xml` structs after the [`AgentRequest`] impl.
 
 use jiff::civil::Date;
@@ -131,7 +131,7 @@ pub struct Supplier {
 pub enum InvoiceAppearance {
     /// `0`: the document is not an invoice, for example a proforma.
     NotInvoice,
-    /// `1`: paper invoice — what a create with `eszamla` `false` (the
+    /// `1`: paper invoice, what a create with `eszamla` `false` (the
     /// default) issues.
     Paper,
     /// `2` or `3`: e-invoice, retaining the exact code. A create with
@@ -257,8 +257,8 @@ pub struct InvoiceInfo {
     /// Issued from a test account (`teszt`).
     ///
     /// Mirrors the wire: the schema has the element mandatory
-    /// (`minOccurs="1"`) and every observed document carries it, so `None` —
-    /// absent or empty — is a document that does not say which account mode
+    /// (`minOccurs="1"`) and every observed document carries it, so `None`
+    /// (absent or empty) is a document that does not say which account mode
     /// issued it, not a live one. A reader that pins the account mode (the
     /// worker's `teszt == mode` check) treats `None` as a mismatch rather
     /// than inventing `false`.
@@ -271,14 +271,14 @@ pub struct InvoiceInfo {
     /// Mirrors the wire, where the element is optional and never spelled
     /// `false`:
     ///
-    /// - `None` — the element is absent: the invoice has not been reversed,
+    /// - `None`: the element is absent; the invoice has not been reversed,
     ///   or the document is itself a storno invoice (the marker never appears
     ///   on the storno invoice; it references its original through
     ///   [`referenced_invoice_number`](Self::referenced_invoice_number)).
-    /// - `Some(true)` — `<sztornozott>true</sztornozott>`: this invoice has
+    /// - `Some(true)`: `<sztornozott>true</sztornozott>`: this invoice has
     ///   been reversed by a storno invoice. Reversal also removes its recorded
     ///   [`payments`](InvoiceDocument::payments) from the response.
-    /// - `Some(false)` — accepted for schema completeness; not observed.
+    /// - `Some(false)`: accepted for schema completeness; not observed.
     ///
     /// Breaking change in 0.x: this was a `bool` defaulting to `false` when the
     /// element was absent. Treat `reversed != Some(true)` as "live".
@@ -1232,7 +1232,7 @@ mod tests {
 
     /// The totals block's lenient forms: an empty `afatipus` is no VAT type,
     /// and an `osszegek` carrying no `afakulcsossz` at all is a document with
-    /// no per-rate subtotals — the grand total stands on its own.
+    /// no per-rate subtotals; the grand total stands on its own.
     #[test]
     fn parses_totals_without_vat_type_or_rate_subtotals() {
         let document_with_subtotals = |subtotals: &str| {
@@ -1617,8 +1617,8 @@ mod tests {
     }
 
     /// `<teszt>` mirrors the wire too: the schema has it mandatory, so a
-    /// document without it (or with an empty one) reports `None` — unknown,
-    /// never `false` = live — and the reader decides what an unknown mode
+    /// document without it (or with an empty one) reports `None` (unknown,
+    /// never `false` = live), and the reader decides what an unknown mode
     /// means (the worker treats it as another account's).
     #[test]
     fn test_marker_mirrors_the_wire() {
@@ -1649,7 +1649,7 @@ mod tests {
     }
 
     /// The XML query reports an unknown number, order number, or external
-    /// identifier as code 7 in the body only — no `szlahu_error_code` header.
+    /// identifier as code 7 in the body only: no `szlahu_error_code` header.
     #[test]
     fn body_only_missing_data_error_is_typed() {
         let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[7]]></hibakod><hibauzenet><![CDATA[Hiányzó adat: számla xml (ismeretlen számlaszám, rendelésszám vagy külső azonosító).]]></hibauzenet></xmlszamlavalasz>"#;
@@ -1664,7 +1664,7 @@ mod tests {
         }
     }
 
-    /// A body with no XML root at all — a proxy's text page, a stack trace —
+    /// A body with no XML root at all (a proxy's text page, a stack trace)
     /// is quoted as a bounded excerpt with the length noted, never whole; a
     /// blank body reads as `empty response`. (The XML query has its own root
     /// dispatch, so the bound is checked on this path too, not only through

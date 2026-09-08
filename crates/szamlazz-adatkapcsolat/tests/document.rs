@@ -520,7 +520,7 @@ fn non_canonical_base64_decodes_when_it_can_and_reads_as_absent_when_it_cannot()
         );
     }
 
-    // What no decoder can read leaves `pdf` absent — the invoice itself is
+    // What no decoder can read leaves `pdf` absent: the invoice itself is
     // still delivered, and the element's text is in the raw XML.
     for garbage in ["JVBERi0===", "not base64!"] {
         let body = with_pdf(garbage);
@@ -665,8 +665,8 @@ fn vendor_example_parses_leniently_and_strictly() {
     assert_eq!(invoice.info.id, 123_456);
     assert_eq!(invoice.info.invoice_number, "2015-123");
     assert_eq!(invoice.supplier.name.as_deref(), Some("Példa Kft."));
-    // The example leaves the buyer's name and address empty — present, but
-    // carrying nothing — and its PDF element empty.
+    // The example leaves the buyer's name and address empty (present, but
+    // carrying nothing), and its PDF element empty.
     assert_eq!(invoice.buyer.name.as_deref(), Some(""));
     assert!(invoice.pdf.is_none());
     assert_eq!(invoice.items.len(), 1);

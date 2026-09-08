@@ -1,7 +1,8 @@
-//! The sans-IO boundary driven by an HTTP client this crate knows nothing
+//! The wire boundary driven by an HTTP client this crate knows nothing
 //! about: `to_wire` yields what any client needs to send, and `RawResponse`
 //! takes what any client returns. The blocking `ureq` stands in for "any
-//! client"; the same round trip is the README's sans-IO example.
+//! client"; the same round trip is the README's "Bring Your Own HTTP Client"
+//! example.
 
 use szamlazz_agent::Credentials;
 use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
@@ -68,6 +69,6 @@ async fn a_blocking_client_drives_the_sans_io_core_end_to_end() {
     assert_eq!(
         raw.session_cookie().as_deref(),
         Some("JSESSIONID=ABC123"),
-        "the cookie a sans-IO caller replays as `Cookie` on its next request"
+        "the cookie a caller with its own HTTP client replays as `Cookie` on its next request"
     );
 }

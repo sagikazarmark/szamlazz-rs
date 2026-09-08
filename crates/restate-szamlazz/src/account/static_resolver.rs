@@ -1,7 +1,7 @@
 //! The static resolver: accounts from deployment configuration, in one of
 //! two mutually exclusive shapes.
 //!
-//! **Single-account** — one `[account]`, reachable unscoped; any scope is
+//! **Single-account**: one `[account]`, reachable unscoped; any scope is
 //! unknown:
 //!
 //! ```toml
@@ -17,7 +17,7 @@
 //! bank_account = "..."
 //! ```
 //!
-//! **Multi-account** — a table of `[accounts.<scope>]`, each reachable under
+//! **Multi-account**: a table of `[accounts.<scope>]`, each reachable under
 //! its scope only; an unscoped request is `unknown_account`:
 //!
 //! ```toml
@@ -31,7 +31,7 @@
 //! ```
 //!
 //! Both present is a load error; there is no default account. The scope keys
-//! are `[a-z0-9_]`, 1–[`MAX_SCOPE_LEN`] bytes — a strict subset of Restate's
+//! are `[a-z0-9_]`, 1–[`MAX_SCOPE_LEN`] bytes: a strict subset of Restate's
 //! scope format (`[a-zA-Z0-9_.-]`, at most 36 bytes) chosen so that
 //! environment overrides can address them
 //! (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`).
@@ -39,13 +39,13 @@
 //! The configuration types implement `Deserialize` only; the endpoint binary
 //! chooses the file format and environment merging. [`StaticResolver`] is
 //! built from a parsed [`StaticConfig`] with `TryFrom`, which validates what
-//! `Deserialize` cannot — including the checkable half of the resolver's
+//! `Deserialize` cannot, including the checkable half of the resolver's
 //! safety contract in the multi-account shape: unique ids and unique
 //! `(endpoint, agent_key)` pairs, so that no szamlazz.hu account is knowingly
-//! reachable under two scopes. Which account a key opens — and whether it is
-//! a test account — is not checkable here or anywhere in the worker (no
-//! operation answers "which account am I?"; ADR 0006, account-pin amendment),
-//! so the right key under the right scope is the operator's go-live check.
+//! reachable under two scopes. Which account a key opens (and whether it is
+//! a test account) is not checkable here or anywhere in the worker (no
+//! operation answers "which account am I?"), so the right key under the right
+//! scope is the operator's go-live check.
 //! It implements both [`AccountResolver`] and [`CredentialStore`]: the agent
 //! key is inline and the credential reference is the account id.
 
@@ -183,7 +183,7 @@ pub enum StaticConfigError {
         /// The second account's table.
         second: AccountTable,
     },
-    /// Two accounts share an `(endpoint, agent_key)` pair — the endpoint
+    /// Two accounts share an `(endpoint, agent_key)` pair: the endpoint
     /// compared normalised, so `https://x/szamla/` and `https://x/szamla`
     /// are one: one szamlazz.hu account would be reachable under two scopes.
     /// The key is not echoed.
@@ -327,7 +327,7 @@ impl StaticResolver {
 
     /// Builds the multi-account shape, enforcing the checkable half of the
     /// safety contract in one pass: every account is built, then its id and
-    /// `(endpoint, agent key)` are claimed against the accounts before it —
+    /// `(endpoint, agent key)` are claimed against the accounts before it,
     /// the endpoint on its normalised form ([`Endpoint::normalized`]), so two
     /// spellings of one server with one key are one account.
     fn multi(accounts: BTreeMap<String, StaticAccount>) -> Result<Self, StaticConfigError> {
@@ -718,7 +718,7 @@ mod tests {
         );
     }
 
-    /// The fan-in rule holds across spellings of one endpoint (J32): a
+    /// The fan-in rule holds across spellings of one endpoint: a
     /// trailing slash, the scheme's or the host's case, or the default port
     /// written out do not make one szamlazz.hu account two. Two paths, two
     /// schemes or two keys still do.

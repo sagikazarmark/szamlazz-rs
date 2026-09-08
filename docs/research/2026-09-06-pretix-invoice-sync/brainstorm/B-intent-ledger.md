@@ -1,27 +1,27 @@
-# B — Intent ledger + reconciler: the sync app owns the retry, the worker keeps kill
+# B, Intent ledger + reconciler: the sync app owns the retry, the worker keeps kill
 
 Ground truth: `brief.md`, `raw/01–03`. New claims: **V** (cite) or **U**; contract facts cite
 `crates/restate-szamlazz/src/contract/*.rs`.
 
 ## 1. Shape
 
-**Components** (one binary): webhook receiver; **planner** — a pure function `plan(pretix_order, ledger_rows) →
+**Components** (one binary): webhook receiver; **planner**; a pure function `plan(pretix_order, ledger_rows) →
 desired ops`, shared by webhook, reconciler and manual paths (the webhook is only a hint, raw/01);
 **drain loop**; **reconciler** (cron); Postgres; a small UI (self-hosted Pretix `order_info` panel optional, raw/01 §4).
 
-**Ledger** — `intent`, one *open* row per `(scope, order_key, op, target)` (partial unique index): `op ∈
+**Ledger**: `intent`, one *open* row per `(scope, order_key, op, target)` (partial unique index): `op ∈
 create_proforma | create_invoice | delete_proforma | storno_invoice | correct_invoice`, `target` (invoice number /
 correction_id), `input_json` (the exact `DocumentInput`), `pretix_snapshot {order.last_modified, status, total,
 invoice_address.last_modified}`, `state, attempts, horizon_at, next_attempt_at, current_key, current_invocation_id,
 last_fault {code, szamlazz_code, message, raw_500_text}, result {number, storno_number}, depends_on, source,
-approved_by`. Child `attempt(n, key, sent_at, ended_at, status, body)` — the §220(3) "acted as expected" log
+approved_by`. Child `attempt(n, key, sent_at, ended_at, status, body)`, the §220(3) "acted as expected" log
 (raw/03 §5). `webhook_receipt(notification_id PK)`.
 
 **States**: `proposed` → `pending` → `in_flight` → {`done`, `retrying`, `checking`, `needs_attention`};
 `retrying` → `pending` at `next_attempt_at`; `checking` → `done | pending`; `needs_attention` → `pending` **only by a
 human or reconciler evidence**; `superseded`.
 
-**Webhook handler**: per-organizer secret URL (Pretix signs nothing — **U**); `INSERT webhook_receipt ON CONFLICT DO
+**Webhook handler**: per-organizer secret URL (Pretix signs nothing, **U**); `INSERT webhook_receipt ON CONFLICT DO
 NOTHING`; enqueue `replan(org, event, code)`; **200**. No Pretix fetch, no worker call (raw/03 §1).
 
 **Replan** (a drain job): fetch the order (raw/01 §2), run the planner, upsert intents. Rules: `n` + transfer →
@@ -35,12 +35,12 @@ row per `order_key`. Per attempt: `key = {intent_id}:{attempts+1}`; `POST /resta
 {key}/{op}?limit-key={event_slug}` (a crash-repeated `/send` is `PreviouslyAccepted`, same id, raw/02 §2 **V**); poll
 the scoped `POST /restate/output` at 1, 2, 5 s, then 30 s: 470 → wait; result → §2; 404 → ambiguous. `/send`+`/output`
 rather than `/call` so "no answer" is not a special case. Worst case ~1 h issue policy + ~24 min invocation budget, so
-a row polls up to **2 h**, then `needs_attention{stuck, invocation_id}` — never a second attempt while one is open.
+a row polls up to **2 h**, then `needs_attention{stuck, invocation_id}`, never a second attempt while one is open.
 
 **Reconciler**: every 15 min per organizer `GET /organizers/{org}/orders/?modified_since={X-Page-Generated}&
 testmode=false` → replan each (raw/01 §2 **V**). Nightly, orders paid/cancelled in the last 30 d: `get`; expected slot
 absent → new intent; live with no `done` row → backfill `done`; reversed where `done` →
-`needs_attention{reversed_externally}`. Cost: one szamlazz.hu read per order per night — etiquette bound **U**.
+`needs_attention{reversed_externally}`. Cost: one szamlazz.hu read per order per night, etiquette bound **U**.
 
 **Manual trigger**: *retry now* = `next_attempt_at=now` on a parked row (a flag); *issue / storno / reissue now* =
 replan with `source=manual`, or a forced row with `approved_by` (an intent).
@@ -63,7 +63,7 @@ replan with `source=manual`, or a forced row with `approved_by` (an intent).
 (card-paid is `haladéktalan`, raw/03 §5), 24 h for other ops; then `needs_attention`. **Exit guarantee**: every attempt
 ends `done`, `needs_attention`, or `retrying` with `next_attempt_at ≤ horizon_at`; `attempts` is monotone; nothing
 leaves `needs_attention` without a human or `get` evidence. A settled fault misclassified as transient costs ≤ 8
-wasted calls — never a loop, never a duplicate. **Account breaker**: > 50 % of an account's attempts in 10 min
+wasted calls, never a loop, never a duplicate. **Account breaker**: > 50 % of an account's attempts in 10 min
 killed / `unavailable` / unreachable → pause its sends 15 m, one alert.
 
 ## 3. Scenarios
@@ -102,22 +102,22 @@ expected-but-absent → new intents. Lost: attempt history.
 
 ## 5. Worker changes
 
-Required: **none** — `get`, the eight faults, `conflict` reasons and `/send`+`/output` suffice; Pretix is the
+Required: **none**; `get`, the eight faults, `conflict` reasons and `/send`+`/output` suffice; Pretix is the
 enumerator, so no `list`. Nice-to-have: `issue_date` on `get` slots. Must **not**: switch `Order` writes to `pause`
-(a paused invocation holds the key and 470s forever — "stuck" would become normal); add state to `Order`; cut
+(a paused invocation holds the key and 470s forever; "stuck" would become normal); add state to `Order`; cut
 idempotency retention below the 2 h poll.
 
 ## 6. Honest weaknesses
 
-- Three new moving parts (DB, queue-on-a-table, cron) and a planner holding the whole Pretix → document mapping —
+- Three new moving parts (DB, queue-on-a-table, cron) and a planner holding the whole Pretix → document mapping,
   the riskiest code; a planner bug parks every order at once.
-- Double bookkeeping vs ADR 0005: the ledger records *intent and attempts*, not document truth — `done` is always
+- Double bookkeeping vs ADR 0005: the ledger records *intent and attempts*, not document truth, `done` is always
   szamlazz.hu's answer and on disagreement `get` wins (done+absent → reopen; absent+live → backfill). But
   `pretix_snapshot` *is* state szamlazz.hu cannot return (no buyer data in `get`/`query`, contract **V**).
-- Fresh key per attempt: ≤ ~10 stored completions per row for 30 d — negligible (**U**); no stale-failure replay.
+- Fresh key per attempt: ≤ ~10 stored completions per row for 30 d, negligible (**U**); no stale-failure replay.
 - Card payments: seconds normally, up to 4 h unattended; "haladéktalan" has no number (raw/03 **U**).
 - A document issued outside the ledger is unseen until the nightly `get`; a create then parks as `conflict{foreign}`
-  or completes as `already_issued` — safe, a day late.
+  or completes as `already_issued`, safe, a day late.
 
 ## 7. Effort
 

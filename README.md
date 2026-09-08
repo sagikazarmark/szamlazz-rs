@@ -5,11 +5,11 @@
 
 **Rust crates for integrating with [szamlazz.hu](https://www.szamlazz.hu), the Hungarian invoicing service.**
 
-Three protocol libraries — the Számla Agent client, the IPN receiver, the Adatkapcsolat receiver — and a **durable
+Three protocol libraries (the Számla Agent client, the IPN receiver, the Adatkapcsolat receiver) and a **durable
 invoicing worker** on [Restate](https://restate.dev/): the `Szamlazz.Order` service issues, corrects and reverses
 szamlazz.hu documents **exactly once per order** under retries, crashes and concurrent callers, keeping no state of its
-own (szamlazz.hu is the source of truth). You call it over HTTP with a JSON body from any language — no Rust, no
-Restate SDK — and branch on the outcome it returns as data; the runnable binary, the request and response reference,
+own (szamlazz.hu is the source of truth). You call it over HTTP with a JSON body from any language (no Rust, no
+Restate SDK), and branch on the outcome it returns as data; the runnable binary, the request and response reference,
 the fault envelope and the guidance for calling from a webhook handler are in the
 [`restate-szamlazz-endpoint` README](crates/restate-szamlazz-endpoint/README.md). Issuing from Rust directly starts at
 [`szamlazz-agent`](crates/szamlazz-agent).
@@ -18,7 +18,7 @@ the fault envelope and the guidance for calling from a webhook handler are in th
 
 - **Complete integration surface.** Use the Számla Agent, receive IPN status snapshots, and accept Adatkapcsolat documents.
 - **Portable library cores.** The three protocol libraries (`szamlazz-agent`, `szamlazz-ipn`, `szamlazz-adatkapcsolat`) target native Rust and `wasm32-unknown-unknown`, including Cloudflare Workers; the Restate crates are native-only.
-- **Sans-IO Számla Agent.** Build complete wire requests and parse raw responses with any HTTP client, or enable the reqwest client.
+- **Bring your own HTTP client.** The Számla Agent core performs no I/O: build complete wire requests and parse raw responses with any HTTP client, or enable the reqwest client.
 - **Protocol-native models.** Typed operations, documents, Acks, errors, and Hungarian Rustdoc aliases preserve szamlazz.hu semantics.
 - **Durable workers.** Issue and reverse documents exactly once per order through stateless Restate services and a runnable endpoint; szamlazz.hu stays the source of truth.
 
@@ -28,20 +28,20 @@ This virtual workspace contains six packages intended for publication and indepe
 
 | Package | Purpose |
 |---|---|
-| [`szamlazz-agent`](crates/szamlazz-agent) | Sans-IO Számla Agent client for issuing and querying documents, registering credit entries, and looking up taxpayers. |
+| [`szamlazz-agent`](crates/szamlazz-agent) | Számla Agent client for issuing and querying documents, registering credit entries, and looking up taxpayers. |
 | [`szamlazz-ipn`](crates/szamlazz-ipn) | IPN receiver types for current payment-status snapshots, with an optional axum extractor. |
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
-| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless — szamlazz.hu is the source of truth, reached through deterministic external ids. |
+| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless: szamlazz.hu is the source of truth, reached through deterministic external ids. |
 | [`restate-szamlazz-endpoint`](crates/restate-szamlazz-endpoint) | Standalone `restate-szamlazz` binary and container image hosting both services for a Restate server; its README is the caller reference for non-Rust users. |
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 
 ## Documentation
 
-- [`docs/design/restate-szamlazz.md`](docs/design/restate-szamlazz.md): design and implementation spec for the Restate worker.
-- [`docs/adr/`](docs/adr): architecture decision records behind it.
 - [`docs/szamlazz-hu-behaviour.md`](docs/szamlazz-hu-behaviour.md): verified Számla Agent behavior the worker relies on, with a go-live checklist.
+- [`docs/adr/`](docs/adr): architecture decision records for the Restate worker.
+- [`docs/design/restate-szamlazz.md`](docs/design/restate-szamlazz.md): the Restate worker's architecture in one document.
 - [`docs/review/`](docs/review): dated whole-workspace reviews with verified findings and the live probes still open.
 
 ## Development
@@ -53,8 +53,8 @@ dagger check
 ```
 
 It runs the `rust` module's build, test, clippy, doc, audit and fmt checks and the workspace's own `ci` module
-(`.dagger/modules/ci`): `ci:test` — the workspace tests with every feature — and `ci:end-to-end` — the
-`restate-szamlazz` handler layer against a real Restate server started inside the container. Run one with
+(`.dagger/modules/ci`): `ci:test` (the workspace tests with every feature) and `ci:end-to-end` (the
+`restate-szamlazz` handler layer against a real Restate server started inside the container). Run one with
 `dagger check ci:end-to-end`.
 
 Run the individual host checks with the tracked lockfile:

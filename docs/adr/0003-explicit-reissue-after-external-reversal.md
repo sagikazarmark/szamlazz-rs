@@ -1,7 +1,7 @@
 # A repeat create after an external reversal returns `reversed` and reissues only on explicit request
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
-Still holds — and is now the rule after **every** reversal, not only external ones: a create that finds its
+Still holds, and is now the rule after **every** reversal, not only external ones: a create that finds its
 document reversed (`sztornozott`) returns `outcome: reversed` and issues only with an explicit `reissue: true`;
 `reissue: true` on a live document is `conflict{live}`. Superseded: `request_id` as retry identity (→ Restate's
 ingress `Idempotency-Key`), the flag-free path after a service-side storno (the service keeps no record of who
@@ -10,18 +10,18 @@ reversed, so the runner-up "flag always required" is what stands), the fingerpri
 
 *Amended (#22): where "live" is observed.* Issuing is two durable steps (design §5): a read-only **lookup**
 and a query-first **create** under a run retry policy. `reissue: true` on a document that is live **at
-lookup** is `conflict{live}` — the caller's flag met a live document and the flag never causes a duplicate.
+lookup** is `conflict{live}`, the caller's flag met a live document and the flag never causes a duplicate.
 A document found live by the create step's *own* leading query that is not the reversed one lookup saw is
 `outcome: issued`, not `conflict{live}`: the lookup had already passed the reversed document, the create
-step ran, its reply was lost, and the re-executed step finds what its earlier execution issued — the very
+step ran, its reply was lost, and the re-executed step finds what its earlier execution issued, the very
 document the caller asked for. The two answers differ because the two queries answer different questions:
 lookup asks "may this create proceed?", the create step's query asks "did my earlier execution already
 land?".
 
 *Amended (#36): a reversal the lookup did not see.* The create step sends only when its leading query finds
 **nothing** under the external id, or **exactly the document the lookup step saw reversed**, still reversed.
-A reversed document that is *not* the lookup's — an earlier execution's send landed with a lost reply and the
-document was reversed in the UI before this execution — settles the step as `outcome: reversed` and sends
+A reversed document that is *not* the lookup's (an earlier execution's send landed with a lost reply and the
+document was reversed in the UI before this execution) settles the step as `outcome: reversed` and sends
 nothing, because it is a reversal the caller has not acknowledged with `reissue`; before #36 the step
 proceeded past any reversed holder and issued a second document without the flag. Symmetrically, the lookup's
 reversed document reported *live* by the create step's query is a server inconsistency and settles the step as
@@ -29,16 +29,16 @@ reversed document reported *live* by the create step's query is a server inconsi
 
 `create_invoice` (and its proforma, prepayment, final and corrective siblings) may find that the
 document the ledger recorded for this order and kind has since been reversed by someone other than
-the service — a storno from the szamlazz.hu UI, by support, or asserted by an operator. The question
+the service, a storno from the szamlazz.hu UI, by support, or asserted by an operator. The question
 was whether the repeat call should issue a replacement.
 
 It does not, by default. Verification detects the reversal (`sztornozott == Some(true)` on the
-recorded number — verified), the slot becomes `reversed{origin: external}`, `gen` is bumped, and the
-handler returns `outcome: reversed{number, storno_number?}` — data, not an error. A new document is
+recorded number: verified), the slot becomes `reversed{origin: external}`, `gen` is bumped, and the
+handler returns `outcome: reversed{number, storno_number?}`, data, not an error. A new document is
 issued only when the incoming request carries **`reissue: true` and a new `request_id`**
 (`reissue` with a known id is `invalid_input`). After a **service-side** storno
 (`Szamlazz.Order.storno_invoice`) the slot is `reversed{origin: service}` and open flag-free: the ledger knows
-the reversal was deliberate. A deleted proforma is likewise open flag-free — it is not a legal
+the reversal was deliberate. A deleted proforma is likewise open flag-free: it is not a legal
 document. The same rule holds in the lookup step: a `Reversed` document returns
 `reversed`; the create step is never reached without the flag.
 
@@ -46,7 +46,7 @@ document. The same rule holds in the lookup step: a `Reversed` document returns
 
 The two failure classes are asymmetric. An unwanted invoice is a numbered legal document, e-mailed
 to the buyer by default (`sendEmail` defaults to true), reported to NAV, and undoable only by another
-storno — the vendor itself calls a reissue after storno an accountant-visible event. A missed reissue
+storno, the vendor itself calls a reissue after storno an accountant-visible event. A missed reissue
 costs one extra call. Identity, not a flag, tells a retry from a rival caller or a stale job (the
 same `request_id` returns `reversed` forever); the flag tells a deliberate re-invoice from a fresh
 UUID minted by a framework. With both, misuse degrades to one `reversed` answer, never to a document.
@@ -54,8 +54,8 @@ UUID minted by a framework. With both, misuse degrades to one `reversed` answer,
 Verified practice facts that bear on the decision:
 
 1. Buyer/partner data (name, address, tax number), cash-accounting nature and currency **cannot** be
-   fixed by a corrective invoice (szamlazz.hu knowledge base). For the commonest webshop error —
-   wrong billing data — storno followed by a new invoice is the vendor's documented path, and the
+   fixed by a corrective invoice (szamlazz.hu knowledge base). For the commonest webshop error
+   (wrong billing data) storno followed by a new invoice is the vendor's documented path, and the
    reversed invoice's order number is reusable (verified: a new invoice was issued under the same
    order after the first was stornoed). Reissue is normal, so it must be *possible* with one extra
    boolean, not *automatic*.

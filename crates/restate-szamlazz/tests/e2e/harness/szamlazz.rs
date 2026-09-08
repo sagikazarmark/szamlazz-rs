@@ -4,7 +4,7 @@
 //! storno, credit and delete operations), the response templates (code 7,
 //! a created document, an API code, …) and the document-centric helpers
 //! ([`holds`] and its siblings) that mount one body on every selector the
-//! document is reachable by, so the stubs cannot disagree (design §11). The
+//! document is reachable by, so the stubs cannot disagree. The
 //! helpers' own tests, against wiremock alone, close the file.
 
 use std::sync::Arc;
@@ -17,8 +17,8 @@ use wiremock::{Mock, MockBuilder, MockServer, Request, ResponseTemplate};
 
 /// The `szallito/id` the rendered documents carry: the seller record's id as
 /// szamlazz.hu prints it in a query body (972720 on the test account). Wire
-/// realism only — the worker holds no account pin (ADR 0006, account-pin
-/// amendment); the scenario that renders [`SUPPLIER_B`] asserts exactly that.
+/// realism only: the worker holds no account pin; the scenario that renders
+/// [`SUPPLIER_B`] asserts exactly that.
 const SUPPLIER: u64 = 972_720;
 
 /// Another seller record's id: what a document of another szamlazz.hu account
@@ -26,7 +26,7 @@ const SUPPLIER: u64 = 972_720;
 pub(crate) const SUPPLIER_B: u64 = 972_721;
 
 /// The `telj` every document of the run carries unless a scenario says
-/// otherwise: the fulfillment date a storno of it must repeat (ADR 0007).
+/// otherwise: the fulfillment date a storno of it must repeat.
 const ORIGINAL_TELJ: Date = date(2026, 7, 15);
 
 pub(crate) struct Doc<'a> {
@@ -36,19 +36,19 @@ pub(crate) struct Doc<'a> {
     pub(crate) reversed: bool,
     pub(crate) referenced_invoice: Option<&'a str>,
     pub(crate) referenced_proforma: Option<&'a str>,
-    /// `teszt` — whether a test account issued the document. Projected by
-    /// `query`, compared with nothing (ADR 0006, account-pin amendment).
+    /// `teszt`: whether a test account issued the document. Projected by
+    /// `query`, compared with nothing.
     pub(crate) test: bool,
-    /// `szallito/id` — the seller record's id in the `<szallito>` block.
+    /// `szallito/id`: the seller record's id in the `<szallito>` block.
     /// Parsed, compared with nothing.
     pub(crate) supplier_id: u64,
     /// The external id the document sits under, when the test states it:
     /// szamlazz.hu never echoes it, so it is not in the body, but it is a
     /// selector the document is reachable by ([`holds`]).
     pub(crate) external_id: Option<&'a str>,
-    /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
+    /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.
     pub(crate) fulfillment_date: Option<Date>,
-    /// `eszamla`; `None` follows `tipus` — `0` on a proforma, `2` (an
+    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
     /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
     /// invoice and `3` for one created with `eszamla=true` (P73).
     pub(crate) eszamla: Option<i32>,
@@ -205,7 +205,7 @@ pub(crate) fn proforma_deleted() -> ResponseTemplate {
     )
 }
 
-/// The proforma deletion's code 335 — no such proforma: deleted already, in
+/// The proforma deletion's code 335 (no such proforma: deleted already), in
 /// headers and body as szamlazz.hu reports it.
 pub(crate) fn proforma_gone() -> ResponseTemplate {
     ResponseTemplate::new(200)
@@ -278,13 +278,13 @@ pub(crate) fn delete_of(number: &str) -> MockBuilder {
 }
 
 /// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: the storno
-/// repeating the original's fulfillment date (ADR 0007).
+/// repeating the original's fulfillment date.
 pub(crate) fn original_telj_tag() -> String {
     format!("<teljesitesDatum>{ORIGINAL_TELJ}</teljesitesDatum>")
 }
 
 /// A storno request carrying the fixture's `telj` ([`ORIGINAL_TELJ`]) as its
-/// `teljesitesDatum` — what every storno of a fixture document must send.
+/// `teljesitesDatum`: what every storno of a fixture document must send.
 pub(crate) fn storno_repeating_telj() -> MockBuilder {
     storno().and(body_string_contains(original_telj_tag()))
 }
@@ -352,8 +352,8 @@ pub(crate) fn taxpayer_unknown() -> ResponseTemplate {
 // ----- what szamlazz.hu holds: one document, every selector ------------------
 
 /// szamlazz.hu holds `doc`: one body on every selector the document is
-/// reachable by — its number, its order number when it carries one, its
-/// external id when the test states one — so the stubs cannot disagree.
+/// reachable by (its number, its order number when it carries one, its
+/// external id when the test states one), so the stubs cannot disagree.
 pub(crate) async fn holds(mock: &MockServer, doc: &Doc<'_>) {
     let selectors = [
         Some(number_query(doc.number)),
@@ -366,7 +366,7 @@ pub(crate) async fn holds(mock: &MockServer, doc: &Doc<'_>) {
 }
 
 /// The next external-id query for `id` loses its reply (a 500 with no body)
-/// once; whatever is mounted after this answers from the second query on —
+/// once; whatever is mounted after this answers from the second query on:
 /// wiremock takes the first active match in mount order, and an
 /// `up_to_n_times(1)` mock is inactive after its one match.
 pub(crate) async fn loses_reply_once(mock: &MockServer, id: &str) {
@@ -379,7 +379,7 @@ pub(crate) async fn loses_reply_once(mock: &MockServer, id: &str) {
 
 /// szamlazz.hu holds `doc` under its external id from the `misses + 1`th
 /// query on: code 7 for `misses` queries, the document afterwards. The number
-/// and order selectors are not mounted — the document is absent before the
+/// and order selectors are not mounted: the document is absent before the
 /// misses and nothing reads it by number or order after. `doc` must state its
 /// external id.
 pub(crate) async fn holds_after_misses(mock: &MockServer, misses: u64, doc: &Doc<'_>) {
@@ -397,15 +397,14 @@ pub(crate) async fn holds_after_misses(mock: &MockServer, misses: u64, doc: &Doc
         .await;
 }
 
-/// The create lands on szamlazz.hu but its reply is lost (design §5 step 4,
-/// ADR 0003): `create()` answers 500, `expect(1)`, and `doc` is the holder of
-/// its external id from the moment the create request is received — code 7
-/// before, the document after. The transition is the create stub being
-/// matched (one flag, flipped by the create's responder and read by the
-/// external id's), so how many queries precede the send is not the test's to
-/// know. Failure-injection sequencing, not a model of szamlazz.hu: one flag
-/// for one document. `doc` must state its external id; the number and order
-/// selectors are not mounted.
+/// The create lands on szamlazz.hu but its reply is lost: `create()` answers
+/// 500, `expect(1)`, and `doc` is the holder of its external id from the
+/// moment the create request is received (code 7 before, the document after).
+/// The transition is the create stub being matched (one flag, flipped by the
+/// create's responder and read by the external id's), so how many queries
+/// precede the send is not the test's to know. Failure-injection sequencing,
+/// not a model of szamlazz.hu: one flag for one document. `doc` must state its
+/// external id; the number and order selectors are not mounted.
 pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>) {
     let id = doc
         .external_id
@@ -451,7 +450,7 @@ async fn query_by(mock: &MockServer, selector: &str) -> (u16, String) {
 
 /// `holds` mounts one body on every selector the document is reachable by and
 /// nothing else: with an order and an external id three stubs, without an
-/// order two, without either one — an unmounted selector is wiremock's 404.
+/// order two, without either one; an unmounted selector is wiremock's 404.
 #[tokio::test]
 async fn holds_answers_every_selector_the_document_is_reachable_by_with_one_body() {
     let mock = MockServer::start().await;
@@ -515,7 +514,7 @@ async fn holds_answers_every_selector_the_document_is_reachable_by_with_one_body
 
 /// `holds_after_misses(n, doc)` answers the document's external id with code
 /// 7 exactly `n` times and the document from then on; the number and order
-/// selectors are not mounted — the document is absent before the misses.
+/// selectors are not mounted: the document is absent before the misses.
 #[tokio::test]
 async fn holds_after_misses_answers_code_7_n_times_then_the_document() {
     let mock = MockServer::start().await;
@@ -558,8 +557,8 @@ async fn holds_after_misses_answers_code_7_n_times_then_the_document() {
 }
 
 /// `create_lands_but_reply_lost(doc)` answers the document's external id with
-/// code 7 until the create request is received — however many queries precede
-/// it — and with the document from that moment on; the create itself is a
+/// code 7 until the create request is received (however many queries precede
+/// it), and with the document from that moment on; the create itself is a
 /// 500. The transition is the create stub being matched, not a query count.
 #[tokio::test]
 async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create_hit() {

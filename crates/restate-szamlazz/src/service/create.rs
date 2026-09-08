@@ -1,11 +1,11 @@
-//! The create protocol (design §5) for the four document kinds and for
-//! correctives, in the order the steps appear in the design.
+//! The create protocol for the four document kinds and for correctives, in
+//! the order the steps run.
 //!
 //! The handlers keep no state. After validation and the reference checks
 //! (read-only steps under the read policy), issuing is two durable steps: a
 //! read-only **lookup** (`lookup-{kind}`) under the read policy that settles
 //! every case needing no create, and a **create** (`create-{kind}`) under the
-//! issue policy's run retry policy, query-first on every execution — the
+//! issue policy's run retry policy, query-first on every execution; the
 //! external-id query inside the create closure is what finds a document an
 //! earlier execution issued. Domain outcomes are data and faults are
 //! `TerminalError`s; a read that szamlazz.hu never answered is `unavailable`,
@@ -83,14 +83,14 @@ impl Identity {
         response
     }
 
-    /// Step 5 of the create protocol (design §5): the settled create step as
-    /// the caller's response. Pure — every szamlazz.hu answer is data.
+    /// Step 5 of the create protocol: the settled create step as the caller's
+    /// response. Pure: every szamlazz.hu answer is data.
     ///
     /// # Errors
     ///
     /// The faults a settled step can still be: rejected credentials; the
     /// leading query answered with another code or `szlahu_down`
-    /// (`unavailable`, as the lookup step answers the same — nothing was
+    /// (`unavailable`, as the lookup step answers the same; nothing was
     /// sent); and an `Issued` without a number (a gateway bug, answered as
     /// `outcome_unknown`). The caller attaches the document's identity.
     fn respond_to(
@@ -119,14 +119,14 @@ impl Identity {
                 }
                 response
             }
-            // An earlier execution of the step created it (ADR 0003): the
-            // caller asked for this document and has it.
+            // An earlier execution of the step created it: the caller asked
+            // for this document and has it.
             CreateOutcome::Found(found) => self.found(Outcome::Issued, &found),
-            // Issued and reversed since the lookup — by an earlier execution
+            // Issued and reversed since the lookup, by an earlier execution
             // of the step and anyone's storno. As if the lookup had seen it:
-            // `reversed`, and a new document needs an explicit `reissue`
-            // (ADR 0003). The storno number is not looked up here; the next
-            // call's lookup reports it.
+            // `reversed`, and a new document needs an explicit `reissue`.
+            // The storno number is not looked up here; the next call's lookup
+            // reports it.
             CreateOutcome::Reversed(found) => self.reversed(found.number(), None),
             // The document the lookup saw reversed is reported live: what
             // the lookup would have answered under `reissue`.
@@ -154,7 +154,7 @@ impl Identity {
                 return Err(Fault::credentials_rejected(namespace, code, message));
             }
             // The leading query answered with a code or `szlahu_down`: the
-            // fault the lookup step raises for the same answer, at once —
+            // fault the lookup step raises for the same answer, at once:
             // nothing was sent (#63).
             CreateOutcome::Api { code, message } => {
                 return Err(Fault::inconclusive_answer(code, message));
@@ -198,10 +198,10 @@ struct Intent {
 /// create of `kind`, with the reason. The invoice and prepayment chains are
 /// exclusive (`prepaid_chain`), and the final invoice is the prepayment
 /// chain's settled end: a live `VS` refuses a plain invoice and a new
-/// prepayment invoice the same way, even after its `ES` is reversed — without
+/// prepayment invoice the same way, even after its `ES` is reversed: without
 /// that row `ES` → `VS` → storno of the `ES` let a plain `SZ` land beside a
-/// live `VS`, the double billing the worker exists to prevent (#62). A
-/// proforma after any of the three makes no sense (`order_invoiced`) — and
+/// live `VS`, the double billing the worker exists to prevent. A proforma
+/// after any of the three makes no sense (`order_invoiced`), and
 /// without these lookups the order-number hint of step 3 would report the
 /// order's own invoice as `foreign`, which claims another channel issued it.
 /// The final invoice's own check is [`Execution::prepayment_for_final`], not
@@ -227,13 +227,12 @@ const fn exclusive_with(kind: DocumentKind) -> &'static [(DocumentKind, Conflict
 
 /// Step 2's gate: the kinds that convert a proforma and so take
 /// `options.proforma` and run the proforma link. The invoice and the
-/// prepayment invoice do — the Agent carries `dijbekeroSzamlaszam` on both
-/// (#69), and szamlazz.hu links the order's live proforma to either by shared
-/// order number regardless (`docs/szamlazz-hu-behaviour.md`, "Proformas:
-/// conversion, auto-linking, deletion"), which is what makes `none` a
+/// prepayment invoice do: the Agent carries `dijbekeroSzamlaszam` on both,
+/// and szamlazz.hu links the order's live proforma to either by shared
+/// order number regardless, which is what makes `none` a
 /// `conflict{proforma_live}` on both. A proforma has nothing to convert; the
 /// final invoice settles a prepayment invoice, and the proforma the order had
-/// was consumed by that prepayment invoice — a live proforma of ours cannot
+/// was consumed by that prepayment invoice: a live proforma of ours cannot
 /// exist beside it, because `create_proforma` is refused once the prepayment
 /// invoice is live (`order_invoiced`).
 const fn links_proforma(kind: DocumentKind) -> bool {
@@ -257,8 +256,8 @@ impl Execution {
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
         let mut refs = Refs::default();
 
-        // Step 1: exclusivity — the other kinds whose live document refuses
-        // this create — then, for a final invoice, its prepayment.
+        // Step 1: exclusivity (the other kinds whose live document refuses
+        // this create), then, for a final invoice, its prepayment.
         for &(other, reason) in exclusive_with(kind) {
             if let Some(response) = self
                 .exclusivity(ctx, &prepared, &identity, other, reason)
@@ -497,11 +496,11 @@ impl Execution {
     /// ([`links_proforma`]).
     ///
     /// Under `auto` and `none` a document under `…:proforma` that fails
-    /// validation is `conflict{external_id_collision}` — see
+    /// validation is `conflict{external_id_collision}`: see
     /// [`Self::exclusivity`] for why a collision is never treated as absent.
     ///
     /// Under `{number}` the named document is verified and checked like every
-    /// other document found by number (design §3): another order's number, or
+    /// other document found by number: another order's number, or
     /// none, is `conflict{not_managed, existing_number}`; a document that is
     /// not a proforma is `invalid_input`.
     async fn proforma_link(
@@ -569,8 +568,8 @@ impl Execution {
                     QueryOutcome::NotFound => Ok(Some(
                         identity.conflict_about(ConflictReason::ProformaMissing, number),
                     )),
-                    // Checked like every other document found by number
-                    // (design §3), in the order the other verifies use: this
+                    // Checked like every other document found by number,
+                    // in the order the other verifies use: this
                     // order's number, then the kind. Without the first a
                     // caller could link another order's live proforma into
                     // this order's invoice.
@@ -657,7 +656,7 @@ impl Execution {
             .map_err(about)?)
     }
 
-    /// Step 3: one read-only durable step under the read policy — the
+    /// Step 3: one read-only durable step under the read policy, querying the
     /// external id and, for every kind but correctives, the order-number
     /// hint. A lookup szamlazz.hu never answered is `unavailable`; the caller
     /// attaches the document.
@@ -688,8 +687,8 @@ impl Execution {
     /// Step 4: one durable step under the issue policy's run retry policy,
     /// query-first on every execution (the query is inside the closure: a
     /// separate journaled pre-query would replay its stale "nothing" on the
-    /// retry and re-send). Any `Err` from the run — exhaustion (500) or
-    /// cancellation (409) — is `outcome_unknown` about this document: nothing
+    /// retry and re-send). Any `Err` from the run (exhaustion (500) or
+    /// cancellation (409)) is `outcome_unknown` about this document: nothing
     /// is recorded, the next invocation's lookup finds whatever landed.
     async fn create_step(
         &self,
@@ -775,10 +774,10 @@ mod tests {
     }
 
     /// Step 1's table: the invoice and prepayment chains refuse each other
-    /// (`prepaid_chain`), and the final invoice — the prepayment chain's
-    /// settled end, live after its `ES` is reversed — refuses both the same
-    /// way (#62: without that row, `ES` → `VS` → storno of the `ES` let a
-    /// plain `SZ` land beside a live `VS`); a proforma is refused by all
+    /// (`prepaid_chain`), and the final invoice (the prepayment chain's
+    /// settled end, live after its `ES` is reversed) refuses both the same
+    /// way (without that row, `ES` → `VS` → storno of the `ES` let a plain
+    /// `SZ` land beside a live `VS`); a proforma is refused by all
     /// three (`order_invoiced`), so that the order's own invoice is never met
     /// by the hint as `foreign`; the final invoice's own check is
     /// `prepayment_for_final`, not exclusivity.
@@ -810,7 +809,7 @@ mod tests {
     }
 
     /// `options.proforma` is an option of the kinds that convert a proforma:
-    /// the invoice and, since #69, the prepayment invoice — the Agent carries
+    /// the invoice and the prepayment invoice; the Agent carries
     /// `dijbekeroSzamlaszam` on both. A proforma has nothing to convert and
     /// the final invoice settles a prepayment invoice, so both refuse
     /// anything but `auto` before any read.
@@ -854,13 +853,12 @@ mod tests {
         }
     }
 
-    /// Step 0 (J8, #64): a body whose line-item arithmetic overflows a
-    /// decimal is the `invalid_input` fault naming the item, raised by the
-    /// handler's own validation before any read — never a panic, which on
-    /// the SDK's connection task would take every in-flight invocation down
-    /// with it. Runs after the Prologue (the check needs the account's
-    /// currency defaults), so `namespace` and `account` are journaled; nothing
-    /// is sent.
+    /// Step 0: a body whose line-item arithmetic overflows a decimal is the
+    /// `invalid_input` fault naming the item, raised by the handler's own
+    /// validation before any read; never a panic, which on the SDK's
+    /// connection task would take every in-flight invocation down with it.
+    /// Runs after the Prologue (the check needs the account's currency
+    /// defaults), so `namespace` and `account` are journaled; nothing is sent.
     #[test]
     fn an_overflowing_line_item_is_invalid_input_not_a_panic() {
         use crate::contract::LineItemInput;
@@ -900,12 +898,11 @@ mod tests {
         assert!(invalid_input(fault).contains("items[0]"));
     }
 
-    /// Step 5 (design §5): every settled create outcome as the caller's
-    /// response — in particular the two the create step settles when its
-    /// leading query or re-query finds something the lookup did not see: a
-    /// document reversed since the lookup is `reversed` (never issued past
-    /// without `reissue`, ADR 0003), and the lookup's reversed document
-    /// reported live is `conflict{live}`.
+    /// Step 5: every settled create outcome as the caller's response, in
+    /// particular the two the create step settles when its leading query or
+    /// re-query finds something the lookup did not see: a document reversed
+    /// since the lookup is `reversed` (never issued past without `reissue`),
+    /// and the lookup's reversed document reported live is `conflict{live}`.
     #[test]
     fn a_settled_create_step_maps_onto_the_response() {
         use crate::test_support::Doc;
@@ -983,7 +980,7 @@ mod tests {
         assert_eq!(body["code"], TerminalCode::CredentialsRejected.as_str());
 
         // The leading query's answers (#63): `unavailable` at once, the shape
-        // the lookup step gives the same code — the szamlazz.hu code beside
+        // the lookup step gives the same code, with the szamlazz.hu code beside
         // it, never in `code`; `szlahu_down` has no code to carry.
         let fault = respond(CreateOutcome::Api {
             code: "57".to_owned(),

@@ -16,7 +16,7 @@ use crate::harness::{Harness, create_body};
 
 /// (xi) every execution of the create step loses its reply and the re-query
 /// finds nothing ⇒ the run retry policy re-executes the step (one second
-/// later under the test policy — not the handler's two-minute
+/// later under the test policy, not the handler's two-minute
 /// `initial_interval`), and its exhaustion is a structured `outcome_unknown`
 /// fault naming the order, kind and external id. That run retries spend
 /// none of the handler's `invocation_retry_policy` attempts is (xi-e)'s
@@ -66,8 +66,8 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
     );
 
     // The run's re-execution is visible while the invocation is in flight:
-    // `retry_count` — the invoker's count of starts — counts it, with the
-    // create step named as the failing command — and the completed invocation
+    // `retry_count` (the invoker's count of starts) counts it, with the
+    // create step named as the failing command, and the completed invocation
     // carries the structured fault.
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
@@ -106,11 +106,11 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
 }
 
 /// (xi-a) what `outcome_unknown` asks the caller to do works: the next call
-/// on the same order with a **new** `Idempotency-Key` — after (xi) left the
-/// outcome of `E2E-11`'s create unknown — finds the document that landed
+/// on the same order with a **new** `Idempotency-Key`, after (xi) left the
+/// outcome of `E2E-11`'s create unknown, finds the document that landed
 /// after all under its external id and answers `already_issued` from the
 /// lookup step, with nothing sent; the same key would replay (xi)'s fault.
-/// (`reconciled` is the create step's own answer to a 152 — (iii); a lookup
+/// (`reconciled` is the create step's own answer to a 152, see (iii); a lookup
 /// that finds the document never reaches the create step.)
 pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issued(h: &Harness) {
     h.reset().await;
@@ -223,7 +223,7 @@ pub(crate) async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness)
         "the read policy's delay was honoured, not the handler's: {elapsed:?}"
     );
 
-    // The run, not the handler, is what retried — and it was the lookup.
+    // The run, not the handler, is what retried, and it was the lookup.
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
         retries.failing_commands,
@@ -261,7 +261,7 @@ pub(crate) async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness)
 
 /// (xi-c) a read that szamlazz.hu never answers is, after the read policy
 /// is exhausted, a structured `unavailable` (503) naming the order, kind and
-/// external id — within the read policy's delays — and the create mock sees
+/// external id (within the read policy's delays), and the create mock sees
 /// zero requests.
 pub(crate) async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
     h.reset().await;
@@ -342,7 +342,7 @@ pub(crate) async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harnes
 }
 
 /// (xi-c') an *answer* to the create step's leading query that is neither 7
-/// nor a credential code — here 57 — is settled data, not `Unconfirmed`
+/// nor a credential code (here 57) is settled data, not `Unconfirmed`
 /// (#63): the handler answers the structured `unavailable` (503) at once with
 /// the code beside it, the `create-invoice` run is journaled as data with no
 /// failure and no failing command recorded (the issue policy is not spent on
@@ -402,7 +402,7 @@ pub(crate) async fn answered_code_on_the_create_leading_query_is_an_immediate_un
 
     // Settled inside the one execution: no run failed, so no failure and no
     // failing command were recorded, and `retry_count` stayed at the first
-    // execution's 1 (the server's count includes it, as (vi-c) observed) —
+    // execution's 1 (the server's count includes it, as (vi-c) observed);
     // the answer was data, not `Unconfirmed`.
     assert!(retries.max_retry_count <= 1, "{retries:?}");
     assert!(retries.failures.is_empty(), "{retries:?}");
@@ -430,14 +430,14 @@ pub(crate) async fn answered_code_on_the_create_leading_query_is_an_immediate_un
 
 /// (xi-c'') the two queries of the lookup step answer a szamlazz.hu code
 /// differently (`Gateway::lookup` steps 1–2). The order-number **hint**
-/// answered with a code that is neither 7 nor a credential code — here 57 —
+/// answered with a code that is neither 7 nor a credential code (here 57)
 /// is data the hint cannot conclude from: it looks for a foreign document,
 /// and a code says nothing about one, so the lookup continues as on a miss
-/// and the create proceeds to `issued` in one execution — no run failure
+/// and the create proceeds to `issued` in one execution, no run failure
 /// recorded (the read policy is not spent on an answer), the hint queried
 /// exactly once, one create on the wire. The **external-id** query answered
 /// with the same code is the lookup's own `unavailable` (503) at once, with
-/// the code beside it and nothing sent — the hint is never asked.
+/// the code beside it and nothing sent; the hint is never asked.
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the same code on the hint, then on the external-id query"

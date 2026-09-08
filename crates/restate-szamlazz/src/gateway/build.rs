@@ -1,5 +1,5 @@
 //! The pure projection of a [`DocumentInput`] plus the account's defaults and
-//! seller block into the Agent's [`CreateInvoice`] (design §5 step 0).
+//! seller block into the Agent's [`CreateInvoice`].
 
 use std::str::FromStr as _;
 
@@ -18,8 +18,8 @@ use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 pub struct DocumentRefs<'a> {
     /// The proforma the document consumes (`dijbekeroSzamlaszam`); carried by
     /// [`IssuedKind::Invoice`], [`IssuedKind::Prepayment`] and
-    /// [`IssuedKind::Final`] — the three kinds the Agent lets carry the
-    /// reference — and ignored by the others.
+    /// [`IssuedKind::Final`] (the three kinds the Agent lets carry the
+    /// reference), and ignored by the others.
     pub proforma: Option<&'a str>,
     /// The prepayment a final invoice settles (`elolegSzamlaszam`); required
     /// for [`IssuedKind::Final`].
@@ -191,9 +191,9 @@ impl Gateway {
 
 /// The gross total of a built create request: the sum of its line items'
 /// gross values, or `None` when the sum does not fit a decimal. Checked, like
-/// every arithmetic on caller input — a panic here would run on the SDK's
+/// every arithmetic on caller input: a panic here would run on the SDK's
 /// connection task and take every in-flight invocation on it down with the
-/// request (#64).
+/// request.
 #[must_use]
 pub fn gross_total(create: &CreateInvoice) -> Option<Decimal> {
     create
@@ -202,8 +202,8 @@ pub fn gross_total(create: &CreateInvoice) -> Option<Decimal> {
         .try_fold(Decimal::ZERO, |sum, item| sum.checked_add(item.gross_value))
 }
 
-/// Maps a template token — the wire value (`SzlaMost`) or the
-/// [`InvoiceTemplate`] variant in snake case (`most`) — to the template;
+/// Maps a template token, the wire value (`SzlaMost`) or the
+/// [`InvoiceTemplate`] variant in snake case (`most`), to the template;
 /// anything else is passed through verbatim.
 fn template(token: &str) -> InvoiceTemplate {
     match token {
@@ -497,8 +497,8 @@ mod tests {
         assert_eq!(IssuedKind::from(DocumentKind::Final), IssuedKind::Final);
     }
 
-    /// The proforma reference rides on every kind the Agent lets carry it —
-    /// the invoice, the prepayment invoice (#69) and the final invoice — as
+    /// The proforma reference rides on every kind the Agent lets carry it
+    /// (the invoice, the prepayment invoice and the final invoice) as
     /// `dijbekeroSzamlaszam`: what step 2 linked is what the create carries.
     /// The other kinds ignore it.
     #[test]
@@ -576,9 +576,9 @@ mod tests {
     }
 
     /// A built request's total is summed with checked arithmetic: two items
-    /// that fit on their own but not together are `None`, never a panic
-    /// (#64, J8 — a panic on the connection task would tear down every
-    /// in-flight invocation on it).
+    /// that fit on their own but not together are `None`, never a panic (a
+    /// panic on the connection task would tear down every in-flight
+    /// invocation on it).
     #[test]
     fn gross_total_of_items_that_overflow_together_is_none_not_a_panic() {
         let gateway = gateway(&json!({}));

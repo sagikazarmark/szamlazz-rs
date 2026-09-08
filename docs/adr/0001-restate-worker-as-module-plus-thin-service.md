@@ -6,25 +6,25 @@ that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
 `restate_szamlazz::gateway::Gateway` is a plain Rust module: a struct holding the client
 and the account it speaks for, with async functions `lookup`, `create`, `storno`, `delete_proforma`,
-`set_payments`, `query`, `query_taxpayer` and `probe` — one per durable step. It has no Restate context, returns every expected
+`set_payments`, `query`, `query_taxpayer` and `probe`, one per durable step. It has no Restate context, returns every expected
 szamlazz.hu outcome as data (never `Err` for a rejection, a duplicate or a "not found"; the create
 step's `Err(Unconfirmed)` is reserved for an answer that is *not* known and is what the run retry
 policy re-executes), and is unit-testable with wiremock. The `Order` Virtual Object (key = order
 number) calls these functions **inside its own `ctx.run` closures**. A thin, stateless
 `Szamlazz.Agent` Restate service exposes `query`, `set_payments` and `storno` for by-number
-operations, `query_taxpayer` for the NAV taxpayer lookup by tax number (#49 — a per-account read
+operations, `query_taxpayer` for the NAV taxpayer lookup by tax number (#49, a per-account read
 that is not about a document but needs the account's agent key, which the worker is the one place
 to hold), and the `check_account` probe, all over the same module. No Restate
 service calls another, and `Order` never invokes a handler on its own key. The dependency direction
-the owner asked for — `Order` depends on the gateway, nothing depends on `Order` — is a compile-time
+the owner asked for (`Order` depends on the gateway, nothing depends on `Order`) is a compile-time
 fact: `Szamlazz.Order → gateway ← Szamlazz.Agent`. Everything the services know about the account
 they read through `Gateway::account()`. Since #25 neither service holds a gateway: both hold the
 `Accounts` bundle (account resolver + credential store) and the deployment-level `WorkerConfig`
-(namespace; the issue, read and resolve policies — the read policy since #37), and every handler's prologue resolves its account and opens a
+(namespace; the issue, read and resolve policies, the read policy since #37), and every handler's prologue resolves its account and opens a
 gateway for its own execution ([ADR 0006](0006-account-selection-via-restate-scopes.md)).
 
 The crate pair mirrors email-rs: `restate-szamlazz` is the library (contract types, config, the identity
-types, the module, both services — no state, ADR 0005; `restate-sdk` is an unconditional dependency), and
+types, the module, both services, no state, ADR 0005; `restate-sdk` is an unconditional dependency), and
 `restate-szamlazz-endpoint` is the binary `restate-szamlazz` that hosts the services over HTTP and
 ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 
@@ -33,12 +33,12 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 - **An `Invoice`/`Issuer` Restate service called by `Order` via `ctx.service_client()`.** Rejected.
   Every cost it adds is one the module does not have: the child's *default* retry policy (500 ms
   initial interval, 70 attempts, pause) re-opens the crash window that `Order`'s 2-minute
-  `initial_interval` closes — a child closure re-executed within a second of a crash queries
+  `initial_interval` closes; a child closure re-executed within a second of a crash queries
   szamlazz.hu before the first request has resolved server-side; the attempt bound becomes
   invocation attempts × child attempts (350 sends under defaults); a *paused* child holds the
   parent's key indefinitely; the buyer PII is journaled three times (Order input, Order's `Call`
   entry, child input); two timeout pairs must stay consistent; and `issue`/`delete_proforma` need
-  `ingress_private` anyway because raw issuing must not bypass `Order`'s lock and pre-query — at which
+  `ingress_private` anyway because raw issuing must not bypass `Order`'s lock and pre-query, at which
   point a private handler differs from a module function only by a second journal and a retry policy.
   The usual reasons for a separate service (independent scaling, per-handler OpenAPI for the raw
   operations, a second Restate caller) do not exist at v1; the first would be a non-goal and the second is
@@ -46,7 +46,7 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 - **`Order` does everything and a public `Invoice.storno` delegates upward into
   `Szamlazz.Order.storno_invoice`.** Rejected. An upward edge into a Virtual Object is a deadlock class: an
   exclusive handler that `.call()`s an exclusive handler on the same VO key never completes
-  (verified — parent `running`, child `pending` forever; killing the parent killed both). It also
+  (verified, parent `running`, child `pending` forever; killing the parent killed both). It also
   inverts the intended dependency direction. The module design is this option with the seam made a
   Rust boundary and the upward call removed.
 
@@ -55,21 +55,21 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 - Every szamlazz.hu call happens inside an `Order` (or `Szamlazz.Agent`) `ctx.run`. The lookup,
   storno and delete runs use `RunRetryPolicy::max_attempts(1)` with outcome-as-data; the create
   step runs under the issue policy (a run retry policy, ADR 0004) and is the one closure that may
-  return a retryable `Err` — only for an outcome that is not known. A run failure surfaces as a
-  terminal error (HTTP 500 to a synchronous caller — verified), which is why the module must never
+  return a retryable `Err`, only for an outcome that is not known. A run failure surfaces as a
+  terminal error (HTTP 500 to a synchronous caller: verified), which is why the module must never
   return `Err` for an expected outcome.
 - A process crash re-executes only the *open* closure; completed runs, sets and sleeps replay from
   the journal. Worst case per episode in a pathological crash loop is (issue policy executions) +
   (invocation attempts − 1) = 9 executions of the create closure, each query-first (ADR 0002),
   finite because of `kill` and of the issue policy's `max_duration` (ADR 0004).
 - `Szamlazz.Agent.storno` on a document that carries `rendelesszam` returns
-  `outcome: managed_by_order{key}` — a convention on the key scheme, never a call into `Order`.
+  `outcome: managed_by_order{key}`, a convention on the key scheme, never a call into `Order`.
   Documents without an order number (no `Order` exists for them) are reversed directly.
 - `lookup`, `create` and `delete_proforma` exist only as module functions. When a second Restate
   caller appears, the upgrade path is an `ingress_private` handler over the module; the module
   boundary is the seam either way.
 - The buyer input is journaled once, in `Order`'s own journal (`journal_retention = 3d`). Responses and
-  tracing carry numbers, ids and totals — no PII; there is no state (ADR 0005).
+  tracing carry numbers, ids and totals, no PII; there is no state (ADR 0005).
   *Amended (#12):* the runs journal the agent crate's response types as they are, so a queried document
   (`QueryOutcome::Found`, the `Live`/`Reversed`/`Collision`/`Foreign` lookup outcomes and the
   `Found`/`Reconciled`/`Collision` create outcomes) is journaled with the buyer block szamlazz.hu
@@ -79,8 +79,8 @@ ships as `ghcr.io/sagikazarmark/restate-szamlazz`.
 - The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`
   prefix marks both as this worker's in a shared Restate cluster; `Agent` names the surface the thin
   service wraps (the Számla Agent, the glossary term). The Rust type is `Agent` and the module
-  behind both services is `gateway` — named for what it is: the module that speaks to szamlazz.hu on
-  behalf of one account, not a second client (the Számla Agent `Client` is the transport it wraps) —
+  behind both services is `gateway`: named for what it is: the module that speaks to szamlazz.hu on
+  behalf of one account, not a second client (the Számla Agent `Client` is the transport it wraps),
   so no Rust item shares a name with the `szamlazz-agent` crate. It was first called `steps`, after
   the durable steps whose bodies it holds; renamed because a new reader should not have to wonder
   what a "step" is. `Invoice`, `Documents` and an unqualified `Szamlazz` were rejected as names for a

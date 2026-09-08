@@ -1,5 +1,5 @@
-//! The upstream corpus — szamlazz.hu's own request and response examples,
-//! `fixtures/upstream/agent/` reached through the `tests/upstream` symlink —
+//! The upstream corpus (szamlazz.hu's own request and response examples,
+//! `fixtures/upstream/agent/` reached through the `tests/upstream` symlink)
 //! read at run time. The corpus is not redistributed with the crate
 //! (`fixtures/SOURCES.md`; `exclude = ["tests/upstream"]` in `Cargo.toml`), so
 //! a package built from crates.io has nothing to read here and every test
@@ -18,8 +18,8 @@ mod corpus {
     /// Where the `tests/upstream` symlink points: `fixtures/upstream/agent`.
     const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/upstream");
 
-    /// The files of one corpus directory in name order, or `None` — after a
-    /// skip message — when the corpus is absent: in a package built from
+    /// The files of one corpus directory in name order, or `None` (after a
+    /// skip message) when the corpus is absent: in a package built from
     /// crates.io the symlink is excluded, so the directory does not exist.
     ///
     /// Only that absence is a skip; any other failure to read is a failure.
@@ -59,7 +59,7 @@ mod corpus {
     pub type Check = fn(&[u8]);
 
     /// Runs every file of a corpus directory through its check, and fails
-    /// when a file has no check, a check has no file, or a check fails —
+    /// when a file has no check, a check has no file, or a check fails:
     /// every failing file is named, so one run reports the whole directory.
     /// Skips (with a message) when the corpus is absent.
     #[track_caller]
@@ -99,13 +99,13 @@ mod corpus {
 }
 
 /// A response body as szamlazz.hu would have delivered it: HTTP 200, no
-/// `szlahu_*` header — every example in the corpus is a body alone.
+/// `szlahu_*` header; every example in the corpus is a body alone.
 fn delivered(body: &[u8]) -> RawResponse {
     RawResponse::new::<&str, &str>([], body.to_vec()).with_status(200)
 }
 
 /// The one email address the examples carry. The docs site masks addresses
-/// as `[email protected]` — with a no-break space (U+00A0) between the words —
+/// as `[email protected]`, with a no-break space (U+00A0) between the words,
 /// and the corpus keeps the page's text verbatim, so that is the value a
 /// request example sends and a response example returns.
 const MASKED_EMAIL: &str = "[email\u{a0}protected]";
@@ -282,10 +282,10 @@ mod examples {
     }
 
     /// `requests/xmlnyugtacreate.xml`: a cash receipt in forints (`Ft`) with
-    /// two rows — one under a special VAT code — and two payments.
+    /// two rows (one under a special VAT code) and two payments.
     pub fn create_receipt() -> CreateReceipt {
         // `ReceiptPayment` is read back in responses too, so it stays
-        // `#[non_exhaustive]` (ADR 0008) and is built through its constructor.
+        // `#[non_exhaustive]` and is built through its constructor.
         let mut voucher = ReceiptPayment::new("voucher", dec!(30000.0));
         voucher.description = Some("OTP SZÉP kártya".to_owned());
 
@@ -415,7 +415,7 @@ mod responses {
     }
 
     /// The docs stand in for every PDF's base64 with something that is not
-    /// base64 — a line of four dots inside it, three dots or prose in its
+    /// base64: a line of four dots inside it, three dots or prose in its
     /// place. As published, the body is refused: a PDF that does not decode
     /// must not pass as one.
     fn refused_as_base64<R: AgentRequest>(request: &R, body: &[u8])
@@ -433,7 +433,7 @@ mod responses {
     }
 
     /// The example with its four-dot abbreviation line removed: the remaining
-    /// lines — wrapped, once broken by a space — are the docs' PDF entire.
+    /// lines (wrapped, once broken by a space) are the docs' PDF entire.
     fn without_abbreviation(body: &[u8]) -> Vec<u8> {
         let text = std::str::from_utf8(body).expect("UTF-8 example");
         let lines: Vec<&str> = text.lines().filter(|line| line.trim() != "....").collect();
@@ -517,7 +517,7 @@ mod responses {
 
     /// A response-version-1 error: plain text, a Java stack trace after the
     /// message. The crate always asks for version 2, so this is an unexpected
-    /// body — quoted as a bounded excerpt, its outcome unknown. The docs show
+    /// body, quoted as a bounded excerpt, its outcome unknown. The docs show
     /// the one page for all four operations, so the four fixtures share it.
     fn text_error<R: AgentRequest>(request: &R, body: &[u8])
     where
@@ -720,7 +720,7 @@ mod responses {
 
     /// The receipt example is commented element by element and carries
     /// `<nyugtaPdf>...</nyugtaPdf>`, three dots for the base64. As published
-    /// it is refused — the dots are not base64 — and with a PDF in their
+    /// it is refused (the dots are not base64), and with a PDF in their
     /// place every block decodes, including the second row, which the docs
     /// spell with the invoice's `nettoErtek`/`afaErtek`/`bruttoErtek` names.
     #[allow(clippy::too_many_lines)]
@@ -882,8 +882,8 @@ mod responses {
 }
 
 /// Every official request example, rebuilt with the crate's request types and
-/// serialised: the crate's XML has the [outline](outline::Outline) of the example —
-/// root, namespace, element names, element order, text — up to the deviations
+/// serialised: the crate's XML has the [outline](outline::Outline) of the example
+/// (root, namespace, element names, element order, text) up to the deviations
 /// each check lists, which are the crate's deliberate protocol choices.
 mod requests {
     use super::outline::{Deviation, assert_equivalent};
@@ -1088,7 +1088,7 @@ mod outline {
     ///
     /// Not part of the outline: the XML declaration, comments, whitespace
     /// around text, every attribute but the root's default namespace, and
-    /// an element with no text and no leaf below it — an empty optional
+    /// an element with no text and no leaf below it; an empty optional
     /// element and an omitted one are the same request to szamlazz.hu (the
     /// docs say "omit this tag" beside `<aggregator></aggregator>`), and
     /// the crate omits.
@@ -1377,8 +1377,8 @@ mod outline {
             );
         }
 
-        /// A deviation that no longer holds — the crate caught up with the
-        /// example, or the example changed — is reported, not silently unused.
+        /// A deviation that no longer holds (the crate caught up with the
+        /// example, or the example changed) is reported, not silently unused.
         #[test]
         #[should_panic(expected = "r/gone")]
         fn a_stale_deviation_fails() {

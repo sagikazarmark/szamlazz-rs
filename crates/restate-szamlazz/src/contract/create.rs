@@ -2,8 +2,8 @@
 //! `create_invoice`, `create_prepayment`, `create_final` and
 //! `correct_invoice`.
 //!
-//! Every one of them takes a [`DocumentInput`] — inside a [`CreateRequest`]
-//! or a [`CorrectRequest`] — and answers a [`CreateResponse`], whose
+//! Every one of them takes a [`DocumentInput`] (inside a [`CreateRequest`]
+//! or a [`CorrectRequest`]) and answers a [`CreateResponse`], whose
 //! [`Outcome`] is the domain result and whose [`ConflictReason`] says why a
 //! request contradicts what szamlazz.hu holds. [`ConflictReason`] is shared
 //! with the storno handlers (see [`storno`](super::storno)).
@@ -48,12 +48,12 @@ impl CreateRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct CreateOptions {
-    /// Issue a new document after the existing one was reversed — by this
+    /// Issue a new document after the existing one was reversed, by this
     /// service, the UI or anyone. Without it a reversed document answers
     /// `outcome: reversed`; with it a live document answers
     /// `conflict{live}`, so the flag can never cause a duplicate.
     pub reissue: bool,
-    /// Which proforma the document converts — on `create_invoice` and
+    /// Which proforma the document converts, on `create_invoice` and
     /// `create_prepayment`, the two kinds the Agent lets carry the reference
     /// (`dijbekeroSzamlaszam`); `create_proforma` and `create_final` refuse
     /// anything but `auto` as `invalid_input`.
@@ -183,13 +183,13 @@ pub enum ConflictReason {
     PrepaidChain,
     /// `create_proforma` while the order's invoice, prepayment invoice or
     /// final invoice of ours is live (see `existing_number`): a proforma after
-    /// the invoice makes no sense. Not `foreign` — the document is this
+    /// the invoice makes no sense. Not `foreign`: the document is this
     /// order's, issued by this service.
     OrderInvoiced,
     /// `reissue: true` while the document is live.
     Live,
     /// A live invoice-kind document under the order number that is under none
-    /// of this order's external ids — another channel or namespace on the
+    /// of this order's external ids: another channel or namespace on the
     /// same szamlazz.hu account; see `existing_number`.
     Foreign,
     /// szamlazz.hu refuses the order number as a duplicate (71/152) and no
@@ -208,8 +208,8 @@ pub enum ConflictReason {
     PrepaymentReversed,
     /// `correct_invoice` on a reversed invoice.
     BaseReversed,
-    /// The document named by number — the invoice to reverse or correct, or
-    /// the proforma of `options.proforma: {number}` — does not carry this
+    /// The document named by number (the invoice to reverse or correct, or
+    /// the proforma of `options.proforma: {number}`) does not carry this
     /// order's number (`existing_number` on a create, `invoice_number` on a
     /// storno). Use the managing order, or `Szamlazz.Agent.storno` for an
     /// unmanaged invoice.
@@ -551,7 +551,7 @@ mod tests {
     /// nothing documented carries a field the contract does not know.
     #[test]
     fn documented_bodies_deserialize() {
-        // crates/restate-szamlazz-endpoint/README.md — the curl example.
+        // crates/restate-szamlazz-endpoint/README.md: the curl example.
         let readme_curl = r#"{
     "document": {
       "buyer": { "name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23." },
@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(request.options, CreateOptions::default());
         assert_eq!(request.document.buyer.name, "Kovács Bt.");
 
-        // tests/e2e/ — the literal bodies of the e2e scenarios.
+        // tests/e2e/: the literal bodies of the e2e scenarios.
         let document = serde_json::to_value(sample_document()).expect("serialize");
         serde_json::from_value::<CreateRequest>(json!({"document": document}))
             .expect("a bare create body");
@@ -637,7 +637,7 @@ mod tests {
     }
 
     /// Every reason is in `ALL`, and its `as_str` token is the snake-case
-    /// serde token — what a caller branches on and what the endpoint README's
+    /// serde token, what a caller branches on and what the endpoint README's
     /// `conflict_reason` table is held to.
     #[test]
     fn every_conflict_reason_is_snake_case() {

@@ -240,7 +240,7 @@ fn parse_decimal(field: &'static str, value: &str) -> Result<Decimal, IpnParseEr
         .or_else(|error: rust_decimal::Error| {
             // The docs show only integer amounts and never specify a decimal
             // separator. Tolerate a lone comma so an unexpected "1234,56"
-            // does not 400 — szamlazz.hu discards a notification after ten
+            // does not 400: szamlazz.hu discards a notification after ten
             // failed deliveries.
             if value.matches(',').count() == 1 && !value.contains('.') {
                 value.replace(',', ".").parse().map_err(|_| error)

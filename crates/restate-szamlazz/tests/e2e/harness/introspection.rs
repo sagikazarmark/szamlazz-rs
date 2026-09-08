@@ -71,7 +71,7 @@ pub(crate) struct Retries {
 }
 
 /// A `sys_invocation` row of a completed invocation. `retry_count` and the
-/// last failure are attempt state, gone once the invocation completed — see
+/// last failure are attempt state, gone once the invocation completed; see
 /// [`Harness::watch`](crate::harness::Harness::watch) for them.
 #[derive(Debug)]
 pub(crate) struct Invocation {

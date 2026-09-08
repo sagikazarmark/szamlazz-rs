@@ -1,5 +1,5 @@
 //! Phase 2: the single → multi flag day and the isolation multi-account mode
-//! leans on — the same order key under two scopes, the same `Idempotency-Key`
+//! leans on: the same order key under two scopes, the same `Idempotency-Key`
 //! under two scopes, an account change and a credential rotation between two
 //! executions.
 
@@ -16,8 +16,8 @@ use crate::harness::{Harness, create_body};
 
 /// (xvi) the single → multi flag day. While the services are private the
 /// ingress refuses a call without creating an invocation; after the drain
-/// and the switch — same namespace, the same szamlazz.hu account now under
-/// scope `acme` — the first scoped create for an order the single-account
+/// and the switch (same namespace, the same szamlazz.hu account now under
+/// scope `acme`) the first scoped create for an order the single-account
 /// phase invoiced finds it under the unchanged external id
 /// (`already_issued`); an unscoped call on the multi-account deployment is
 /// `unknown_account` (400) with `namespace` and `account` journaled and
@@ -128,7 +128,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
 
 /// (xvii) the same order key under scopes `acme` and `beta`, concurrently:
 /// two Virtual Objects, two `issued`, each account's own agent key on the
-/// create wire exactly once — Restate namespaces the Virtual Object key per
+/// create wire exactly once; Restate namespaces the Virtual Object key per
 /// scope, and the prologue opens each execution's gateway on its own
 /// account. (The lookup queries carry the key as well; the create bodies are
 /// what identify *which account issued*.)
@@ -204,7 +204,7 @@ pub(crate) async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &
 }
 
 /// (xvii-b) the **same** `Idempotency-Key` under two scopes is two
-/// invocations — two `x-restate-id`s, two documents — because Restate hashes
+/// invocations (two `x-restate-id`s, two documents), because Restate hashes
 /// the scope into the idempotency identity; and the key replayed under
 /// either scope returns that scope's own stored completion without a call.
 pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: &Harness) {
@@ -267,8 +267,8 @@ pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: 
 
 /// (xix) `acme`'s seller bank account changes between two executions of a
 /// create step (the first loses its reply): the second execution's create
-/// carries the **journaled** account's bank account — the invocation
-/// finishes on the account it started on — and only new invocations see the
+/// carries the **journaled** account's bank account (the invocation
+/// finishes on the account it started on), and only new invocations see the
 /// change.
 pub(crate) async fn account_change_between_executions_does_not_reach_the_invocation(h: &Harness) {
     h.reset().await;
@@ -363,7 +363,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
 /// (xx) `beta`'s agent key is rotated between two executions of a create
 /// step (the first loses its reply): the second execution fetches the
 /// credentials again and carries the new key, while the journaled `account`
-/// entry is byte-identical before and after — credentials are never in it.
+/// entry is byte-identical before and after; credentials are never in it.
 pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harness) {
     h.reset().await;
     h.absent("E2E-20", &["prepayment", "final", "proforma", "invoice"])
@@ -390,7 +390,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
         // journaled and the re-execution is a second away. Read the entry as
         // journaled *before* the rotation, then rotate. (Journal entries are
         // immutable, so the comparison below proves the rotation left the
-        // second execution's account as journaled — the credentials are not
+        // second execution's account as journaled: the credentials are not
         // part of it.)
         h.wait_for_creates(1).await;
         let invocations = h.all_invocations().await;

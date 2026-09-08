@@ -1,8 +1,8 @@
-//! Discovery and binding tests of the Restate adapters (design §11): the
-//! service names, the handler set with its shared flags and the per-handler
-//! retry policy, plus an `Endpoint` build — and the fault → `TerminalError`
-//! mapping the handlers share, and the sentinels that the agent key reaches
-//! neither the `credentials_rejected` warning nor its fault body.
+//! Discovery and binding tests of the Restate adapters: the service names,
+//! the handler set with its shared flags and the per-handler retry policy,
+//! plus an `Endpoint` build; and the fault → `TerminalError` mapping the
+//! handlers share, and the sentinels that the agent key reaches neither the
+//! `credentials_rejected` warning nor its fault body.
 
 use restate_sdk::discovery::{HandlerType, RetryPolicyOnMaxAttempts, ServiceType};
 use restate_sdk::endpoint::Endpoint;
@@ -21,7 +21,7 @@ use crate::test_support::{Doc, ORIGINAL_TELJ};
 const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as u64;
 
 /// The `inactivity_timeout` / `abort_timeout` of every handler whose step is
-/// one szamlazz.hu round trip — the four reads and `set_payments`' one send —
+/// one szamlazz.hu round trip (the four reads and `set_payments`' one send)
 /// in the discovery reports (milliseconds): `2m`, the 60 s client timeout
 /// plus the margin a stalling szamlazz.hu needs (#114). The writes whose step
 /// is three trips carry `4m` / `3m`. A literal, like the attributes it pins
@@ -29,7 +29,7 @@ const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as 
 const ONE_TRIP_TIMEOUT_MS: u64 = 120_000;
 
 /// The `Accounts` bundle of a test account at `endpoint` with `agent_key`,
-/// through the static resolver — what the endpoint binary builds.
+/// through the static resolver: what the endpoint binary builds.
 fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
     let config: StaticConfig = serde_json::from_value(json!({
         "account": {
@@ -87,7 +87,7 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
             // retention so the journal is inspectable. The timeouts are the
             // reads' 2m / 2m (#114): a read step is one szamlazz.hu round trip
             // bounded by the 60 s client timeout, and szamlazz.hu has been
-            // seen to stall for a minute and still answer — the server's 1 m
+            // seen to stall for a minute and still answer; the server's 1 m
             // default would suspend exactly such a read.
             assert_eq!(handler.ty, Some(HandlerType::Shared));
             let input = handler.input.as_ref().expect("an empty input payload");
@@ -106,10 +106,10 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
         // Exclusive is the Virtual Object default and left implicit (`None`).
         assert_eq!(handler.ty, None, "{name}");
         assert!(handler.input.is_some(), "{name} takes an input");
-        // ADR 0004: every handler that calls szamlazz.hu kills after 5
-        // attempts with a 2m → 10m back-off and bounded timeouts. The 2m is
-        // the same rule as the issue policy's floor: the retry after a crash
-        // waits out the client timeout plus a margin.
+        // Every handler that calls szamlazz.hu kills after 5 attempts with a
+        // 2m → 10m back-off and bounded timeouts. The 2m is the same rule as
+        // the issue policy's floor: the retry after a crash waits out the
+        // client timeout plus a margin.
         assert_eq!(
             handler.retry_policy_initial_interval,
             Some(120_000),
@@ -175,7 +175,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
         if name == "query" || name == "query_taxpayer" || name == "check_account" {
             // Read-only: a short 10s → 1m back-off, three attempts, no
             // idempotency retention (nothing to replay); an explicit journal
-            // retention so the journal is inspectable — and, for the probe,
+            // retention so the journal is inspectable, and, for the probe,
             // so the leak assertion can scan it. The reads' 2m / 2m timeouts
             // (#114): one 60 s round trip plus the margin a stalling
             // szamlazz.hu needs, the same rule as `set_payments`' one send.
@@ -223,12 +223,12 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 "{name}"
             );
             // Both writes wait out the 60 s client timeout before the retry
-            // after a crash — never the server's ~500 ms default — so that the
+            // after a crash (never the server's ~500 ms default), so that the
             // re-execution cannot run while the first send is still in flight:
             // `set_payments` because an additive send is at-least-once,
             // `storno` because its re-execution's leading query would
-            // otherwise look before the cut send has landed (ADR 0004). The
-            // same rule floors the issue policy's `initial_delay`.
+            // otherwise look before the cut send has landed. The same rule
+            // floors the issue policy's `initial_delay`.
             assert_eq!(
                 handler.retry_policy_initial_interval,
                 Some(120_000),
@@ -240,11 +240,11 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             );
             if name == "storno" {
                 // The storno step is the same closure `Szamlazz.Order` runs, so
-                // the policy is `Szamlazz.Order`'s throughout (ADR 0004, #87):
-                // five attempts, 2m → 10m — invocation attempts are spent only
-                // on worker-side failures and every re-dispatch is query-first,
+                // the policy is `Szamlazz.Order`'s throughout (#87): five
+                // attempts, 2m → 10m (invocation attempts are spent only on
+                // worker-side failures and every re-dispatch is query-first,
                 // so nothing about an unmanaged storno justifies a shorter
-                // budget — and the 4m/3m timeouts (query, send, re-query at
+                // budget), and the 4m/3m timeouts (query, send, re-query at
                 // 60 s each): anything shorter suspends a slow storno mid-step.
                 assert_eq!(handler.retry_policy_max_interval, Some(600_000), "{name}");
                 assert_eq!(
@@ -272,7 +272,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
 }
 
 /// Both services hold the same accounts and the same deployment-level
-/// settings, and nothing else — no gateway, no client.
+/// settings, and nothing else: no gateway, no client.
 #[tokio::test]
 async fn services_bind_to_an_endpoint() {
     let worker = WorkerConfig::new(namespace());
@@ -296,7 +296,7 @@ async fn services_bind_to_an_endpoint() {
 }
 
 /// An embedder's store naturally derives `Debug` over its key map. The
-/// crate's own `Debug` impls — `Accounts`, and `Order` / `Agent` over it —
+/// crate's own `Debug` impls (`Accounts`, and `Order` / `Agent` over it)
 /// never descend into the plugged-in resolver or store, so such a store's
 /// keys cannot reach a log line through the services' `Debug`.
 #[test]
@@ -368,10 +368,10 @@ fn a_leaky_store_does_not_print_its_keys_through_accounts_order_or_agent() {
 }
 
 /// A handler's body is decoded by the handler, not the SDK: `Body<T>`'s SDK
-/// `Deserialize` never fails — it keeps the verdict — so a malformed body
+/// `Deserialize` never fails (it keeps the verdict), so a malformed body
 /// reaches the handler and leaves it as the structured `invalid_input` fault
 /// (400, `{code, message}`) with serde's message, naming the field when there
-/// is one — never the SDK's plain-text `Cannot decode input payload`.
+/// is one; never the SDK's plain-text `Cannot decode input payload`.
 #[test]
 fn a_malformed_body_is_a_structured_invalid_input() {
     use bytes::Bytes;
@@ -538,8 +538,8 @@ fn faults_serialise_their_code_and_status() {
     }
 }
 
-/// A szamlazz.hu code never travels in `code` — that field carries a
-/// `TerminalCode` token — but in `szamlazz_code`, beside it: on the 422
+/// A szamlazz.hu code never travels in `code` (that field carries a
+/// `TerminalCode` token), but in `szamlazz_code`, beside it: on the 422
 /// pass-through, whose message is szamlazz.hu's own; on a credential
 /// rejection; on an inconclusive answer to a read. Faults that no szamlazz.hu
 /// answer caused carry no `szamlazz_code` at all.
@@ -590,9 +590,9 @@ fn a_szamlazz_code_travels_in_its_own_field() {
 }
 
 /// The fault a credential rejection raises names the szamlazz.hu code, tells
-/// the caller the outcome is not known — never that "this attempt issued
+/// the caller the outcome is not known (never that "this attempt issued
 /// nothing", which a post-send re-query can make false and which uses a word
-/// the glossary avoids for a handler execution (#63) — and carries the
+/// the glossary avoids for a handler execution, #63), and carries the
 /// document identity when one is attached.
 #[test]
 fn credentials_rejected_fault_names_the_code_and_the_document() {
@@ -666,7 +666,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     ));
     LogCapture::rebuild_interest();
 
-    // What the prologue does: resolve, fetch, open — then the gateway
+    // What the prologue does: resolve, fetch, open; then the gateway
     // observes the code and the fault is built.
     let account = order.accounts().resolve(None).await.expect("account");
     let credentials = order.accounts().fetch(&account).await.expect("credentials");
@@ -701,12 +701,12 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     assert_eq!(body["code"], "credentials_rejected");
 }
 
-/// Every handler execution runs inside one span — `execution` — carrying the
+/// Every handler execution runs inside one span (`execution`) carrying the
 /// scope, the order key, the invocation id and, once the prologue has resolved
 /// it, the account id (#65). Every log line under it is thereby attributable
 /// to an account in a multi-account deployment: the paging
-/// `credentials_rejected` warning — whose own fields stay the namespace and
-/// the code — and the events inside a gateway step's span alike.
+/// `credentials_rejected` warning (whose own fields stay the namespace and
+/// the code), and the events inside a gateway step's span alike.
 #[tokio::test]
 async fn the_execution_span_attributes_every_log_line_under_it() {
     use tracing::Instrument as _;
@@ -852,10 +852,10 @@ fn lookup_classifies_query_outcomes() {
         let lookup = classify(QueryOutcome::Found(other.clone())).expect(label);
         assert_eq!(lookup, Lookup::Collision(other), "{label}");
     }
-    // No account pin (ADR 0006, account-pin amendment): neither `teszt` nor
-    // the seller record's id (`szallito/id`) is compared with anything — a
-    // document of this order and kind is ours whatever they say, and whether
-    // they say anything (an absent `<teszt>` is `None` since #70).
+    // No account pin: neither `teszt` nor the seller record's id
+    // (`szallito/id`) is compared with anything; a document of this order and
+    // kind is ours whatever they say, and whether they say anything (an
+    // absent `<teszt>` is `None` since #70).
     for (label, other) in [
         ("teszt", doc(|doc| doc.test = Some(false))),
         ("no teszt", doc(|doc| doc.test = None)),
@@ -891,11 +891,11 @@ fn lookup_classifies_query_outcomes() {
     assert_eq!(body["code"], "credentials_rejected");
 }
 
-/// The settled storno step as the response (design §6 step 4), for the two
-/// answers the leading query can settle it with before anything is sent
-/// (#63): another code is `unavailable` naming it — the shape the storno
-/// lookup gives the same code — and `szlahu_down` is `unavailable` without a
-/// `szamlazz_code`. Both services share this mapping.
+/// The settled storno step as the response, for the two answers the leading
+/// query can settle it with before anything is sent (#63): another code is
+/// `unavailable` naming it (the shape the storno lookup gives the same code),
+/// and `szlahu_down` is `unavailable` without a `szamlazz_code`. Both
+/// services share this mapping.
 #[test]
 fn a_settled_storno_step_maps_its_leading_query_answers_onto_faults() {
     use restate_sdk::errors::TerminalError;
@@ -948,8 +948,8 @@ fn a_settled_storno_step_maps_its_leading_query_answers_onto_faults() {
     assert_eq!(body["code"], "credentials_rejected");
 }
 
-/// A read step that ended without an answer — the read policy exhausted
-/// (500 carrying the last `Unanswered`) or the invocation cancelled (409) —
+/// A read step that ended without an answer (the read policy exhausted
+/// (500 carrying the last `Unanswered`) or the invocation cancelled (409))
 /// is the `unavailable` fault naming the step and the last failure, about
 /// the document when the caller attaches one.
 #[test]
@@ -993,13 +993,13 @@ fn an_exhausted_read_is_a_structured_unavailable() {
     assert!(error.message().contains("409"), "{}", error.message());
 }
 
-/// The best-effort reads — the storno-number hint after a verify found the
+/// The best-effort reads (the storno-number hint after a verify found the
 /// document already reversed, and `Szamlazz.Agent.storno`'s storno lookup in
-/// the same situation — swallow an exhausted read policy: the handler's
+/// the same situation) swallow an exhausted read policy: the handler's
 /// answer (`reversed`) is already known, so the number is reported as unknown
 /// after a `warn` naming the step. They never swallow a cancellation: the SDK
 /// ends a cancelled run with 409, and an invocation told to stop must not
-/// answer `reversed` as if nothing had happened (J13, #65) — the error is
+/// answer `reversed` as if nothing had happened (#65); the error is
 /// propagated as it came.
 #[test]
 fn a_best_effort_read_swallows_exhaustion_but_propagates_a_cancellation() {
@@ -1041,10 +1041,10 @@ fn a_best_effort_read_swallows_exhaustion_but_propagates_a_cancellation() {
 
 /// What the two best-effort reads make of an answer, for a document the
 /// verify already saw reversed: `Szamlazz.Order.storno_invoice`'s order-number
-/// hint names the storno when it is the `SS` referencing the invoice — any
+/// hint names the storno when it is the `SS` referencing the invoice; any
 /// other document under the order, nothing, or another code is unknown;
 /// `Szamlazz.Agent.storno`'s by-number storno lookup names it when a storno of
-/// ours holds the id (J25, #65) — nothing under it (a reversal from the UI) or
+/// ours holds the id (#65); nothing under it (a reversal from the UI) or
 /// another code is unknown. Rejected credentials stay the fault on both.
 #[test]
 fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
@@ -1136,13 +1136,13 @@ fn the_best_effort_reads_name_the_storno_only_from_its_own_document() {
     ));
 }
 
-/// The Virtual Object key must arrive trimmed (design §3): Restate's per-key
-/// lock is on the *raw* key, so `ORD-1` and ` ORD-1` would be two instances
-/// with two locks mapping to one szamlazz.hu order and identical external ids
-/// — two concurrent creates under them would both pass their lookup and both
-/// send. The handler refuses a key whose trimmed form differs from the raw
-/// one as `invalid_input` naming the rule; [`OrderKey::parse`] itself stays
-/// lenient for the places that parse an order number rather than a key.
+/// The Virtual Object key must arrive trimmed: Restate's per-key lock is on
+/// the *raw* key, so `ORD-1` and ` ORD-1` would be two instances with two
+/// locks mapping to one szamlazz.hu order and identical external ids; two
+/// concurrent creates under them would both pass their lookup and both send.
+/// The handler refuses a key whose trimmed form differs from the raw one as
+/// `invalid_input` naming the rule; [`OrderKey::parse`] itself stays lenient
+/// for the places that parse an order number rather than a key.
 #[test]
 fn the_order_key_must_arrive_trimmed() {
     use restate_sdk::errors::TerminalError;
@@ -1197,12 +1197,12 @@ fn the_order_key_must_arrive_trimmed() {
     }
 }
 
-/// The storno intent both storno handlers build from the verified original
-/// (design §6 step 3, ADR 0007): the storno repeats the original's `telj`,
-/// lifts `eszamla` from the document (the appearance cases are
+/// The storno intent both storno handlers build from the verified original:
+/// the storno repeats the original's `telj`, lifts `eszamla` from the
+/// document (the appearance cases are
 /// [`the_storno_intent_lifts_eszamla_from_the_original_not_the_default`]),
-/// and an original szamlazz.hu returned without a `telj` — its schema has the
-/// element mandatory — is the `unavailable` fault naming the invoice, never
+/// and an original szamlazz.hu returned without a `telj` (its schema has the
+/// element mandatory) is the `unavailable` fault naming the invoice, never
 /// a send without the date or with a default.
 #[test]
 fn the_storno_intent_repeats_the_originals_fulfillment_date() {
@@ -1272,12 +1272,12 @@ fn the_storno_intent_repeats_the_originals_fulfillment_date() {
 }
 
 /// The storno's `eszamla` is the verified original's appearance, and the
-/// account default only where the code is not an invoice appearance
-/// (design §6 step 3). szamlazz.hu does not require a storno's form to match
-/// its original's — a mismatch is accepted silently and the storno document
-/// takes the *request's* flag (P73) — so the intent, not the server, keeps a
-/// reversal in its original's form: `1` (paper) is `false` under an e-invoice
-/// default, `3` (the code szamlazz.hu reports for an invoice created with
+/// account default only where the code is not an invoice appearance.
+/// szamlazz.hu does not require a storno's form to match its original's: a
+/// mismatch is accepted silently and the storno document takes the
+/// *request's* flag (P73), so the intent, not the server, keeps a reversal in
+/// its original's form: `1` (paper) is `false` under an e-invoice default,
+/// `3` (the code szamlazz.hu reports for an invoice created with
 /// `eszamla=true`) and `2` are `true` under a paper default, and `0` (a
 /// proforma) is whatever the account default says.
 #[test]

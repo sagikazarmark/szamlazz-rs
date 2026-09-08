@@ -3,8 +3,7 @@
 //! parses.
 //!
 //! Request writers are hand-written on purpose: element order in the Számla
-//! Agent XML is fixed, so the writer code *is* the wire specification. See
-//! ADR 0001.
+//! Agent XML is fixed, so the writer code *is* the wire specification.
 
 use jiff::civil::Date;
 use quick_xml::Writer;

@@ -16,8 +16,8 @@ The corpus is read by tests, never embedded in them: `crates/szamlazz-agent/test
 and `crates/szamlazz-adatkapcsolat/tests/upstream` are workspace-only symlinks into
 `fixtures/upstream/agent/` and `fixtures/upstream/adatkapcsolat/`, excluded from the
 package (`exclude = ["tests/upstream"]` in each `Cargo.toml`). The tests behind them
-(`tests/upstream.rs`, `tests/document.rs`) open the files at run time with `std::fs` —
-never `include_bytes!`, which would copy them into the package — and skip with a
+(`tests/upstream.rs`, `tests/document.rs`) open the files at run time with `std::fs`
+(never `include_bytes!`, which would copy them into the package), and skip with a
 message when the directory is absent, as it is in a package built from crates.io.
 
 ## Packaged synthetic fixtures
@@ -102,15 +102,15 @@ Downloaded directly (verified to be XML, not HTML error pages):
 | `agent/xsd/szamla.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/szamla/szamla.xsd (schema of the `<szamla>` document returned by querying_xml; same file as `adatkapcsolat/szamla.xsd`) |
 | `agent/xsd/xmlnyugtacreate.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/nyugtacreate/xmlnyugtacreate.xsd |
 | `agent/xsd/xmlnyugtast.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/nyugtast/xmlnyugtast.xsd |
-| `agent/xsd/xmlnyugtaget.xsd` | https://docs.szamlazz.hu/agent/querying_receipt/xsd (inline code block; refreshed 2026-08-11 — the served file at https://www.szamlazz.hu/szamla/docs/xsds/nyugtaget/xmlnyugtaget.xsd is stale and lacks `rendelesSzam`. The docs render the block with newlines collapsed; the original 4-space indentation was restored, content unchanged) |
+| `agent/xsd/xmlnyugtaget.xsd` | https://docs.szamlazz.hu/agent/querying_receipt/xsd (inline code block; refreshed 2026-08-11: the served file at https://www.szamlazz.hu/szamla/docs/xsds/nyugtaget/xmlnyugtaget.xsd is stale and lacks `rendelesSzam`. The docs render the block with newlines collapsed; the original 4-space indentation was restored, content unchanged) |
 | `agent/xsd/xmlnyugtasend.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/nyugtasend/xmlnyugtasend.xsd |
 | `agent/xsd/xmlnyugtasendvalasz.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/nyugtasend/xmlnyugtasendvalasz.xsd (the URL linked from the docs, http://www.szamlazz.hu/docs/xsds/nyugta/xmlnyugtasendvalasz.xsd, returns 404) |
 | `agent/xsd/xmlnyugtavalasz.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/nyugtavalasz/xmlnyugtavalasz.xsd |
 | `agent/xsd/xmltaxpayer.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/taxpayer/xmltaxpayer.xsd (the URL linked from the docs, http://www.szamlazz.hu/docs/xsds/agent/xmltaxpayer.xsd, returns 404) |
 
-Extracted verbatim from inline docs code blocks (the canonical URLs linked from the docs —
+Extracted verbatim from inline docs code blocks (the canonical URLs linked from the docs,
 http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdel.xsd and
-http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdelvalasz.xsd — return 404, and no
+http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdelvalasz.xsd, return 404, and no
 working variant was found under /szamla/docs/xsds/):
 
 | File | Source URL |
@@ -122,8 +122,8 @@ Note: each https://docs.szamlazz.hu/agent/&lt;operation&gt;/xsd page also shows 
 the downloaded files above are the canonical versions.
 
 **Deliberate deviation:** `agent/xsd/xmlszamla.xsd` was patched by hand (commit `3fc523a`) to add
-the `csoportazonosito` (vevő) and `torloKod` (tétel) elements. The docs pages — prose, examples,
-and the inline XSD at https://docs.szamlazz.hu/agent/generating_invoice/xsd — document both
+the `csoportazonosito` (vevő) and `torloKod` (tétel) elements. The docs pages (prose, examples,
+and the inline XSD at https://docs.szamlazz.hu/agent/generating_invoice/xsd) document both
 fields, but the file served at the download URL above is a stale, older revision that omits them
 (verified 2026-08-08: the served file is unchanged since 2026-07-04 and never contained them).
 The docs' inline XSD is the normative one ("The sent XML file must comply with the following XSD
@@ -131,7 +131,7 @@ schema"). Do not refresh this file from the download URL without re-checking the
 XSD, or the two elements will be silently dropped again. Similarly, the served `xmlnyugtaget.xsd`
 lacks the documented `rendelesSzam` selector (`agent/xsd/xmlnyugtaget.xsd` was therefore
 refreshed from the docs' inline XSD on 2026-08-11, see the table above), and the served
-`xmlnyugtaarchiv.xsd` dropped `rendelesSzam` after 2026-07-04 — the docs pages remain the
+`xmlnyugtaarchiv.xsd` dropped `rendelesSzam` after 2026-07-04; the docs pages remain the
 source of truth over the served XSD files where they disagree.
 
 ## adatkapcsolat/
@@ -164,5 +164,5 @@ Not available:
   locale). No `docs.pdf` could therefore be saved; the XSDs above were downloaded individually
   instead.
 - No example (sample document) XML is shown on the bejovo-szamlak, banki-tranzakciok or nyugtak
-  pages — those pages contain only the XSDs. Incoming-invoice, bank-transaction and receipt
+  pages; those pages contain only the XSDs. Incoming-invoice, bank-transaction and receipt
   pushed-document examples and their receiver-response examples are therefore not included.

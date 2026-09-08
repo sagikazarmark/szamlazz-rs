@@ -1,4 +1,4 @@
-//! `szamlazz listen` — a development receiver for IPN and Adatkapcsolat.
+//! `szamlazz listen`: a development receiver for IPN and Adatkapcsolat.
 //!
 //! Serves the IPN endpoint at `/ipn` and the Adatkapcsolat endpoint at
 //! `/adatkapcsolat`, pretty-printing every message. Point szamlazz.hu (or a
@@ -24,10 +24,10 @@ pub struct ListenArgs {
     bind: String,
 
     /// Expected X-Szamlazzhu-Key for the Adatkapcsolat endpoint; requests
-    /// with a different key are answered `KEY_ERR` per protocol — after which
+    /// with a different key are answered `KEY_ERR` per protocol, after which
     /// szamlazz.hu never resends that bank transaction or receipt, so make
     /// sure it is the key of the registration you point here. Prefer the
-    /// `SZAMLAZZ_ADATKAPCSOLAT_KEY` environment variable — a key passed as a
+    /// `SZAMLAZZ_ADATKAPCSOLAT_KEY` environment variable: a key passed as a
     /// flag is visible in the process list and shell history.
     #[arg(long, env = "SZAMLAZZ_ADATKAPCSOLAT_KEY", hide_env_values = true)]
     adatkapcsolat_key: Option<String>,

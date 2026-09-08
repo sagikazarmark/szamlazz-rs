@@ -1,4 +1,4 @@
-//! `szamlazz` — command line tool for szamlazz.hu.
+//! `szamlazz`: command line tool for szamlazz.hu.
 
 mod commands;
 mod output;
@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "szamlazz", version, about)]
 struct Cli {
     /// Számla Agent key; generate one on the szamlazz.hu dashboard. Prefer the
-    /// `SZAMLAZZ_AGENT_KEY` environment variable — a key passed as a flag is
+    /// `SZAMLAZZ_AGENT_KEY` environment variable: a key passed as a flag is
     /// visible in the process list and shell history.
     #[arg(
         long,

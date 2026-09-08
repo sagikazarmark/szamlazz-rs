@@ -14,8 +14,8 @@ use crate::harness::szamlazz::{
 };
 use crate::harness::{Harness, create_body, document};
 
-/// (x-b) a malformed body — one carrying a field the contract does not
-/// know, a misspelt `reissue` — is refused as the structured `invalid_input`
+/// (x-b) a malformed body (one carrying a field the contract does not
+/// know, a misspelt `reissue`) is refused as the structured `invalid_input`
 /// fault (400, `{code, message}` naming the field), not accepted as
 /// `reissue: false` and not the SDK's plain-text `Cannot decode input
 /// payload`. Refused before the prologue: nothing journaled, nothing sent,
@@ -64,7 +64,7 @@ pub(crate) async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) 
         "{invocation:?}"
     );
 
-    // A nested one — `buyer.tax_numer` — and a wrong type are the same
+    // A nested one (`buyer.tax_numer`) and a wrong type are the same
     // fault; the caller never gets an invoice without the tax number.
     let mut body = json!({ "document": document(dec!(1000)) });
     body["document"]["buyer"]["tax_numer"] = json!("12345678-2-42");
@@ -94,12 +94,12 @@ pub(crate) async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) 
     eprintln!("(x-b) malformed body → structured invalid_input, nothing issued: pass");
 }
 
-/// (x-c) a Virtual Object key that is not trimmed — `%20E2E-10c`, which the
-/// ingress decodes to ` E2E-10c` — is refused as `invalid_input` naming the
+/// (x-c) a Virtual Object key that is not trimmed (`%20E2E-10c`, which the
+/// ingress decodes to ` E2E-10c`) is refused as `invalid_input` naming the
 /// rule. Restate's per-key lock is on the *raw* key, so ` E2E-10c` and
 /// `E2E-10c` would be two instances with two locks mapping to one szamlazz.hu
 /// order and identical external ids, and two concurrent creates under them
-/// would both pass their lookup and both send; the caller trims (design §3).
+/// would both pass their lookup and both send; the caller trims.
 /// Refused after the body decode and before the prologue: nothing journaled,
 /// nothing sent, the create mock `expect(0)`. A trailing space is the same
 /// fault; the trimmed key is accepted as before.
@@ -157,14 +157,14 @@ pub(crate) async fn an_untrimmed_order_key_is_refused(h: &Harness) {
     );
 }
 
-/// (x-e) bounded inputs (#64). An order key outside the alphabet — an
+/// (x-e) bounded inputs (#64). An order key outside the alphabet, whether an
 /// internal space (`E2E%2010d`, which the ingress decodes to `E2E 10d`), a
-/// `:`, 41 bytes — and an `invoice_number` over 40 bytes are refused as
+/// `:` or 41 bytes, and an `invoice_number` over 40 bytes are refused as
 /// `invalid_input` naming the rule before the prologue: nothing journaled,
 /// nothing sent. A body whose line-item arithmetic overflows a decimal is the
-/// same fault from the handler's own validation — after the prologue's two
+/// same fault from the handler's own validation (after the prologue's two
 /// entries (`namespace`, `account`), which the check needs for the account's
-/// currency defaults, and before any read — never a panic: the request is
+/// currency defaults, and before any read), never a panic: the request is
 /// sent beside a healthy create on another order against the same endpoint,
 /// and that create is `issued` without a retry; exactly one create reaches
 /// szamlazz.hu, the healthy order's.
@@ -310,7 +310,7 @@ pub(crate) async fn bounded_inputs_are_refused_and_disturb_no_other_invocation(h
 /// szamlazz.hu and is 400 `invalid_input` without a `szamlazz_code`; a
 /// credit entry szamlazz.hu refuses is 422 `szamlazz_error` naming the
 /// invoice; an unknown invoice on `Szamlazz.Order.storno_invoice` is 404
-/// `not_found` — the same token `Szamlazz.Agent` answers — attaching the
+/// `not_found` (the same token `Szamlazz.Agent` answers) attaching the
 /// order, kind and storno external id.
 pub(crate) async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_beside_it(
     h: &Harness,

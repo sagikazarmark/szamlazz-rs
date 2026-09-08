@@ -12,8 +12,8 @@ use crate::harness::{Harness, create_body};
 /// (x-d) a live final invoice under `…:final` closes the order to every
 /// other create (#62). After `ES` → `VS` → storno of the `ES`, `…:prepayment`
 /// is reversed, `…:invoice` is absent and the newest document under the order
-/// is the `ES`'s storno — nothing the lookup step's hint would call foreign
-/// — so without a row for the final invoice a plain `SZ` (or a second `ES`
+/// is the `ES`'s storno (nothing the lookup step's hint would call foreign),
+/// so without a row for the final invoice a plain `SZ` (or a second `ES`
 /// under `reissue`) landed beside the live `VS`. The exclusivity step finds
 /// the `VS`: `create_invoice` and `create_prepayment`, with and without
 /// `reissue`, are `conflict{prepaid_chain, existing_number}`, `create_proforma`
@@ -21,7 +21,7 @@ use crate::harness::{Harness, create_body};
 /// `exclusivity-final` with no lookup step after it, and nothing is sent. A
 /// **reversed** `VS` refuses nothing: `create_invoice`, and `create_prepayment`
 /// with `reissue`, proceed to `issued`; `create_final` reports the reversed
-/// final and, with `reissue`, issues the next one under the same id — its own
+/// final and, with `reissue`, issues the next one under the same id; its own
 /// check, `prepayment-for-final`, is unchanged.
 #[allow(
     clippy::too_many_lines,
@@ -92,8 +92,8 @@ pub(crate) async fn a_live_final_closes_the_order_to_the_other_creates(h: &Harne
 
     // A reversed final refuses nothing: with both the `ES` and the `VS`
     // reversed, the plain invoice proceeds and a second prepayment invoice
-    // proceeds under `reissue` — the hint's newest document is the final's
-    // storno, not foreign — and each create lands under its own external id.
+    // proceeds under `reissue` (the hint's newest document is the final's
+    // storno, not foreign), and each create lands under its own external id.
     for (handler, kind, reissue, number) in [
         ("create_invoice", "invoice", false, "SZ-36"),
         ("create_prepayment", "prepayment", true, "ES-36B"),
@@ -203,7 +203,7 @@ pub(crate) async fn a_live_final_closes_the_order_to_the_other_creates(h: &Harne
 /// and/or the `VS` reversed since: nothing under `…:invoice` or `…:proforma`,
 /// the `ES` under `…:prepayment`, the `VS` (`hivszamlaszam` = the `ES`) under
 /// `…:final`, and the newest document under the order the storno `SS-{n}` of
-/// the last one reversed — the `VS` itself while both are live.
+/// the last one reversed, or the `VS` itself while both are live.
 async fn mount_prepaid_chain(h: &Harness, n: &str, es_reversed: bool, vs_reversed: bool) {
     let order = format!("E2E-{n}");
     let (es, vs, ss) = (format!("ES-{n}"), format!("VS-{n}"), format!("SS-{n}"));
@@ -245,16 +245,16 @@ async fn mount_prepaid_chain(h: &Harness, n: &str, es_reversed: bool, vs_reverse
 }
 
 /// (x-h) `create_final` settles its prepayment invoice first
-/// (`prepayment-for-final`, design §5 kind specifics): none under
-/// `…:prepayment` is `conflict{prepayment_missing}` without an
-/// `existing_number`, a reversed one is `conflict{prepayment_reversed,
-/// existing_number}`, both with nothing sent and no step after the check; a
-/// live one is named on the wire — `elolegSzamlaszam` beside the `vegszamla`
-/// flag — and is never foreign to the lookup step's hint although it is the
-/// newest live invoice-kind document under the order; and szamlazz.hu's 73
-/// (the referenced prepayment invoice cannot be identified — how the server
-/// enforces one final invoice per prepayment invoice) is `rejected{73}` with
-/// its message, settled after one send.
+/// (`prepayment-for-final`): none under `…:prepayment` is
+/// `conflict{prepayment_missing}` without an `existing_number`, a reversed one
+/// is `conflict{prepayment_reversed, existing_number}`, both with nothing sent
+/// and no step after the check; a live one is named on the wire
+/// (`elolegSzamlaszam` beside the `vegszamla` flag), and is never foreign to
+/// the lookup step's hint although it is the newest live invoice-kind document
+/// under the order; and szamlazz.hu's 73 (the referenced prepayment invoice
+/// cannot be identified: how the server enforces one final invoice per
+/// prepayment invoice) is `rejected{73}` with its message, settled after one
+/// send.
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the two refusals, the issued final on the wire and the 73"
@@ -372,7 +372,7 @@ pub(crate) async fn create_final_settles_its_prepayment_invoice_first(h: &Harnes
     assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
 
     // szamlazz.hu's 73: the referenced prepayment invoice cannot be
-    // identified — a rejection, settled after one send.
+    // identified (a rejection, settled after one send).
     h.reset().await;
     h.holds(&Doc {
         external_id: Some("acct:E2E-43:prepayment"),

@@ -43,9 +43,9 @@ type Ci {
 
   """
   The handler layer end to end: the ignored `tests/e2e` suite of
-  `restate-szamlazz` — the `Szamlazz.Order` and `Szamlazz.Agent` handlers, the
+  `restate-szamlazz`: the `Szamlazz.Order` and `Szamlazz.Agent` handlers, the
   multi-account flag day and scope isolation, the journal scan for the agent
-  key, the run-name pin and the protocol-v7 canary — against `restate-server`
+  key, the run-name pin and the protocol-v7 canary, against `restate-server`
   processes the harness spawns in this container from the binary of the
   Restate image (`RESTATE_SERVER_BIN`; there is no docker here). `CI` is set,
   so a run without a server fails instead of skipping.

@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/szamlazz-agent?style=flat-square&label=crates.io)](https://crates.io/crates/szamlazz-agent)
 [![docs.rs](https://img.shields.io/docsrs/szamlazz-agent?style=flat-square&label=docs.rs)](https://docs.rs/szamlazz-agent)
 
-**Sans-IO Rust client for the [szamlazz.hu Számla Agent](https://docs.szamlazz.hu/agent/basics/what-is).**
+**Rust client for the [szamlazz.hu Számla Agent](https://docs.szamlazz.hu/agent/basics/what-is).**
 
 The core performs no I/O: request types serialize into a ready-to-send `WireRequest`, and typed responses parse from raw headers and body bytes. Any HTTP client can drive it on native Rust or `wasm32-unknown-unknown`, including Cloudflare Workers.
 
@@ -61,7 +61,7 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(document.info.order_number.as_deref(), Some("ORD-1"));
     println!("gross total: {}", document.totals.total.gross);
 
-    // Fetch the PDF — by invoice number here; the order number or the external id work too.
+    // Fetch the PDF, by invoice number here; the order number or the external id work too.
     let fetch = QueryInvoicePdf::new(InvoiceSelector::InvoiceNumber(document.info.invoice_number));
     let fetched = client.send(&fetch).await?;
     fetched.pdf.save_to("ORD-1.pdf")?; // or `fetched.pdf.as_bytes()` for the raw bytes
@@ -81,7 +81,7 @@ use szamlazz_agent::{Client, ClientError, InvoiceNumber, OutcomeClass};
 
 /// What one create settled to.
 enum Outcome {
-    /// Issued — now, or by an earlier attempt whose reply was lost.
+    /// Issued, now, or by an earlier attempt whose reply was lost.
     /// `None` only for a PDF preview, which issues nothing.
     Issued(Option<InvoiceNumber>),
     /// Nothing was issued: szamlazz.hu refused, or confirmed that nothing
@@ -89,7 +89,7 @@ enum Outcome {
     /// request may be sent again, once its cause is fixed.
     NotIssued(ClientError),
     /// A document may exist: neither the create nor the reconciling query
-    /// answered. Never send again from here — query by the external id
+    /// answered. Never send again from here, query by the external id
     /// until szamlazz.hu answers.
     Unknown(ClientError),
 }
@@ -127,7 +127,7 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
             match client.send(&query).await {
                 // An earlier attempt issued it; only the reply was lost.
                 Ok(document) => Outcome::Issued(Some(document.info.invoice_number)),
-                // Code 7: szamlazz.hu confirms nothing carries the id — the create did not land.
+                // Code 7: szamlazz.hu confirms nothing carries the id, the create did not land.
                 Err(answer) if answer.outcome_class() == OutcomeClass::NotFound => {
                     Outcome::NotIssued(error)
                 }
@@ -139,11 +139,11 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
 }
 ```
 
-`Outcome::Unknown` is answered by querying again, never by re-sending: the create may have landed, and a second one would be a second legal document. `ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number — query by `InvoiceSelector::OrderNumber` to find it.
+`Outcome::Unknown` is answered by querying again, never by re-sending: the create may have landed, and a second one would be a second legal document. `ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number; query by `InvoiceSelector::OrderNumber` to find it.
 
 ## Bring Your Own HTTP Client
 
-Without `client-reqwest`, `AgentRequest::to_wire` builds the request body and `RawResponse` takes whatever your HTTP client returns. The transport is yours: `POST` to `wire::ENDPOINT` with the given `Content-Type`, and hand every response to `parse` — szamlazz.hu signals errors in-band. Here with the blocking [`ureq`](https://crates.io/crates/ureq):
+Without `client-reqwest`, `AgentRequest::to_wire` builds the request body and `RawResponse` takes whatever your HTTP client returns. The transport is yours: `POST` to `wire::ENDPOINT` with the given `Content-Type`, and hand every response to `parse`; szamlazz.hu signals errors in-band. Here with the blocking [`ureq`](https://crates.io/crates/ureq):
 
 ```rust
 use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
@@ -172,7 +172,7 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
 
 To skip re-authentication on consecutive calls, replay `RawResponse::session_cookie()` as the `Cookie` header of the next request; the reqwest client does this through its cookie store.
 
-The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP 200 with `szlahu_*` headers and a `<hibakod>` body), so the parsers read those first, and the status only decides the case where neither carries an answer — a non-2xx there is `ParseError::HttpStatus`, a proxy or CDN speaking instead of szamlazz.hu, rather than a puzzling `UnexpectedBody`. Without the status that case is still an `UnexpectedBody` parse error; both are `OutcomeClass::Unknown`.
+The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP 200 with `szlahu_*` headers and a `<hibakod>` body), so the parsers read those first, and the status only decides the case where neither carries an answer; a non-2xx there is `ParseError::HttpStatus`, a proxy or CDN speaking instead of szamlazz.hu, rather than a puzzling `UnexpectedBody`. Without the status that case is still an `UnexpectedBody` parse error; both are `OutcomeClass::Unknown`.
 
 ## Feature Flags
 
@@ -194,31 +194,31 @@ No features are enabled by default. The [crate documentation](https://docs.rs/sz
 
 ## Line Items
 
-szamlazz.hu verifies every row's arithmetic server-side — net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT (error codes 259–264) — and the crate does not duplicate that check. It offers three ways to fill the values:
+szamlazz.hu verifies every row's arithmetic server-side (net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT; error codes 259–264), and the crate does not duplicate that check. It offers three ways to fill the values:
 
 - **`LineItem::try_calculated(…, rounding)`** derives them and returns `ArithmeticError` instead of panicking when a value does not fit a `Decimal`. Use it on values you do not control. The rounding is an explicit choice:
-  - `Rounding::minor_unit(&currency)` — the currency's minor unit: whole forints for HUF (`Currency::minor_unit_digits` returns 0 for HUF although ISO 4217 says 2 — the fillér is out of circulation and szamlazz.hu works in whole forints), cents for EUR, thousandths for KWD, 2 for a code the table does not know. This is what the invoice can state and what NAV reporting takes, so it is the choice for a document that must reconcile to the caller's ledger.
-  - `Rounding::Scale(n)` — a fixed number of decimal places.
-  - `Rounding::Exact` — no rounding; a `100.005 EUR` net goes on the wire with a five-decimal VAT. szamlazz.hu then rounds each value to two decimals on its own and does not recompute the gross: `100.004 / 27.00108 / 127.00508` is stored as `100 / 27 / 127.01`, a document whose gross is not net + VAT (observed on the test account). Ask for this only when your business rule requires it and you accept that.
+  - `Rounding::minor_unit(&currency)`: the currency's minor unit, whole forints for HUF (`Currency::minor_unit_digits` returns 0 for HUF although ISO 4217 says 2: the fillér is out of circulation and szamlazz.hu works in whole forints), cents for EUR, thousandths for KWD, 2 for a code the table does not know. This is what the invoice can state and what NAV reporting takes, so it is the choice for a document that must reconcile to the caller's ledger.
+  - `Rounding::Scale(n)`: a fixed number of decimal places.
+  - `Rounding::Exact`: no rounding; a `100.005 EUR` net goes on the wire with a five-decimal VAT. szamlazz.hu then rounds each value to two decimals on its own and does not recompute the gross: `100.004 / 27.00108 / 127.00508` is stored as `100 / 27 / 127.01`, a document whose gross is not net + VAT (observed on the test account). Ask for this only when your business rule requires it and you accept that.
 
-  Rounding is half away from zero and applied at each step — the net is rounded before the VAT is derived from it — so gross = net + VAT holds exactly on the wire, and what is sent is what szamlazz.hu stores. The rounded net can differ from unit price × quantity by up to half a minor unit (`2 × 1234.25 HUF = 2468.5 → 2469`); szamlazz.hu's `net = price × qty` check (259) tolerated discrepancies of 0.5, 1 and 2 HUF on the test account and rejected 5 and 10, so the half unit is safely inside — hand-computed values passed to `LineItem::new` are the ones that can hit it.
+  Rounding is half away from zero and applied at each step (the net is rounded before the VAT is derived from it), so gross = net + VAT holds exactly on the wire, and what is sent is what szamlazz.hu stores. The rounded net can differ from unit price × quantity by up to half a minor unit (`2 × 1234.25 HUF = 2468.5 → 2469`); szamlazz.hu's `net = price × qty` check (259) tolerated discrepancies of 0.5, 1 and 2 HUF on the test account and rejected 5 and 10, so the half unit is safely inside: hand-computed values passed to `LineItem::new` are the ones that can hit it.
 - **`LineItem::calculated(…)`** and **`LineItem::calculated_for_currency(…, &currency)`** are the infallible forms: two decimals, and whole forints for HUF with **exact, unrounded** arithmetic for every other currency, respectively. Both panic on overflow; `calculated_for_currency` is kept for compatibility with the pre-0.4 non-HUF behaviour.
 - **`LineItem::new(…)`** takes net, VAT and gross as your system computed them and sends them as-is.
 
-`VatRate::Percent` renders its wire token normalised — `27.00`, `27.0` and `27` all go out as `27`, `5.50` as `5.5`. szamlazz.hu accepts `27.00` and `27.0` as well (test account), so this is hygiene: the integer form is the one every fixture shows, and a queried rate comes back as a double (`27.0`) that round-trips to `27` this way.
+`VatRate::Percent` renders its wire token normalised: `27.00`, `27.0` and `27` all go out as `27`, `5.50` as `5.5`. szamlazz.hu accepts `27.00` and `27.0` as well (test account), so this is hygiene: the integer form is the one every fixture shows, and a queried rate comes back as a double (`27.0`) that round-trips to `27` this way.
 
 ## Protocol Notes
 
 - Identifiers are English; Rustdoc search also finds types by Hungarian names such as `díjbekérő` and `kintlévőség` through doc aliases.
 - Errors are typed as `ErrorCode` values while preserving the verbatim Hungarian message.
-- Two different questions are answered per error. `ErrorCode::is_retryable()` says whether the same *query* can succeed later (codes 1 and 55). `outcome_class()` — on `ErrorCode`, `ResponseError` and `ClientError` — says whether a *document may exist* despite the error: `Rejected` (nothing was created), `Unknown` (1, 55, 56, `szlahu_down`, a transport or parse failure, any code the crate does not know — query by external id before re-sending), `DuplicateOrderNumber` (71/152) or `NotFound` (7). Re-sending a create because `is_retryable()` is true can issue a duplicate legal document; act on `outcome_class()` instead.
+- Two different questions are answered per error. `ErrorCode::is_retryable()` says whether the same *query* can succeed later (codes 1 and 55). `outcome_class()` (on `ErrorCode`, `ResponseError` and `ClientError`) says whether a *document may exist* despite the error: `Rejected` (nothing was created), `Unknown` (1, 55, 56, `szlahu_down`, a transport or parse failure, any code the crate does not know; query by external id before re-sending), `DuplicateOrderNumber` (71/152) or `NotFound` (7). Re-sending a create because `is_retryable()` is true can issue a duplicate legal document; act on `outcome_class()` instead.
 - Agent code 56 means issuance succeeded but notification delivery failed. It sets `notification_delivery_failed = true`; do not retry that issued document.
-- An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused — it is silently ignored — so read the issued document's `hivdijbekszam` to see which link landed ([behaviour notes](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#proformas-conversion-auto-linking-deletion)).
-- **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice — by `elolegSzamlaszam` or by the shared order number — but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account — [behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices).
+- An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused (it is silently ignored), so read the issued document's `hivdijbekszam` to see which link landed.
+- **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice (by `elolegSzamlaszam` or by the shared order number), but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account.
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client never retries automatically.
 - A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
-- Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length — a parse failure can be logged as is.
+- Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length: a parse failure can be logged as is.
 - A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live". A reader that pins the account mode should treat `None` as a mismatch.
 
 ## License

@@ -5,7 +5,7 @@ amended by #22 (the create step under a run retry policy), #30 (the storno step)
 (the `Szamlazz.Agent` writes' timeouts and retry interval), #61 (the ≥ 90 s re-check rule in code) and #87 (what
 an invocation attempt is spent on; `Szamlazz.Agent.storno` on `Order`'s policy; the read policy widened), below.
 Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the verified Restate facts, and
-the operational alerts; the retry policy and timeout values hold as amended (#41, #61, #87 — the current values are
+the operational alerts; the retry policy and timeout values hold as amended (#41, #61, #87, the current values are
 in the paragraph below and in the code). Withdrawn by #87: the third "considered option"'s etiquette rationale
 (etiquette bounds sends, which the issue policy governs, not invocation attempts). Kill itself is under review for
 the `Order` writes (#87's follow-up). Superseded: the `pending` slot as what makes
@@ -14,7 +14,7 @@ contract phrased in terms of `request_id` (→ retry with a **new** `Idempotency
 replayed under the same key), the operator handlers, and `idempotency_retention = 7d` (the code sets `30d`).
 
 Restate's server-wide default retry policy is `initial-interval 500ms`, factor 2, `max-interval 1m`,
-`max-attempts 70`, `on-max-attempts pause` — about an hour of back-off followed by an indefinite
+`max-attempts 70`, `on-max-attempts pause`, about an hour of back-off followed by an indefinite
 pause awaiting a human (the reference page; the guides disagree with each other on the initial
 interval, so the policy is pinned in code and never left to the default). `on_max_attempts` is a
 per-handler setting in Rust SDK 0.12 and the server honors it (verified: `GET /services/{name}`
@@ -52,8 +52,8 @@ is what makes kill safe; kill is what keeps the key reachable.
 
 - **The server default (`pause` after 70 attempts).** Rejected: a stuck `Order` invocation holds the
   order's key for ~63 minutes of back-off and then until a human resumes or kills it. Every
-  exclusive handler for that order — including the caller's own retries, which are the intended
-  recovery path — queues behind it; only the shared `get` answers. A paused invocation blocks the
+  exclusive handler for that order (including the caller's own retries, which are the intended
+  recovery path) queues behind it; only the shared `get` answers. A paused invocation blocks the
   very handler that would reconcile it.
 - **`pause` with a small `max_attempts`.** Rejected: still holds the key, still needs a human per
   stuck order, and `resume` only re-runs the same budget on the same deployment. Fix-and-resume is
@@ -67,18 +67,18 @@ is what makes kill safe; kill is what keeps the key reachable.
 
 ## Amended (#22): the create step under a run retry policy
 
-The create was first a hand-rolled loop — one `ctx.run` per attempt with `max_attempts(1)`, a
+The create was first a hand-rolled loop, one `ctx.run` per attempt with `max_attempts(1)`, a
 durable `ctx.sleep` between attempts, an attempt counter in the handler. It is now **one** `ctx.run`
 (`create-{kind}`) under the issue policy, `RunRetryPolicy::new().initial_delay(2m)
 .exponentiation_factor(2.0).max_delay(10m).max_attempts(5).max_duration(1h)`, and Restate does the
-retrying: the closure returns `Err(Unconfirmed)` — a plain `std::error::Error`, retryable to the SDK
-— only when szamlazz.hu's answer is *not* known, and every known answer is `Ok` data. Exhaustion
+retrying: the closure returns `Err(Unconfirmed)` (a plain `std::error::Error`, retryable to the SDK)
+only when szamlazz.hu's answer is *not* known, and every known answer is `Ok` data. Exhaustion
 fails the run as a `TerminalError` (500, the last `Unconfirmed`'s message), which the handler maps
 to `outcome_unknown{order, kind, external_id}`; so does a cancel mid-create (409).
 
 The policy must be set explicitly, with `new()` and every field: the SDK's default for a run is
 `RetryPolicy::Infinite`, which sends no `next_retry_delay`, and the server then consumes *this*
-handler's `invocation_retry_policy` budget (5 attempts, kill) instead — 2 minutes between
+handler's `invocation_retry_policy` budget (5 attempts, kill) instead, 2 minutes between
 re-executions and a kill that looks like a transport failure. `RunRetryPolicy::default()` caps at
 2 s / 50 s; `new()` has factor 1.0 and no caps. Verified end to end: with a 1 s test policy the
 re-execution follows the run's delay, not the handler's 2 m, and exhaustion is the structured fault.
@@ -91,7 +91,7 @@ query can live.
 
 **Accepted risk: the attempt count is not durable.** The SDK restores a run's retry count and
 elapsed duration from the server's `retry_count_since_last_stored_command` only when the failing
-run is the first journal entry after replay — true for this handler, whose code is deterministic
+run is the first journal entry after replay; true for this handler, whose code is deterministic
 and whose open entry on re-dispatch is always the create step. Otherwise the count restarts, and
 `max_attempts` is not a hard bound. `max_duration` is the hard limit and is set accordingly (1 h,
 above the ≈ 39 minutes five attempts at `2m → 10m` take). No propagation-lag retry is added inside
@@ -104,17 +104,17 @@ Storno had kept a hand-rolled loop (three `run_once` attempts, a durable sleep, 
 off `issue.initial_delay` / `max_delay`). It now has the shape of the create: a read-only lookup step
 (`lookup-storno-{number}`) and one `ctx.run` (`storno-{number}`) under the same issue policy, query-first
 inside the closure, `Err(Unconfirmed)` only for an unknown answer, exhaustion mapped to
-`outcome_unknown{order, kind, external_id}` — on `Szamlazz.Order.storno_invoice` and on
+`outcome_unknown{order, kind, external_id}`, on `Szamlazz.Order.storno_invoice` and on
 `Szamlazz.Agent.storno` alike. No durable attempt counter or `ctx.sleep` remains: the issue policy is
 the retry envelope of every szamlazz.hu write, and the resolve policy (#25) that of the `account` step.
-The one in-process retry left is the prologue's credential fetch — three fetches 200 ms apart, outside
-the journal, then a terminal `unavailable` — which is deliberately not a Restate retry (design §4;
+The one in-process retry left is the prologue's credential fetch (three fetches 200 ms apart, outside
+the journal, then a terminal `unavailable`), which is deliberately not a Restate retry (design §4;
 [ADR 0006](0006-account-selection-via-restate-scopes.md) records why terminal was chosen over retryable).
 
 ## Amended (#37): the read policy is the retry envelope of every szamlazz.hu read
 
-Until #37 every read-only step — the lookup step, the exclusivity, proforma-link and `get` lookups, the
-verifies, the order-number hint, the storno lookup, `Szamlazz.Agent.query`, the `check_account` probe —
+Until #37 every read-only step (the lookup step, the exclusivity, proforma-link and `get` lookups, the
+verifies, the order-number hint, the storno lookup, `Szamlazz.Agent.query`, the `check_account` probe)
 ran once (`max_attempts(1)`), journaled a transport failure as a `Transport` outcome, and every handler
 mapped that data to the **terminal** `unavailable`. One network blip on any of `create_invoice`'s up to
 four reads was a 503 the caller is told to page on, and nothing retried it. There is no safety reason
@@ -123,14 +123,14 @@ as a first answer (the create step re-queries inside its own closure regardless)
 
 Every read now runs under a third deployment-level run retry policy, the **read policy** (`[read]`,
 `RunRetryPolicy::new()` field for field like the issue policy; defaults `max_attempts = 3`,
-`5s → 30s`, factor 2, `max_duration = 2m` — widened to `5`, `5s → 60s`, `5m` by #87, below). The gateway's read fns return `Err(Unanswered)` — a plain
-`std::error::Error`, retryable to the SDK, the read-side twin of `Unconfirmed` — when szamlazz.hu did
-not answer (a transport or parse failure, `szlahu_down`), and every *answer* — a document, code 7,
-3/135/136/164, another API code — as `Ok` data; the `Transport` variants of the journaled outcome
+`5s → 30s`, factor 2, `max_duration = 2m`, widened to `5`, `5s → 60s`, `5m` by #87, below). The gateway's read fns return `Err(Unanswered)` (a plain
+`std::error::Error`, retryable to the SDK, the read-side twin of `Unconfirmed`) when szamlazz.hu did
+not answer (a transport or parse failure, `szlahu_down`), and every *answer* (a document, code 7,
+3/135/136/164, another API code) as `Ok` data; the `Transport` variants of the journaled outcome
 types are gone, and another API code on a read is the new data variant `Api{code, message}` (still
 `unavailable` in the handlers that could not conclude from it, except `Szamlazz.Agent.query`'s 422
-pass-through and the probe's `Accepted`, which were already data). Exhaustion of the read policy — or
-a cancel mid-read (409) — is the `unavailable` fault, naming the step and the last `Unanswered`,
+pass-through and the probe's `Accepted`, which were already data). Exhaustion of the read policy, or
+a cancel mid-read (409), is the `unavailable` fault, naming the step and the last `Unanswered`,
 about the document when the step knows one (`{order, kind, external_id}` on the lookup step). The
 storno-number hint after a verify that found the document already reversed stays best effort: a hint
 the read policy could not get answered reports the reversal without the storno number rather than
@@ -140,9 +140,9 @@ The three policies are now the complete retry envelope of the worker: the issue 
 szamlazz.hu write, the read policy for every szamlazz.hu read, the resolve policy for the `account`
 step; the credential fetch keeps its in-process retry. The handler timeouts do not change: a retryable
 run failure is returned to the server with `next_retry_delay` and the invocation yields (the SDK does
-not sleep in-process — `restate-sdk-shared-core` 7.0.3, `vm/transitions/journal.rs`), so a read's
+not sleep in-process; `restate-sdk-shared-core` 7.0.3, `vm/transitions/journal.rs`), so a read's
 retry delays are spent between executions and a failed read ends the execution it fails in; the
-per-execution worst case — one read of at most two 60 s calls, or the create closure's three — is the
+per-execution worst case (one read of at most two 60 s calls, or the create closure's three) is the
 one `inactivity_timeout = 4m` / `abort_timeout = 3m` were sized for. Verified end to end: a lookup that
 loses its reply once is re-executed under a 1 s test read policy and the create completes `issued` in
 one invocation with one create on the wire and `last_failure_related_command_name = lookup-invoice`
@@ -154,13 +154,13 @@ replay, `max_duration` is the bound.
 
 `Szamlazz.Agent.storno` runs the same three-call storno closure as `Szamlazz.Order.storno_invoice` (query, send,
 re-query at up to 60 s each, ~180 s in the worst case) but carried `inactivity_timeout = 2m` /
-`abort_timeout = 2m`, below that worst case: a slow storno was suspended and resumed mid-step — not lossy, the
+`abort_timeout = 2m`, below that worst case: a slow storno was suspended and resumed mid-step, not lossy, the
 re-execution's leading query finds a landed storno, but a full prologue replay and a needless round. It now
 carries `Szamlazz.Order`'s `4m` / `3m`; the discovery test asserts them.
 
 `Szamlazz.Agent.set_payments` had `max_attempts = 2, kill` with no `initial_interval`, so the one retry after a
-crash ran on the server's ~500 ms default. Its send is **at-least-once** under `additive: true` — every send that
-reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request — so a retry
+crash ran on the server's ~500 ms default. Its send is **at-least-once** under `additive: true` (every send that
+reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request), so a retry
 that fires while the first send is still in flight (the client waits up to 60 s) could append twice. It now
 carries an explicit `initial_interval = "2m"`, longer than the client timeout; the `outcome_unknown` message is
 conditional on `additive` ("query the invoice before re-sending" rather than "call set_payments again"), and the
@@ -168,7 +168,7 @@ hazard is stated on the request field and in both READMEs. Its timeouts stay `2m
 
 Amended #41 also settled the 71/152 contradiction (design §5 step 4): a duplicate-order-number refusal with nothing
 under the order was `Err(Unconfirmed::Contradiction)` and re-sent the create for up to five executions; it is now
-`conflict{duplicate_order_number}` without `existing_number` on the first occurrence, logged at `warn` — the
+`conflict{duplicate_order_number}` without `existing_number` on the first occurrence, logged at `warn`; the
 refusal is an answer szamlazz.hu already gave.
 
 ## Amended (#61): the ≥ 90 s re-check rule lives in code
@@ -178,11 +178,11 @@ Számla Agent client gives up on a reply at 60 s and szamlazz.hu has been seen t
 still issuing (behaviour notes; [ADR 0002](0002-order-keyed-idempotency-via-external-ids.md) states the "never below
 ~90 s" bound). Until #61 the rule held by convention, with two gaps.
 
-`Szamlazz.Agent.storno` had `max_attempts = 2, kill` with no `initial_interval` — the same omission #41 closed on
-`set_payments` — so the one retry after a crash (a rollout cutting the connection mid-storno) was re-dispatched at the
+`Szamlazz.Agent.storno` had `max_attempts = 2, kill` with no `initial_interval` (the same omission #41 closed on
+`set_payments`), so the one retry after a crash (a rollout cutting the connection mid-storno) was re-dispatched at the
 server's ~500 ms default while the first `xmlszamlast` could still be in flight; its re-execution's leading query
-would then find nothing and send a second storno. Not lossy — szamlazz.hu answers a repeated storno with the existing
-storno number — but a second send the rule forbids, and the endpoint README documented the 500 ms as the behaviour. It
+would then find nothing and send a second storno. Not lossy (szamlazz.hu answers a repeated storno with the existing
+storno number), but a second send the rule forbids, and the endpoint README documented the 500 ms as the behaviour. It
 now carries `initial_interval = "2m"` like every other write handler of both services, and the discovery test pins the
 interval on both `Szamlazz.Agent` writes.
 
@@ -191,8 +191,8 @@ interval on both `Szamlazz.Agent` writes.
 the original send. The issue policy's `initial_delay` now has a floor, `IssueConfig::MIN_INITIAL_DELAY` = the agent
 crate's newly exported `client::REQUEST_TIMEOUT` (60 s) + `IssueConfig::RE_CHECK_MARGIN` (30 s) = 90 s, derived from
 the client's constant rather than a second copy of "60 s"; a shorter delay is `WorkerConfigError::IssueDelayBelowFloor`,
-whose message names the rule, and `--check-config` fails with it. The floor is on the issue policy only — a read
-writes nothing and the resolve policy never reaches szamlazz.hu — and bites where the endpoint loads configuration:
+whose message names the rule, and `--check-config` fails with it. The floor is on the issue policy only (a read
+writes nothing and the resolve policy never reaches szamlazz.hu), and bites where the endpoint loads configuration:
 the e2e suite's 1 s policies are built in Rust, handed to `from_parts` and never pass through `validate`.
 
 ## Amended (#87): an invocation attempt is spent only on a worker-side failure
@@ -200,39 +200,39 @@ the e2e suite's 1 s policies are built in Rust, handed to `from_parts` and never
 Two retry envelopes wrap every szamlazz.hu call, both Restate's: the **run retry policies** (`[issue]`, `[read]`,
 `[resolve]`) on the `ctx.run` steps, and the handlers' **invocation retry policy**. This ADR sized the second as if it
 were the first: its third considered option rejected a larger attempt budget because "szamlazz.hu etiquette bounds
-sends". It does — but sends are bounded by the issue policy, and **a run retry does not spend an invocation
+sends". It does, but sends are bounded by the issue policy, and **a run retry does not spend an invocation
 attempt**. Verified in Restate 1.7.8 (`crates/invoker-impl/src/invocation_state_machine.rs`, `handle_task_error`):
-an SDK error carrying `next_retry_delay` — what the shared core sends for every run retry — becomes
+an SDK error carrying `next_retry_delay` (what the shared core sends for every run retry) becomes
 `RequestedErrorBehavior::RetryWithIntervalOverride`, and the server takes
 `next_retry_interval_override.or_else(|| retry_iter.next())`: the handler's attempt iterator is not advanced. It is
-advanced by everything else — the worker unreachable (connection refused), the stream cut by a rollout or a crash,
+advanced by everything else: the worker unreachable (connection refused), the stream cut by a rollout or a crash,
 the abort timeout, a journal entry the deployment cannot decode, a non-deterministic replay. The iterator is
 cumulative over the invocation's life (`retry_iter.attempts()`; the re-dispatch after a scheduler retry
 `fast_forward`s it, so the arithmetic holds under the vqueues flag); only the SDK-facing
 `retry_count_since_last_stored_command` resets on progress. Asserted end to end (`(xi-e)` in
 `tests/e2e/get.rs`): `get`'s handler allows three attempts, all four of its reads lose their reply once under a 1 s
-test read policy, `sys_invocation.retry_count` — the invoker's count of starts, `start_count` in
-`crates/worker-api/src/invoker/status_handle.rs` — is observed past the handler's budget while in flight (five
+test read policy, `sys_invocation.retry_count` (the invoker's count of starts, `start_count` in
+`crates/worker-api/src/invoker/status_handle.rs`) is observed past the handler's budget while in flight (five
 starts in the run that landed this amendment), and the invocation completes instead of being killed.
 
 Consequences for the numbers of this ADR:
 
 - **Which policy tolerates which outage.** szamlazz.hu unreachable, worker up: the run policies decide, and every
-  handler's first szamlazz.hu call is a read, so `[read]` decides — the old default (3 executions, `5s → 30s`, `2m`;
+  handler's first szamlazz.hu call is a read, so `[read]` decides, the old default (3 executions, `5s → 30s`, `2m`;
   two delays of 5 and 10 s) gave up after ~15 s of connection refusals with a terminal 503 `unavailable` stored under the caller's `Idempotency-Key`
   for 30 days. The defaults are now `max_attempts = 5`, `5s → 60s`, factor 2, `max_duration = 5m`: 75 s of back-off
   rides out a blip of about a minute (four delays: 5 + 10 + 20 + 40 s, so the 60 s cap is inert at the defaults), and a
-  stalling szamlazz.hu — five 60 s client timeouts plus the delays exceed the bound — is waited out up to the 5 m
+  stalling szamlazz.hu (five 60 s client timeouts plus the delays exceed the bound) is waited out up to the 5 m
   `max_duration`. The issue policy stays
   at 5 executions: it is the send bound, and the etiquette lives there. Worker unreachable: the invocation policy
-  decides — 4 re-dispatches at 2 → 4 → 8 → 10 min on the `Order` writes, ~24 min of back-off; every invocation, in
+  decides; 4 re-dispatches at 2 → 4 → 8 → 10 min on the `Order` writes, ~24 min of back-off; every invocation, in
   flight or newly arriving, older than that when the worker returns is killed.
 - **`Szamlazz.Agent.storno`** ran on `max_attempts = 2` (#41): any worker outage over 2 min killed it while
-  `Szamlazz.Order.storno_invoice` — the same closure — survived ~24 min. Nothing about an unmanaged storno justifies
+  `Szamlazz.Order.storno_invoice` (the same closure) survived ~24 min. Nothing about an unmanaged storno justifies
   the asymmetry: the step is query-first and szamlazz.hu's storno is idempotent server-side. It now carries
   `Szamlazz.Order`'s policy (`2m`, factor 2, `10m`, 5, kill); the discovery test pins it.
 - **`Szamlazz.Agent.set_payments` stays at 2.** Its send is at-least-once under `additive: true` and has no query
-  in front of it, so every invocation attempt is a potential second copy of the entries — the one handler where the
+  in front of it, so every invocation attempt is a potential second copy of the entries; the one handler where the
   attempt count is a duplicate hazard rather than an availability knob.
 - **The 500 of a killed invocation is the last retryable error's text**, not the worker's `{code, message}` fault
   body: a caller parsing faults must tolerate it (README, caller contract).
@@ -245,37 +245,37 @@ the arm with `Invoked | Suspended | Inboxed | Scheduled`, `do_append_response_si
 `resume` keeps the pinned deployment unless `--deployment latest` is passed (`lifecycle/manual_resume.rs`,
 `resolve_pinned_deployment`). Neither is exercised end to end yet; this amendment changes no `on_max_attempts`.
 
-## Amended (#114): every wait has a bound — the reads' timeouts, a deadline on the prologue's calls
+## Amended (#114): every wait has a bound, the reads' timeouts, a deadline on the prologue's calls
 
 Two waits the worker could sit in had no bound of their own (review 2026-09-06, J10 and J6).
 
 **The read handlers ran on the server's defaults.** `Szamlazz.Order.get`, `Szamlazz.Agent.query`, `query_taxpayer`
 and `check_account` set neither `inactivity_timeout` nor `abort_timeout`, so they took Restate's 1 m / 1 m, while
-every write handler sized its own from one rule — a step's szamlazz.hu round trips at the Számla Agent client's
+every write handler sized its own from one rule, a step's szamlazz.hu round trips at the Számla Agent client's
 `REQUEST_TIMEOUT` (60 s) each, plus margin: `4m` / `3m` for the create and storno steps' three trips, `2m` / `2m` for
 `set_payments`' one send. A read step is one trip bounded by the same 60 s, and szamlazz.hu has been observed to stall
 for a minute at a time and still answer (behaviour notes), so a stalled read landed exactly on the default inactivity
-boundary: suspended, then aborted, an invocation attempt spent on a read that would have completed — and `get` is
+boundary: suspended, then aborted, an invocation attempt spent on a read that would have completed, and `get` is
 four such reads back to back. The four read handlers now carry `inactivity_timeout = 2m`, `abort_timeout = 2m`, the
 one-trip value of the same rule; the discovery test pins them beside the writes'. (#50 reshapes `get` into fewer reads
 and lands after this, so it reshapes an explicit budget rather than a default.)
 
 **The prologue's `resolve` and `fetch` had no deadline.** The resolve policy bounds re-executions of the `account`
-step, not one hung call inside it — the policy evaluates only on closure *failure* — and the fetch loop pauses between
+step, not one hung call inside it (the policy evaluates only on closure *failure*), and the fetch loop pauses between
 attempts, but each attempt was unbounded: a hung `AccountResolver::resolve` or `CredentialStore::fetch` (a
 database-backed embedder's pool that never answers) held the execution until the handler's inactivity and abort
 timeouts, spending an invocation attempt on a wait the policies exist to retry. Both calls now run under
-`tokio::time::timeout` with a worker-owned constant, `prologue::CALL_DEADLINE` = 10 s — a constant, not a setting: the
+`tokio::time::timeout` with a worker-owned constant, `prologue::CALL_DEADLINE` = 10 s: a constant, not a setting: the
 static resolver is in memory and never reaches it, and a resolver that has not answered in ten seconds is not going
 to. At the deadline the future is dropped and the timeout is the existing retryable answer: in the `account` step the
 closure's error (`ResolverUnavailable::TimedOut`, so the resolve policy re-executes it, and the exhausted step's fault
-text — the last error's display, as for every `run_retrying` step — names the deadline); in the fetch loop one
+text, the last error's display, as for every `run_retrying` step, names the deadline); in the fetch loop one
 attempt's failure (`FetchFailure::TimedOut`, retried through the same branch as a reported `Unavailable`, then the
 terminal `unavailable` fault, whose text names the deadline and neither the account nor the credential reference,
 #65). The loop therefore ends within `3 × 10 s` plus the two 200 ms pauses. The timeout is a variant of its own
 beside the reported `Unavailable` rather than folded into `ResolveError::Unavailable` / `FetchError::Unavailable` as
 #114 first sketched it: those displays are fixed and never echo their source, so a fold could not name the deadline in
-the fault text — and a resolver that reports itself unavailable and one the worker gave up on are two things an
+the fault text, and a resolver that reports itself unavailable and one the worker gave up on are two things an
 operator reads differently. Both are unit-tested under a paused tokio clock (a resolver that never answers is the
 error at exactly the deadline; a store that never answers is the fault after three attempts within that bound); the
 trait rustdoc checklists tell an embedder that the worker bounds the call and that a resolver or store over a pool
@@ -284,16 +284,16 @@ sets its own, shorter timeouts. No journaled type changed shape.
 ## Consequences
 
 - Kill is safe because there is nothing to compensate: the external-id query inside the create
-  step is what the next call reconciles against — it finds whatever landed, live or reversed,
+  step is what the next call reconciles against; it finds whatever landed, live or reversed,
   before it considers sending.
 - Caller contract, documented in the crate README: **any error from an issuing or storno handler
-  means "outcome unknown — retry with a **new** `Idempotency-Key`, or read `Szamlazz.Order.get`"**,
+  means "outcome unknown, retry with a **new** `Idempotency-Key`, or read `Szamlazz.Order.get`"**,
   never "no document exists". A call that timed out on the client side may still run once the key
   frees; `get` is the way to learn its outcome. Callers should not long-poll an exclusive handler;
   `get` is the non-blocking status check. The same key would replay the stored
   `TerminalError{outcome_unknown}` for `idempotency_retention` (30 days). (#67 later scoped the
   rule to `outcome_unknown`, `unavailable` and `credentials_rejected`; the settled 4xx/422 faults
-  are not "outcome unknown" — design §7.)
+  are not "outcome unknown", design §7.)
 - Operations: alert on `sys_invocation` failed completions, on invocations in `backing-off` for
   more than 5 minutes and on any invocation `paused` (none is expected under kill; one is a policy
   override or a server default leaking through); `idempotency_retention = 30d` keeps failed completions
@@ -303,7 +303,7 @@ sets its own, shorter timeouts. No journaled type changed shape.
 - Runbook: `Szamlazz.Order.get`, then re-call the same handler with a new key. Its lookup step
   reconciles by external id and only then does its create step send.
 - In a pathological crash loop an episode executes the create closure at most (issue policy
-  executions) + (invocation attempts − 1) = 9 times, each query-first — finite only because of kill
+  executions) + (invocation attempts − 1) = 9 times, each query-first, finite only because of kill
   and of the issue policy's `max_duration`.
 - Because there is no child Restate service (ADR 0001), the "callee pauses and strands the parent"
   branch does not exist; the rule of thumb "no handler that `Order` awaits may pause" is trivially

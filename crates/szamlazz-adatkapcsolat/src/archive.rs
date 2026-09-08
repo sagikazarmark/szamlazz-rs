@@ -61,7 +61,7 @@ impl DocumentKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Layout {
-    /// `{type}/{YYYY}/{MM}/{name}` — the month comes from the document's own
+    /// `{type}/{YYYY}/{MM}/{name}`: the month comes from the document's own
     /// date (so re-deliveries land in the same place); undated documents go
     /// to `{type}/undated/{name}`.
     #[default]
@@ -75,7 +75,7 @@ pub enum Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Redelivery {
-    /// Write `name.ext`; a re-delivery overwrites it — latest state wins.
+    /// Write `name.ext`; a re-delivery overwrites it: latest state wins.
     #[default]
     Overwrite,
     /// Write `name.{timestamp}.ext` only; every delivery is kept.
@@ -102,7 +102,7 @@ pub enum ArchiveError {
 ///
 /// [`Archiver::new`] applies the defaults: monthly layout, overwrite on
 /// re-delivery, source XML, PDFs, and typed JSON all saved. Anything else goes through
-/// [`Archiver::builder`]. Objects land relative to the operator's root — set
+/// [`Archiver::builder`]. Objects land relative to the operator's root; set
 /// `root` on the `OpenDAL` service to put everything under a prefix.
 #[derive(Debug)]
 pub struct Archiver {
@@ -152,7 +152,7 @@ impl ArchiverBuilder {
     }
 
     /// Whether document data is written as JSON (default `true`). The
-    /// embedded PDF is always stripped from the JSON — it is controlled by
+    /// embedded PDF is always stripped from the JSON: it is controlled by
     /// [`ArchiverBuilder::save_pdf`] alone. The exact source XML is controlled
     /// separately by [`ArchiverBuilder::save_xml`].
     pub fn save_data(mut self, save: bool) -> Self {
@@ -267,8 +267,8 @@ impl Archiver {
     }
 
     /// Archives the exact receipt-batch delivery once. Individual receipts
-    /// still get their own typed JSON files. A batch without receipts —
-    /// which the parse accepts — has nothing to name the file by and nothing
+    /// still get their own typed JSON files. A batch without receipts
+    /// (which the parse accepts) has nothing to name the file by and nothing
     /// to archive.
     async fn archive_receipt_batch(&self, batch: &ReceiptBatch) -> Result<(), ArchiveError> {
         if !self.save_xml {

@@ -1,7 +1,7 @@
 //! Restate services for issuing and managing szamlazz.hu documents with durable, idempotent
 //! execution.
 //!
-//! The `Order` Virtual Object — keyed by the order number — serialises issuing per key so that a
+//! The `Order` Virtual Object (keyed by the order number) serialises issuing per key so that a
 //! caller can say "issue the invoice for order X" and get exactly one legal document under
 //! retries, crashes, concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the
 //! source of truth, reached through deterministic external ids (`{namespace}:{order}:{kind}`), so
@@ -12,27 +12,27 @@
 //! resolved [`Account`], deployment constants in [`WorkerConfig`], line totals are computed, and
 //! domain outcomes are returned as data.
 //!
-//! - [`contract`] — the request/response types.
-//! - [`config`] — the deployment-level configuration (the namespace; the issue, read and resolve
+//! - [`contract`]: the request/response types.
+//! - [`config`]: the deployment-level configuration (the namespace; the issue, read and resolve
 //!   policies).
-//! - [`account`] — the account model, the account resolver and credential store traits, and
+//! - [`account`]: the account model, the account resolver and credential store traits, and
 //!   the static resolver over deployment configuration.
-//! - [`identity`] — order keys and external ids.
-//! - [`gateway`] — the module that speaks to szamlazz.hu for one account, outcome as data.
-//! - [`service`] — the Restate adapters.
+//! - [`identity`]: order keys and external ids.
+//! - [`gateway`]: the module that speaks to szamlazz.hu for one account, outcome as data.
+//! - [`service`]: the Restate adapters.
 //!
 //! ## Features
 //!
-//! - `schemars` — `JsonSchema` derives on every [`contract`] type, so the Restate discovery
+//! - `schemars`: `JsonSchema` derives on every [`contract`] type, so the Restate discovery
 //!   manifest and the `OpenAPI` export carry typed request and response schemas. It enables
 //!   `restate-sdk/schemars` too, and Cargo unifies features per build: with it on, every
-//!   `Json<T>` handler on the same endpoint — your own included — needs `T: JsonSchema`.
+//!   `Json<T>` handler on the same endpoint (your own included) needs `T: JsonSchema`.
 //!
 //! ## Compatibility
 //!
 //! The crate re-exports the two crates it is built on, [`restate_sdk`] and [`szamlazz_agent`],
 //! and the two Számla Agent types the [`CredentialStore`] trait is written in, [`Credentials`]
-//! and [`AgentKey`] — so an embedder pins one version of each. The coupling is
+//! and [`AgentKey`], so an embedder pins one version of each. The coupling is
 //! restate-szamlazz 0.x ⇔ szamlazz-agent 0.x (same minor) ⇔ restate-sdk 0.12 ⇔ Restate server
 //! 1.7.8 with protocol v7. The SDK's `#[restate_sdk::service]` macro expands to `::restate_sdk`
 //! paths, so a crate that defines services of its own also names `restate-sdk` as a direct
@@ -70,14 +70,14 @@
 //! ## Your own resolver and store
 //!
 //! A deployment that keeps its accounts in a database and its agent keys in a credential store
-//! of its own implements [`AccountResolver`] and [`CredentialStore`] itself — both are
-//! object-safe traits returning a [`BoxFuture`](account::BoxFuture) — and bundles them with
+//! of its own implements [`AccountResolver`] and [`CredentialStore`] itself (both are
+//! object-safe traits returning a [`BoxFuture`](account::BoxFuture)) and bundles them with
 //! [`Accounts::new`]. Their safety contracts are on the traits. Two things the compiler will
 //! otherwise tell you about: `account::Endpoint` (the Számla Agent URL an [`Account`] carries)
 //! and `restate_sdk::prelude::Endpoint` (the Restate endpoint) share a name, so alias one; and
 //! when one value is both resolver and store, `db.clone()` coerces to `Arc<dyn AccountResolver>`
 //! at the argument but `Arc::clone(&db)` does not (the expected type makes it
-//! `Arc::<dyn AccountResolver>::clone`, whose argument no longer matches) — call `.clone()` on
+//! `Arc::<dyn AccountResolver>::clone`, whose argument no longer matches); call `.clone()` on
 //! the value.
 //!
 //! ```no_run
@@ -171,10 +171,8 @@
 //!
 //! Domain outcomes (`issued`, `already_issued`, `reconciled`, `reversed`, `rejected`,
 //! `conflict{reason}`) are returned as data with HTTP 200. A `TerminalError` carries a
-//! [`contract::TerminalCode`] and always means "outcome unknown — retry with a new
+//! [`contract::TerminalCode`] and always means "outcome unknown: retry with a new
 //! `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no document exists".
-//!
-//! See `docs/design/restate-szamlazz.md` in the repository for the design.
 
 pub mod account;
 pub mod config;

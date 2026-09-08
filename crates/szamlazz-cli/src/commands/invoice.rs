@@ -1,4 +1,4 @@
-//! `szamlazz invoice` — create, fetch, download, reverse.
+//! `szamlazz invoice`: create, fetch, download, reverse.
 
 use std::path::PathBuf;
 

@@ -1,6 +1,6 @@
-//! Where the suite's Restate server comes from — the *server gate*
+//! Where the suite's Restate server comes from (the *server gate*
 //! ([`server_gate`]), decided once from the environment before anything
-//! starts — and the server itself ([`Restate`]): a running one reused, a
+//! starts), and the server itself ([`Restate`]): a running one reused, a
 //! `restate-server` binary spawned on the loopback, or a container of
 //! [`IMAGE`]. The two suites of the binary run concurrently, each on a server
 //! of its own shape ([`MAIN_SERVER`], [`WITHOUT_PROTOCOL_V7`]).
@@ -27,8 +27,8 @@ pub(crate) enum Launcher {
     /// three flags on ([`SERVER_FLAGS`]); nothing is started or stopped.
     Reuse { admin: String, ingress: String },
     /// `RESTATE_SERVER_BIN`: a `restate-server` binary the harness spawns on
-    /// this host, on the ports the server spec names — what the Dagger check
-    /// uses, where there is no docker.
+    /// this host, on the ports the server spec names (what the Dagger check
+    /// uses, where there is no docker).
     Binary(PathBuf),
     /// The docker daemon: a container of [`IMAGE`].
     Docker,
@@ -36,7 +36,7 @@ pub(crate) enum Launcher {
 
 /// The server gate, the decision behind [`launcher_or_skip`]: `reuse` first,
 /// then `binary`, then docker (probed only when neither is given); with none
-/// of them `Ok(None)` — a skip — unless `ci` is set (non-empty), in which
+/// of them `Ok(None)` (a skip) unless `ci` is set (non-empty), in which
 /// case the suite must not pass by skipping and the answer is the failure
 /// message, naming every way to provide a server.
 fn server_gate(
@@ -106,9 +106,9 @@ pub(crate) fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
 }
 
 /// The three experimental server features multi-account mode depends on
-/// (design §4, ADR 0006) — vqueues, protocol v7 (below it the SDK sees no
-/// scope) and scoped Virtual Objects — as `/version` reports each, with the
-/// environment flag that enables it.
+/// (vqueues, protocol v7 (below it the SDK sees no scope) and scoped Virtual
+/// Objects), as `/version` reports each, with the environment flag that
+/// enables it.
 pub(crate) const FEATURES: [(&str, &str); 3] = [
     ("vqueues", "RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true"),
     (
@@ -144,8 +144,8 @@ pub(crate) const MAIN_SERVER: ServerSpec = ServerSpec {
 };
 
 /// The protocol-v7 canary's server: vqueues and scoped Virtual Objects on,
-/// protocol v7 off — a deployment that forgot the one flag the scope needs to
-/// reach the SDK. Its own ports: the two suites run concurrently.
+/// protocol v7 off (a deployment that forgot the one flag the scope needs to
+/// reach the SDK). Its own ports: the two suites run concurrently.
 pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
     flags: &[FEATURES[0].1, FEATURES[2].1],
     ingress_port: 18081,
@@ -154,25 +154,25 @@ pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
 };
 
 /// A Restate server: an existing one (from the environment), a `restate-server`
-/// process, or a container — the last two stopped on drop.
+/// process, or a container (the last two stopped on drop).
 pub(crate) struct Restate {
     pub(crate) admin: String,
     pub(crate) ingress: String,
-    /// The flags the server runs with — what `/version` must report.
+    /// The flags the server runs with: what `/version` must report.
     pub(crate) flags: &'static [&'static str],
     /// The host name under which the server reaches this process's endpoint.
     pub(crate) endpoint_host: String,
     container: Option<String>,
     process: Option<Child>,
     /// The spawned server's base directory, removed on drop unless the test
-    /// is failing — then it stays, with `restate-server.log` in it.
+    /// is failing; then it stays, with `restate-server.log` in it.
     base_dir: Option<PathBuf>,
 }
 
 impl Launcher {
     /// The server of `spec`'s shape: started from the binary or the image, or
     /// the running one taken as it is (checked against `spec`'s flags like
-    /// the others — the caller reuses only where the shape is the main
+    /// the others; the caller reuses only where the shape is the main
     /// suite's).
     pub(crate) fn launch(self, spec: &ServerSpec) -> Restate {
         let endpoint_host = |default: &str| {
@@ -329,7 +329,7 @@ impl Drop for Restate {
 /// The gate reads the environment once: a reusable server wins, then a
 /// `restate-server` binary, then docker; with none of the three the suite
 /// skips on a developer machine and **fails** under `CI`, naming every way to
-/// provide a server — a suite that passes by skipping proves nothing.
+/// provide a server; a suite that passes by skipping proves nothing.
 #[test]
 fn the_server_gate_prefers_a_reused_server_then_the_binary_then_docker() {
     let reuse = Some(("http://a:9070".to_owned(), "http://a:8080".to_owned()));

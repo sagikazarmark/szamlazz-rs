@@ -5,15 +5,15 @@
 //!   and the server process or container.
 //! - [`accounts`]: the scripted and mutable resolver and store the two
 //!   deployments run over, and the deployments themselves.
-//! - [`szamlazz`]: what szamlazz.hu holds — the document fixture, the
-//!   selector matchers and the response templates.
+//! - [`szamlazz`]: what szamlazz.hu holds (the document fixture, the
+//!   selector matchers and the response templates).
 //! - [`ingress`]: an ingress reply and the fault inside its error envelope.
 //! - [`introspection`]: `sys_journal` and `sys_invocation` rows.
 //! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]) and its
-//!   matching — the *run-name pin*.
+//!   matching, the *run-name pin*.
 //!
-//! The harness's own tests — the server gate, the run-pattern matching, the
-//! stub helpers against wiremock alone — live beside what they test and need
+//! The harness's own tests (the server gate, the run-pattern matching, the
+//! stub helpers against wiremock alone) live beside what they test and need
 //! no server.
 
 pub(crate) mod accounts;
@@ -78,24 +78,24 @@ pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
 /// ingress, SQL and stub helpers the scenarios drive them through.
 ///
 /// A scenario states what szamlazz.hu holds through the document-centric
-/// helpers — one call per document, the same body on every selector the
-/// document is reachable by, so the stubs cannot disagree — and through the
+/// helpers (one call per document, the same body on every selector the
+/// document is reachable by, so the stubs cannot disagree), and through the
 /// raw selector builders where it is about a specific wire sequence:
 ///
 /// - [`Harness::absent`]: code 7 on the external ids of `kinds` under `order`.
 /// - [`Harness::holds`]: `doc` on `number_query`, on `order_query` when it
 ///   carries an order, on `external_id_query` when it states an external id.
 ///   When two held documents carry one order, the one held first answers the
-///   order query (wiremock answers with the first mounted match) — a scenario
+///   order query (wiremock answers with the first mounted match): a scenario
 ///   whose order's newest document is not the one it holds keeps the raw
 ///   `order_query` builder.
 /// - [`Harness::holds_after_misses`]: the external-id selector alone, code 7
-///   for `misses` queries, then `doc` — the document appearing after a
+///   for `misses` queries, then `doc`, the document appearing after a
 ///   hand-counted number of queries (the lookup step's, the create step's
 ///   leading query and re-query).
 /// - [`Harness::create_lands_but_reply_lost`]: `create()` answers 500,
 ///   `expect(1)`, and `doc` holds its external id from the moment the create
-///   request is received — the transition is the create stub being matched,
+///   request is received; the transition is the create stub being matched,
 ///   not a query count. Code 7 on the external id before.
 /// - The raw builders (`number_query`, `order_query`, `external_id_query`,
 ///   `create`, `storno`), `expect(n)` and `up_to_n_times(n)`: a stub the
@@ -537,7 +537,7 @@ impl Harness {
     /// run retry under the 1 s test policies is visible for ten samples.
     const WATCH_POLL: Duration = Duration::from_millis(100);
 
-    /// [`watch_for`](Self::watch_for) over four seconds — enough for the one
+    /// [`watch_for`](Self::watch_for) over four seconds, enough for the one
     /// or two run retries a scenario provokes under the 1 s test policies.
     pub(crate) fn watch(&self, key: &str) -> tokio::task::JoinHandle<Retries> {
         self.watch_for(key, Duration::from_secs(4))
@@ -545,11 +545,11 @@ impl Harness {
 
     /// Watches the invocations on Virtual Object `key` for `window` (a
     /// detached task polling every [`Self::WATCH_POLL`], so it carries its own
-    /// copy of the query — `sql` borrows the harness) and records what
+    /// copy of the query; `sql` borrows the harness) and records what
     /// `sys_invocation` reports **while they are in flight**: `retry_count`
     /// (the invoker's count of starts), `last_failure` and
     /// `last_failure_related_command_name` are attempt state, cleared once the
-    /// invocation completes — a completed row shows neither the count nor the
+    /// invocation completes; a completed row shows neither the count nor the
     /// failing command (verified against 1.7.8). Start it before the call,
     /// await it after.
     pub(crate) fn watch_for(
@@ -622,8 +622,8 @@ impl Harness {
         }
     }
 
-    /// Verifies the previous scenario's `expect(n)` counts — wiremock checks
-    /// them on `verify` and on drop, never on `reset` — then forgets every
+    /// Verifies the previous scenario's `expect(n)` counts (wiremock checks
+    /// them on `verify` and on drop, never on `reset`), then forgets every
     /// mock and every recorded request. A mock that saw more or fewer
     /// requests than it expected fails here, at the start of the next
     /// scenario, naming the mock and the requests received; the last

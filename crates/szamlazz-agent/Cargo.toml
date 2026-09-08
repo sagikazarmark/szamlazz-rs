@@ -1,7 +1,7 @@
 [package]
 name = "szamlazz-agent"
 version.workspace = true
-description = "Sans-IO client for the szamlazz.hu Számla Agent"
+description = "Client for the szamlazz.hu Számla Agent"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

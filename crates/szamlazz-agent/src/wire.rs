@@ -1,5 +1,5 @@
-//! The sans-IO wire layer: fully built HTTP requests and raw-response
-//! ingestion, with no HTTP client attached.
+//! The wire layer: fully built HTTP requests and raw-response ingestion,
+//! with no HTTP client attached.
 
 use crate::credentials::Credentials;
 use crate::error::{ApiError, ErrorCode, ParseError, RequestError, ResponseError, body_excerpt};
@@ -8,9 +8,9 @@ use crate::error::{ApiError, ErrorCode, ParseError, RequestError, ResponseError,
 /// multipart form field name selects the operation.
 ///
 /// A [`WireRequest`] does not carry the URL: the endpoint is a property of the
-/// transport, not of the operation, so the client owns it — the bundled
-/// reqwest client through its builder, a sans-IO integration by sending a
-/// `POST` to this constant (or to a mock server in tests).
+/// transport, not of the operation, so the client owns it: the bundled
+/// reqwest client through its builder, an integration with its own HTTP
+/// client by sending a `POST` to this constant (or to a mock server in tests).
 pub const ENDPOINT: &str = "https://www.szamlazz.hu/szamla/";
 
 /// Fixed multipart boundary.
@@ -24,9 +24,9 @@ const BASE_BOUNDARY: &str = "----szamlazz-agent-4f7d1a2b9c3e";
 /// [`ENDPOINT`].
 ///
 /// Exactly what an HTTP client needs and nothing about the transport: send
-/// `body` with a `Content-Type` of `content_type`. Everything transport-side —
+/// `body` with a `Content-Type` of `content_type`. Everything transport-side,
 /// the URL, timeouts, TLS, and the `JSESSIONID` session cookie a response
-/// sets (see [`RawResponse::session_cookie`]) — is the client's to manage.
+/// sets (see [`RawResponse::session_cookie`]), is the client's to manage.
 ///
 /// Read, never constructed, outside this crate; fields may be added.
 #[derive(Clone)]
@@ -129,8 +129,8 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// A raw HTTP response as received.
 ///
 /// Build one from any HTTP client's response, then hand it to the request
-/// type's `parse` function. szamlazz.hu signals errors in-band — HTTP 200
-/// with `szlahu_*` headers and a `<hibakod>` body — so the parsers read the
+/// type's `parse` function. szamlazz.hu signals errors in-band (HTTP 200
+/// with `szlahu_*` headers and a `<hibakod>` body), so the parsers read the
 /// headers and the body first; the HTTP status ([`RawResponse::with_status`])
 /// only matters when neither carries a szamlazz.hu answer, where a non-2xx
 /// says the endpoint (a proxy, a CDN, a misconfigured URL) answered instead.
@@ -195,8 +195,8 @@ impl RawResponse {
     ///
     /// Optional: the parsers read szamlazz.hu's in-band answer first. With
     /// the status known, a non-2xx response that carries no `szlahu_*` header
-    /// is refused as [`ParseError::HttpStatus`] — the endpoint answered, not
-    /// szamlazz.hu — instead of being parsed as an unexpected body. The
+    /// is refused as [`ParseError::HttpStatus`] (the endpoint answered, not
+    /// szamlazz.hu) instead of being parsed as an unexpected body. The
     /// bundled reqwest client always sets it.
     #[must_use]
     pub fn with_status(mut self, status: u16) -> Self {
@@ -234,7 +234,7 @@ impl RawResponse {
     /// Document-issuing operations report the issued number as
     /// `szlahu_szamlaszam`, the totals as `szlahu_nettovegosszeg` /
     /// `szlahu_bruttovegosszeg` / `szlahu_kintlevoseg`, and szamlazz.hu's
-    /// internal *document* identifier as `szlahu_id` — the same value the XML
+    /// internal *document* identifier as `szlahu_id`, the same value the XML
     /// query returns as `alap/id` (a storno or corrective invoice carries its
     /// original's identifier as `gazdEsemAzon`). `szlahu_id` is not an
     /// account or supplier identifier; that is `szallito/id` in query bodies.
@@ -249,7 +249,7 @@ impl RawResponse {
     /// 73), storno (14, 221, 352), and proforma deletion (335) report errors
     /// in the headers *and* the body; the XML query (7) and credit-entry
     /// registration (463) report in the body only. `None` here therefore does
-    /// not mean success — every parser in this crate also reads the body's
+    /// not mean success: every parser in this crate also reads the body's
     /// `<hibakod>` / `<hibauzenet>`. An empty header is no error either: it
     /// is read as absent, like an empty `<hibakod>` element.
     #[must_use]
@@ -266,8 +266,8 @@ impl RawResponse {
 
     /// Fails on a header-signaled error, otherwise hands back the response.
     ///
-    /// In order: `szlahu_down`, `szlahu_error_code`, then — only when neither
-    /// carried a szamlazz.hu answer — a known non-2xx status
+    /// In order: `szlahu_down`, `szlahu_error_code`, then (only when neither
+    /// carried a szamlazz.hu answer) a known non-2xx status
     /// ([`ParseError::HttpStatus`]).
     pub(crate) fn check(&self) -> Result<&Self, ResponseError> {
         match self.header_verdict()? {
@@ -280,7 +280,7 @@ impl RawResponse {
     /// one order every parser applies: `szlahu_down` is
     /// [`ResponseError::ServiceUnavailable`]; else the `szlahu_error_code`
     /// error, handed back as data for the parser to judge (invoice creation
-    /// tolerates 56); else — only when neither carried a szamlazz.hu answer —
+    /// tolerates 56); else (only when neither carried a szamlazz.hu answer)
     /// a known non-2xx status is [`ParseError::HttpStatus`], the endpoint's
     /// answer, not szamlazz.hu's. `Ok(None)` says the body decides.
     pub(crate) fn header_verdict(&self) -> Result<Option<ApiError>, ResponseError> {
@@ -524,8 +524,8 @@ mod tests {
     }
 
     /// A 502 HTML page from a proxy carries no szamlazz.hu answer: refused by
-    /// its status, with a bounded excerpt of the body — never the whole page
-    /// — and the length noted.
+    /// its status, with a bounded excerpt of the body (never the whole page),
+    /// and the length noted.
     #[test]
     fn non_2xx_without_a_szamlazz_header_is_refused_by_status() {
         let page = format!("<html><body>Bad Gateway {}</body></html>", "x".repeat(2000));
@@ -552,7 +552,8 @@ mod tests {
 
     /// The status is a tie-breaker, not the verdict: szamlazz.hu's in-band
     /// headers are read first whatever the status, and an unknown status
-    /// (a sans-IO caller that did not supply one) changes nothing.
+    /// (a caller with its own HTTP client that did not supply one) changes
+    /// nothing.
     #[test]
     fn in_band_headers_take_precedence_over_the_status() {
         let error = RawResponse::new(

@@ -19,7 +19,7 @@ use crate::xml;
 /// corrective without the invoice it corrects) and attaches to each kind the
 /// references it can carry. The proforma being consumed
 /// (`dijbekeroSzamlaszam`) is one of them on the three kinds the XSD lets
-/// carry it — an invoice, a prepayment invoice and a final invoice — and
+/// carry it (an invoice, a prepayment invoice and a final invoice), and
 /// [`InvoiceKind::proforma_number`] reads it uniformly.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -34,7 +34,7 @@ pub enum InvoiceKind {
     /// A proforma / payment request (`díjbekérő`).
     #[doc(alias = "díjbekérő")]
     Proforma,
-    /// A delivery note (`szállítólevél`) — a non-financial document.
+    /// A delivery note (`szállítólevél`), a non-financial document.
     #[doc(alias = "szállítólevél")]
     DeliveryNote,
     /// A prepayment (advance) invoice (`előlegszámla`), optionally issued
@@ -44,8 +44,7 @@ pub enum InvoiceKind {
     /// invoice's order number when the reference is absent (verified); the
     /// reference makes the link explicit rather than leaving it to the order
     /// number. A prepayment invoice sent *with* the reference has not been
-    /// exercised on the test account yet — see the behaviour notes'
-    /// [unverified list](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#still-unverified).
+    /// exercised on the test account yet.
     #[doc(alias = "előlegszámla")]
     Prepayment {
         /// The proforma being invoiced (`dijbekeroSzamlaszam`), if any.
@@ -53,14 +52,13 @@ pub enum InvoiceKind {
     },
     /// A final invoice (`végszámla`) settling a prepayment invoice.
     ///
-    /// szamlazz.hu links the prepayment invoice — by `prepayment_number` or
-    /// by the shared order number — but does **not** net it into the final
+    /// szamlazz.hu links the prepayment invoice (by `prepayment_number` or
+    /// by the shared order number), but does **not** net it into the final
     /// invoice's totals: a final invoice sent with the full performance as
     /// its only lines is issued for the full amount, and the buyer is billed
     /// the prepayment twice. A `végszámla` lists the full performance and
     /// deducts the prepayment as a **negative line item at the same VAT
-    /// rate**; the caller supplies that line. Verified on the test account:
-    /// [behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices).
+    /// rate**; the caller supplies that line. Verified on the test account.
     #[doc(alias = "végszámla")]
     Final {
         /// The prepayment invoice being settled (`elolegSzamlaszam`), if
@@ -298,7 +296,7 @@ pub struct InvoiceHeader {
     ///
     /// A request, not a guarantee: on the test account a create sent with
     /// yesterday's date was answered `sikeres=true` with the issued invoice's
-    /// `<kelt>` set to **today** — the value is silently replaced, not
+    /// `<kelt>` set to **today**; the value is silently replaced, not
     /// rejected (a storno with a non-today `keltDatum` *is* rejected, with
     /// 352). Read the date back from the created document rather than
     /// assuming the one sent.
@@ -774,7 +772,7 @@ impl CreatedInvoice {
     /// answers a storno request for a proforma or a delivery note with a
     /// success-shaped response that merely echoes the requested document
     /// (same number, positive totals) and reverses nothing. A repeat storno of
-    /// an already reversed invoice also passes this check — it echoes the
+    /// an already reversed invoice also passes this check: it echoes the
     /// existing storno invoice, which is a genuine reversal. So does the
     /// storno of a zero-total invoice, whose storno document carries a gross
     /// of `0`.
@@ -1542,9 +1540,9 @@ mod tests {
 
     /// The JSON shape a caller building the request from JSON (the CLI) sends:
     /// every kind that carries a proforma reference is an object with
-    /// `proforma_number` — the prepayment invoice included since #69, before
-    /// which it was the bare string `"prepayment"` — and a `final` written
-    /// before #69, without `proforma_number`, still decodes.
+    /// `proforma_number` (the prepayment invoice included; earlier releases
+    /// wrote it as the bare string `"prepayment"`), and a `final` written by
+    /// an earlier release, without `proforma_number`, still decodes.
     #[test]
     fn invoice_kind_json_shape() {
         use serde_json::json;

@@ -1,7 +1,7 @@
 //! `Szamlazz.Order.storno_invoice`: reversed then stale create then
 //! `reissue`, the original's `telj` repeated or the storno refused (ADR
 //! 0007), the storno step's rejections and exhaustion, an order Restate has
-//! no memory of (Phase 2), and — on both storno handlers — the storno issued
+//! no memory of (Phase 2), and (on both storno handlers) the storno issued
 //! in its original's form (`eszamla`).
 
 use std::time::{Duration, Instant};
@@ -49,7 +49,7 @@ async fn mount_reversed_sz1(h: &Harness) {
 }
 
 /// (iv) storno ⇒ `reversed{storno_number}` with the storno carrying the
-/// original's `telj` as `teljesitesDatum` and no `keltDatum` (ADR 0007); a
+/// original's `telj` as `teljesitesDatum` and no `keltDatum`; a
 /// create ⇒ `reversed`; a create with `reissue` ⇒ `issued` as the newest
 /// holder of the same external id.
 pub(crate) async fn storno_then_stale_create_then_reissue(h: &Harness) {
@@ -129,17 +129,16 @@ pub(crate) async fn storno_then_stale_create_then_reissue(h: &Harness) {
     eprintln!("(iv) storno → reversed; stale create → reversed; reissue → issued: pass");
 }
 
-/// (iv-b) the storno's `teljesitesDatum` (ADR 0007), end to end. A verified
-/// original without a `telj` is 503 `unavailable` about the storno — order,
-/// kind and the storno external id — with only the prologue and the verify
-/// journaled and nothing sent; the fault comes **after** the answers that
-/// need no send, so a `telj`-less document of another order is still
-/// `conflict{not_managed}`, a `telj`-less proforma still
-/// `rejected{not_stornoable}` and a `telj`-less reversed invoice still
-/// `reversed` with its storno number from the hint. And a storno whose first
-/// reply is lost is re-executed under the issue policy with a byte-identical
-/// body — the date is a pure function of the journaled verify — under one
-/// `storno-{number}` entry.
+/// (iv-b) the storno's `teljesitesDatum`, end to end. A verified original
+/// without a `telj` is 503 `unavailable` about the storno (order, kind and the
+/// storno external id) with only the prologue and the verify journaled and
+/// nothing sent; the fault comes **after** the answers that need no send, so a
+/// `telj`-less document of another order is still `conflict{not_managed}`, a
+/// `telj`-less proforma still `rejected{not_stornoable}` and a `telj`-less
+/// reversed invoice still `reversed` with its storno number from the hint. And
+/// a storno whose first reply is lost is re-executed under the issue policy
+/// with a byte-identical body (the date is a pure function of the journaled
+/// verify) under one `storno-{number}` entry.
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the fault, its three predecessors and the re-executed step"
@@ -266,7 +265,7 @@ pub(crate) async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: 
 
     // A lost reply: the first execution's send answers 500 and its re-query
     // still misses; the second execution's send lands. Both sends carry the
-    // same bytes — the same `teljesitesDatum` — under one run entry.
+    // same bytes (the same `teljesitesDatum`) under one run entry.
     h.reset().await;
     number_query("SZ-4E")
         .respond_with(Doc::new("SZ-4E", "SZ", "E2E-4").response())
@@ -317,20 +316,19 @@ pub(crate) async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: 
     );
 }
 
-/// (iv-c) the storno step's answers at the order's handler (design §6 steps
-/// 3–4): szamlazz.hu's typed refusals — 14 (a storno of a storno) and 221
-/// (the invoice has a corrective) — are `rejected{code, message}`, settled
-/// after one send that carries the caller's comment; every execution's send
-/// losing its reply exhausts the issue policy into the structured
-/// `outcome_unknown` naming the storno's identity, with the `storno-{number}`
-/// run as the retried command and one send per execution; and the next call
-/// — a new `Idempotency-Key` — is answered by the storno lookup (design §6
-/// step 2) when the `SS` is under the storno external id while the verify
-/// still reports the original live — szamlazz.hu's query surface behind the
-/// storno that landed — `reversed` with the storno number and nothing sent,
-/// through `verify-storno-{number}` and `lookup-storno-{number}` alone. (A
-/// verify that already reports `sztornozott` answers before the lookup, from
-/// the hint — (iv-b).)
+/// (iv-c) the storno step's answers at the order's handler: szamlazz.hu's
+/// typed refusals, 14 (a storno of a storno) and 221 (the invoice has a
+/// corrective), are `rejected{code, message}`, settled after one send that
+/// carries the caller's comment; every execution's send losing its reply
+/// exhausts the issue policy into the structured `outcome_unknown` naming the
+/// storno's identity, with the `storno-{number}` run as the retried command
+/// and one send per execution; and the next call (a new `Idempotency-Key`) is
+/// answered by the storno lookup when the `SS` is under the storno external id
+/// while the verify still reports the original live (szamlazz.hu's query
+/// surface behind the storno that landed): `reversed` with the storno number
+/// and nothing sent, through `verify-storno-{number}` and
+/// `lookup-storno-{number}` alone. (A verify that already reports
+/// `sztornozott` answers before the lookup, from the hint, see (iv-b).)
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the two typed refusals, the exhaustion, then the reconciling call"
@@ -448,8 +446,8 @@ pub(crate) async fn storno_rejections_and_exhaustion_at_the_orders_handler(h: &H
     );
 
     // The next call: the storno landed after all and its `SS` is under the
-    // storno external id, while the verify still reports the original live
-    // — so the lookup, not the verify, is what answers, and nothing is sent.
+    // storno external id, while the verify still reports the original live,
+    // so the lookup, not the verify, is what answers, and nothing is sent.
     h.reset().await;
     h.holds(&Doc::new("SZ-45", "SZ", "E2E-45")).await;
     external_id_query("acct:E2E-45:storno:SZ-45")
@@ -618,13 +616,13 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
 }
 
 /// (xviii-f) The storno's `eszamla` is the verified original's appearance,
-/// not the account default — on both storno handlers. szamlazz.hu accepts a
+/// not the account default, on both storno handlers. szamlazz.hu accepts a
 /// mismatch silently and issues the storno in the *request's* form (P73), so
 /// the derivation is the only thing keeping a reversal in its original's
 /// form. `acme` is switched to issuing e-invoices by default; a **paper**
 /// original (`<eszamla>1</eszamla>`) is still reversed with
-/// `<eszamla>false</eszamla>` by `Szamlazz.Order.storno_invoice`, and — the
-/// default switched back to paper — an **e-invoice** original (`3`, the code
+/// `<eszamla>false</eszamla>` by `Szamlazz.Order.storno_invoice`, and (the
+/// default switched back to paper) an **e-invoice** original (`3`, the code
 /// szamlazz.hu was observed to report) is reversed with
 /// `<eszamla>true</eszamla>` by `Szamlazz.Agent.storno`.
 pub(crate) async fn storno_is_issued_in_the_originals_form_not_the_accounts_default(h: &Harness) {

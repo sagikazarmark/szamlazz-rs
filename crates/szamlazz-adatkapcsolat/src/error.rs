@@ -3,7 +3,7 @@
 /// An opaque XML-parsing failure.
 ///
 /// Wraps the underlying parser error so the XML backend is not part of this
-/// crate's public API — it can change without a breaking release. The cause is
+/// crate's public API: it can change without a breaking release. The cause is
 /// available through [`Display`](std::fmt::Display) and, type-erased, through
 /// [`Error::source`](std::error::Error::source).
 #[derive(Debug)]
@@ -48,7 +48,7 @@ pub enum ParseError {
         /// Namespace found on the root element, if any.
         actual: String,
     },
-    /// The document parsed but does not conform to its XSD — an element the
+    /// The document parsed but does not conform to its XSD: an element the
     /// schema requires is missing, an enumeration carries an unknown value,
     /// a VAT rate is negative. Raised only by [`Document::parse_strict`];
     /// [`Document::parse`] reads such a document leniently.

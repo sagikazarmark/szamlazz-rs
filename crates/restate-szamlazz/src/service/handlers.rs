@@ -28,18 +28,18 @@ use crate::contract::{
 /// Keeps no state: every handler answers from szamlazz.hu through the order's
 /// deterministic external ids. The retry identity of a request is Restate's
 /// ingress `Idempotency-Key`. Every handler with an input takes it as a
-/// [`Body`] and decodes it first — a malformed body is the `invalid_input`
-/// fault before anything is journaled — then parses its key (an invalid or
+/// [`Body`] and decodes it first (a malformed body is the `invalid_input`
+/// fault before anything is journaled), then parses its key (an invalid or
 /// untrimmed key is `invalid_input` likewise, before the prologue), then runs
 /// its execution inside one span (`execution{scope, order,
 /// restate.invocation.id, account.id}`, so every log line it emits is
-/// attributable): the prologue — pin the namespace, resolve the request's
-/// scope to its account (journaled once per invocation), fetch the
-/// credentials for this execution, open the gateway — and then its operation.
-/// Issuing is two durable steps — a read-only lookup and a query-first create
-/// under the issue policy's run retry policy (design §5) — and every handler
-/// that calls szamlazz.hu kills the invocation after five attempts (ADR 0004);
-/// the external-id query inside the create step is what makes both safe.
+/// attributable): the prologue (pin the namespace, resolve the request's
+/// scope to its account, journaled once per invocation, fetch the
+/// credentials for this execution, open the gateway) and then its operation.
+/// Issuing is two durable steps (a read-only lookup and a query-first create
+/// under the issue policy's run retry policy), and every handler that calls
+/// szamlazz.hu kills the invocation after five attempts; the external-id
+/// query inside the create step is what makes both safe.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -109,9 +109,8 @@ impl Order {
     /// Converts the order's live proforma unless told otherwise
     /// (`options.proforma`, exactly as `create_invoice` takes it): the create
     /// carries `dijbekeroSzamlaszam`, so the link does not rest on
-    /// szamlazz.hu's own linking by shared order number — which happens
-    /// regardless (`docs/szamlazz-hu-behaviour.md`, "Proformas: conversion,
-    /// auto-linking, deletion"), and is why `none` is `conflict{proforma_live}`
+    /// szamlazz.hu's own linking by shared order number, which happens
+    /// regardless, and is why `none` is `conflict{proforma_live}`
     /// while a live proforma of ours exists. `get` reports the proforma as
     /// `consumed` once the link landed.
     #[handler(
@@ -148,10 +147,10 @@ impl Order {
     /// szamlazz.hu links the prepayment invoice (the create carries
     /// `elolegSzamlaszam`) but does **not** net it into the final invoice's
     /// totals: the caller's `document` lists the full performance and deducts
-    /// the prepayment as a negative line item at the same VAT rate
-    /// ([behaviour note C6-2](https://github.com/sagikazarmark/szamlazz-rs/blob/main/docs/szamlazz-hu-behaviour.md#prepayment-and-final-invoices)).
-    /// Takes no `options.proforma` (anything but `auto` is `invalid_input`):
-    /// the order's proforma was consumed by the prepayment invoice.
+    /// the prepayment as a negative line item at the same VAT rate (verified
+    /// on the test account). Takes no `options.proforma` (anything but `auto`
+    /// is `invalid_input`): the order's proforma was consumed by the
+    /// prepayment invoice.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -271,10 +270,10 @@ impl Order {
     /// What szamlazz.hu holds under the order's external ids right now: four
     /// queries, no state. Read-only, so it runs concurrently with the
     /// exclusive handlers. The journal is retained a day so that it can be
-    /// inspected; there is nothing to replay. The timeouts are the reads'
-    /// (#114): a read step is one round trip bounded by the 60 s client
-    /// timeout, and szamlazz.hu has been seen to stall for a minute and still
-    /// answer, so the server's 1 m default would suspend exactly such a read.
+    /// inspected; there is nothing to replay. The timeouts are the reads': a
+    /// read step is one round trip bounded by the 60 s client timeout, and
+    /// szamlazz.hu has been seen to stall for a minute and still answer, so
+    /// the server's 1 m default would suspend exactly such a read.
     #[handler(
         invocation_retry_policy(max_attempts = 3, on_max_attempts = "kill"),
         inactivity_timeout = "2m",
@@ -297,17 +296,17 @@ impl Order {
 /// probe. Never calls into `Order`; a document that carries an order number
 /// is reported as `managed_by_order` instead, read off the verified document.
 /// Unkeyed: invocations run concurrently, so two by-number writes on one
-/// invoice are not serialised here — the caller's (see [`Agent`]).
+/// invoice are not serialised here; that is the caller's (see [`Agent`]).
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the
     /// worker, resolves to the intended account and the account's agent key
-    /// works — with one read-only query of a sentinel external id, issuing
+    /// works, with one read-only query of a sentinel external id, issuing
     /// nothing. For onboarding and deploy pipelines; also the deploy-time
     /// canary for the experimental Restate flags (`scope: null` under a
     /// scoped call means the server did not forward the scope). No input.
     /// The journal is retained a day so that the leak assertion can scan it.
-    /// The timeouts are the reads' 2m / 2m (#114): one 60 s round trip plus
+    /// The timeouts are the reads' 2m / 2m: one 60 s round trip plus
     /// the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
@@ -332,7 +331,7 @@ impl Agent {
 
     /// Queries a document by number, order number or external id. The
     /// journal is retained a day so that it can be inspected; there is
-    /// nothing to replay. The timeouts are the reads' 2m / 2m (#114): one
+    /// nothing to replay. The timeouts are the reads' 2m / 2m: one
     /// 60 s round trip plus the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
@@ -361,13 +360,13 @@ impl Agent {
     }
 
     /// Looks a Hungarian taxpayer up through NAV (`xmltaxpayer`) by tax
-    /// number — the bare eight-digit stem or the full `NNNNNNNN-N-NN` form —
+    /// number (the bare eight-digit stem or the full `NNNNNNNN-N-NN` form)
     /// on the account the request's scope resolves to, so an embedder needs
     /// no second credential path for this one read. Read-only, one step
     /// under the read policy; `valid: false` is data. Not cached here: the
     /// caller caches, with a TTL on the order of a day. The journal is
     /// retained a day so that it can be inspected; there is nothing to
-    /// replay. The timeouts are the reads' 2m / 2m (#114): one 60 s round
+    /// replay. The timeouts are the reads' 2m / 2m: one 60 s round
     /// trip plus the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
@@ -437,9 +436,9 @@ impl Agent {
 
     /// Reverses an invoice that no `Order` manages. The storno step is the
     /// same closure `Szamlazz.Order` runs (query, send, re-query at 60 s
-    /// each), so the retry policy and the timeouts are `Szamlazz.Order`'s
-    /// (ADR 0004): invocation attempts are spent only on worker-side failures
-    /// — a crash, a rollout cutting the connection — and every re-dispatch is
+    /// each), so the retry policy and the timeouts are `Szamlazz.Order`'s:
+    /// invocation attempts are spent only on worker-side failures
+    /// (a crash, a rollout cutting the connection), and every re-dispatch is
     /// query-first, so nothing about an unmanaged storno justifies a shorter
     /// budget; the retry interval waits out the 60 s client timeout (never
     /// the server's ~500 ms default), so that the leading query cannot look

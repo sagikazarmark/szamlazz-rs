@@ -8,11 +8,11 @@ use crate::harness::Harness;
 use crate::harness::accounts::AGENT_KEYS;
 use crate::harness::run_names::{RUN_NAMES, is_prefix_of_path, run_pattern};
 
-/// (xx-b) the `Szamlazz.Order` object keeps no state (design §3, ADR 0005):
-/// after every create, storno, delete and read of the run, on both
-/// deployments, the `state` table holds no row for the service — szamlazz.hu
-/// is the only record, and there is nothing a redeploy could leave behind.
-/// Checked over the run's invocations so that the empty table is not vacuous.
+/// (xx-b) the `Szamlazz.Order` object keeps no state: after every create,
+/// storno, delete and read of the run, on both deployments, the `state` table
+/// holds no row for the service; szamlazz.hu is the only record, and there is
+/// nothing a redeploy could leave behind. Checked over the run's invocations
+/// so that the empty table is not vacuous.
 pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
     // Far under what the run issues; a floor against an empty table proving
     // nothing (a purge or a retention change emptying `sys_invocation`).
@@ -42,7 +42,7 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
 /// (xxi) the leak check over the whole run: the hex-decoded `raw` of every
 /// journal entry of every invocation the server holds, and every
 /// `completion_failure`, contain none of the agent keys the run put on the
-/// wire — while the scan does find the positive control's sentinel from
+/// wire, while the scan does find the positive control's sentinel from
 /// (xii), so it reads real bytes.
 pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
     const POSITIVE_CONTROL: &str = "SENTINEL-8f3a2c-LEAK-CONTROL";
@@ -103,7 +103,7 @@ pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
 /// invocation the server still holds, the `ctx.run` names in journal order
 /// are a prefix of one of its handler's pinned paths, every handler seen is
 /// pinned, and every pinned path was walked in full by at least one
-/// invocation — so a renamed, inserted, reordered or dropped step, on any
+/// invocation, so a renamed, inserted, reordered or dropped step, on any
 /// handler of either service, fails here rather than stranding an in-flight
 /// invocation on the next deploy.
 pub(crate) async fn every_handler_journals_its_pinned_run_names(h: &Harness) {
@@ -151,13 +151,13 @@ pub(crate) async fn every_handler_journals_its_pinned_run_names(h: &Harness) {
     }
     assert!(
         unpinned.is_empty(),
-        "handlers with no pinned run names: {unpinned:?} — pin their steps in RUN_NAMES"
+        "handlers with no pinned run names: {unpinned:?}; pin their steps in RUN_NAMES"
     );
     assert!(
         unexplained.is_empty(),
         "run sequences no pinned path of their handler explains:\n  {}\n\n\
          A renamed, inserted, reordered or dropped step strands every in-flight invocation of the \
-         previous deployment on replay (ADR 0005). Keep the names and their order; a step that must \
+         previous deployment on replay. Keep the names and their order; a step that must \
          change is a new row in RUN_NAMES and a deploy that drains first, never an edited row.",
         unexplained.join("\n  ")
     );

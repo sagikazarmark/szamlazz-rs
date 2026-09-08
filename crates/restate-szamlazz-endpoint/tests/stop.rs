@@ -2,9 +2,9 @@
 //!
 //! Spawns `restate-szamlazz` on an ephemeral port (`--port 0`) with a
 //! minimal environment-only configuration, waits for its start-up log line,
-//! sends the signal — from this process, with `kill(2)`, so the test does not
-//! depend on a `kill` executable the test image may not ship — and asserts a
-//! prompt exit with status 0 — what `docker stop`, a Kubernetes rollout or
+//! sends the signal (from this process, with `kill(2)`, so the test does not
+//! depend on a `kill` executable the test image may not ship) and asserts a
+//! prompt exit with status 0: what `docker stop`, a Kubernetes rollout or
 //! `kill -TERM` expect. Unix only: the signals are.
 
 #![cfg(unix)]
@@ -57,8 +57,8 @@ fn sigint_stops_the_endpoint_with_status_0() {
     );
 }
 
-/// The start-up log line names the bound address — the port the kernel
-/// picked, since `--port 0` asked for one — and the signals that stop the
+/// The start-up log line names the bound address (the port the kernel
+/// picked, since `--port 0` asked for one), and the signals that stop the
 /// process.
 #[test]
 fn the_start_up_log_names_the_bound_address_and_the_stop_signals() {

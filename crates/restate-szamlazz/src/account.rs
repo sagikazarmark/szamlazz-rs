@@ -1,6 +1,6 @@
 //! The account model and the two pluggable traits that produce it.
 //!
-//! An [`Account`] is one szamlazz.hu account as the worker knows it — its
+//! An [`Account`] is one szamlazz.hu account as the worker knows it: its
 //! resolver-owned id, endpoint, document defaults, seller block and a
 //! reference to its credentials. Never the agent key: the account
 //! is resolved once per invocation and journaled, and the journal is visible in
@@ -25,7 +25,7 @@ pub use static_resolver::{
     StaticResolver,
 };
 
-/// One szamlazz.hu account as the worker knows it — never the agent key.
+/// One szamlazz.hu account as the worker knows it, never the agent key.
 ///
 /// Resolved once per invocation by an account resolver and journaled, so an
 /// invocation finishes on the account it started on. Everything account-shaped
@@ -50,10 +50,10 @@ pub use static_resolver::{
 /// against**. Ownership validation is about the *document*: under one of our
 /// external ids a document is ours when it carries the order number and the
 /// `tipus` of the kind, and found by number it must carry this order's number
-/// (`Szamlazz.Order`'s verifies) — nothing about the account. 0.3 pinned two
+/// (`Szamlazz.Order`'s verifies); nothing about the account. 0.3 pinned two
 /// fields of a queried document, `szallito/id` (`supplier_id`) and `teszt`
-/// (`mode`); ADR 0006's account-pin amendment dropped both. Neither is in a
-/// create response — a create's reply is a number and totals — so neither
+/// (`mode`); both were dropped. Neither is in a create response (a create's
+/// reply is a number and totals), so neither
 /// could fire before the first document of a fresh order was issued: a key
 /// configured under the wrong scope issued into the wrong account and answered
 /// `issued`, and the pin tripped on the *next* found document. A tripwire with
@@ -66,8 +66,8 @@ pub use static_resolver::{
 /// every key rotation, `Szamlazz.Agent.query` a document known to be the
 /// account's and read `<teszt>` and the seller block (name, tax number) on
 /// the answer. A key pasted into the wrong scope issues that scope's
-/// documents in another company's name — or on a test account, or on a live
-/// one from staging — with nothing in the worker failing. The endpoint
+/// documents in another company's name (or on a test account, or on a live
+/// one from staging), with nothing in the worker failing. The endpoint
 /// README's deploy checklist carries the check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -145,7 +145,7 @@ macro_rules! opaque_string {
 
 opaque_string! {
     /// The resolver's identifier of an [`Account`]: opaque to the worker,
-    /// meaningful to the operator. Never a resolution input — the scope is.
+    /// meaningful to the operator. Never a resolution input; the scope is.
     AccountId
 }
 
@@ -159,12 +159,12 @@ opaque_string! {
 /// userinfo.
 ///
 /// Validated when parsed and when deserialized, so an [`Account`] never
-/// carries an endpoint the client cannot post to — or one that would leak:
+/// carries an endpoint the client cannot post to, or one that would leak:
 /// the endpoint is journaled with the account and printed in the start-up
 /// log, so a `user:password@` in it would be shown in the Restate UI for the
-/// retention period, and it is refused (#65). Plain `http` stays allowed — a
+/// retention period, and it is refused. Plain `http` stays allowed (a
 /// local mock or a proxy is a legitimate target, and the type cannot tell a
-/// test deployment from production — but the agent key travels in the request
+/// test deployment from production), but the agent key travels in the request
 /// body, so `http` to a host other than loopback sends it in cleartext;
 /// [`Endpoint::is_cleartext`] reports that case for the start-up log to warn
 /// about. The text is kept as written.
@@ -235,18 +235,18 @@ impl Endpoint {
     }
 
     /// The endpoint as the comparison key of the safety contract's fan-in
-    /// rule — unique `(endpoint, credentials)` pairs: two endpoints with
+    /// rule (unique `(endpoint, credentials)` pairs): two endpoints with
     /// equal keys reach one server, so one agent key under both is one
     /// szamlazz.hu account under two scopes.
     ///
     /// Folds what a URL may spell two ways for one target: the scheme's and
     /// the host's case, the scheme's default port written out (`:443` on
-    /// `https`, `:80` on `http`) and the path's trailing slashes —
+    /// `https`, `:80` on `http`) and the path's trailing slashes, so
     /// `https://www.szamlazz.hu/szamla/` (the default) and
     /// `https://www.szamlazz.hu/szamla` (typed) are one endpoint. The rule
     /// errs toward refusing: a pair refused at load time costs the operator a
     /// configuration fix, a pair admitted costs duplicate documents. Nothing
-    /// else is folded — a path's case and a query are kept as written — and
+    /// else is folded (a path's case and a query are kept as written), and
     /// the endpoint itself is untouched: what the client posts to, what is
     /// journaled and what the start-up log prints stay the text as written.
     #[must_use]
@@ -275,7 +275,7 @@ impl Endpoint {
 
 /// An [`Endpoint`] reduced to what identifies its target, for the fan-in
 /// rule's `(endpoint, credentials)` comparison ([`Endpoint::normalized`]).
-/// Compared, hashed and ordered; never displayed and never posted to — the
+/// Compared, hashed and ordered; never displayed and never posted to: the
 /// folding that makes two spellings equal (the trimmed trailing slash above
 /// all) may produce a URL szamlazz.hu does not serve, so the type exposes no
 /// text. Not journaled.
@@ -331,7 +331,7 @@ impl<'de> Deserialize<'de> for Endpoint {
 }
 
 /// A string that is not a valid [`Endpoint`]. Does not echo the text: an
-/// endpoint URL may carry userinfo — the very thing one variant refuses.
+/// endpoint URL may carry userinfo, the very thing one variant refuses.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InvalidEndpoint {
@@ -358,7 +358,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///
 /// The worker calls [`resolve`](Self::resolve) once per invocation, inside a
 /// durable step, and journals the result: the scope is the only resolution
-/// input — never a header, a body field or the Virtual Object key. Implement
+/// input, never a header, a body field or the Virtual Object key. Implement
 /// it over a database, a configuration service or a table in memory; the
 /// static resolver ([`StaticResolver`]) is the configuration-backed one.
 ///
@@ -366,32 +366,31 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///
 /// The worker cannot check these at runtime; a resolver guarantees them. The
 /// static resolver enforces every checkable rule at load time
-/// ([`StaticConfigError`] names them); a resolver of your own — a
-/// database-backed one above all — guarantees them itself.
+/// ([`StaticConfigError`] names them); a resolver of your own (a
+/// database-backed one above all) guarantees them itself.
 ///
 /// - **One account under exactly one scope, no fan-in.** Unscoped counts as
 ///   a scope value. Two scopes reaching one szamlazz.hu account would split
 ///   an order's per-key lock across two Virtual Objects. A database-backed
-///   resolver must guarantee it itself — `check_account` only echoes the
+///   resolver must guarantee it itself: `check_account` only echoes the
 ///   configuration, and no runtime check can see two scopes at once.
 /// - **Append-only mapping.** Moving traffic to another account means a new
 ///   scope; a scope's account is never changed in place. A running
 ///   invocation stays on the account it journaled either way.
 /// - **Unique `(endpoint, credentials)` pairs.** The same agent key on the
-///   same endpoint is one account, whatever its `id` — and the same endpoint
+///   same endpoint is one account, whatever its `id`, and the same endpoint
 ///   is the same server, however spelled: compare on
 ///   [`Endpoint::normalized`] (scheme and host case, a default port written
 ///   out, a trailing slash), as the static resolver does, so `…/szamla/`
 ///   beside `…/szamla` with one key is refused rather than admitted as two.
 /// - **The right key under the right scope.** The worker holds no account
-///   pin — nothing on a found document is checked against the account (see
-///   [`Account`], *No account pin*) — so a key that opens another szamlazz.hu
+///   pin: nothing on a found document is checked against the account (see
+///   [`Account`], *No account pin*), so a key that opens another szamlazz.hu
 ///   account than the scope names, or a test account where a live one is
 ///   meant (and the reverse), issues there with nothing failing. The
 ///   resolver guarantees it; the deployment verifies it at go-live and after
 ///   every rotation by querying a known document under each scope and
-///   reading its `<teszt>` and seller block (ADR 0006, account-pin
-///   amendment).
+///   reading its `<teszt>` and seller block.
 /// - **A stable `credential_ref` across rotations.** Rotate the value behind
 ///   the reference, never the reference: the reference is journaled with the
 ///   account and an in-flight invocation fetches by it on its next
@@ -402,7 +401,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///   window of refusals. A resolver may cache resolved accounts internally.
 /// - **Answer within seconds.** The worker bounds every `resolve` call at
 ///   ten seconds and drops the future at the deadline; a slow answer is
-///   `unavailable` — retried under the resolve policy, then the terminal
+///   `unavailable`, retried under the resolve policy, then the terminal
 ///   fault. A resolver over a pool or a network sets its own, shorter
 ///   timeouts and answers `Unavailable` itself rather than letting a call
 ///   hang into the worker's bound.
@@ -415,7 +414,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// # Debug
 ///
 /// The trait requires no `Debug`: a resolver often holds a connection pool
-/// or a key table, and the crate never formats one — [`Accounts`]' own
+/// or a key table, and the crate never formats one: [`Accounts`]' own
 /// `Debug` names the trait objects without descending into them.
 pub trait AccountResolver: Send + Sync {
     /// The account reachable under `scope`; `None` is the unscoped request.
@@ -437,7 +436,7 @@ pub trait AccountResolver: Send + Sync {
 /// - **Fetched on every handler execution, never journaled.** The worker
 ///   calls [`fetch`](Self::fetch) outside the journal every time a handler
 ///   executes, including replays, and holds the result only for that
-///   execution — so a rotation is picked up on the next execution of every
+///   execution, so a rotation is picked up on the next execution of every
 ///   in-flight invocation, and no agent key is written into Restate.
 ///   [`Credentials`] has no serde implementation: the compiler rejects any
 ///   attempt to journal it.
@@ -450,15 +449,15 @@ pub trait AccountResolver: Send + Sync {
 ///   echoes the store's own message.
 /// - **Answer within seconds.** The worker bounds every `fetch` call at ten
 ///   seconds and drops the future at the deadline; a slow answer is
-///   `unavailable` — retried in process like a reported `Unavailable`, then
+///   `unavailable`, retried in process like a reported `Unavailable`, then
 ///   the terminal fault. A store over a secrets service or a network sets its
 ///   own, shorter timeouts and answers `Unavailable` itself rather than
 ///   letting a call hang into the worker's bound.
 ///
 /// # Debug
 ///
-/// The trait requires no `Debug` — a store over a key map would print the
-/// keys — and the crate never formats one: [`Accounts`]' own `Debug` names
+/// The trait requires no `Debug` (a store over a key map would print the
+/// keys), and the crate never formats one: [`Accounts`]' own `Debug` names
 /// the trait objects without descending into them. Should you derive `Debug`
 /// on a store, hold [`Credentials`] rather than raw strings: its `Debug` is
 /// redacted.
@@ -528,14 +527,14 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// The bundle of resolver and store both Restate services share.
 ///
-/// Trait objects rather than type parameters, so that the services' types —
-/// and the SDK-generated clients — do not change with the deployment's
+/// Trait objects rather than type parameters, so that the services' types
+/// (and the SDK-generated clients) do not change with the deployment's
 /// choice of resolver. Build it with [`Accounts::new`] over your own
 /// resolver and store, or with [`Accounts::from`] a [`StaticResolver`],
 /// which is both.
 ///
-/// Its `Debug` — and so that of [`Order`](crate::Order) and
-/// [`Agent`](crate::Agent), which derive theirs over it — names the two
+/// Its `Debug`, and so that of [`Order`](crate::Order) and
+/// [`Agent`](crate::Agent), which derive theirs over it, names the two
 /// trait objects and never descends into them: a store that derives `Debug`
 /// over a key map cannot print its keys through the services.
 #[derive(Clone)]
@@ -610,9 +609,9 @@ mod tests {
     assert_not_impl_any!(Credentials: serde::Serialize, serde::Deserialize<'static>);
     assert_not_impl_any!(AgentKey: serde::Serialize, serde::Deserialize<'static>);
 
-    /// Everything the worker may print or journal about an account — the
+    /// Everything the worker may print or journal about an account (the
     /// account itself, the bundle, an opened gateway, the resolver's and the
-    /// store's errors — renders without the agent key.
+    /// store's errors) renders without the agent key.
     #[tokio::test]
     async fn renderings_of_account_accounts_gateway_and_errors_carry_no_secret() {
         const KEY: &str = "sentinel-agent-key-4b8c2e";
@@ -742,7 +741,7 @@ mod tests {
         );
     }
 
-    /// An endpoint with userinfo is refused (#65): the endpoint is journaled
+    /// An endpoint with userinfo is refused: the endpoint is journaled
     /// with the account and printed in the start-up log, so a password in it
     /// would be shown in the Restate UI for the retention period. The error
     /// never echoes the text.
@@ -767,8 +766,8 @@ mod tests {
         );
     }
 
-    /// Plain `http` stays allowed — a local mock or a proxy is a legitimate
-    /// target and the type cannot tell a test deployment from production —
+    /// Plain `http` stays allowed (a local mock or a proxy is a legitimate
+    /// target and the type cannot tell a test deployment from production),
     /// but an `http` endpoint on a host other than loopback sends the agent
     /// key in cleartext, which the type reports so the start-up log can warn.
     #[test]
@@ -799,7 +798,7 @@ mod tests {
 
     /// The fan-in rule compares endpoints on a normalised form: two spellings
     /// of one server are one endpoint, two servers stay two. The endpoint
-    /// itself keeps its text, and the key is not a URL — it has no text to
+    /// itself keeps its text, and the key is not a URL: it has no text to
     /// post to.
     #[test]
     fn endpoint_normalizes_for_comparison_only() {

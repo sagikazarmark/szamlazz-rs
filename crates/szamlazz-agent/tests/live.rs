@@ -41,7 +41,7 @@ fn today() -> Date {
     jiff::Zoned::now().date()
 }
 
-/// A one-line HUF document of `kind` — the same buyer, dates and line item on
+/// A one-line HUF document of `kind`: the same buyer, dates and line item on
 /// every live test, so the documents an account accumulates are recognisable.
 fn document(kind: InvoiceKind) -> CreateInvoice {
     let mut invoice = CreateInvoice::new(
@@ -77,7 +77,7 @@ fn document(kind: InvoiceKind) -> CreateInvoice {
 #[tokio::test]
 #[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
 async fn taxpayer_query() {
-    // KBOSS.HU Kft. — the operator of szamlazz.hu itself.
+    // KBOSS.HU Kft., the operator of szamlazz.hu itself.
     let info = client()
         .send(&QueryTaxpayer::new("13421739").expect("valid prefix"))
         .await
@@ -154,14 +154,13 @@ async fn query_by_number(client: &Client, number: &InvoiceNumber) -> InvoiceDocu
 }
 
 /// What `<eszamla>` means in a queried document, and whether a storno's
-/// `eszamla` must match its original's — settled live (P73 in
-/// `docs/szamlazz-hu-behaviour.md`): an invoice created with
+/// `eszamla` must match its original's, settled live: an invoice created with
 /// `<eszamla>true</eszamla>` and one with `false`, each queried back, then
 /// stornoed with a matching and a mismatching `eszamla` (four originals, since
 /// a repeat storno only echoes the existing storno). Asserts what was
-/// observed — the mapping the crate publishes as [`InvoiceAppearance`] (`1`
+/// observed (the mapping the crate publishes as [`InvoiceAppearance`] (`1`
 /// paper, `2`/`3` e-invoice), and that every storno is accepted and issued in
-/// the *request's* form — and prints the four cases as a table
+/// the *request's* form) and prints the four cases as a table
 /// (`--nocapture`). A create refused by the account (no e-invoice feature)
 /// fails the test with the code.
 ///

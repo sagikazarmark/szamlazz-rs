@@ -46,7 +46,7 @@ struct Cli {
     port: u16,
 
     /// Load and validate the configuration, build the endpoint, log what
-    /// would be served and exit 0 — without listening. Non-zero with the
+    /// would be served and exit 0, without listening. Non-zero with the
     /// error otherwise. For CI and init containers.
     #[arg(long)]
     check_config: bool,
@@ -105,9 +105,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// A future that completes on the first stop signal — `SIGTERM` (what
+/// A future that completes on the first stop signal, `SIGTERM` (what
 /// `docker stop`, a Kubernetes rollout and `kill` send) or `SIGINT`
-/// (Ctrl-C) — and logs which one arrived. The signal handlers are installed
+/// (Ctrl-C), and logs which one arrived. The signal handlers are installed
 /// when this is called, so call it before anything a stop should interrupt:
 /// the SDK's `serve` waits for `SIGINT` alone, and a `SIGTERM` nobody handles
 /// ends the process on the spot, without the SDK's graceful drain.
@@ -142,9 +142,9 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
 /// Wires the configuration into the two services and binds them to one
 /// endpoint: the static resolver over `[account]` or `[accounts.<scope>]` is
 /// the `Accounts` bundle both services hold beside the deployment-level
-/// `WorkerConfig`. Logs what was bound — the namespace, the shape, each
+/// `WorkerConfig`. Logs what was bound (the namespace, the shape, each
 /// resolved account's scope, id and endpoint, and whether request identity
-/// verification is on — never an agent key. `bind_addr` is
+/// verification is on), never an agent key. `bind_addr` is
 /// the address the endpoint will listen on (or would, under
 /// `--check-config`): what the warning about accepting unsigned requests
 /// names as reachable.
@@ -169,7 +169,7 @@ fn build_endpoint(config: EndpointConfig, bind_addr: SocketAddr) -> Result<Endpo
             endpoint = %account.endpoint,
             "szamlazz.hu account"
         );
-        // Allowed — a mock or a proxy is a legitimate target — but the agent
+        // Allowed (a mock or a proxy is a legitimate target), but the agent
         // key travels in the request body, so say so (#65).
         if account.endpoint.is_cleartext() {
             tracing::warn!(
@@ -221,7 +221,7 @@ fn build_endpoint(config: EndpointConfig, bind_addr: SocketAddr) -> Result<Endpo
         RequestIdentity::Unsigned { deliberate: false } => {
             let reachable = reachable_at(bind_addr);
             tracing::warn!(
-                "request identity verification disabled: accepting unsigned requests — any client reaching {reachable} can invoke the services under any scope; set `identity_keys` to the Restate server's request identity public keys (README: Request Identity), or write `identity_keys = []` out to accept this for local development"
+                "request identity verification disabled: accepting unsigned requests; any client reaching {reachable} can invoke the services under any scope; set `identity_keys` to the Restate server's request identity public keys (README: Request Identity), or write `identity_keys = []` out to accept this for local development"
             );
         }
     }
@@ -230,7 +230,7 @@ fn build_endpoint(config: EndpointConfig, bind_addr: SocketAddr) -> Result<Endpo
 }
 
 /// Where the unsigned-requests warning says the endpoint is reachable: the
-/// address as configured — or, under `--port 0`, the address alone, since
+/// address as configured, or, under `--port 0`, the address alone, since
 /// the kernel picks the port at bind time and nothing is known of it before
 /// (nor ever under `--check-config`, which never binds); `:0` would name an
 /// address no client can reach.
@@ -319,7 +319,7 @@ mod tests {
         );
     }
 
-    /// The account's own invariants — here a blank agent key — are checked
+    /// The account's own invariants (here a blank agent key) are checked
     /// when the static resolver is built, before anything is bound.
     #[test]
     fn rejects_an_invalid_account() {
@@ -391,7 +391,7 @@ mod tests {
     }
 
     /// An agent key given through the environment reaches szamlazz.hu exactly
-    /// as written — an all-digit key with a leading zero included, which a
+    /// as written: an all-digit key with a leading zero included, which a
     /// value parsed as a number would lose.
     #[tokio::test]
     async fn an_all_digit_agent_key_from_the_environment_reaches_the_gateway_byte_exact() {

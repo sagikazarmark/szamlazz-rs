@@ -34,8 +34,8 @@
 //! binary chooses the file format and environment merging, and merges the
 //! static resolver's account configuration
 //! ([`StaticConfig`](crate::account::StaticConfig)) beside these keys.
-//! Everything account-shaped — credentials, endpoint,
-//! document defaults, seller block — is carried by the
+//! Everything account-shaped (credentials, endpoint,
+//! document defaults, seller block) is carried by the
 //! [`Account`](crate::account::Account) a resolver produces and read by the
 //! services through [`Gateway::account`](crate::gateway::Gateway::account);
 //! the value types those fields are made of ([`Defaults`],
@@ -43,8 +43,8 @@
 //! here so that any resolver's configuration can reuse them. The value types
 //! also implement `Serialize`: they ride inside the journaled `Account`, so
 //! they are additive-only and `#[non_exhaustive]`. The three policies are
-//! `#[non_exhaustive]` too — deployment-level, journaled nowhere, but fields
-//! may be added — so build any of them from `Default::default()` (or
+//! `#[non_exhaustive]` too (deployment-level, journaled nowhere, but fields
+//! may be added), so build any of them from `Default::default()` (or
 //! deserialize it) and set fields.
 
 use std::fmt;
@@ -165,7 +165,7 @@ pub enum WorkerConfigError {
     /// The issue policy's `initial_delay` is below
     /// [`IssueConfig::MIN_INITIAL_DELAY`], which documents the rule.
     #[error(
-        "issue.initial_delay ({initial:?}) must be at least {floor:?} — the Számla Agent client's \
+        "issue.initial_delay ({initial:?}) must be at least {floor:?}: the Számla Agent client's \
          {timeout:?} request timeout plus a {margin:?} margin: szamlazz.hu has been seen to stall \
          that long and still issue, so the create and storno steps are never re-executed while \
          their send may still be in flight",
@@ -447,12 +447,12 @@ impl Default for Defaults {
 ///
 /// Deliberately not the agent crate's [`Seller`], although the fields mirror
 /// it: the account's journal shape is this crate's contract with every
-/// in-flight invocation (ADR 0005), and a crate-owned type keeps a `Seller`
-/// change in `szamlazz-agent` — a field renamed, retyped, or made required —
+/// in-flight invocation, and a crate-owned type keeps a `Seller`
+/// change in `szamlazz-agent` (a field renamed, retyped, or made required)
 /// from altering what an `account` entry replays as. The same reason
 /// `Szamlazz.Agent.query_taxpayer` journals the crate-owned
 /// `QueryTaxpayerResponse` projection rather than the agent crate's
-/// `TaxpayerInfo` (J-05-07, #115).
+/// `TaxpayerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
@@ -513,10 +513,10 @@ impl SellerEmailConfig {
     }
 }
 
-/// The issue policy: the run retry policy of the create step (design §5
-/// step 4) and the storno step (§6 step 3). Restate re-executes the step after
+/// The issue policy: the run retry policy of the create step and the storno
+/// step. Restate re-executes the step after
 /// `initial_delay`, multiplying the delay by `factor` up to `max_delay`, until
-/// `max_attempts` executions or `max_duration` — then the step fails and the
+/// `max_attempts` executions or `max_duration`; then the step fails and the
 /// handler reports `outcome_unknown`. The policy shapes no journal entry.
 ///
 /// `initial_delay` has a floor, [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY),
@@ -564,7 +564,7 @@ impl IssueConfig {
 
     /// The least `initial_delay` a deployment may run with: the Számla Agent
     /// client's [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT)
-    /// plus [`RE_CHECK_MARGIN`](Self::RE_CHECK_MARGIN) — 90 s at today's
+    /// plus [`RE_CHECK_MARGIN`](Self::RE_CHECK_MARGIN), 90 s at today's
     /// values, derived rather than copied so that a change to the timeout
     /// moves the floor with it.
     ///
@@ -573,15 +573,15 @@ impl IssueConfig {
     /// once the send can no longer be in flight: the client gives up on a
     /// reply at the timeout, but szamlazz.hu has been seen to stall that long
     /// and still issue. The same rule sizes every write handler's
-    /// `initial_interval` (`2m`). The read and resolve policies have no floor
-    /// — a read writes nothing, and the resolve policy never reaches
+    /// `initial_interval` (`2m`). The read and resolve policies have no floor:
+    /// a read writes nothing, and the resolve policy never reaches
     /// szamlazz.hu.
     pub const MIN_INITIAL_DELAY: Duration =
         szamlazz_agent::client::REQUEST_TIMEOUT.saturating_add(Self::RE_CHECK_MARGIN);
 
     /// The policy as the SDK's run retry policy, every field set from this
     /// configuration. Built on [`RunRetryPolicy::new`], whose factor is 1.0
-    /// and which caps nothing — not on `default()`, which caps the delay at
+    /// and which caps nothing, not on `default()`, which caps the delay at
     /// 2 s and the duration at 50 s.
     #[must_use]
     pub fn run_retry_policy(&self) -> RunRetryPolicy {
@@ -595,27 +595,27 @@ impl IssueConfig {
 }
 
 /// The read policy: the run retry policy of every read-only durable step of
-/// both services — the lookup step and the exclusivity, proforma-link and
+/// both services (the lookup step and the exclusivity, proforma-link and
 /// `get` lookups, the verifies, the order-number hint, the storno lookup,
-/// `Szamlazz.Agent.query` and the `check_account` probe. A read that
+/// `Szamlazz.Agent.query` and the `check_account` probe). A read that
 /// szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`)
 /// is the step's retryable error, re-executed after `initial_delay`, the
 /// delay multiplied by `factor` up to `max_delay`, until `max_attempts`
-/// executions or `max_duration` — then the step fails and the handler reports
+/// executions or `max_duration`; then the step fails and the handler reports
 /// `unavailable`. Every szamlazz.hu *answer* is data and never retried. The
 /// policy shapes no journal entry.
 ///
 /// A read may be retried freely: it writes nothing, and a re-executed
 /// closure's answer is exactly as fresh as a first answer. The defaults are
 /// sized for szamlazz.hu, not for the worker: five executions 5 → 10 → 20 →
-/// 40 s apart ride out a blip of about a minute, and — szamlazz.hu is observed
-/// to stall for a minute at a time — a stalling szamlazz.hu is waited out up
-/// to the 5 m bound, instead of failing the invocation with a terminal
+/// 40 s apart ride out a blip of about a minute, and, since szamlazz.hu is
+/// observed to stall for a minute at a time, a stalling szamlazz.hu is waited
+/// out up to the 5 m bound, instead of failing the invocation with a terminal
 /// `unavailable` that is stored under the caller's `Idempotency-Key` for the
 /// retention period. This policy, not the handlers' invocation retry policy,
 /// is what decides how long a szamlazz.hu outage is tolerated: a run retry is
-/// re-dispatched by the server without spending an invocation attempt (ADR
-/// 0004, #87). A worker outage is the invocation retry policy's business.
+/// re-dispatched by the server without spending an invocation attempt. A
+/// worker outage is the invocation retry policy's business.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
 /// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
@@ -653,7 +653,7 @@ impl Default for ReadConfig {
 
 impl ReadConfig {
     /// The policy as the SDK's run retry policy, every field set from this
-    /// configuration — built on [`RunRetryPolicy::new`] for the same reason
+    /// configuration, built on [`RunRetryPolicy::new`] for the same reason
     /// as [`IssueConfig::run_retry_policy`].
     #[must_use]
     pub fn run_retry_policy(&self) -> RunRetryPolicy {
@@ -667,10 +667,10 @@ impl ReadConfig {
 }
 
 /// The resolve policy: the run retry policy of the `account` step of every
-/// handler (design §4), which asks the account resolver for the request's
-/// account. An unavailable resolver is retried under it — `initial_delay`
+/// handler, which asks the account resolver for the request's
+/// account. An unavailable resolver is retried under it (`initial_delay`
 /// growing by `factor` to `max_delay`, bounded by `max_duration` and nothing
-/// else — and its exhaustion is the `unavailable` fault. Unscoped and unknown
+/// else), and its exhaustion is the `unavailable` fault. Unscoped and unknown
 /// are answers, journaled as data, never retried. Shapes no journal entry.
 ///
 /// Set explicitly for the same reason as the issue policy: the SDK's default
@@ -957,7 +957,7 @@ mod tests {
 
     /// The issue policy is the run retry policy of the create and storno
     /// steps, every field set: `RunRetryPolicy::new()` has factor 1.0 and no caps, and
-    /// `default()` caps at 2 s / 50 s — neither is what the policy says.
+    /// `default()` caps at 2 s / 50 s; neither is what the policy says.
     #[test]
     fn issue_policy_maps_to_the_run_retry_policy_field_for_field() {
         assert_eq!(
@@ -979,9 +979,9 @@ mod tests {
         );
     }
 
-    /// The read policy is the run retry policy of every read-only step —
-    /// the lookups, verifies, hints, `get`'s queries, `Szamlazz.Agent.query`
-    /// and the probe — every field set, like the issue policy.
+    /// The read policy is the run retry policy of every read-only step
+    /// (the lookups, verifies, hints, `get`'s queries, `Szamlazz.Agent.query`
+    /// and the probe), every field set, like the issue policy.
     #[test]
     fn read_policy_maps_to_the_run_retry_policy_field_for_field() {
         assert_eq!(
@@ -1038,8 +1038,8 @@ mod tests {
             WorkerConfig::new("acct".parse().expect("namespace")),
             "`new` carries the default read policy too"
         );
-        // The delays between the default executions — initial × factor^n,
-        // each under the cap — sum to 75 s: a read rides out a szamlazz.hu
+        // The delays between the default executions (initial × factor^n,
+        // each under the cap) sum to 75 s: a read rides out a szamlazz.hu
         // blip of about a minute instead of poisoning the caller's key with a
         // 503, and the bound is what a stalling szamlazz.hu runs into (#87).
         let read = &minimal.read;
@@ -1173,8 +1173,8 @@ mod tests {
         );
     }
 
-    /// `issue.initial_delay` is floored at [`IssueConfig::MIN_INITIAL_DELAY`]
-    /// — the Számla Agent client's timeout plus a margin, derived, not copied.
+    /// `issue.initial_delay` is floored at [`IssueConfig::MIN_INITIAL_DELAY`],
+    /// the Számla Agent client's timeout plus a margin, derived, not copied.
     /// The other two policies have no floor.
     #[test]
     fn validate_floors_the_issue_initial_delay_at_the_client_timeout_plus_a_margin() {
@@ -1214,7 +1214,7 @@ mod tests {
                 .validate()
                 .expect_err("error")
                 .to_string(),
-            "issue.initial_delay (5s) must be at least 90s — the Számla Agent client's 60s request \
+            "issue.initial_delay (5s) must be at least 90s: the Számla Agent client's 60s request \
              timeout plus a 30s margin: szamlazz.hu has been seen to stall that long and still \
              issue, so the create and storno steps are never re-executed while their send may \
              still be in flight",
@@ -1301,7 +1301,7 @@ mod tests {
     }
 
     /// A duration field takes the `"2m"` string form or a bare non-negative
-    /// integer, read as seconds — on every policy, as the doc comments say.
+    /// integer, read as seconds, on every policy, as the doc comments say.
     /// A float, a negative number or another type is refused.
     #[test]
     fn duration_fields_accept_a_bare_integer_as_seconds() {

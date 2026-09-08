@@ -129,7 +129,7 @@ impl fmt::Debug for Pdf {
     }
 }
 
-/// Serializes as a base64 string — the wire representation.
+/// Serializes as a base64 string, the wire representation.
 impl serde::Serialize for Pdf {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use base64::Engine as _;
@@ -137,7 +137,7 @@ impl serde::Serialize for Pdf {
     }
 }
 
-/// Deserializes from a base64 string — the wire representation.
+/// Deserializes from a base64 string, the wire representation.
 impl<'de> serde::Deserialize<'de> for Pdf {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let encoded = String::deserialize(deserializer)?;
@@ -177,54 +177,54 @@ pub enum VatRate {
     /// A numeric percentage (27, 18, 5, 0, or fractional foreign rates such as
     /// 5.5).
     Percent(Decimal),
-    /// `AAM` — alanyi adómentes (subjective/personal VAT exemption).
+    /// `AAM`: alanyi adómentes (subjective/personal VAT exemption).
     Aam,
-    /// `TAM` — tárgyi adómentes (objective exemption / exempt activity).
+    /// `TAM`: tárgyi adómentes (objective exemption / exempt activity).
     Tam,
-    /// `TAHK` — tárgyi adómentes, a tevékenység közérdekű vagy sajátos
+    /// `TAHK`: tárgyi adómentes, a tevékenység közérdekű vagy sajátos
     /// jellegére tekintettel (exempt due to public-interest or special nature).
     Tahk,
-    /// `EUT` — EU-n belüli ügylet (intra-EU transaction).
+    /// `EUT`: EU-n belüli ügylet (intra-EU transaction).
     Eut,
-    /// `EUKT` — EU-n kívüli ügylet (transaction outside the EU).
+    /// `EUKT`: EU-n kívüli ügylet (transaction outside the EU).
     Eukt,
-    /// `F.AFA` — fordított áfa (domestic reverse charge).
+    /// `F.AFA`: fordított áfa (domestic reverse charge).
     FAfa,
-    /// `K.AFA` — különbözet szerinti áfa (margin scheme).
+    /// `K.AFA`: különbözet szerinti áfa (margin scheme).
     KAfa,
-    /// `HO` — területi hatályon kívüli (outside the territorial scope of the
+    /// `HO`: területi hatályon kívüli (outside the territorial scope of the
     /// Hungarian VAT act).
     Ho,
-    /// `EUE` — EU-n belüli, másik tagállamban teljesített ügylet.
+    /// `EUE`: EU-n belüli, másik tagállamban teljesített ügylet.
     Eue,
-    /// `EUFADE` — EU-n belüli fordított adózású ügylet (intra-EU reverse
+    /// `EUFADE`: EU-n belüli fordított adózású ügylet (intra-EU reverse
     /// charge, not under §37).
     Eufade,
-    /// `EUFAD37` — az Áfa tv. 37.§-a alapján EU-n belüli fordított adózású
+    /// `EUFAD37`: az Áfa tv. 37.§-a alapján EU-n belüli fordított adózású
     /// ügylet (intra-EU reverse charge under §37; requires an EU tax number).
     Eufad37,
-    /// `ATK` — áfa tárgyi hatályán kívüli (outside the scope of VAT).
+    /// `ATK`: áfa tárgyi hatályán kívüli (outside the scope of VAT).
     Atk,
-    /// `NAM` — nemzetközi ügyletekhez kapcsolódó adómentesség (exemption for
+    /// `NAM`: nemzetközi ügyletekhez kapcsolódó adómentesség (exemption for
     /// other international transactions).
     Nam,
-    /// `EAM` — adómentes termékexport harmadik országba (exempt export to a
+    /// `EAM`: adómentes termékexport harmadik országba (exempt export to a
     /// third country).
     Eam,
-    /// `KBAUK` — közösségen belüli adómentes új közlekedési eszköz értékesítés
+    /// `KBAUK`: közösségen belüli adómentes új közlekedési eszköz értékesítés
     /// (intra-EU exempt sale of new means of transport).
     Kbauk,
-    /// `KBAET` — közösségen belüli adómentes termékértékesítés (intra-EU
+    /// `KBAET`: közösségen belüli adómentes termékértékesítés (intra-EU
     /// exempt supply of goods; requires an EU tax number).
     Kbaet,
-    /// `ÁKK` — áfakörön kívüli (outside the VAT system; seen on receipts).
+    /// `ÁKK`: áfakörön kívüli (outside the VAT system; seen on receipts).
     Akk,
-    /// `EU` — EU-n belüli értékesítés (intra-EU sale; receipt code list).
+    /// `EU`: EU-n belüli értékesítés (intra-EU sale; receipt code list).
     Eu,
-    /// `EUK` — EU-n kívüli értékesítés (sale outside the EU; receipt code
+    /// `EUK`: EU-n kívüli értékesítés (sale outside the EU; receipt code
     /// list).
     Euk,
-    /// `MAA` — mentes az adó alól (exempt from tax; receipt code list).
+    /// `MAA`: mentes az adó alól (exempt from tax; receipt code list).
     Maa,
     /// Any other code accepted by szamlazz.hu/NAV.
     Other(String),
@@ -238,7 +238,7 @@ impl VatRate {
 
     /// The exact wire token.
     ///
-    /// A percentage is normalised — trailing zeros dropped, so `27.00`, `27.0`
+    /// A percentage is normalised (trailing zeros dropped), so `27.00`, `27.0`
     /// and `27` all render as `27` and `5.50` as `5.5`. szamlazz.hu accepts
     /// `27.00` and `27.0` too (observed on the test account, 2026-09-06), so
     /// this is hygiene, not a requirement: the integer form is the one every
@@ -351,7 +351,7 @@ impl<'de> serde::Deserialize<'de> for VatRate {
 /// A currency code (`pénznem`).
 ///
 /// szamlazz.hu accepts 37 ISO-style codes; `HUF` may also be written `Ft`.
-/// The set is open — any code converts via [`Currency::new`] or `From`.
+/// The set is open: any code converts via [`Currency::new`] or `From`.
 #[doc(alias = "pénznem")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Currency(Cow<'static, str>);
@@ -383,14 +383,14 @@ impl Currency {
     /// letter case).
     ///
     /// Non-HUF invoices must carry an exchange rate and quoting bank. The
-    /// comparison ignores case so that a `huf` is not demanded one — the
+    /// comparison ignores case so that a `huf` is not demanded one; the
     /// code itself still goes on the wire as given.
     #[must_use]
     pub fn is_huf(&self) -> bool {
         self.0.eq_ignore_ascii_case("HUF") || self.0.eq_ignore_ascii_case("Ft")
     }
 
-    /// The number of decimal places of the currency's minor unit — the ISO
+    /// The number of decimal places of the currency's minor unit, the ISO
     /// 4217 exponent: 2 for most currencies, 0 for JPY or ISK, 3 for KWD or
     /// BHD, 4 for CLF. The code is matched in any letter case.
     ///
@@ -564,19 +564,19 @@ impl<'de> serde::Deserialize<'de> for Language {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PaymentMethod {
-    /// `átutalás` — bank transfer.
+    /// `átutalás`: bank transfer.
     Transfer,
-    /// `készpénz` — cash.
+    /// `készpénz`: cash.
     Cash,
-    /// `bankkártya` — card payment.
+    /// `bankkártya`: card payment.
     Card,
-    /// `csekk` — check.
+    /// `csekk`: check.
     Check,
-    /// `utánvét` — cash on delivery.
+    /// `utánvét`: cash on delivery.
     CashOnDelivery,
     /// `PayPal`.
     PayPal,
-    /// `SZÉP kártya` — SZÉP card.
+    /// `SZÉP kártya`: SZÉP card.
     SzepCard,
     /// Any other free-text payment method.
     Other(String),
@@ -662,15 +662,15 @@ impl<'de> serde::Deserialize<'de> for PaymentMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaxpayerStatus {
-    /// `7` — business outside the EU.
+    /// `7`: business outside the EU.
     NonEuBusiness,
-    /// `6` — business in another EU member state.
+    /// `6`: business in another EU member state.
     EuBusiness,
-    /// `1` — has a Hungarian tax number.
+    /// `1`: has a Hungarian tax number.
     HasTaxNumber,
-    /// `0` — unknown.
+    /// `0`: unknown.
     Unknown,
-    /// `-1` — no tax number (private individual).
+    /// `-1`: no tax number (private individual).
     NoTaxNumber,
 }
 
@@ -764,7 +764,7 @@ mod tests {
             serde_json::to_string(&VatRate::Percent(dec!(18.00))).expect("json"),
             "\"18\""
         );
-        // A code is passed through verbatim — `Other` is the way to send a
+        // A code is passed through verbatim: `Other` is the way to send a
         // literal `27.00` if a probe ever needs to.
         assert_eq!(VatRate::Other("27.00".into()).as_wire(), "27.00");
     }

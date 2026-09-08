@@ -27,8 +27,8 @@ pub use sources::{EnvOverrides, PlainKeys};
 /// (`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` → `account.agent_key`).
 pub const ENV_PREFIX: &str = "RESTATE_SZAMLAZZ_";
 
-/// The configuration sources: the file at `path`, if any — TOML, JSON or
-/// YAML by extension — with the `RESTATE_SZAMLAZZ_` environment overrides
+/// The configuration sources: the file at `path`, if any (TOML, JSON or
+/// YAML by extension) with the `RESTATE_SZAMLAZZ_` environment overrides
 /// merged on top. Environment values are strings, read by the field's type
 /// ([`EnvOverrides`]).
 ///
@@ -77,16 +77,16 @@ pub struct EndpointConfig {
 }
 
 /// What the endpoint does with the signature Restate puts on every request
-/// when the runtime holds a request identity key — as the top-level
+/// when the runtime holds a request identity key, as the top-level
 /// `identity_keys` decides it.
 ///
-/// Identity keys are what enforce the assumption the scope model rests on
-/// (ADR 0006): that only the Restate runtime speaks to the endpoint. The
+/// Identity keys are what enforce the assumption the scope model rests on:
+/// that only the Restate runtime speaks to the endpoint. The
 /// scope travels as protocol data inside the request, so an endpoint that
 /// accepts unsigned requests lets any client reaching its port invoke either
 /// service under any scope. Hence the distinction between the two unsigned
 /// cases: an operator who wrote `identity_keys = []` chose this (a laptop);
-/// one whose configuration does not mention `identity_keys` may not have —
+/// one whose configuration does not mention `identity_keys` may not have;
 /// the start-up log warns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestIdentity {
@@ -96,7 +96,7 @@ pub enum RequestIdentity {
     Verified(Vec<String>),
     /// No key is configured: every request is accepted, signed or not.
     /// `deliberate` when the configuration writes the empty list out
-    /// (`identity_keys = []`, in the file — the local-development opt-out),
+    /// (`identity_keys = []`, in the file: the local-development opt-out),
     /// not when it omits `identity_keys` or sets it to a delimited string
     /// that yields no key (an empty `RESTATE_SZAMLAZZ_IDENTITY_KEYS`, which
     /// is what a deployment template renders when the secret is missing).
@@ -116,7 +116,7 @@ impl Default for RequestIdentity {
 /// The file layout, one explicit field per top-level key. The library's
 /// [`WorkerConfig`] and [`StaticConfig`] are assembled from it rather than
 /// flattened into it, so a parse error keeps the key path and the source
-/// figment attaches — `#[serde(flatten)]` deserializes through a buffer that
+/// figment attaches; `#[serde(flatten)]` deserializes through a buffer that
 /// drops both.
 #[derive(Debug, Deserialize)]
 struct Layout {
@@ -168,9 +168,9 @@ impl EndpointConfig {
     /// # Errors
     ///
     /// Returns an error when the figment holds a key the configuration does
-    /// not know, at any level — every such key is named with its path and its
-    /// source; the pre-release layout's moved keys (`account.slug`, top-level
-    /// `[defaults]` / `[seller]`) with where they went — or both account
+    /// not know, at any level (every such key is named with its path and its
+    /// source); the pre-release layout's moved keys (`account.slug`, top-level
+    /// `[defaults]` / `[seller]`) with where they went, or both account
     /// shapes at once (each named with its source); when it does not parse;
     /// or when [`WorkerConfig::validate`] fails. The accounts themselves are
     /// validated when the static resolver is built.
@@ -187,11 +187,11 @@ impl EndpointConfig {
     }
 }
 
-/// Reads `identity_keys` — a list, or a comma/whitespace-delimited string,
+/// Reads `identity_keys` (a list, or a comma/whitespace-delimited string,
 /// the shape the `RESTATE_SZAMLAZZ_IDENTITY_KEYS` environment override has
-/// since every environment value is a string — as the [`RequestIdentity`] it
+/// since every environment value is a string) as the [`RequestIdentity`] it
 /// decides. Any key makes it `Verified`. The empty list literal is the
-/// deliberate opt-out; a delimited string that yields no key is not — it
+/// deliberate opt-out; a delimited string that yields no key is not: it
 /// reads as the key unmentioned, because an empty environment variable is
 /// what a deployment template renders when the secret is missing.
 fn identity_keys<'de, D>(deserializer: D) -> Result<RequestIdentity, D::Error>
@@ -240,9 +240,8 @@ mod tests {
 
     use super::*;
 
-    /// The configuration example of design §9, with `identity_keys = []`
-    /// written out.
-    const SPEC_EXAMPLE: &str = r#"
+    /// A full configuration example, with `identity_keys = []` written out.
+    const FULL_EXAMPLE: &str = r#"
         identity_keys = []
         namespace = "acct"
 
@@ -316,11 +315,11 @@ mod tests {
         )
     }
 
-    /// Every documented example configuration — the fixtures, every TOML
-    /// block of the endpoint README, the library README, the workspace README
-    /// and the design document — loads and builds its accounts, so the
-    /// documentation cannot drift from what the loader accepts (a key the
-    /// loader does not know fails here).
+    /// Every documented example configuration (the fixtures and every TOML
+    /// block of the endpoint README, the library README and the workspace
+    /// README) loads and builds its accounts, so the documentation cannot
+    /// drift from what the loader accepts (a key the loader does not know
+    /// fails here).
     #[test]
     fn every_documented_example_loads() {
         let documents = [
@@ -330,10 +329,6 @@ mod tests {
                 include_str!("../../restate-szamlazz/README.md"),
             ),
             ("workspace README", include_str!("../../../README.md")),
-            (
-                "design document",
-                include_str!("../../../docs/design/restate-szamlazz.md"),
-            ),
         ];
         let mut examples = vec![
             (
@@ -354,7 +349,10 @@ mod tests {
                 examples.push((name, block));
             }
         }
-        assert!(examples.len() >= 6, "the documents carry TOML examples");
+        // The two fixtures plus the endpoint README's blocks (the quick start's
+        // minimal configuration, the full single-account one, the
+        // multi-account one).
+        assert!(examples.len() >= 5, "the documents carry TOML examples");
 
         for (name, toml) in examples {
             let config = load(toml).unwrap_or_else(|error| panic!("{name}: {error:#}\n{toml}"));
@@ -363,28 +361,20 @@ mod tests {
         }
     }
 
-    /// The fault table of the endpoint README and design §7 lists every
-    /// `TerminalCode` with its status — a README row `` | `code` | status | ``,
-    /// the design's `code (status)` — so the caller-facing table cannot drift
-    /// from the codes the worker raises. (The library README's table is held
-    /// to the same by the library's own test; this one reaches the documents
-    /// outside that package.)
+    /// The fault table of the endpoint README lists every `TerminalCode` with
+    /// its status, as a row `` | `code` | status | ``, so the caller-facing
+    /// table cannot drift from the codes the worker raises. (The library
+    /// README's table is held to the same by the library's own test; this one
+    /// reaches the document outside that package.)
     #[test]
     fn every_terminal_code_is_in_every_fault_table() {
         use restate_szamlazz::contract::TerminalCode;
 
-        let documents = [
-            (
-                "endpoint README",
-                include_str!("../README.md"),
-                "| `{code}` | {status} |",
-            ),
-            (
-                "design document",
-                include_str!("../../../docs/design/restate-szamlazz.md"),
-                "{code} ({status})",
-            ),
-        ];
+        let documents = [(
+            "endpoint README",
+            include_str!("../README.md"),
+            "| `{code}` | {status} |",
+        )];
         for (name, document, shape) in documents {
             for code in TerminalCode::ALL {
                 let entry = shape
@@ -401,8 +391,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_spec_example() {
-        let config = load(SPEC_EXAMPLE).expect("configuration should load");
+    fn parses_the_full_example() {
+        let config = load(FULL_EXAMPLE).expect("configuration should load");
 
         assert_eq!(config.worker.namespace.as_str(), "acct");
         assert_eq!(config.worker.issue.max_attempts, 5);
@@ -492,7 +482,7 @@ mod tests {
     /// `[account.defaults]`, an issue-policy field, a read-policy field and
     /// the namespace itself. Every value is a string the field's type reads:
     /// `"3"` is `3` on a count, `"1.5"` on a factor, `"true"` on a flag,
-    /// `"90"` seconds on a duration — and an all-digit agent key stays the
+    /// `"90"` seconds on a duration, and an all-digit agent key stays the
     /// string it was written as, leading zero included.
     #[test]
     fn environment_overrides_nest_with_double_underscores_and_are_read_as_strings() {
@@ -506,7 +496,7 @@ mod tests {
             jail.set_env("RESTATE_SZAMLAZZ_READ__MAX_ATTEMPTS", "4");
             jail.set_env("RESTATE_SZAMLAZZ_NAMESPACE", "from-env");
 
-            let config = load_with_env(SPEC_EXAMPLE).expect("configuration should load");
+            let config = load_with_env(FULL_EXAMPLE).expect("configuration should load");
 
             let account = config
                 .accounts
@@ -547,7 +537,7 @@ mod tests {
         });
     }
 
-    /// The binary's sources: a file by extension — TOML, JSON or YAML — with
+    /// The binary's sources: a file by extension (TOML, JSON or YAML) with
     /// the environment on top; a missing file and an unknown extension are
     /// refused before anything is read.
     #[test]
@@ -600,8 +590,8 @@ mod tests {
         });
     }
 
-    /// A file's key paths render plainly in errors — `issue.factor`, not
-    /// figment's `default.issue.factor` — beside the file they came from.
+    /// A file's key paths render plainly in errors (`issue.factor`, not
+    /// figment's `default.issue.factor`) beside the file they came from.
     #[test]
     fn file_key_paths_render_without_the_profile_prefix() {
         Jail::expect_with(|jail| {
@@ -666,7 +656,7 @@ mod tests {
     /// differs is whether the operator said so. `identity_keys = []` written
     /// out is the deliberate opt-out (local development; an `info` at
     /// start-up); a configuration that does not mention `identity_keys` is
-    /// the omission the start-up `warn` names — in the file, and when a
+    /// the omission the start-up `warn` names: in the file, and when a
     /// JSON or YAML file writes the empty list.
     #[test]
     fn omitting_identity_keys_is_unsigned_by_omission_and_an_explicit_empty_list_is_deliberate() {
@@ -707,8 +697,8 @@ mod tests {
 
     /// A delimited string that yields no key is not the opt-out: an empty
     /// `RESTATE_SZAMLAZZ_IDENTITY_KEYS` is what a deployment template renders
-    /// when the secret it should carry is missing — the very case the
-    /// start-up warning exists for — so it warns like an omission, and it
+    /// when the secret it should carry is missing (the very case the
+    /// start-up warning exists for), so it warns like an omission, and it
     /// overrides a file's keys or its written-out `[]` the same way. Only the
     /// list literal `[]` is deliberate.
     #[test]
@@ -839,7 +829,7 @@ mod tests {
     }
 
     /// Both shapes in one configuration are refused at load, naming both
-    /// tables and where each came from — in particular a multi-account file
+    /// tables and where each came from, in particular a multi-account file
     /// plus a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` left over from the
     /// flag day, which materialises a partial `[account]`: the error names
     /// `account` and the rule, not `missing field id`.
@@ -901,8 +891,8 @@ mod tests {
         });
     }
 
-    /// The pre-release layout — `account.slug`, top-level `[defaults]` and
-    /// `[seller]` — is refused by name rather than silently ignored.
+    /// The pre-release layout (`account.slug`, top-level `[defaults]` and
+    /// `[seller]`) is refused by name rather than silently ignored.
     #[test]
     fn pre_release_layout_fails_with_a_clear_error() {
         let error = load(
@@ -938,9 +928,9 @@ mod tests {
         assert!(!message.contains("`[account.defaults]`"), "{message}");
     }
 
-    /// An unknown key is refused at every level — the top level, a policy,
+    /// An unknown key is refused at every level (the top level, a policy,
     /// an account table and its `defaults` / `seller` / `seller.email`
-    /// sub-tables, in either shape — with an error naming the key, its path
+    /// sub-tables, in either shape) with an error naming the key, its path
     /// and where it came from, instead of being ignored and leaving the
     /// setting at its default.
     #[test]
@@ -1047,8 +1037,8 @@ mod tests {
     }
 
     /// A parse error names the key it happened at and where that key came
-    /// from — a wrong type under `[issue]` in a file, a wrong type under
-    /// `[account.defaults]` from the environment — not just serde's message.
+    /// from (a wrong type under `[issue]` in a file, a wrong type under
+    /// `[account.defaults]` from the environment), not just serde's message.
     #[test]
     fn parse_errors_name_the_key_path_and_the_source() {
         let error = load(&format!("{}\n[issue]\ninitial_delay = true", minimal()))

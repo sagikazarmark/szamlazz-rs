@@ -1,6 +1,6 @@
 //! The pushed document types, deserialized leniently: unknown elements are
 //! ignored, empty elements read as absent, and an element the XSD requires
-//! is as optional as any other — [`Document::parse`] refuses **shape** (a body
+//! is as optional as any other; [`Document::parse`] refuses **shape** (a body
 //! that is not the pushed document) and never **content**, because a push is
 //! at-most-N-times delivery and a refusal szamlazz.hu retries identically for
 //! 72 hours loses the record. The XSD's requirements are available as a signal
@@ -33,7 +33,7 @@ pub enum Document {
     /// An incoming (received) invoice (`<szamlabe>`).
     #[doc(alias = "bejövő számla")]
     IncomingInvoice(InvoiceDocument),
-    /// A bank transaction (`<banktranz>`), pushed in periodic batches — one
+    /// A bank transaction (`<banktranz>`), pushed in periodic batches, one
     /// transaction per request.
     #[doc(alias = "banki tranzakció")]
     BankTransaction(BankTransaction),
@@ -47,7 +47,7 @@ impl Document {
     ///
     /// Refuses **shape**, never **content**. A push is at-most-N-times
     /// delivery: szamlazz.hu retries a non-200 answer, identically, for up
-    /// to 72 hours and then drops the record — for a bank transaction or a
+    /// to 72 hours and then drops the record; for a bank transaction or a
     /// receipt that is the last time it offers it. A body this parse cannot
     /// read is therefore lost, so it refuses only what the receiver cannot
     /// Ack: a body that is not UTF-8 or not well-formed XML, an unknown root
@@ -65,14 +65,14 @@ impl Document {
     /// The line between an unknown enumeration token (content) and a
     /// malformed lexical value (shape) is the one the crate has always drawn
     /// with [`InvoiceAppearance::Unknown`]: an enumeration is an open set
-    /// szamlazz.hu extends — a new direction or document type is a protocol
-    /// extension the receiver must survive — while a fourth spelling of
+    /// szamlazz.hu extends (a new direction or document type is a protocol
+    /// extension the receiver must survive), while a fourth spelling of
     /// `true` or a date that is not a date is not an extension but a value
     /// the type cannot hold, and reading it as `None` would hide it behind
     /// the same answer as an omission.
     ///
-    /// The XSD's own requirements — its `minOccurs="1"` elements, its
-    /// enumerations, its non-negative VAT rates — are a **signal**, not a
+    /// The XSD's own requirements (its `minOccurs="1"` elements, its
+    /// enumerations, its non-negative VAT rates) are a **signal**, not a
     /// gate: [`Document::validate`] reports the first one a parsed document
     /// misses, and [`Document::parse_strict`] makes it a gate for callers
     /// that want one.
@@ -375,7 +375,7 @@ impl From<Pdf> for Vec<u8> {
     }
 }
 
-/// Serializes as a base64 string — the wire representation.
+/// Serializes as a base64 string, the wire representation.
 impl serde::Serialize for Pdf {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use base64::Engine as _;
@@ -518,7 +518,7 @@ pub struct Bank {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct InvoiceInfo {
-    /// The document id (`id`) — this is the value an [`InvoiceAck`] must
+    /// The document id (`id`): this is the value an [`InvoiceAck`] must
     /// echo.
     ///
     /// [`InvoiceAck`]: crate::InvoiceAck
@@ -1006,14 +1006,14 @@ impl FinancialItem {
 }
 
 /// A pushed invoice document: `<szamla>` (outgoing) or `<szamlabe>`
-/// (incoming) — the two shapes are near-identical and share this type; which
+/// (incoming). The two shapes are near-identical and share this type; which
 /// one arrived is expressed by the [`Document`] variant / [`Handler`] method.
 ///
 /// [`Handler`]: crate::Handler
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct InvoiceDocument {
-    /// The supplier (`szallito`). Empty when the push omits the block — every
+    /// The supplier (`szallito`). Empty when the push omits the block: every
     /// field of a [`Party`] is optional, so an absent block and an empty one
     /// read the same.
     #[doc(alias = "szállító")]
@@ -1055,7 +1055,7 @@ pub struct InvoiceDocument {
     pub payments: Vec<RecordedPayment>,
     /// The invoice PDF (`pdf`), base64 on the wire, decoded here.
     ///
-    /// `None` when the element is absent or empty — and when its content does
+    /// `None` when the element is absent or empty, and when its content does
     /// not decode. The decoder forgives an encoder's sloppiness (missing
     /// padding, set trailing bits); what it still cannot read is not a reason
     /// to refuse the invoice, so the parse degrades the PDF to `None` and
@@ -1225,9 +1225,9 @@ fn validation<T>(message: impl Into<String>) -> Result<T, ValidationError> {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
 pub enum TransactionDirection {
-    /// `BE` — incoming.
+    /// `BE`: incoming.
     Incoming,
-    /// `KI` — outgoing.
+    /// `KI`: outgoing.
     Outgoing,
     /// A token `banktranz.xsd` does not enumerate, kept exactly as received.
     #[serde(untagged)]
@@ -1280,7 +1280,7 @@ pub struct TransactionPartner {
 
 /// A pushed bank transaction (`<banktranz>`).
 ///
-/// Only the `id` is required to parse — it is what identifies the record. The
+/// Only the `id` is required to parse: it is what identifies the record. The
 /// elements `banktranz.xsd` marks required (`bankszamla`, `erteknap`, `irany`,
 /// `technikai`, `osszeg`, `devizanem`) are read as the wire delivers them,
 /// `None` when absent or empty: a bank transaction answered non-200 is
@@ -1580,7 +1580,7 @@ pub struct ReceiptDocument {
     pub totals: Totals,
 }
 
-/// A pushed receipt batch (`<xmlnyugtaarchiv>`) — receipts are delivered in
+/// A pushed receipt batch (`<xmlnyugtaarchiv>`): receipts are delivered in
 /// daily batches, unlike the other document types.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
@@ -1745,7 +1745,7 @@ pub(crate) mod de {
     }
 
     /// Deserializes an optional `<irany>`, reading an empty element as absent
-    /// and any non-empty token — known or not — as a direction.
+    /// and any non-empty token (known or not) as a direction.
     pub fn opt_transaction_direction<'de, D>(
         deserializer: D,
     ) -> Result<Option<TransactionDirection>, D::Error>
@@ -1768,7 +1768,7 @@ pub(crate) mod de {
     );
 
     /// Deserializes the `<pdf>` element: absent or empty is `None`, and so is
-    /// content [`PDF_ENGINE`] cannot decode — a document-content detail must
+    /// content [`PDF_ENGINE`] cannot decode; a document-content detail must
     /// not decide the delivery of a legal record. The encoded text stays in
     /// the document's raw XML.
     pub fn base64_pdf<'de, D>(deserializer: D) -> Result<Option<Pdf>, D::Error>

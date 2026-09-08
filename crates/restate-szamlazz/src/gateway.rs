@@ -1,28 +1,28 @@
 //! The module that speaks to szamlazz.hu on behalf of one account: one plain
 //! async fn per `ctx.run`, over the [`szamlazz_agent::Client`], returning
-//! every expected szamlazz.hu outcome **as data** — a rejection, a duplicate
+//! every expected szamlazz.hu outcome **as data**; a rejection, a duplicate
 //! order number, a not-found or a no-op storno is a value, never an `Err`.
 //! The `Err`s are deliberate and say what a run retry policy may re-execute:
 //! the read-only steps return [`Unanswered`] when szamlazz.hu did not answer
 //! (a transport or parse failure, `szlahu_down`), and the create and storno
-//! steps return [`Unconfirmed`] when szamlazz.hu's answer is *not* known — an
+//! steps return [`Unconfirmed`] when szamlazz.hu's answer is *not* known; an
 //! answer to a write step's leading query is data too ([`CreateOutcome::Api`],
 //! [`CreateOutcome::Unavailable`] and the storno twins): nothing was sent, so
 //! nothing is unconfirmed.
 //!
 //! [`Gateway`] owns the client and the [`Account`] it speaks for; it is not a
-//! second client — the Számla Agent `Client` is the transport it wraps.
+//! second client: the Számla Agent `Client` is the transport it wraps.
 //! `Szamlazz.Order` calls these inside `ctx.run`; the `Szamlazz.Agent` Restate
 //! service is a thin facade over the same functions. Neither Restate service
 //! calls the other. Everything the services need to know about the account
 //! (its ownership-validation pins, its document defaults) is read through
 //! [`Gateway::account`].
 //!
-//! Every query result is validated before it is called ours (design §3):
+//! Every query result is validated before it is called ours:
 //! external ids are not unique server-side and the order-number hint returns
 //! the most recently issued document of any kind.
 //!
-//! Tracing events carry external ids, kinds, numbers and codes — never buyer
+//! Tracing events carry external ids, kinds, numbers and codes, never buyer
 //! data.
 //!
 //! # Journaled types are additive-only
@@ -31,31 +31,30 @@
 //! them as the result of a `ctx.run`. An in-flight invocation replays the
 //! entries the *previous* deployment wrote, and an entry the new code cannot
 //! decode is a retryable SDK error: the invocation replays into the same
-//! failure until its attempts are spent — holding the order key the whole time
-//! — and is killed. So every type the services journal is **additive-only**: a
+//! failure until its attempts are spent (holding the order key the whole time),
+//! and is killed. So every type the services journal is **additive-only**: a
 //! new field carries a serde default, a new variant may be added, and no field
-//! or variant is renamed, removed or retyped — with one admitted widening: a
+//! or variant is renamed, removed or retyped, with one admitted widening: a
 //! field `T` may become `Option<T>` when every value the old type wrote decodes
 //! to `Some` and re-encodes byte for byte, which the compatibility test proves
-//! on the committed fixtures (`InvoiceInfo::test`, #70; ADR 0005, *Widening*).
+//! on the committed fixtures (`InvoiceInfo::test`).
 //! This holds for the outcomes here
 //! ([`LookupOutcome`], [`CreateOutcome`], [`QueryOutcome`],
 //! [`StornoLookupOutcome`], [`StornoOutcome`], [`DeleteOutcome`],
 //! [`SetPaymentsOutcome`], [`ProbeOutcome`], [`TaxpayerOutcome`]), for the
 //! prologue's journaled [`Account`] and pinned namespace, and for the agent
-//! crate's response types the document outcomes carry **as they are** —
-//! [`InvoiceDocument`], [`InvoiceCreationResult`], [`CreatedInvoice`] and
-//! everything they nest — whose JSON layout is thereby part of this crate's
+//! crate's response types the document outcomes carry **as they are**
+//! ([`InvoiceDocument`], [`InvoiceCreationResult`], [`CreatedInvoice`] and
+//! everything they nest), whose JSON layout is thereby part of this crate's
 //! journal contract. [`TaxpayerOutcome`] carries the crate-owned
-//! [`QueryTaxpayerResponse`] instead — a projection that is additive-only by
+//! [`QueryTaxpayerResponse`] instead: a projection that is additive-only by
 //! the same rule, so a change to the agent crate's `TaxpayerInfo` cannot reach
 //! a journaled taxpayer answer. The rule is checked in CI: `service::journal`
 //! pins one JSON fixture per variant of every journaled type under
 //! `tests/journal/` and replays every fixture ever committed through the
 //! current types; the `Journaled` marker trait the run helpers require is the
-//! link from the `ctx.run` sites to that directory (ADR 0005, journal
-//! compatibility). A journaled document therefore includes the buyer block
-//! szamlazz.hu returned with it.
+//! link from the `ctx.run` sites to that directory. A journaled document
+//! therefore includes the buyer block szamlazz.hu returned with it.
 //!
 //! [`InvoiceDocumentExt`] adds the checks the services make on a queried
 //! document before trusting or acting on it.
@@ -86,9 +85,9 @@ pub mod build;
 pub use build::{DocumentRefs, InputError, gross_total};
 
 /// The pseudo-code of a rejection that never reached szamlazz.hu: the request
-/// violates the Számla Agent wire contract (a sixth credit entry, a replacing
-/// credit-entry request with no entries — it would clear the invoice's
-/// payments — a document without line items). Stands beside szamlazz.hu's
+/// violates the Számla Agent wire contract (a sixth credit entry; a replacing
+/// credit-entry request with no entries, which would clear the invoice's
+/// payments; a document without line items). Stands beside szamlazz.hu's
 /// numeric codes in the `Rejected { code }` outcomes. On a create or storno
 /// it is the `rejected` outcome like any other code;
 /// `Szamlazz.Agent.set_payments` tells it apart and answers the caller's
@@ -107,7 +106,7 @@ pub struct Gateway {
     account: Account,
 }
 
-/// The lookup step (design §5 step 3): what identifies the document whose
+/// The lookup step: what identifies the document whose
 /// external id is queried and, for every kind but correctives, the order
 /// whose hint is taken.
 ///
@@ -156,9 +155,9 @@ pub enum LookupOutcome {
     /// order or kind).
     Collision(Box<InvoiceDocument>),
     /// A live invoice-kind document under the order number that is neither
-    /// in `our_numbers` nor the document seen under the external id — another
+    /// in `our_numbers` nor the document seen under the external id: another
     /// channel's. Reported even when our own document under the id is
-    /// reversed: no create — reissue or not — may proceed past it.
+    /// reversed: no create (reissue or not) may proceed past it.
     Foreign(Box<InvoiceDocument>),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
     /// external-id query or the hint; nothing may be concluded and nothing
@@ -181,7 +180,7 @@ pub enum LookupOutcome {
     },
 }
 
-/// The create step (design §5 step 4): query the external id, then send the
+/// The create step: query the external id, then send the
 /// create unless a live document of ours is already there.
 ///
 /// Carries what identifies the document and the create to send. A found
@@ -214,22 +213,22 @@ pub struct CreateStepRequest<'a> {
 #[non_exhaustive]
 pub enum CreateOutcome {
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
-    /// create — indistinguishable and reported either way). The result
+    /// create, indistinguishable and reported either way). The result
     /// carries a number.
     Issued(InvoiceCreationResult),
-    /// A live document of ours is under the external id — found by the
+    /// A live document of ours is under the external id, found by the
     /// leading query (an earlier execution of this step created it) or by the
     /// re-query after a lost reply. Nothing was sent, or what was sent landed.
     Found(Box<InvoiceDocument>),
     /// A **reversed** document of ours that the lookup step did not see is
     /// under the external id: an earlier execution of this step (or anyone)
-    /// issued it and it was reversed since. Nothing was sent — a reversal
+    /// issued it and it was reversed since. Nothing was sent: a reversal
     /// the lookup did not see must be answered as `reversed`, never issued
-    /// past (ADR 0003: a new document needs an explicit `reissue`).
+    /// past (a new document needs an explicit `reissue`).
     Reversed(Box<InvoiceDocument>),
     /// The document the lookup step saw **reversed** is reported **live**
     /// by the leading query or the re-query: the server contradicts itself.
-    /// Nothing was sent — sending is the least safe answer to an
+    /// Nothing was sent: sending is the least safe answer to an
     /// inconsistency; the caller sees `conflict{live}` as the lookup would
     /// have reported.
     LiveAgain(Box<InvoiceDocument>),
@@ -243,7 +242,7 @@ pub enum CreateOutcome {
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found no live document of ours: the duplicate is
     /// not ours. Never reported for correctives, which are exempt from the
-    /// order-number check — their unresolved 71/152 is
+    /// order-number check: their unresolved 71/152 is
     /// [`CreateOutcome::Rejected`].
     DuplicateOrderNumber {
         /// The szamlazz.hu code (`71` or `152`).
@@ -277,9 +276,9 @@ pub enum CreateOutcome {
     /// szamlazz.hu answered the **leading** query with another code (neither
     /// 7 nor a credential code): an answer the step cannot conclude from, so
     /// nothing was sent. Settled data, as [`LookupOutcome::Api`] is for the
-    /// same code one step earlier — not [`Unconfirmed`], which would spend the
+    /// same code one step earlier, not [`Unconfirmed`], which would spend the
     /// issue policy, sized for the post-send window, on a read and report an
-    /// answer as silence (#63). The same code on a post-send re-query is
+    /// answer as silence. The same code on a post-send re-query is
     /// [`Unconfirmed::ReQueryFailed`]: there a send happened.
     Api {
         /// The szamlazz.hu code.
@@ -290,7 +289,7 @@ pub enum CreateOutcome {
     /// szamlazz.hu reported unavailability (`szlahu_down`) to the **leading**
     /// query: nothing was sent. Settled data for the same reason as
     /// [`CreateOutcome::Api`]. (The lookup step, under the read policy sized
-    /// for reads, re-executes on the same answer — [`Unanswered::Unavailable`].)
+    /// for reads, re-executes on the same answer, [`Unanswered::Unavailable`].)
     Unavailable {
         /// szamlazz.hu's message.
         message: String,
@@ -302,7 +301,7 @@ pub enum CreateOutcome {
 /// landed.
 ///
 /// Reserved for exchanges whose answer is not known. An *answer* to the
-/// leading query — another code, `szlahu_down` — is settled data
+/// leading query (another code, `szlahu_down`) is settled data
 /// ([`CreateOutcome::Api`], [`CreateOutcome::Unavailable`] and the storno
 /// twins), never this. Every variant but [`Unconfirmed::Transport`] on the
 /// leading query follows an immediate external-id re-query: one that found no
@@ -316,15 +315,15 @@ pub enum CreateOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unconfirmed {
-    /// The HTTP exchange or the response parse failed — on the leading query
+    /// The HTTP exchange or the response parse failed, on the leading query
     /// (nothing was sent) or on the create or storno.
     #[error("transport failure: {0}")]
     Transport(String),
     /// szamlazz.hu reported an open code to the create or storno, one that
     /// leaves the outcome open: 1, 55, 56 without a number, or a code the
     /// agent crate does not know ([`OutcomeClass::Unknown`]). `code` is
-    /// `None` for the one open answer that names no code — success without
-    /// a document number — which is as open as a code would be.
+    /// `None` for the one open answer that names no code (success without
+    /// a document number), which is as open as a code would be.
     #[error("{}", open_display(code.as_deref(), message))]
     Open {
         /// The szamlazz.hu code, when one was reported.
@@ -336,13 +335,13 @@ pub enum Unconfirmed {
     /// storno: whether it acted first is not known.
     #[error("szamlazz.hu is unavailable (szlahu_down): {0}")]
     Unavailable(String),
-    /// The send ended without a settled answer — `sent` says how — and the
+    /// The send ended without a settled answer (`sent` says how), and the
     /// immediate re-query that would have settled it failed itself, so
     /// neither is known. Both are named: the re-query's failure never hides
-    /// that a send happened (#63).
+    /// that a send happened.
     #[error("{sent}; the re-query that would have settled it failed: {re_query}")]
     ReQueryFailed {
-        /// How the send ended — the display of the [`Unconfirmed`] it would
+        /// How the send ended: the display of the [`Unconfirmed`] it would
         /// have been had the re-query found nothing, or the duplicate-order-
         /// number answer (71/152) the re-query was to resolve.
         sent: String,
@@ -353,7 +352,7 @@ pub enum Unconfirmed {
 }
 
 /// The display of [`Unconfirmed::Open`]: the code when one was reported,
-/// otherwise the one open answer without a code (#63).
+/// otherwise the one open answer without a code.
 fn open_display(code: Option<&str>, message: &str) -> String {
     match code {
         Some(code) => format!("open code {code}: {message}"),
@@ -373,12 +372,12 @@ impl Unconfirmed {
 }
 
 /// A read-only step got no answer from szamlazz.hu: the read policy
-/// re-executes it. The error of every read fn of the gateway — [`lookup`],
+/// re-executes it. The error of every read fn of the gateway ([`lookup`],
 /// [`verify`], [`query`], [`hint`], [`lookup_storno`], [`query_taxpayer`],
-/// [`probe`] — and never of a write.
+/// [`probe`]), and never of a write.
 ///
-/// Every szamlazz.hu *answer* — a document, code 7, rejected credentials,
-/// another API code — is the read's data; this is only the exchange that
+/// Every szamlazz.hu *answer* (a document, code 7, rejected credentials,
+/// another API code) is the read's data; this is only the exchange that
 /// produced none. A read writes nothing, so re-executing it is safe and a
 /// re-executed closure's answer is exactly as fresh as a first one; its
 /// exhaustion is the handler's `unavailable` fault.
@@ -402,7 +401,7 @@ pub enum Unanswered {
 }
 
 /// The checks the services make on a queried document before trusting or
-/// acting on it (design §3).
+/// acting on it.
 pub trait InvoiceDocumentExt {
     /// The document number.
     fn number(&self) -> &str;
@@ -417,9 +416,9 @@ pub trait InvoiceDocumentExt {
     /// unknown `eszamla` codes, where the account default applies.
     ///
     /// What the storno handlers send as the storno's `eszamla`. szamlazz.hu
-    /// does not require a storno's form to match its original's — a mismatch
+    /// does not require a storno's form to match its original's: a mismatch
     /// is accepted silently and the storno document takes the request's flag
-    /// (P73) — so this derivation, not the server, is what keeps a reversal
+    /// (P73), so this derivation, not the server, is what keeps a reversal
     /// in its original's form. `1` is paper and `2`/`3` are e-invoice codes,
     /// as the vendor annotation says and the test account confirmed (`3` for
     /// an invoice created with `eszamla=true`).
@@ -430,13 +429,13 @@ pub trait InvoiceDocumentExt {
 
     /// Whether the document carries `order` as its order number
     /// (`rendelesszam`, trimmed as szamlazz.hu matches it). What makes a
-    /// document found by number this order's to act on or link (design §3).
+    /// document found by number this order's to act on or link.
     fn carries_order(&self, order: &OrderKey) -> bool;
 
-    /// Whether the document is ours (design §3): it [carries
+    /// Whether the document is ours: it [carries
     /// `order`](Self::carries_order) and the `tipus` of `kind`. Nothing about
-    /// the account: the worker holds no account pin (ADR 0006, account-pin
-    /// amendment — `teszt` and `szallito/id` are parsed, never compared).
+    /// the account: the worker holds no account pin (`teszt` and `szallito/id`
+    /// are parsed, never compared).
     fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool;
 }
 
@@ -487,7 +486,7 @@ pub enum QueryOutcome {
     /// The document.
     Found(Box<InvoiceDocument>),
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
-    /// number or external id — or a deleted / consumed proforma.
+    /// number or external id, or a deleted / consumed proforma.
     NotFound,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
     /// check was not made. See [`is_credentials_rejected`].
@@ -512,10 +511,10 @@ pub enum QueryOutcome {
 ///
 /// Credential acceptance is the only fact it establishes: szamlazz.hu answers
 /// the credential codes before it looks at the request, so any other answer
-/// — code 7 above all, since nothing the service issues carries the sentinel
-/// id — means the key works. *Which* account the key opens it cannot tell: a
+/// (code 7 above all, since nothing the service issues carries the sentinel
+/// id) means the key works. *Which* account the key opens it cannot tell: a
 /// not-found probe has no document to read, and no operation answers "which
-/// account am I?" — that is the operator's go-live check. An exchange that
+/// account am I?"; that is the operator's go-live check. An exchange that
 /// produced no answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -536,8 +535,8 @@ pub enum ProbeOutcome {
 /// What the taxpayer query of `Szamlazz.Agent.query_taxpayer` learned from
 /// one `xmltaxpayer` exchange ([`Gateway::query_taxpayer`]).
 ///
-/// Every szamlazz.hu answer is data: NAV's verdict on the prefix — valid or
-/// not — is [`TaxpayerOutcome::Found`], a credential code is
+/// Every szamlazz.hu answer is data: NAV's verdict on the prefix (valid or
+/// not) is [`TaxpayerOutcome::Found`], a credential code is
 /// [`TaxpayerOutcome::CredentialsRejected`], any other `funcCode ≠ OK` (a
 /// NAV-side failure szamlazz.hu relays, a szamlazz.hu code of its own) is
 /// [`TaxpayerOutcome::Api`]. An exchange that produced no answer is
@@ -557,7 +556,7 @@ pub enum TaxpayerOutcome {
         /// The szamlazz.hu message.
         message: String,
     },
-    /// szamlazz.hu answered with another code — its own, or NAV's
+    /// szamlazz.hu answered with another code: its own, or NAV's
     /// `errorCode` relayed under `funcCode ERROR`.
     Api {
         /// The code.
@@ -630,13 +629,13 @@ impl QueryError {
     }
 }
 
-/// What the storno lookup step found (design §6 step 2), read-only. A query
+/// What the storno lookup step found, read-only. A query
 /// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum StornoLookupOutcome {
     /// Nothing under the storno external id (code 7), or a holder that is not
-    /// the storno of the invoice — a storno is idempotent server-side, so the
+    /// the storno of the invoice: a storno is idempotent server-side, so the
     /// storno step proceeds past a stray holder.
     Absent,
     /// The `SS` reversing the invoice holds the storno external id: a storno
@@ -664,7 +663,7 @@ pub enum StornoLookupOutcome {
     },
 }
 
-/// The storno step (design §6 step 3): what identifies the storno to send.
+/// The storno step: what identifies the storno to send.
 #[derive(Debug, Clone, Copy)]
 pub struct StornoStepRequest<'a> {
     /// The invoice to reverse.
@@ -677,7 +676,7 @@ pub struct StornoStepRequest<'a> {
     /// Issue the storno as an e-invoice.
     pub e_invoice: bool,
     /// The storno's `teljesitesDatum`: the verified original's `telj`, which
-    /// NAV requires the storno to repeat (ADR 0007). A pure function of the
+    /// NAV requires the storno to repeat. A pure function of the
     /// journaled verify result, so every execution of the step sends the
     /// same date.
     pub fulfillment_date: Date,
@@ -693,7 +692,7 @@ pub enum StornoOutcome {
     /// or echoed by an idempotent repeat), validated with
     /// [`CreatedInvoice::reverses`] by [`Gateway::storno`].
     Reversed(CreatedInvoice),
-    /// The storno invoice is under the storno external id — found by the
+    /// The storno invoice is under the storno external id, found by the
     /// leading query (an earlier execution of this step, or the lookup step's
     /// race, sent it) or by the re-query after a lost reply. Nothing was
     /// sent, or what was sent landed.
@@ -724,7 +723,7 @@ pub enum StornoOutcome {
     },
     /// szamlazz.hu answered the **leading** query with another code (neither
     /// 7 nor a credential code): nothing was sent. Settled data, as
-    /// [`CreateOutcome::Api`] is for the create step (#63).
+    /// [`CreateOutcome::Api`] is for the create step.
     Api {
         /// The szamlazz.hu code.
         code: String,
@@ -733,7 +732,7 @@ pub enum StornoOutcome {
     },
     /// szamlazz.hu reported unavailability (`szlahu_down`) to the **leading**
     /// query: nothing was sent. Settled data, as [`CreateOutcome::Unavailable`]
-    /// is for the create step (#63).
+    /// is for the create step.
     Unavailable {
         /// szamlazz.hu's message.
         message: String,
@@ -875,12 +874,12 @@ impl Gateway {
         &self.account
     }
 
-    /// Whether `found` is ours (design §3) for `order` and `kind`.
+    /// Whether `found` is ours for `order` and `kind`.
     fn is_ours(found: &InvoiceDocument, order: &OrderKey, kind: IssuedKind) -> bool {
         found.is_ours(order, kind)
     }
 
-    /// The lookup step (design §5 step 3), read-only.
+    /// The lookup step, read-only.
     ///
     /// 1. Query by external id: a validated live hit is
     ///    [`LookupOutcome::Live`] (the hint is not taken); an invalid hit is
@@ -973,20 +972,20 @@ impl Gateway {
         })
     }
 
-    /// The create step (design §5 step 4), query-first on every execution.
+    /// The create step, query-first on every execution.
     ///
     /// 1. Query by external id: a validated live hit that is not
-    ///    `request.reversed` is [`CreateOutcome::Found`] — an earlier
-    ///    execution created it; a validated **reversed** hit that is not
-    ///    `request.reversed` is [`CreateOutcome::Reversed`] — issued and
-    ///    reversed since the lookup; `request.reversed` reported live is
+    ///    `request.reversed` is [`CreateOutcome::Found`] (an earlier
+    ///    execution created it); a validated **reversed** hit that is not
+    ///    `request.reversed` is [`CreateOutcome::Reversed`] (issued and
+    ///    reversed since the lookup); `request.reversed` reported live is
     ///    [`CreateOutcome::LiveAgain`]; an invalid hit is
     ///    [`CreateOutcome::Collision`]; code 7 and `request.reversed` still
     ///    reversed continue; rejected credentials are
     ///    [`CreateOutcome::CredentialsRejected`]; another code is
     ///    [`CreateOutcome::Api`] and `szlahu_down` [`CreateOutcome::Unavailable`]
-    ///    — answers, settled with nothing sent (#63); only a transport failure
-    ///    is [`Unconfirmed::Transport`] — never create when the check itself
+    ///    (answers, settled with nothing sent); only a transport failure
+    ///    is [`Unconfirmed::Transport`]: never create when the check itself
     ///    failed. The rule: the step sends only when the external id holds
     ///    nothing, or exactly the document the lookup step saw reversed.
     /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
@@ -1019,7 +1018,7 @@ impl Gateway {
         &self,
         request: &CreateStepRequest<'_>,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        // Step 1: the leading query. An answer settles the step — nothing
+        // Step 1: the leading query. An answer settles the step: nothing
         // has been sent; only an exchange without one is unconfirmed.
         match self.settled_by_query(request).await {
             Ok(Some(settled)) => return Ok(settled),
@@ -1108,7 +1107,7 @@ impl Gateway {
     /// [`CreateOutcome::Reconciled`]; every other settled answer of the query
     /// (a collision, a document reversed since the lookup, the lookup's
     /// reversed document live again) is reported as such; otherwise the
-    /// duplicate is not ours — [`CreateOutcome::DuplicateOrderNumber`], named
+    /// duplicate is not ours: [`CreateOutcome::DuplicateOrderNumber`], named
     /// through the order-number query when the newest document under the
     /// order is a live document of the kind being issued. The query's miss is
     /// a contradiction (szamlazz.hu refused the order number yet knows nothing
@@ -1156,8 +1155,8 @@ impl Gateway {
             }
             Ok(_) => None,
             Err(QueryError::NotFound) => {
-                // A contradiction — szamlazz.hu refused the order number yet
-                // knows nothing under it — but still a refusal it has already
+                // A contradiction (szamlazz.hu refused the order number yet
+                // knows nothing under it), but still a refusal it has already
                 // given: settled, not re-sent.
                 tracing::warn!(
                     code = %code,
@@ -1181,12 +1180,12 @@ impl Gateway {
         })
     }
 
-    /// The external-id query of the create step: `Some` when it settles the
-    /// step — a live document of ours that is not `request.reversed`
+    /// The external-id query of the create step. `Some` when it settles the
+    /// step: a live document of ours that is not `request.reversed`
     /// ([`CreateOutcome::Found`]), a reversed document of ours that is not
     /// `request.reversed` ([`CreateOutcome::Reversed`]), `request.reversed`
     /// reported live ([`CreateOutcome::LiveAgain`]) or an invalid holder
-    /// ([`CreateOutcome::Collision`]) — `None` when the send may proceed:
+    /// ([`CreateOutcome::Collision`]); `None` when the send may proceed:
     /// nothing under the id, or exactly the document the lookup step saw
     /// reversed, still reversed.
     ///
@@ -1241,7 +1240,7 @@ impl Gateway {
     }
 
     /// The external-id query of both steps, validated against this gateway's
-    /// account (design §3).
+    /// account.
     ///
     /// # Errors
     ///
@@ -1310,7 +1309,7 @@ impl Gateway {
     /// The account probe of `Szamlazz.Agent.check_account`: one query of the
     /// sentinel `external_id` ([`ExternalId::for_probe`]), whose expected
     /// answer is code 7. Every szamlazz.hu answer but a credential code is
-    /// [`ProbeOutcome::Accepted`] — the credential codes come before anything
+    /// [`ProbeOutcome::Accepted`]: the credential codes come before anything
     /// else, so any other code means the key was accepted; a document under
     /// the sentinel id, which nothing the service issues carries, is logged
     /// and accepted as well. Issues nothing.
@@ -1350,7 +1349,7 @@ impl Gateway {
 
     /// The taxpayer lookup of `Szamlazz.Agent.query_taxpayer`: one
     /// `xmltaxpayer` query of the eight-digit `prefix`, read-only. NAV's
-    /// verdict — the registered taxpayer, or `valid: false` — is
+    /// verdict (the registered taxpayer, or `valid: false`) is
     /// [`TaxpayerOutcome::Found`]; rejected credentials are
     /// [`TaxpayerOutcome::CredentialsRejected`]; any other code, szamlazz.hu's
     /// or NAV's relayed one, is [`TaxpayerOutcome::Api`]. Finds no document,
@@ -1386,7 +1385,7 @@ impl Gateway {
         }
     }
 
-    /// The storno lookup step (design §6 step 2), read-only: the storno
+    /// The storno lookup step, read-only: the storno
     /// external id is queried and the `SS` reversing `invoice_number` is
     /// [`StornoLookupOutcome::AlreadyReversed`]; code 7 or another holder is
     /// [`StornoLookupOutcome::Absent`]; rejected credentials are
@@ -1429,19 +1428,19 @@ impl Gateway {
         }
     }
 
-    /// The storno step (design §6 step 3), query-first on every execution.
+    /// The storno step, query-first on every execution.
     ///
     /// 1. Query the storno external id: an `SS` referencing the invoice is
-    ///    [`StornoOutcome::AlreadyReversed`] — an earlier execution sent it;
+    ///    [`StornoOutcome::AlreadyReversed`] (an earlier execution sent it);
     ///    code 7 (or another holder) continues; rejected credentials are
     ///    [`StornoOutcome::CredentialsRejected`]; another code is
     ///    [`StornoOutcome::Api`] and `szlahu_down` [`StornoOutcome::Unavailable`]
-    ///    — answers, settled with nothing sent (#63); only a transport failure
-    ///    is [`Unconfirmed::Transport`] — never send when the check itself
+    ///    (answers, settled with nothing sent); only a transport failure
+    ///    is [`Unconfirmed::Transport`]: never send when the check itself
     ///    failed.
     /// 2. Send `xmlszamlast` with the external id, comment, e-invoice flag and
-    ///    `teljesitesDatum` — the verified original's `telj`, which NAV
-    ///    requires the storno to repeat (ADR 0007) — and **no issue date**
+    ///    `teljesitesDatum` (the verified original's `telj`, which NAV
+    ///    requires the storno to repeat), and **no issue date**
     ///    (352 otherwise): a response validated with
     ///    [`CreatedInvoice::reverses`] is [`StornoOutcome::Reversed`], an
     ///    echo of the requested number [`StornoOutcome::NotStornoable`], a
@@ -1472,7 +1471,7 @@ impl Gateway {
         &self,
         request: StornoStepRequest<'_>,
     ) -> Result<StornoOutcome, Unconfirmed> {
-        // Step 1: the leading query. An answer settles the step — nothing
+        // Step 1: the leading query. An answer settles the step: nothing
         // has been sent; only an exchange without one is unconfirmed.
         match self.storno_settled_by_query(&request).await {
             Ok(Some(settled)) => return Ok(settled),
@@ -1561,9 +1560,9 @@ impl Gateway {
         }
     }
 
-    /// The storno-external-id query of the storno step: `Some` when it
-    /// settles the step — the `SS` reversing the invoice
-    /// ([`StornoOutcome::AlreadyReversed`]) or rejected credentials — `None`
+    /// The storno-external-id query of the storno step. `Some` when it
+    /// settles the step: the `SS` reversing the invoice
+    /// ([`StornoOutcome::AlreadyReversed`]) or rejected credentials; `None`
     /// when no storno of ours is there.
     ///
     /// # Errors
@@ -1714,7 +1713,7 @@ impl Gateway {
 /// credentials, 135 browser session active, 136 login blocked, 164 multiple
 /// accounts. szamlazz.hu answers these before it acts on the request (its
 /// documentation; unverified on the probe account), so the request that
-/// draws one was not acted on — the worker's configuration is wrong, not the
+/// draws one was not acted on: the worker's configuration is wrong, not the
 /// request.
 #[must_use]
 pub fn is_credentials_rejected(code: &ErrorCode) -> bool {
@@ -1761,8 +1760,7 @@ pub(crate) fn is_invoice_family(tipus: &str) -> bool {
     matches!(tipus, "SZ" | "ES" | "VS")
 }
 
-/// What the external-id query of the lookup and create steps saw, validated
-/// (design §3).
+/// What the external-id query of the lookup and create steps saw, validated.
 enum Seen {
     /// Code 7.
     Absent,
@@ -1797,7 +1795,7 @@ enum Failure {
         code: String,
         message: String,
     },
-    /// [`OutcomeClass::Unknown`] — 1, 55, 56 without a number, a code the
+    /// [`OutcomeClass::Unknown`]: 1, 55, 56 without a number, a code the
     /// agent crate does not know, or any class added to the crate later: the
     /// outcome is open, re-query.
     Unknown {
@@ -1953,10 +1951,10 @@ mod tests {
         assert_eq!(proforma.e_invoice(), None, "eszamla 0 is not an invoice");
         assert!(proforma.is_ours(&order, IssuedKind::Proforma));
 
-        // No account pin: neither `teszt` nor the seller record's id is read
-        // (ADR 0006, account-pin amendment) — not a live marker, and not a
-        // missing one either (the agent crate reports an absent `<teszt>` as
-        // `None` since #70; the worker has nothing to compare it with).
+        // No account pin: neither `teszt` nor the seller record's id is read:
+        // not a live marker, and not a missing one either (the agent crate
+        // reports an absent `<teszt>` as `None` since #70; the worker has
+        // nothing to compare it with).
         let other_account = Doc {
             test: Some(false),
             ..Doc::new("SZ-1", "SZ")

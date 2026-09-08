@@ -58,17 +58,17 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     );
 }
 
-/// (vii-d') `delete_proforma`'s other answers (design §6 tail). szamlazz.hu
-/// has no guard against deleting a proforma with registered credit entries,
-/// so the handler has one: a paid proforma without `force` is `{deleted:
-/// false, reason: proforma_paid}` after the lookup alone, and with `force` it
-/// is deleted (one send). A document under `…:proforma` that is not this
-/// order's proforma is `{deleted: false, reason: external_id_collision}` —
-/// never touched, since the newest holder may hide a proforma of ours behind
-/// it. szamlazz.hu's 335 (no such proforma — deleted since the lookup) is
-/// `{deleted: true}` like a fresh deletion. A lost reply is the
-/// `outcome_unknown` fault about the proforma: the delete has no retry of its
-/// own (one send, one step journaled), and the next call's lookup tells.
+/// (vii-d') `delete_proforma`'s other answers. szamlazz.hu has no guard
+/// against deleting a proforma with registered credit entries, so the handler
+/// has one: a paid proforma without `force` is `{deleted: false, reason:
+/// proforma_paid}` after the lookup alone, and with `force` it is deleted (one
+/// send). A document under `…:proforma` that is not this order's proforma is
+/// `{deleted: false, reason: external_id_collision}`, never touched, since the
+/// newest holder may hide a proforma of ours behind it. szamlazz.hu's 335 (no
+/// such proforma: deleted since the lookup) is `{deleted: true}` like a fresh
+/// deletion. A lost reply is the `outcome_unknown` fault about the proforma:
+/// the delete has no retry of its own (one send, one step journaled), and the
+/// next call's lookup tells.
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the paid guard with and without force, the collision, 335 and the lost reply"
@@ -155,7 +155,7 @@ pub(crate) async fn delete_proforma_guards_paid_proformas_and_settles_every_answ
     assert_eq!(collision["reason"], "external_id_collision", "{collision}");
     assert_eq!(h.requests_seen().await, 1, "nothing sent");
 
-    // 335 — gone since the lookup: deleted all the same.
+    // 335 (gone since the lookup): deleted all the same.
     h.reset().await;
     h.holds(&Doc {
         external_id: Some("acct:E2E-47:proforma"),

@@ -5,15 +5,14 @@
 //! an [`InvoiceDocument`] the way the gateway parses a query answer. The Számla
 //! Agent crate's response types are `#[non_exhaustive]` on purpose, so a
 //! unit test cannot construct one directly; the XML is the seam, and it is
-//! what szamlazz.hu actually says (design §11 — tests state the answer
-//! szamlazz.hu gives, not a second model of it). Every unit test that needs a
-//! found document builds it here (#18); the two renderers below are the
-//! deliberate exceptions.
+//! what szamlazz.hu actually says (tests state the answer szamlazz.hu gives,
+//! not a second model of it). Every unit test that needs a found document
+//! builds it here; the two renderers below are the deliberate exceptions.
 //!
 //! The wiremock integration tests (`tests/gateway.rs`, `tests/e2e/`)
 //! carry their own `Doc` and do not share this one: a `#[cfg(test)]` module is
-//! invisible to a `tests/` crate, and the alternative — a `test-support`
-//! cargo feature enabled by a `[dev-dependencies]` self-reference — would make
+//! invisible to a `tests/` crate, and the alternative (a `test-support`
+//! cargo feature enabled by a `[dev-dependencies]` self-reference) would make
 //! a test fixture part of the crate's public feature set (docs.rs builds with
 //! `all-features`, and a public feature is semver surface). The e2e `Doc`
 //! also carries a harness-only `external_id` selector that is not part of any
@@ -23,7 +22,7 @@
 //! `service::journal`'s `document()` is not a fixture of this kind and stays
 //! where it is: it renders *every* element the `szamla` XML can carry, so
 //! that a rename anywhere in the journaled types is caught, and its output is
-//! pinned as JSON under `tests/journal/` — porting it here would churn the
+//! pinned as JSON under `tests/journal/`; porting it here would churn the
 //! pinned fixtures for no test.
 //!
 //! [`LogCapture`] is what the sentinel tests assert a warning through: what
@@ -37,13 +36,12 @@ use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 
 /// The `szallito/id` of the documents [`Doc`] renders unless a test says
 /// otherwise: the seller record's id as szamlazz.hu prints it in a query body
-/// (972720 on the test account). Wire realism only — the worker holds no
-/// account pin (ADR 0006, account-pin amendment), and tests that render
-/// another value assert exactly that.
+/// (972720 on the test account). Wire realism only: the worker holds no
+/// account pin, and tests that render another value assert exactly that.
 pub(crate) const SUPPLIER: u64 = 972_720;
 
 /// The `telj` every document carries unless a test says otherwise: the
-/// fulfillment date a storno of it must repeat (ADR 0007).
+/// fulfillment date a storno of it must repeat.
 pub(crate) const ORIGINAL_TELJ: Date = date(2026, 7, 15);
 
 /// A queried document, rendered as szamlazz.hu's `<szamla>` response XML.
@@ -55,44 +53,43 @@ pub(crate) const ORIGINAL_TELJ: Date = date(2026, 7, 15);
 pub(crate) struct Doc<'a> {
     /// `szamlaszam`.
     pub(crate) number: &'a str,
-    /// `tipus` — `SZ`, `D`, `ES`, `VS`, `HS`, `SS`, …
+    /// `tipus`: `SZ`, `D`, `ES`, `VS`, `HS`, `SS`, …
     pub(crate) tipus: &'a str,
-    /// `rendelesszam`; `None` renders no element — a document issued outside
+    /// `rendelesszam`; `None` renders no element: a document issued outside
     /// any order.
     pub(crate) order: Option<&'a str>,
-    /// `teszt` — whether a test account issued the document. Parsed and
-    /// projected by `query`, compared with nothing (ADR 0006, account-pin
-    /// amendment). `None` renders no element — szamlazz.hu breaking its
-    /// schema, a document that does not say (the agent crate reports it as
-    /// `None` since #70).
+    /// `teszt`: whether a test account issued the document. Parsed and
+    /// projected by `query`, compared with nothing. `None` renders no element:
+    /// szamlazz.hu breaking its schema, a document that does not say (the
+    /// agent crate reports it as `None`).
     pub(crate) test: Option<bool>,
-    /// `szallito/id` — the seller record's id in the `<szallito>` block.
-    /// Parsed, compared with nothing (ADR 0006, account-pin amendment).
+    /// `szallito/id`: the seller record's id in the `<szallito>` block.
+    /// Parsed, compared with nothing.
     pub(crate) supplier_id: u64,
-    /// `<sztornozott>true</sztornozott>` — the document is reversed (as
+    /// `<sztornozott>true</sztornozott>`: the document is reversed (as
     /// observed); `false` renders no element, as on a live document and on
     /// the storno invoice itself.
     pub(crate) reversed: bool,
-    /// `hivszamlaszam` — the invoice a storno or a corrective references.
+    /// `hivszamlaszam`: the invoice a storno or a corrective references.
     pub(crate) referenced_invoice: Option<&'a str>,
-    /// `hivdijbekszam` — the proforma an invoice or prepayment consumed.
+    /// `hivdijbekszam`: the proforma an invoice or prepayment consumed.
     pub(crate) referenced_proforma: Option<&'a str>,
-    /// `eszamla`; `None` follows `tipus` — `0` on a proforma, `2` (an
+    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
     /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
     /// invoice and `3` for one created with `eszamla=true` (P73).
     pub(crate) eszamla: Option<i32>,
     /// `kelt`; `None` renders no element.
     pub(crate) issue_date: Option<Date>,
-    /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
+    /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.
     pub(crate) fulfillment_date: Option<Date>,
     /// `osszegek/totalossz/netto`.
     pub(crate) net: &'a str,
     /// `osszegek/totalossz/afa`.
     pub(crate) vat: &'a str,
-    /// `osszegek/totalossz/brutto` — what a document with no credit entries
+    /// `osszegek/totalossz/brutto`: what a document with no credit entries
     /// owes in full.
     pub(crate) gross: &'a str,
-    /// `kifizetesek` — the credit entries registered against the document;
+    /// `kifizetesek`: the credit entries registered against the document;
     /// empty renders no element.
     pub(crate) payments: &'a [CreditRecord<'a>],
     /// Further `<alap>` children, verbatim (`<fizh>…</fizh><devizanem>HUF</devizanem>`),
@@ -106,7 +103,7 @@ pub(crate) struct Doc<'a> {
 pub(crate) struct CreditRecord<'a> {
     /// `datum`.
     pub(crate) date: Date,
-    /// `jogcim` — the credit entry's title, e.g. `átutalás`.
+    /// `jogcim`: the credit entry's title, e.g. `átutalás`.
     pub(crate) title: &'a str,
     /// `osszeg`.
     pub(crate) amount: &'a str,
@@ -232,12 +229,12 @@ impl Default for Doc<'_> {
 }
 
 /// Captures every `tracing` event the current thread emits, formatted, so a
-/// test can assert what a warning says — and what it does not (an agent key).
+/// test can assert what a warning says, and what it does not (an agent key).
 ///
 /// [`LogCapture::subscribe`] installs a `TRACE`-level subscriber as the
 /// thread's default for the returned guard's lifetime. tracing caches a
 /// callsite's interest on its first hit, and a first hit from a parallel test
-/// thread — which has no subscriber — would cache it as disabled; the caller
+/// thread (which has no subscriber) would cache it as disabled; the caller
 /// hits the callsite it is about once *after* subscribing (a warm-up event it
 /// can tell apart), then calls [`LogCapture::rebuild_interest`] so the cache
 /// is re-evaluated against this thread's subscriber.
@@ -312,9 +309,9 @@ mod tests {
         assert!(document.payments.is_empty());
     }
 
-    /// Each marker the worker reads renders from its field — `rendelesszam`,
+    /// Each marker the worker reads renders from its field (`rendelesszam`,
     /// `sztornozott`, and the `hivszamlaszam` / `hivdijbekszam` references of
-    /// a storno and of the invoice that consumed a proforma — and so do the
+    /// a storno and of the invoice that consumed a proforma), and so do the
     /// two it parses but compares with nothing, `teszt` and `szallito/id`.
     #[test]
     fn the_markers_render_from_their_fields() {
@@ -380,8 +377,8 @@ mod tests {
         );
     }
 
-    /// `eszamla` follows `tipus` — `0` on a proforma, `2` (an e-invoice code)
-    /// on anything else — unless a test sets the code itself.
+    /// `eszamla` follows `tipus` (`0` on a proforma, `2` (an e-invoice code)
+    /// on anything else) unless a test sets the code itself.
     #[test]
     fn eszamla_follows_the_kind_unless_set() {
         assert_eq!(Doc::new("D-1", "D").parse().info.e_invoice.code(), 0);
@@ -440,7 +437,7 @@ mod tests {
         assert_eq!(second.comment, None);
         assert_eq!(second.bank_account, None);
 
-        // `telj` absent, and `telj` empty — szamlazz.hu breaking its schema
+        // `telj` absent, and `telj` empty: szamlazz.hu breaking its schema
         // either way; both parse as no fulfillment date.
         let without_telj = Doc {
             fulfillment_date: None,

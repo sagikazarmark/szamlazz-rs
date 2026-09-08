@@ -10,7 +10,7 @@ re-triggers the verification of everything marked *verified*. The szamlazz.hu fa
 tests in `crates/restate-szamlazz/tests/e2e/` that prove the fact.
 
 `restate-szamlazz` served exactly one szamlazz.hu account per deployment, baked into configuration. A
-second account was a second deployment — which is not even possible inside one Restate environment, since
+second account was a second deployment, which is not even possible inside one Restate environment, since
 `Szamlazz.Order` and `Szamlazz.Agent` are fixed service names and a second registration is a *revision* of
 the first. An integration that invoices Pretix ticket orders for many organizers, each with its own
 szamlazz.hu account and with events that may override the account, needed one deployment to serve N
@@ -25,7 +25,7 @@ the **Restate scope** (`/restate/scope/{scope}/call/Szamlazz.Order/{order}/…`,
 namespace in a pure durable step (`namespace`); resolve the scope to its **Account** through the pluggable
 `AccountResolver` in a durable step named `account` under the **resolve policy**; fetch the account's
 credentials through the pluggable `CredentialStore` *outside the journal*, on every handler execution;
-open the **Gateway** — the module that speaks to szamlazz.hu for one account — over a fresh Számla Agent
+open the **Gateway** (the module that speaks to szamlazz.hu for one account) over a fresh Számla Agent
 client. The `Account` is journaled once per invocation and carries everything about the account but its
 agent key; the credentials are held only for the execution. The Virtual Object key stays the bare, trimmed
 order number, and the external ids stay `{namespace}:{order}:{kind}` under one deployment-wide
@@ -41,10 +41,10 @@ of every invocation and resource inside it**"): the Virtual Object key and the `
 namespaced per scope, so the same order number under two scopes is two `Szamlazz.Order` instances with two
 locks, and the same `Idempotency-Key` under two scopes is two invocations (verified end to end:
 `same_order_key_under_two_scopes_issues_on_both_accounts`,
-`same_idempotency_key_under_two_scopes_is_two_invocations`). The scope is set per call — it is a path segment
+`same_idempotency_key_under_two_scopes_is_two_invocations`). The scope is set per call: it is a path segment
 of the ingress request, and the worker's two services never call each other, so nothing here relies on
 inheritance across calls. A scope value is `[a-zA-Z0-9_.-]`, non-empty, at most
-36 characters (ASCII, so bytes) — a dashed UUID fits exactly — which is the constraint on the account
+36 characters (ASCII, so bytes) (a dashed UUID fits exactly), which is the constraint on the account
 identifiers a caller may use. The scope is also Restate's partition key for scoped invocations
 (`crates/types/src/identifiers.rs` at v1.7.8: "When scoped, the partition key comes from the scope"; the
 scope is a field of `IdempotencyId` and of `ServiceId`, and is hashed into the deterministic invocation id
@@ -54,13 +54,13 @@ Rejected transports, each because it leaves the Restate identity shared between 
 
 - **A request header.** Not part of the invocation identity: two accounts' orders would share one Virtual
   Object lock and one `Idempotency-Key` space, and a retried request could name a different account under
-  the same key. Headers are also the spoofable layer — the ingress appends the caller's headers after its
+  the same key. Headers are also the spoofable layer, the ingress appends the caller's headers after its
   own and the SDK keeps the last value of a duplicated name (verified, see the ingress-path note).
 - **A body field.** The same identity problem, plus the account would be journaled beside the buyer's PII
   and parsed by every handler, including the input-less `get` and `check_account`.
 - **An account prefix on the Virtual Object key** (`{account}:{order}`). Works without any server flag and
   namespaces the lock; the `Idempotency-Key` it namespaces only through the key (`IdempotencyId` carries
-  `service_key`, verified), so not at all for `Szamlazz.Agent`, which has no key — and the caller composes
+  `service_key`, verified), so not at all for `Szamlazz.Agent`, which has no key, and the caller composes
   the account into every key and every by-number call. Kept as the flagless contingency (below), not chosen.
 - **The invocation id or `ctx.rand_uuid()`.** Deterministic only within one journal; useless to a later
   invocation.
@@ -76,7 +76,7 @@ Resolution is split so that the *decision* is durable and the *secret* is not.
    the account's bank account or defaults, or a redeploy with a new resolver reaches only new invocations
    (verified: `account_change_between_executions_does_not_reach_the_invocation`). The journaled `Account` is
    visible in the Restate UI for the journal retention period and contains no secret, so that is safe. The
-   type is additive-only — a new field gets `#[serde(default)]`, nothing is renamed or removed — so an old
+   type is additive-only, a new field gets `#[serde(default)]`, nothing is renamed or removed, so an old
    journal replays on new code (since #47 the rule covers every journaled type and is pinned by fixtures;
    [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md), *Journal compatibility*).
    `unscoped` and `unknown` are journaled and never retried; only the
@@ -93,7 +93,7 @@ return them and no journaled type can hold them. It is a *narrow* guard: `AgentK
 one line from a `String` in a journaled struct. The real guarantee is the end-to-end **sentinel scan**:
 after the whole run, every `sys_journal` row of every invocation the server holds, hex-decoded from the
 `raw` column (run results are bytes and render as integer arrays in `entry_json`, so a text `LIKE` is
-vacuous), plus every `sys_invocation.completion_failure`, contains none of the run's three agent keys —
+vacuous), plus every `sys_invocation.completion_failure`, contains none of the run's three agent keys,
 while the same scan finds a sentinel deliberately journaled as a positive control
 (`no_agent_key_in_any_journal_of_the_run`, `harness_scoped_call_and_leak_positive_control`).
 
@@ -101,11 +101,11 @@ while the same scan finds a sentinel deliberately journaled as a positive contro
 
 Seven rules, listed in full in the library README's "what it relies on" and, rule by rule, on the *Account
 resolver*, *Credential store* and *Scope* entries of `CONTEXT.md`; the traits document their own halves as a
-checklist on their rustdoc (rules 1–2 plus the load-time checks the static resolver makes — unique `(endpoint,
-credentials)` pairs — the right key under the right scope, a stable `credential_ref` across rotations and never
+checklist on their rustdoc (rules 1–2 plus the load-time checks the static resolver makes, unique `(endpoint,
+credentials)` pairs, the right key under the right scope, a stable `credential_ref` across rotations and never
 caching `Unscoped` / `Unknown` on `AccountResolver`; the fetch-every-execution and stable-reference rules on
 `CredentialStore`; #43). The worker enforces what it can (the static resolver at load time) and *relies on* the
-rest — including, since the account-pin amendment below, that the key under a scope opens the account the scope
+rest, including, since the account-pin amendment below, that the key under a scope opens the account the scope
 names, live or test as meant: the worker holds no account pin, and the go-live check (query a document known to be
 the account's under each scope and read its `test` and seller block) is the operator's. *Amended (account-pin
 amendment, 2026-09-07):* the original text's `mode` matching `teszt`, the `supplier_id` recommendation, the
@@ -114,17 +114,17 @@ pins.
 
 1. **One szamlazz.hu account is reachable under exactly one scope value.** Unscoped counts as a value.
    No fan-in: two scopes reaching one account would split an order's per-key lock across two Virtual
-   Objects, and the worker cannot detect it at runtime — `check_account` only echoes configuration.
+   Objects, and the worker cannot detect it at runtime, `check_account` only echoes configuration.
 2. **The scope → account mapping is append-only.** Moving traffic to another account means a new scope, never
    re-pointing an existing one. Appending a scope cannot create fan-in; any change that could put one account
-   under two identities at once — the single → multi flag day above all — is a drain–switch–resume.
+   under two identities at once (the single → multi flag day above all) is a drain–switch–resume.
 3. **The namespace is permanent** for the deployment. Changing it hides every document issued so far.
 4. **Order keys are unique within an account** for its lifetime, across all writers.
 5. **The caller records the order key and the scope as used**; nothing else is needed to operate on the
    order later (rule of ADR 0005, now per account).
 6. **The scope is routing, not authorization.** The ingress sits behind a gateway that sets the scope
    from the authenticated identity, never forwards a caller-supplied scope path, and **strips
-   `x-restate-*` request headers** — the ingress lets a caller's copy of one of its own headers win, and
+   `x-restate-*` request headers**: the ingress lets a caller's copy of one of its own headers win, and
    the SDK keeps the last value of a duplicated name (verified for `x-restate-ingress-path`; the limit key
    therefore travels as the `limit-key` query parameter or is set by the gateway).
 7. **Ownership is decided by the external-id query alone.** The order-number query can *name* a document
@@ -136,7 +136,7 @@ the deployment serves, under whichever scope they name. The gateway of rule 6 is
 the operator's, not the worker's. The static resolver's `[accounts.<scope>]` shape enforces the checkable
 half of rule 1 at load time: unique `(endpoint, agent_key)` pairs and unique ids. *Amended (XPRB probe,
 2026-09-06; account-pin amendment, 2026-09-07):* the original text also checked unique `supplier_id`s among the
-accounts that pinned one; the pin became optional, then was dropped — see the decision bullet below. A
+accounts that pinned one; the pin became optional, then was dropped, see the decision bullet below. A
 database-backed resolver must guarantee rules 1 and 2 itself.
 
 ### Experimental Restate dependencies
@@ -147,12 +147,12 @@ The scope reaches the SDK only under **service protocol v7**, and a scoped call 
 e2e harness set them and assert them on the admin `/version` endpoint). The server source at v1.7.8
 (`crates/types/src/config/common.rs`) annotates them:
 
-> `vqueues` — "Current in heavy development, do not enable this feature unless you are a contributor"
+> `vqueues`: "Current in heavy development, do not enable this feature unless you are a contributor"
 >
-> `scoped_virtual_objects` — "Allow scope on Virtual Object targets. Scoped Virtual Objects are not
+> `scoped_virtual_objects`, "Allow scope on Virtual Object targets. Scoped Virtual Objects are not
 > officially supported in v1.7. Requires `vqueues` to be enabled as well."
 >
-> `protocol_v7` — "Once enabled, you **cannot** rollback back to previous versions where v7 is not
+> `protocol_v7`, "Once enabled, you **cannot** rollback back to previous versions where v7 is not
 > supported < v1.7"
 
 while the documentation (*Services → Flow control*) presents the same feature as opt-in for users:
@@ -186,11 +186,11 @@ requiring no server flag.
 
 ### `x-restate-ingress-path`: considered and dropped
 
-Restate's ingress sets `x-restate-ingress-path` (the original path and query) on every forwarded request —
+Restate's ingress sets `x-restate-ingress-path` (the original path and query) on every forwarded request,
 present in server 1.6.0 through 1.7.8, **undocumented** (verified in `service_handler.rs`; absent from the
-HTTP invocation docs and the changelog). A prologue guard on it was built for #27 — parse the path, drop
+HTTP invocation docs and the changelog). A prologue guard on it was built for #27 (parse the path, drop
 the query, percent-decode, recognise `/restate/scope/{scope}/call|send/…`, fail with `unavailable` when a
-scoped path arrived with no SDK scope — and **dropped on review**: it hinged on a header that is
+scoped path arrived with no SDK scope), and **dropped on review**: it hinged on a header that is
 undocumented, version-dependent and caller-overridable (the ingress appends the caller's headers after its
 own; the SDK keeps the last), a per-request dependency the worker is not willing to take. The worker
 therefore has no per-request signal of "was this call scoped?"; the defence is `check_account` per scope
@@ -233,15 +233,15 @@ the journals purged between the steps (`purged_order_is_stornoed_and_reissued`).
 
 The hand-rolled attempt loop (one `ctx.run` per attempt, a durable sleep, an attempt counter) became two
 steps (#22, ADR 0004 amended): a read-only **lookup** (`lookup-{kind}`) that settles every case needing no
-create, and a **create** (`create-{kind}`) under the **issue policy** — a run retry policy, `2m → 10m`,
-factor 2, five executions, bounded by one hour — whose closure returns `Err(Unconfirmed)` only when
+create, and a **create** (`create-{kind}`) under the **issue policy** (a run retry policy, `2m → 10m`,
+factor 2, five executions, bounded by one hour) whose closure returns `Err(Unconfirmed)` only when
 szamlazz.hu's answer is not known and every known answer as `Ok` data. **Every execution of the create step
 is query-first, inside the closure**: a separate journaled pre-query would replay its stale "nothing" on
 the retry and the re-executed closure would send again. Storno has the same shape (#30).
 
 **Accepted risk: the attempt count is not durable.** The SDK restores a run's retry count and elapsed
 duration from the server's `retry_count_since_last_stored_command` only when the failing run is the *first*
-journal entry after replay — true for these handlers, whose code is deterministic and whose open entry on
+journal entry after replay; true for these handlers, whose code is deterministic and whose open entry on
 re-dispatch is the create step (or the storno step). Otherwise the count restarts, so `max_attempts` is
 best-effort and `max_duration` is the hard bound (verified: an exhausted create step with a short test
 policy returns the structured `outcome_unknown` within the run's delays, not the handler's, with
@@ -252,9 +252,9 @@ propagation-lag retry is added inside the closure: read-your-writes lag by exter
 
 On 71/152 the create step re-queries the external id **inside the same closure**: a live document of ours
 → `Reconciled` (an earlier send landed with a lost reply); a live document that fails validation →
-`Collision`; **reversed and ours, or absent** → the duplicate is not the document under our id — our own is
+`Collision`; **reversed and ours, or absent** → the duplicate is not the document under our id, our own is
 reversed or never existed, so the server's live document of our kind under this order was issued by
-someone else (the UI, another channel, another namespace on the same account) — and the order-number query
+someone else (the UI, another channel, another namespace on the same account), and the order-number query
 *names* it: `conflict{duplicate_order_number, existing_number}` when the newest document under the order is
 a live document of our kind, without `existing_number` otherwise (another kind, reversed, or a failed
 naming query). The order-number query names, it never adopts (rule 7). If it returns nothing while the
@@ -262,8 +262,8 @@ server just said "duplicate", the contradiction is logged at `warn` and settled 
 `existing_number` (#41; before it the contradiction was `Unconfirmed` and the step re-sent for a refusal the server
 had already given). Correctives keep
 their exemption: no order-number hint in lookup (the live base under the order is expected), and an
-unresolvable 71/152 is `rejected`, not a conflict. A foreign document is reported in seconds — by the
-lookup's hint or by this branch — never after a retry budget.
+unresolvable 71/152 is `rejected`, not a conflict. A foreign document is reported in seconds (by the
+lookup's hint or by this branch), never after a retry budget.
 
 ### `mode` is required, defaults to `live`, and is always validated
 
@@ -272,11 +272,11 @@ the `account_mismatch` fault. The section stands as the record of the original d
 
 PRD story 16 first read "optional; unset means unchecked". Rejected on review: an operator always knows
 whether an account is a test account, and unset-means-unchecked would have removed a default-on guard
-that ADR 0002, ADR 0005, design §3 and both READMEs state — `teszt == account.mode` on every found
+that ADR 0002, ADR 0005, design §3 and both READMEs state, `teszt == account.mode` on every found
 document. With the default `live`, a test account configured as live fails loudly on its first found
 document, on any handler that finds one (`account_mismatch` on a verify or a by-number query,
 `conflict{external_id_collision}` on a lookup) instead of issuing on the wrong account. Every handler that
-finds a document runs the check; `Szamlazz.Agent.set_payments` finds none and is the one exemption (#32) —
+finds a document runs the check; `Szamlazz.Agent.set_payments` finds none and is the one exemption (#32):
 joined since #49 by `Szamlazz.Agent.query_taxpayer`, which finds none either (a taxpayer record is NAV's, not the
 account's, and carries no pins).
 
@@ -284,10 +284,10 @@ account's, and carries no pins).
 
 The fetch is not a Restate retry. Three in-process attempts, then `TerminalError{unavailable}` (503),
 `gone` at once. Terminal by decision: a retryable error would route a prolonged store outage into the
-handler's `invocation_retry_policy` — five attempts, kill — and end as an unstructured 500 that looks like a
+handler's `invocation_retry_policy` (five attempts, kill), and end as an unstructured 500 that looks like a
 transport failure; the terminal fault is structured and immediate. **Documented cost:** an outage during a
 *replay* of an invocation whose create already landed surfaces as `unavailable` although the document
-exists — which is exactly what the caller contract already says an error means ("outcome unknown"); `get` or
+exists, which is exactly what the caller contract already says an error means ("outcome unknown"); `get` or
 a retry with a new `Idempotency-Key` answers `already_issued` (verified:
 `failing_credential_store_is_a_terminal_unavailable`, the same order issuing once the store is back).
 
@@ -296,7 +296,7 @@ a retry with a new `Idempotency-Key` answers `already_issued` (verified:
 szamlazz.hu answering 3 (invalid credentials), 135 (browser session active), 136 (login blocked) or 164
 (multiple accounts) to any step is the worker's misconfiguration, not the caller's request: the same
 request succeeds once the key is fixed, so it is not a 4xx ("do not retry") and not 401/403 ("*you* are
-unauthenticated" — the caller authenticated to the gateway, and the worker's key is not the caller's). It is
+unauthenticated"; the caller authenticated to the gateway, and the worker's key is not the caller's). It is
 a fault and never `rejected`: the execution that saw the code issued nothing (szamlazz.hu answers these
 codes before acting), but an earlier execution may have landed with a lost reply. Logged at `warn` with the
 namespace and the code, never the key. `check_account` alone returns the same codes as data, because
@@ -306,9 +306,9 @@ reporting them is its purpose.
 
 The SDK's default retry policy for a `ctx.run` is `RetryPolicy::Infinite`, which sends no
 `next_retry_delay`; the server then spends *this handler's* `invocation_retry_policy` (five attempts, kill)
-on the run's failures. So every step that must not consume the invocation budget sets a policy explicitly —
+on the run's failures. So every step that must not consume the invocation budget sets a policy explicitly,
 the issue policy on the create and storno steps, the resolve policy on the `account` step, `max_attempts(1)`
-on every read and one-shot write — and builds it with `RunRetryPolicy::new()` (factor 1.0, no caps), **not**
+on every read and one-shot write, and builds it with `RunRetryPolicy::new()` (factor 1.0, no caps), **not**
 `RunRetryPolicy::default()`, which caps the delay at 2 s and the duration at 50 s. Verified end to end: with
 a 1 s test policy the re-execution follows the run's delay, not the handler's 2 m.
 
@@ -324,8 +324,8 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   szamlazz.hu's `JSESSIONID` cookie; a shared or cached client would carry one account's session into
   another account's request. The fresh client is a *session boundary*, not a performance choice. A resolver
   may cache accounts internally.
-- **No account pin.** *Amended twice. XPRB probe, 2026-09-06 — `supplier_id` from mandatory in the
-  multi-account shape to optional in both. Account-pin amendment, 2026-09-07 — `supplier_id` and `mode` both
+- **No account pin.** *Amended twice. XPRB probe, 2026-09-06, `supplier_id` from mandatory in the
+  multi-account shape to optional in both. Account-pin amendment, 2026-09-07, `supplier_id` and `mode` both
   dropped.* The worker had two pins on a found document: `mode` against `<teszt>` (required, default `live`),
   and `supplier_id` against `<szallito><id>` (optional), the latter to catch an agent key configured under the
   wrong scope, which `mode` cannot (it does not tell two live accounts apart). Three findings dropped
@@ -334,48 +334,48 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
      own docs define it: the counterpart of `<vevo>`, the company in whose name the document is issued
      ("Megbízó (szállító): az a cég, akinek a nevében a számlák készülnek", *Megbízott számlakibocsátás*), and
      the same `szallitoTipus` names the third-party vendor on an incoming invoice. Its `<id>` is annotated
-     nowhere in three documentation sections. The `<szallito>` block is per-document state — the Adatkapcsolat
-     re-pushes an invoice when its `<bankszamla>` changes — so whether `<id>` is a stable party-record id or a
+     nowhere in three documentation sections. The `<szallito>` block is per-document state (the Adatkapcsolat
+     re-pushes an invoice when its `<bankszamla>` changes), so whether `<id>` is a stable party-record id or a
      per-snapshot row is unknown; its stability across an edit of the seller data in Settings was never
      tested (behaviour notes, *Still unverified*), nor its value on a NAV-imported (`forras = 34`) document,
      nor on any live account. The 22/22 constant readings were one test account, two days, no edits.
   2. **The check was a tripwire with a first-document blind spot, and its cost was asymmetric.** A create
-     response (`xmlszamlavalasz`, the `szlahu_*` headers) carries neither `<szallito>` nor `<teszt>` — both
-     are in the query body only — so the first create on a fresh order under a wrong key issued into the wrong
+     response (`xmlszamlavalasz`, the `szlahu_*` headers) carries neither `<szallito>` nor `<teszt>` (both
+     are in the query body only), so the first create on a fresh order under a wrong key issued into the wrong
      account and answered `issued`; either pin fired on the *next* found document. Were the `szallito/id`
      premise wrong (the id drifting), a pinned deployment would `account_mismatch` every storno, corrective,
-     proforma link and query on its own documents and classify its own lookups as collisions — every order
+     proforma link and query on its own documents and classify its own lookups as collisions: every order
      stranded until configuration was edited, on the live account where it had never been observed. `mode`
      had no false-positive risk (`teszt` is documented, REQ, an account-level flag the operator knows a
      priori) but exactly the same blind spot, and told test from live only: a trustworthy tripwire that could
-     not stop staging from issuing its first real invoice to NAV. One clean rule — the worker compares a found
-     document with the order and kind it should have, and with nothing about the account — was preferred to a
+     not stop staging from issuing its first real invoice to NAV. One clean rule (the worker compares a found
+     document with the order and kind it should have, and with nothing about the account) was preferred to a
      half measure kept for being cheap.
   3. **The onboarding step made the check tautological.** The README told the operator to read the value off
      a document *through the configuration being checked* ("leave it unset until you have read it off a real
      document"). Under a swapped key that document is the wrong account's, and pinning its id blesses the
-     misconfiguration. A fresh live account has no document to read, so the pin could not be set at go-live —
+     misconfiguration. A fresh live account has no document to read, so the pin could not be set at go-live:
      the moment the first-document check would matter most.
-  So both pins are gone. `Account.supplier_id` and `Account.mode` are removed from the journaled type — its
+  So both pins are gone. `Account.supplier_id` and `Account.mode` are removed from the journaled type: its
   fixture regenerated without archiving the previous shape, the documented acknowledgement (ADR 0005,
   `service::journal`) that no in-flight invocation of the previous deployment is kept replayable; the worker has
   not gone live, so none exists. `AccountMode`, `StaticAccount.mode` / `supplier_id` and the endpoint's `mode` /
   `supplier_id` configuration keys are gone (either in a deployment file is refused as an unknown key like any
   other); `QueryResponse.supplier_id` and `CheckedAccount.mode` / `supplier_id` are gone from the responses
   (`QueryResponse.test` stays: it is `teszt` as reported, what the go-live check reads); the `account_mismatch`
-  fault code (409) is gone — nothing can raise it — so `TerminalCode` has seven codes; ownership validation is
+  fault code (409) is gone (nothing can raise it), so `TerminalCode` has seven codes; ownership validation is
   `rendelesszam == order ∧ tipus ∈ kind-set`; and the unique-supplier-ids load-time check and the prologue's
-  `warn` went with the pins. The agent crate still parses `<szallito>` and `<teszt>` in full — they are what
+  `warn` went with the pins. The agent crate still parses `<szallito>` and `<teszt>` in full: they are what
   szamlazz.hu sends. What replaces the pins is a documented **go-live check**, last line of the deploy checklist:
   under each scope, `Szamlazz.Agent.query` a document known to be the account's (a number from its szamlazz.hu
-  UI; issue one in the UI first on a fresh live account) and read `test` and the seller block — name, tax number
-  — on the answer. **The residual risk is accepted and stated** in the endpoint README (*Accounts are yours to
+  UI; issue one in the UI first on a fresh live account) and read `test` and the seller block (name, tax number)
+  on the answer. **The residual risk is accepted and stated** in the endpoint README (*Accounts are yours to
   verify*), the library README, `Account`'s rustdoc and CONTEXT.md: a key pasted into the wrong scope, a live key
   where a test one was meant or the reverse, issues there, answers `issued`, and nothing in the worker fails.
   Considered and not taken: pinning the seller **tax number** instead of `szallito/id` (documented, legally
   mandatory on every invoice, operator-known independently of szamlazz.hu, and what `action-agent_ceg_mb` itself
-  identifies an existing account by; compared as the normalised 8-digit stem) — the same tripwire with a
-  trustworthy field, and the same blind spot; keeping `mode` alone as cheap defence in depth — the same blind
+  identifies an existing account by; compared as the normalised 8-digit stem); the same tripwire with a
+  trustworthy field, and the same blind spot; keeping `mode` alone as cheap defence in depth; the same blind
   spot, a narrower catch, and a fault code and a configuration field for a check that cannot prevent what it is
   for; and a configured **canary document number** the `check_account` probe and the create step would verify
   before a first send, which is the one shape that would turn a tripwire into a gate, for `teszt` and a seller
@@ -399,10 +399,10 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   invocations; and story 8 demands that no code path can persist a key.
 - **Fetch the credentials once per invocation and journal a token.** Rejected: a token is a credential with
   extra steps, and the store would need a second, journal-shaped API.
-- **Virtual Object state per account.** Rejected: ADR 0005 — nothing to store that szamlazz.hu or the
+- **Virtual Object state per account.** Rejected: ADR 0005, nothing to store that szamlazz.hu or the
   resolver does not already answer, and state would be per *key*, not per account.
 - **A retryable credential-fetch error.** Rejected above (kill-on-five, unstructured 500).
-- **`mode` optional, unset means unchecked.** Rejected above — and moot since the account-pin amendment:
+- **`mode` optional, unset means unchecked.** Rejected above, and moot since the account-pin amendment:
   `mode` is gone altogether.
 - **Keep the ingress-path guard.** Rejected above.
 - **Per-event throttling via scopes.** Rejected for callers: a scope is identity, and one account under two
@@ -421,15 +421,15 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   applies to any change of mapping (rule 2). Scripted in the endpoint README.
 - Two new terminal codes: `unknown_account` (400), raised by the prologue before anything is issued, and
   `credentials_rejected` (503), whose raising execution issued nothing. `contract::TerminalCode` had six codes
-  at this point — the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` kept
+  at this point: the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` kept
   their by-number 404 `not_found` and 422 pass-through of szamlazz.hu's own code beside them, built outside
   `TerminalCode`. (#67 later folded both into it as `not_found` and `szamlazz_error`, the szamlazz.hu code moving
   to the fault's own `szamlazz_code` field, and rescoped caller-contract rule 2 to the three "outcome unknown"
-  codes — design §7 and §8 are current.) This decision left the caller-contract sentence unchanged.
+  codes, design §7 and §8 are current.) This decision left the caller-contract sentence unchanged.
 - `account_mismatch` was raised on **every** document a handler found by number, not only on `Szamlazz.Order`'s
   verifies: `Szamlazz.Agent.query` and `Szamlazz.Agent.storno` checked the found document's `teszt` (and
   `szallito/id`) against the resolved account before they answered or sent (#32). *Amended (account-pin
-  amendment):* gone with the pins — no handler compares a found document with the account; a wrong-scope
+  amendment):* gone with the pins, no handler compares a found document with the account; a wrong-scope
   by-number request acts on whatever the resolved account's key finds, which is what rule 5 and the go-live
   check are for.
 - The prologue adds two journal entries to every invocation (`namespace`, `account`) and one szamlazz.hu-free
@@ -457,9 +457,9 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
 - **ADR 0004.** Amended by #22 and #30 in place (the create and storno steps under the issue policy, the
   accepted retry-count risk, the run-policy facts restated above); the prologue's resolve policy and the
   in-process credential fetch are the two retry envelopes it did not have.
-- **ADR 0005.** Amended: the validation formula's account terms are gone (account-pin amendment) — `teszt ==
-  account.mode` outright, and the `supplier_id` term — with the "pin `supplier_id` in config" of ADR 0005's
-  lost-on-purpose list — after going from mandatory (multi shape) to optional (XPRB amendment); the fields were
+- **ADR 0005.** Amended: the validation formula's account terms are gone (account-pin amendment) (`teszt ==
+  account.mode` outright, and the `supplier_id` term) with the "pin `supplier_id` in config" of ADR 0005's
+  lost-on-purpose list, after going from mandatory (multi shape) to optional (XPRB amendment); the fields were
   removed from the journaled `Account`, the previous journal shape not archived (pre-go-live, nothing replays
   it). The order-number hint is unconditional (the `detect_foreign` setting is gone). The rest holds.
 

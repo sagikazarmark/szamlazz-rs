@@ -1,9 +1,9 @@
-//! Sans-IO client for the [szamlazz.hu Számla Agent](https://docs.szamlazz.hu/) XML API.
+//! Client for the [szamlazz.hu Számla Agent](https://docs.szamlazz.hu/) XML API.
 //!
 //! The core of this crate performs no I/O: request types serialize into a
 //! ready-to-send [`WireRequest`](wire::WireRequest) and responses are parsed
-//! from raw headers and body bytes, so any HTTP client on any platform —
-//! including `wasm32-unknown-unknown` and Cloudflare Workers — can drive it.
+//! from raw headers and body bytes, so any HTTP client on any platform
+//! (including `wasm32-unknown-unknown` and Cloudflare Workers) can drive it.
 //! Enable the `client-reqwest` feature for a ready-made async client.
 //!
 //! Identifiers are English; every type documents its Hungarian wire name and
@@ -41,7 +41,7 @@
 //!
 //! # Features
 //!
-//! Default features are empty and provide the sans-IO request/response core.
+//! Default features are empty and provide the I/O-free request/response core.
 //! The core works on native targets and `wasm32-unknown-unknown`; filesystem
 //! helpers such as `Pdf::save_to` are available only on non-wasm targets.
 //!
@@ -68,7 +68,7 @@ pub use client::{Client, ClientError};
 
 /// The README's examples, compiled as doctests: the quick start (issue, query
 /// by external id, fetch the PDF) and the failure branch need `client-reqwest`,
-/// the sans-IO round trip only the `ureq` dev-dependency.
+/// the bring-your-own-client round trip only the `ureq` dev-dependency.
 #[cfg(all(doctest, feature = "client-reqwest"))]
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;

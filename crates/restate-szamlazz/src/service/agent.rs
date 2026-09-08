@@ -3,12 +3,11 @@
 //! `check_account` probe.
 //!
 //! No handler compares the document it finds with the account the invocation
-//! resolved to: the worker holds no account pin (ADR 0006, account-pin
-//! amendment) — which account a key opens is the operator's go-live check.
-//! Every read — the probe, `query`, `query_taxpayer`, the verify and the
-//! storno lookup — runs under the read policy; `set_payments` is a write
-//! without a retry of its own, and with `additive: true` an at-least-once
-//! one (see [`SetPaymentsRequest::additive`]).
+//! resolved to: the worker holds no account pin; which account a key opens
+//! is the operator's go-live check. Every read (the probe, `query`,
+//! `query_taxpayer`, the verify and the storno lookup) runs under the read
+//! policy; `set_payments` is a write without a retry of its own, and with
+//! `additive: true` an at-least-once one (see [`SetPaymentsRequest::additive`]).
 
 use std::sync::Arc;
 
@@ -51,7 +50,7 @@ pub(super) fn taxpayer_step(prefix: &TaxpayerPrefix) -> String {
 
 /// What the probe step settled, as `check_account`'s `credentials`. Every
 /// probe outcome is data: a wrong key is `rejected`, reporting it is the
-/// probe's purpose. (An exchange that settled nothing never reaches here — it
+/// probe's purpose. (An exchange that settled nothing never reaches here: it
 /// is the read's `Unanswered`, retried by the read policy and `unavailable`
 /// on exhaustion.)
 pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
@@ -65,11 +64,11 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
 
 /// The `outcome_unknown` fault of `set_payments` after a lost reply. What the
 /// caller does next depends on `additive`: a replacing call is idempotent and
-/// is simply repeated; an additive one is at-least-once — the lost send may
-/// have appended the entries — so the caller queries the invoice first.
+/// is simply repeated; an additive one is at-least-once (the lost send may
+/// have appended the entries), so the caller queries the invoice first.
 fn set_payments_unknown(additive: bool, message: &str) -> Fault {
     let next = if additive {
-        "the entries are additive and may have landed — query the invoice before re-sending"
+        "the entries are additive and may have landed; query the invoice before re-sending"
     } else {
         "call set_payments again"
     };
@@ -97,8 +96,8 @@ fn query_response(outcome: QueryOutcome, namespace: &Namespace) -> Result<QueryR
 
 /// What `query_taxpayer` answers from what its one step settled: NAV's record
 /// as data (`valid: false` included); a credential code as
-/// `credentials_rejected`; any other `funcCode ≠ OK` — szamlazz.hu's own or
-/// NAV's relayed one — passed through as `szamlazz_error` (422).
+/// `credentials_rejected`; any other `funcCode ≠ OK` (szamlazz.hu's own or
+/// NAV's relayed one) passed through as `szamlazz_error` (422).
 fn taxpayer_response(
     outcome: TaxpayerOutcome,
     namespace: &Namespace,
@@ -113,9 +112,9 @@ fn taxpayer_response(
 }
 
 /// What `set_payments` answers from what its one step settled: the totals on
-/// success; a rejection that never reached szamlazz.hu — the wire contract
+/// success; a rejection that never reached szamlazz.hu (the wire contract
 /// takes at most five entries, and a replacing request with none would clear
-/// the invoice's payments ([`REQUEST_CODE`]) — as `invalid_input`, the
+/// the invoice's payments, [`REQUEST_CODE`]) as `invalid_input`, the
 /// caller's request; szamlazz.hu refusing the entries passed through as
 /// `szamlazz_error` (422) naming the invoice; a credential code as
 /// `credentials_rejected`; a lost reply as `outcome_unknown`, conditional on
@@ -153,7 +152,7 @@ impl Execution {
     /// The `check_account` probe: the prologue has resolved whatever scope
     /// the SDK saw to an account (or refused the request as
     /// `unknown_account`); this runs one durable step (`probe`) under the
-    /// read policy — a query of the sentinel external id — and reports that
+    /// read policy (a query of the sentinel external id), and reports that
     /// scope, the configured account, the pinned namespace and szamlazz.hu's
     /// verdict on the credentials. `scope` is what the SDK saw, not what the
     /// caller sent: `None` under a scoped call means the server did not
@@ -179,8 +178,8 @@ impl Execution {
     }
 
     /// The `query` handler: one durable step (`query`) under the read policy
-    /// — the document as szamlazz.hu returned it, the same entry `verify`
-    /// writes — then the projection. The projection carries `test` (`teszt`)
+    /// (the document as szamlazz.hu returned it, the same entry `verify`
+    /// writes), then the projection. The projection carries `test` (`teszt`)
     /// as szamlazz.hu reported it: the go-live check reads it off a known
     /// document here, since the worker compares it with nothing.
     pub(super) async fn query_request(
@@ -198,10 +197,10 @@ impl Execution {
     }
 
     /// The `query_taxpayer` handler: one durable step (`taxpayer-{prefix}`)
-    /// under the read policy — NAV's answer as szamlazz.hu relayed it,
-    /// projected onto the crate-owned response — then the projection as is.
-    /// `valid: false` is the answer, not a fault. Any other `funcCode ≠ OK` —
-    /// szamlazz.hu's code or NAV's relayed one — is an answer: passed through
+    /// under the read policy (NAV's answer as szamlazz.hu relayed it,
+    /// projected onto the crate-owned response), then the projection as is.
+    /// `valid: false` is the answer, not a fault. Any other `funcCode ≠ OK`
+    /// (szamlazz.hu's code or NAV's relayed one) is an answer: passed through
     /// as `szamlazz_error` (422, the code in `szamlazz_code`) like `query`'s,
     /// never retried; a NAV outage therefore surfaces as a terminal 422 the
     /// caller may retry with a new `Idempotency-Key`.
@@ -220,7 +219,7 @@ impl Execution {
     }
 
     /// The `set_payments` handler: one durable step (`set-payments-{number}`)
-    /// that registers the credit entries without a preceding query — a verify
+    /// that registers the credit entries without a preceding query; a verify
     /// round trip (about a second per credit entry) would establish nothing
     /// the send does not, and a credit entry is not a legal document.
     pub(super) async fn set_payments_request(
@@ -246,8 +245,8 @@ impl Execution {
             .map_err(HandlerError::from)
     }
 
-    /// The `storno` handler: verify by number, then — for a document carrying
-    /// no order number — the lookup and storno steps of design §6 under the
+    /// The `storno` handler: verify by number, then (for a document carrying
+    /// no order number) the lookup and storno steps under the
     /// by-number storno external id. A document carrying an order number is
     /// answered as `managed_by_order`; one already reversed is `reversed`
     /// with the storno number the by-number storno lookup names, best effort
@@ -287,8 +286,8 @@ impl Execution {
         }
         if found.info.reversed == Some(true) {
             // Idempotent: already reversed by anyone. The storno number is
-            // best effort — ours when a storno of ours holds the by-number
-            // storno id, unknown otherwise (J25); a cancelled invocation
+            // best effort: ours when a storno of ours holds the by-number
+            // storno id, unknown otherwise; a cancelled invocation
             // propagates as such.
             let storno_number = storno_number_of_unmanaged(ctx, self, &number).await?;
             let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
@@ -296,8 +295,8 @@ impl Execution {
             return Ok(response);
         }
         // The intent is a pure function of the verified document: a `telj`
-        // it does not carry is a fault after every answer that needs no send
-        // (ADR 0007). No document type pre-check here — the echo tells.
+        // it does not carry is a fault after every answer that needs no send.
+        // No document type pre-check here: the echo tells.
         let intent = StornoIntent::from_verified(
             &found,
             self.gateway.account(),
@@ -324,7 +323,7 @@ impl Execution {
         }
 
         // The storno step, under the issue policy: query-first on every
-        // execution; any `Err` from the run — exhaustion or cancellation — is
+        // execution; any `Err` from the run (exhaustion or cancellation) is
         // `outcome_unknown`, and the next call's lookup finds whatever landed.
         let outcome = storno_step(ctx, self, &intent).await.map_err(|error| {
             Fault::outcome_unknown(format!(
@@ -354,8 +353,8 @@ mod tests {
         (error.code(), body)
     }
 
-    /// A sixth credit entry never reaches szamlazz.hu — the wire contract
-    /// takes at most five — and is the caller's request: `invalid_input`
+    /// A sixth credit entry never reaches szamlazz.hu (the wire contract
+    /// takes at most five), and is the caller's request: `invalid_input`
     /// (400) naming the limit, with no szamlazz.hu code to carry. Not a
     /// pass-through: szamlazz.hu answered nothing.
     #[test]
@@ -376,7 +375,7 @@ mod tests {
 
     /// szamlazz.hu refusing the credit entries is its answer, passed through:
     /// `szamlazz_error` (422) with the szamlazz.hu code in `szamlazz_code`
-    /// — never in `code`, which is the symbolic token — and its message.
+    /// (never in `code`, which is the symbolic token), and its message.
     #[test]
     fn a_refused_credit_entry_is_a_szamlazz_error_carrying_the_code() {
         let outcome = SetPaymentsOutcome::Rejected {
@@ -434,8 +433,8 @@ mod tests {
         assert_eq!(body["szamlazz_code"], "3", "{body}");
     }
 
-    /// `query_taxpayer`: any `funcCode ≠ OK` — szamlazz.hu's or NAV's relayed
-    /// one — is the same 422 pass-through, the code in `szamlazz_code`.
+    /// `query_taxpayer`: any `funcCode ≠ OK` (szamlazz.hu's or NAV's relayed
+    /// one) is the same 422 pass-through, the code in `szamlazz_code`.
     #[test]
     fn query_taxpayer_passes_a_nav_code_through() {
         let outcome = TaxpayerOutcome::Api {
@@ -504,7 +503,7 @@ mod tests {
     }
 
     /// The bare stem and the full tax number are one request to szamlazz.hu
-    /// and one journal entry: the same prefix, the same step name — a caller
+    /// and one journal entry: the same prefix, the same step name, so a caller
     /// that sends the full number and one that sends the stem replay each
     /// other's step.
     #[test]
@@ -518,7 +517,7 @@ mod tests {
 
     /// A tax number in neither accepted form is the caller's request:
     /// `invalid_input` (400) naming the input and the accepted forms, decided
-    /// before the prologue — nothing journaled, nothing sent — for every
+    /// before the prologue (nothing journaled, nothing sent) for every
     /// rejected form alike (whitespace, a wrong length, a partial or wrong
     /// suffix, another separator, a non-digit, non-ASCII digits).
     #[test]
@@ -563,7 +562,7 @@ mod tests {
     }
 
     /// An exhausted read of the taxpayer step is the `unavailable` fault
-    /// naming the step by its prefix — `taxpayer-{prefix}` — and the last
+    /// naming the step by its prefix (`taxpayer-{prefix}`), and the last
     /// failure, never the tax number as the caller sent it.
     #[test]
     fn an_exhausted_taxpayer_read_is_unavailable_naming_the_step() {
@@ -589,7 +588,7 @@ mod tests {
 
     /// Every probe outcome is data: a wrong key is `credentials: rejected`,
     /// not a fault. (An exchange that settled nothing is not an outcome at
-    /// all — it is the read's `Unanswered`, retried by the read policy and
+    /// all: it is the read's `Unanswered`, retried by the read policy and
     /// `unavailable` on exhaustion.)
     #[test]
     fn the_probe_outcome_is_data() {

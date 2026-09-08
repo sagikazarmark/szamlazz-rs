@@ -1,8 +1,8 @@
 //! Receiver for the szamlazz.hu **Online Pénzügyi Adatkapcsolat** (Financial
 //! Data Connection) push protocol.
 //!
-//! szamlazz.hu POSTs XML documents — outgoing invoices, incoming invoices,
-//! bank transactions, and daily receipt batches — to a single registered URL,
+//! szamlazz.hu POSTs XML documents (outgoing invoices, incoming invoices,
+//! bank transactions, and daily receipt batches) to a single registered URL,
 //! authenticated by the `X-Szamlazzhu-Key` header. The document type is
 //! identified by the XML root element. The receiver must answer HTTP 200 with
 //! a small response XML (an [`ack`](InvoiceAck)) echoing the document id;
@@ -11,13 +11,13 @@
 //! `KEY_ERR` / `KEY_DEL` are *deliberate protocol speech*, not errors: they
 //! tell szamlazz.hu the key is wrong (stop sending until it changes) or that
 //! the connection should be severed. A bank transaction or receipt answered
-//! `KEY_ERR` is never resent, an invoice only when it next changes — so they
+//! `KEY_ERR` is never resent, an invoice only when it next changes, so they
 //! are for a *definite* verdict, and anything uncertain is a non-200 that
 //! keeps the retry window alive. Express them via the ack constructors.
 //!
 //! A push is at-most-N-times delivery, and a non-200 szamlazz.hu retries
 //! identically for 72 hours loses the record. So [`Document::parse`] refuses
-//! only what the receiver cannot Ack — shape, never content: an element the
+//! only what the receiver cannot Ack (shape, never content): an element the
 //! XSD requires but the push omits is `None`, an unknown enumeration token is
 //! kept, a PDF that does not decode is `None` beside the raw XML. The XSD's
 //! verdict is a signal a receiver can ask for ([`Document::validate`]) or

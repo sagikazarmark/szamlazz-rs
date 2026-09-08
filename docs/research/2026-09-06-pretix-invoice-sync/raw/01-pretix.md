@@ -1,12 +1,12 @@
-# Pretix side of the integration — primary-source findings
+# Pretix side of the integration, primary-source findings
 
 Sources: docs.pretix.eu (2026.8 dev build) and `pretix/pretix` master (paths below). No secondary write-ups.
 
 ## 1. Webhooks
 
-- **Payload** (order events): `{notification_id, organizer, event, code, action}` only — no order body. VERIFIED `src/pretix/api/webhooks.py` `ParametrizedOrderWebhookEvent.build_payload`; docs …/api/webhooks.html "Receiving webhooks".
+- **Payload** (order events): `{notification_id, organizer, event, code, action}` only, no order body. VERIFIED `src/pretix/api/webhooks.py` `ParametrizedOrderWebhookEvent.build_payload`; docs …/api/webhooks.html "Receiving webhooks".
 - **`notification_id` = the `LogEntry` pk**, passed unchanged into every retry (`send_webhook(logentry_id, …, retry_count)`). Stable; the consumer cannot rotate it. VERIFIED `webhooks.py`.
-- **Order action types** (VERIFIED `register_default_webhook_events`; docs …/resources/webhooks.html): `placed`, `placed.require_approval`, `paid`, `canceled`, `reactivated`, `expired`, `expirychanged`, `modified` (buyer-input change incl. invoice address — `control/views/orders.py:2260`), `contact.changed`, `changed.*` (material: `item|price|cancel|add|addfee|feevalue|split|subevent|tax_rule|…`, `base/services/orders.py`), `refund.created|created.externally|requested|done|canceled|failed`, `payment.confirmed`, `approved`, `denied`, `deleted` (test mode only). Wildcards resolve by dotted prefix (`LogEntry.webhook_type`, `base/models/log.py`).
+- **Order action types** (VERIFIED `register_default_webhook_events`; docs …/resources/webhooks.html): `placed`, `placed.require_approval`, `paid`, `canceled`, `reactivated`, `expired`, `expirychanged`, `modified` (buyer-input change incl. invoice address, `control/views/orders.py:2260`), `contact.changed`, `changed.*` (material: `item|price|cancel|add|addfee|feevalue|split|subevent|tax_rule|…`, `base/services/orders.py`), `refund.created|created.externally|requested|done|canceled|failed`, `payment.confirmed`, `approved`, `denied`, `deleted` (test mode only). Wildcards resolve by dotted prefix (`LogEntry.webhook_type`, `base/models/log.py`).
 - **Invoicing meaning**: `paid` is logged in `OrderPayment._mark_paid_inner` only when the order becomes status `p` (payments − refunds ≥ total); `payment.confirmed` fires per payment, including partial ones and on already paid/canceled orders. VERIFIED `base/models/orders.py:1873, 1984-2000`. `expired` cancels pretix's own invoice (`services/orders.py:374-377`).
 - **No webhook for pretix's own invoice generation**: `pretix.event.order.invoice.generated` is a log action, not a registered webhook type. VERIFIED by absence.
 - **Retry schedule** on non-2xx or transport error (30 s timeout): `5s, 30s, 1m, 5m, 20m, 60m, 4h, 6h, 12h, 12h, 24h` → 11 retries / 12 deliveries, cumulative ≈ 213 995 s ≈ **59.4 h (~2.5 days)**; code comment: "approximately 3 days, as documented". Intervals < 5 m via Celery countdown, ≥ 5 m via a `WebHookCallRetry` row picked up by `periodic_task`. VERIFIED `send_webhook`; docs "Responding to a webhook".
@@ -22,7 +22,7 @@ Sources: docs.pretix.eu (2026.8 dev build) and `pretix/pretix` master (paths bel
 - **Fetch**: `GET /api/v1/organizers/{org}/events/{event}/orders/{code}/`; 404 unknown order, 403 unknown org/event. VERIFIED `doc/api/resources/orders.rst` "Fetching individual orders".
 - **Fields**: `status` (`n|p|e|c`), `total`, `locale`, `last_modified`, `testmode`, `invoice_address` {`company, is_business, name, name_parts, street, zipcode, city, country, state, vat_id, vat_id_validated, internal_reference, last_modified`}, `positions[]` (`price, tax_rate, tax_value, tax_code, canceled`), `fees[]`, `payments[]` (`state ∈ created|pending|confirmed|canceled|failed|refunded, amount, provider, payment_date`), `refunds[]` (`state ∈ created|transit|external|canceled|failed|done, amount, source`), `cancellation_date`. Currency lives on the **event** resource. Order-level `payment_provider`/`payment_date` are "DEPRECATED AND INACCURATE". VERIFIED orders.rst 15-122, 274-322.
 - **Reconciler query**: per-event and organizer-wide (`/organizers/{org}/orders/`) lists accept `modified_since`, `created_since`, `status`, `testmode`, `ordering=last_modified`; feed back the `X-Page-Generated` header as `modified_since`; docs recommend `testmode=false`. VERIFIED orders.rst 496-538; fundamentals.rst "Object-level conditional fetching".
-- **Rate limit**: Hosted only — 360 req/min per organizer for token auth, `429` + `Retry-After`; self-hosted none by default. VERIFIED `doc/api/ratelimit.rst`.
+- **Rate limit**: Hosted only, 360 req/min per organizer for token auth, `429` + `Retry-After`; self-hosted none by default. VERIFIED `doc/api/ratelimit.rst`.
 - **Tokens**: team-level; team has `all_events`/`limit_events` and `limit_event_permissions` (`event.orders:read`, `event.orders:write`, `event.settings.invoicing:write`, …). One org-wide token with `event.orders:read` suffices for reading. VERIFIED `doc/api/tokenauth.rst`, `resources/teams.rst`.
 
 ## 3. Pretix's own invoicing
@@ -37,10 +37,10 @@ Sources: docs.pretix.eu (2026.8 dev build) and `pretix/pretix` master (paths bel
 
 - Plugin = Django app with `PretixPluginMeta`; event/organizer/hybrid activation. VERIFIED `doc/development/api/plugins.rst`.
 - Signals: the `order_*` set above plus `periodic_task` (global, "between a minute and a day", must be idempotent). VERIFIED `base/signals.py:944-951`.
-- Control panel: `order_info(order, request)` → HTML on the order page; `order_position_buttons`; `nav_event`; custom `/control/event/{organizer}/{event}/…` views with `EventPermissionRequiredMixin` — enough for a badge and a retry button. VERIFIED `src/pretix/control/signals.py:59, 268, 290`; `doc/development/api/customview.rst`.
+- Control panel: `order_info(order, request)` → HTML on the order page; `order_position_buttons`; `nav_event`; custom `/control/event/{organizer}/{event}/…` views with `EventPermissionRequiredMixin`, enough for a badge and a retry button. VERIFIED `src/pretix/control/signals.py:59, 268, 290`; `doc/development/api/customview.rst`.
 - Background jobs: `@pretix.celery_app.app.task` (synchronous without a broker). Own models: assumed by the quality checklist ("If the plugin adds any database models…"). VERIFIED `doc/development/implementation/background.rst`; `doc/development/api/quality.rst` B.
 - Plugins may register extra webhook types (`register_webhook_events`). VERIFIED `src/pretix/api/signals.py:32`.
-- **Hosted pretix.eu**: marketplace text — plugins are for "hosting pretix yourself … If you use pretix through our pretix Hosted offering, you do not need this page, most useful plugins are already installed for you." No self-service install. VERIFIED marketplace.pretix.eu. An explicit "third-party plugins refused" statement: UNVERIFIED (docs, pricing FAQ, marketplace checked).
+- **Hosted pretix.eu**: marketplace text; plugins are for "hosting pretix yourself … If you use pretix through our pretix Hosted offering, you do not need this page, most useful plugins are already installed for you." No self-service install. VERIFIED marketplace.pretix.eu. An explicit "third-party plugins refused" statement: UNVERIFIED (docs, pricing FAQ, marketplace checked).
 
 ## 5. Order codes
 
@@ -55,9 +55,9 @@ Sources: docs.pretix.eu (2026.8 dev build) and `pretix/pretix` master (paths bel
 
 ## Consequences for the sync app
 
-- The webhook is a hint: re-read the order and decide from `status`, `payments[].state`, `refunds[]`, `invoice_address` — never from `action`.
+- The webhook is a hint: re-read the order and decide from `status`, `payments[].state`, `refunds[]`, `invoice_address`, never from `action`.
 - Expect duplicates and out-of-order arrival (`paid` before `placed`); handlers must be idempotent on order state.
-- Pretix's retry is ~2.5 days / 12 deliveries with a fixed `notification_id`, no re-send afterwards, no per-order re-trigger — it cannot be the durable retry loop or the Idempotency-Key source.
+- Pretix's retry is ~2.5 days / 12 deliveries with a fixed `notification_id`, no re-send afterwards, no per-order re-trigger: it cannot be the durable retry loop or the Idempotency-Key source.
 - Return 2xx once the event is *recorded*, not once the invoice is issued; the 30 s timeout and back-off would starve a payment burst.
 - A reconciler is cheap: org-wide `orders/?modified_since=<X-Page-Generated>&testmode=false` with one `event.orders:read` token (360 req/min on Hosted).
 - Codes are unique per organizer, so `{event-slug}-{code}` is safe; the slug is needed for the API path, not for identity.

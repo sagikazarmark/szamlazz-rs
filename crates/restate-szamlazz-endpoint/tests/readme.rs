@@ -1,10 +1,10 @@
-//! The endpoint README is the caller reference — what a backend developer who
+//! The endpoint README is the caller reference: what a backend developer who
 //! has never opened the Rust source builds against. These tests hold its
 //! examples and tables to the contract types, so the reference cannot drift
 //! from the worker:
 //!
 //! - every fenced `json` block names its contract type in the fence's info
-//!   string (`` ```json CreateResponse ``) and round-trips through that type —
+//!   string (`` ```json CreateResponse ``) and round-trips through that type:
 //!   a request deserializes and re-serializes to itself, a response
 //!   re-serializes to exactly the bytes shown (nulls included: the README
 //!   shows what the worker emits, not a trimmed sketch);
@@ -18,8 +18,8 @@
 //!   quick start, the rest in the response reference).
 //!
 //! The fault table's rows are held to `TerminalCode::ALL` by the `config`
-//! module's `every_terminal_code_is_in_every_fault_table`, beside the design
-//! document's; the TOML blocks by its `every_documented_example_loads`.
+//! module's `every_terminal_code_is_in_every_fault_table`; the TOML blocks by
+//! its `every_documented_example_loads`.
 
 use std::fmt::Debug;
 
@@ -130,7 +130,7 @@ where
 }
 
 /// A response example deserializes as `T` and re-serializes to **exactly** the
-/// value shown — the README shows the wire body as the worker emits it, every
+/// value shown: the README shows the wire body as the worker emits it, every
 /// `null` included.
 fn response<T>(example: &Example) -> T
 where
@@ -156,7 +156,7 @@ where
 }
 
 /// The Restate ingress error envelope (server 1.7.8): the HTTP status in
-/// `code`, a string `message`, and `source` — `invocation` for a completed
+/// `code`, a string `message`, and `source`: `invocation` for a completed
 /// invocation's terminal error, `ingress` for an error Restate itself raised.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,7 +167,7 @@ struct Envelope {
 }
 
 /// The worker's fault, as the e2e harness decodes it from the envelope's
-/// `message` (`tests/e2e/harness/ingress.rs`, `Fault`) — re-declared here because the
+/// `message` (`tests/e2e/harness/ingress.rs`, `Fault`), re-declared here because the
 /// worker's own `Fault` is `Serialize`-only and private to the service
 /// module: what a caller sees is exactly this.
 #[derive(Debug, Deserialize)]
@@ -221,7 +221,7 @@ fn fault(example: &Example) -> Fault {
 }
 
 /// A killed invocation's example: `source: invocation`, 500, and a message that
-/// is the last retryable error's text — not JSON.
+/// is the last retryable error's text, not JSON.
 fn killed(example: &Example) {
     let envelope = envelope(example);
     assert_eq!(envelope.source, "invocation", "README.md:{}", example.line);
@@ -314,8 +314,8 @@ fn a_create_response_example_exists_per_outcome() {
     }
 }
 
-/// The fault examples cover the three envelope cases — a structured fault, a
-/// killed invocation, an ingress error — and among the structured ones there
+/// The fault examples cover the three envelope cases (a structured fault, a
+/// killed invocation, an ingress error), and among the structured ones there
 /// is one carrying the document identity and one carrying a `szamlazz_code`,
 /// so both optional parts of the inner object are shown.
 #[test]

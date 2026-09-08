@@ -1,10 +1,10 @@
-//! axum integration: a [`Router`] that runs the whole push protocol — key
-//! verification, root-element dispatch, ack rendering — around a [`Handler`].
+//! axum integration: a [`Router`] that runs the whole push protocol (key
+//! verification, root-element dispatch, ack rendering) around a [`Handler`].
 //!
 //! Works on native servers and on `wasm32`/Cloudflare Workers. axum requires
 //! handler futures to be `Send`, which futures holding JS objects can never
 //! be; on wasm targets this module wraps the handler future and state in
-//! `send_wrapper::SendWrapper` — the same single-thread `Send` assertion
+//! `send_wrapper::SendWrapper`, the same single-thread `Send` assertion
 //! `#[worker::send]` makes. This is sound on single-threaded executors
 //! (Workers, browsers); a hypothetical multi-threaded wasm runtime would
 //! panic at the wrapper's thread check instead of causing undefined behavior.
@@ -37,12 +37,12 @@ type AppState<R> = send_wrapper::SendWrapper<Arc<Receiver<R>>>;
 /// are directly available while handling the document. The three answers are
 /// protocol decisions, not just lookup results:
 ///
-/// - `Ok(Some(handler))` — the key is known; the push is handled.
-/// - `Ok(None)` — the key is **definitely** unknown; the router answers the
+/// - `Ok(Some(handler))`: the key is known; the push is handled.
+/// - `Ok(None)`: the key is **definitely** unknown; the router answers the
 ///   protocol's `KEY_ERR` Ack, and szamlazz.hu **never resends** a bank
 ///   transaction or receipt answered that way (an invoice only when it next
 ///   changes). Return it only from a lookup that actually completed.
-/// - `Err(_)` — the key **could not be checked** (a database or secrets
+/// - `Err(_)`: the key **could not be checked** (a database or secrets
 ///   service timed out, …); the router answers `503` with no Ack, so the
 ///   record stays in szamlazz.hu's 72-hour retry window. The error is not
 ///   echoed to szamlazz.hu; log it yourself.
@@ -51,14 +51,14 @@ type AppState<R> = send_wrapper::SendWrapper<Arc<Receiver<R>>>;
 /// Implementations can be written as `async fn`; the `MaybeSend` bound keeps
 /// the trait implementable on Cloudflare Workers, where futures are `!Send`.
 /// On native targets the future borrows the returned handler, so the handler
-/// type must be `Sync` — which the router requires of it anyway. Use
+/// type must be `Sync`, which the router requires of it anyway. Use
 /// constant-time key comparison when keys are secrets rather than opaque IDs.
 pub trait KeyResolver {
     /// Handler/context selected for an authenticated key.
     type Handler: Handler;
 
-    /// Why a lookup could not complete. Not sent to szamlazz.hu — the `503`
-    /// alone drives the retry — so it may carry internal detail.
+    /// Why a lookup could not complete. Not sent to szamlazz.hu (the `503`
+    /// alone drives the retry), so it may carry internal detail.
     type Error: std::fmt::Display;
 
     /// Authenticates `presented_key` and returns its tenant handler/context.
@@ -72,11 +72,11 @@ pub trait KeyResolver {
 ///
 /// The receiver sits on the public internet and buffers each push before it
 /// can authenticate it, so a cap is the default: [`BodyLimit::DEFAULT`] is
-/// 64 MiB — far above any observed push, where Számlázz.hu publishes no
+/// 64 MiB, far above any observed push, where Számlázz.hu publishes no
 /// maximum. Requests over the cap are answered `413`, which szamlazz.hu
 /// retries like any non-200. Receipt batches are unbounded in principle;
 /// raise the cap, or pass [`BodyLimit::Unlimited`], as a deliberate,
-/// deployment-level choice — nothing selects it for you.
+/// deployment-level choice; nothing selects it for you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BodyLimit {
@@ -129,36 +129,36 @@ impl Default for BodyLimit {
 /// A push is delivered at most a bounded number of times, and szamlazz.hu
 /// reads the body of a `200` only: a `200` ends the delivery, any other status
 /// is retried for up to 72 hours whatever its body says. Two `200` bodies
-/// carry *control codes* and end more than the delivery — `KEY_ERR` ("this
+/// carry *control codes* and end more than the delivery: `KEY_ERR` ("this
 /// key is wrong") makes szamlazz.hu stop sending under the key, and **a bank
 /// transaction or receipt answered `KEY_ERR` is never resent**, an invoice
 /// only when it next changes. So the layer reserves `KEY_ERR` for a definite
 /// mismatch and answers every uncertain case with a status that keeps the
 /// retry window alive, in this order, before your [`Handler`] runs:
 ///
-/// - **`401`** — no (or an undecodable) `X-Szamlazzhu-Key` header. szamlazz.hu
+/// - **`401`**: no (or an undecodable) `X-Szamlazzhu-Key` header. szamlazz.hu
 ///   always sends it, so its absence is transport damage (a proxy stripping
 ///   it). Answered before the body is read: an unauthenticated client gets no
 ///   parsing out of the receiver.
-/// - **`413`** — the body is over the [`BodyLimit`].
-/// - **`400`** — the root element is not a known document (or the body is not
+/// - **`413`**: the body is over the [`BodyLimit`].
+/// - **`400`**: the root element is not a known document (or the body is not
 ///   UTF-8 / XML at all). Only UTF-8 validity and the root element are
 ///   checked at this point.
-/// - **`200` + `KEY_ERR`**, in the Ack shape of the pushed kind — the
+/// - **`200` + `KEY_ERR`**, in the Ack shape of the pushed kind: the
 ///   [`KeyResolver`] completed and knows no such key ([`Ok(None)`]). With
 ///   `router(key, …)` that is a header not equal to `key`. Retries stop.
-/// - **`503`** — the resolver could not check the key ([`Err`]): the record
+/// - **`503`**: the resolver could not check the key ([`Err`]): the record
 ///   stays retryable instead of being dropped.
-/// - **`400`** — an authenticated push whose body is not the pushed document
+/// - **`400`**: an authenticated push whose body is not the pushed document
 ///   at all: an element outside the document's namespace, XML the typed
 ///   parse cannot read (truncated, an `alap/id` missing, a date that is not a
 ///   date). Never a document that merely omits what the XSD requires, carries
-///   an unknown `irany` or a PDF that does not decode — [`Document::parse`]
+///   an unknown `irany` or a PDF that does not decode; [`Document::parse`]
 ///   reads those leniently and the push is Acked, because szamlazz.hu retries
 ///   a `400` identically for 72 hours and then drops the record. A receiver
 ///   that wants the XSD's verdict calls [`Document::validate`] from its
 ///   handler.
-/// - **`500`** — the handler failed; szamlazz.hu retries for up to 72 hours.
+/// - **`500`**: the handler failed; szamlazz.hu retries for up to 72 hours.
 ///
 /// Retry-keeping: `401`, `413`, `400`, `503`, `500`. Final: `200`, with or
 /// without a control code.
@@ -166,7 +166,7 @@ impl Default for BodyLimit {
 /// # Body limit
 ///
 /// This router applies [`BodyLimit::DEFAULT`] (64 MiB). Use
-/// [`router_with_body_limit`] to raise it or — as an explicit choice — to
+/// [`router_with_body_limit`] to raise it or (as an explicit choice) to
 /// lift it with [`BodyLimit::Unlimited`].
 ///
 /// [`Ok(None)`]: KeyResolver::resolve
@@ -244,7 +244,7 @@ where
 /// This helper installs both exact routes without a redirect. `path` may be
 /// passed with or without its trailing slash. Both forms also accept the
 /// optional identification-key suffix configured by Adatkapcsolat's
-/// `addkeytourl` setting — as its own segment (`{path}/{key}`), so the
+/// `addkeytourl` setting, as its own segment (`{path}/{key}`), so the
 /// receiver URL must be registered with a trailing slash (see [`router`]);
 /// authentication still uses `X-Szamlazzhu-Key`.
 ///
@@ -316,7 +316,7 @@ where
 }
 
 /// The protocol in the order [`router`] documents: header, body limit, root
-/// scan, key, and — for authenticated pushes only — the full parse and the
+/// scan, key, and (for authenticated pushes only) the full parse and the
 /// handler. Unauthenticated work stays minimal; every uncertain answer stays
 /// retryable.
 async fn receive_inner<R>(State(receiver): State<AppState<R>>, request: Request) -> Response
@@ -326,8 +326,8 @@ where
     <R::Handler as Handler>::Error: MaybeSend,
 {
     // Szamlazz.hu sends the key header with every push, so a missing (or
-    // undecodable) header is transport damage — typically a proxy stripping
-    // it — not an unknown key. KEY_ERR would make szamlazz.hu stop resending
+    // undecodable) header is transport damage (typically a proxy stripping
+    // it), not an unknown key. KEY_ERR would make szamlazz.hu stop resending
     // (bank transactions and receipts permanently); a non-200 keeps the
     // 72-hour retry window alive while the deployment is fixed. Answered
     // before the body is buffered: a client without the header gets no work
@@ -347,8 +347,8 @@ where
         Err(rejection) => return rejection.into_response(),
     };
 
-    // Identify the root before authentication — a KEY_ERR Ack takes the shape
-    // of the pushed kind — but read no XML past its start tag.
+    // Identify the root before authentication (a KEY_ERR Ack takes the shape
+    // of the pushed kind), but read no XML past its start tag.
     let root = match Document::identify(&body) {
         Ok(root) => root,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
@@ -360,18 +360,18 @@ where
             // Per protocol: answer 200 with a KEY_ERR Ack matching the pushed
             // document type, so szamlazz.hu stops sending until the key
             // changes. Reserved for a lookup that completed and found no
-            // tenant — bank transactions and receipts answered this way are
+            // tenant; bank transactions and receipts answered this way are
             // never resent.
             return key_error_response(root);
         }
         // The resolver could not check the key. KEY_ERR would permanently
         // drop the record; a non-200 keeps the 72-hour retry window alive.
-        // 503 needs no root kind — it carries no Ack.
+        // 503 needs no root kind: it carries no Ack.
         Err(_) => return resolver_unavailable(),
     };
 
     // Authenticated: the per-element namespace pass and the typed parse.
-    // Shape only — a body that is not the pushed document. Content is read
+    // Shape only: a body that is not the pushed document. Content is read
     // leniently: a 400 here is retried identically for 72 hours and then
     // dropped, so it must not be the answer to a missing element.
     let document = match Document::parse_identified(&body, root) {
@@ -431,7 +431,7 @@ fn key_error_response(root: RootKind) -> Response {
 }
 
 /// Answers a resolver that could not check the key with a bare 503. Like a
-/// handler failure, the error is not echoed — it may carry internal detail —
+/// handler failure, the error is not echoed (it may carry internal detail),
 /// and the status alone keeps szamlazz.hu retrying.
 fn resolver_unavailable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, "key resolver unavailable").into_response()
@@ -447,7 +447,7 @@ fn xml_response(body: Vec<u8>) -> Response {
 }
 
 /// Compares the presented key against the configured one without an
-/// early-exit on the first differing byte — the header is the connection's
+/// early-exit on the first differing byte: the header is the connection's
 /// only authentication, so leaking its content through timing must be avoided.
 /// (The length comparison is not itself secret-dependent.)
 fn keys_match(presented: &str, expected: &str) -> bool {
@@ -466,7 +466,7 @@ fn keys_match(presented: &str, expected: &str) -> bool {
 }
 
 /// Answers a handler failure with a bare 500. The handler's error is
-/// deliberately not echoed to szamlazz.hu — it may carry internal detail, and
+/// deliberately not echoed to szamlazz.hu: it may carry internal detail, and
 /// the status alone drives the 72-hour retry. Handlers should log their own
 /// errors for diagnostics.
 fn handler_error() -> Response {

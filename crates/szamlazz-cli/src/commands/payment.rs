@@ -1,4 +1,4 @@
-//! `szamlazz payment` — register credit entries on an invoice.
+//! `szamlazz payment`: register credit entries on an invoice.
 
 use std::path::PathBuf;
 

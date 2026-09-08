@@ -23,7 +23,7 @@ max_duration = "1m"
 
 [account]
 id = "acme"                   # the account's identifier as the worker knows it; journaled with every invocation, shown in the Restate UI
-agent_key = "..."             # SECRET — prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
+agent_key = "..."             # SECRET, prefer RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY
 endpoint = "https://www.szamlazz.hu/szamla/"   # optional; the production URL by default
 
 [account.defaults]            # all optional

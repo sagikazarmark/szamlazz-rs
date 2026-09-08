@@ -243,7 +243,7 @@ fn unknown_root_is_an_error() {
 }
 
 // `Document::parse` refuses shape only: what is not the pushed document at
-// all. Content — a missing element, an unknown token, an undecodable PDF — is
+// all. Content (a missing element, an unknown token, an undecodable PDF) is
 // read leniently and is `parse_strict`'s concern (`tests/document.rs`).
 #[test]
 fn rejects_shapes_that_are_not_the_document() {
@@ -439,7 +439,7 @@ async fn wrong_key_answers_key_err_without_handler() {
 
 // A PDF that does not decode is a content detail of a legal record, not a
 // reason to refuse its delivery: under a wrong key the push is `KEY_ERR` as
-// any other, under the right one it is Acked (with `pdf` read as absent —
+// any other, under the right one it is Acked (with `pdf` read as absent; see
 // `tests/document.rs`).
 #[tokio::test]
 async fn undecodable_pdf_does_not_fail_the_push() {
@@ -457,8 +457,8 @@ async fn undecodable_pdf_does_not_fail_the_push() {
     assert!(!response.contains("hibakod"), "{response}");
 }
 
-// The authenticated 400 is for a body that is not the pushed document at all
-// — szamlazz.hu would retry it identically for 72 hours and then drop it, so
+// The authenticated 400 is for a body that is not the pushed document at all:
+// szamlazz.hu would retry it identically for 72 hours and then drop it, so
 // it must never be the answer to a document that merely omits what the XSD
 // requires: that one is Acked.
 #[tokio::test]
@@ -488,7 +488,7 @@ async fn authenticated_400_is_reserved_for_a_body_that_is_not_a_document() {
 
 // The docs guarantee the header accompanies every push, so a missing header
 // is transport damage (e.g. a stripping proxy), not an unknown key. KEY_ERR
-// would halt resends — bank transactions and receipts permanently — while a
+// would halt resends (bank transactions and receipts permanently), while a
 // non-200 keeps the 72-hour retry window alive.
 #[tokio::test]
 async fn missing_key_answers_retryable_non_200() {
@@ -513,8 +513,8 @@ async fn missing_key_is_401_before_the_body_is_inspected() {
     }
 }
 
-// Only the root element is inspected before the key check — enough to shape a
-// KEY_ERR Ack — while the per-element namespace pass runs for authenticated
+// Only the root element is inspected before the key check (enough to shape a
+// KEY_ERR Ack), while the per-element namespace pass runs for authenticated
 // pushes only. A child in the wrong namespace is therefore KEY_ERR under a
 // wrong key and 400 under the right one.
 #[tokio::test]
@@ -616,7 +616,7 @@ fn oversized_body(size: usize) -> Vec<u8> {
 
 // Számlázz.hu publishes no maximum size, but the receiver sits on the public
 // internet: the default is a generous, documented cap, and lifting it is an
-// explicit choice — never what a caller gets by not thinking about it.
+// explicit choice, never what a caller gets by not thinking about it.
 #[tokio::test]
 async fn default_body_limit_is_64_mib_and_unlimited_is_explicit() {
     assert_eq!(BodyLimit::default(), BodyLimit::Max(64 * 1024 * 1024));
@@ -636,7 +636,7 @@ async fn default_body_limit_is_64_mib_and_unlimited_is_explicit() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    // Explicitly unlimited: the body is buffered and read — refused by the
+    // Explicitly unlimited: the body is buffered and read, then refused by the
     // typed parse (a transaction without an id), not by the limit.
     let unlimited = szamlazz_adatkapcsolat::axum::router_with_body_limit(
         "secret-key",
@@ -661,7 +661,7 @@ async fn default_body_limit_is_64_mib_and_unlimited_is_explicit() {
 }
 
 // The cap is enforced before the key is checked, and only for requests that
-// carry the header — an unauthenticated client never gets the body buffered.
+// carry the header: an unauthenticated client never gets the body buffered.
 #[tokio::test]
 async fn body_limit_applies_after_the_header_check_and_before_the_key_check() {
     let over = oversized_body(64 * 1024 * 1024 + 1);

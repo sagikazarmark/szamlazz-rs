@@ -20,16 +20,16 @@ use crate::gateway::{
 };
 use crate::identity::{ExternalId, OrderKey};
 
-/// A type the services journal as the result of a `ctx.run` — the bound of
+/// A type the services journal as the result of a `ctx.run`: the bound of
 /// `run_once`, `run_retrying` and `run_reading`, so this list is exactly what
 /// the journal can hold.
 ///
 /// Implementing it is a promise that the type's serde layout is
-/// **additive-only**, as the [`gateway`](crate::gateway) module docs state
-/// (ADR 0005, journal compatibility). The promise is checked by the fixtures
-/// under `tests/journal/<type>/` (`service::journal`), one per variant: a new
-/// implementor is pinned there before it is journaled, and a new variant of
-/// one of these enums fails to compile until its sample is listed.
+/// **additive-only**, as the [`gateway`](crate::gateway) module docs state.
+/// The promise is checked by the fixtures under `tests/journal/<type>/`
+/// (`service::journal`), one per variant: a new implementor is pinned there
+/// before it is journaled, and a new variant of one of these enums fails to
+/// compile until its sample is listed.
 pub(super) trait Journaled: Serialize + DeserializeOwned {}
 
 impl Journaled for Namespace {}
@@ -44,7 +44,7 @@ impl Journaled for SetPaymentsOutcome {}
 impl Journaled for ProbeOutcome {}
 impl Journaled for TaxpayerOutcome {}
 
-/// A fault raised as a `TerminalError` (design §7): never a domain outcome.
+/// A fault raised as a `TerminalError`: never a domain outcome.
 ///
 /// Serialised as the error message so that the ingress body carries the
 /// [`TerminalCode`] token, the szamlazz.hu code when szamlazz.hu's answer is
@@ -123,33 +123,33 @@ impl Fault {
     pub(super) fn inconclusive_answer(code: impl Into<String>, message: impl Into<String>) -> Self {
         let code = code.into();
         Self::unavailable(format!(
-            "szamlazz.hu answered the query with code {code}: {}; nothing may be concluded — retry with a new Idempotency-Key or read get",
+            "szamlazz.hu answered the query with code {code}: {}; nothing may be concluded; retry with a new Idempotency-Key or read get",
             message.into()
         ))
         .answered_with(code)
     }
 
     /// szamlazz.hu reported unavailability (`szlahu_down`) to a write step's
-    /// leading query — before anything was sent (#63). An answer, so it is
+    /// leading query, before anything was sent. An answer, so it is
     /// journaled and never re-executed under the issue policy, which is sized
     /// for the post-send window; a fault, since nothing may be concluded from
     /// it. No `szamlazz_code`: `szlahu_down` is a header, not a code.
     pub(super) fn szlahu_down_answer(message: impl Into<String>) -> Self {
         Self::unavailable(format!(
-            "szamlazz.hu reported unavailability (szlahu_down) to the query: {}; nothing was sent — retry with a new Idempotency-Key or read get",
+            "szamlazz.hu reported unavailability (szlahu_down) to the query: {}; nothing was sent; retry with a new Idempotency-Key or read get",
             message.into()
         ))
     }
 
-    /// The verified original of a storno carries no `telj` (ADR 0007).
-    /// szamlazz.hu's query schema has the element mandatory — the legal "no
-    /// separate date" case is an equal `telj`, never an absent one — so this
+    /// The verified original of a storno carries no `telj`.
+    /// szamlazz.hu's query schema has the element mandatory (the legal "no
+    /// separate date" case is an equal `telj`, never an absent one), so this
     /// is szamlazz.hu breaking its own schema: the same class as an
     /// inconclusive answer, and answered the same way. The storno must repeat
     /// that date and no default can be right, so nothing is sent.
     pub(super) fn missing_fulfillment_date(number: &str) -> Self {
         Self::unavailable(format!(
-            "szamlazz.hu returned invoice {number} without a fulfillment date (telj), which the storno must repeat; nothing was sent — retry with a new Idempotency-Key, or query the invoice"
+            "szamlazz.hu returned invoice {number} without a fulfillment date (telj), which the storno must repeat; nothing was sent, so retry with a new Idempotency-Key, or query the invoice"
         ))
     }
 
@@ -164,13 +164,12 @@ impl Fault {
     }
 
     /// szamlazz.hu rejected the account's agent credentials with `code`
-    /// (3, 135, 136 or 164). Logs the warning that pages the operator — tagged
-    /// with the namespace and the code, never the key — and builds the fault.
+    /// (3, 135, 136 or 164). Logs the warning that pages the operator (tagged
+    /// with the namespace and the code, never the key), and builds the fault.
     /// The message claims the outcome is not known, nothing more: szamlazz.hu
     /// answers these codes before acting, so the request it rejected was not
     /// acted on, but the rejection may be a post-send re-query's after a send
-    /// with an open code, and an earlier execution's send may have landed
-    /// (#63).
+    /// with an open code, and an earlier execution's send may have landed.
     pub(super) fn credentials_rejected(
         namespace: &Namespace,
         code: impl Into<String>,
@@ -186,7 +185,7 @@ impl Fault {
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
-                "szamlazz.hu rejected the agent credentials (code {code}: {message}); the outcome is not known — fix the account's agent key, then retry with a new Idempotency-Key or read get"
+                "szamlazz.hu rejected the agent credentials (code {code}: {message}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
             ),
         )
         .answered_with(code)
@@ -240,21 +239,21 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
 /// The status the SDK ends a run with when the invocation was cancelled
 /// (`restate-sdk` 0.12, `endpoint/context.rs`: `TerminalFailure { code: 409,
 /// message: "cancelled" }`). A closure's own error never reaches a run's
-/// `TerminalError` with this code — `run_retrying` turns it into a retryable
-/// failure and exhaustion is 500 — so on a run's error the code alone tells a
+/// `TerminalError` with this code (`run_retrying` turns it into a retryable
+/// failure and exhaustion is 500), so on a run's error the code alone tells a
 /// cancellation from an exhausted policy.
 const CANCELLED: u16 = 409;
 
-/// What a **best-effort** read makes of a run that ended without an answer —
+/// What a **best-effort** read makes of a run that ended without an answer:
 /// the storno-number hint after a verify found the document already reversed,
 /// and `Szamlazz.Agent.storno`'s storno lookup in the same situation: reads
 /// whose handler already knows its answer (`reversed`) and only lacks the
-/// storno number. An exhausted read policy is swallowed — logged at `warn`
-/// naming the step and the last failure — and the number is reported as
+/// storno number. An exhausted read policy is swallowed (logged at `warn`
+/// naming the step and the last failure), and the number is reported as
 /// unknown, rather than failing a handler whose answer is known. A
 /// cancellation is never swallowed: the invocation was told to stop, and a
 /// cancelled invocation must not complete as `reversed` as if nothing had
-/// happened (J13, #65); it is propagated as it came, so the SDK reports the
+/// happened; it is propagated as it came, so the SDK reports the
 /// cancellation.
 ///
 /// # Errors
@@ -274,18 +273,18 @@ pub(super) fn best_effort(step: &str, error: TerminalError) -> Result<(), Termin
 
 /// Parses the Virtual Object key as an [`OrderKey`].
 ///
-/// The key must arrive trimmed (design §3). Restate's per-key lock is on the
-/// *raw* key, so `ORD-1` and ` ORD-1` would be two instances with two locks
-/// that map to one szamlazz.hu order and identical external ids — two
-/// concurrent creates under them would both pass their lookup and both send,
-/// leaving szamlazz.hu's order-number-repetition toggle as the only guard. A
-/// key whose trimmed form differs from the raw one is therefore refused as
+/// The key must arrive trimmed. Restate's per-key lock is on the *raw* key,
+/// so `ORD-1` and ` ORD-1` would be two instances with two locks that map to
+/// one szamlazz.hu order and identical external ids: two concurrent creates
+/// under them would both pass their lookup and both send, leaving
+/// szamlazz.hu's order-number-repetition toggle as the only guard. A key
+/// whose trimmed form differs from the raw one is therefore refused as
 /// `invalid_input` naming the rule; [`OrderKey::parse`] itself stays lenient
 /// for the places that parse an order number rather than a key.
 pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
     if key.trim() != key {
         return Err(Fault::invalid_input(format!(
-            "invalid order key {key:?}: the order key must not have leading or trailing whitespace — Restate locks on the raw key, so trim it before calling"
+            "invalid order key {key:?}: the order key must not have leading or trailing whitespace; Restate locks on the raw key, so trim it before calling"
         )));
     }
     OrderKey::parse(key)
@@ -295,7 +294,7 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
 /// The document a verify by number found, or the fault for anything else:
 /// 404 `not_found` naming the invoice on code 7, `unavailable` on a code the
 /// verify cannot conclude from (`Fault::inconclusive_answer`), a credential
-/// code as `credentials_rejected`. Shared by every verify — `Szamlazz.Order`'s
+/// code as `credentials_rejected`. Shared by every verify: `Szamlazz.Order`'s
 /// attach the order identity to the fault ([`Fault::about`]),
 /// `Szamlazz.Agent.storno`'s carries none.
 ///
@@ -319,7 +318,7 @@ pub(super) fn verified_document(
     }
 }
 
-/// What the storno step sends (design §6 step 3), built from what the verify
+/// What the storno step sends, built from what the verify
 /// step found. Shared by `Szamlazz.Order.storno_invoice` and
 /// `Szamlazz.Agent.storno`, whose storno external ids differ.
 #[derive(Debug, Clone)]
@@ -331,18 +330,18 @@ pub(super) struct StornoIntent {
     pub(super) storno_id: ExternalId,
     pub(super) comment: Option<String>,
     /// The verified document's `eszamla` when known, else the account
-    /// default — an open code set for which the account's own default is a
+    /// default: an open code set for which the account's own default is a
     /// legitimate choice.
     pub(super) e_invoice: bool,
     /// The verified document's `telj`, which the storno repeats as its
-    /// `teljesitesDatum` (ADR 0007): a fiscal fact of the document for which
+    /// `teljesitesDatum`: a fiscal fact of the document for which
     /// no default can be right, so it is never defaulted.
     pub(super) fulfillment_date: Date,
 }
 
 impl StornoIntent {
-    /// The intent for reversing the verified `found` — `number`, as the
-    /// caller named it — under `storno_id`: `e_invoice` lifted from the
+    /// The intent for reversing the verified `found` (`number`, as the
+    /// caller named it) under `storno_id`: `e_invoice` lifted from the
     /// document with `account`'s default as fallback, `fulfillment_date` the
     /// document's own `telj`. A pure function of the journaled verify result,
     /// so every execution rebuilds the same request.
@@ -377,10 +376,10 @@ impl StornoIntent {
 ///
 /// # Errors
 ///
-/// The faults a settled step can still be — rejected credentials (the
+/// The faults a settled step can still be: rejected credentials (the
 /// warning tagged with `namespace`), and the leading query answered with
-/// another code or `szlahu_down` (`unavailable` at once; nothing was sent,
-/// #63). The caller attaches the identity it knows.
+/// another code or `szlahu_down` (`unavailable` at once; nothing was sent).
+/// The caller attaches the identity it knows.
 pub(super) fn storno_response(
     outcome: GatewayStornoOutcome,
     number: String,
@@ -421,7 +420,7 @@ pub(super) fn storno_response(
 /// of the order the verify already saw reversed: the hint when it is the `SS`
 /// referencing `number`, unknown when it is any other document (something
 /// newer was issued under the order), nothing (code 7) or another code
-/// (nothing may be concluded from it, and the handler's answer — `reversed` —
+/// (nothing may be concluded from it, and the handler's answer, `reversed`,
 /// is known). Rejected credentials stay the fault they are on every step.
 ///
 /// # Errors
@@ -447,7 +446,7 @@ pub(super) fn storno_number_from_hint(
 /// verify already saw reversed: the `SS` under the storno external id when the
 /// storno was ours, unknown when nothing is under the id (a reversal from the
 /// UI leaves nothing there) or another code answered (nothing may be concluded
-/// from it, and the handler's answer — `reversed` — is known). Rejected
+/// from it, and the handler's answer, `reversed`, is known). Rejected
 /// credentials stay the fault they are on every step.
 ///
 /// # Errors
@@ -466,13 +465,13 @@ pub(super) fn storno_number_from_lookup(
     }
 }
 
-/// What a query by one of our external ids found (design §3).
+/// What a query by one of our external ids found.
 ///
 /// Every caller matches all three variants: an issuing handler refuses a
 /// [`Lookup::Collision`] as `conflict{external_id_collision}` (the newest
 /// holder may hide a document of ours), `delete_proforma` answers
-/// `not_deleted{external_id_collision}`, and only `get` — a read that must not
-/// fail — reports the slot as absent.
+/// `not_deleted{external_id_collision}`, and only `get` (a read that must not
+/// fail) reports the slot as absent.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Lookup {
     /// szamlazz.hu holds nothing under the id (code 7).
@@ -549,7 +548,7 @@ macro_rules! journal_helpers {
 
             /// Runs one handler execution: the prologue, then `body` on the
             /// execution it built, the whole inside the execution span
-            /// (`prologue::execution_span`) — so every log line from the
+            /// (`prologue::execution_span`), so every log line from the
             /// prologue's first step to the handler's answer carries the
             /// scope, the key, the invocation id and, once resolved, the
             /// account id. `key` is the Virtual Object key on the object
@@ -575,7 +574,7 @@ macro_rules! journal_helpers {
                 .await
             }
 
-            /// The prologue of every handler (design §4): pin → resolve →
+            /// The prologue of every handler: pin → resolve →
             /// fetch → open. Runs inside the execution span [`execute`]
             /// opened, on which it records the account id once resolved.
             ///
@@ -585,11 +584,11 @@ macro_rules! journal_helpers {
             /// 2. **Resolve** the request's scope to its account in a durable
             ///    step named `account` under the resolve policy: unscoped and
             ///    unknown are journaled as data and become the terminal
-            ///    `unknown_account`; an unavailable resolver — reporting so,
-            ///    or silent past `prologue::CALL_DEADLINE` — is retryable and
+            ///    `unknown_account`; an unavailable resolver (reporting so,
+            ///    or silent past `prologue::CALL_DEADLINE`) is retryable and
             ///    journals nothing; exhaustion is `unavailable`.
-            /// 3. **Fetch** the account's credentials outside the journal —
-            ///    on every execution, including replays — with a short
+            /// 3. **Fetch** the account's credentials outside the journal
+            ///    (on every execution, including replays) with a short
             ///    in-process retry, each attempt bounded by the same
             ///    deadline, then terminal `unavailable`.
             /// 4. **Open** the gateway for this execution over a fresh client.
@@ -657,7 +656,7 @@ macro_rules! journal_helpers {
             }
 
             /// Journals the result of `f` under `name`, re-executing it under
-            /// `policy` while it fails with `E` — the step's own "not
+            /// `policy` while it fails with `E`, the step's own "not
             /// settled" error, which the SDK treats as retryable. The whole
             /// handler replays to this entry after the policy's delay, so the
             /// closure begins again from its first line.
@@ -696,7 +695,7 @@ macro_rules! journal_helpers {
             /// # Errors
             ///
             /// The `unavailable` fault of a read that ended without an answer
-            /// — the read policy exhausted or the invocation cancelled —
+            /// (the read policy exhausted or the invocation cancelled),
             /// naming the step and the last failure. The caller attaches the
             /// document when it knows one.
             pub(in crate::service) async fn run_reading<'ctx, T, F, Fut>(
@@ -716,7 +715,7 @@ macro_rules! journal_helpers {
                     .map_err(|error| super::read_exhausted(&name, &error))
             }
 
-            /// A **best-effort** read under the read policy — [`run_reading`]
+            /// A **best-effort** read under the read policy: [`run_reading`]
             /// for a step whose handler already knows its answer and only
             /// lacks a detail: the answer of `f` as `Some`, or `None` when the
             /// read policy is exhausted (logged at `warn` naming the step;
@@ -726,7 +725,7 @@ macro_rules! journal_helpers {
             ///
             /// A cancellation of the invocation, as it came: never swallowed,
             /// so a cancelled invocation does not complete as if nothing had
-            /// happened (J13, #65).
+            /// happened.
             pub(in crate::service) async fn run_best_effort<'ctx, T, F, Fut>(
                 ctx: &$ctx<'ctx>,
                 name: impl Into<String>,
@@ -779,7 +778,7 @@ macro_rules! journal_helpers {
 
             /// Journaled query by one of our external ids, under the read
             /// policy, validated against the identity the document should
-            /// have (design §3). A fault carries that identity.
+            /// have. A fault carries that identity.
             pub(in crate::service) async fn lookup(
                 ctx: &$ctx<'_>,
                 exec: &Execution,
@@ -795,7 +794,7 @@ macro_rules! journal_helpers {
                 Lookup::classify(outcome, &exec.config.namespace, order, kind).map_err(about)
             }
 
-            /// The storno lookup step (design §6 step 2): one read-only
+            /// The storno lookup step: one read-only
             /// journaled query of the storno external id, under the read
             /// policy.
             pub(in crate::service) async fn lookup_storno(
@@ -815,16 +814,16 @@ macro_rules! journal_helpers {
                 .await
             }
 
-            /// The storno step (design §6 step 3): one durable step under the
+            /// The storno step: one durable step under the
             /// issue policy's run retry policy, query-first on every execution
             /// (the query is inside the closure: a separate journaled query
             /// would replay its stale "nothing" on the retry and re-send).
-            /// The request is rebuilt from the intent on every execution —
-            /// the date included — so every send is byte-identical.
+            /// The request is rebuilt from the intent on every execution
+            /// (the date included), so every send is byte-identical.
             ///
             /// # Errors
             ///
-            /// The `TerminalError` the run ends with — exhaustion (500) or
+            /// The `TerminalError` the run ends with: exhaustion (500) or
             /// cancellation (409); the caller maps it to `outcome_unknown`
             /// about its document. Nothing is recorded: the next call's
             /// lookup finds whatever landed.
@@ -861,7 +860,7 @@ macro_rules! journal_helpers {
             /// The storno number of a reversed document of `order`, when the
             /// order-number hint is the `SS` referencing it (step
             /// `hint-storno-{number}`, a best-effort read under the read
-            /// policy — [`run_best_effort`]). Rejected credentials are a fault
+            /// policy, [`run_best_effort`]). Rejected credentials are a fault
             /// about the storno (`storno_id`); everything else the hint can
             /// answer is data ([`super::storno_number_from_hint`]).
             pub(in crate::service) async fn storno_number_of(
@@ -889,12 +888,12 @@ macro_rules! journal_helpers {
 
             /// The storno number of a reversed document no `Order` manages,
             /// when a storno of ours holds `{namespace}:by-number:{number}:storno`
-            /// (step `lookup-storno-{number}` — the same entry the storno
-            /// protocol's lookup step writes, which this path never reaches —
+            /// (step `lookup-storno-{number}`, the same entry the storno
+            /// protocol's lookup step writes, which this path never reaches;
             /// a best-effort read under the read policy, [`run_best_effort`]).
             /// The only read that can name an unmanaged document's storno: it
-            /// carries no order number for the hint (J25, #65). Rejected
-            /// credentials are a fault; everything else is data
+            /// carries no order number for the hint. Rejected credentials are
+            /// a fault; everything else is data
             /// ([`super::storno_number_from_lookup`]).
             pub(in crate::service) async fn storno_number_of_unmanaged(
                 ctx: &$ctx<'_>,

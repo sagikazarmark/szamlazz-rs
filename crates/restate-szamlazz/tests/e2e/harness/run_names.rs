@@ -1,8 +1,8 @@
 //! The *run-name pin*'s table and matching: the durable steps of every
 //! handler of both services as the `ctx.run` names they journal
 //! ([`RUN_NAMES`]), a journaled name read as its pattern ([`run_pattern`])
-//! and the prefix rule ([`is_prefix_of_path`]). The pin itself — over every
-//! invocation of the run — is the last scenario (`pins`); the matching's own
+//! and the prefix rule ([`is_prefix_of_path`]). The pin itself (over every
+//! invocation of the run) is the last scenario (`pins`); the matching's own
 //! tests close this file.
 
 use std::sync::LazyLock;
@@ -30,18 +30,18 @@ impl RunPath {
 }
 
 /// The durable steps of every handler of both services, in order, as the
-/// `ctx.run` names they journal — the part of the journal contract the type
+/// `ctx.run` names they journal: the part of the journal contract the type
 /// fixtures (`tests/journal/`) do not cover. An in-flight invocation replays
-/// the *previous* deployment's entries by name and position (ADR 0005), so a
+/// the *previous* deployment's entries by name and position, so a
 /// renamed, inserted or reordered step strands it; this table makes that a
 /// failing test instead of a killed invocation. A `{number}` / `{prefix}`
 /// segment is a parameter ([`run_pattern`]); a handler with two rows has two
 /// paths. The pin holds when every observed sequence of a handler is a prefix
 /// of one of its paths (a handler that answers early journals the first steps
-/// only — [`is_prefix_of_path`]) and every path is observed in full at least
-/// once in the run. The parameter of a parametrized name is pinned by its
-/// prefix only: a number that itself began with a pinned stem (`storno-1`)
-/// would read as the longer pattern — none of the suite's do.
+/// only; see [`is_prefix_of_path`]) and every path is observed in full at
+/// least once in the run. The parameter of a parametrized name is pinned by
+/// its prefix only: a number that itself began with a pinned stem (`storno-1`)
+/// would read as the longer pattern; none of the suite's do.
 pub(crate) const RUN_NAMES: &[RunPath] = &[
     RunPath::new(
         "Szamlazz.Order",
@@ -206,7 +206,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
     ),
 ];
 
-/// The parametrized run names of [`RUN_NAMES`] — every `{…}` pattern — by
+/// The parametrized run names of [`RUN_NAMES`] (every `{…}` pattern) by
 /// the prefix that names the step, longest prefix first, so that a name is
 /// read as the most specific pattern it starts with: `verify-storno-…` is
 /// `verify-storno-{number}`, never `verify-{number}`. Derived from the table,
@@ -270,7 +270,7 @@ fn run_patterns_read_a_parametrized_name_by_its_longest_prefix() {
     }
 }
 
-/// An observed sequence is explained by a path when it is a prefix of it — a
+/// An observed sequence is explained by a path when it is a prefix of it: a
 /// handler that answers early journals the first steps only; a renamed step,
 /// an inserted one or one out of order is explained by none.
 #[test]

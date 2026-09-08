@@ -22,11 +22,11 @@
 //!
 //! Semantics:
 //! - Handlers run **sequentially, in registration order**, and all of them
-//!   run even when an earlier one fails — each delivery makes as much
+//!   run even when an earlier one fails: each delivery makes as much
 //!   progress as possible.
 //! - If any handler failed, the fan-out fails with a per-handler report →
 //!   HTTP 500 → szamlazz.hu re-delivers **to every handler**. Members must
-//!   therefore tolerate re-delivery — which the push protocol demands of any
+//!   therefore tolerate re-delivery, which the push protocol demands of any
 //!   receiver anyway (a lost acknowledgement causes re-delivery too).
 //! - Acks are merged: the strongest control code wins (`KEY_DEL` over
 //!   `KEY_ERR` over accept); otherwise the document is accepted with the

@@ -1,5 +1,5 @@
 //! `--check-config` loads and validates the configuration, builds the
-//! endpoint and exits without listening — what a CI job or an init container
+//! endpoint and exits without listening: what a CI job or an init container
 //! runs before the real process starts.
 //!
 //! Spawns `restate-szamlazz --check-config` on the fixtures, on a file without
@@ -22,12 +22,12 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The last line `--check-config` logs before exiting 0.
 const VALID: &str = "configuration is valid; not listening (--check-config)";
-/// The line the binary logs once it listens — which `--check-config` never
+/// The line the binary logs once it listens, which `--check-config` never
 /// reaches.
 const STARTED: &str = "starting Restate szamlazz.hu endpoint";
-/// The phrase both "no identity key" lines share — the `warn` on a
+/// The phrase both "no identity key" lines share (the `warn` on a
 /// configuration that does not mention `identity_keys` and the `info` on
-/// `identity_keys = []` written out — and what a CI job greps for.
+/// `identity_keys = []` written out), and what a CI job greps for.
 const UNSIGNED: &str = "accepting unsigned requests";
 
 /// A valid single-account configuration that does not mention
@@ -40,7 +40,7 @@ id = "acme"
 agent_key = "k"
 "#;
 
-/// The single-account fixture — the README's example — is valid: exit 0, the
+/// The single-account fixture (the README's example) is valid: exit 0, the
 /// start-up summary (namespace, shape, account, bound services, identity
 /// keys) on stdout, and no listening.
 #[test]
@@ -99,8 +99,8 @@ fn a_valid_single_account_file_exits_0_and_prints_the_start_up_summary() {
     );
 }
 
-/// A configuration that does not mention `identity_keys` is valid — the
-/// endpoint would start — but `--check-config` prints the start-up `warn`:
+/// A configuration that does not mention `identity_keys` is valid (the
+/// endpoint would start), but `--check-config` prints the start-up `warn`:
 /// the consequence, with the address the endpoint would listen on, and both
 /// remedies; a CI job greps for it.
 #[test]
@@ -185,7 +185,7 @@ fn the_unsigned_requests_warning_names_the_bind_address() {
 }
 
 /// Under `--port 0` the kernel picks the port at bind time, so before the
-/// bind — and under `--check-config`, which never binds — nothing is known of
+/// bind (and under `--check-config`, which never binds) nothing is known of
 /// it: the warning names the address without a port rather than `:0`, which
 /// no client can reach.
 #[test]
@@ -207,7 +207,7 @@ fn the_unsigned_requests_warning_does_not_name_port_0_as_reachable() {
 }
 
 /// The multi-account fixture is valid too, and its summary lists each
-/// account under its scope — and the identity key the shape requires.
+/// account under its scope, and the identity key the shape requires.
 #[test]
 fn a_valid_multi_account_file_exits_0_and_lists_every_scope() {
     let output = check_config(&fixture("multi.toml"), &[]);
@@ -230,7 +230,7 @@ fn a_valid_multi_account_file_exits_0_and_lists_every_scope() {
     assert!(output.stdout.contains(VALID), "{output}");
 }
 
-/// An unknown key — in the file or in the environment — is a non-zero exit
+/// An unknown key (in the file or in the environment) is a non-zero exit
 /// with an error that names the key, its path and its source.
 #[test]
 fn an_unknown_key_exits_non_zero_with_the_error() {
@@ -263,9 +263,9 @@ fn an_unknown_key_exits_non_zero_with_the_error() {
     assert!(!output.stdout.contains(VALID), "{output}");
 }
 
-/// An issue policy whose `initial_delay` is under the floor — the Számla Agent
+/// An issue policy whose `initial_delay` is under the floor (the Számla Agent
 /// client's timeout plus a margin, so that a create or storno step is never
-/// re-executed while its send may still be in flight — is refused before the
+/// re-executed while its send may still be in flight) is refused before the
 /// endpoint starts: the file parses; it is the invariant that fails, and the
 /// error names the table and the floor.
 #[test]
@@ -364,7 +364,7 @@ fn check_config_with_args(file: &Path, env: &[(&str, &str)], args: &[&str]) -> C
 
     // The pipes are drained on threads while the parent polls for the exit,
     // so a binary that wrongly listens is killed and reported rather than
-    // hanging the test — and a chatty one cannot block on a full pipe.
+    // hanging the test, and a chatty one cannot block on a full pipe.
     let stdout = drain(child.stdout.take().expect("stdout is piped"));
     let stderr = drain(child.stderr.take().expect("stderr is piped"));
     let deadline = Instant::now() + TIMEOUT;

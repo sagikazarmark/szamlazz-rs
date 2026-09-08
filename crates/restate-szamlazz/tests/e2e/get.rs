@@ -1,6 +1,6 @@
 //! `Szamlazz.Order.get`: the status shape, its reads retried under the read
-//! policy — run retries spending no invocation attempts (ADR 0004, #87) —
-//! and a purged invocation querying szamlazz.hu again.
+//! policy (run retries spending no invocation attempts; #87), and a purged
+//! invocation querying szamlazz.hu again.
 
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ use crate::harness::Harness;
 use crate::harness::szamlazz::{Doc, external_id_query, not_found};
 
 /// The `max_attempts` of `handler`'s invocation retry policy as the service
-/// discovers it — what the deployment registered with the server, read from
+/// discovers it: what the deployment registered with the server, read from
 /// the same source rather than copied.
 fn discovered_max_attempts<S: Discoverable>(handler: &str) -> u64 {
     S::discover()
@@ -104,22 +104,21 @@ pub(crate) async fn flaky_get_read_is_retried_by_the_read_policy(h: &Harness) {
     eprintln!("(xi-d) flaky get read → retried by the read policy, status complete: pass");
 }
 
-/// (xi-e) **run retries do not spend invocation attempts** — the fact every
-/// retry budget of the worker rests on (ADR 0004, #87): a re-execution the
-/// SDK asks for with a delay (`next_retry_delay`, a run retry policy) is
-/// re-dispatched by the server without advancing the handler's
-/// `invocation_retry_policy` iterator, whose attempts are spent only on
-/// worker-side failures. Proved on `get`: all four of its reads lose their
-/// reply once, so the read policy re-executes the invocation four times —
-/// more re-executions than the handler's `max_attempts` (read from discovery)
-/// would allow if they counted — and the status still completes with what
-/// szamlazz.hu holds, instead of the invocation being killed.
-/// `sys_invocation.retry_count` is the invoker's count of starts
-/// (`start_count`; verified against 1.7.8), so it is seen past the handler's
-/// `max_attempts` while the invocation is in flight.
+/// (xi-e) **run retries do not spend invocation attempts**, the fact every
+/// retry budget of the worker rests on (#87): a re-execution the SDK asks for
+/// with a delay (`next_retry_delay`, a run retry policy) is re-dispatched by
+/// the server without advancing the handler's `invocation_retry_policy`
+/// iterator, whose attempts are spent only on worker-side failures. Proved on
+/// `get`: all four of its reads lose their reply once, so the read policy
+/// re-executes the invocation four times, more re-executions than the
+/// handler's `max_attempts` (read from discovery) would allow if they counted,
+/// and the status still completes with what szamlazz.hu holds, instead of the
+/// invocation being killed. `sys_invocation.retry_count` is the invoker's
+/// count of starts (`start_count`; verified against 1.7.8), so it is seen past
+/// the handler's `max_attempts` while the invocation is in flight.
 pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
     h.reset().await;
-    // Each of the four reads loses its reply once — mounted before the steady
+    // Each of the four reads loses its reply once: mounted before the steady
     // answers, which take over from the second query on.
     for kind in ["proforma", "invoice", "prepayment", "final"] {
         h.loses_reply_once(&format!("acct:E2E-30:{kind}")).await;
@@ -157,7 +156,7 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
 
     // Four re-executions on top of the first start: the count is seen past
     // the handler's budget (each re-execution is visible for the 1 s back-off
-    // before it), and the invocation completes rather than being killed —
+    // before it), and the invocation completes rather than being killed;
     // run retries spent none of its attempts.
     assert!(
         retries.max_retry_count > get_max_attempts,

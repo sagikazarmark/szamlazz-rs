@@ -1,7 +1,7 @@
-//! Wiremock tests of the `gateway` module: the lookup and create steps
-//! (design §5 steps 3–4), storno validation (§6), deletion, credit entries,
-//! credential rejections and failed exchanges — `Unanswered` on the reads,
-//! `Unconfirmed` on the writes — against synthetic szamlazz.hu responses.
+//! Wiremock tests of the `gateway` module: the lookup and create steps,
+//! storno validation, deletion, credit entries, credential rejections and
+//! failed exchanges (`Unanswered` on the reads, `Unconfirmed` on the writes)
+//! against synthetic szamlazz.hu responses.
 
 use jiff::civil::{Date, date};
 use restate_szamlazz::account::{Account, Endpoint};
@@ -23,7 +23,7 @@ use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
 /// The `szallito/id` the rendered documents carry: wire realism; the gateway
-/// holds no account pin (ADR 0006, account-pin amendment).
+/// holds no account pin.
 const SUPPLIER: u64 = 972_720;
 
 /// The szamlazz.hu codes that mean "the agent credentials are wrong": 3
@@ -69,7 +69,7 @@ fn document() -> DocumentInput {
 }
 
 /// The `telj` every document of these tests carries unless a test says
-/// otherwise: the fulfillment date a storno of it must repeat (ADR 0007).
+/// otherwise: the fulfillment date a storno of it must repeat.
 const ORIGINAL_TELJ: Date = date(2026, 7, 15);
 
 /// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: what every
@@ -86,13 +86,13 @@ struct Doc<'a> {
     reversed: bool,
     referenced_proforma: Option<&'a str>,
     referenced_invoice: Option<&'a str>,
-    /// `teszt`; `None` renders no element — szamlazz.hu breaking its schema.
+    /// `teszt`; `None` renders no element: szamlazz.hu breaking its schema.
     test: Option<bool>,
     supplier_id: u64,
     payments: &'a [&'a str],
-    /// `telj`; `None` renders no element — szamlazz.hu breaking its schema.
+    /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.
     fulfillment_date: Option<Date>,
-    /// `eszamla`; `None` follows `tipus` — `0` on a proforma, `2` (an
+    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
     /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
     /// invoice and `3` for one created with `eszamla=true` (P73).
     eszamla: Option<i32>,
@@ -382,7 +382,7 @@ impl Harness {
             .await
     }
 
-    /// The create step for a document of `ORD-1` carrying `refs` — what the
+    /// The create step for a document of `ORD-1` carrying `refs`: what the
     /// handler's steps 1–2 resolved.
     async fn create_with_refs(
         &self,
@@ -493,11 +493,11 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
     }
 }
 
-/// No account pin (ADR 0006, account-pin amendment): a document of this
-/// order and kind under our id is ours whatever its `teszt` and `szallito/id`
-/// say — or whether `teszt` says anything (absent is `None` since #70) — live,
-/// and it settles the lookup without the hint. Both are parsed (the journaled
-/// document is whole), neither is compared with anything.
+/// No account pin: a document of this order and kind under our id is ours
+/// whatever its `teszt` and `szallito/id` say (or whether `teszt` says
+/// anything; absent is `None` since #70), live, and it settles the lookup
+/// without the hint. Both are parsed (the journaled document is whole),
+/// neither is compared with anything.
 #[tokio::test]
 async fn lookup_holds_no_account_pin() {
     for (label, doc) in [
@@ -616,8 +616,8 @@ async fn lookup_of_our_reversed_document_has_no_storno_number_when_the_hint_is_n
 async fn lookup_reports_a_live_invoice_under_the_order_that_is_not_ours_as_foreign() {
     // Plain foreign; a conversion of our proforma not reachable under our id
     // (not issued by this service, so nothing is adopted); and a foreign
-    // document beside our own reversed one, where no create — reissue or
-    // not — may proceed.
+    // document beside our own reversed one, where no create (reissue or
+    // not) may proceed.
     let plain = (not_found(), Doc::new("SZ-77", "SZ"), "SZ-77");
     let conversion = (
         not_found(),
@@ -744,7 +744,7 @@ async fn lookup_without_an_answer_is_unanswered_not_data() {
 #[tokio::test]
 async fn lookup_answered_with_another_code_is_data() {
     // Another szamlazz.hu code on the external-id query is an answer the
-    // handler cannot conclude from — data, not a retryable failure. On the
+    // handler cannot conclude from: data, not a retryable failure. On the
     // hint it says nothing about foreign documents and the lookup continues.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
@@ -925,7 +925,7 @@ async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_noth
     // The step, driven twice: the first execution's reply is lost (500), its
     // immediate re-query still sees nothing, so it is unconfirmed; the second
     // execution's leading query finds the document that landed and sends no
-    // create — also when the lookup step had seen a reversed document
+    // create, also when the lookup step had seen a reversed document
     // (`reissue: true`) that this live one is not.
     for (label, reversed) in [("plain", None), ("reissue", Some("SZ-0"))] {
         let h = Harness::start().await;
@@ -985,9 +985,9 @@ async fn create_never_sends_past_a_reversal_the_lookup_did_not_see() {
     // The hole this closes: the lookup saw nothing (or X reversed), an
     // earlier execution's send landed with a lost reply, and the document
     // was reversed in the UI before this execution. The leading query finds
-    // a reversed document that is not the lookup's — the step settles as
+    // a reversed document that is not the lookup's: the step settles as
     // `Reversed` and sends nothing; a new document needs an explicit
-    // `reissue` (ADR 0003).
+    // `reissue`.
     for (label, reversed) in [
         ("lookup saw nothing", None),
         ("reissue past X", Some("SZ-0")),
@@ -1042,7 +1042,7 @@ async fn create_never_sends_when_the_lookups_reversed_document_is_reported_live(
 async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_settled() {
     // The send lands, its reply is lost, and the document is reversed before
     // the immediate re-query sees it. The re-query settles the step as
-    // `Reversed` — not `Unconfirmed`, which would re-execute the step into a
+    // `Reversed`, not `Unconfirmed`, which would re-execute the step into a
     // second send.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
@@ -1120,7 +1120,7 @@ async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
 }
 
 /// An *answer* to the leading query that is neither 7 nor a credential code
-/// — another API code, or `szlahu_down` — is settled data, as the lookup
+/// (another API code, or `szlahu_down`) is settled data, as the lookup
 /// step answers the same code: nothing was sent, so nothing is unconfirmed,
 /// and the issue policy (sized for the post-send window) is not spent on a
 /// read. The create mock sees zero requests (#63).
@@ -1241,7 +1241,7 @@ async fn create_with_an_open_outcome_re_queries_once_and_is_unconfirmed_when_not
     }
 }
 
-/// What the run journals as its last failure — `Unconfirmed`'s display — names
+/// What the run journals as its last failure (`Unconfirmed`'s display) names
 /// the cause it stands for: `szlahu_down` after a send is unavailability, not
 /// an "open code", and an open answer without a code is szamlazz.hu's success
 /// without a document number, never `szlahu_down` (#63).
@@ -1271,8 +1271,8 @@ fn unconfirmed_displays_name_their_cause() {
 }
 
 /// A post-send re-query that fails itself never hides how the send ended
-/// (#63): the step is unconfirmed with both causes named — the send's
-/// open code and the re-query's failure — whether the re-query lost its
+/// (#63): the step is unconfirmed with both causes named (the send's
+/// open code and the re-query's failure) whether the re-query lost its
 /// reply, was answered with another code, or met `szlahu_down`. The storno
 /// step composes the same way.
 #[tokio::test]
@@ -1322,7 +1322,7 @@ async fn a_failed_post_send_re_query_names_both_the_send_and_its_own_failure() {
     }
 
     // A lost reply on the send, then a lost reply on the re-query: the
-    // display says both — not just the query's.
+    // display says both, not just the query's.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
         .respond_with(not_found())
@@ -1407,7 +1407,7 @@ async fn create_with_an_open_outcome_is_found_when_the_re_query_sees_the_documen
 async fn create_answered_with_a_code_the_crate_does_not_know_is_an_open_outcome() {
     // A code the agent crate does not know may be a refusal or a new "issued,
     // but…" code like 55 and 56: the create and the storno step treat it as
-    // open — re-query once, then `Unconfirmed::Open` when nothing landed —
+    // open (re-query once, then `Unconfirmed::Open` when nothing landed)
     // rather than claim `rejected`, which would assert that no document exists.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
@@ -1589,7 +1589,7 @@ async fn duplicate_order_number_has_no_existing_number_when_another_kind_is_newe
 #[tokio::test]
 async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_a_number() {
     // szamlazz.hu refused the order number, yet knows nothing under it: a
-    // contradiction, but still a refusal — settled on the first occurrence
+    // contradiction, but still a refusal, settled on the first occurrence
     // (the harness's create mock expects exactly one send), without a number
     // to name.
     let h = duplicate_harness(not_found()).await;
@@ -1611,8 +1611,8 @@ async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_
 
 /// The 71/152 re-query is what settles whether the duplicate is ours; when it
 /// fails itself the step is unconfirmed naming both the refusal and the
-/// re-query's failure (#63), and the order-number query — which names, but
-/// cannot settle — is not taken.
+/// re-query's failure (#63), and the order-number query (which names, but
+/// cannot settle) is not taken.
 #[tokio::test]
 async fn duplicate_order_number_whose_re_query_fails_is_unconfirmed_naming_both() {
     let h = duplicate_harness(ResponseTemplate::new(500)).await;
@@ -1847,7 +1847,7 @@ async fn verify_query_and_hint() {
         Ok(QueryOutcome::Found(found)) => {
             assert_eq!(found.number(), "SZ-1");
             assert_eq!(found.payment_amounts(), vec![dec!(500), dec!(770)]);
-            // The `telj` the storno handlers repeat (ADR 0007).
+            // The `telj` the storno handlers repeat.
             assert_eq!(found.info.fulfillment_date, Some(ORIGINAL_TELJ));
         }
         other => panic!("expected Found, got {other:?}"),
@@ -1918,8 +1918,8 @@ async fn verify_query_and_hint() {
 #[tokio::test]
 async fn verify_of_a_document_without_telj_has_no_fulfillment_date() {
     // szamlazz.hu's schema has `telj` mandatory; a document without the
-    // element still parses — the gateway reports the fact, and the storno
-    // handlers refuse to send on it (ADR 0007).
+    // element still parses: the gateway reports the fact, and the storno
+    // handlers refuse to send on it.
     let h = Harness::start().await;
     number_query("SZ-1")
         .respond_with(
@@ -2022,7 +2022,7 @@ async fn probe_accepts_a_document_under_the_sentinel_id() {
     assert_eq!(h.bodies().await.len(), 1);
 }
 
-/// A wrong key is data — `CredentialsRejected` with szamlazz.hu's code — not
+/// A wrong key is data (`CredentialsRejected` with szamlazz.hu's code), not
 /// an error, for every credential code; still exactly one request.
 #[tokio::test]
 async fn probe_reports_a_wrong_key_as_credentials_rejected() {
@@ -2062,7 +2062,7 @@ async fn probe_accepts_any_other_szamlazz_code() {
     assert_eq!(h.bodies().await.len(), 1);
 }
 
-/// A failed exchange — a transport failure, `szlahu_down` — settles nothing
+/// A failed exchange (a transport failure, `szlahu_down`) settles nothing
 /// about the credentials: it is the read's retryable error, not an outcome.
 #[tokio::test]
 async fn probe_without_an_answer_is_unanswered() {
@@ -2090,7 +2090,7 @@ async fn probe_without_an_answer_is_unanswered() {
 // ----- storno ----------------------------------------------------------------
 
 /// The storno step request of `SZ-1`, repeating the original's `telj`
-/// ([`ORIGINAL_TELJ`]) as its `fulfillment_date` (ADR 0007).
+/// ([`ORIGINAL_TELJ`]) as its `fulfillment_date`.
 fn storno_request(external_id: &ExternalId) -> StornoStepRequest<'_> {
     StornoStepRequest {
         invoice_number: "SZ-1",
@@ -2234,13 +2234,13 @@ async fn storno_reversed_is_validated() {
     assert!(body.contains("<eszamla>true</eszamla>"));
     assert!(
         body.contains(&original_telj_tag()),
-        "the storno repeats the original's fulfillment date (ADR 0007): {body}"
+        "the storno repeats the original's fulfillment date: {body}"
     );
     assert!(!body.contains("<keltDatum>"), "352 otherwise");
 }
 
-/// A storno of an e-invoice — `<eszamla>2</eszamla>` or `3` in the verified
-/// original — goes out with `<eszamla>true</eszamla>`, one of a paper invoice
+/// A storno of an e-invoice (`<eszamla>2</eszamla>` or `3` in the verified
+/// original) goes out with `<eszamla>true</eszamla>`, one of a paper invoice
 /// (`1`) with `false`: `Gateway::verify` reads the code, `e_invoice()` turns
 /// it into the flag and `Gateway::storno` puts it on the wire unchanged. The
 /// gateway's half of the derivation; `StornoIntent::from_verified` (the
@@ -2402,8 +2402,8 @@ async fn storno_leading_query_hit_is_already_reversed() {
 }
 
 /// The storno step's twin of the create step's rule (#63): an *answer* to
-/// the leading query that is neither 7 nor a credential code — another API
-/// code, or `szlahu_down` — is settled data, nothing is sent and nothing is
+/// the leading query that is neither 7 nor a credential code (another API
+/// code, or `szlahu_down`) is settled data, nothing is sent and nothing is
 /// unconfirmed.
 #[tokio::test]
 async fn storno_leading_query_answered_with_another_code_or_szlahu_down_is_settled_without_a_send()
@@ -2531,7 +2531,7 @@ async fn storno_with_a_lost_reply_re_queries_once_and_is_unconfirmed_when_nothin
     ));
 
     // Both executions built the storno from the same step request, so the
-    // two sends are byte-identical — the date included (ADR 0007).
+    // two sends are byte-identical, the date included.
     let bodies = h.bodies().await;
     assert_eq!(bodies.len(), 6, "query, storno, re-query; twice");
     assert_eq!(
@@ -2848,7 +2848,7 @@ async fn a_gateway_opened_from_an_account_sends_that_accounts_key() {
 
 /// Two accounts on one szamlazz.hu: each gateway's requests carry its own
 /// key, and a session cookie szamlazz.hu sets for the first never travels
-/// with the second — a fresh client per gateway. The first gateway's second
+/// with the second: a fresh client per gateway. The first gateway's second
 /// request *does* carry the cookie, proving the cookie store is live and the
 /// test would catch a shared client.
 #[tokio::test]
@@ -2952,8 +2952,8 @@ async fn taxpayer_query_of_a_known_prefix_is_found_with_the_registered_data() {
     );
 }
 
-/// A well-formed prefix NAV knows no taxpayer under is a normal answer —
-/// `Found` with `valid: false` and nothing else — not a fault: the caller
+/// A well-formed prefix NAV knows no taxpayer under is a normal answer,
+/// `Found` with `valid: false` and nothing else, not a fault: the caller
 /// asked whether the number is valid, and the answer is no.
 #[tokio::test]
 async fn taxpayer_query_of_an_unknown_prefix_is_found_invalid_as_data() {
@@ -2980,7 +2980,7 @@ async fn taxpayer_query_of_an_unknown_prefix_is_found_invalid_as_data() {
     assert_eq!(h.bodies().await.len(), 1);
 }
 
-/// A wrong key is data — `CredentialsRejected` with szamlazz.hu's code — for
+/// A wrong key is data (`CredentialsRejected` with szamlazz.hu's code) for
 /// every credential code; exactly one request, nothing retried.
 #[tokio::test]
 async fn taxpayer_query_reports_a_wrong_key_as_credentials_rejected() {
@@ -3003,9 +3003,9 @@ async fn taxpayer_query_reports_a_wrong_key_as_credentials_rejected() {
     }
 }
 
-/// Any other `funcCode ≠ OK` is szamlazz.hu's *answer* — NAV's relayed
-/// `errorCode` in the body, or a szamlazz.hu code of its own in the headers
-/// — and is `Api` data, never `Unanswered`: an answer is not retried.
+/// Any other `funcCode ≠ OK` is szamlazz.hu's *answer* (NAV's relayed
+/// `errorCode` in the body, or a szamlazz.hu code of its own in the headers),
+/// and is `Api` data, never `Unanswered`: an answer is not retried.
 #[tokio::test]
 async fn taxpayer_query_answered_with_another_code_is_api_data() {
     let h = Harness::start().await;
@@ -3038,8 +3038,8 @@ async fn taxpayer_query_answered_with_another_code_is_api_data() {
     );
 }
 
-/// A failed exchange — a transport failure, an unparseable body,
-/// `szlahu_down` — settles nothing: it is the read's retryable `Unanswered`,
+/// A failed exchange (a transport failure, an unparseable body,
+/// `szlahu_down`) settles nothing: it is the read's retryable `Unanswered`,
 /// not an outcome.
 #[tokio::test]
 async fn taxpayer_query_without_an_answer_is_unanswered() {

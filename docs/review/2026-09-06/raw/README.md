@@ -1,4 +1,4 @@
-# Raw reviewer reports — read the judges' verdicts first
+# Raw reviewer reports, read the judges' verdicts first
 
 These are the eight domain reports as the reviewers wrote them, **before** verification.
 The judges in [`../judges/`](../judges/) re-read the cited code for every critical, high
