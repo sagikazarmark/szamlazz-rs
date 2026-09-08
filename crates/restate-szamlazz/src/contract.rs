@@ -180,6 +180,91 @@ impl fmt::Display for TerminalCode {
     }
 }
 
+/// The body of a fault: what a `TerminalError` either service raises carries,
+/// as the caller receives it inside Restate's ingress envelope.
+///
+/// `code` is always a [`TerminalCode`] token (a szamlazz.hu code never
+/// travels in it); `szamlazz_code` is the szamlazz.hu code when szamlazz.hu's
+/// answer is what the fault is about; `order`, `kind` and `external_id`
+/// identify the document the fault is about when the handler knows one (the
+/// `Szamlazz.Order` handlers' faults; a by-number fault of `Szamlazz.Agent`
+/// carries none). The HTTP status the ingress reports is the code's,
+/// [`TerminalCode::status`].
+///
+/// On the wire the fault is the JSON **string** inside Restate's ingress
+/// envelope: `{"code": <HTTP status>, "message": "<fault JSON>", "source":
+/// "invocation"}` under `x-restate-error-source: invocation` (server 1.7.8;
+/// the SDK carries a terminal error as a code and a message and offers no
+/// other channel), so a caller parses `message` a second time, into this
+/// type. A response type: open (a client tolerates fields added later) and
+/// `#[non_exhaustive]`, built with [`Fault::new`] and the setters; the
+/// optional fields are omitted when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct Fault {
+    /// The fault's code: one of the seven [`TerminalCode`] tokens.
+    pub code: TerminalCode,
+    /// What happened and what the caller does next, in prose.
+    pub message: String,
+    /// The szamlazz.hu code, when szamlazz.hu's answer is what the fault is
+    /// about (`szamlazz_error` always; `credentials_rejected`; `unavailable`
+    /// on an inconclusive code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub szamlazz_code: Option<String>,
+    /// The order the fault is about (the `Szamlazz.Order` key), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
+    /// The kind of the document the fault is about, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<IssuedKind>,
+    /// The external id of the document the fault is about, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+impl Fault {
+    /// A fault of `code` with `message` and nothing else.
+    pub fn new(code: TerminalCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            szamlazz_code: None,
+            order: None,
+            kind: None,
+            external_id: None,
+        }
+    }
+
+    /// The same fault carrying the szamlazz.hu code its answer had.
+    #[must_use]
+    pub fn with_szamlazz_code(mut self, szamlazz_code: impl Into<String>) -> Self {
+        self.szamlazz_code = Some(szamlazz_code.into());
+        self
+    }
+
+    /// The same fault about the document identified by `order` (the
+    /// `Szamlazz.Order` key), `kind` and `external_id`.
+    #[must_use]
+    pub fn about(
+        mut self,
+        order: impl AsRef<str>,
+        kind: Option<IssuedKind>,
+        external_id: impl AsRef<str>,
+    ) -> Self {
+        self.order = Some(order.as_ref().to_owned());
+        self.kind = kind;
+        self.external_id = Some(external_id.as_ref().to_owned());
+        self
+    }
+
+    /// The HTTP status the ingress reports for the fault: its code's.
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        self.code.status()
+    }
+}
+
 /// `gross − Σ payments`, when the gross total is known and the arithmetic
 /// fits a decimal. The one definition of the outstanding amount both
 /// `create_*` and `query` report. Checked: the amounts are szamlazz.hu's, but
@@ -271,6 +356,47 @@ mod tests {
             "SZ-1",
             "serialises as the plain string"
         );
+    }
+
+    /// The fault body is the public contract: it round-trips through JSON
+    /// with the optional fields omitted when absent, its status is its
+    /// code's, and a fault written by the services reads back as this type
+    /// (what the e2e harness and the endpoint README's examples decode).
+    #[test]
+    fn fault_round_trips_and_omits_absent_fields() {
+        let bare = Fault::new(TerminalCode::InvalidInput, "malformed request body");
+        let json = serde_json::to_value(&bare).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({"code": "invalid_input", "message": "malformed request body"})
+        );
+        assert_eq!(bare.status(), 400);
+        assert_eq!(serde_json::from_value::<Fault>(json).expect("back"), bare);
+
+        let about = Fault::new(TerminalCode::NotFound, "invoice SZ-9 is not known (code 7)")
+            .with_szamlazz_code("7")
+            .about("ORD-1", Some(IssuedKind::Invoice), "acct:ORD-1:invoice");
+        let json = serde_json::to_value(&about).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "code": "not_found",
+                "message": "invoice SZ-9 is not known (code 7)",
+                "szamlazz_code": "7",
+                "order": "ORD-1",
+                "kind": "invoice",
+                "external_id": "acct:ORD-1:invoice",
+            })
+        );
+        assert_eq!(about.status(), 404);
+        assert_eq!(serde_json::from_value::<Fault>(json).expect("back"), about);
+
+        // Open: a field added later does not fail an older reader.
+        let newer: Fault = serde_json::from_value(serde_json::json!({
+            "code": "unavailable", "message": "m", "hint": "later"
+        }))
+        .expect("tolerates unknown fields");
+        assert_eq!(newer.code, TerminalCode::Unavailable);
     }
 
     /// Every fault either service raises is one of these seven codes, each

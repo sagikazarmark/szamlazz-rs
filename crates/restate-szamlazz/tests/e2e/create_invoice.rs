@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::introspection::run_result;
 use crate::harness::szamlazz::{
@@ -766,7 +768,7 @@ pub(crate) async fn the_invoices_proforma_link_is_settled_before_any_send(h: &Ha
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert!(
         fault.message.contains("SZ-42 is not a proforma (tipus SZ)"),
         "names the number and its tipus: {fault:?}"

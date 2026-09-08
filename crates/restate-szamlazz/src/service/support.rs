@@ -6,7 +6,6 @@
 use std::ops::ControlFlow;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
-use serde::Serialize;
 use szamlazz_agent::Date;
 
 use crate::account::Account;
@@ -14,8 +13,7 @@ use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
     FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
 };
-use crate::identity::Namespace;
-use crate::identity::{ExternalId, OrderKey};
+use crate::identity::{ExternalId, Namespace, OrderKey};
 
 pub(super) use self::journaled::Journaled;
 #[cfg(test)]
@@ -103,52 +101,14 @@ mod journaled {
     );
 }
 
-/// A fault raised as a `TerminalError`: never a domain outcome.
-///
-/// Serialised as the error message so that the ingress body carries the
-/// [`TerminalCode`] token, the szamlazz.hu code when szamlazz.hu's answer is
-/// what the fault is about, and the identity of the document it is about.
-/// `code` is always a `TerminalCode` token; a szamlazz.hu code never travels
-/// in it.
-///
-/// What the caller receives is Restate's ingress envelope with this JSON as
-/// the **string** in its `message`: `{"code": <HTTP status>, "message":
-/// "<fault JSON>", "source": "invocation"}` (server 1.7.8), under
-/// `x-restate-error-source: invocation`. The SDK offers no other channel for
-/// a structured terminal error, so the envelope is documented in the endpoint
-/// README (*Faults*) and asserted by the e2e harness (`Reply::fault`).
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct Fault {
-    code: TerminalCode,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    szamlazz_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    order: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<IssuedKind>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    external_id: Option<String>,
-}
+pub(super) use crate::contract::Fault;
 
+/// The service-side constructors of the contract's [`Fault`], one per way the
+/// handlers fail: each names its [`TerminalCode`] and writes the message the
+/// caller reads. The wire shape is the contract's; the conversion to the
+/// SDK's `TerminalError` hands it the code's status and the fault JSON as
+/// the message, which the ingress wraps in its envelope.
 impl Fault {
-    pub(super) fn new(code: TerminalCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            szamlazz_code: None,
-            order: None,
-            kind: None,
-            external_id: None,
-        }
-    }
-
-    /// The same fault carrying the szamlazz.hu code its answer had.
-    fn answered_with(mut self, szamlazz_code: impl Into<String>) -> Self {
-        self.szamlazz_code = Some(szamlazz_code.into());
-        self
-    }
-
     pub(super) fn invalid_input(message: impl Into<String>) -> Self {
         Self::new(TerminalCode::InvalidInput, message)
     }
@@ -168,7 +128,7 @@ impl Fault {
             TerminalCode::SzamlazzError,
             format!("szamlazz.hu error {code}: {}", message.into()),
         )
-        .answered_with(code)
+        .with_szamlazz_code(code)
     }
 
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
@@ -185,7 +145,7 @@ impl Fault {
             "szamlazz.hu answered the query with code {code}: {}; nothing may be concluded; retry with a new Idempotency-Key or read get",
             message.into()
         ))
-        .answered_with(code)
+        .with_szamlazz_code(code)
     }
 
     /// szamlazz.hu reported unavailability (`szlahu_down`) to a write step's
@@ -247,33 +207,22 @@ impl Fault {
                 "szamlazz.hu rejected the agent credentials (code {code}: {message}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
             ),
         )
-        .answered_with(code)
+        .with_szamlazz_code(code)
     }
 
-    /// Attaches the identity of the document the fault is about.
-    pub(super) fn about(
-        mut self,
-        order: &OrderKey,
-        kind: Option<IssuedKind>,
-        external_id: impl Into<String>,
-    ) -> Self {
-        self.order = Some(order.as_str().to_owned());
-        self.kind = kind;
-        self.external_id = Some(external_id.into());
-        self
-    }
-
-    /// The HTTP status the ingress reports for the fault: the code's.
-    const fn status(&self) -> u16 {
-        self.code.status()
+    /// The SDK's terminal error carrying this fault: the code's status and
+    /// the fault JSON as the message.
+    fn into_terminal(self) -> TerminalError {
+        let status = self.status();
+        let body = serde_json::to_string(&self)
+            .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", self.code));
+        TerminalError::new_with_code(status, body)
     }
 }
 
 impl From<Fault> for TerminalError {
     fn from(fault: Fault) -> Self {
-        let body = serde_json::to_string(&fault)
-            .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", fault.code));
-        Self::new_with_code(fault.status(), body)
+        fault.into_terminal()
     }
 }
 

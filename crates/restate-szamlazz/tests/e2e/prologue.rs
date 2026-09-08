@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use rust_decimal::dec;
 use serde_json::json;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::introspection::run_result;
 use crate::harness::szamlazz::{
     Doc, api_error, create, created, not_found, number_query, order_query,
@@ -39,7 +41,7 @@ pub(crate) async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("acme-events"), "{fault:?}");
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(
@@ -61,7 +63,12 @@ pub(crate) async fn harness_scoped_call_and_leak_positive_control(h: &Harness) {
         )
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
-    assert_eq!(reply.fault().code, "unknown_account", "{}", reply.body);
+    assert_eq!(
+        reply.fault().code,
+        TerminalCode::UnknownAccount,
+        "{}",
+        reply.body
+    );
     assert_eq!(
         h.runs(reply.invocation_id()).await,
         ["namespace", "account"]
@@ -223,7 +230,7 @@ pub(crate) async fn failing_credential_store_is_a_terminal_unavailable(h: &Harne
     h.script.set_store_down(false);
     assert_eq!(reply.status, 503, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
     assert!(fault.message.contains("credentials"), "{fault:?}");
     assert!(!fault.message.contains("scripted"), "{fault:?}");
     // No response names the account, nor the store's reference (#65).

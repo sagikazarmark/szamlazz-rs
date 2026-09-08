@@ -8,6 +8,8 @@ use rust_decimal::{Decimal, dec};
 use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::szamlazz::{
     Doc, api_error, create, created, credit, not_found, number_query, order_query,
     storno_never_sent, storno_of,
@@ -39,7 +41,7 @@ pub(crate) async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) 
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert!(
         fault.message.contains("unknown field `resissue`"),
         "names the field: {fault:?}"
@@ -73,7 +75,7 @@ pub(crate) async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) 
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert!(fault.message.contains("`tax_numer`"), "{fault:?}");
 
     let reply = h
@@ -85,7 +87,12 @@ pub(crate) async fn a_malformed_body_is_a_structured_invalid_input(h: &Harness) 
         )
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
-    assert_eq!(reply.fault().code, "invalid_input", "{}", reply.body);
+    assert_eq!(
+        reply.fault().code,
+        TerminalCode::InvalidInput,
+        "{}",
+        reply.body
+    );
     assert_eq!(
         h.requests_seen().await,
         before,
@@ -125,7 +132,7 @@ pub(crate) async fn an_untrimmed_order_key_is_refused(h: &Harness) {
             .await;
         assert_eq!(reply.status, 400, "{key}: {}", reply.body);
         let fault = reply.fault();
-        assert_eq!(fault.code, "invalid_input", "{key}: {fault:?}");
+        assert_eq!(fault.code, TerminalCode::InvalidInput, "{key}: {fault:?}");
         assert!(
             fault
                 .message
@@ -196,7 +203,7 @@ pub(crate) async fn bounded_inputs_are_refused_and_disturb_no_other_invocation(h
             .await;
         assert_eq!(reply.status, 400, "{key}: {}", reply.body);
         let fault = reply.fault();
-        assert_eq!(fault.code, "invalid_input", "{key}: {fault:?}");
+        assert_eq!(fault.code, TerminalCode::InvalidInput, "{key}: {fault:?}");
         assert!(
             fault.message.contains(rule),
             "{key}: names the rule: {fault:?}"
@@ -219,7 +226,7 @@ pub(crate) async fn bounded_inputs_are_refused_and_disturb_no_other_invocation(h
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert!(
         fault
             .message
@@ -270,7 +277,7 @@ pub(crate) async fn bounded_inputs_are_refused_and_disturb_no_other_invocation(h
 
     assert_eq!(refused.status, 400, "{}", refused.body);
     let fault = refused.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert!(
         fault.message.contains("items[0]") && fault.message.contains("overflows a decimal"),
         "names the item and the rule: {fault:?}"
@@ -339,7 +346,7 @@ pub(crate) async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_be
         .await;
     assert_eq!(reply.status, 422, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "szamlazz_error", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::SzamlazzError, "{fault:?}");
     assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
     assert!(fault.message.contains("Hibás számlaszám."), "{fault:?}");
     assert_eq!(fault.order, None, "{fault:?}");
@@ -356,7 +363,7 @@ pub(crate) async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_be
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert_eq!(fault.szamlazz_code, None, "{fault:?}");
     assert!(fault.message.contains("at most five"), "{fault:?}");
     assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
@@ -377,7 +384,7 @@ pub(crate) async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_be
         .await;
     assert_eq!(reply.status, 422, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "szamlazz_error", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::SzamlazzError, "{fault:?}");
     assert_eq!(fault.szamlazz_code.as_deref(), Some("463"), "{fault:?}");
     assert!(fault.message.contains("SZ-30"), "{fault:?}");
     assert!(fault.message.contains("Sztornózó"), "{fault:?}");
@@ -401,7 +408,7 @@ pub(crate) async fn every_fault_carries_a_terminal_code_and_the_szamlazz_code_be
         .await;
     assert_eq!(reply.status, 404, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "not_found", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::NotFound, "{fault:?}");
     assert_eq!(fault.szamlazz_code, None, "{fault:?}");
     assert!(fault.message.contains("SZ-34"), "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-34"), "{fault:?}");

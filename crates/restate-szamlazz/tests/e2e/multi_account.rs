@@ -6,6 +6,8 @@
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::accounts::{AGENT_KEY, BANK_ACCOUNT, BANK_ACCOUNT_CHANGED, KEY_B, KEY_B_V2};
 use crate::harness::introspection::run_result;
 use crate::harness::szamlazz::{
@@ -92,7 +94,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("unscoped"), "{fault:?}");
     assert!(
         fault.message.contains("/restate/scope/"),
@@ -118,7 +120,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("gamma"), "{fault:?}");
     assert_eq!(h.requests_seen().await, 0);
     eprintln!(

@@ -551,21 +551,26 @@ StornoResponse { outcome ∈ reversed | rejected | conflict | managed_by_order, 
                  invoice_number, storno_number?, order_key?, code?, message? }
 DeleteProformaResponse { deleted, reason? }
 OrderStatus, see §6
-TerminalError { code, message, szamlazz_code?, order?, kind?, external_id? }
+Fault { code, message, szamlazz_code?, order?, kind?, external_id? }   (contract::Fault, the TerminalError body)
 TerminalError codes: invalid_input (400) | unknown_account (400) | not_found (404) | szamlazz_error (422)
                    | outcome_unknown (500) | unavailable (503) | credentials_rejected (503)
 On the wire (Restate 1.7.8 ingress), a TerminalError is the JSON *string* in `message` of Restate's own envelope:
-  { "code": <HTTP status>, "message": "<the TerminalError JSON above>", "source": "invocation" }
+  { "code": <HTTP status>, "message": "<the Fault JSON above>", "source": "invocation" }
   + header x-restate-error-source: invocation
 ```
 
 The envelope is Restate's, not ours: the Rust SDK 0.12 carries a terminal error as `(code, message)` and offers no
 other channel, so the worker serialises the fault into the message and the caller parses `message` a second time
-(`From<Fault> for TerminalError` in `service::support`). A caller reading the envelope's `code` sees the HTTP status,
-never the token. The endpoint README (*Faults*) shows one body per case, a structured fault, a killed invocation
-(the same envelope with the last retryable error's text in `message`), an ingress error (`source: ingress`), held to
-the contract types by the endpoint crate's `tests/readme.rs`; the e2e harness asserts the envelope on every fault it
-receives (`Reply::fault`).
+(`From<Fault> for TerminalError` in `service::support`). The fault body is a public contract type,
+`contract::Fault` (`Serialize + Deserialize`, open like every response type, `#[non_exhaustive]`, built with
+`Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::credentials_rejected`, …, are
+a crate-private inherent impl in `service::support`), so a Rust caller decodes `message` into it rather than
+re-declaring the shape: the e2e harness (`Reply::fault`) and the endpoint crate's `tests/readme.rs` both did until
+#128. A caller reading the envelope's `code` sees the HTTP status, never the token. The endpoint README (*Faults*)
+shows one body per case, a structured fault, a killed invocation (the same envelope with the last retryable error's
+text in `message`), an ingress error (`source: ingress`), held to the contract types by `tests/readme.rs` (a fault
+example must re-serialise from `Fault` to exactly what it shows); the e2e harness asserts the envelope on every fault
+it receives.
 
 `invalid_input`: the caller's request, which the same request never gets past, a 400 and "fix the request". Three
 sources. A **malformed body**: every request type and every object it nests (`CreateRequest`, `CreateOptions`,

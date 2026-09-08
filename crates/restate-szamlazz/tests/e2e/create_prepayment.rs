@@ -6,6 +6,8 @@ use rust_decimal::dec;
 use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::szamlazz::{Doc, create, created, external_id_query, order_query};
 use crate::harness::{Harness, create_body, document};
 
@@ -37,7 +39,12 @@ pub(crate) async fn prepayment_converts_the_proforma_like_the_invoice(h: &Harnes
             .await;
         assert_eq!(reply.status, 400, "{handler}: {}", reply.body);
         let fault = reply.fault();
-        assert_eq!(fault.code, "invalid_input", "{handler}: {}", reply.body);
+        assert_eq!(
+            fault.code,
+            TerminalCode::InvalidInput,
+            "{handler}: {}",
+            reply.body
+        );
         assert!(
             fault.message.contains(&format!("not {handler}")),
             "{handler}: names the handler: {}",

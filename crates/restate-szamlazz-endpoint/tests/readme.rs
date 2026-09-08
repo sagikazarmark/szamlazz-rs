@@ -9,10 +9,11 @@
 //!   re-serializes to exactly the bytes shown (nulls included: the README
 //!   shows what the worker emits, not a trimmed sketch);
 //! - the fault examples are the ingress envelope with the worker's fault
+//!   (the contract's `Fault`, which every field shown must be a field of)
 //!   inside `message`, and the envelope's `code` is the status the fault's
 //!   `TerminalCode` pins (the e2e harness's `Reply::fault` in
-//!   `crates/restate-szamlazz/tests/e2e/harness/ingress.rs` asserts the same shape on a
-//!   live reply);
+//!   `crates/restate-szamlazz/tests/e2e/harness/ingress.rs` decodes the same
+//!   type out of a live reply);
 //! - the `conflict_reason` table has a row per `ConflictReason`, and the
 //!   README shows a `CreateResponse` example per `Outcome` (`issued` in the
 //!   quick start, the rest in the response reference).
@@ -25,9 +26,9 @@ use std::fmt::Debug;
 
 use restate_szamlazz::contract::{
     CheckAccountResponse, ConflictReason, CorrectRequest, CreateRequest, CreateResponse,
-    DeleteProformaRequest, DeleteProformaResponse, IssuedKind, OrderStatus, Outcome, QueryRequest,
+    DeleteProformaRequest, DeleteProformaResponse, Fault, OrderStatus, Outcome, QueryRequest,
     QueryResponse, QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest,
-    SetPaymentsResponse, StornoRequest, StornoResponse, TerminalCode,
+    SetPaymentsResponse, StornoRequest, StornoResponse,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -166,25 +167,6 @@ struct Envelope {
     source: String,
 }
 
-/// The worker's fault, as the e2e harness decodes it from the envelope's
-/// `message` (`tests/e2e/harness/ingress.rs`, `Fault`), re-declared here because the
-/// worker's own `Fault` is `Serialize`-only and private to the service
-/// module: what a caller sees is exactly this.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Fault {
-    code: TerminalCode,
-    message: String,
-    #[serde(default)]
-    szamlazz_code: Option<String>,
-    #[serde(default)]
-    order: Option<String>,
-    #[serde(default)]
-    kind: Option<IssuedKind>,
-    #[serde(default)]
-    external_id: Option<String>,
-}
-
 fn envelope(example: &Example) -> Envelope {
     serde_json::from_value(example.value.clone()).unwrap_or_else(|error| {
         panic!(
@@ -205,6 +187,16 @@ fn fault(example: &Example) -> Fault {
             example.line, envelope.message
         )
     });
+    // `Fault` is a response type and tolerates unknown fields; the README
+    // shows what the worker emits, so the example must re-serialise to
+    // exactly what it shows.
+    let shown: Value = serde_json::from_str(&envelope.message).expect("the message is JSON");
+    assert_eq!(
+        serde_json::to_value(&fault).expect("json"),
+        shown,
+        "README.md:{}: the fault example carries only the fault's fields",
+        example.line
+    );
     assert_eq!(
         envelope.code,
         fault.code.status(),
