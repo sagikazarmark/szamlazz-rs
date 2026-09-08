@@ -619,14 +619,24 @@ reversal without the number after a `warn`, while a cancellation of the invocati
 
 ### Journal compatibility
 
-The same run checks that every type the services journal as a `ctx.run` result is additive-only (the rule is in
-the `gateway` module docs), and `tests/journal/<type>/<variant>.json` pins one fixture per variant. The generator
-fails when the current code writes a different shape; the compatibility test replays every fixture ever committed
-through the current types.
+The same run checks that every type the services journal as a `ctx.run` result is crate-owned and additive-only
+(the rule is in the `gateway` module docs), and `tests/journal/<type>/<variant>.json` pins one fixture per
+variant. The generator fails when the current code writes a different shape; the compatibility test replays every
+fixture ever committed through the current types.
+
+No `szamlazz_agent` response type is journaled: the document outcomes carry the worker's own projections
+(`gateway::document::{FoundDocument, IssuedDocument}`: what the handlers read of a queried document or a create
+reply, never the buyer block, the seller block, the line items or the PDF), so a change to an agent response type is
+a compile error in a `From` impl, not a journal entry the next deployment cannot decode. A guard in the same module
+asserts no variant of any journaled type serialises a `supplier`, `buyer`, `items`, `financial_items`, `labels` or
+`pdf` key.
 
 After an additive change, regenerate with `UPDATE_JOURNAL_FIXTURES=1 cargo test -p restate-szamlazz journal`; it
 writes missing fixtures and archives a differing one beside the new shape. Review the diff as a contract change.
-Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on upgrade.
+Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on upgrade. The
+twelve `<variant>.1.json` archives of the pre-#127 document outcomes are the one deliberate break, of the pre-go-live
+window (ADR 0005, #127 amendment): `DELIBERATE_BREAKS` lists them, and the compatibility test asserts each still
+fails to replay.
 
 The same module's leak guard builds every journaled type around an account whose agent key is a sentinel (the
 `account` entry through the static resolver, the two `Transport` write outcomes through a gateway opened with the

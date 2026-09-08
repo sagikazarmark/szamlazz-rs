@@ -9,17 +9,16 @@ use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
 };
 use restate_szamlazz::gateway::{
-    CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway,
-    InvoiceDocumentExt as _, LookupOutcome, LookupRequest, ProbeOutcome, QueryOutcome,
-    REQUEST_CODE, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest,
-    TaxpayerOutcome, Unanswered, Unconfirmed,
+    CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway, LookupOutcome,
+    LookupRequest, ProbeOutcome, QueryOutcome, REQUEST_CODE, SetPaymentsOutcome,
+    StornoLookupOutcome, StornoOutcome, StornoStepRequest, TaxpayerOutcome, Unanswered,
+    Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
 use szamlazz_agent::client::REQUEST_TIMEOUT;
-use szamlazz_agent::ops::invoice::InvoiceCreationResult;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
-use szamlazz_agent::{Credentials, InvoiceNumber, reqwest};
+use szamlazz_agent::{Credentials, reqwest};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 
@@ -469,14 +468,18 @@ async fn lookup_finds_our_live_document_and_takes_no_hint() {
 
     match h.lookup(&[]).await {
         LookupOutcome::Live(found) => {
-            assert_eq!(found.number(), "SZ-1");
-            assert_eq!(found.info.document_type, "SZ");
+            assert_eq!(found.number, "SZ-1");
+            assert_eq!(found.document_type, "SZ");
             assert!(found.is_live());
-            assert_eq!(found.info.order_number.as_deref(), Some("ORD-1"));
-            assert_eq!(found.totals.total.gross, dec!(1270));
-            assert_eq!(found.totals.total.net, dec!(1000));
-            assert_eq!(found.supplier.id, Some(SUPPLIER));
-            assert_eq!(found.buyer.name, "Buyer", "the journaled document is whole");
+            assert_eq!(found.order_number.as_deref(), Some("ORD-1"));
+            assert_eq!(found.gross_total, dec!(1270));
+            assert_eq!(found.net_total, dec!(1000));
+            assert_eq!(found.test, Some(true));
+            // The journaled document is the worker's projection: the seller
+            // and buyer blocks szamlazz.hu returned with it are not in it.
+            let json = serde_json::to_value(&found).expect("serialises");
+            assert!(json.get("supplier").is_none(), "{json}");
+            assert!(json.get("buyer").is_none(), "{json}");
         }
         other => panic!("expected Live, got {other:?}"),
     }
@@ -502,7 +505,7 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
             .mount(&h.server)
             .await;
         match h.lookup(&[]).await {
-            LookupOutcome::Collision(found) => assert_eq!(found.number(), doc.number, "{label}"),
+            LookupOutcome::Collision(found) => assert_eq!(found.number, doc.number, "{label}"),
             other => panic!("{label}: expected Collision, got {other:?}"),
         }
     }
@@ -511,8 +514,8 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
 /// No account pin: a document of this order and kind under our id is ours
 /// whatever its `teszt` and `szallito/id` say (or whether `teszt` says
 /// anything; absent is `None` since #70), live, and it settles the lookup
-/// without the hint. Both are parsed (the journaled document is whole),
-/// neither is compared with anything.
+/// without the hint. `teszt` is carried by the projection and compared with
+/// nothing; the seller block is not carried at all.
 #[tokio::test]
 async fn lookup_holds_no_account_pin() {
     for (label, doc) in [
@@ -551,9 +554,8 @@ async fn lookup_holds_no_account_pin() {
             .await;
         match h.lookup(&[]).await {
             LookupOutcome::Live(found) => {
-                assert_eq!(found.number(), "SZ-1", "{label}");
-                assert_eq!(found.info.test, doc.test, "{label}: parsed");
-                assert_eq!(found.supplier.id, Some(doc.supplier_id), "{label}: parsed");
+                assert_eq!(found.number, "SZ-1", "{label}");
+                assert_eq!(found.test, doc.test, "{label}: carried");
             }
             other => panic!("{label}: expected Live, got {other:?}"),
         }
@@ -585,7 +587,7 @@ async fn lookup_of_our_reversed_document_names_its_storno_from_the_hint() {
             document,
             storno_number,
         } => {
-            assert_eq!(document.number(), "SZ-1");
+            assert_eq!(document.number, "SZ-1");
             assert!(!document.is_live());
             assert_eq!(storno_number.as_deref(), Some("SS-1"));
         }
@@ -619,7 +621,7 @@ async fn lookup_of_our_reversed_document_has_no_storno_number_when_the_hint_is_n
                 document,
                 storno_number,
             } => {
-                assert_eq!(document.number(), "SZ-1", "{label}");
+                assert_eq!(document.number, "SZ-1", "{label}");
                 assert_eq!(storno_number, None, "{label}");
             }
             other => panic!("{label}: expected Reversed, got {other:?}"),
@@ -664,7 +666,7 @@ async fn lookup_reports_a_live_invoice_under_the_order_that_is_not_ours_as_forei
             .await;
 
         match h.lookup(&["D-1".to_owned()]).await {
-            LookupOutcome::Foreign(found) => assert_eq!(found.number(), expected, "{label}"),
+            LookupOutcome::Foreign(found) => assert_eq!(found.number, expected, "{label}"),
             other => panic!("{label}: expected Foreign, got {other:?}"),
         }
     }
@@ -847,17 +849,12 @@ async fn corrective_with_a_live_base_under_the_order_is_issued() {
         .create_kind(IssuedKind::Corrective, &corrective_id, None)
         .await
     {
-        Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("HS-1")),
+        Ok(CreateOutcome::Issued(issued)) => assert_eq!(issued.number, "HS-1"),
         other => panic!("expected Issued, got {other:?}"),
     }
 }
 
 // ----- create ----------------------------------------------------------------
-
-/// The issued number of a create result.
-fn number_of(issued: &InvoiceCreationResult) -> Option<&str> {
-    issued.invoice_number.as_ref().map(InvoiceNumber::as_str)
-}
 
 #[tokio::test]
 async fn create_with_nothing_under_the_id_sends_the_create_and_is_issued() {
@@ -875,7 +872,7 @@ async fn create_with_nothing_under_the_id_sends_the_create_and_is_issued() {
 
     match h.create(None).await {
         Ok(CreateOutcome::Issued(issued)) => {
-            assert_eq!(number_of(&issued), Some("SZ-2"));
+            assert_eq!(issued.number, "SZ-2");
             assert_eq!(issued.net_total, Some(dec!(1000)));
             assert_eq!(issued.gross_total, Some(dec!(1270)));
             assert_eq!(issued.outstanding, Some(dec!(1270)));
@@ -925,7 +922,7 @@ async fn prepayment_consuming_a_proforma_sends_the_reference() {
         .create_with_refs(IssuedKind::Prepayment, &prepayment_id, None, refs)
         .await
     {
-        Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("ES-1")),
+        Ok(CreateOutcome::Issued(issued)) => assert_eq!(issued.number, "ES-1"),
         other => panic!("expected Issued, got {other:?}"),
     }
     let bodies = h.bodies().await;
@@ -964,7 +961,7 @@ async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_noth
             "{label}: first execution"
         );
         match h.create(reversed).await {
-            Ok(CreateOutcome::Found(found)) => assert_eq!(found.number(), "SZ-1", "{label}"),
+            Ok(CreateOutcome::Found(found)) => assert_eq!(found.number, "SZ-1", "{label}"),
             other => panic!("{label}: expected Found, got {other:?}"),
         }
         assert_eq!(
@@ -990,7 +987,7 @@ async fn create_past_the_reversed_document_the_lookup_saw_sends_the_create() {
         .await;
 
     match h.create(Some("SZ-1")).await {
-        Ok(CreateOutcome::Issued(issued)) => assert_eq!(number_of(&issued), Some("SZ-2")),
+        Ok(CreateOutcome::Issued(issued)) => assert_eq!(issued.number, "SZ-2"),
         other => panic!("expected Issued, got {other:?}"),
     }
 }
@@ -1021,7 +1018,7 @@ async fn create_never_sends_past_a_reversal_the_lookup_did_not_see() {
 
         match h.create(reversed).await {
             Ok(CreateOutcome::Reversed(found)) => {
-                assert_eq!(found.number(), "SZ-1", "{label}");
+                assert_eq!(found.number, "SZ-1", "{label}");
                 assert!(!found.is_live(), "{label}");
             }
             other => panic!("{label}: expected Reversed, got {other:?}"),
@@ -1048,7 +1045,7 @@ async fn create_never_sends_when_the_lookups_reversed_document_is_reported_live(
         .await;
 
     match h.create(Some("SZ-1")).await {
-        Ok(CreateOutcome::LiveAgain(found)) => assert_eq!(found.number(), "SZ-1"),
+        Ok(CreateOutcome::LiveAgain(found)) => assert_eq!(found.number, "SZ-1"),
         other => panic!("expected LiveAgain, got {other:?}"),
     }
 }
@@ -1076,7 +1073,7 @@ async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_
         .await;
 
     match h.create(None).await {
-        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-1"),
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number, "SZ-1"),
         other => panic!("expected Reversed, got {other:?}"),
     }
     assert_eq!(
@@ -1088,7 +1085,7 @@ async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_
     // Re-executed anyway (the run policy re-dispatching a step whose result
     // was not journaled): the leading query settles it again, nothing sent.
     match h.create(None).await {
-        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-1"),
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number, "SZ-1"),
         other => panic!("expected Reversed, got {other:?}"),
     }
 }
@@ -1114,7 +1111,7 @@ async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
         .mount(&h.server)
         .await;
     match h.create(None).await {
-        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number(), "SZ-9"),
+        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number, "SZ-9"),
         other => panic!("expected Collision, got {other:?}"),
     }
 
@@ -1256,7 +1253,7 @@ async fn create_answered_56_with_a_number_is_issued_with_the_notification_flag()
 
     match h.create(None).await {
         Ok(CreateOutcome::Issued(issued)) => {
-            assert_eq!(number_of(&issued), Some("SZ-2"));
+            assert_eq!(issued.number, "SZ-2");
             assert!(issued.notification_delivery_failed);
             assert_eq!(issued.net_total, Some(dec!(1000)));
             assert_eq!(issued.gross_total, Some(dec!(1270)));
@@ -1472,7 +1469,7 @@ async fn create_with_an_open_outcome_is_found_when_the_re_query_sees_the_documen
         .await;
 
     match h.create(None).await {
-        Ok(CreateOutcome::Found(found)) => assert_eq!(found.number(), "SZ-4"),
+        Ok(CreateOutcome::Found(found)) => assert_eq!(found.number, "SZ-4"),
         other => panic!("expected Found, got {other:?}"),
     }
 }
@@ -1560,7 +1557,7 @@ async fn duplicate_order_number_with_our_live_document_under_the_id_is_reconcile
         .await;
 
     match h.create(None).await {
-        Ok(CreateOutcome::Reconciled(found)) => assert_eq!(found.number(), "SZ-3"),
+        Ok(CreateOutcome::Reconciled(found)) => assert_eq!(found.number, "SZ-3"),
         other => panic!("expected Reconciled, got {other:?}"),
     }
 }
@@ -1577,7 +1574,7 @@ async fn duplicate_order_number_with_an_invalid_document_under_the_id_is_a_colli
     .await;
 
     match h.create(None).await {
-        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number(), "SZ-9"),
+        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number, "SZ-9"),
         other => panic!("expected Collision, got {other:?}"),
     }
 }
@@ -1595,7 +1592,7 @@ async fn duplicate_order_number_with_a_reversal_the_lookup_did_not_see_is_revers
         .await;
 
     match h.create(None).await {
-        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number(), "SZ-3"),
+        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number, "SZ-3"),
         other => panic!("expected Reversed, got {other:?}"),
     }
 }
@@ -1758,7 +1755,7 @@ async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_que
         .create_kind(IssuedKind::Corrective, &corrective_id, None)
         .await
     {
-        Ok(CreateOutcome::Reconciled(found)) => assert_eq!(found.number(), "HS-1"),
+        Ok(CreateOutcome::Reconciled(found)) => assert_eq!(found.number, "HS-1"),
         other => panic!("expected Reconciled, got {other:?}"),
     }
 }
@@ -1919,10 +1916,10 @@ async fn verify_query_and_hint() {
 
     match h.gateway.verify("SZ-1").await {
         Ok(QueryOutcome::Found(found)) => {
-            assert_eq!(found.number(), "SZ-1");
+            assert_eq!(found.number, "SZ-1");
             assert_eq!(found.payment_amounts(), vec![dec!(500), dec!(770)]);
             // The `telj` the storno handlers repeat.
-            assert_eq!(found.info.fulfillment_date, Some(ORIGINAL_TELJ));
+            assert_eq!(found.fulfillment_date, Some(ORIGINAL_TELJ));
         }
         other => panic!("expected Found, got {other:?}"),
     }
@@ -1942,7 +1939,7 @@ async fn verify_query_and_hint() {
     );
     match h.gateway.hint(&order()).await {
         Ok(QueryOutcome::Found(found)) => {
-            assert_eq!(found.info.document_type, "SS");
+            assert_eq!(found.document_type, "SS");
             assert!(found.is_storno_of("SZ-1"));
         }
         other => panic!("expected Found, got {other:?}"),
@@ -1955,7 +1952,7 @@ async fn verify_query_and_hint() {
         .await
     {
         Ok(QueryOutcome::Found(found)) => {
-            assert_eq!(found.info.invoice_number.as_str(), "SZ-1");
+            assert_eq!(found.number, "SZ-1");
             assert_eq!(found.payments.len(), 2);
         }
         other => panic!("expected Found, got {other:?}"),
@@ -2007,8 +2004,8 @@ async fn verify_of_a_document_without_telj_has_no_fulfillment_date() {
         .await;
     match h.gateway.verify("SZ-1").await {
         Ok(QueryOutcome::Found(found)) => {
-            assert_eq!(found.number(), "SZ-1");
-            assert_eq!(found.info.fulfillment_date, None);
+            assert_eq!(found.number, "SZ-1");
+            assert_eq!(found.fulfillment_date, None);
         }
         other => panic!("expected Found, got {other:?}"),
     }
@@ -2295,7 +2292,7 @@ async fn storno_reversed_is_validated() {
 
     match h.gateway.storno(storno_request(&storno_id)).await {
         Ok(StornoOutcome::Reversed(storno)) => {
-            assert_eq!(storno.invoice_number.as_str(), "SS-1");
+            assert_eq!(storno.number, "SS-1");
             assert_eq!(storno.gross_total, Some(dec!(-1270)));
             assert_eq!(storno.document_id, Some(924_307_747));
         }
@@ -2398,7 +2395,7 @@ async fn storno_of_a_zero_gross_invoice_is_reversed() {
 
     match h.gateway.storno(storno_request(&storno_id)).await {
         Ok(StornoOutcome::Reversed(storno)) => {
-            assert_eq!(storno.invoice_number.as_str(), "SS-1");
+            assert_eq!(storno.number, "SS-1");
             assert_eq!(storno.gross_total, Some(dec!(0)));
         }
         other => panic!("expected Reversed, got {other:?}"),

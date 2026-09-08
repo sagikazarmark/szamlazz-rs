@@ -1,11 +1,12 @@
 {
   "Reversed": {
-    "number": "SS-1",
+    "invoice_number": "SS-1",
     "document_id": 924307747,
     "net_total": "-10000",
     "gross_total": "-12700",
     "outstanding": "0",
     "customer_account_url": "https://www.szamlazz.hu/szamla/fiok/example",
+    "pdf": "JVBERi0=",
     "notification_delivery_failed": false
   }
 }

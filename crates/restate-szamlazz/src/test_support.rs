@@ -2,13 +2,16 @@
 //! [`LogCapture`], a `tracing` capture, and [`open_gateway`], a gateway over
 //! an HTTP client that loads no root certificates.
 //!
-//! [`Doc`] renders szamlazz.hu's `<szamla>` response XML and parses it into
-//! an [`InvoiceDocument`] the way the gateway parses a query answer. The Számla
-//! Agent crate's response types are `#[non_exhaustive]` on purpose, so a
-//! unit test cannot construct one directly; the XML is the seam, and it is
-//! what szamlazz.hu actually says (tests state the answer szamlazz.hu gives,
-//! not a second model of it). Every unit test that needs a found document
-//! builds it here; the two renderers below are the deliberate exceptions.
+//! [`Doc`] renders szamlazz.hu's `<szamla>` response XML, parses it into the
+//! Számla Agent crate's [`InvoiceDocument`] and projects it onto the worker's
+//! [`FoundDocument`] the way the gateway reads a query answer. The agent's
+//! response types are `#[non_exhaustive]` on purpose, so a unit test cannot
+//! construct one directly, and the projection is constructed through the wire
+//! by convention (ADR 0008; a literal would state a second model of the
+//! document): the XML is the seam, and it is what szamlazz.hu actually says
+//! (tests state the answer szamlazz.hu gives). Every unit test that needs a
+//! found document builds it here; the two renderers below are the deliberate
+//! exceptions.
 //!
 //! The wiremock integration tests (`tests/gateway.rs`, `tests/e2e/`)
 //! carry their own `Doc` and do not share this one: a `#[cfg(test)]` module is
@@ -47,7 +50,7 @@ use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 use szamlazz_agent::{Credentials, InvoiceNumber, reqwest};
 
 use crate::account::Account;
-use crate::gateway::Gateway;
+use crate::gateway::{FoundDocument, Gateway};
 
 /// The HTTP client [`open_gateway`] opens a gateway over: the default client
 /// (see `szamlazz_agent::client`) minus the root certificates (see the module
@@ -241,8 +244,13 @@ impl<'a> Doc<'a> {
         )
     }
 
-    /// The document parsed as the gateway parses a query answer.
-    pub(crate) fn parse(&self) -> InvoiceDocument {
+    /// The document as the Számla Agent crate parses a query answer, before
+    /// the worker's projection: what the builder's own tests read (each field
+    /// as the parser sees it), and the seam for a test that needs a value the
+    /// renderer cannot put on the wire (a `rendelesszam` the parser would
+    /// have trimmed; [`Doc::assigned_order`]) to read what
+    /// [`FoundDocument::from`] makes of it.
+    pub(crate) fn wire(&self) -> InvoiceDocument {
         QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(
             self.number,
         )))
@@ -250,8 +258,26 @@ impl<'a> Doc<'a> {
         .expect("the rendered szamla XML parses")
     }
 
+    /// The document as the gateway reads a query answer: parsed by the
+    /// Számla Agent crate ([`Doc::wire`]) and projected onto the worker's
+    /// [`FoundDocument`].
+    pub(crate) fn parse(&self) -> FoundDocument {
+        FoundDocument::from(self.wire())
+    }
+
+    /// [`Doc::parse`] with `order` assigned to the parsed `rendelesszam`
+    /// **after** the agent crate's parser, so the projection's own reading of
+    /// the element (trim, empty as none) is exercised with the parser's
+    /// normalisation out of the way: the renderer cannot put an untrimmed or
+    /// empty element on the wire and have it arrive as such.
+    pub(crate) fn assigned_order(&self, order: Option<&str>) -> FoundDocument {
+        let mut wire = self.wire();
+        wire.info.order_number = order.map(str::to_owned);
+        FoundDocument::from(wire)
+    }
+
     /// [`Doc::parse`] boxed, as the gateway outcomes carry a found document.
-    pub(crate) fn boxed(&self) -> Box<InvoiceDocument> {
+    pub(crate) fn boxed(&self) -> Box<FoundDocument> {
         Box::new(self.parse())
     }
 }
@@ -316,8 +342,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
     }
 }
 
-/// The builder's own tests, at the [`Doc::parse`] seam: what each field
-/// renders as, read back through the Számla Agent parser.
+/// The builder's own tests, at the [`Doc::wire`] seam: what each field
+/// renders as, read back through the Számla Agent parser (the projection's
+/// reading of it is `gateway::document`'s own test).
 mod tests {
     use rust_decimal::dec;
 
@@ -329,7 +356,7 @@ mod tests {
     /// referencing nothing, with no credit entries.
     #[test]
     fn the_default_document_is_a_live_test_invoice_of_ord_1() {
-        let document = Doc::default().parse();
+        let document = Doc::default().wire();
         assert_eq!(document.info.invoice_number.as_str(), "SZ-1");
         assert_eq!(document.info.document_type, "SZ");
         assert_eq!(document.info.order_number.as_deref(), Some("ORD-1"));
@@ -356,7 +383,7 @@ mod tests {
             reversed: true,
             ..Doc::new("SZ-9", "SZ")
         }
-        .parse();
+        .wire();
         assert_eq!(other.info.invoice_number.as_str(), "SZ-9");
         assert_eq!(other.info.order_number.as_deref(), Some("ORD-2"));
         assert_eq!(other.info.test, Some(false));
@@ -367,7 +394,7 @@ mod tests {
             order: None,
             ..Doc::default()
         }
-        .parse();
+        .wire();
         assert_eq!(unmanaged.info.order_number, None);
 
         let unknown_mode = Doc {
@@ -378,13 +405,13 @@ mod tests {
             !unknown_mode.xml().contains("<teszt>"),
             "renders no element"
         );
-        assert_eq!(unknown_mode.parse().info.test, None);
+        assert_eq!(unknown_mode.wire().info.test, None);
 
         let storno = Doc {
             referenced_invoice: Some("SZ-1"),
             ..Doc::new("SS-1", "SS")
         }
-        .parse();
+        .wire();
         assert_eq!(storno.info.document_type, "SS");
         assert_eq!(
             storno
@@ -400,7 +427,7 @@ mod tests {
             referenced_proforma: Some("D-1"),
             ..Doc::default()
         }
-        .parse();
+        .wire();
         assert_eq!(
             consumer
                 .info
@@ -415,13 +442,13 @@ mod tests {
     /// on anything else) unless a test sets the code itself.
     #[test]
     fn eszamla_follows_the_kind_unless_set() {
-        assert_eq!(Doc::new("D-1", "D").parse().info.e_invoice.code(), 0);
-        assert_eq!(Doc::new("ES-1", "ES").parse().info.e_invoice.code(), 2);
+        assert_eq!(Doc::new("D-1", "D").wire().info.e_invoice.code(), 0);
+        assert_eq!(Doc::new("ES-1", "ES").wire().info.e_invoice.code(), 2);
         let paper = Doc {
             eszamla: Some(1),
             ..Doc::default()
         };
-        assert_eq!(paper.parse().info.e_invoice.code(), 1);
+        assert_eq!(paper.wire().info.e_invoice.code(), 1);
     }
 
     /// What `get` and the `Szamlazz.Agent.query` projection read beyond the
@@ -447,7 +474,7 @@ mod tests {
             alap_extra: "<fizh>2026-07-12</fizh><devizanem>HUF</devizanem>",
             ..Doc::default()
         }
-        .parse();
+        .wire();
 
         assert_eq!(document.info.issue_date, Some(date(2026, 7, 4)));
         assert_eq!(document.info.fulfillment_date, Some(date(2026, 7, 4)));
@@ -477,14 +504,14 @@ mod tests {
             fulfillment_date: None,
             ..Doc::default()
         }
-        .parse();
+        .wire();
         assert_eq!(without_telj.info.fulfillment_date, None);
         let empty_telj = Doc {
             fulfillment_date: None,
             alap_extra: "<telj></telj>",
             ..Doc::default()
         }
-        .parse();
+        .wire();
         assert_eq!(empty_telj.info.fulfillment_date, None);
     }
 }

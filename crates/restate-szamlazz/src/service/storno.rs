@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::{ObjectContext, SharedObjectContext};
-use szamlazz_agent::ops::query_xml::InvoiceDocument;
 
 use super::prologue::Execution;
 use super::support::{
@@ -18,7 +17,7 @@ use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
     DocumentStatus, IssuedKind, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
-use crate::gateway::{DeleteOutcome, InvoiceDocumentExt as _, issued_kind_of};
+use crate::gateway::{DeleteOutcome, FoundDocument, issued_kind_of};
 use crate::identity::{ExternalId, OrderKey};
 
 impl Execution {
@@ -48,7 +47,7 @@ impl Execution {
             ControlFlow::Continue(found) => found,
             ControlFlow::Break(response) => return Ok(response),
         };
-        let kind = issued_kind_of(&found.info.document_type);
+        let kind = issued_kind_of(&found.document_type);
         // Every fault from here on is about this storno.
         let about = |fault: Fault| fault.about(&order, kind, storno_id.as_str());
         // The intent is a pure function of the verified document: a `telj`
@@ -103,7 +102,7 @@ impl Execution {
         order: &OrderKey,
         number: &str,
         storno_id: &ExternalId,
-    ) -> Result<ControlFlow<StornoResponse, Box<InvoiceDocument>>, HandlerError> {
+    ) -> Result<ControlFlow<StornoResponse, Box<FoundDocument>>, HandlerError> {
         let namespace = &self.config.namespace;
         let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
         let found = object::verify(ctx, self, format!("verify-storno-{number}"), number)
@@ -153,7 +152,7 @@ impl Execution {
 
         let outcome = {
             let gateway = Arc::clone(&self.gateway);
-            let number = found.number().to_owned();
+            let number = found.number;
             object::run_once(
                 ctx,
                 format!("delete-proforma-{number}"),
@@ -229,7 +228,7 @@ fn order_status(found: impl IntoIterator<Item = (DocumentKind, Lookup)>) -> Orde
 }
 
 /// The `get` projection of a document of ours.
-fn document_status(found: &InvoiceDocument) -> DocumentStatus {
+fn document_status(found: &FoundDocument) -> DocumentStatus {
     let state = if found.is_live() {
         DocumentState::Live
     } else {
@@ -237,15 +236,13 @@ fn document_status(found: &InvoiceDocument) -> DocumentStatus {
             storno_number: None,
         }
     };
-    let mut status = DocumentStatus::new(found.number(), state);
-    status.gross = Some(found.totals.total.gross);
-    status.net = Some(found.totals.total.net);
+    let mut status = DocumentStatus::new(&found.number, state);
+    status.gross = Some(found.gross_total);
+    status.net = Some(found.net_total);
     status.payments = found.payment_amounts();
-    status.referenced_proforma = found
-        .info
-        .referenced_proforma_number
-        .as_ref()
-        .map(|number| number.as_str().to_owned());
+    status
+        .referenced_proforma
+        .clone_from(&found.referenced_proforma_number);
     status.e_invoice = found.e_invoice();
 
     status
@@ -260,7 +257,7 @@ fn document_status(found: &InvoiceDocument) -> DocumentStatus {
 /// number is the hint's, which the handler reads best effort); a `tipus`
 /// szamlazz.hu cannot reverse (a proforma, a delivery note, a storno) is
 /// `rejected{not_stornoable}`; a live `SZ`, `ES`, `VS` or `HS` proceeds.
-fn storno_verdict(found: &InvoiceDocument, order: &OrderKey, number: &str) -> StornoVerdict {
+fn storno_verdict(found: &FoundDocument, order: &OrderKey, number: &str) -> StornoVerdict {
     if !found.carries_order(order) {
         return StornoVerdict::Answered(
             StornoResponse::new(StornoOutcome::Conflict, number)
@@ -270,7 +267,7 @@ fn storno_verdict(found: &InvoiceDocument, order: &OrderKey, number: &str) -> St
     if !found.is_live() {
         return StornoVerdict::AlreadyReversed;
     }
-    if !matches!(found.info.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
+    if !matches!(found.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
         return StornoVerdict::Answered(not_stornoable(number.to_owned()));
     }
     StornoVerdict::Proceed
@@ -293,7 +290,7 @@ fn not_stornoable(number: String) -> StornoResponse {
 fn delete_guard(
     found: Lookup,
     force: bool,
-) -> ControlFlow<DeleteProformaResponse, Box<InvoiceDocument>> {
+) -> ControlFlow<DeleteProformaResponse, Box<FoundDocument>> {
     let found = match found {
         Lookup::Absent => return ControlFlow::Break(DeleteProformaResponse::absent()),
         Lookup::Collision(_) => {
@@ -418,10 +415,11 @@ mod tests {
             assert_eq!(response.invoice_number, "D-1", "{not_ours:?}");
             assert_eq!(response.storno_number, None, "{not_ours:?}");
         }
-        let mut assigned = Doc::default().parse();
+        // The projection's own reading of the parsed value, with the parser's
+        // normalisation out of the way.
         for raw in ["", "   ", "ORD-2"] {
-            assigned.info.order_number = Some(raw.to_owned());
-            let StornoVerdict::Answered(response) = storno_verdict(&assigned, &order, "SZ-1")
+            let StornoVerdict::Answered(response) =
+                storno_verdict(&Doc::default().assigned_order(Some(raw)), &order, "SZ-1")
             else {
                 panic!("order_number {raw:?} is answered");
             };
@@ -431,9 +429,12 @@ mod tests {
                 "order_number {raw:?}: the worker's own reading"
             );
         }
-        assigned.info.order_number = Some(" ORD-1 ".to_owned());
         assert_eq!(
-            storno_verdict(&assigned, &order, "SZ-1"),
+            storno_verdict(
+                &Doc::default().assigned_order(Some(" ORD-1 ")),
+                &order,
+                "SZ-1"
+            ),
             StornoVerdict::Proceed,
             "a padded order number carries the order"
         );
