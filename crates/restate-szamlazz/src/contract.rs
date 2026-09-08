@@ -364,7 +364,7 @@ mod tests {
     /// The fault body is the public contract: it round-trips through JSON
     /// with the optional fields omitted when absent, its status is its
     /// code's, and a fault written by the services reads back as this type
-    /// (what the e2e harness and the endpoint README's examples decode).
+    /// (what the e2e harness decodes).
     #[test]
     fn fault_round_trips_and_omits_absent_fields() {
         let bare = Fault::new(TerminalCode::InvalidInput, "malformed request body");
@@ -440,9 +440,7 @@ mod tests {
 
     /// The crate README's fault table lists every code with its status, as a
     /// row `` | `code` | status | ``. A new variant fails here until the
-    /// table carries it. (The endpoint README carries the same table; the
-    /// endpoint crate's `config` tests hold it to the codes: it lives outside
-    /// this package, which `cargo package` cannot include.)
+    /// table carries it.
     #[test]
     fn every_terminal_code_is_in_the_fault_table() {
         let readme = include_str!("../README.md");

@@ -13,9 +13,3 @@ devenv.local.yaml
 target/
 
 .env
-
-# local endpoint configuration
-restate-szamlazz.toml
-restate-szamlazz.json
-restate-szamlazz.yaml
-restate-szamlazz.yml

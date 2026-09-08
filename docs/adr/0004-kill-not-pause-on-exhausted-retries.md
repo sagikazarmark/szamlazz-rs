@@ -191,8 +191,8 @@ interval on both `Szamlazz.Agent` writes.
 the original send. The issue policy's `initial_delay` now has a floor, `IssueConfig::MIN_INITIAL_DELAY` = the agent
 crate's newly exported `client::REQUEST_TIMEOUT` (60 s) + `IssueConfig::RE_CHECK_MARGIN` (30 s) = 90 s, derived from
 the client's constant rather than a second copy of "60 s"; a shorter delay is `WorkerConfigError::IssueDelayBelowFloor`,
-whose message names the rule, and `--check-config` fails with it. The floor is on the issue policy only (a read
-writes nothing and the resolve policy never reaches szamlazz.hu), and bites where the endpoint loads configuration:
+whose message names the rule, and a deployment's configuration load fails with it. The floor is on the issue policy only (a read
+writes nothing and the resolve policy never reaches szamlazz.hu), and bites where a deployment validates its configuration:
 the e2e suite's 1 s policies are built in Rust, handed to `from_parts` and never pass through `validate`.
 
 ## Amended (#87): an invocation attempt is spent only on a worker-side failure

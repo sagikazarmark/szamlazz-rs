@@ -33,8 +33,8 @@
 //! Both present is a load error; there is no default account. The scope keys
 //! are `[a-z0-9_]`, 1–[`MAX_SCOPE_LEN`] bytes: a strict subset of Restate's
 //! scope format (`[a-zA-Z0-9_.-]`, at most 36 bytes) chosen so that
-//! environment overrides can address them
-//! (`RESTATE_SZAMLAZZ_ACCOUNTS__<SCOPE>__AGENT_KEY`).
+//! environment overrides can address them (an
+//! `…_ACCOUNTS__<SCOPE>__AGENT_KEY` variable of the host's own prefix).
 //!
 //! The configuration types implement `Deserialize` only and are **closed**
 //! at every level (`#[serde(deny_unknown_fields)]`): a misspelt key is a
@@ -43,7 +43,7 @@
 //! ([`Defaults`], [`SellerConfig`], [`SellerEmailConfig`]), which stay
 //! permissive so that an `account` entry of an earlier deployment replays;
 //! [`StaticDefaults`] and [`StaticSeller`] mirror them field for field and
-//! convert with `From`. The endpoint binary chooses the file format and
+//! convert with `From`. The host chooses the file format and
 //! environment merging. [`StaticResolver`] is built from a parsed
 //! [`StaticConfig`] with `TryFrom`, which validates what `Deserialize`
 //! cannot, including the checkable half of the resolver's safety contract in
@@ -762,8 +762,8 @@ mod tests {
         );
     }
 
-    /// The single-account shape as the endpoint binary would hand it over
-    /// after merging its file format and environment overrides.
+    /// The single-account shape as a host would hand it over after merging
+    /// its file format and environment overrides.
     fn single() -> StaticConfig {
         serde_json::from_value(json!({
             "account": {

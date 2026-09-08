@@ -30,7 +30,7 @@ const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as 
 const ONE_TRIP_TIMEOUT_MS: u64 = 120_000;
 
 /// The `Accounts` bundle of a test account at `endpoint` with `agent_key`,
-/// through the static resolver: what the endpoint binary builds.
+/// through the static resolver: what a deployment builds.
 fn accounts(endpoint: &str, agent_key: &str) -> Accounts {
     let config: StaticConfig = serde_json::from_value(json!({
         "account": {
