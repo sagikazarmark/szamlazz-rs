@@ -6,9 +6,9 @@
 //! 72 hours loses the record. The XSD's requirements are available as a signal
 //! through [`Document::validate`] / [`Document::parse_strict`]. Date fields are
 //! the business-level civil [`Date`] type; XML Schema's optional `xs:date`
-//! timezone suffix (`Z`/`±hh:mm`) is accepted on the wire and discarded, so
-//! a schema-valid push can never fail the whole delivery over an offset a
-//! civil date cannot represent.
+//! timezone suffix (`Z`/`±hh:mm`) is accepted on the wire and discarded, and a
+//! date text that is not a date reads as `None`, so no date element, however
+//! it is written, can fail the delivery of the record it sits in.
 
 use std::fmt;
 use std::sync::Arc;
@@ -53,23 +53,30 @@ impl Document {
     /// Ack: a body that is not UTF-8 or not well-formed XML, an unknown root
     /// or an element outside the document's namespace, an `alap/id` (or a
     /// bank transaction `id`) that is missing or not an integer, an invoice
-    /// without its `szamlaszam`, and a value that is not of its lexical type
-    /// (a `<kelt>` that is not a date, an `<osszeg>` that is not a number, a
-    /// `<teszt>` that is not a boolean). Everything else is content and reads
-    /// as the wire delivers it: a missing element is `None`, an unknown
-    /// `<irany>` is [`TransactionDirection::Other`], a `<pdf>` that does not
-    /// decode is [`None`](InvoiceDocument::pdf) with the encoded text still
-    /// in [`raw_xml`](InvoiceDocument::raw_xml), an empty receipt batch has
-    /// no receipts.
+    /// without its `szamlaszam`, and a number or boolean that is not one (an
+    /// `<osszeg>` that is not a number, a `<teszt>` that is not a boolean).
+    /// Everything else is content and reads as the wire delivers it: a
+    /// missing element is `None`, an unknown `<irany>` is
+    /// [`TransactionDirection::Other`], a `<pdf>` that does not decode is
+    /// [`None`](InvoiceDocument::pdf) with the encoded text still in
+    /// [`raw_xml`](InvoiceDocument::raw_xml), a date that is not a date (a
+    /// `<kelt>` of `2015-12-01junk`) is `None` with its text likewise in the
+    /// raw XML, an empty receipt batch has no receipts.
     ///
     /// The line between an unknown enumeration token (content) and a
     /// malformed lexical value (shape) is the one the crate has always drawn
     /// with [`InvoiceAppearance::Unknown`]: an enumeration is an open set
     /// szamlazz.hu extends (a new direction or document type is a protocol
     /// extension the receiver must survive), while a fourth spelling of
-    /// `true` or a date that is not a date is not an extension but a value
-    /// the type cannot hold, and reading it as `None` would hide it behind
-    /// the same answer as an omission.
+    /// `true` is not an extension but a value the type cannot hold, and
+    /// reading it as `None` would hide it behind the same answer as an
+    /// omission. A date that is not a date is the one lexical failure read
+    /// as content: the crate already reads `xs:date` on its own terms (the
+    /// timezone suffix a civil [`Date`] cannot hold is discarded), a text it
+    /// cannot make a date of is `None` with the text kept in the raw XML,
+    /// and where the XSD requires the date [`validate`](Self::validate)
+    /// reports the requirement it fails to meet, so the record is kept and
+    /// the verdict is still to be had.
     ///
     /// The XSD's own requirements (its `minOccurs="1"` elements, its
     /// enumerations, its non-negative VAT rates) are a **signal**, not a
@@ -1654,6 +1661,14 @@ impl ReceiptBatch {
 
 /// Lenient deserialization helpers: szamlazz.hu sends absent values as empty
 /// elements and bools as either `true`/`false` or `0`/`1`.
+///
+/// Every helper reads wire text an authenticated push delivered, which may
+/// hold any UTF-8. The rule for it: never index or split a `str` by a byte
+/// offset the text has not been shown to have a char boundary at. Byte
+/// positions are read through `strip_suffix`, `split_at_checked` or a slice
+/// pattern over `as_bytes()`, so that no text of any length or encoding
+/// panics; a panic here escapes the router after the key check and leaves
+/// szamlazz.hu with no answer to retry.
 pub(crate) mod de {
     use serde::{Deserialize, Deserializer};
 
@@ -1684,41 +1699,59 @@ pub(crate) mod de {
     /// Strips XML Schema's optional timezone suffix (`Z` or `±hh:mm`) from an
     /// `xs:date` lexical value. The offset carries nothing a civil [`Date`]
     /// can represent, but a schema-valid value must not fail the parse.
+    ///
+    /// The `±hh:mm` form is the last six bytes of the text; the split is
+    /// boundary-checked because the text is wire content and byte six from
+    /// the end may fall inside a multi-byte character.
     fn strip_xs_date_timezone(text: &str) -> &str {
         if let Some(date) = text.strip_suffix('Z') {
             return date;
         }
-        if text.len() > 6 {
-            let (date, suffix) = text.split_at(text.len() - 6);
-            let bytes = suffix.as_bytes();
-            if matches!(bytes[0], b'+' | b'-')
-                && bytes[1].is_ascii_digit()
-                && bytes[2].is_ascii_digit()
-                && bytes[3] == b':'
-                && bytes[4].is_ascii_digit()
-                && bytes[5].is_ascii_digit()
-            {
-                return date;
-            }
+        let Some((date, suffix)) = text
+            .len()
+            .checked_sub(6)
+            .and_then(|at| text.split_at_checked(at))
+        else {
+            return text;
+        };
+        if is_xs_timezone_offset(suffix) {
+            date
+        } else {
+            text
         }
-        text
+    }
+
+    /// Whether `suffix` is exactly an `xs:date` `±hh:mm` offset. A slice
+    /// pattern over the bytes, so a suffix of any other length or content
+    /// is simply `false`.
+    fn is_xs_timezone_offset(suffix: &str) -> bool {
+        matches!(
+            suffix.as_bytes(),
+            [b'+' | b'-', h1, h2, b':', m1, m2]
+                if h1.is_ascii_digit()
+                    && h2.is_ascii_digit()
+                    && m1.is_ascii_digit()
+                    && m2.is_ascii_digit()
+        )
     }
 
     /// Deserializes an optional `xs:date`, reading empty elements as absent
-    /// and discarding any timezone suffix.
+    /// and discarding any timezone suffix. A text that is not a date is
+    /// content, not shape: it reads as `None` like an omitted element, the
+    /// text stays in the document's raw XML, and where the XSD requires the
+    /// date the strict parse reports the requirement it fails to meet. Never
+    /// an error for any text: the push must be Acked whatever one date
+    /// element holds.
     pub fn opt_xs_date<'de, D>(deserializer: D) -> Result<Option<Date>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = Option::<String>::deserialize(deserializer)?;
 
-        match value.as_deref().map(str::trim) {
-            None | Some("") => Ok(None),
-            Some(text) => strip_xs_date_timezone(text)
-                .parse()
-                .map(Some)
-                .map_err(serde::de::Error::custom),
-        }
+        Ok(value
+            .as_deref()
+            .map(str::trim)
+            .and_then(|text| strip_xs_date_timezone(text).parse().ok()))
     }
 
     pub fn opt_flexible_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -1936,9 +1969,81 @@ mod tests {
             Some(jiff::civil::date(2015, 12, 1))
         );
 
-        // Garbage after the date is still rejected.
+        // Garbage after the date is content: the date reads as absent, the
+        // text stays in the raw XML, and only the strict parse minds.
         let body =
             OUTGOING_INVOICE.replace("<kelt>2015-12-01</kelt>", "<kelt>2015-12-01junk</kelt>");
-        assert!(Document::parse(body.as_bytes()).is_err());
+        let Document::OutgoingInvoice(invoice) =
+            Document::parse(body.as_bytes()).expect("a date that is not a date is content")
+        else {
+            panic!("expected outgoing invoice");
+        };
+        assert_eq!(invoice.info.issue_date, None);
+        assert!(
+            invoice
+                .raw_xml()
+                .is_some_and(|xml| xml.contains("<kelt>2015-12-01junk</kelt>"))
+        );
+        assert_eq!(
+            invoice
+                .validate(InvoiceDirection::Outgoing)
+                .expect_err("the XSD requires a date")
+                .to_string(),
+            "missing required invoice alap/kelt"
+        );
+    }
+
+    /// Feeds `text` through the optional-date deserializer as the content of
+    /// one element, the way a pushed `<kelt>` reaches it.
+    fn read_opt_date(text: &str) -> Result<Option<Date>, quick_xml::DeError> {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(default, deserialize_with = "de::opt_xs_date")]
+            date: Option<Date>,
+        }
+        quick_xml::de::from_str::<Wrapper>(&format!("<w><date>{text}</date></w>"))
+            .map(|wrapper| wrapper.date)
+    }
+
+    #[test]
+    fn xs_date_that_is_not_a_date_reads_as_absent_whatever_its_bytes() {
+        // The timezone strip once split the text six bytes from its end;
+        // `str::split_at` panics when that index is inside a multi-byte
+        // character. Every text here is seven or more bytes long, most with
+        // a non-ASCII character in the way of that split: none may panic,
+        // and none is a date.
+        for text in [
+            // Seven bytes; the split at byte 1 falls inside `é`.
+            "é12345",
+            // Seven bytes ending in a multi-byte character; the split at
+            // byte 1 falls inside the first `é`.
+            "éé€",
+            // Seven bytes ending in a multi-byte character; the split lands
+            // on a boundary, the suffix is not an offset.
+            "12345é",
+            // A well-formed date with a multi-byte character where the
+            // offset's last digit would be.
+            "2024-01-01+01:0é",
+            // A multi-byte character in front of a well-formed offset.
+            "é+01:00",
+            // Every byte is a boundary; the suffix is not an offset.
+            "2024-01-01junk",
+        ] {
+            assert_eq!(
+                read_opt_date(text).unwrap_or_else(|error| panic!("{text:?}: {error}")),
+                None,
+                "{text:?}"
+            );
+        }
+
+        assert_eq!(
+            read_opt_date("2024-01-01+01:00").expect("schema-valid xs:date"),
+            Some(jiff::civil::date(2024, 1, 1))
+        );
+        assert_eq!(
+            read_opt_date("2024-01-01").expect("plain xs:date"),
+            Some(jiff::civil::date(2024, 1, 1))
+        );
+        assert_eq!(read_opt_date("").expect("empty is absent"), None);
     }
 }
