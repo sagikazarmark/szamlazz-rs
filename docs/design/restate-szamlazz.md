@@ -25,7 +25,8 @@ key, and the worker is the one place that holds one (§4, `Szamlazz.Agent.query_
 | `restate-szamlazz` | library | Contract types, deployment config, the account model with the resolver and credential-store traits and the static resolver, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
 | `restate-szamlazz-endpoint` | binary `restate-szamlazz`, container `ghcr.io/sagikazarmark/restate-szamlazz` | Hosts the services over HTTP for a Restate server; clap + figment config in the single-account (`[account]`) or multi-account (`[accounts.<scope>]`) shape |
 
-`restate-sdk` is an unconditional dependency; the only feature is `schemars`.
+`restate-sdk` is an unconditional dependency; the features are `schemars` and `test-util` (the unchecked configuration
+constructor the e2e harness builds its sub-floor policies with; never enabled by a deployment).
 
 Layering (ADR 0001): the `gateway` is a Rust module that speaks to szamlazz.hu on behalf of one account; it owns the
 `szamlazz_agent::Client` (the transport it wraps; it is not a second client) and the account, and exposes one plain
@@ -550,21 +551,26 @@ StornoResponse { outcome ∈ reversed | rejected | conflict | managed_by_order, 
                  invoice_number, storno_number?, order_key?, code?, message? }
 DeleteProformaResponse { deleted, reason? }
 OrderStatus, see §6
-TerminalError { code, message, szamlazz_code?, order?, kind?, external_id? }
+Fault { code, message, szamlazz_code?, order?, kind?, external_id? }   (contract::Fault, the TerminalError body)
 TerminalError codes: invalid_input (400) | unknown_account (400) | not_found (404) | szamlazz_error (422)
                    | outcome_unknown (500) | unavailable (503) | credentials_rejected (503)
 On the wire (Restate 1.7.8 ingress), a TerminalError is the JSON *string* in `message` of Restate's own envelope:
-  { "code": <HTTP status>, "message": "<the TerminalError JSON above>", "source": "invocation" }
+  { "code": <HTTP status>, "message": "<the Fault JSON above>", "source": "invocation" }
   + header x-restate-error-source: invocation
 ```
 
 The envelope is Restate's, not ours: the Rust SDK 0.12 carries a terminal error as `(code, message)` and offers no
 other channel, so the worker serialises the fault into the message and the caller parses `message` a second time
-(`From<Fault> for TerminalError` in `service::support`). A caller reading the envelope's `code` sees the HTTP status,
-never the token. The endpoint README (*Faults*) shows one body per case, a structured fault, a killed invocation
-(the same envelope with the last retryable error's text in `message`), an ingress error (`source: ingress`), held to
-the contract types by the endpoint crate's `tests/readme.rs`; the e2e harness asserts the envelope on every fault it
-receives (`Reply::fault`).
+(`From<Fault> for TerminalError` in `service::support`). The fault body is a public contract type,
+`contract::Fault` (`Serialize + Deserialize`, open like every response type, `#[non_exhaustive]`, built with
+`Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::credentials_rejected`, …, are
+a crate-private inherent impl in `service::support`), so a Rust caller decodes `message` into it rather than
+re-declaring the shape: the e2e harness (`Reply::fault`) and the endpoint crate's `tests/readme.rs` both did until
+#128. A caller reading the envelope's `code` sees the HTTP status, never the token. The endpoint README (*Faults*)
+shows one body per case, a structured fault, a killed invocation (the same envelope with the last retryable error's
+text in `message`), an ingress error (`source: ingress`), held to the contract types by `tests/readme.rs` (a fault
+example must re-serialise from `Fault` to exactly what it shows); the e2e harness asserts the envelope on every fault
+it receives.
 
 `invalid_input`: the caller's request, which the same request never gets past, a 400 and "fix the request". Three
 sources. A **malformed body**: every request type and every object it nests (`CreateRequest`, `CreateOptions`,
@@ -591,8 +597,8 @@ consequences (nothing journaled, nothing sent), by the handler's own check rathe
 a request **the operation cannot take**: `options.proforma` on any kind but `create_invoice`, a `{number}` proforma
 link that is not a `D` document, an empty `buyer.name`, an invalid Virtual Object key (§3), a sixth credit entry on
 `set_payments` (the Számla Agent wire contract takes five, so the gateway refuses it before anything is sent, the
-`request` pseudo-code of its `Rejected` outcome, which the handler maps here rather than to `szamlazz_error`, since
-szamlazz.hu answered nothing). These are raised after the prologue, by the handler's own validation or the gateway's.
+`RejectionCode::Request` of its `Rejected` outcome's `Rejection`, serialised as the `request` pseudo-code, which the
+handler maps here rather than to `szamlazz_error`, since szamlazz.hu answered nothing). These are raised after the prologue, by the handler's own validation or the gateway's.
 
 `not_found`: the request names a document **by number** that szamlazz.hu does not know, code 7 on
 `Szamlazz.Agent.query`'s selector, on the invoice of `Szamlazz.Agent.storno` or `Szamlazz.Order.storno_invoice`, on the
@@ -684,12 +690,19 @@ carries the same rules for an embedder. The rules:
 
 ## 9. Configuration (deployment-constant; never in payloads)
 
-Two configuration types, both serde-`Deserialize` only (the host chooses the format). `WorkerConfig` is the
-deployment-level part the services hold, the namespace and the three run retry policies; `StaticConfig` is the static resolver's account, and everything
-account-shaped (credentials, endpoint, document defaults, seller block) lives on the `Account`
-it produces (read by the services through `Gateway::account()`). The endpoint binary reads one file with both side by
-side: its own layout type has one explicit field per top-level key and assembles the two library types from them,
-so a parse error keeps the key path and the source figment attaches (a `#[serde(flatten)]` would drop both):
+Two configuration types, both serde-`Deserialize` only (the host chooses the format) and closed at every level
+(`#[serde(deny_unknown_fields)]`). `WorkerConfig` is the deployment-level part the services hold, the namespace
+(`identity::Namespace`) and the three run retry policies, one `RetryPolicyConfig<T: Table>` each (`IssueConfig`,
+`ReadConfig`, `ResolveConfig` are its three instantiations; the table names the policy in an error and carries its
+defaults; `max_attempts` is optional on every table, unset by default on `[resolve]`); `WorkerConfig::validate`
+yields the `ValidatedWorkerConfig` the services are built from, the one constructor a deployment has (#128).
+`StaticConfig` is the static resolver's account, read through closed input types (`StaticAccount`, `StaticDefaults`,
+`StaticSeller`, `StaticSellerEmail`) distinct from the journaled value types they are built into
+(`account::{Defaults, SellerConfig, SellerEmailConfig}`, permissive for replay), and everything account-shaped
+(credentials, endpoint, document defaults, seller block) lives on the `Account` it produces (read by the services
+through `Gateway::account()`). The endpoint binary reads one file with both side by side: its own layout type has one
+explicit field per top-level key and assembles the two library types from them, so a parse error keeps the key path
+and the source figment attaches (a `#[serde(flatten)]` would drop both, and admits no `deny_unknown_fields`):
 
 ```toml
 identity_keys = ["publickeyv1_…"]   # the Restate server's request identity public keys (§10); `[]` written out is the local-development opt-out, the key unmentioned a start-up warn
@@ -709,7 +722,7 @@ factor = 2.0
 max_delay = "60s"
 max_duration = "5m"           # the hard bound; a szamlazz.hu outage is tolerated for this long, not for the handlers' attempts
 
-[resolve]    # the resolve policy: the run retry policy of the prologue's `account` step; no attempt cap; the duration is the bound
+[resolve]    # the resolve policy: the run retry policy of the prologue's `account` step; max_attempts unset by default: the duration is the bound
 initial_delay = "1s"
 factor = 2.0
 max_delay = "10s"
@@ -727,25 +740,29 @@ endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
 All three policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
 server would spend the handler's `invocation_retry_policy` instead. Durations are `"90s"`, `"2m"`, `"1h"` or a bare
 non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
-invariants (`max_attempts ≥ 1` on the issue and read policies, `initial_delay ≤ max_delay` and `factor ≥ 1` on all
+invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and a finite `factor ≥ 1` on all
 three) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
 `REQUEST_TIMEOUT` (60 s) plus a 30 s margin, a create or storno step re-executed sooner would query for the cut execution's
 send while it may still be in flight (the ~90 s rule of ADR 0002 and the behaviour notes, in code since #61; the read
-and resolve policies have no floor, and the e2e suite's 1 s policies are built in Rust and never pass through
-`validate`);
+and resolve policies have no floor, and the e2e suite's 1 s policies are built with
+`ValidatedWorkerConfig::unchecked` behind the `test-util` feature and never pass through `validate`; `validate` is the
+one way to the `ValidatedWorkerConfig` that `Order::from_parts` / `Agent::from_parts` take, #128);
 `StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint).
 
-**The endpoint's loader is strict.** Before the typed extraction it walks the merged figment value against the known
-key tree (the top level, the policies, each account table and its `defaults` / `seller` / `seller.email`), and
-refuses every unknown key at once, naming the key, its path, its source (the file, or the environment variable that
-set it) and what is accepted there; a typo such as `mod = "test"` or `[isue]` fails at start-up instead of silently
-running a test account as live or leaving a policy at its default. The refusal lives in the loader rather than as
-`#[serde(deny_unknown_fields)]` on the library types because the account-shaped value types are journaled inside
-`Account` and must stay permissive for replay; a test checks the tree against the `Serialize` output of the library
-types so it cannot drift. The same walk names both account shapes with their sources when both are present (a stray
-`RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` on a multi-account file would otherwise surface as the partial account's
-`missing field id`), and refuses the pre-release layout (`account.slug`, top-level `[defaults]` / `[seller]`) with each
-moved key named: the crate has never been released, there is no compatibility shim. Environment override values are
+**The endpoint's loader is strict.** The layout and every library type it is made of are closed
+(`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount` and
+its `StaticDefaults` / `StaticSeller` / `StaticSellerEmail`), so an unknown key at any level is a parse error that
+figment attaches the key path and the source to (the file, or the environment variable that set it); a typo such as
+`mod = "test"` or `[isue]` fails at start-up instead of silently running a test account as live or leaving a policy at
+its default. The input types are distinct from the journaled value types they are built into (`Defaults`,
+`SellerConfig`, `SellerEmailConfig` in `account`, which stay permissive so that an `account` entry of an earlier
+deployment replays), mirror them field for field and convert with `From`; a round-trip test holds the two sides to each
+other (#128; the pre-#128 loader kept a hand-maintained key tree instead, J-05-15). The one shape rule serde cannot
+express is checked first, on the merged figment value: both account shapes present is refused naming each with its
+source (a stray `RESTATE_SZAMLAZZ_ACCOUNT__AGENT_KEY` on a multi-account file would otherwise surface as the partial
+account's `missing field id`). The pre-release layout (`account.slug`, top-level `[defaults]` / `[seller]`) is refused
+as any unknown key is: the crate has never been released, there is no compatibility shim and no longer a named
+refusal. Environment override values are
 read as **strings** and the field's type decides (`extract_lossy`: `"3"` is `3` on a count, `"true"` on a flag), so an
 all-digit agent key keeps its leading zeros; figment's own environment provider would parse it as a number.
 `--check-config` runs the loader and builds the endpoint, then exits 0 without listening.
@@ -889,7 +906,7 @@ show: the durable sequence, replay, the per-key lock and the journal.
   before their class; 71/152 the duplicate; seven `Rejected`-class codes and 7 as `Rejected`; 1, 55, 56 and an
   unknown code as `Unknown` through the arm a class the agent
   crate adds later falls into; `szlahu_down` as `Unavailable`; a request the wire contract refused as `Rejected`
-  under the `request` pseudo-code; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
+  under `RejectionCode::Request`; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
   credential code and another code are answers, `szlahu_down` and a transport failure `Unanswered`) with the
   `outcome` fold every read fn applies, and the send rule of the two write steps as a function of what the leading
   or re-query saw against the number the lookup saw reversed: `settle_create` (nothing, or exactly the lookup's

@@ -3,6 +3,8 @@
 
 use serde_json::json;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::Harness;
 use crate::harness::accounts::{AGENT_KEY, KEY_B};
 use crate::harness::szamlazz::{
@@ -69,7 +71,12 @@ pub(crate) async fn check_account_names_the_account_and_reports_the_credentials(
     h.reset().await;
     let reply = h.check_account(Some("acme-events")).await;
     assert_eq!(reply.status, 400, "{}", reply.body);
-    assert_eq!(reply.fault().code, "unknown_account", "{}", reply.body);
+    assert_eq!(
+        reply.fault().code,
+        TerminalCode::UnknownAccount,
+        "{}",
+        reply.body
+    );
     assert_eq!(
         h.runs(reply.invocation_id()).await,
         ["namespace", "account"]
@@ -133,7 +140,7 @@ pub(crate) async fn check_account_under_each_scope_names_its_account(h: &Harness
     let reply = h.check_account(None).await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("unscoped"), "{fault:?}");
     assert_eq!(
         h.runs(reply.invocation_id()).await,
@@ -209,7 +216,7 @@ pub(crate) async fn agent_query_projects_what_it_finds(h: &Harness) {
         .call_agent_scoped("acme", "query", &query_of("SZ-27"))
         .await;
     assert_eq!(reply.status, 404, "{}", reply.body);
-    assert_eq!(reply.fault().code, "not_found", "{}", reply.body);
+    assert_eq!(reply.fault().code, TerminalCode::NotFound, "{}", reply.body);
     eprintln!(
         "(xviii-c) Szamlazz.Agent.query under a scope: the projection with test as reported, no supplier_id; 7 → not_found: pass"
     );
@@ -291,7 +298,7 @@ pub(crate) async fn agent_query_taxpayer_runs_on_the_scoped_account(h: &Harness)
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert!(fault.message.contains("\"12345678-2\""), "{fault:?}");
     assert!(fault.message.contains("12345678-2-42"), "{fault:?}");
     assert!(

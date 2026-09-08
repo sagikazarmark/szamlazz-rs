@@ -120,14 +120,16 @@ use szamlazz_agent::Credentials;
 use crate::account::{
     Account, AccountResolver as _, CredentialStore as _, Endpoint, StaticConfig, StaticResolver,
 };
-use crate::config::{Defaults, Namespace, SellerConfig, SellerEmailConfig};
+use crate::account::{Defaults, SellerConfig, SellerEmailConfig};
 use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
 use crate::gateway::{
     CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, ProbeOutcome,
-    QueryOutcome, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
+    QueryOutcome, Rejection, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome,
+    SzamlazzAnswer, TaxpayerOutcome,
 };
+use crate::identity::Namespace;
 use crate::test_support::open_gateway;
 
 use super::prologue::Resolution;
@@ -297,20 +299,14 @@ fn query_outcome_pins() -> Pins {
         &[
             QueryOutcome::Found(document("SZ-1", false)),
             QueryOutcome::NotFound,
-            QueryOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
-            QueryOutcome::Api {
-                code: API.code(),
-                message: API.message(),
-            },
+            QueryOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            QueryOutcome::Api(API.answer()),
         ],
         &variants!(QueryOutcome {
             Found(_) => "found",
             NotFound => "not-found",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -328,14 +324,8 @@ fn lookup_outcome_pins() -> Pins {
             },
             LookupOutcome::Collision(document("SZ-1", false)),
             LookupOutcome::Foreign(document("SZ-2", false)),
-            LookupOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
-            LookupOutcome::Api {
-                code: API.code(),
-                message: API.message(),
-            },
+            LookupOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            LookupOutcome::Api(API.answer()),
         ],
         &variants!(LookupOutcome {
             Absent => "absent",
@@ -343,8 +333,8 @@ fn lookup_outcome_pins() -> Pins {
             Reversed { .. } => "reversed",
             Collision(_) => "collision",
             Foreign(_) => "foreign",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -361,22 +351,12 @@ fn create_outcome_pins() -> Pins {
             CreateOutcome::Reconciled(document("SZ-1", false)),
             CreateOutcome::Collision(document("SZ-1", false)),
             CreateOutcome::DuplicateOrderNumber {
-                code: "152".to_owned(),
-                message: "A rendelésszám már szerepel egy számlán: SZ-2".to_owned(),
+                answer: SzamlazzAnswer::new("152", "A rendelésszám már szerepel egy számlán: SZ-2"),
                 existing_number: Some("SZ-2".to_owned()),
             },
-            CreateOutcome::Rejected {
-                code: REJECTED.code(),
-                message: REJECTED.message(),
-            },
-            CreateOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
-            CreateOutcome::Api {
-                code: API.code(),
-                message: API.message(),
-            },
+            CreateOutcome::Rejected(Rejection::from(REJECTED.answer())),
+            CreateOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            CreateOutcome::Api(API.answer()),
             CreateOutcome::Unavailable {
                 message: DOWN.to_owned(),
             },
@@ -389,9 +369,9 @@ fn create_outcome_pins() -> Pins {
             Reconciled(_) => "reconciled",
             Collision(_) => "collision",
             DuplicateOrderNumber { .. } => "duplicate-order-number",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
             Unavailable { .. } => "unavailable",
         }),
     )
@@ -406,20 +386,14 @@ fn storno_lookup_outcome_pins() -> Pins {
             StornoLookupOutcome::AlreadyReversed {
                 storno_number: "SS-1".to_owned(),
             },
-            StornoLookupOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
-            StornoLookupOutcome::Api {
-                code: API.code(),
-                message: API.message(),
-            },
+            StornoLookupOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            StornoLookupOutcome::Api(API.answer()),
         ],
         &variants!(StornoLookupOutcome {
             Absent => "absent",
             AlreadyReversed { .. } => "already-reversed",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
@@ -434,18 +408,12 @@ fn storno_outcome_pins() -> Pins {
                 storno_number: "SS-1".to_owned(),
             },
             StornoOutcome::NotStornoable,
-            StornoOutcome::Rejected {
-                code: "221".to_owned(),
-                message: "A számlához helyesbítő számla tartozik.".to_owned(),
-            },
-            StornoOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
-            StornoOutcome::Api {
-                code: API.code(),
-                message: API.message(),
-            },
+            StornoOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
+                "221",
+                "A számlához helyesbítő számla tartozik.",
+            ))),
+            StornoOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            StornoOutcome::Api(API.answer()),
             StornoOutcome::Unavailable {
                 message: DOWN.to_owned(),
             },
@@ -454,9 +422,9 @@ fn storno_outcome_pins() -> Pins {
             Reversed(_) => "reversed",
             AlreadyReversed { .. } => "already-reversed",
             NotStornoable => "not-stornoable",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
             Unavailable { .. } => "unavailable",
         }),
     )
@@ -469,21 +437,15 @@ fn delete_outcome_pins() -> Pins {
         &[
             DeleteOutcome::Deleted,
             DeleteOutcome::AlreadyGone,
-            DeleteOutcome::Rejected {
-                code: REJECTED.code(),
-                message: REJECTED.message(),
-            },
-            DeleteOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
+            DeleteOutcome::Rejected(Rejection::from(REJECTED.answer())),
+            DeleteOutcome::CredentialsRejected(CREDENTIALS.answer()),
             DeleteOutcome::Transport(TRANSPORT.to_owned()),
         ],
         &variants!(DeleteOutcome {
             Deleted => "deleted",
             AlreadyGone => "already-gone",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
             Transport(_) => "transport",
         }),
     )
@@ -498,20 +460,17 @@ fn set_payments_outcome_pins() -> Pins {
                 outstanding: Some(dec!(0)),
                 gross: Some(dec!(12700)),
             },
-            SetPaymentsOutcome::Rejected {
-                code: "463".to_owned(),
-                message: "Sztornózott számlára nem rögzíthető kifizetés.".to_owned(),
-            },
-            SetPaymentsOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
+            SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
+                "463",
+                "Sztornózott számlára nem rögzíthető kifizetés.",
+            ))),
+            SetPaymentsOutcome::CredentialsRejected(CREDENTIALS.answer()),
             SetPaymentsOutcome::Transport(TRANSPORT.to_owned()),
         ],
         &variants!(SetPaymentsOutcome {
             Done { .. } => "done",
-            Rejected { .. } => "rejected",
-            CredentialsRejected { .. } => "credentials-rejected",
+            Rejected(_) => "rejected",
+            CredentialsRejected(_) => "credentials-rejected",
             Transport(_) => "transport",
         }),
     )
@@ -523,14 +482,11 @@ fn probe_outcome_pins() -> Pins {
         "probe-outcome",
         &[
             ProbeOutcome::Accepted,
-            ProbeOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
+            ProbeOutcome::CredentialsRejected(CREDENTIALS.answer()),
         ],
         &variants!(ProbeOutcome {
             Accepted => "accepted",
-            CredentialsRejected { .. } => "credentials-rejected",
+            CredentialsRejected(_) => "credentials-rejected",
         }),
     )
 }
@@ -541,24 +497,18 @@ fn taxpayer_outcome_pins() -> Pins {
         "taxpayer-outcome",
         &[
             TaxpayerOutcome::Found(taxpayer()),
-            TaxpayerOutcome::CredentialsRejected {
-                code: CREDENTIALS.code(),
-                message: CREDENTIALS.message(),
-            },
-            TaxpayerOutcome::Api {
-                code: NAV.code(),
-                message: NAV.message(),
-            },
+            TaxpayerOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            TaxpayerOutcome::Api(NAV.answer()),
         ],
         &variants!(TaxpayerOutcome {
             Found(_) => "found",
-            CredentialsRejected { .. } => "credentials-rejected",
-            Api { .. } => "api",
+            CredentialsRejected(_) => "credentials-rejected",
+            Api(_) => "api",
         }),
     )
 }
 
-/// A szamlazz.hu code and message, as the code-and-message variants carry
+/// A szamlazz.hu code and message, as the answer-carrying variants carry
 /// them.
 struct Code {
     code: &'static str,
@@ -566,12 +516,8 @@ struct Code {
 }
 
 impl Code {
-    fn code(&self) -> String {
-        self.code.to_owned()
-    }
-
-    fn message(&self) -> String {
-        self.message.to_owned()
+    fn answer(&self) -> SzamlazzAnswer {
+        SzamlazzAnswer::new(self.code, self.message)
     }
 }
 
@@ -1411,8 +1357,8 @@ mod harness_tests {
             &variants!(QueryOutcome {
                 Found(_) => "found",
                 NotFound => "not-found",
-                CredentialsRejected { .. } => "credentials-rejected",
-                Api { .. } => "api",
+                CredentialsRejected(_) => "credentials-rejected",
+                Api(_) => "api",
             }),
         );
     }

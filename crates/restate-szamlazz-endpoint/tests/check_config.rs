@@ -231,7 +231,9 @@ fn a_valid_multi_account_file_exits_0_and_lists_every_scope() {
 }
 
 /// An unknown key (in the file or in the environment) is a non-zero exit
-/// with an error that names the key, its path and its source.
+/// with an error that names the key, its path and its source. The first one
+/// is reported (the rule is serde's, on the closed layout), so the file's key
+/// and the environment's are checked one at a time.
 #[test]
 fn an_unknown_key_exits_non_zero_with_the_error() {
     let file = temp_file(
@@ -246,18 +248,42 @@ fn an_unknown_key_exits_non_zero_with_the_error() {
         "#,
     );
 
+    let output = check_config(&file, &[]);
+
+    assert_ne!(output.status.code(), Some(0), "{output}");
+    assert!(
+        output.stderr.contains("unknown field: found `mod`"),
+        "{output}"
+    );
+    assert!(
+        output.stderr.contains("for key \"account.mod\""),
+        "{output}"
+    );
+    assert!(output.stderr.contains("unknown-key.toml"), "{output}");
+    assert!(!output.stdout.contains(VALID), "{output}");
+
+    let file = temp_file(
+        "valid.toml",
+        r#"
+        namespace = "acct"
+
+        [account]
+        id = "acme"
+        agent_key = "k"
+        "#,
+    );
+
     let output = check_config(&file, &[("RESTATE_SZAMLAZZ_ISUE__MAX_ATTEMPTS", "1")]);
 
     assert_ne!(output.status.code(), Some(0), "{output}");
     assert!(
-        output.stderr.contains("unknown key `account.mod`"),
+        output.stderr.contains("unknown field: found `isue`"),
         "{output}"
     );
-    assert!(output.stderr.contains("unknown-key.toml"), "{output}");
     assert!(
         output
             .stderr
-            .contains("unknown key `isue` (RESTATE_SZAMLAZZ_ISUE__MAX_ATTEMPTS)"),
+            .contains("for key \"RESTATE_SZAMLAZZ_ISUE\" in environment variables"),
         "{output}"
     );
     assert!(!output.stdout.contains(VALID), "{output}");

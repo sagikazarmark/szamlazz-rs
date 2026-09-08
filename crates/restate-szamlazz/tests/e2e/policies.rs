@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
+use restate_szamlazz::contract::{IssuedKind, TerminalCode};
+
 use crate::harness::szamlazz::{
     Doc, api_error, create, created, external_id_query, not_found, order_query,
 };
@@ -58,9 +60,9 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
     // The ingress wraps the handler's terminal error; the fault is the JSON
     // in its message.
     let fault = reply.fault();
-    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-11"));
-    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
     assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-11:invoice"));
     assert!(
         fault.message.contains("retry with a new Idempotency-Key"),
@@ -140,7 +142,7 @@ pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issue
         )
         .await;
     assert_eq!(replayed.status, 500, "{}", replayed.body);
-    assert_eq!(replayed.fault().code, "outcome_unknown");
+    assert_eq!(replayed.fault().code, TerminalCode::OutcomeUnknown);
     assert_eq!(
         h.requests_seen().await,
         before,
@@ -230,9 +232,9 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     );
     assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-L4"));
-    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
     assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-L4:invoice"));
     assert!(
         fault.message.contains("(409)") && fault.message.contains("cancelled"),
@@ -420,9 +422,9 @@ pub(crate) async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harnes
     );
 
     let fault = reply.fault();
-    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-28"));
-    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
     assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-28:invoice"));
     assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
     assert!(fault.message.contains("transport failure"), "{fault:?}");
@@ -508,10 +510,10 @@ pub(crate) async fn answered_code_on_the_create_leading_query_is_an_immediate_un
     assert_eq!(reply.status, 503, "{}", reply.body);
 
     let fault = reply.fault();
-    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
     assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-29"));
-    assert_eq!(fault.kind.as_deref(), Some("invoice"));
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
     assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-29:invoice"));
     assert!(fault.message.contains("code 57"), "{fault:?}");
     assert!(
@@ -642,10 +644,10 @@ pub(crate) async fn an_answered_code_on_the_hint_is_inconclusive_and_the_create_
         .await;
     assert_eq!(reply.status, 503, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
     assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-29C"), "{fault:?}");
-    assert_eq!(fault.kind.as_deref(), Some("invoice"), "{fault:?}");
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice), "{fault:?}");
     assert_eq!(
         fault.external_id.as_deref(),
         Some("acct:E2E-29C:invoice"),

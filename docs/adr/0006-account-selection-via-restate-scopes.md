@@ -471,5 +471,6 @@ For readers of older commits and tickets: the module that speaks to szamlazz.hu 
 order-number hint became unconditional in the lookup step; the sentences "one deployment serves one
 szamlazz.hu account" and "a second account is a second deployment" were removed from the design and both
 READMEs. Outside the ADRs' own status lines and superseded text, these words appear nowhere else in the
-repository on purpose; the endpoint's configuration loader still names `account.slug` in the error that
-refuses the pre-release layout.
+repository on purpose (the endpoint's configuration loader named `account.slug` in the error that refused the
+pre-release layout until #128, when the named refusal went with the hand-maintained key tree: an unknown key is
+refused as any other, and the endpoint was never released).

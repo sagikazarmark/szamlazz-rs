@@ -223,6 +223,25 @@ impl ErrorCode {
         matches!(self, Self::Maintenance | Self::EInvoiceSigningFailed)
     }
 
+    /// Whether the code is about the agent credentials rather than the
+    /// request: 3 (invalid credentials), 135 (a browser session is active),
+    /// 136 (login blocked) or 164 (multiple accounts). szamlazz.hu answers
+    /// these before it looks at the request (its documentation; unverified
+    /// on the test account), so the request that draws one was not acted on,
+    /// and the same request succeeds once the account is fixed. A subset of
+    /// [`OutcomeClass::Rejected`]: what an integration pages an operator on
+    /// rather than reports as a refusal of the document.
+    #[must_use]
+    pub fn is_credential_error(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidCredentials
+                | Self::BrowserSessionActive
+                | Self::LoginBlocked
+                | Self::MultipleAccounts
+        )
+    }
+
     /// What this code says about the document the request asked for: may one
     /// exist despite the error? See [`OutcomeClass`] for the caller's action
     /// per class.
@@ -786,6 +805,37 @@ mod tests {
             assert!(NAMED.contains(&code), "{code:?} is a named code");
             assert_eq!(code.outcome_class(), expected, "{code:?}");
         }
+    }
+
+    /// The credential codes are exactly 3, 135, 136 and 164: what szamlazz.hu
+    /// answers about the agent key before it looks at the request. Every
+    /// other named code, and an unknown one, is about the request; the
+    /// credential codes are a subset of the rejected class.
+    #[test]
+    fn credential_codes_are_the_four_login_codes() {
+        let credential = [
+            ErrorCode::InvalidCredentials,
+            ErrorCode::BrowserSessionActive,
+            ErrorCode::LoginBlocked,
+            ErrorCode::MultipleAccounts,
+        ];
+        for code in NAMED {
+            assert_eq!(
+                code.is_credential_error(),
+                credential.contains(&code),
+                "{code:?}"
+            );
+        }
+        for code in &credential {
+            assert_eq!(code.outcome_class(), OutcomeClass::Rejected, "{code:?}");
+        }
+        assert_eq!(
+            credential.map(|code| code.code().to_owned()),
+            ["3", "135", "136", "164"]
+        );
+        // Read off the wire, the code is the same variant.
+        assert!(ErrorCode::from("135").is_credential_error());
+        assert!(!ErrorCode::Unknown("3x".to_owned()).is_credential_error());
     }
 
     /// A code the crate does not know may be a refusal or a new "issued, but…"

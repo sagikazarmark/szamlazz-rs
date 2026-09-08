@@ -89,6 +89,7 @@ mod policies;
 mod prologue;
 mod storno;
 
+use restate_szamlazz::contract::TerminalCode;
 use serde_json::json;
 
 use crate::harness::Harness;
@@ -236,7 +237,7 @@ async fn e2e_check_account_without_protocol_v7() {
     let reply = h.check_account(Some("acme")).await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unknown_account", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("unscoped"), "{fault:?}");
     assert_eq!(
         h.runs(reply.invocation_id()).await,

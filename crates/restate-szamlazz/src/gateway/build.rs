@@ -227,7 +227,7 @@ mod tests {
 
     use super::*;
     use crate::account::{Account, Endpoint};
-    use crate::config::{Defaults, SellerConfig};
+    use crate::account::{Defaults, SellerConfig};
     use crate::contract::document::tests::sample_document;
     use crate::contract::{DocumentKind, ExchangeRateInput, LineItemInput};
     use crate::test_support::open_gateway;

@@ -14,6 +14,9 @@ categories = ["api-bindings"]
 default = []
 ## JSON Schema derivation for the contract types (OpenAPI via Restate discovery).
 schemars = ["dep:schemars", "restate-sdk/schemars"]
+## Constructors that skip validation (`ValidatedWorkerConfig::unchecked`), for test
+## harnesses whose policies are sized for a mock. Never enable it in a deployment.
+test-util = []
 
 [dependencies]
 szamlazz-agent = { workspace = true, features = ["client-reqwest"] }
@@ -32,6 +35,10 @@ tracing = { workspace = true }
 unicode-normalization = "0.1.25"
 
 [dev-dependencies]
+# The crate itself with `test-util`, so the e2e harness can build the
+# sub-floor policies its mock is sized for; a path-only dev-dependency is
+# dropped on publish.
+restate-szamlazz = { path = ".", features = ["test-util"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 static_assertions = "1.1.0"
 # `sync` for the e2e harness's sampler (a `watch` channel stops it), `signal`
@@ -53,3 +60,4 @@ workspace = true
 # public API surface.
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -33,7 +33,7 @@ use restate_szamlazz::account::{StaticConfig, StaticResolver};
 use restate_szamlazz::{Accounts, Agent, Order, WorkerConfig};
 
 async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    worker.validate()?;
+    let worker = worker.validate()?;
     let accounts = Accounts::from(StaticResolver::try_from(accounts)?);
     let order = Order::from_parts(accounts.clone(), worker.clone());
     let agent = Agent::from_parts(accounts, worker);
@@ -293,26 +293,30 @@ accepted and queryable) because its parts are bounded (namespace 16, order key, 
 
 ### Configuration
 
-`WorkerConfig` is the deployment-level configuration the services hold:
+`WorkerConfig` is the deployment-level configuration the services hold, closed to unknown keys at every level:
 
-- `namespace` (the `config::Namespace`): the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`,
+- `namespace` (the `identity::Namespace`): the external-id prefix of the deployment, 1–16 bytes of `[a-z0-9-]`,
   permanent.
-- `[issue]` (`IssueConfig`): the issue policy of the create and storno steps. `max_attempts`, `initial_delay`,
-  `factor`, `max_delay`, `max_duration`; by default `5` executions, `2m` → `10m`, bounded by `1h`.
-- `[read]` (`ReadConfig`): the read policy of every read-only step. The same fields; by default `5` executions,
-  `5s` → `60s`, bounded by `5m`.
-- `[resolve]` (`ResolveConfig`): the resolve policy of the `account` step. The same fields without
-  `max_attempts`; by default `1s` → `10s`, bounded by `1m`.
+- `[issue]`, `[read]`, `[resolve]`: the three run retry policies, one `RetryPolicyConfig` each with the table's
+  defaults (`IssueConfig`, `ReadConfig`, `ResolveConfig` are the three instantiations): `max_attempts` (optional; the
+  duration is the sole bound when unset), `initial_delay`, `factor`, `max_delay`, `max_duration`. The issue policy
+  runs the create and storno steps, by default `5` executions, `2m` → `10m`, bounded by `1h`; the read policy runs
+  every read-only step, by default `5` executions, `5s` → `60s`, bounded by `5m`; the resolve policy runs the
+  `account` step, by default with no attempt cap, `1s` → `10s`, bounded by `1m`.
 
 Each policy's `run_retry_policy()` is the `RunRetryPolicy` its steps run under. `validate()` checks the
-cross-field invariants (`max_attempts ≥ 1`, `initial_delay ≤ max_delay`, `factor ≥ 1`) and one floor:
+cross-field invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay`, a finite `factor ≥ 1`) and one floor:
 `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported `REQUEST_TIMEOUT`
 (60 s) plus a 30 s margin (90 s), because a create or storno step re-executed sooner would re-check while its send
-may still be in flight; the error names the rule.
+may still be in flight; the error names the rule. It yields the `ValidatedWorkerConfig` that `Order::from_parts`
+and `Agent::from_parts` take, so a deployment cannot run on a policy below the floor (the `test-util` feature's
+`ValidatedWorkerConfig::unchecked` is for test harnesses whose szamlazz.hu is a mock).
 
-Nothing account-shaped is in `WorkerConfig`: document defaults and the seller block belong to the `Account`. Their
-value types (`config::Defaults`, `config::SellerConfig`, and `config::Secret`, whose `Debug` output is redacted)
-live in `config` so that any resolver's configuration can reuse them.
+Nothing account-shaped is in `WorkerConfig`: document defaults and the seller block belong to the `Account`, and
+their value types (`account::Defaults`, `account::SellerConfig`, `account::SellerEmailConfig`) are journaled with it,
+so they stay permissive and additive-only. The static resolver reads them through closed input types of its own
+(`StaticDefaults`, `StaticSeller`, `StaticSellerEmail`, beside `StaticAccount`'s `Secret` agent key, whose `Debug`
+output is redacted), which mirror them field for field.
 
 ### Accounts
 

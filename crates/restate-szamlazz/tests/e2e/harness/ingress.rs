@@ -1,7 +1,8 @@
 //! An ingress reply ([`Reply`]) and the structured fault inside Restate's
-//! error envelope ([`Fault`]).
+//! error envelope (the contract's [`Fault`], decoded a second time out of
+//! the envelope's `message`).
 
-use serde::Deserialize;
+use restate_szamlazz::contract::Fault;
 use serde_json::Value;
 
 /// An ingress reply: the status, the parsed body, the invocation id the
@@ -52,19 +53,4 @@ impl Reply {
         serde_json::from_str(message)
             .unwrap_or_else(|error| panic!("a structured fault ({error}): {message}"))
     }
-}
-
-/// The fault body of a `TerminalError`.
-#[derive(Debug, Deserialize)]
-pub(crate) struct Fault {
-    pub(crate) code: String,
-    pub(crate) message: String,
-    #[serde(default)]
-    pub(crate) szamlazz_code: Option<String>,
-    #[serde(default)]
-    pub(crate) order: Option<String>,
-    #[serde(default)]
-    pub(crate) kind: Option<String>,
-    #[serde(default)]
-    pub(crate) external_id: Option<String>,
 }

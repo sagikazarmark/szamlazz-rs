@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 
+use restate_szamlazz::contract::{IssuedKind, TerminalCode};
+
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{
     Doc, agent_key_tag, api_error, create, create_with_key, created, external_id_query, not_found,
@@ -162,12 +164,12 @@ pub(crate) async fn storno_repeats_the_originals_fulfillment_date_or_refuses(h: 
         .await;
     assert_eq!(reply.status, 503, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
     assert!(fault.message.contains("SZ-4A"), "{fault:?}");
     assert!(fault.message.contains("fulfillment date"), "{fault:?}");
     assert!(fault.message.contains("nothing was sent"), "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-4"), "{fault:?}");
-    assert_eq!(fault.kind.as_deref(), Some("invoice"), "{fault:?}");
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice), "{fault:?}");
     assert_eq!(
         fault.external_id.as_deref(),
         Some("acct:E2E-4:storno:SZ-4A"),
@@ -411,14 +413,14 @@ pub(crate) async fn storno_rejections_and_exhaustion_at_the_orders_handler(h: &H
         "the issue policy's delay (1 s) was honoured, not the handler's: {elapsed:?}"
     );
     let fault = reply.fault();
-    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
     assert!(fault.message.contains("storno step"), "{fault:?}");
     assert!(
         fault.message.contains("retry with a new Idempotency-Key"),
         "{fault:?}"
     );
     assert_eq!(fault.order.as_deref(), Some("E2E-45"), "{fault:?}");
-    assert_eq!(fault.kind.as_deref(), Some("invoice"), "{fault:?}");
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice), "{fault:?}");
     assert_eq!(
         fault.external_id.as_deref(),
         Some("acct:E2E-45:storno:SZ-45"),

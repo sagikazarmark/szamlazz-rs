@@ -12,12 +12,12 @@ use super::support::{
     storno_response, verified_document,
 };
 use super::support::{object, shared};
-use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, DeleteProformaRequest, DeleteProformaResponse, DocumentKind, DocumentState,
     DocumentStatus, IssuedKind, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{DeleteOutcome, FoundDocument, issued_kind_of};
+use crate::identity::Namespace;
 use crate::identity::{ExternalId, OrderKey};
 
 impl Execution {
@@ -49,7 +49,7 @@ impl Execution {
         };
         let kind = issued_kind_of(&found.document_type);
         // Every fault from here on is about this storno.
-        let about = |fault: Fault| fault.about(&order, kind, storno_id.as_str());
+        let about = |fault: Fault| fault.about(&order, kind, &storno_id);
         // The intent is a pure function of the verified document: a `telj`
         // it does not carry is a fault after every answer that needs no
         // send.
@@ -104,7 +104,7 @@ impl Execution {
         storno_id: &ExternalId,
     ) -> Result<ControlFlow<StornoResponse, Box<FoundDocument>>, HandlerError> {
         let namespace = &self.config.namespace;
-        let about = |fault: Fault| fault.about(order, None, storno_id.as_str());
+        let about = |fault: Fault| fault.about(order, None, storno_id);
         let found = object::verify(ctx, self, format!("verify-storno-{number}"), number)
             .await
             .map_err(about)?;
@@ -161,8 +161,7 @@ impl Execution {
             .await?
         };
         // Every fault of the settled step is about this proforma.
-        let about =
-            |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), proforma_id.as_str());
+        let about = |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), &proforma_id);
         delete_response(outcome, &self.config.namespace).map_err(|fault| about(fault).into())
     }
 
@@ -323,9 +322,11 @@ fn delete_response(
         DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone => {
             Ok(DeleteProformaResponse::deleted())
         }
-        DeleteOutcome::Rejected { code, .. } => Ok(DeleteProformaResponse::not_deleted(code)),
-        DeleteOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        DeleteOutcome::Rejected(rejection) => {
+            Ok(DeleteProformaResponse::not_deleted(rejection.code))
+        }
+        DeleteOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
         DeleteOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
             "proforma deletion outcome unknown: {message}; retry with a new Idempotency-Key"
@@ -340,6 +341,7 @@ mod tests {
     use rust_decimal::dec;
 
     use super::*;
+    use crate::gateway::{Rejection, SzamlazzAnswer};
     use crate::test_support::{CreditRecord, Doc};
 
     fn ord_1() -> OrderKey {
@@ -536,10 +538,7 @@ mod tests {
         );
         assert_eq!(
             delete_response(
-                DeleteOutcome::Rejected {
-                    code: "57".to_owned(),
-                    message: "Hibás XML.".to_owned(),
-                },
+                DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "Hibás XML."))),
                 &namespace,
             )
             .expect("data"),
@@ -548,10 +547,10 @@ mod tests {
 
         let (status, body) = fault_body(
             delete_response(
-                DeleteOutcome::CredentialsRejected {
-                    code: "3".to_owned(),
-                    message: "Sikertelen bejelentkezés.".to_owned(),
-                },
+                DeleteOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                    "3",
+                    "Sikertelen bejelentkezés.",
+                )),
                 &namespace,
             )
             .expect_err("a fault"),

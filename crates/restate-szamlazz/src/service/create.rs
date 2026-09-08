@@ -21,7 +21,6 @@ use szamlazz_agent::ops::invoice::CreateInvoice;
 use super::prologue::Execution;
 use super::support::object::{lookup, run_reading, run_retrying, verify};
 use super::support::{Fault, Lookup, verified_document};
-use crate::config::Namespace;
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
     IssuedKind, Outcome, ProformaLink, Warning, outstanding,
@@ -30,6 +29,7 @@ use crate::gateway::{
     CreateOutcome, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
     QueryOutcome,
 };
+use crate::identity::Namespace;
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
 /// The identity fields every [`CreateResponse`] carries.
@@ -85,7 +85,7 @@ impl Identity {
 
     /// `fault`, about this document of `order`.
     fn about(&self, order: &OrderKey, fault: Fault) -> Fault {
-        fault.about(order, Some(self.kind), self.external_id.as_str())
+        fault.about(order, Some(self.kind), &self.external_id)
     }
 
     /// Step 5 of the create protocol: the settled create step as the caller's
@@ -135,26 +135,25 @@ impl Identity {
                 self.conflict_about(ConflictReason::ExternalIdCollision, found.number)
             }
             CreateOutcome::DuplicateOrderNumber {
-                code,
-                message,
+                answer,
                 existing_number,
             } => {
                 let mut response = self
                     .conflict(ConflictReason::DuplicateOrderNumber)
-                    .with_code(code)
-                    .with_message(message);
+                    .with_code(answer.code)
+                    .with_message(answer.message);
                 response.existing_number = existing_number;
                 response
             }
-            CreateOutcome::Rejected { code, message } => self.rejected(code, message),
-            CreateOutcome::CredentialsRejected { code, message } => {
-                return Err(Fault::credentials_rejected(namespace, code, message));
+            CreateOutcome::Rejected(rejection) => self.rejected(rejection.code, rejection.message),
+            CreateOutcome::CredentialsRejected(answer) => {
+                return Err(Fault::credentials_rejected(namespace, answer));
             }
             // The leading query answered with a code or `szlahu_down`: the
             // fault the lookup step raises for the same answer, at once:
             // nothing was sent (#63).
-            CreateOutcome::Api { code, message } => {
-                return Err(Fault::inconclusive_answer(code, message));
+            CreateOutcome::Api(answer) => {
+                return Err(Fault::inconclusive_answer(answer));
             }
             CreateOutcome::Unavailable { message } => {
                 return Err(Fault::szlahu_down_answer(message));
@@ -353,11 +352,9 @@ fn decide_proforma_by_number(
     refs: &mut Refs,
 ) -> Result<Option<CreateResponse>, Fault> {
     match outcome {
-        QueryOutcome::Api { code, message } => {
-            Err(identity.about(order, Fault::inconclusive_answer(code, message)))
-        }
-        QueryOutcome::CredentialsRejected { code, message } => {
-            Err(identity.about(order, Fault::credentials_rejected(namespace, code, message)))
+        QueryOutcome::Api(answer) => Err(identity.about(order, Fault::inconclusive_answer(answer))),
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(identity.about(order, Fault::credentials_rejected(namespace, answer)))
         }
         QueryOutcome::NotFound => Ok(Some(
             identity.conflict_about(ConflictReason::ProformaMissing, number),
@@ -441,11 +438,11 @@ fn decide_lookup(
     namespace: &Namespace,
 ) -> Result<ControlFlow<CreateResponse, Option<String>>, Fault> {
     Ok(match outcome {
-        LookupOutcome::Api { code, message } => {
-            return Err(Fault::inconclusive_answer(code, message));
+        LookupOutcome::Api(answer) => {
+            return Err(Fault::inconclusive_answer(answer));
         }
-        LookupOutcome::CredentialsRejected { code, message } => {
-            return Err(Fault::credentials_rejected(namespace, code, message));
+        LookupOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
         }
         LookupOutcome::Live(found) if reissue => {
             ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number))
@@ -856,7 +853,7 @@ mod tests {
     use crate::config::WorkerConfig;
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
-    use crate::gateway::IssuedDocument;
+    use crate::gateway::{IssuedDocument, Rejection, SzamlazzAnswer};
     use crate::test_support::{Doc, open_gateway};
 
     /// An execution as the prologue would build it for the test account.
@@ -1192,10 +1189,7 @@ mod tests {
         let identity = invoice_identity();
 
         let fault = decide_lookup(
-            LookupOutcome::Api {
-                code: "57".to_owned(),
-                message: "Hibás XML.".to_owned(),
-            },
+            LookupOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")),
             false,
             &identity,
             &namespace(),
@@ -1214,10 +1208,10 @@ mod tests {
         );
 
         let fault = decide_lookup(
-            LookupOutcome::CredentialsRejected {
-                code: "135".to_owned(),
-                message: "Aktív böngésző session.".to_owned(),
-            },
+            LookupOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                "135",
+                "Aktív böngésző session.",
+            )),
             true,
             &identity,
             &namespace(),
@@ -1618,10 +1612,7 @@ mod tests {
         let mut refs = Refs::default();
 
         let fault = decide_proforma_by_number(
-            QueryOutcome::Api {
-                code: "57".to_owned(),
-                message: "Hibás XML.".to_owned(),
-            },
+            QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")),
             "D-1",
             &ord_1(),
             &identity,
@@ -1638,10 +1629,10 @@ mod tests {
         assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
 
         let fault = decide_proforma_by_number(
-            QueryOutcome::CredentialsRejected {
-                code: "3".to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
-            },
+            QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                "3",
+                "Sikertelen bejelentkezés.",
+            )),
             "D-1",
             &ord_1(),
             &identity,
@@ -1905,8 +1896,7 @@ mod tests {
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
 
         let response = respond(CreateOutcome::DuplicateOrderNumber {
-            code: "152".to_owned(),
-            message: "dup".to_owned(),
+            answer: SzamlazzAnswer::new("152", "dup"),
             existing_number: Some("SZ-77".to_owned()),
         })
         .expect("data");
@@ -1917,18 +1907,16 @@ mod tests {
         assert_eq!(response.existing_number.as_deref(), Some("SZ-77"));
         assert_eq!(response.code.as_deref(), Some("152"));
 
-        let response = respond(CreateOutcome::Rejected {
-            code: "259".to_owned(),
-            message: "net".to_owned(),
-        })
+        let response = respond(CreateOutcome::Rejected(Rejection::from(
+            SzamlazzAnswer::new("259", "net"),
+        )))
         .expect("data");
         assert_eq!(response.outcome, Outcome::Rejected);
         assert_eq!(response.code.as_deref(), Some("259"));
 
-        let fault = respond(CreateOutcome::CredentialsRejected {
-            code: "3".to_owned(),
-            message: "login".to_owned(),
-        })
+        let fault = respond(CreateOutcome::CredentialsRejected(SzamlazzAnswer::new(
+            "3", "login",
+        )))
         .expect_err("a fault");
         let (status, body) = fault_body(fault);
         assert_eq!(status, 503, "{body}");
@@ -1937,11 +1925,8 @@ mod tests {
         // The leading query's answers (#63): `unavailable` at once, the shape
         // the lookup step gives the same code, with the szamlazz.hu code beside
         // it, never in `code`; `szlahu_down` has no code to carry.
-        let fault = respond(CreateOutcome::Api {
-            code: "57".to_owned(),
-            message: "Hibás XML.".to_owned(),
-        })
-        .expect_err("a fault");
+        let fault = respond(CreateOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")))
+            .expect_err("a fault");
         let (status, body) = fault_body(fault);
         assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], TerminalCode::Unavailable.as_str());

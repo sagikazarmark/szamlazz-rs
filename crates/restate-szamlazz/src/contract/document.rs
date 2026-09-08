@@ -3,7 +3,7 @@
 //!
 //! These types are a *projection* of the Számla Agent model: account
 //! constants live on the resolved [`Account`](crate::account::Account) (its
-//! [`Defaults`](crate::config::Defaults) and seller block), line totals are
+//! [`Defaults`](crate::account::Defaults) and seller block), line totals are
 //! computed here, and the payment method is an English enum. Each type
 //! converts into its `szamlazz_agent` counterpart. Like every request type,
 //! each refuses a field it does not know (`#[serde(deny_unknown_fields)]`):
@@ -77,7 +77,7 @@ impl DocumentInput {
 }
 
 /// Per-call overrides of the account's configured document defaults
-/// (`config::Defaults`).
+/// (`account::Defaults`).
 ///
 /// Every field is optional; an absent field keeps the configured value.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

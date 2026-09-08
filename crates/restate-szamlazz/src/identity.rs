@@ -1,9 +1,16 @@
-//! Identity of orders and documents: the `Order` key and the deterministic
-//! external id (`szamlaKulsoAzon`).
+//! Identity of orders and documents: the deployment's [`Namespace`], the
+//! `Order` key, the document kinds, the caller-supplied [`CorrectionId`] and
+//! [`InvoiceNumber`], and the deterministic external id (`szamlaKulsoAzon`)
+//! composed of them.
 //!
 //! The order key is the trimmed order number, and the external id is derived
-//! from the key alone so that *any* invocation can find what an earlier one
-//! issued.
+//! from the key alone under the namespace so that *any* invocation can find
+//! what an earlier one issued. Every segment an external id is composed of is
+//! defined here, bounded, and free of the separator, so the module proves the
+//! id's length budget on its own and depends on nothing else in the crate:
+//! `contract` re-exports the caller-facing types ([`CorrectionId`],
+//! [`InvoiceNumber`], [`DocumentKind`], [`IssuedKind`]) and `config` holds
+//! the [`Namespace`] in the deployment settings; neither is imported here.
 
 use std::fmt;
 use std::str::FromStr;
@@ -11,8 +18,101 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::{UnicodeNormalization as _, is_nfc};
 
-use crate::config::Namespace;
-use crate::contract::{CorrectionId, DocumentKind, InvoiceNumber, IssuedKind};
+/// The namespace: the external-id prefix of this deployment, 1–16 bytes of
+/// `[a-z0-9-]`.
+///
+/// Chosen by the operator, opaque to szamlazz.hu and permanent: every
+/// external id the deployment issues starts with it, so changing it would
+/// hide every document issued so far. `:` is excluded because it is the
+/// external-id separator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Namespace(String);
+
+impl Namespace {
+    /// The maximum length in bytes.
+    pub const MAX_LEN: usize = 16;
+
+    /// The namespace as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn validate(value: &str) -> Result<(), InvalidNamespace> {
+        if value.is_empty() {
+            return Err(InvalidNamespace::Empty);
+        }
+        if value.len() > Self::MAX_LEN {
+            return Err(InvalidNamespace::TooLong(value.len()));
+        }
+        if let Some(invalid) = value
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            return Err(InvalidNamespace::InvalidChar(invalid));
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Namespace {
+    type Err = InvalidNamespace;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for Namespace {
+    type Error = InvalidNamespace;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl fmt::Display for Namespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for Namespace {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Serializes as the plain string.
+impl Serialize for Namespace {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// Deserializes from a string, rejecting invalid namespaces.
+impl<'de> Deserialize<'de> for Namespace {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A string that is not a valid [`Namespace`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum InvalidNamespace {
+    /// The namespace is empty.
+    #[error("namespace must not be empty")]
+    Empty,
+    /// The namespace exceeds [`Namespace::MAX_LEN`] bytes.
+    #[error("namespace is {0} bytes long, at most {max} are allowed", max = Namespace::MAX_LEN)]
+    TooLong(usize),
+    /// A character is outside `[a-z0-9-]`.
+    #[error("namespace may only contain lowercase ASCII letters, digits and '-', found {0:?}")]
+    InvalidChar(char),
+}
 
 /// The key of an `Order` Virtual Object: the order number (`rendelésszám`)
 /// trimmed of leading and trailing whitespace, case preserved, exactly what
@@ -152,6 +252,428 @@ pub enum InvalidOrderKey {
     /// the order.
     #[error("order number must be in Unicode NFC (normalise it before calling)")]
     NotNfc,
+}
+
+/// A document kind of which an order carries at most one live document, each
+/// with its own handler and external id.
+///
+/// Correctives are not kinds in this sense (an order may carry any number of
+/// them); the kind of an issued document, correctives included, is
+/// `IssuedKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentKind {
+    /// Proforma (`díjbekérő`).
+    Proforma,
+    /// Invoice (`számla`).
+    Invoice,
+    /// Prepayment invoice (`előlegszámla`).
+    Prepayment,
+    /// Final invoice (`végszámla`).
+    Final,
+}
+
+impl DocumentKind {
+    /// Every kind, in the order `Szamlazz.Order.get` reports them.
+    pub const ALL: [Self; 4] = [Self::Proforma, Self::Invoice, Self::Prepayment, Self::Final];
+
+    /// The snake-case token used on the wire and inside external ids.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proforma => "proforma",
+            Self::Invoice => "invoice",
+            Self::Prepayment => "prepayment",
+            Self::Final => "final",
+        }
+    }
+
+    /// Whether the kind is a legal invoice (everything except a proforma).
+    #[must_use]
+    pub const fn is_invoice_kind(self) -> bool {
+        !matches!(self, Self::Proforma)
+    }
+}
+
+impl fmt::Display for DocumentKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The kind of a document the service issued: the four kinds of
+/// `DocumentKind` plus correctives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum IssuedKind {
+    /// Proforma (`díjbekérő`).
+    Proforma,
+    /// Invoice (`számla`).
+    Invoice,
+    /// Prepayment invoice (`előlegszámla`).
+    Prepayment,
+    /// Final invoice (`végszámla`).
+    Final,
+    /// Corrective invoice (`helyesbítő számla`).
+    Corrective,
+}
+
+impl IssuedKind {
+    /// Every issued kind: the four [`DocumentKind`]s in their order, then
+    /// `Corrective`.
+    pub const ALL: [Self; 5] = [
+        Self::Proforma,
+        Self::Invoice,
+        Self::Prepayment,
+        Self::Final,
+        Self::Corrective,
+    ];
+
+    /// The snake-case token used on the wire and inside external ids.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proforma => "proforma",
+            Self::Invoice => "invoice",
+            Self::Prepayment => "prepayment",
+            Self::Final => "final",
+            Self::Corrective => "corrective",
+        }
+    }
+
+    /// The document kind, or `None` for a corrective.
+    #[must_use]
+    pub const fn document_kind(self) -> Option<DocumentKind> {
+        match self {
+            Self::Proforma => Some(DocumentKind::Proforma),
+            Self::Invoice => Some(DocumentKind::Invoice),
+            Self::Prepayment => Some(DocumentKind::Prepayment),
+            Self::Final => Some(DocumentKind::Final),
+            Self::Corrective => None,
+        }
+    }
+}
+
+impl From<DocumentKind> for IssuedKind {
+    fn from(kind: DocumentKind) -> Self {
+        match kind {
+            DocumentKind::Proforma => Self::Proforma,
+            DocumentKind::Invoice => Self::Invoice,
+            DocumentKind::Prepayment => Self::Prepayment,
+            DocumentKind::Final => Self::Final,
+        }
+    }
+}
+
+impl fmt::Display for IssuedKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The caller-supplied identity of one corrective invoice.
+///
+/// Several correctives per invoice are legitimate, so the caller names each
+/// one; the id is embedded in the corrective's external id
+/// (`{namespace}:{order}:corrective:{id}`) and a new id issues a new corrective by
+/// contract. The same id finds the corrective it issued.
+///
+/// Valid ids match `^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$` and are not one of the
+/// tokens external ids are composed of ([`ExternalId::TOKENS`]: `invoice`,
+/// `storno`, `check-account`, … in any letter case), so no composition reads
+/// as another. The length keeps the longest composed id within
+/// [`ExternalId::MAX_LEN`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CorrectionId(String);
+
+impl CorrectionId {
+    /// The maximum length in bytes (the id is ASCII, so also in characters).
+    /// A dashed UUID (36) fits.
+    pub const MAX_LEN: usize = 40;
+
+    /// The id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn validate(value: &str) -> Result<(), InvalidCorrectionId> {
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return Err(InvalidCorrectionId::Empty);
+        };
+        if value.len() > Self::MAX_LEN {
+            return Err(InvalidCorrectionId::TooLong(value.len()));
+        }
+        if !first.is_ascii_alphanumeric() {
+            return Err(InvalidCorrectionId::InvalidStart(first));
+        }
+        if let Some(invalid) =
+            chars.find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+        {
+            return Err(InvalidCorrectionId::InvalidChar(invalid));
+        }
+        if ExternalId::is_token(value) {
+            return Err(InvalidCorrectionId::Reserved(value.to_owned()));
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for CorrectionId {
+    type Err = InvalidCorrectionId;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for CorrectionId {
+    type Error = InvalidCorrectionId;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<&str> for CorrectionId {
+    type Error = InvalidCorrectionId;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl fmt::Display for CorrectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for CorrectionId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<CorrectionId> for String {
+    fn from(id: CorrectionId) -> Self {
+        id.0
+    }
+}
+
+/// Serializes as the plain string.
+impl Serialize for CorrectionId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// Deserializes from a string, rejecting ids that do not match the pattern.
+impl<'de> Deserialize<'de> for CorrectionId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+#[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
+impl schemars::JsonSchema for CorrectionId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CorrectionId".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::CorrectionId").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Caller-supplied identity of one corrective invoice; not one of the external-id tokens (invoice, proforma, prepayment, final, corrective, storno, by-number, check-account).",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$",
+        })
+    }
+}
+
+/// A string that is not a valid [`CorrectionId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum InvalidCorrectionId {
+    /// The id is empty.
+    #[error("correction id must not be empty")]
+    Empty,
+    /// The id exceeds [`CorrectionId::MAX_LEN`] bytes.
+    #[error("correction id is {0} bytes long, at most {max} are allowed", max = CorrectionId::MAX_LEN)]
+    TooLong(usize),
+    /// The first character is not an ASCII letter or digit.
+    #[error("correction id must start with an ASCII letter or digit, found {0:?}")]
+    InvalidStart(char),
+    /// A later character is outside `[A-Za-z0-9._-]`.
+    #[error("correction id may only contain ASCII letters, digits, '.', '_' and '-', found {0:?}")]
+    InvalidChar(char),
+    /// The id is one of the tokens external ids are composed of
+    /// ([`ExternalId::TOKENS`]), in any letter case.
+    #[error(
+        "correction id {0:?} is reserved: the external-id tokens ({tokens}) are not correction ids",
+        tokens = ExternalId::TOKENS.join(", ")
+    )]
+    Reserved(String),
+}
+
+/// A caller-supplied invoice number (`számlaszám`), as the by-number requests
+/// take it: `Szamlazz.Agent.query`'s selector, `set_payments`, `storno`,
+/// `Szamlazz.Order.storno_invoice`, the base of `correct_invoice` and the
+/// `options.proforma: {number}` link.
+///
+/// Bounded because it flows into step names and into the storno external ids
+/// (`{namespace}:{order}:storno:{number}`, `{namespace}:by-number:{number}:storno`):
+/// 1–[`MAX_LEN`](Self::MAX_LEN) bytes, no whitespace, no control character,
+/// no `:`. Nothing is trimmed: a padded number is refused, never sent, since
+/// szamlazz.hu would answer 7 (`not_found`) to it and the rule is the better
+/// diagnosis. szamlazz.hu's own numbers (`E-TST-2026-123`) are far inside the
+/// bound; NAV's `invoiceNumber` allows 50 characters, and the longest composed
+/// external id keeps the bound within [`ExternalId::MAX_LEN`].
+///
+/// Distinct from `szamlazz_agent::InvoiceNumber`, the unvalidated wire type a
+/// number szamlazz.hu *reports* is carried in; the worker's response types
+/// echo numbers as plain strings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InvoiceNumber(String);
+
+impl InvoiceNumber {
+    /// The maximum length in bytes.
+    pub const MAX_LEN: usize = 40;
+
+    /// The number as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn validate(value: &str) -> Result<(), InvalidInvoiceNumber> {
+        if value.is_empty() {
+            return Err(InvalidInvoiceNumber::Empty);
+        }
+        if value.len() > Self::MAX_LEN {
+            return Err(InvalidInvoiceNumber::TooLong(value.len()));
+        }
+        if let Some(control) = value.chars().find(|c| c.is_control()) {
+            return Err(InvalidInvoiceNumber::ControlChar(control));
+        }
+        if let Some(whitespace) = value.chars().find(|c| c.is_whitespace()) {
+            return Err(InvalidInvoiceNumber::Whitespace(whitespace));
+        }
+        if value.contains(ExternalId::SEPARATOR) {
+            return Err(InvalidInvoiceNumber::Separator);
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for InvoiceNumber {
+    type Err = InvalidInvoiceNumber;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for InvoiceNumber {
+    type Error = InvalidInvoiceNumber;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<&str> for InvoiceNumber {
+    type Error = InvalidInvoiceNumber;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl fmt::Display for InvoiceNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for InvoiceNumber {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<InvoiceNumber> for String {
+    fn from(number: InvoiceNumber) -> Self {
+        number.0
+    }
+}
+
+/// Serializes as the plain string.
+impl Serialize for InvoiceNumber {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// Deserializes from a string, rejecting numbers outside the bound.
+impl<'de> Deserialize<'de> for InvoiceNumber {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+#[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
+impl schemars::JsonSchema for InvoiceNumber {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "InvoiceNumber".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::InvoiceNumber").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "An invoice number (számlaszám) as the caller names it: 1–40 bytes, no whitespace, no control character, no ':'.",
+            "minLength": 1,
+            "maxLength": InvoiceNumber::MAX_LEN,
+            "pattern": "^[^\\s\\x00-\\x1F\\x7F:]+$",
+        })
+    }
+}
+
+/// A string that is not a valid [`InvoiceNumber`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum InvalidInvoiceNumber {
+    /// The number is empty.
+    #[error("invoice number must not be empty")]
+    Empty,
+    /// The number exceeds [`InvoiceNumber::MAX_LEN`] bytes.
+    #[error("invoice number is {0} bytes long, at most {max} are allowed", max = InvoiceNumber::MAX_LEN)]
+    TooLong(usize),
+    /// Contains a control character.
+    #[error("invoice number must not contain control characters, found {0:?}")]
+    ControlChar(char),
+    /// Contains whitespace, anywhere; nothing is trimmed.
+    #[error("invoice number must not contain whitespace, found {0:?}")]
+    Whitespace(char),
+    /// Contains `:`, the separator of the external id's segments.
+    #[error("invoice number must not contain ':' (the external-id separator)")]
+    Separator,
 }
 
 /// The external id (`szamlaKulsoAzon`) the service sends or queries.
@@ -348,6 +870,44 @@ mod tests {
 
     fn namespace() -> Namespace {
         "acct".parse().expect("valid namespace")
+    }
+
+    /// The namespace is 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it
+    /// is the external-id separator.
+    #[test]
+    fn namespace_rule_is_enforced_at_parse_time() {
+        for accepted in ["a", "acct", "acct-1", "0", "a".repeat(16).as_str()] {
+            let namespace: Namespace = accepted.parse().expect(accepted);
+            assert_eq!(namespace.as_str(), accepted);
+            assert_eq!(namespace.to_string(), accepted);
+            assert_eq!(
+                serde_json::from_value::<Namespace>(serde_json::json!(accepted)).expect(accepted),
+                namespace
+            );
+        }
+
+        let too_long = "a".repeat(17);
+        let rejected = [
+            ("", InvalidNamespace::Empty),
+            ("Acct", InvalidNamespace::InvalidChar('A')),
+            ("acct_1", InvalidNamespace::InvalidChar('_')),
+            ("acct 1", InvalidNamespace::InvalidChar(' ')),
+            ("acct:1", InvalidNamespace::InvalidChar(':')),
+            ("ácct", InvalidNamespace::InvalidChar('á')),
+            (too_long.as_str(), InvalidNamespace::TooLong(17)),
+        ];
+        for (input, expected) in rejected {
+            assert_eq!(
+                input.parse::<Namespace>(),
+                Err(expected.clone()),
+                "{input:?}"
+            );
+            assert_eq!(Namespace::try_from(input.to_owned()), Err(expected));
+            assert!(
+                serde_json::from_value::<Namespace>(serde_json::json!(input)).is_err(),
+                "{input:?} should be rejected"
+            );
+        }
     }
 
     /// The key's alphabet: trimmed, 1–40 bytes, case preserved, no control
@@ -549,5 +1109,200 @@ mod tests {
         assert_eq!(normalize_buyer_name("Pro\u{301}ba"), "Pr\u{f3}ba");
         assert_ne!(normalize_buyer_name("kft."), normalize_buyer_name("Kft."));
         assert_eq!(normalize_buyer_name("  a  b  "), "a  b");
+    }
+
+    #[test]
+    fn correction_id_accepts_valid_ids() {
+        for id in [
+            "a",
+            "0",
+            "c-2",
+            "order.42_fix-1",
+            "A",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "invoice-2",
+            "storno.1",
+            &"x".repeat(CorrectionId::MAX_LEN),
+        ] {
+            let parsed: CorrectionId = id.parse().expect(id);
+            assert_eq!(parsed.as_str(), id);
+            assert_eq!(parsed.to_string(), id);
+        }
+        assert_eq!(
+            CorrectionId::MAX_LEN,
+            40,
+            "a dashed UUID (36) fits with room"
+        );
+    }
+
+    #[test]
+    fn correction_id_rejects_invalid_ids() {
+        let too_long = "x".repeat(CorrectionId::MAX_LEN + 1);
+        let cases = [
+            ("", InvalidCorrectionId::Empty),
+            ("-a", InvalidCorrectionId::InvalidStart('-')),
+            (".a", InvalidCorrectionId::InvalidStart('.')),
+            ("a b", InvalidCorrectionId::InvalidChar(' ')),
+            ("a/b", InvalidCorrectionId::InvalidChar('/')),
+            ("a:b", InvalidCorrectionId::InvalidChar(':')),
+            ("á", InvalidCorrectionId::InvalidStart('á')),
+            ("aá", InvalidCorrectionId::InvalidChar('á')),
+            (
+                too_long.as_str(),
+                InvalidCorrectionId::TooLong(CorrectionId::MAX_LEN + 1),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                input.parse::<CorrectionId>(),
+                Err(expected.clone()),
+                "{input:?}"
+            );
+            assert_eq!(CorrectionId::try_from(input.to_owned()), Err(expected));
+        }
+    }
+
+    /// A correction id equal to one of the tokens the external ids are
+    /// composed of (the kinds, `corrective`, `storno`, `by-number`,
+    /// `check-account`) is refused, in any letter case, so that
+    /// `{namespace}:{order}:corrective:{id}` never reads as another
+    /// composition. Belt and braces beside the `:`-free
+    /// [`OrderKey`], which already makes such a
+    /// collision impossible.
+    #[test]
+    fn correction_id_refuses_the_external_id_tokens() {
+        for token in ExternalId::TOKENS {
+            for spelling in [token.to_owned(), token.to_ascii_uppercase()] {
+                assert_eq!(
+                    spelling.parse::<CorrectionId>(),
+                    Err(InvalidCorrectionId::Reserved(spelling.clone())),
+                    "{spelling:?}"
+                );
+                let error = serde_json::from_str::<CorrectionId>(&format!("\"{spelling}\""))
+                    .expect_err("refused through serde too")
+                    .to_string();
+                assert!(
+                    error.contains("reserved") && error.contains(token),
+                    "{spelling:?}: names the rule and the token: {error}"
+                );
+            }
+        }
+        assert_eq!(ExternalId::TOKENS.len(), 8);
+        for kind in IssuedKind::ALL {
+            assert!(ExternalId::TOKENS.contains(&kind.as_str()), "{kind}");
+        }
+    }
+
+    #[test]
+    fn correction_id_serde_validates() {
+        let id: CorrectionId = serde_json::from_str("\"c-1\"").expect("valid");
+        assert_eq!(id.as_str(), "c-1");
+        assert_eq!(serde_json::to_string(&id).expect("serialize"), "\"c-1\"");
+        assert!(serde_json::from_str::<CorrectionId>("\"-c\"").is_err());
+        assert!(serde_json::from_str::<CorrectionId>("\"\"").is_err());
+    }
+
+    /// A caller-supplied invoice number as the by-number requests take it
+    /// (`Szamlazz.Agent.query`'s selector, `set_payments`, `storno`,
+    /// `Szamlazz.Order.storno_invoice`, `correct_invoice`'s base and the
+    /// `options.proforma: {number}` link): at most 40 bytes, no whitespace, no
+    /// control character, no `:`. It flows into step names and into the
+    /// storno external ids, so it is bounded like the other segments;
+    /// szamlazz.hu's own numbers (`E-TST-2026-123`) are far inside.
+    #[test]
+    fn invoice_number_table() {
+        let longest = "x".repeat(InvoiceNumber::MAX_LEN);
+        for number in [
+            "SZ-1",
+            "E-TST-2026-123",
+            "D-2026-7",
+            "2026/0001",
+            "É-2026-1",
+            longest.as_str(),
+        ] {
+            let parsed: InvoiceNumber = number.parse().expect(number);
+            assert_eq!(parsed.as_str(), number);
+            assert_eq!(parsed.to_string(), number);
+            assert_eq!(InvoiceNumber::try_from(number.to_owned()), Ok(parsed));
+        }
+        assert_eq!(InvoiceNumber::MAX_LEN, 40);
+
+        let too_long = "x".repeat(InvoiceNumber::MAX_LEN + 1);
+        for (input, expected) in [
+            ("", InvalidInvoiceNumber::Empty),
+            (" SZ-1", InvalidInvoiceNumber::Whitespace(' ')),
+            ("SZ-1 ", InvalidInvoiceNumber::Whitespace(' ')),
+            ("SZ 1", InvalidInvoiceNumber::Whitespace(' ')),
+            ("SZ\u{a0}1", InvalidInvoiceNumber::Whitespace('\u{a0}')),
+            ("SZ\t1", InvalidInvoiceNumber::ControlChar('\t')),
+            ("SZ\u{7f}1", InvalidInvoiceNumber::ControlChar('\u{7f}')),
+            ("SZ:1", InvalidInvoiceNumber::Separator),
+            (
+                too_long.as_str(),
+                InvalidInvoiceNumber::TooLong(InvoiceNumber::MAX_LEN + 1),
+            ),
+        ] {
+            assert_eq!(
+                input.parse::<InvoiceNumber>(),
+                Err(expected.clone()),
+                "{input:?}"
+            );
+            assert_eq!(InvoiceNumber::try_from(input.to_owned()), Err(expected));
+        }
+    }
+
+    #[test]
+    fn correction_id_orders_as_string() {
+        let a: CorrectionId = "a".parse().expect("valid");
+        let b: CorrectionId = "b".parse().expect("valid");
+        assert!(a < b);
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(b.clone(), 2);
+        map.insert(a.clone(), 1);
+        assert_eq!(map.keys().collect::<Vec<_>>(), vec![&a, &b]);
+    }
+
+    #[test]
+    fn kinds_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&DocumentKind::Prepayment).expect("serialize"),
+            "\"prepayment\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IssuedKind::Corrective).expect("serialize"),
+            "\"corrective\""
+        );
+        assert_eq!(
+            serde_json::from_str::<DocumentKind>("\"final\"").expect("deserialize"),
+            DocumentKind::Final
+        );
+        assert!(serde_json::from_str::<DocumentKind>("\"corrective\"").is_err());
+        for kind in DocumentKind::ALL {
+            assert_eq!(IssuedKind::from(kind).document_kind(), Some(kind));
+            assert_eq!(IssuedKind::from(kind).as_str(), kind.as_str());
+        }
+        assert_eq!(IssuedKind::Corrective.document_kind(), None);
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn correction_id_schema_carries_the_pattern() {
+        let schema = schemars::schema_for!(CorrectionId);
+        let json = serde_json::to_value(&schema).expect("serialize");
+        assert_eq!(json["pattern"], "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$");
+    }
+
+    /// The schema carries the bound the type enforces: the length as
+    /// `maxLength`, and a pattern that refuses whitespace, ASCII control
+    /// characters and the separator, in the ECMA-262 subset JSON Schema
+    /// guarantees, so no `\p{…}` class.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn invoice_number_schema_carries_the_bound() {
+        let schema = schemars::schema_for!(InvoiceNumber);
+        let json = serde_json::to_value(&schema).expect("serialize");
+        assert_eq!(json["maxLength"], InvoiceNumber::MAX_LEN);
+        assert_eq!(json["minLength"], 1);
+        assert_eq!(json["pattern"], "^[^\\s\\x00-\\x1F\\x7F:]+$");
     }
 }

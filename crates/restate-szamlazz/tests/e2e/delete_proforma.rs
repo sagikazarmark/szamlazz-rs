@@ -5,6 +5,8 @@
 use serde_json::json;
 use wiremock::ResponseTemplate;
 
+use restate_szamlazz::contract::{IssuedKind, TerminalCode};
+
 use crate::harness::Harness;
 use crate::harness::szamlazz::{
     Doc, delete_of, external_id_query, not_found, proforma_deleted, proforma_gone,
@@ -201,7 +203,7 @@ pub(crate) async fn delete_proforma_guards_paid_proformas_and_settles_every_answ
         .await;
     assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "outcome_unknown", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
     assert!(
         fault.message.contains("proforma deletion outcome unknown"),
         "{fault:?}"
@@ -211,7 +213,7 @@ pub(crate) async fn delete_proforma_guards_paid_proformas_and_settles_every_answ
         "{fault:?}"
     );
     assert_eq!(fault.order.as_deref(), Some("E2E-48"), "{fault:?}");
-    assert_eq!(fault.kind.as_deref(), Some("proforma"), "{fault:?}");
+    assert_eq!(fault.kind, Some(IssuedKind::Proforma), "{fault:?}");
     assert_eq!(
         fault.external_id.as_deref(),
         Some("acct:E2E-48:proforma"),

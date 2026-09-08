@@ -1,10 +1,11 @@
-//! Configuration types: the deployment-level [`WorkerConfig`] the Restate
-//! services hold, and the account-level building blocks a resolver's
-//! configuration is written in.
+//! The deployment-level configuration the Restate services hold:
+//! [`WorkerConfig`], validated into the [`ValidatedWorkerConfig`] the
+//! services are built from.
 //!
 //! [`WorkerConfig`] is what is constant for a deployment, is not
 //! account-shaped, and therefore neither travels in a request payload nor
-//! routes through the gateway:
+//! routes through the gateway: the namespace of the external ids and the
+//! three run retry policies, one [`RetryPolicyConfig`] per table:
 //!
 //! ```toml
 //! namespace = "acct"            # the external-id prefix; permanent
@@ -24,36 +25,42 @@
 //! max_duration = "5m"
 //!
 //! [resolve]                     # the run retry policy of the `account` step
-//! initial_delay = "1s"
+//! initial_delay = "1s"         # no max_attempts: the duration is the bound
 //! factor = 2.0
 //! max_delay = "10s"
 //! max_duration = "1m"
 //! ```
 //!
-//! [`WorkerConfig`] and [`Secret`] only implement `Deserialize`; the endpoint
-//! binary chooses the file format and environment merging, and merges the
-//! static resolver's account configuration
+//! The types implement `Deserialize` only and are **closed**
+//! (`#[serde(deny_unknown_fields)]`): a misspelt table or key is a parse
+//! error naming it, never a policy left at its default. The endpoint binary
+//! chooses the file format and environment merging, and reads the static
+//! resolver's account configuration
 //! ([`StaticConfig`](crate::account::StaticConfig)) beside these keys.
-//! Everything account-shaped (credentials, endpoint,
-//! document defaults, seller block) is carried by the
-//! [`Account`](crate::account::Account) a resolver produces and read by the
-//! services through [`Gateway::account`](crate::gateway::Gateway::account);
-//! the value types those fields are made of ([`Defaults`],
-//! [`SellerConfig`], and [`Secret`] for a key written inline) are defined
-//! here so that any resolver's configuration can reuse them. The value types
-//! also implement `Serialize`: they ride inside the journaled `Account`, so
-//! they are additive-only and `#[non_exhaustive]`. The three policies are
-//! `#[non_exhaustive]` too (deployment-level, journaled nowhere, but fields
-//! may be added), so build any of them from `Default::default()` (or
-//! deserialize it) and set fields.
+//! Everything account-shaped (credentials, endpoint, document defaults,
+//! seller block) is the [`Account`](crate::account::Account) a resolver
+//! produces, read by the services through
+//! [`Gateway::account`](crate::gateway::Gateway::account); its value types
+//! live in [`account`](crate::account), where they are journaled.
+//!
+//! The policies are `#[non_exhaustive]` (deployment-level, journaled nowhere,
+//! but fields may be added): build one from `Default::default()` (or
+//! deserialize it) and set fields. [`WorkerConfig::validate`] is the one way
+//! to a [`ValidatedWorkerConfig`], and [`Order::from_parts`](crate::Order)
+//! and [`Agent::from_parts`](crate::Agent) take nothing else, so a deployment
+//! cannot run on an issue policy below its floor.
 
 use std::fmt;
-use std::str::FromStr;
+use std::marker::PhantomData;
+use std::ops::Deref;
 use std::time::Duration;
 
 use restate_sdk::context::RunRetryPolicy;
 use serde::{Deserialize, Serialize};
-use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
+
+use crate::identity::Namespace;
+
+use table::Table;
 
 /// The deployment-level settings the Restate services hold: what is not
 /// account-shaped and therefore does not route through the gateway.
@@ -62,9 +69,11 @@ use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 /// policy is the run retry policy of the create and storno steps; the read
 /// policy is the run retry policy of every read-only step; the resolve policy
 /// is the run retry policy of the `account` step. All three policies default
-/// when absent. Call [`validate`](Self::validate) after parsing for the
-/// cross-field invariants `Deserialize` cannot express.
+/// when absent. [`validate`](Self::validate) checks the cross-field
+/// invariants `Deserialize` cannot express and yields the
+/// [`ValidatedWorkerConfig`] the services take.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
     pub namespace: Namespace,
@@ -92,63 +101,97 @@ impl WorkerConfig {
         }
     }
 
-    /// Checks the cross-field invariants that `Deserialize` cannot express.
+    /// Checks the cross-field invariants that `Deserialize` cannot express
+    /// and yields the configuration the services are built from.
     ///
     /// The namespace is validated when parsed and needs no further check.
     ///
     /// # Errors
     ///
-    /// Returns the first violated invariant: a `max_attempts` of zero on the
-    /// issue or read policy, an issue `initial_delay` below
+    /// Returns the first violated invariant: a `max_attempts` of zero on any
+    /// policy, an issue `initial_delay` below
     /// [`IssueConfig::MIN_INITIAL_DELAY`], an `initial_delay` greater than the
     /// `max_delay` of the same policy, or a `factor` below 1 on any policy.
-    pub fn validate(&self) -> Result<(), WorkerConfigError> {
-        for (policy, max_attempts) in [
-            (Policy::Issue, self.issue.max_attempts),
-            (Policy::Read, self.read.max_attempts),
-        ] {
-            if max_attempts == 0 {
-                return Err(WorkerConfigError::ZeroMaxAttempts { policy });
-            }
-        }
+    pub fn validate(self) -> Result<ValidatedWorkerConfig, WorkerConfigError> {
+        self.check()?;
+        Ok(ValidatedWorkerConfig(self))
+    }
+
+    /// The invariants, in the order they are reported: an attempt cap of
+    /// zero on any table, the issue floor (the safety rule), then each
+    /// table's consistency rules.
+    fn check(&self) -> Result<(), WorkerConfigError> {
+        self.issue.check_attempts()?;
+        self.read.check_attempts()?;
+        self.resolve.check_attempts()?;
         if self.issue.initial_delay < IssueConfig::MIN_INITIAL_DELAY {
             return Err(WorkerConfigError::IssueDelayBelowFloor {
                 initial: self.issue.initial_delay,
                 floor: IssueConfig::MIN_INITIAL_DELAY,
             });
         }
-        for (policy, initial, max, factor) in [
-            (
-                Policy::Issue,
-                self.issue.initial_delay,
-                self.issue.max_delay,
-                self.issue.factor,
-            ),
-            (
-                Policy::Read,
-                self.read.initial_delay,
-                self.read.max_delay,
-                self.read.factor,
-            ),
-            (
-                Policy::Resolve,
-                self.resolve.initial_delay,
-                self.resolve.max_delay,
-                self.resolve.factor,
-            ),
-        ] {
-            if initial > max {
-                return Err(WorkerConfigError::DelayOrder {
-                    policy,
-                    initial,
-                    max,
-                });
-            }
-            if factor.is_nan() || factor < 1.0 {
-                return Err(WorkerConfigError::InvalidFactor { policy, factor });
-            }
-        }
+        self.issue.check_delays()?;
+        self.read.check_delays()?;
+        self.resolve.check_delays()?;
         Ok(())
+    }
+}
+
+impl TryFrom<WorkerConfig> for ValidatedWorkerConfig {
+    type Error = WorkerConfigError;
+
+    fn try_from(config: WorkerConfig) -> Result<Self, Self::Error> {
+        config.validate()
+    }
+}
+
+/// A [`WorkerConfig`] whose invariants [`WorkerConfig::validate`] has
+/// checked: what [`Order::from_parts`](crate::Order) and
+/// [`Agent::from_parts`](crate::Agent) take, so that the services cannot be
+/// built over an issue policy below its floor. Dereferences to the
+/// [`WorkerConfig`] it wraps.
+///
+/// There is no other constructor: a policy the floor refuses (the e2e suite's
+/// one-second issue delay against a mock that answers at once) is built with
+/// `ValidatedWorkerConfig::unchecked`, behind the `test-util` feature, which
+/// a deployment never enables (and which this documentation is built without,
+/// so the method is not linked here).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedWorkerConfig(WorkerConfig);
+
+impl ValidatedWorkerConfig {
+    /// Wraps `config` **without** checking its invariants: for test harnesses
+    /// whose policies are sized for a mock rather than for szamlazz.hu.
+    ///
+    /// Behind the `test-util` feature so that a deployment cannot reach it:
+    /// an issue `initial_delay` below [`IssueConfig::MIN_INITIAL_DELAY`]
+    /// re-executes the create step while the cut execution's send may still
+    /// be in flight.
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn unchecked(config: WorkerConfig) -> Self {
+        Self(config)
+    }
+
+    /// The settings.
+    #[must_use]
+    pub fn into_inner(self) -> WorkerConfig {
+        self.0
+    }
+}
+
+impl Deref for ValidatedWorkerConfig {
+    type Target = WorkerConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<WorkerConfig> for ValidatedWorkerConfig {
+    fn as_ref(&self) -> &WorkerConfig {
+        &self.0
     }
 }
 
@@ -188,9 +231,9 @@ pub enum WorkerConfigError {
         /// The configured maximum delay.
         max: Duration,
     },
-    /// A policy's `factor` is below 1 (the delay would shrink) or not a
-    /// number.
-    #[error("{policy}.factor ({factor}) must be a number of at least 1")]
+    /// A policy's `factor` is below 1 (the delay would shrink), or not a
+    /// finite number (`nan`, `inf`; TOML and YAML accept both as floats).
+    #[error("{policy}.factor ({factor}) must be a finite number of at least 1")]
     InvalidFactor {
         /// The policy.
         policy: Policy,
@@ -221,378 +264,101 @@ impl fmt::Display for Policy {
     }
 }
 
-/// The namespace: the external-id prefix of this deployment, 1–16 bytes of
-/// `[a-z0-9-]`.
-///
-/// Chosen by the operator, opaque to szamlazz.hu and permanent: every
-/// external id the deployment issues starts with it, so changing it would
-/// hide every document issued so far. `:` is excluded because it is the
-/// external-id separator.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Namespace(String);
+/// The three tables a [`RetryPolicyConfig`] is read from, as types: each
+/// names its [`Policy`] and carries its defaults, so one struct serves the
+/// three policies with three sets of defaults.
+pub mod table {
+    use std::fmt;
+    use std::time::Duration;
 
-impl Namespace {
-    /// The maximum length in bytes.
-    pub const MAX_LEN: usize = 16;
+    use super::{Policy, RetryPolicyConfig};
 
-    /// The namespace as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// A policy table of the [`WorkerConfig`](super::WorkerConfig): its name
+    /// and its defaults. Sealed: the three tables are the deployment's.
+    pub trait Table: sealed::Sealed + Sized + fmt::Debug + Clone + Copy + PartialEq + Eq {
+        /// The table, as a [`WorkerConfigError`](super::WorkerConfigError)
+        /// names it.
+        const POLICY: Policy;
+
+        /// The table's defaults.
+        fn defaults() -> RetryPolicyConfig<Self>;
     }
 
-    fn validate(value: &str) -> Result<(), InvalidNamespace> {
-        if value.is_empty() {
-            return Err(InvalidNamespace::Empty);
-        }
-        if value.len() > Self::MAX_LEN {
-            return Err(InvalidNamespace::TooLong(value.len()));
-        }
-        if let Some(invalid) = value
-            .chars()
-            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
-        {
-            return Err(InvalidNamespace::InvalidChar(invalid));
-        }
-        Ok(())
-    }
-}
-
-impl FromStr for Namespace {
-    type Err = InvalidNamespace;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::validate(value)?;
-        Ok(Self(value.to_owned()))
-    }
-}
-
-impl TryFrom<String> for Namespace {
-    type Error = InvalidNamespace;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-}
-
-impl fmt::Display for Namespace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Namespace {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Serializes as the plain string.
-impl Serialize for Namespace {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-/// Deserializes from a string, rejecting invalid namespaces.
-impl<'de> Deserialize<'de> for Namespace {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-/// A string that is not a valid [`Namespace`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum InvalidNamespace {
-    /// The namespace is empty.
-    #[error("namespace must not be empty")]
-    Empty,
-    /// The namespace exceeds [`Namespace::MAX_LEN`] bytes.
-    #[error("namespace is {0} bytes long, at most {max} are allowed", max = Namespace::MAX_LEN)]
-    TooLong(usize),
-    /// A character is outside `[a-z0-9-]`.
-    #[error("namespace may only contain lowercase ASCII letters, digits and '-', found {0:?}")]
-    InvalidChar(char),
-}
-
-/// A secret string whose `Debug` output is redacted.
-///
-/// Deserializes from a string or an integer: agent keys may be all digits,
-/// and an unquoted one is a number to TOML and YAML.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Secret(String);
-
-impl Secret {
-    /// Wraps a secret.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    mod sealed {
+        pub trait Sealed {}
     }
 
-    /// The secret in clear text.
-    #[must_use]
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
+    /// `[issue]`: the run retry policy of the create step and the storno
+    /// step. Defaults: five executions, `2m → 10m` doubling, bounded at `1h`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Issue {}
 
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Secret(***)")
-    }
-}
+    /// `[read]`: the run retry policy of every read-only step. Defaults:
+    /// five executions, `5s → 60s` doubling, bounded at `5m`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Read {}
 
-impl<'de> Deserialize<'de> for Secret {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct StringOrInteger;
+    /// `[resolve]`: the run retry policy of the `account` step. Defaults:
+    /// no attempt cap, `1s → 10s` doubling, bounded at `1m`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Resolve {}
 
-        impl serde::de::Visitor<'_> for StringOrInteger {
-            type Value = Secret;
+    impl sealed::Sealed for Issue {}
+    impl sealed::Sealed for Read {}
+    impl sealed::Sealed for Resolve {}
 
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string or an integer")
-            }
+    impl Table for Issue {
+        const POLICY: Policy = Policy::Issue;
 
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(Secret::from(value))
-            }
-
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-                Ok(Secret::from(value))
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(Secret::from(value.to_string()))
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(Secret::from(value.to_string()))
-            }
-        }
-
-        deserializer.deserialize_any(StringOrInteger)
-    }
-}
-
-impl From<String> for Secret {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for Secret {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-/// Document defaults; [`DocumentOverrides`](crate::contract::DocumentOverrides)
-/// may change the first seven per call.
-///
-/// Journaled inside the [`Account`](crate::account::Account), so
-/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
-/// and set fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct Defaults {
-    /// Issue e-invoices (`e-számla`). Default `false`.
-    pub e_invoice: bool,
-    /// Document language code. Default `hu`.
-    pub language: String,
-    /// Currency code. Default `HUF`.
-    pub currency: String,
-    /// Quoting bank for non-HUF documents without an explicit rate. Default
-    /// `MNB`.
-    pub exchange_rate_bank: String,
-    /// PDF template token.
-    pub template: Option<String>,
-    /// Whether szamlazz.hu should email documents to buyers.
-    pub send_email: Option<bool>,
-    /// Invoice number prefix (`számlaszám előtag`).
-    pub number_prefix: Option<String>,
-    /// Additional logo token configured on the account.
-    pub extra_logo: Option<String>,
-    /// Aggregator identifier for contracted integrations; not overridable per
-    /// call.
-    pub aggregator: Option<String>,
-    /// Guardian processing flag for contracted integrations; not overridable
-    /// per call.
-    pub guardian: Option<bool>,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            e_invoice: false,
-            language: "hu".to_owned(),
-            currency: "HUF".to_owned(),
-            exchange_rate_bank: "MNB".to_owned(),
-            template: None,
-            send_email: None,
-            number_prefix: None,
-            extra_logo: None,
-            aggregator: None,
-            guardian: None,
+        fn defaults() -> RetryPolicyConfig<Self> {
+            RetryPolicyConfig::new(
+                Some(5),
+                Duration::from_mins(2),
+                2.0,
+                Duration::from_mins(10),
+                Duration::from_hours(1),
+            )
         }
     }
-}
 
-/// The seller (`eladó`) block; the account's own data is used where absent.
-///
-/// Journaled inside the [`Account`](crate::account::Account), so
-/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
-/// and set fields.
-///
-/// Deliberately not the agent crate's [`Seller`], although the fields mirror
-/// it: the account's journal shape is this crate's contract with every
-/// in-flight invocation, and a crate-owned type keeps a `Seller`
-/// change in `szamlazz-agent` (a field renamed, retyped, or made required)
-/// from altering what an `account` entry replays as. The same reason
-/// `Szamlazz.Agent.query_taxpayer` journals the crate-owned
-/// `QueryTaxpayerResponse` projection rather than the agent crate's
-/// `TaxpayerInfo`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct SellerConfig {
-    /// Bank name.
-    pub bank: Option<String>,
-    /// Bank account number.
-    pub bank_account: Option<String>,
-    /// Name of the signer shown on documents.
-    pub signer_name: Option<String>,
-    /// The notification email szamlazz.hu sends to buyers.
-    pub email: SellerEmailConfig,
-}
+    impl Table for Read {
+        const POLICY: Policy = Policy::Read;
 
-impl SellerConfig {
-    /// The Agent seller block. The email block is present only when at least
-    /// one of its fields is set.
-    #[must_use]
-    pub fn to_seller(&self) -> Seller {
-        Seller {
-            bank: self.bank.clone(),
-            bank_account: self.bank_account.clone(),
-            signer_name: self.signer_name.clone(),
-            email: self.email.to_seller_email(),
+        fn defaults() -> RetryPolicyConfig<Self> {
+            RetryPolicyConfig::new(
+                Some(5),
+                Duration::from_secs(5),
+                2.0,
+                Duration::from_mins(1),
+                Duration::from_mins(5),
+            )
         }
     }
-}
 
-/// Settings of the notification email szamlazz.hu sends to buyers.
-///
-/// Journaled inside the [`Account`](crate::account::Account) through
-/// [`SellerConfig`], so additive-only and `#[non_exhaustive]`: start from
-/// [`Default::default`] and set fields.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct SellerEmailConfig {
-    /// Reply-to address.
-    pub reply_to: Option<String>,
-    /// Subject.
-    pub subject: Option<String>,
-    /// Body; supports `BBCode`.
-    pub body: Option<String>,
-}
+    impl Table for Resolve {
+        const POLICY: Policy = Policy::Resolve;
 
-impl SellerEmailConfig {
-    /// The Agent email block, or `None` when nothing is configured.
-    #[must_use]
-    pub fn to_seller_email(&self) -> Option<SellerEmail> {
-        if self.reply_to.is_none() && self.subject.is_none() && self.body.is_none() {
-            return None;
+        fn defaults() -> RetryPolicyConfig<Self> {
+            RetryPolicyConfig::new(
+                None,
+                Duration::from_secs(1),
+                2.0,
+                Duration::from_secs(10),
+                Duration::from_mins(1),
+            )
         }
-        Some(SellerEmail {
-            reply_to: self.reply_to.clone(),
-            subject: self.subject.clone(),
-            body: self.body.clone(),
-        })
     }
 }
 
 /// The issue policy: the run retry policy of the create step and the storno
-/// step. Restate re-executes the step after
-/// `initial_delay`, multiplying the delay by `factor` up to `max_delay`, until
-/// `max_attempts` executions or `max_duration`; then the step fails and the
-/// handler reports `outcome_unknown`. The policy shapes no journal entry.
+/// step. Restate re-executes the step after `initial_delay`, multiplying the
+/// delay by `factor` up to `max_delay`, until `max_attempts` executions or
+/// `max_duration`; then the step fails and the handler reports
+/// `outcome_unknown`. The policy shapes no journal entry.
 ///
 /// `initial_delay` has a floor, [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY),
 /// which [`WorkerConfig::validate`] enforces.
-///
-/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
-/// deserialize it, or start from [`Default::default`] and set fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct IssueConfig {
-    /// Executions of the step, including the first. Default `5`.
-    pub max_attempts: u32,
-    /// Delay before the first re-execution. Default `2m`; at least
-    /// [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY).
-    #[serde(with = "duration_str")]
-    pub initial_delay: Duration,
-    /// Multiplier of the delay after each re-execution. Default `2.0`.
-    pub factor: f32,
-    /// Cap of the delay. Default `10m`.
-    #[serde(with = "duration_str")]
-    pub max_delay: Duration,
-    /// Hard bound on the time spent re-executing the step. Default `1h`.
-    #[serde(with = "duration_str")]
-    pub max_duration: Duration,
-}
-
-impl Default for IssueConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            initial_delay: Duration::from_mins(2),
-            factor: 2.0,
-            max_delay: Duration::from_mins(10),
-            max_duration: Duration::from_hours(1),
-        }
-    }
-}
-
-impl IssueConfig {
-    /// The margin [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY) keeps beyond
-    /// the client timeout.
-    pub const RE_CHECK_MARGIN: Duration = Duration::from_secs(30);
-
-    /// The least `initial_delay` a deployment may run with: the Számla Agent
-    /// client's [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT)
-    /// plus [`RE_CHECK_MARGIN`](Self::RE_CHECK_MARGIN), 90 s at today's
-    /// values, derived rather than copied so that a change to the timeout
-    /// moves the floor with it.
-    ///
-    /// Every re-execution of the create or storno step begins with a query
-    /// for what the cut execution sent, and that query is conclusive only
-    /// once the send can no longer be in flight: the client gives up on a
-    /// reply at the timeout, but szamlazz.hu has been seen to stall that long
-    /// and still issue. The same rule sizes every write handler's
-    /// `initial_interval` (`2m`). The read and resolve policies have no floor:
-    /// a read writes nothing, and the resolve policy never reaches
-    /// szamlazz.hu.
-    pub const MIN_INITIAL_DELAY: Duration =
-        szamlazz_agent::client::REQUEST_TIMEOUT.saturating_add(Self::RE_CHECK_MARGIN);
-
-    /// The policy as the SDK's run retry policy, every field set from this
-    /// configuration. Built on [`RunRetryPolicy::new`], whose factor is 1.0
-    /// and which caps nothing, not on `default()`, which caps the delay at
-    /// 2 s and the duration at 50 s.
-    #[must_use]
-    pub fn run_retry_policy(&self) -> RunRetryPolicy {
-        RunRetryPolicy::new()
-            .initial_delay(self.initial_delay)
-            .exponentiation_factor(self.factor)
-            .max_delay(self.max_delay)
-            .max_attempts(self.max_attempts)
-            .max_duration(self.max_duration)
-    }
-}
+pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 
 /// The read policy: the run retry policy of every read-only durable step of
 /// both services (the lookup step and the exclusivity, proforma-link and
@@ -616,109 +382,159 @@ impl IssueConfig {
 /// is what decides how long a szamlazz.hu outage is tolerated: a run retry is
 /// re-dispatched by the server without spending an invocation attempt. A
 /// worker outage is the invocation retry policy's business.
-///
-/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
-/// deserialize it, or start from [`Default::default`] and set fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct ReadConfig {
-    /// Executions of the step, including the first. Default `5`.
-    pub max_attempts: u32,
-    /// Delay before the first re-execution. Default `5s`.
-    #[serde(with = "duration_str")]
-    pub initial_delay: Duration,
-    /// Multiplier of the delay after each re-execution. Default `2.0`.
-    pub factor: f32,
-    /// Cap of the delay. Default `60s`.
-    #[serde(with = "duration_str")]
-    pub max_delay: Duration,
-    /// Hard bound on the time spent re-executing the step. Default `5m`.
-    #[serde(with = "duration_str")]
-    pub max_duration: Duration,
-}
-
-impl Default for ReadConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            initial_delay: Duration::from_secs(5),
-            factor: 2.0,
-            max_delay: Duration::from_mins(1),
-            max_duration: Duration::from_mins(5),
-        }
-    }
-}
-
-impl ReadConfig {
-    /// The policy as the SDK's run retry policy, every field set from this
-    /// configuration, built on [`RunRetryPolicy::new`] for the same reason
-    /// as [`IssueConfig::run_retry_policy`].
-    #[must_use]
-    pub fn run_retry_policy(&self) -> RunRetryPolicy {
-        RunRetryPolicy::new()
-            .initial_delay(self.initial_delay)
-            .exponentiation_factor(self.factor)
-            .max_delay(self.max_delay)
-            .max_attempts(self.max_attempts)
-            .max_duration(self.max_duration)
-    }
-}
+pub type ReadConfig = RetryPolicyConfig<table::Read>;
 
 /// The resolve policy: the run retry policy of the `account` step of every
-/// handler, which asks the account resolver for the request's
-/// account. An unavailable resolver is retried under it (`initial_delay`
-/// growing by `factor` to `max_delay`, bounded by `max_duration` and nothing
-/// else), and its exhaustion is the `unavailable` fault. Unscoped and unknown
-/// are answers, journaled as data, never retried. Shapes no journal entry.
+/// handler, which asks the account resolver for the request's account. An
+/// unavailable resolver is retried under it (`initial_delay` growing by
+/// `factor` to `max_delay`, bounded by `max_duration`; no attempt cap by
+/// default), and its exhaustion is the `unavailable` fault. Unscoped and
+/// unknown are answers, journaled as data, never retried. Shapes no journal
+/// entry.
 ///
 /// Set explicitly for the same reason as the issue policy: the SDK's default
 /// run policy sends no retry delay and the server would spend the handler's
 /// `invocation_retry_policy` instead.
+pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
+
+/// A run retry policy as one table of the [`WorkerConfig`] configures it:
+/// the [`IssueConfig`], [`ReadConfig`] and [`ResolveConfig`] are this one
+/// struct with the table's defaults ([`Table::defaults`]). Restate
+/// re-executes the step after `initial_delay`, multiplying the delay by
+/// `factor` up to `max_delay`, until `max_attempts` executions (when set) or
+/// `max_duration`, whichever comes first.
 ///
 /// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`). `#[non_exhaustive]`, like every policy:
-/// deserialize it, or start from [`Default::default`] and set fields.
+/// integer read as seconds (`90`). Closed: an unknown key is a parse error.
+/// `#[non_exhaustive]`: deserialize it, or start from [`Default::default`]
+/// (the table's defaults) and set fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct ResolveConfig {
-    /// Delay before the first re-execution. Default `1s`.
+pub struct RetryPolicyConfig<T: Table> {
+    /// Executions of the step, including the first; `None` leaves the
+    /// duration as the sole bound. Default `5` on `[issue]` and `[read]`,
+    /// unset on `[resolve]`.
+    pub max_attempts: Option<u32>,
+    /// Delay before the first re-execution. Default `2m` on `[issue]` (at
+    /// least [`IssueConfig::MIN_INITIAL_DELAY`]), `5s` on `[read]`, `1s` on
+    /// `[resolve]`.
     #[serde(with = "duration_str")]
     pub initial_delay: Duration,
     /// Multiplier of the delay after each re-execution. Default `2.0`.
     pub factor: f32,
-    /// Cap of the delay. Default `10s`.
+    /// Cap of the delay. Default `10m` on `[issue]`, `60s` on `[read]`, `10s`
+    /// on `[resolve]`.
     #[serde(with = "duration_str")]
     pub max_delay: Duration,
-    /// Hard bound on the time spent re-executing the step. Default `1m`.
+    /// Hard bound on the time spent re-executing the step. Default `1h` on
+    /// `[issue]`, `5m` on `[read]`, `1m` on `[resolve]`.
     #[serde(with = "duration_str")]
     pub max_duration: Duration,
+    #[serde(skip)]
+    table: PhantomData<T>,
 }
 
-impl Default for ResolveConfig {
+impl<T: Table> Default for RetryPolicyConfig<T> {
+    /// The table's defaults ([`Table::defaults`]).
     fn default() -> Self {
-        Self {
-            initial_delay: Duration::from_secs(1),
-            factor: 2.0,
-            max_delay: Duration::from_secs(10),
-            max_duration: Duration::from_mins(1),
-        }
+        T::defaults()
     }
 }
 
-impl ResolveConfig {
-    /// The policy as the SDK's run retry policy: delays and the duration bound
-    /// from this configuration, no attempt cap (the duration is the bound).
+impl<T: Table> RetryPolicyConfig<T> {
+    /// A policy of every field.
+    const fn new(
+        max_attempts: Option<u32>,
+        initial_delay: Duration,
+        factor: f32,
+        max_delay: Duration,
+        max_duration: Duration,
+    ) -> Self {
+        Self {
+            max_attempts,
+            initial_delay,
+            factor,
+            max_delay,
+            max_duration,
+            table: PhantomData,
+        }
+    }
+
+    /// The policy as the SDK's run retry policy, every field set from this
+    /// configuration. Built on [`RunRetryPolicy::new`], whose factor is 1.0
+    /// and which caps nothing, not on `default()`, which caps the delay at
+    /// 2 s and the duration at 50 s. An unset `max_attempts` sets no attempt
+    /// cap: the duration is the bound.
     #[must_use]
     pub fn run_retry_policy(&self) -> RunRetryPolicy {
-        RunRetryPolicy::new()
+        let policy = RunRetryPolicy::new()
             .initial_delay(self.initial_delay)
             .exponentiation_factor(self.factor)
             .max_delay(self.max_delay)
-            .max_duration(self.max_duration)
+            .max_duration(self.max_duration);
+        match self.max_attempts {
+            Some(max_attempts) => policy.max_attempts(max_attempts),
+            None => policy,
+        }
     }
+
+    /// An attempt cap, when set, is at least one execution.
+    fn check_attempts(&self) -> Result<(), WorkerConfigError> {
+        if self.max_attempts == Some(0) {
+            return Err(WorkerConfigError::ZeroMaxAttempts { policy: T::POLICY });
+        }
+        Ok(())
+    }
+
+    /// The delays are ordered and the factor does not shrink them.
+    fn check_delays(&self) -> Result<(), WorkerConfigError> {
+        if self.initial_delay > self.max_delay {
+            return Err(WorkerConfigError::DelayOrder {
+                policy: T::POLICY,
+                initial: self.initial_delay,
+                max: self.max_delay,
+            });
+        }
+        // The factor is finite and at least 1: `inf` is a float to TOML and
+        // YAML and would otherwise clear the `< 1.0` check.
+        if !self.factor.is_finite() || self.factor < 1.0 {
+            return Err(WorkerConfigError::InvalidFactor {
+                policy: T::POLICY,
+                factor: self.factor,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl IssueConfig {
+    /// The margin [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY) keeps beyond
+    /// the client timeout.
+    pub const RE_CHECK_MARGIN: Duration = Duration::from_secs(30);
+
+    /// The least `initial_delay` a deployment may run with: the Számla Agent
+    /// client's [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT)
+    /// plus [`RE_CHECK_MARGIN`](Self::RE_CHECK_MARGIN), 90 s at today's
+    /// values, derived rather than copied so that a change to the timeout
+    /// moves the floor with it.
+    ///
+    /// Every re-execution of the create or storno step begins with a query
+    /// for what the cut execution sent, and that query is conclusive only
+    /// once the send can no longer be in flight: the client gives up on a
+    /// reply at the timeout, but szamlazz.hu has been seen to stall that long
+    /// and still issue. The same rule sizes every write handler's
+    /// `initial_interval` (`2m`). The read and resolve policies have no floor:
+    /// a read writes nothing, and the resolve policy never reaches
+    /// szamlazz.hu.
+    ///
+    /// The derivation holds because the gateway opens its client with the
+    /// default timeout: [`Gateway::open`](crate::gateway::Gateway::open) never
+    /// supplies its own `reqwest::Client`, on which the timeout would be the
+    /// caller's ([`Gateway::open_with_http`](crate::gateway::Gateway::open_with_http)
+    /// says so).
+    pub const MIN_INITIAL_DELAY: Duration =
+        szamlazz_agent::client::REQUEST_TIMEOUT.saturating_add(Self::RE_CHECK_MARGIN);
 }
 
 /// Parses a duration written as `"90s"`, `"2m"`, `"1h"` or a plain number of
@@ -841,6 +657,15 @@ mod tests {
 
     use super::*;
 
+    /// The `validate` verdict of a parsed configuration, for the tables that
+    /// assert on the error alone.
+    fn verdict(value: serde_json::Value) -> Result<(), WorkerConfigError> {
+        serde_json::from_value::<WorkerConfig>(value)
+            .expect("parse")
+            .validate()
+            .map(|_| ())
+    }
+
     #[test]
     fn full_worker_config_parses() {
         let config: WorkerConfig = serde_json::from_value(json!({
@@ -862,20 +687,31 @@ mod tests {
         .expect("parse");
 
         assert_eq!(config.namespace.as_str(), "acct-1");
-        assert_eq!(config.issue.max_attempts, 3);
+        assert_eq!(config.issue.max_attempts, Some(3));
         assert_eq!(config.issue.initial_delay, Duration::from_secs(90));
         assert_eq!(config.issue.factor.to_bits(), 1.5f32.to_bits());
         assert_eq!(config.issue.max_delay, Duration::from_secs(3600));
         assert_eq!(config.issue.max_duration, Duration::from_secs(7200));
+        assert_eq!(config.resolve.max_attempts, None);
         assert_eq!(config.resolve.initial_delay, Duration::from_secs(2));
         assert_eq!(config.resolve.factor.to_bits(), 3.0f32.to_bits());
         assert_eq!(config.resolve.max_delay, Duration::from_secs(20));
         assert_eq!(config.resolve.max_duration, Duration::from_secs(300));
-        config.validate().expect("valid");
+        let validated = config.clone().validate().expect("valid");
+        assert_eq!(
+            *validated, config,
+            "the validated settings deref to the parsed ones"
+        );
+        assert_eq!(validated.as_ref(), &config);
+        assert_eq!(validated.clone().into_inner(), config);
+        assert_eq!(
+            ValidatedWorkerConfig::try_from(config.clone()).expect("valid"),
+            validated
+        );
     }
 
-    /// Only the namespace is required; both policies default, and the parsed
-    /// minimum equals [`WorkerConfig::new`].
+    /// Only the namespace is required; the three policies default, and the
+    /// parsed minimum equals [`WorkerConfig::new`].
     #[test]
     fn minimal_worker_config_is_the_namespace_with_default_policies() {
         let config: WorkerConfig =
@@ -886,12 +722,19 @@ mod tests {
             WorkerConfig::new("acct".parse().expect("namespace"))
         );
         assert_eq!(config.issue, IssueConfig::default());
-        assert_eq!(config.issue.max_attempts, 5);
+        assert_eq!(config.issue.max_attempts, Some(5));
         assert_eq!(config.issue.initial_delay, Duration::from_secs(120));
         assert_eq!(config.issue.factor.to_bits(), 2.0f32.to_bits());
         assert_eq!(config.issue.max_delay, Duration::from_secs(600));
         assert_eq!(config.issue.max_duration, Duration::from_secs(3600));
+        assert_eq!(config.read, ReadConfig::default());
+        assert_eq!(config.read.max_attempts, Some(5));
+        assert_eq!(config.read.initial_delay, Duration::from_secs(5));
+        assert_eq!(config.read.factor.to_bits(), 2.0f32.to_bits());
+        assert_eq!(config.read.max_delay, Duration::from_secs(60));
+        assert_eq!(config.read.max_duration, Duration::from_secs(300));
         assert_eq!(config.resolve, ResolveConfig::default());
+        assert_eq!(config.resolve.max_attempts, None);
         assert_eq!(config.resolve.initial_delay, Duration::from_secs(1));
         assert_eq!(config.resolve.max_delay, Duration::from_secs(10));
         assert_eq!(config.resolve.max_duration, Duration::from_secs(60));
@@ -901,45 +744,97 @@ mod tests {
             serde_json::from_value::<WorkerConfig>(json!({})).is_err(),
             "the namespace has no default"
         );
+
+        // The delays between the default read executions (initial × factor^n,
+        // each under the cap) sum to 75 s: a read rides out a szamlazz.hu
+        // blip of about a minute instead of poisoning the caller's key with a
+        // 503, and the bound is what a stalling szamlazz.hu runs into (#87).
+        let read = ReadConfig::default();
+        let attempts = read.max_attempts.expect("the read policy caps attempts");
+        let back_off: Duration = (0..attempts - 1)
+            .map(|n| {
+                read.initial_delay
+                    .mul_f32(read.factor.powi(n.cast_signed()))
+            })
+            .map(|delay| delay.min(read.max_delay))
+            .sum();
+        assert_eq!(back_off, Duration::from_secs(75));
+        assert!(back_off < read.max_duration, "the back-off fits the bound");
     }
 
-    /// The namespace is 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it
-    /// is the external-id separator.
+    /// The namespace is validated where it is parsed (`identity`); the
+    /// configuration's `namespace` key takes the validated type, so a value
+    /// outside its alphabet fails the parse rather than the first request.
     #[test]
-    fn namespace_rule_is_enforced_at_parse_time() {
+    fn namespace_key_is_validated_at_parse_time() {
         for accepted in ["a", "acct", "acct-1", "0", "a".repeat(16).as_str()] {
-            let namespace: Namespace = accepted.parse().expect(accepted);
-            assert_eq!(namespace.as_str(), accepted);
-            assert_eq!(namespace.to_string(), accepted);
             let config: WorkerConfig =
                 serde_json::from_value(json!({ "namespace": accepted })).expect(accepted);
-            assert_eq!(config.namespace, namespace);
+            assert_eq!(config.namespace.as_str(), accepted);
         }
+        for rejected in [
+            "",
+            "Acct",
+            "acct_1",
+            "acct 1",
+            "acct:1",
+            "ácct",
+            &"a".repeat(17),
+        ] {
+            let result = serde_json::from_value::<WorkerConfig>(json!({ "namespace": rejected }));
+            assert!(result.is_err(), "{rejected:?} should be rejected");
+        }
+    }
 
-        let too_long = "a".repeat(17);
-        let rejected = [
-            ("", InvalidNamespace::Empty),
-            ("Acct", InvalidNamespace::InvalidChar('A')),
-            ("acct_1", InvalidNamespace::InvalidChar('_')),
-            ("acct 1", InvalidNamespace::InvalidChar(' ')),
-            ("acct:1", InvalidNamespace::InvalidChar(':')),
-            ("ácct", InvalidNamespace::InvalidChar('á')),
-            (too_long.as_str(), InvalidNamespace::TooLong(17)),
+    /// The configuration is closed at every level: an unknown top-level key,
+    /// an unknown key in any of the three tables, is a parse error naming the
+    /// key and the keys expected in its place, never a policy left at its
+    /// default. (A misspelt `[isue]` table would otherwise leave the issue
+    /// policy at its default.)
+    #[test]
+    fn unknown_keys_are_refused_at_every_level() {
+        let cases = [
+            (json!({"namespace": "acct", "isue": {}}), "isue", "issue"),
+            (
+                json!({"namespace": "acct", "issue": {"max_atempts": 1}}),
+                "max_atempts",
+                "max_attempts",
+            ),
+            (
+                json!({"namespace": "acct", "read": {"initial": "1s"}}),
+                "initial",
+                "initial_delay",
+            ),
+            (
+                json!({"namespace": "acct", "resolve": {"attempts": 1}}),
+                "attempts",
+                "max_duration",
+            ),
         ];
-        for (input, expected) in rejected {
-            assert_eq!(
-                input.parse::<Namespace>(),
-                Err(expected.clone()),
-                "{input:?}"
+        for (value, unknown, expected) in cases {
+            let error = serde_json::from_value::<WorkerConfig>(value)
+                .expect_err(unknown)
+                .to_string();
+            assert!(
+                error.contains(&format!("unknown field `{unknown}`")),
+                "{unknown}: names the key: {error}"
             );
-            assert_eq!(Namespace::try_from(input.to_owned()), Err(expected));
-            let result = serde_json::from_value::<WorkerConfig>(json!({ "namespace": input }));
-            assert!(result.is_err(), "{input:?} should be rejected");
+            assert!(
+                error.contains(&format!("`{expected}`")),
+                "{unknown}: lists what is expected: {error}"
+            );
         }
+        // `max_attempts` is a key of every table: the resolve policy takes an
+        // attempt cap too when one is written (the duration stays the bound
+        // when none is).
+        let capped: WorkerConfig =
+            serde_json::from_value(json!({"namespace": "acct", "resolve": {"max_attempts": 3}}))
+                .expect("parse");
+        assert_eq!(capped.resolve.max_attempts, Some(3));
     }
 
     /// The resolve policy is the run retry policy of the `account` step:
-    /// delays and the duration bound, no attempt cap.
+    /// delays and the duration bound, no attempt cap unless one is written.
     #[test]
     fn resolve_policy_maps_to_the_run_retry_policy_bounded_by_duration() {
         assert_eq!(
@@ -953,11 +848,13 @@ mod tests {
         assert_eq!(parsed.initial_delay, Duration::from_secs(2));
         assert_eq!(parsed.max_duration, Duration::from_secs(30));
         assert_eq!(parsed.max_delay, Duration::from_secs(10), "default kept");
+        assert_eq!(parsed.max_attempts, None, "default kept");
     }
 
     /// The issue policy is the run retry policy of the create and storno
-    /// steps, every field set: `RunRetryPolicy::new()` has factor 1.0 and no caps, and
-    /// `default()` caps at 2 s / 50 s; neither is what the policy says.
+    /// steps, every field set: `RunRetryPolicy::new()` has factor 1.0 and no
+    /// caps, and `default()` caps at 2 s / 50 s; neither is what the policy
+    /// says.
     #[test]
     fn issue_policy_maps_to_the_run_retry_policy_field_for_field() {
         assert_eq!(
@@ -966,11 +863,12 @@ mod tests {
              max_attempts: Some(5), max_duration: Some(3600s) }"
         );
         let short = IssueConfig {
-            max_attempts: 2,
+            max_attempts: Some(2),
             initial_delay: Duration::from_secs(1),
             factor: 1.5,
             max_delay: Duration::from_secs(2),
             max_duration: Duration::from_secs(30),
+            ..IssueConfig::default()
         };
         assert_eq!(
             format!("{:?}", short.run_retry_policy()),
@@ -990,11 +888,12 @@ mod tests {
              max_attempts: Some(5), max_duration: Some(300s) }"
         );
         let short = ReadConfig {
-            max_attempts: 2,
+            max_attempts: Some(2),
             initial_delay: Duration::from_secs(1),
             factor: 1.0,
             max_delay: Duration::from_secs(1),
             max_duration: Duration::from_secs(10),
+            ..ReadConfig::default()
         };
         assert_eq!(
             format!("{:?}", short.run_retry_policy()),
@@ -1018,159 +917,142 @@ mod tests {
             },
         }))
         .expect("parse");
-        assert_eq!(config.read.max_attempts, 4);
+        assert_eq!(config.read.max_attempts, Some(4));
         assert_eq!(config.read.initial_delay, Duration::from_secs(2));
         assert_eq!(config.read.factor.to_bits(), 1.5f32.to_bits());
         assert_eq!(config.read.max_delay, Duration::from_secs(20));
         assert_eq!(config.read.max_duration, Duration::from_secs(180));
         config.validate().expect("valid");
-
-        let minimal: WorkerConfig =
-            serde_json::from_value(json!({ "namespace": "acct" })).expect("parse");
-        assert_eq!(minimal.read, ReadConfig::default());
-        assert_eq!(minimal.read.max_attempts, 5);
-        assert_eq!(minimal.read.initial_delay, Duration::from_secs(5));
-        assert_eq!(minimal.read.factor.to_bits(), 2.0f32.to_bits());
-        assert_eq!(minimal.read.max_delay, Duration::from_secs(60));
-        assert_eq!(minimal.read.max_duration, Duration::from_secs(300));
-        assert_eq!(
-            minimal,
-            WorkerConfig::new("acct".parse().expect("namespace")),
-            "`new` carries the default read policy too"
-        );
-        // The delays between the default executions (initial × factor^n,
-        // each under the cap) sum to 75 s: a read rides out a szamlazz.hu
-        // blip of about a minute instead of poisoning the caller's key with a
-        // 503, and the bound is what a stalling szamlazz.hu runs into (#87).
-        let read = &minimal.read;
-        let back_off: Duration = (0..read.max_attempts - 1)
-            .map(|n| {
-                read.initial_delay
-                    .mul_f32(read.factor.powi(n.cast_signed()))
-            })
-            .map(|delay| delay.min(read.max_delay))
-            .sum();
-        assert_eq!(back_off, Duration::from_secs(75));
-        assert!(back_off < read.max_duration, "the back-off fits the bound");
     }
 
-    /// `[read]` is held to the same invariants as `[issue]`, and the error
-    /// names its table.
+    /// Every table is held to the same invariants, and the error names its
+    /// table.
     #[test]
-    fn validate_reports_invariants_of_the_read_policy() {
-        fn config(read: &serde_json::Value) -> WorkerConfig {
-            serde_json::from_value(json!({ "namespace": "acct", "read": read })).expect("parse")
+    fn validate_reports_the_invariants_of_every_table() {
+        for (table, policy, max_delay) in [
+            ("issue", Policy::Issue, 600),
+            ("read", Policy::Read, 60),
+            ("resolve", Policy::Resolve, 10),
+        ] {
+            let config = |policy: serde_json::Value| json!({ "namespace": "acct", table: policy });
+            assert_eq!(
+                verdict(config(json!({"max_attempts": 0}))),
+                Err(WorkerConfigError::ZeroMaxAttempts { policy }),
+                "{table}"
+            );
+            assert_eq!(
+                verdict(config(json!({"max_attempts": 0})))
+                    .expect_err("error")
+                    .to_string(),
+                format!("{table}.max_attempts must be at least 1")
+            );
+            assert_eq!(
+                verdict(config(json!({"max_attempts": 1}))),
+                Ok(()),
+                "{table}"
+            );
+            let over = Duration::from_secs(max_delay + 1);
+            let initial = json!(max_delay + 1);
+            assert_eq!(
+                verdict(config(json!({"initial_delay": initial}))),
+                Err(WorkerConfigError::DelayOrder {
+                    policy,
+                    initial: over,
+                    max: Duration::from_secs(max_delay),
+                }),
+                "{table}"
+            );
+            assert_eq!(
+                verdict(config(json!({"initial_delay": initial})))
+                    .expect_err("error")
+                    .to_string(),
+                format!(
+                    "{table}.initial_delay ({over:?}) must not exceed {table}.max_delay ({:?})",
+                    Duration::from_secs(max_delay)
+                ),
+                "the error names the table"
+            );
+            assert_eq!(
+                verdict(config(json!({"initial_delay": max_delay}))),
+                Ok(()),
+                "{table}: equal delays are in order"
+            );
+            assert_eq!(
+                verdict(config(json!({"factor": 0.5}))),
+                Err(WorkerConfigError::InvalidFactor {
+                    policy,
+                    factor: 0.5
+                }),
+                "{table}"
+            );
+            assert_eq!(verdict(config(json!({"factor": 1.0}))), Ok(()), "{table}");
+            assert_eq!(
+                verdict(config(json!({"factor": 0.5})))
+                    .expect_err("error")
+                    .to_string(),
+                format!("{table}.factor (0.5) must be a finite number of at least 1")
+            );
         }
-
-        assert_eq!(
-            config(&json!({"max_attempts": 0})).validate(),
-            Err(WorkerConfigError::ZeroMaxAttempts {
-                policy: Policy::Read
-            })
-        );
-        assert_eq!(
-            config(&json!({"max_attempts": 0}))
-                .validate()
-                .expect_err("error")
-                .to_string(),
-            "read.max_attempts must be at least 1"
-        );
-        assert_eq!(
-            config(&json!({"initial_delay": "61s"})).validate(),
-            Err(WorkerConfigError::DelayOrder {
-                policy: Policy::Read,
-                initial: Duration::from_secs(61),
-                max: Duration::from_secs(60),
-            })
-        );
-        assert_eq!(config(&json!({"initial_delay": "60s"})).validate(), Ok(()));
-        assert_eq!(
-            config(&json!({"factor": 0.5})).validate(),
-            Err(WorkerConfigError::InvalidFactor {
-                policy: Policy::Read,
-                factor: 0.5
-            })
-        );
-        assert_eq!(config(&json!({"factor": 1.0})).validate(), Ok(()));
-        assert_eq!(
-            config(&json!({"initial_delay": "61s"}))
-                .validate()
-                .expect_err("error")
-                .to_string(),
-            "read.initial_delay (61s) must not exceed read.max_delay (60s)",
-            "the error names the table"
-        );
     }
 
+    /// `inf` is a float to TOML (`factor = inf`) and is at least 1, so the
+    /// order check alone would pass it on to Restate as a non-finite
+    /// exponentiation factor; it is refused as not finite, like `nan`. JSON
+    /// cannot write either, so the check is exercised on the struct.
     #[test]
-    fn validate_reports_invariants_of_both_policies() {
-        fn config(issue: &serde_json::Value, resolve: &serde_json::Value) -> WorkerConfig {
-            serde_json::from_value(json!({
-                "namespace": "acct",
-                "issue": issue,
-                "resolve": resolve,
-            }))
-            .expect("parse")
+    fn a_non_finite_factor_is_refused_on_every_table() {
+        for non_finite in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let config = WorkerConfig {
+                issue: IssueConfig {
+                    factor: non_finite,
+                    ..IssueConfig::default()
+                },
+                read: ReadConfig {
+                    factor: non_finite,
+                    ..ReadConfig::default()
+                },
+                resolve: ResolveConfig {
+                    factor: non_finite,
+                    ..ResolveConfig::default()
+                },
+                ..WorkerConfig::new("acct".parse().expect("namespace"))
+            };
+            let error = config
+                .validate()
+                .expect_err("a non-finite factor is refused");
+            assert!(
+                matches!(
+                    error,
+                    WorkerConfigError::InvalidFactor {
+                        policy: Policy::Issue,
+                        factor
+                    } if factor.is_nan() == non_finite.is_nan()
+                ),
+                "{non_finite}: {error:?}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be a finite number of at least 1"),
+                "{error}"
+            );
         }
-        let none = json!({});
-
-        assert_eq!(
-            config(&json!({"max_attempts": 0}), &none).validate(),
-            Err(WorkerConfigError::ZeroMaxAttempts {
-                policy: Policy::Issue
-            })
-        );
-        assert_eq!(
-            config(&json!({"max_attempts": 0}), &none)
-                .validate()
-                .expect_err("error")
-                .to_string(),
-            "issue.max_attempts must be at least 1"
-        );
-        assert_eq!(
-            config(&json!({"initial_delay": "11m"}), &none).validate(),
-            Err(WorkerConfigError::DelayOrder {
-                policy: Policy::Issue,
-                initial: Duration::from_mins(11),
-                max: Duration::from_secs(600),
-            })
-        );
-        assert_eq!(
-            config(&json!({"initial_delay": "10m"}), &none).validate(),
-            Ok(())
-        );
-        assert_eq!(
-            config(&json!({"factor": 0.5}), &none).validate(),
+        // The check is per table: a finite issue factor and an infinite read
+        // one is the read table's error.
+        let config = WorkerConfig {
+            read: ReadConfig {
+                factor: f32::INFINITY,
+                ..ReadConfig::default()
+            },
+            ..WorkerConfig::new("acct".parse().expect("namespace"))
+        };
+        assert!(matches!(
+            config.validate(),
             Err(WorkerConfigError::InvalidFactor {
-                policy: Policy::Issue,
-                factor: 0.5
+                policy: Policy::Read,
+                ..
             })
-        );
-        assert_eq!(config(&json!({"factor": 1.0}), &none).validate(), Ok(()));
-
-        assert_eq!(
-            config(&none, &json!({"initial_delay": "11s"})).validate(),
-            Err(WorkerConfigError::DelayOrder {
-                policy: Policy::Resolve,
-                initial: Duration::from_secs(11),
-                max: Duration::from_secs(10),
-            })
-        );
-        assert_eq!(
-            config(&none, &json!({"factor": 0.0})).validate(),
-            Err(WorkerConfigError::InvalidFactor {
-                policy: Policy::Resolve,
-                factor: 0.0
-            })
-        );
-        assert_eq!(
-            config(&none, &json!({"initial_delay": "11s"}))
-                .validate()
-                .expect_err("error")
-                .to_string(),
-            "resolve.initial_delay (11s) must not exceed resolve.max_delay (10s)",
-            "the error names the table"
-        );
+        ));
     }
 
     /// `issue.initial_delay` is floored at [`IssueConfig::MIN_INITIAL_DELAY`],
@@ -1178,9 +1060,7 @@ mod tests {
     /// The other two policies have no floor.
     #[test]
     fn validate_floors_the_issue_initial_delay_at_the_client_timeout_plus_a_margin() {
-        fn config(issue: &serde_json::Value) -> WorkerConfig {
-            serde_json::from_value(json!({ "namespace": "acct", "issue": issue })).expect("parse")
-        }
+        let issue = |issue: serde_json::Value| json!({ "namespace": "acct", "issue": issue });
 
         assert_eq!(
             IssueConfig::MIN_INITIAL_DELAY,
@@ -1194,24 +1074,16 @@ mod tests {
         );
 
         // The boundary: 90 s is accepted, 89 s is not.
-        assert_eq!(config(&json!({"initial_delay": "90s"})).validate(), Ok(()));
+        assert_eq!(verdict(issue(json!({"initial_delay": "90s"}))), Ok(()));
         assert_eq!(
-            config(&json!({"initial_delay": "89s"})).validate(),
+            verdict(issue(json!({"initial_delay": "89s"}))),
             Err(WorkerConfigError::IssueDelayBelowFloor {
                 initial: Duration::from_secs(89),
                 floor: Duration::from_secs(90),
             })
         );
         assert_eq!(
-            config(&json!({"initial_delay": "5s"})).validate(),
-            Err(WorkerConfigError::IssueDelayBelowFloor {
-                initial: Duration::from_secs(5),
-                floor: Duration::from_secs(90),
-            })
-        );
-        assert_eq!(
-            config(&json!({"initial_delay": "5s"}))
-                .validate()
+            verdict(issue(json!({"initial_delay": "5s"})))
                 .expect_err("error")
                 .to_string(),
             "issue.initial_delay (5s) must be at least 90s: the Számla Agent client's 60s request \
@@ -1224,7 +1096,7 @@ mod tests {
         // The floor is checked before the order of the delays: it is the
         // safety rule, the order a consistency rule.
         assert_eq!(
-            config(&json!({"initial_delay": "5s", "max_delay": "4s"})).validate(),
+            verdict(issue(json!({"initial_delay": "5s", "max_delay": "4s"}))),
             Err(WorkerConfigError::IssueDelayBelowFloor {
                 initial: Duration::from_secs(5),
                 floor: Duration::from_secs(90),
@@ -1233,13 +1105,30 @@ mod tests {
 
         // No floor on the read or resolve policy: a 1 s delay is fine (the
         // e2e suite runs on exactly that).
-        let short: WorkerConfig = serde_json::from_value(json!({
+        assert_eq!(
+            verdict(json!({
+                "namespace": "acct",
+                "read": { "initial_delay": "1s", "max_delay": "1s" },
+                "resolve": { "initial_delay": "1s", "max_delay": "1s" },
+            })),
+            Ok(())
+        );
+    }
+
+    /// The one way past the floor is `unchecked`, behind `test-util`: what
+    /// the e2e harness builds its one-second issue policy with. It checks
+    /// nothing.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn unchecked_skips_validation() {
+        let below: WorkerConfig = serde_json::from_value(json!({
             "namespace": "acct",
-            "read": { "initial_delay": "1s", "max_delay": "1s" },
-            "resolve": { "initial_delay": "1s", "max_delay": "1s" },
+            "issue": { "initial_delay": "1s", "max_delay": "2s" },
         }))
         .expect("parse");
-        assert_eq!(short.validate(), Ok(()));
+        assert!(below.clone().validate().is_err());
+        let unchecked = ValidatedWorkerConfig::unchecked(below.clone());
+        assert_eq!(*unchecked, below);
     }
 
     #[test]
@@ -1290,14 +1179,32 @@ mod tests {
         assert_eq!(format_duration(Duration::from_millis(1500)), "1s");
     }
 
+    /// A policy serialises to its configuration shape: durations as strings,
+    /// an unset attempt cap as `null`, and the table marker nowhere.
     #[test]
-    fn issue_config_round_trips_durations_as_strings() {
+    fn policies_round_trip_through_their_configuration_shape() {
         let json = serde_json::to_value(IssueConfig::default()).expect("serialize");
         assert_eq!(json["initial_delay"], "2m");
         assert_eq!(json["max_delay"], "10m");
         assert_eq!(json["max_duration"], "1h");
+        assert_eq!(json["max_attempts"], 5);
+        assert_eq!(
+            json.as_object().expect("object").keys().collect::<Vec<_>>(),
+            [
+                "factor",
+                "initial_delay",
+                "max_attempts",
+                "max_delay",
+                "max_duration"
+            ]
+        );
         let back: IssueConfig = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, IssueConfig::default());
+
+        let json = serde_json::to_value(ResolveConfig::default()).expect("serialize");
+        assert_eq!(json["max_attempts"], serde_json::Value::Null);
+        let back: ResolveConfig = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, ResolveConfig::default());
     }
 
     /// A duration field takes the `"2m"` string form or a bare non-negative
@@ -1335,47 +1242,5 @@ mod tests {
                 "the error says what a duration is: {rejected}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn secret_debug_is_redacted() {
-        let secret: Secret = serde_json::from_value(json!("hunter2")).expect("parse");
-        let debug = format!("{secret:?}");
-        assert!(!debug.contains("hunter2"), "{debug}");
-        assert_eq!(debug, "Secret(***)");
-        assert_eq!(secret.expose(), "hunter2");
-        assert_eq!(format!("{:?}", Secret::new("x")), "Secret(***)");
-        assert_eq!(Secret::from("x"), Secret::from("x".to_owned()));
-        let numeric: Secret = serde_json::from_value(json!(12_345_678)).expect("parse");
-        assert_eq!(numeric.expose(), "12345678");
-    }
-
-    #[test]
-    fn seller_config_projects_to_the_agent_seller_block() {
-        let seller: SellerConfig = serde_json::from_value(json!({
-            "bank": "Bank",
-            "bank_account": "1234",
-            "signer_name": "Signer",
-            "email": {"reply_to": "r@e.hu", "subject": "S", "body": "B"},
-        }))
-        .expect("parse");
-        let block = seller.to_seller();
-        assert_eq!(block.bank.as_deref(), Some("Bank"));
-        assert_eq!(block.bank_account.as_deref(), Some("1234"));
-        assert_eq!(block.signer_name.as_deref(), Some("Signer"));
-        let email = block.email.expect("email block");
-        assert_eq!(email.reply_to.as_deref(), Some("r@e.hu"));
-        assert_eq!(email.subject.as_deref(), Some("S"));
-        assert_eq!(email.body.as_deref(), Some("B"));
-
-        assert_eq!(
-            SellerConfig::default().to_seller().email,
-            None,
-            "no email block unless a field is set"
-        );
-        assert_eq!(Defaults::default().language, "hu");
-        assert_eq!(Defaults::default().currency, "HUF");
-        assert_eq!(Defaults::default().exchange_rate_bank, "MNB");
-        assert!(!Defaults::default().e_invoice);
     }
 }

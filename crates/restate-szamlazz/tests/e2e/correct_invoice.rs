@@ -6,6 +6,8 @@ use rust_decimal::dec;
 use serde_json::{Value, json};
 use wiremock::matchers::body_string_contains;
 
+use restate_szamlazz::contract::{IssuedKind, TerminalCode};
+
 use crate::harness::szamlazz::{
     Doc, create, created, duplicate_order_number, external_id_query, not_found, number_query,
     order_query,
@@ -119,11 +121,11 @@ pub(crate) async fn correctives_verify_their_base_and_take_no_hint(h: &Harness) 
         .await;
     assert_eq!(reply.status, 404, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "not_found", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::NotFound, "{fault:?}");
     assert!(fault.message.contains("SZ-C7"), "{fault:?}");
     assert_eq!(fault.szamlazz_code, None, "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-C2"), "{fault:?}");
-    assert_eq!(fault.kind.as_deref(), Some("corrective"), "{fault:?}");
+    assert_eq!(fault.kind, Some(IssuedKind::Corrective), "{fault:?}");
     assert_eq!(
         fault.external_id.as_deref(),
         Some("acct:E2E-C2:corrective:fix-7"),

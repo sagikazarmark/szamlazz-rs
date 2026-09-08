@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 
+use restate_szamlazz::contract::TerminalCode;
+
 use crate::harness::Harness;
 use crate::harness::accounts::{AGENT_KEY, AGENT_KEYS};
 use crate::harness::szamlazz::{
@@ -178,7 +180,7 @@ pub(crate) async fn set_payments_replaces_or_appends_and_answers_a_lost_reply(h:
         .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "invalid_input", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
     assert_eq!(fault.szamlazz_code, None, "{fault:?}");
     assert!(fault.message.contains("at least one entry"), "{fault:?}");
     assert!(fault.message.contains("nothing was sent"), "{fault:?}");
@@ -214,7 +216,11 @@ pub(crate) async fn set_payments_replaces_or_appends_and_answers_a_lost_reply(h:
             .await;
         assert_eq!(reply.status, 500, "{number}: {}", reply.body);
         let fault = reply.fault();
-        assert_eq!(fault.code, "outcome_unknown", "{number}: {fault:?}");
+        assert_eq!(
+            fault.code,
+            TerminalCode::OutcomeUnknown,
+            "{number}: {fault:?}"
+        );
         assert!(
             fault
                 .message
@@ -297,7 +303,7 @@ pub(crate) async fn agent_storno_repeats_the_originals_fulfillment_date_or_refus
         .await;
     assert_eq!(reply.status, 503, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, "unavailable", "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
     assert!(fault.message.contains("SZ-32"), "{fault:?}");
     assert!(fault.message.contains("fulfillment date"), "{fault:?}");
     assert_eq!(fault.order, None, "{fault:?}");

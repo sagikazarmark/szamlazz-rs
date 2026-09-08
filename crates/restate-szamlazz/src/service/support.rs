@@ -3,19 +3,19 @@
 //! documents found under our external ids and the account check of documents
 //! found by number.
 
+use std::fmt;
 use std::ops::ControlFlow;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
-use serde::Serialize;
 use szamlazz_agent::Date;
 
 use crate::account::Account;
-use crate::config::Namespace;
 use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
     FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
+    SzamlazzAnswer,
 };
-use crate::identity::{ExternalId, OrderKey};
+use crate::identity::{ExternalId, Namespace, OrderKey};
 
 pub(super) use self::journaled::Journaled;
 #[cfg(test)]
@@ -30,12 +30,12 @@ mod journaled {
     use serde::Serialize;
     use serde::de::DeserializeOwned;
 
-    use crate::config::Namespace;
     use crate::gateway::{
         CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
         SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
         TaxpayerOutcome,
     };
+    use crate::identity::Namespace;
     use crate::service::prologue::Resolution;
 
     /// A type the services journal as the result of a `ctx.run`: the bound
@@ -103,52 +103,14 @@ mod journaled {
     );
 }
 
-/// A fault raised as a `TerminalError`: never a domain outcome.
-///
-/// Serialised as the error message so that the ingress body carries the
-/// [`TerminalCode`] token, the szamlazz.hu code when szamlazz.hu's answer is
-/// what the fault is about, and the identity of the document it is about.
-/// `code` is always a `TerminalCode` token; a szamlazz.hu code never travels
-/// in it.
-///
-/// What the caller receives is Restate's ingress envelope with this JSON as
-/// the **string** in its `message`: `{"code": <HTTP status>, "message":
-/// "<fault JSON>", "source": "invocation"}` (server 1.7.8), under
-/// `x-restate-error-source: invocation`. The SDK offers no other channel for
-/// a structured terminal error, so the envelope is documented in the endpoint
-/// README (*Faults*) and asserted by the e2e harness (`Reply::fault`).
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct Fault {
-    code: TerminalCode,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    szamlazz_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    order: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<IssuedKind>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    external_id: Option<String>,
-}
+pub(super) use crate::contract::Fault;
 
+/// The service-side constructors of the contract's [`Fault`], one per way the
+/// handlers fail: each names its [`TerminalCode`] and writes the message the
+/// caller reads. The wire shape is the contract's; the conversion to the
+/// SDK's `TerminalError` hands it the code's status and the fault JSON as
+/// the message, which the ingress wraps in its envelope.
 impl Fault {
-    pub(super) fn new(code: TerminalCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            szamlazz_code: None,
-            order: None,
-            kind: None,
-            external_id: None,
-        }
-    }
-
-    /// The same fault carrying the szamlazz.hu code its answer had.
-    fn answered_with(mut self, szamlazz_code: impl Into<String>) -> Self {
-        self.szamlazz_code = Some(szamlazz_code.into());
-        self
-    }
-
     pub(super) fn invalid_input(message: impl Into<String>) -> Self {
         Self::new(TerminalCode::InvalidInput, message)
     }
@@ -162,13 +124,24 @@ impl Fault {
     /// szamlazz.hu answered with an error code the handler passes through
     /// rather than concludes from: the `szamlazz_error` fault (422) with the
     /// code in `szamlazz_code` and a message that repeats szamlazz.hu's.
-    pub(super) fn szamlazz_error(code: impl Into<String>, message: impl Into<String>) -> Self {
-        let code = code.into();
+    pub(super) fn szamlazz_error(answer: SzamlazzAnswer) -> Self {
         Self::new(
             TerminalCode::SzamlazzError,
-            format!("szamlazz.hu error {code}: {}", message.into()),
+            format!("szamlazz.hu error {answer}"),
         )
-        .answered_with(code)
+        .with_szamlazz_code(answer.code)
+    }
+
+    /// [`Fault::szamlazz_error`] with what the handler was doing named before
+    /// szamlazz.hu's answer (`the credit entries on invoice SZ-1 were
+    /// refused: 259: …`), so the caller reads the subject first; the code
+    /// travels in `szamlazz_code` as on every pass-through.
+    pub(super) fn szamlazz_error_on(subject: impl fmt::Display, answer: SzamlazzAnswer) -> Self {
+        Self::new(
+            TerminalCode::SzamlazzError,
+            format!("{subject}: szamlazz.hu error {answer}"),
+        )
+        .with_szamlazz_code(answer.code)
     }
 
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
@@ -179,13 +152,11 @@ impl Fault {
     /// document from (neither 7 nor a credential code). An answer, so it is
     /// journaled and never retried by the read policy; still a fault, since
     /// nothing may be concluded from it.
-    pub(super) fn inconclusive_answer(code: impl Into<String>, message: impl Into<String>) -> Self {
-        let code = code.into();
+    pub(super) fn inconclusive_answer(answer: SzamlazzAnswer) -> Self {
         Self::unavailable(format!(
-            "szamlazz.hu answered the query with code {code}: {}; nothing may be concluded; retry with a new Idempotency-Key or read get",
-            message.into()
+            "szamlazz.hu answered the query with code {answer}; nothing may be concluded; retry with a new Idempotency-Key or read get"
         ))
-        .answered_with(code)
+        .with_szamlazz_code(answer.code)
     }
 
     /// szamlazz.hu reported unavailability (`szlahu_down`) to a write step's
@@ -229,46 +200,24 @@ impl Fault {
     /// answers these codes before acting, so the request it rejected was not
     /// acted on, but the rejection may be a post-send re-query's after a send
     /// with an open code, and an earlier execution's send may have landed.
-    pub(super) fn credentials_rejected(
-        namespace: &Namespace,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        let code = code.into();
-        let message = message.into();
+    pub(super) fn credentials_rejected(namespace: &Namespace, answer: SzamlazzAnswer) -> Self {
         tracing::warn!(
             namespace = %namespace,
-            code = %code,
+            code = %answer.code,
             "szamlazz.hu rejected the agent credentials; fix the account's agent key"
         );
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
-                "szamlazz.hu rejected the agent credentials (code {code}: {message}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
+                "szamlazz.hu rejected the agent credentials (code {answer}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
             ),
         )
-        .answered_with(code)
-    }
-
-    /// Attaches the identity of the document the fault is about.
-    pub(super) fn about(
-        mut self,
-        order: &OrderKey,
-        kind: Option<IssuedKind>,
-        external_id: impl Into<String>,
-    ) -> Self {
-        self.order = Some(order.as_str().to_owned());
-        self.kind = kind;
-        self.external_id = Some(external_id.into());
-        self
-    }
-
-    /// The HTTP status the ingress reports for the fault: the code's.
-    const fn status(&self) -> u16 {
-        self.code.status()
+        .with_szamlazz_code(answer.code)
     }
 }
 
+/// The SDK's terminal error carrying the fault: the code's status and the
+/// fault JSON as the message, which the ingress wraps in its envelope.
 impl From<Fault> for TerminalError {
     fn from(fault: Fault) -> Self {
         let body = serde_json::to_string(&fault)
@@ -370,9 +319,9 @@ pub(super) fn verified_document(
         QueryOutcome::NotFound => Err(Fault::not_found(format!(
             "invoice {number} is not known to szamlazz.hu (code 7)"
         ))),
-        QueryOutcome::Api { code, message } => Err(Fault::inconclusive_answer(code, message)),
-        QueryOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
     }
 }
@@ -478,12 +427,10 @@ pub(super) fn after_storno_lookup(
         StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(ControlFlow::Break(
             reversed_response(number, Some(storno_number)),
         )),
-        StornoLookupOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        StornoLookupOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
-        StornoLookupOutcome::Api { code, message } => {
-            Err(Fault::inconclusive_answer(code, message))
-        }
+        StornoLookupOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
     }
 }
 
@@ -514,16 +461,16 @@ pub(super) fn storno_response(
             .with_message(
                 "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
             ),
-        GatewayStornoOutcome::Rejected { code, message } => {
+        GatewayStornoOutcome::Rejected(rejection) => {
             StornoResponse::new(StornoOutcome::Rejected, number)
-                .with_code(code)
-                .with_message(message)
+                .with_code(rejection.code)
+                .with_message(rejection.message)
         }
-        GatewayStornoOutcome::CredentialsRejected { code, message } => {
-            return Err(Fault::credentials_rejected(namespace, code, message));
+        GatewayStornoOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
         }
-        GatewayStornoOutcome::Api { code, message } => {
-            return Err(Fault::inconclusive_answer(code, message));
+        GatewayStornoOutcome::Api(answer) => {
+            return Err(Fault::inconclusive_answer(answer));
         }
         GatewayStornoOutcome::Unavailable { message } => {
             return Err(Fault::szlahu_down_answer(message));
@@ -548,9 +495,9 @@ pub(super) fn storno_number_from_hint(
 ) -> Result<Option<String>, Fault> {
     match outcome {
         QueryOutcome::Found(found) if found.is_storno_of(number) => Ok(Some(found.number)),
-        QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api { .. } => Ok(None),
-        QueryOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api(_) => Ok(None),
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
     }
 }
@@ -571,9 +518,9 @@ pub(super) fn storno_number_from_lookup(
 ) -> Result<Option<String>, Fault> {
     match outcome {
         StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(Some(storno_number)),
-        StornoLookupOutcome::Absent | StornoLookupOutcome::Api { .. } => Ok(None),
-        StornoLookupOutcome::CredentialsRejected { code, message } => {
-            Err(Fault::credentials_rejected(namespace, code, message))
+        StornoLookupOutcome::Absent | StornoLookupOutcome::Api(_) => Ok(None),
+        StornoLookupOutcome::CredentialsRejected(answer) => {
+            Err(Fault::credentials_rejected(namespace, answer))
         }
     }
 }
@@ -610,9 +557,9 @@ impl Lookup {
     ) -> Result<Self, Fault> {
         match outcome {
             QueryOutcome::NotFound => Ok(Self::Absent),
-            QueryOutcome::Api { code, message } => Err(Fault::inconclusive_answer(code, message)),
-            QueryOutcome::CredentialsRejected { code, message } => {
-                Err(Fault::credentials_rejected(namespace, code, message))
+            QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+            QueryOutcome::CredentialsRejected(answer) => {
+                Err(Fault::credentials_rejected(namespace, answer))
             }
             QueryOutcome::Found(found) => {
                 if found.is_ours(order, kind) {
@@ -645,13 +592,14 @@ macro_rules! journal_helpers {
 
             use super::{Fault, Journaled, Lookup, StornoIntent};
             use crate::account::Accounts;
-            use crate::config::WorkerConfig;
+            use crate::config::{ValidatedWorkerConfig, WorkerConfig};
             use crate::contract::{IssuedKind, Selector};
             use crate::gateway::{
                 QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
                 StornoStepRequest, Unanswered,
             };
             use crate::identity::{ExternalId, OrderKey};
+            use crate::service::Deployment;
             use crate::service::prologue::{self as decisions, Execution};
             use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
             use restate_sdk::errors::{HandlerError, TerminalError};
@@ -670,8 +618,7 @@ macro_rules! journal_helpers {
             pub(in crate::service) async fn execute<T, F, Fut>(
                 ctx: &$ctx<'_>,
                 key: Option<&str>,
-                accounts: &Accounts,
-                config: &WorkerConfig,
+                deployment: &Deployment,
                 body: F,
             ) -> Result<T, HandlerError>
             where
@@ -680,7 +627,8 @@ macro_rules! journal_helpers {
             {
                 let span = decisions::execution_span(ctx.scope(), key, ctx.invocation_id());
                 async move {
-                    let execution = prologue(ctx, accounts, config).await?;
+                    let execution =
+                        prologue(ctx, &deployment.accounts, &deployment.config).await?;
                     body(execution).await
                 }
                 .instrument(span)
@@ -708,16 +656,19 @@ macro_rules! journal_helpers {
             async fn prologue(
                 ctx: &$ctx<'_>,
                 accounts: &Accounts,
-                config: &WorkerConfig,
+                config: &ValidatedWorkerConfig,
             ) -> Result<Execution, HandlerError> {
                 // 1. Pin.
                 let pinned = {
                     let namespace = config.namespace.clone();
                     run_once(ctx, "namespace", move || async move { namespace }).await?
                 };
+                // The pin replaces the namespace alone, which no policy
+                // invariant reads: the execution's settings are the validated
+                // ones with the journaled namespace.
                 let config = WorkerConfig {
                     namespace: pinned,
-                    ..config.clone()
+                    ..WorkerConfig::clone(config)
                 };
 
                 // 2. Resolve.
@@ -900,7 +851,7 @@ macro_rules! journal_helpers {
                 order: &OrderKey,
                 kind: IssuedKind,
             ) -> Result<Lookup, Fault> {
-                let about = |fault: Fault| fault.about(order, Some(kind), external_id.as_str());
+                let about = |fault: Fault| fault.about(order, Some(kind), &external_id);
                 let outcome = query_external_id(ctx, exec, name, external_id)
                     .await
                     .map_err(about)?;
@@ -996,7 +947,7 @@ macro_rules! journal_helpers {
                     return Ok(None);
                 };
                 super::storno_number_from_hint(outcome, number, &exec.config.namespace)
-                    .map_err(|fault| fault.about(order, None, storno_id.as_str()).into())
+                    .map_err(|fault| fault.about(order, None, &storno_id).into())
             }
 
             /// The storno number of a reversed document no `Order` manages,
