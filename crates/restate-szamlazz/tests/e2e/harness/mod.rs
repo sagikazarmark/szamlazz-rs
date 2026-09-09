@@ -7,18 +7,19 @@
 //! - the server specs of the two suites ([`MAIN_SERVER`],
 //!   [`WITHOUT_PROTOCOL_V7`]) over the crate's server gate, launcher and
 //!   [`Restate`] handle (`restate_e2e_harness::{gate, server}`);
-//! - [`accounts`]: the scripted and mutable resolver and store the two
-//!   deployments run over, and the deployments themselves;
-//! - [`szamlazz`]: what szamlazz.hu holds (the document fixture, the
-//!   selector matchers and the response templates);
+//! - [`accounts`]: the resolver and store the two deployments run over, and
+//!   the deployments themselves;
+//! - [`szamlazz`]: what szamlazz.hu holds (the shared document fixture and
+//!   matchers of `tests/common`, and the document-centric mount helpers);
 //! - [`ingress`]: an ingress reply with the worker's [`Fault`] decoded out
 //!   of the crate's envelope check;
 //! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]), the
 //!   *run-name pin*, over the crate's matcher.
 //!
-//! The harness's own tests (the fetch hold, the stub helpers against wiremock
-//! alone) live beside what they test and need no server; the server gate's,
-//! the sampler's and the matcher's are the crate's.
+//! The harness's own tests (the fetch hold and the resolution script, the
+//! stub helpers against wiremock alone) live beside what they test and need
+//! no server; the server gate's, the sampler's and the matcher's are the
+//! crate's.
 //!
 //! [`Fault`]: restate_szamlazz::contract::Fault
 
@@ -34,7 +35,6 @@ use std::time::Duration;
 use jiff::civil::date;
 use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
 pub(crate) use restate_e2e_harness::gate::{Reuse, launcher_or_skip};
-pub(crate) use restate_e2e_harness::plain_http;
 use restate_e2e_harness::{Invocation, JournalEntry, Restate, ServerSpec, Target, Watch};
 use restate_sdk::prelude::Endpoint;
 use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
@@ -43,13 +43,11 @@ use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
 use wiremock::{MockServer, ResponseTemplate};
 
-use crate::harness::accounts::{
-    MutableAccounts, ScriptedAccounts, multi_account_services, services,
-};
+use crate::harness::accounts::{MutableAccounts, multi_account_services, services};
 use crate::harness::ingress::Reply;
 use crate::harness::szamlazz::{
-    Doc, Sends, create_lands_but_reply_lost, create_lands_on_the_second_send, create_lands_slowly,
-    external_id_query, holds, holds_after_misses, loses_reply_once, not_found,
+    Doc, Sends, create_lands_on_the_second_send, create_lands_slowly, external_id_query, holds,
+    holds_after_misses, loses_reply_once, not_found,
 };
 
 // ----- the servers ---------------------------------------------------------------
@@ -126,28 +124,39 @@ pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
 ///   for `misses` queries, then `doc`, the document appearing after a
 ///   hand-counted number of queries (the lookup step's, the create step's
 ///   leading query and re-query).
-/// - [`Harness::create_lands_but_reply_lost`]: `create()` answers 500,
-///   `expect(1)`, and `doc` holds its external id from the moment the create
-///   request is received; the transition is the create stub being matched,
-///   not a query count. Code 7 on the external id before.
-/// - [`Harness::create_lands_slowly`]: the same transition at the create's
-///   receipt, but the create is answered `created` after a delay: the window
-///   a second caller or a cancellation arrives in while the first send's
-///   reply is in flight, opened to the scenario by the returned [`Sends`].
+/// - [`Harness::create_lands_slowly`]: the order's create is answered
+///   `created` after a delay, and `doc` holds its external id from the moment
+///   the create request is received (code 7 before): the transition is the
+///   create stub being matched, not a query count, and the delay is the
+///   window a second caller or a cancellation arrives in while the first
+///   send's reply is in flight, opened to the scenario by the returned
+///   [`Sends`]. (Its sibling `create_lands_but_reply_lost`, the 500 instead
+///   of the delayed answer, is the helper module's; no scenario needs it,
+///   the gateway's table covers the immediate re-query.)
 /// - [`Harness::create_lands_on_the_second_send`]: the first create answered
 ///   without landing (`szlahu_down`, a 500), the second landing: what a
 ///   create step meets when it re-executes after an *Unconfirmed* send.
 /// - The raw builders (`number_query`, `order_query`, `external_id_query`,
-///   `create`, `storno`), `expect(n)` and `up_to_n_times(n)`: a stub the
-///   scenario asserts on (`expect`), a non-document answer (7, 500, an API
-///   code) or an ordering-dependent shape stays explicit, byte for byte.
+///   `create_for`, `storno_of_number`), `expect(n)` and `up_to_n_times(n)`: a
+///   stub the scenario asserts on (`expect`), a non-document answer (7, 500,
+///   an API code) or an ordering-dependent shape stays explicit, byte for
+///   byte.
 ///
-/// The five document helpers are checked against wiremock alone by the
-/// non-ignored tests in [`szamlazz`].
+/// **Every stub is discriminated by what it is about** (the order key on a
+/// create, the number on a storno, a credit entry or a delete, the external id
+/// or the order on a query), never by its place in time: phase 1 mounts once
+/// and runs its scenarios concurrently, every scenario owns its order keys and
+/// numbers, and nothing is reset between them; what a scenario counts it
+/// counts **per order or per number** ([`Harness::create_bodies_of`] and its
+/// siblings, [`Harness::requests_mentioning`]), never over the whole mock.
+/// Every mock's `expect(n)` is verified at the first [`Harness::reset`] after
+/// it (phase 2's scenarios run in sequence and reset between them; the last
+/// one's mocks are checked when the harness is dropped). The document helpers
+/// are checked against wiremock alone by the non-ignored tests in
+/// [`szamlazz`].
 pub(crate) struct Harness {
     restate: Restate,
     pub(crate) mock: MockServer,
-    pub(crate) script: Arc<ScriptedAccounts>,
     /// The multi-account phase's resolver and store, once the flag day ran.
     multi: Option<Arc<MutableAccounts>>,
 }
@@ -158,11 +167,10 @@ impl Harness {
     /// the single-account deployment.
     pub(crate) async fn start(restate: Restate) -> Self {
         let mock = MockServer::start().await;
-        let (scripted, order, agent) = services(&mock.uri());
+        let (order, agent) = services(&mock.uri());
         let harness = Self {
             restate,
             mock,
-            script: scripted,
             multi: None,
         };
         harness.deploy(order, agent).await;
@@ -241,6 +249,16 @@ impl Harness {
         .await
     }
 
+    /// Calls `Szamlazz.Agent.{handler}` unscoped.
+    pub(crate) async fn call_agent(&self, handler: &str, body: &Value) -> Reply {
+        self.invoke(
+            &format!("/restate/call/Szamlazz.Agent/{handler}"),
+            Some(body),
+            None,
+        )
+        .await
+    }
+
     /// Calls `Szamlazz.Agent.{handler}` under `scope`.
     pub(crate) async fn call_agent_scoped(
         &self,
@@ -290,13 +308,6 @@ impl Harness {
     }
 
     /// `Szamlazz.Order.get`: no input, no idempotency key.
-    pub(crate) async fn get(&self, key: &str) -> Value {
-        let reply = self.get_reply(key).await;
-        assert_eq!(reply.status, 200, "get on {key}: {}", reply.body);
-        reply.0.body
-    }
-
-    /// `Szamlazz.Order.get` as the raw reply, for the invocation id.
     pub(crate) async fn get_reply(&self, key: &str) -> Reply {
         self.invoke(
             &format!("/restate/call/Szamlazz.Order/{key}/get"),
@@ -323,13 +334,19 @@ impl Harness {
         reply.0.body
     }
 
-    /// Submits `Szamlazz.Order.{handler}` on `key` without waiting for it
-    /// (`/restate/send/…`): the invocation id of the accepted invocation.
-    /// ("Send" alone is a szamlazz.hu request in this suite.)
-    pub(crate) async fn submit(&self, key: &str, handler: &str, body: &Value) -> String {
+    /// Submits `Szamlazz.Order.{handler}` on `key` under `scope` without
+    /// waiting for it (`/restate/send/…`): the invocation id of the accepted
+    /// invocation. ("Send" alone is a szamlazz.hu request in this suite.)
+    pub(crate) async fn submit_scoped(
+        &self,
+        scope: &str,
+        key: &str,
+        handler: &str,
+        body: &Value,
+    ) -> String {
         let reply = self
             .invoke(
-                &format!("/restate/send/Szamlazz.Order/{key}/{handler}"),
+                &format!("/restate/scope/{scope}/send/Szamlazz.Order/{key}/{handler}"),
                 Some(body),
                 None,
             )
@@ -425,52 +442,69 @@ impl Harness {
         self.restate.admin().purge(invocation_id).await;
     }
 
-    /// Verifies the previous scenario's `expect(n)` counts (wiremock checks
-    /// them on `verify` and on drop, never on `reset`), then forgets every
-    /// mock and every recorded request. A mock that saw more or fewer
-    /// requests than it expected fails here, at the start of the next
-    /// scenario, naming the mock and the requests received; the last
+    /// Verifies every mounted mock's `expect(n)` (wiremock checks them on
+    /// `verify` and on drop, never on `reset`), then forgets every mock and
+    /// every recorded request. A mock that saw more or fewer requests than it
+    /// expected fails here, naming the mock and the requests received: at
+    /// the end of phase 1 for every mock its concurrent scenarios mounted, and
+    /// at the start of each phase-2 scenario for the previous one's; the last
     /// scenario's mocks are checked when the harness is dropped.
     pub(crate) async fn reset(&self) {
         self.mock.verify().await;
         self.mock.reset().await;
     }
 
-    pub(crate) async fn requests_seen(&self) -> usize {
-        self.mock.received_requests().await.expect("requests").len()
+    /// The bodies of the requests szamlazz.hu has seen so far that mention
+    /// `needle`: an order key, a number, an external id. How a scenario says
+    /// "nothing of mine reached szamlazz.hu" beside scenarios whose requests
+    /// it does not count.
+    pub(crate) async fn requests_mentioning(&self, needle: &str) -> Vec<String> {
+        self.bodies(None, needle).await
     }
 
-    /// The bodies of the create requests szamlazz.hu has seen so far.
-    pub(crate) async fn create_bodies(&self) -> Vec<String> {
-        self.bodies_of("action-xmlagentxmlfile").await
+    /// The bodies of the create requests of `order` szamlazz.hu has seen so
+    /// far.
+    pub(crate) async fn create_bodies_of(&self, order: &str) -> Vec<String> {
+        self.bodies(
+            Some("action-xmlagentxmlfile"),
+            &format!("<rendelesSzam>{order}</rendelesSzam>"),
+        )
+        .await
     }
 
-    /// The bodies of the storno requests szamlazz.hu has seen so far.
-    pub(crate) async fn storno_bodies(&self) -> Vec<String> {
-        self.bodies_of("action-szamla_agent_st").await
+    /// The bodies of the storno requests of `number` szamlazz.hu has seen so
+    /// far.
+    pub(crate) async fn storno_bodies_of(&self, number: &str) -> Vec<String> {
+        self.bodies(
+            Some("action-szamla_agent_st"),
+            &format!("<szamlaszam>{number}</szamlaszam>"),
+        )
+        .await
     }
 
-    /// The bodies of the proforma deletions szamlazz.hu has seen so far.
-    pub(crate) async fn delete_bodies(&self) -> Vec<String> {
-        self.bodies_of("action-szamla_agent_dijbekero_torlese")
-            .await
+    /// The bodies of the proforma deletions of `number` szamlazz.hu has seen
+    /// so far.
+    pub(crate) async fn delete_bodies_of(&self, number: &str) -> Vec<String> {
+        self.bodies(
+            Some("action-szamla_agent_dijbekero_torlese"),
+            &format!("<szamlaszam>{number}</szamlaszam>"),
+        )
+        .await
     }
 
-    /// The bodies of the credit-entry requests szamlazz.hu has seen so far.
-    pub(crate) async fn credit_bodies(&self) -> Vec<String> {
-        self.bodies_of("action-szamla_agent_kifiz").await
-    }
-
-    /// The bodies of the requests of `action` szamlazz.hu has seen so far.
-    pub(crate) async fn bodies_of(&self, action: &str) -> Vec<String> {
-        let marker = format!("name=\"{action}\"");
+    /// The bodies of the requests of `action` (every action when `None`)
+    /// szamlazz.hu has seen so far that mention `needle`.
+    async fn bodies(&self, action: Option<&str>, needle: &str) -> Vec<String> {
+        let marker = action.map(|action| format!("name=\"{action}\""));
         self.mock
             .received_requests()
             .await
             .expect("requests")
             .iter()
             .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-            .filter(|body| body.contains(&marker))
+            .filter(|body| {
+                marker.as_ref().is_none_or(|marker| body.contains(marker)) && body.contains(needle)
+            })
             .collect()
     }
 
@@ -511,12 +545,6 @@ impl Harness {
     /// [`loses_reply_once`]. Mount before the steady answers.
     pub(crate) async fn loses_reply_once(&self, id: &str) {
         loses_reply_once(&self.mock, id).await;
-    }
-
-    /// The create lands but its reply is lost, and `doc` is the holder of its
-    /// external id from that moment on: see [`create_lands_but_reply_lost`].
-    pub(crate) async fn create_lands_but_reply_lost(&self, doc: &Doc<'_>) {
-        create_lands_but_reply_lost(&self.mock, doc).await;
     }
 
     /// The create lands at once but its reply takes `delay`, and `doc` is the

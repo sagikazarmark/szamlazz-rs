@@ -22,7 +22,10 @@ use restate_e2e_harness::{RunPath, RunPatterns};
 /// only; see [`is_prefix_of_path`]) and every path is observed in full at
 /// least once in the run. The parameter of a parametrized name is pinned by
 /// its prefix only: a number that itself began with a pinned stem (`storno-1`)
-/// would read as the longer pattern; none of the suite's do.
+/// would read as the longer pattern; none of the suite's do. The walk
+/// requirement sizes the suite: every row is walked by at least one phase-1
+/// or phase-2 scenario, and a row whose only walker were removed fails the pin
+/// (#134).
 pub(crate) const RUN_NAMES: &[RunPath] = &[
     RunPath::new(
         "Szamlazz.Order",

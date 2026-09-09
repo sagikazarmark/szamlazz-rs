@@ -17,10 +17,9 @@ use std::pin::pin;
 use std::time::{Duration, Instant};
 
 use rust_decimal::dec;
-use wiremock::ResponseTemplate;
 
 use crate::harness::ingress::Reply;
-use crate::harness::szamlazz::{Doc, create, created, not_found, order_query};
+use crate::harness::szamlazz::{Doc, create_for, created, not_found, order_query, szlahu_down};
 use crate::harness::{Harness, create_body};
 
 /// The scope every call of this family goes under.
@@ -45,12 +44,10 @@ async fn timed(call: impl Future<Output = Reply>) -> Timed {
 /// The order-key lock's proof, shared by the two races below: the second
 /// call, accepted by the server while the first was in flight, is answered
 /// **after** the first (queued, not run beside it), from its lookup step
-/// (`already_issued`, no `create-invoice` run) and without a send of its own:
-/// every create on the wire carries `order`, and how many there are is the
-/// scenario's to say.
+/// (`already_issued`, no `create-invoice` run) and without a send of its own;
+/// how many creates the order saw is the scenario's to say.
 async fn assert_second_call_queued_behind_the_first(
     h: &Harness,
-    order: &str,
     number: &str,
     first: Timed,
     second: Timed,
@@ -80,14 +77,6 @@ async fn assert_second_call_queued_behind_the_first(
          (first {:?}, second {:?})",
         first.done,
         second.done
-    );
-
-    let creates = h.create_bodies().await;
-    assert!(
-        creates
-            .iter()
-            .all(|body| body.contains(&format!("<rendelesSzam>{order}</rendelesSzam>"))),
-        "every send is this order's: {creates:?}"
     );
 
     for (which, reply) in [("first", &first.reply), ("second", &second.reply)] {
@@ -123,7 +112,7 @@ async fn assert_second_call_queued_behind_the_first(
     );
 }
 
-/// (xxiii) same key, same scope, two `create_invoice` with distinct
+/// Same key, same scope, two `create_invoice` with distinct
 /// `Idempotency-Key`s, the first's send **delayed** by szamlazz.hu: the second
 /// call is queued behind the Virtual Object's lock while the first is
 /// mid-send; it runs once the first has completed, its lookup finds the
@@ -152,7 +141,7 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
         .create_lands_slowly(
             &Doc {
                 external_id: Some("acct:E2E-L1:invoice"),
-                ..Doc::new("SZ-L1", "SZ", "E2E-L1")
+                ..Doc::of("SZ-L1", "SZ", "E2E-L1")
             },
             Duration::from_secs(3),
         )
@@ -173,7 +162,7 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
             hold.reached().await;
             let in_flight = h.await_in_flight_on("E2E-L1", 2).await;
             assert!(
-                h.create_bodies().await.is_empty(),
+                h.create_bodies_of("E2E-L1").await.is_empty(),
                 "nothing sent while the first is held: {in_flight:?}"
             );
             let released = Instant::now();
@@ -210,14 +199,15 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
         elapsed < Duration::from_secs(60),
         "nothing was retried by the handler: {elapsed:?}"
     );
-    assert_second_call_queued_behind_the_first(h, "E2E-L1", "SZ-L1", first, second).await;
-    assert_eq!(h.create_bodies().await.len(), 1, "one create on the wire");
-    eprintln!(
-        "(xxiii) same key, same scope, two concurrent creates with the first's send delayed → issued + already_issued, one create, the second's runs end at the lookup: pass"
+    assert_second_call_queued_behind_the_first(h, "SZ-L1", first, second).await;
+    assert_eq!(
+        h.create_bodies_of("E2E-L1").await.len(),
+        1,
+        "one create on the wire"
     );
 }
 
-/// (xxiii-b) the re-execution variant: the first call's send is answered
+/// The re-execution variant: the first call's send is answered
 /// `szlahu_down` (nothing landed: the immediate re-query finds nothing, the
 /// create step is *Unconfirmed*, and the issue policy re-executes it after its
 /// `initial_delay`), and the second call arrives **between the two
@@ -227,7 +217,7 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
 /// the lock while it is held, and only then is it released to send. The
 /// second send lands; the second call then finds the document from its
 /// lookup. Two creates on the wire, both the first call's; the same
-/// assertions as (xxiii) otherwise.
+/// assertions as the race above otherwise.
 ///
 /// #125 asks for the second call to arrive *while the create step waits out
 /// its delay*. This scenario places it a step later, at the re-execution's
@@ -257,9 +247,9 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         .create_lands_on_the_second_send(
             &Doc {
                 external_id: Some("acct:E2E-L2:invoice"),
-                ..Doc::new("SZ-L2", "SZ", "E2E-L2")
+                ..Doc::of("SZ-L2", "SZ", "E2E-L2")
             },
-            ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
+            szlahu_down(),
         )
         .await;
 
@@ -278,7 +268,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         async {
             hold.reached().await;
             assert_eq!(
-                h.create_bodies().await.len(),
+                h.create_bodies_of("E2E-L2").await.len(),
                 1,
                 "the first execution sent before the second reached its fetch"
             );
@@ -286,7 +276,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
             // the second queued behind it.
             let in_flight = h.await_in_flight_on("E2E-L2", 2).await;
             assert_eq!(
-                h.create_bodies().await.len(),
+                h.create_bodies_of("E2E-L2").await.len(),
                 1,
                 "the second call was queued before the second send: {in_flight:?}"
             );
@@ -311,23 +301,20 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         ["create-invoice"],
         "the first call's create step is what re-executed: {retries:?}"
     );
-    assert_second_call_queued_behind_the_first(h, "E2E-L2", "SZ-L2", first, second).await;
+    assert_second_call_queued_behind_the_first(h, "SZ-L2", first, second).await;
     assert_eq!(
-        h.create_bodies().await.len(),
+        h.create_bodies_of("E2E-L2").await.len(),
         2,
         "two sends, both the first call's: the one szamlazz.hu did not act on and the one that landed"
     );
-    eprintln!(
-        "(xxiii-b) same key, same scope, the second call between the first call's two executions → issued + already_issued, two sends of the first call, the second's runs end at the lookup: pass"
-    );
 }
 
-/// (xxiv) the same `Idempotency-Key` sent while the first invocation is in
+/// The same `Idempotency-Key` sent while the first invocation is in
 /// flight **attaches** to it: one invocation id on both replies, the same body
 /// (`issued`), one create on the wire, one invocation on the order. What the
 /// glossary's *Idempotency-Key* entry asks the caller to do after **no
 /// answer**: keep the key, since a new one would queue a second invocation
-/// behind the lock, as (xxiii) shows. The completed case (the stored
+/// behind the lock, as the first race shows. The completed case (the stored
 /// completion replayed) is (ii); that this is not it is the hold's doing: the
 /// first invocation is parked at its credential fetch while the retry is
 /// sent, the retry stays **unanswered** for as long as the hold is held (a
@@ -342,7 +329,7 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    create()
+    create_for("E2E-L3")
         .respond_with(created("SZ-L3", "1000", "1270"))
         .expect(1)
         .mount(&h.mock)
@@ -396,7 +383,11 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         first.reply.invocation_id(),
         "the invocation the retry found in flight is the one it attached to"
     );
-    assert_eq!(h.create_bodies().await.len(), 1, "one create on the wire");
+    assert_eq!(
+        h.create_bodies_of("E2E-L3").await.len(),
+        1,
+        "one create on the wire"
+    );
     let on_the_order = h
         .sql("SELECT id, target_handler_name, idempotency_key FROM sys_invocation WHERE target_service_key = 'E2E-L3'")
         .await;
@@ -413,8 +404,5 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
             .last()
             .map(String::as_str),
         Some("create-invoice")
-    );
-    eprintln!(
-        "(xxiv) the same Idempotency-Key while the first invocation is in flight → attached: unanswered while the first is held, one invocation id, one create: pass"
     );
 }
