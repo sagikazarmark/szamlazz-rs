@@ -84,7 +84,7 @@ use crate::identity::{ExternalId, OrderKey};
 pub mod build;
 pub mod document;
 
-pub use build::{DocumentRefs, InputError, gross_total};
+pub use build::{DocumentRefs, InputError};
 pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 
 /// What szamlazz.hu answered with when the answer is a code rather than a
@@ -243,8 +243,11 @@ impl<'de> Deserialize<'de> for RejectionCode {
 ///
 /// Opened with [`Gateway::open`] for one handler execution from a resolved
 /// account and freshly fetched credentials, or with
-/// [`Gateway::open_with_http`] over a caller-built HTTP client.
-#[derive(Debug, Clone)]
+/// [`Gateway::open_with_http`] over a caller-built HTTP client. Not `Clone`:
+/// a clone would share the client and its cookie jar, the very thing the
+/// fresh-client-per-open boundary exists to prevent; the services hold one
+/// in an `Arc` for the execution.
+#[derive(Debug)]
 pub struct Gateway {
     client: Client,
     account: Account,
