@@ -1,7 +1,10 @@
 """
 The checks of this workspace the generic `rust` module cannot express: the
-workspace tests with every feature, and the handler layer of `restate-szamlazz`
-end to end against a real Restate server.
+workspace tests with every feature, and the end-to-end suites against a real
+Restate server (the handler layer of `restate-szamlazz`, and the
+`restate-e2e-harness` crate's own smoke test); and the `restate-server` binary
+those suites run against, exported for a developer
+(`dagger call ci restate-server export --path ./restate-server`).
 
 Runs on the `rust` module's container (wired in as `container` from
 `rust:container`): the toolchain, the workspace at `/work/src` and the cargo
@@ -42,17 +45,19 @@ type Ci {
   }
 
   """
-  The handler layer end to end: the ignored `tests/e2e` suite of
-  `restate-szamlazz`: the `Szamlazz.Order` and `Szamlazz.Agent` handlers, the
-  multi-account flag day and scope isolation, the journal scan for the agent
-  key, the run-name pin and the protocol-v7 canary, against `restate-server`
-  processes the harness spawns in this container from the binary of the
-  Restate image (`RESTATE_SERVER_BIN`; there is no docker here). `CI` is set,
-  so a run without a server fails instead of skipping.
+  End to end: the ignored `e2e_` tests of the workspace against
+  `restate-server` processes the harness spawns in this container from the
+  binary of the Restate image (`RESTATE_SERVER_BIN`; there is no docker here).
+  The `tests/e2e` suite of `restate-szamlazz` (the `Szamlazz.Order` and
+  `Szamlazz.Agent` handlers, the multi-account flag day and scope isolation,
+  the journal scan for the agent key, the run-name pin and the protocol-v7
+  canary) and the `restate-e2e-harness` crate's own `e2e_smoke` (its contract
+  with no consumer). `CI` is set, so a run without a server fails instead of
+  skipping.
 
   Runs with the selection `compiled` built (`--workspace --all-features`, every
-  test target), narrowed to the two ignored e2e tests by name, so nothing is
-  compiled here: selecting the package (`-p restate-szamlazz`) or the target
+  test target), narrowed to the ignored e2e tests by name, so nothing is
+  compiled here: selecting a package (`-p restate-szamlazz`) or a target
   (`--test e2e`) unifies dev-dependency features differently (only the
   packages with a selected dev target contribute theirs) and recompiles
   fifty-odd crates, `tokio`, `hyper`, `reqwest` and `restate-sdk` among them,
@@ -78,7 +83,7 @@ type Ci {
   let endToEndScript: String! = """cargo test --workspace --all-features --locked --tests -- --ignored e2e_
 status=$?
 if [ "$status" -ne 0 ]; then
-  for log in "${TMPDIR:-/tmp}"/restate-szamlazz-e2e-*/restate-server.log; do
+  for log in "${TMPDIR:-/tmp}"/restate-e2e-*/restate-server.log; do
     [ -f "$log" ] || continue
     echo
     echo "==== $log (kept by the harness; last 300 lines) ===="
@@ -99,9 +104,12 @@ exit "$status"
   }
 
   """
-  The `restate-server` binary, taken from the Restate image.
+  The `restate-server` binary, taken from the Restate image: what the
+  end-to-end check runs against, and what a developer exports to run the
+  suites locally (`dagger call ci restate-server export --path
+  ./restate-server`, then `RESTATE_SERVER_BIN=$PWD/restate-server`).
   """
-  let restateServer: File! {
+  restateServer: File! {
     Dagger
       .container
       .from("docker.restate.dev/restatedev/restate:" + self.restateVersion)

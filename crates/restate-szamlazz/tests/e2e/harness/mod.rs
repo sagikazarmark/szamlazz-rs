@@ -1,38 +1,42 @@
-//! The harness the scenarios drive: the Restate server, the wiremock standing
-//! in for szamlazz.hu, and the ingress, SQL and stub helpers ([`Harness`]).
+//! The harness the scenarios drive: the Restate server (through the
+//! `restate-e2e-harness` crate), the wiremock standing in for szamlazz.hu,
+//! and the ingress, SQL and stub helpers ([`Harness`]).
 //!
-//! - [`gate`]: where the server comes from (the *server gate*), the launcher
-//!   and the server process or container.
-//! - [`admin`]: the admin API's SQL endpoint and the sampler over it
-//!   ([`admin::Watch`]) that records an invocation's run retries while it runs.
+//! What is szamlazz's stays here; what is Restate's is the crate's:
+//!
+//! - the server specs of the two suites ([`MAIN_SERVER`],
+//!   [`WITHOUT_PROTOCOL_V7`]) over the crate's server gate, launcher and
+//!   [`Restate`] handle (`restate_e2e_harness::{gate, server}`);
 //! - [`accounts`]: the scripted and mutable resolver and store the two
-//!   deployments run over, and the deployments themselves.
+//!   deployments run over, and the deployments themselves;
 //! - [`szamlazz`]: what szamlazz.hu holds (the document fixture, the
-//!   selector matchers and the response templates).
-//! - [`ingress`]: an ingress reply and the fault inside its error envelope.
-//! - [`introspection`]: `sys_journal` and `sys_invocation` rows.
-//! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]) and its
-//!   matching, the *run-name pin*.
+//!   selector matchers and the response templates);
+//! - [`ingress`]: an ingress reply with the worker's [`Fault`] decoded out
+//!   of the crate's envelope check;
+//! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]), the
+//!   *run-name pin*, over the crate's matcher.
 //!
-//! The harness's own tests (the server gate, the sampler's decision, the
-//! run-pattern matching, the stub helpers against wiremock alone) live beside
-//! what they test and need no server.
+//! The harness's own tests (the fetch hold, the stub helpers against wiremock
+//! alone) live beside what they test and need no server; the server gate's,
+//! the sampler's and the matcher's are the crate's.
+//!
+//! [`Fault`]: restate_szamlazz::contract::Fault
 
 pub(crate) mod accounts;
-pub(crate) mod admin;
-pub(crate) mod gate;
 pub(crate) mod ingress;
-pub(crate) mod introspection;
 pub(crate) mod run_names;
 pub(crate) mod szamlazz;
 
 use std::collections::BTreeMap;
-use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use jiff::civil::date;
-use restate_sdk::prelude::{Endpoint, HttpServer};
+use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
+pub(crate) use restate_e2e_harness::gate::{Reuse, launcher_or_skip};
+pub(crate) use restate_e2e_harness::plain_http;
+use restate_e2e_harness::{Invocation, JournalEntry, Restate, ServerSpec, Target, Watch};
+use restate_sdk::prelude::Endpoint;
 use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
@@ -42,24 +46,38 @@ use wiremock::{MockServer, ResponseTemplate};
 use crate::harness::accounts::{
     MutableAccounts, ScriptedAccounts, multi_account_services, services,
 };
-use crate::harness::admin::{Admin, Watch};
-use crate::harness::gate::{FEATURES, Restate};
 use crate::harness::ingress::Reply;
-use crate::harness::introspection::{Invocation, JournalEntry};
 use crate::harness::szamlazz::{
     Doc, Sends, create_lands_but_reply_lost, create_lands_on_the_second_send, create_lands_slowly,
     external_id_query, holds, holds_after_misses, loses_reply_once, not_found,
 };
 
-// ----- the harness's own HTTP client -----------------------------------------------
+// ----- the servers ---------------------------------------------------------------
 
-/// A [`reqwest::ClientBuilder`] for the harness's own traffic, all of it plain
-/// `http://` on the loopback (the Restate admin and ingress APIs, a raw post at
-/// the wiremock): **no root certificates**, so building it never parses the
-/// system CA store (#136). The gateways the deployment's prologue opens are
-/// the production `Gateway::open`, untouched.
-pub(crate) fn plain_http() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().tls_certs_only(std::iter::empty())
+/// The main suite's server: the three experimental flags multi-account mode
+/// depends on (vqueues, protocol v7 (below it the SDK sees no scope) and
+/// scoped Virtual Objects). Set on the server the harness starts and expected
+/// of one reused through the environment.
+pub(crate) const MAIN_SERVER: ServerSpec = ServerSpec {
+    name: "main",
+    flags: &[FLAG_VQUEUES, FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS],
+};
+
+/// The protocol-v7 canary's server: vqueues and scoped Virtual Objects on,
+/// protocol v7 off (a deployment that forgot the one flag the scope needs to
+/// reach the SDK).
+pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
+    name: "canary",
+    flags: &[FLAG_VQUEUES, FLAG_SCOPED_VIRTUAL_OBJECTS],
+};
+
+/// The two Restate services of the worker, as the admin API names them.
+const SERVICES: [&str; 2] = ["Szamlazz.Order", "Szamlazz.Agent"];
+
+/// The `Szamlazz.Order` object `key`, in whatever scope: the suite's keys are
+/// unique across the run, so no scenario watches one key under two scopes.
+fn order(key: &str) -> Target<'_> {
+    Target::object(SERVICES[0], key)
 }
 
 // ----- request bodies ----------------------------------------------------------
@@ -129,120 +147,35 @@ pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
 pub(crate) struct Harness {
     restate: Restate,
     pub(crate) mock: MockServer,
-    http: reqwest::Client,
-    /// The server's admin API: the SQL endpoint, and what a [`Watch`] samples.
-    admin: Admin,
     pub(crate) script: Arc<ScriptedAccounts>,
     /// The multi-account phase's resolver and store, once the flag day ran.
     multi: Option<Arc<MutableAccounts>>,
 }
 
 impl Harness {
-    /// The harness on `restate`: waits for its admin API (failing at once,
-    /// with the server's own account of it, when a server the harness started
-    /// is gone before then), checks that `/version` reports exactly the
-    /// features the server's flags enable, and serves and registers the
-    /// single-account deployment.
-    pub(crate) async fn start(mut restate: Restate) -> Self {
+    /// The harness on `restate` (launched and ready: its admin API answering
+    /// and `/version` reporting its spec's features): serves and registers
+    /// the single-account deployment.
+    pub(crate) async fn start(restate: Restate) -> Self {
         let mock = MockServer::start().await;
-        let http = plain_http()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .expect("client");
-        let admin = Admin::new(restate.admin.clone(), http.clone());
-
-        // Wait for the admin API.
-        let deadline = Instant::now() + Duration::from_secs(90);
-        loop {
-            if let Ok(response) = http.get(format!("{}/health", restate.admin)).send().await
-                && response.status().is_success()
-            {
-                break;
-            }
-            if let Some(reason) = restate.exited() {
-                panic!("{reason}");
-            }
-            assert!(
-                Instant::now() < deadline,
-                "Restate admin API did not come up"
-            );
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        // The server reports the features its flags enable and no other: the
-        // main suite needs all three, the protocol-v7 canary needs one off; a
-        // reused server (from the environment) is checked the same way.
-        let version: Value = http
-            .get(format!("{}/version", restate.admin))
-            .send()
-            .await
-            .expect("version")
-            .json()
-            .await
-            .expect("version json");
-        for (feature, flag) in FEATURES {
-            let expected = restate.flags.contains(&flag);
-            assert_eq!(
-                version["features"][feature],
-                Value::Bool(expected),
-                "the Restate server must run with {feature} {}: {version}",
-                if expected { "enabled" } else { "disabled" }
-            );
-        }
-
-        // Serve the endpoint on a free port and register it.
         let (scripted, order, agent) = services(&mock.uri());
         let harness = Self {
             restate,
             mock,
-            http,
-            admin,
             script: scripted,
             multi: None,
         };
-        harness.serve_and_register(order, agent).await;
+        harness.deploy(order, agent).await;
         harness
     }
 
     /// Serves `order` and `agent` on a free port of this host and registers
     /// the deployment with the server: a new URI is a new revision of both
     /// services, and new invocations route to it.
-    async fn serve_and_register(&self, order: Order, agent: Agent) {
-        let listener = TcpListener::bind("0.0.0.0:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        listener.set_nonblocking(true).expect("nonblocking");
-        let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
-        tokio::spawn(async move {
-            HttpServer::new(Endpoint::builder().bind(order).bind(agent).build())
-                .serve(listener)
-                .await;
-        });
-
-        let deployment = json!({
-            "uri": format!("http://{}:{port}", self.restate.endpoint_host),
-            "force": true,
-        });
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let response = self
-                .http
-                .post(format!("{}/deployments", self.restate.admin))
-                .json(&deployment)
-                .send()
-                .await;
-            match response {
-                Ok(response) if response.status().is_success() => break,
-                Ok(response) => {
-                    let body = response.text().await.unwrap_or_default();
-                    assert!(
-                        Instant::now() < deadline,
-                        "deployment registration failed: {body}"
-                    );
-                }
-                Err(error) => assert!(Instant::now() < deadline, "admin unreachable: {error}"),
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+    async fn deploy(&self, order: Order, agent: Agent) {
+        self.restate
+            .deploy(Endpoint::builder().bind(order).bind(agent).build())
+            .await;
     }
 
     /// The single → multi flag day, as ADR 0006 and design §9 script it: make
@@ -252,9 +185,9 @@ impl Harness {
     /// `beta`), make the services public again. Callers then use scoped paths.
     pub(crate) async fn switch_to_multi_account(&mut self) {
         self.set_public(false).await;
-        self.drain().await;
+        self.restate.drain().await;
         let (mutable, order, agent) = multi_account_services(&self.mock.uri()).await;
-        self.serve_and_register(order, agent).await;
+        self.deploy(order, agent).await;
         self.multi = Some(mutable);
         self.set_public(true).await;
     }
@@ -268,38 +201,8 @@ impl Harness {
 
     /// `PATCH /services/{service}` with `public` for both services.
     pub(crate) async fn set_public(&self, public: bool) {
-        for service in ["Szamlazz.Order", "Szamlazz.Agent"] {
-            let response = self
-                .http
-                .patch(format!("{}/services/{service}", self.restate.admin))
-                .json(&json!({ "public": public }))
-                .send()
-                .await
-                .expect("modify service");
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            assert!(
-                (200..300).contains(&status),
-                "PATCH /services/{service} public={public} failed ({status}): {body}"
-            );
-        }
-    }
-
-    /// Waits until `sys_invocation` holds no invocation that is not completed.
-    async fn drain(&self) {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let in_flight = self
-                .sql("SELECT id, status FROM sys_invocation WHERE status <> 'completed'")
-                .await;
-            if in_flight.is_empty() {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "invocations still in flight: {in_flight:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        for service in SERVICES {
+            self.restate.set_public(service, public).await;
         }
     }
 
@@ -363,38 +266,15 @@ impl Harness {
         self.invoke(&path, None, None).await
     }
 
+    /// `POST {ingress}{path}` through the crate's ingress, the reply with the
+    /// worker's fault decodable ([`Reply::fault`]).
     pub(crate) async fn invoke(
         &self,
         path: &str,
         body: Option<&Value>,
         idempotency: Option<&str>,
     ) -> Reply {
-        let mut request = self.http.post(format!("{}{path}", self.restate.ingress));
-        if let Some(idempotency) = idempotency {
-            request = request.header("idempotency-key", idempotency);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request.send().await.expect("ingress call");
-        let status = response.status().as_u16();
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-        };
-        let invocation_id = header("x-restate-id");
-        let error_source = header("x-restate-error-source");
-        let text = response.text().await.expect("body");
-        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        Reply {
-            status,
-            body,
-            invocation_id,
-            error_source,
-        }
+        Reply(self.restate.invoke(path, body, idempotency).await)
     }
 
     pub(crate) async fn ok(
@@ -406,14 +286,14 @@ impl Harness {
     ) -> Value {
         let reply = self.call(key, handler, body, idempotency).await;
         assert_eq!(reply.status, 200, "{handler} on {key}: {}", reply.body);
-        reply.body
+        reply.0.body
     }
 
     /// `Szamlazz.Order.get`: no input, no idempotency key.
     pub(crate) async fn get(&self, key: &str) -> Value {
         let reply = self.get_reply(key).await;
         assert_eq!(reply.status, 200, "get on {key}: {}", reply.body);
-        reply.body
+        reply.0.body
     }
 
     /// `Szamlazz.Order.get` as the raw reply, for the invocation id.
@@ -440,7 +320,7 @@ impl Harness {
             "get on {key} under {scope}: {}",
             reply.body
         );
-        reply.body
+        reply.0.body
     }
 
     /// Submits `Szamlazz.Order.{handler}` on `key` without waiting for it
@@ -462,7 +342,7 @@ impl Harness {
     /// does to one that will not finish, and what `on_max_attempts = kill`
     /// does after the handler's attempts are spent.
     pub(crate) async fn kill(&self, invocation_id: &str) {
-        self.patch_invocation(invocation_id, "kill").await;
+        self.restate.admin().kill(invocation_id).await;
     }
 
     /// Cancels an invocation (`PATCH /invocations/{id}/cancel`): the
@@ -471,7 +351,7 @@ impl Harness {
     /// fit (a write step's 409 is `outcome_unknown`) and the invocation
     /// completes with that answer. A kill ends it without one.
     pub(crate) async fn cancel(&self, invocation_id: &str) {
-        self.patch_invocation(invocation_id, "cancel").await;
+        self.restate.admin().cancel(invocation_id).await;
     }
 
     /// The one invocation in flight on Virtual Object `key`: its id, from
@@ -480,13 +360,7 @@ impl Harness {
     /// its id only with its answer): to cancel it, or to check that a retry
     /// attached to it.
     pub(crate) async fn in_flight_on(&self, key: &str) -> String {
-        let in_flight = self.in_flight_ids_on(key).await;
-        assert_eq!(
-            in_flight.len(),
-            1,
-            "one invocation in flight on {key}: {in_flight:?}"
-        );
-        in_flight[0].clone()
+        self.restate.admin().in_flight_on(&order(key)).await
     }
 
     /// Waits until `sys_invocation` holds `count` invocations in flight on
@@ -494,120 +368,42 @@ impl Harness {
     /// server-side moment a call made while the key is held is queued behind
     /// it, which the ingress reports only with the call's answer. The ids.
     pub(crate) async fn await_in_flight_on(&self, key: &str, count: usize) -> Vec<String> {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let in_flight = self.in_flight_ids_on(key).await;
-            if in_flight.len() >= count {
-                return in_flight;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "{key} never had {count} invocation(s) in flight: {in_flight:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    /// The ids of the invocations on Virtual Object `key` the server holds and
-    /// has not completed.
-    async fn in_flight_ids_on(&self, key: &str) -> Vec<String> {
-        self.sql(&format!(
-            "SELECT id FROM sys_invocation WHERE target_service_key = '{key}' AND status <> 'completed' ORDER BY id"
-        ))
-        .await
-        .iter()
-        .map(|row| row["id"].as_str().expect("id").to_owned())
-        .collect()
-    }
-
-    /// `PATCH /invocations/{id}/{action}` on the admin API, asserting success.
-    async fn patch_invocation(&self, invocation_id: &str, action: &str) {
-        let response = self
-            .http
-            .patch(format!(
-                "{}/invocations/{invocation_id}/{action}",
-                self.restate.admin
-            ))
-            .send()
+        self.restate
+            .admin()
+            .await_in_flight_on(&order(key), count)
             .await
-            .expect(action);
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        assert!(
-            (200..300).contains(&status),
-            "{action} of {invocation_id} failed ({status}): {body}"
-        );
     }
 
     /// Waits until `sys_invocation` reports the invocation in one of
     /// `statuses`; the status it reached.
     pub(crate) async fn await_status(&self, invocation_id: &str, statuses: &[&str]) -> String {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let rows = self
-                .sql(&format!(
-                    "SELECT status FROM sys_invocation WHERE id = '{invocation_id}'"
-                ))
-                .await;
-            let status = rows
-                .first()
-                .and_then(|row| row["status"].as_str())
-                .unwrap_or_default()
-                .to_owned();
-            if statuses.contains(&status.as_str()) {
-                return status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "invocation {invocation_id} is {status:?}, not one of {statuses:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        self.restate
+            .admin()
+            .await_status(invocation_id, statuses)
+            .await
     }
 
     /// Runs a SQL query against the introspection API (`POST :9070/query`);
     /// a scenario's read, so an exchange without rows is a failure of the
     /// scenario (the sampler, [`Self::watch`], retries instead).
     pub(crate) async fn sql(&self, query: &str) -> Vec<Value> {
-        self.admin
-            .sql(query)
-            .await
-            .unwrap_or_else(|error| panic!("{error}"))
+        self.restate.admin().sql_or_panic(query).await
     }
 
     /// The names of the `ctx.run` commands of an invocation, in journal
     /// order: which durable steps ran.
     pub(crate) async fn runs(&self, invocation_id: &str) -> Vec<String> {
-        self.journal(invocation_id)
-            .await
-            .into_iter()
-            .filter(JournalEntry::is_run)
-            .filter_map(|entry| entry.name)
-            .collect()
+        self.restate.admin().runs(invocation_id).await
     }
 
     /// The journal of an invocation, in index order.
     pub(crate) async fn journal(&self, invocation_id: &str) -> Vec<JournalEntry> {
-        let rows = self
-            .sql(&format!(
-                "SELECT index, entry_type, name, raw FROM sys_journal WHERE id = '{invocation_id}' ORDER BY index"
-            ))
-            .await;
-        rows.iter().map(JournalEntry::from_row).collect()
+        self.restate.admin().journal(invocation_id).await
     }
 
     /// The `sys_invocation` row of an invocation.
     pub(crate) async fn invocation(&self, invocation_id: &str) -> Invocation {
-        let rows = self
-            .sql(&format!(
-                "SELECT {} FROM sys_invocation WHERE id = '{invocation_id}'",
-                Invocation::COLUMNS
-            ))
-            .await;
-        let row = rows
-            .first()
-            .unwrap_or_else(|| panic!("no sys_invocation row for {invocation_id}"));
-        Invocation::from_row(row)
+        self.restate.admin().invocation(invocation_id).await
     }
 
     /// Watches the invocations on Virtual Object `key` and records what
@@ -620,30 +416,13 @@ impl Harness {
     /// it observes the invocation completed, and `finish` ends one whose call
     /// was answered between two samples.
     pub(crate) fn watch(&self, key: &str) -> Watch {
-        Watch::start(self.admin.clone(), key)
+        Watch::start(self.restate.admin().clone(), &order(key))
     }
 
     /// Purges a completed invocation (`PATCH /invocations/{id}/purge`), so a
     /// later call runs against an order Restate has no memory of.
     pub(crate) async fn purge(&self, invocation_id: &str) {
-        self.patch_invocation(invocation_id, "purge").await;
-        // The purge is asynchronous; wait for the row to go.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let rows = self
-                .sql(&format!(
-                    "SELECT id FROM sys_invocation WHERE id = '{invocation_id}'"
-                ))
-                .await;
-            if rows.is_empty() {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "invocation {invocation_id} still present after purge"
-            );
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+        self.restate.admin().purge(invocation_id).await;
     }
 
     /// Verifies the previous scenario's `expect(n)` counts (wiremock checks
@@ -698,35 +477,12 @@ impl Harness {
     /// Every journal entry of every invocation the server still holds, with
     /// `raw` hex-decoded, keyed by invocation id.
     pub(crate) async fn all_journals(&self) -> BTreeMap<String, Vec<JournalEntry>> {
-        let rows = self
-            .sql("SELECT id, index, entry_type, name, raw FROM sys_journal ORDER BY id, index")
-            .await;
-        let mut journals: BTreeMap<String, Vec<JournalEntry>> = BTreeMap::new();
-        for row in &rows {
-            journals
-                .entry(row["id"].as_str().expect("id").to_owned())
-                .or_default()
-                .push(JournalEntry::from_row(row));
-        }
-        journals
+        self.restate.admin().all_journals().await
     }
 
     /// Every `sys_invocation` row the server still holds.
     pub(crate) async fn all_invocations(&self) -> Vec<(String, Invocation)> {
-        let rows = self
-            .sql(&format!(
-                "SELECT id, {} FROM sys_invocation ORDER BY id",
-                Invocation::COLUMNS
-            ))
-            .await;
-        rows.iter()
-            .map(|row| {
-                (
-                    row["id"].as_str().expect("id").to_owned(),
-                    Invocation::from_row(row),
-                )
-            })
-            .collect()
+        self.restate.admin().all_invocations().await
     }
 
     /// Mounts the code-7 answers for the external ids of `kinds` under

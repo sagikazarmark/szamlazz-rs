@@ -2093,6 +2093,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "restate-e2e-harness"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "reqwest",
+ "restate-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "restate-sdk"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2167,8 +2179,7 @@ dependencies = [
  "bytes",
  "http",
  "jiff",
- "nix",
- "reqwest",
+ "restate-e2e-harness",
  "restate-sdk",
  "restate-szamlazz",
  "rust_decimal",

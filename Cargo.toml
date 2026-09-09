@@ -26,8 +26,8 @@ clap = { version = "4.6.1", features = ["derive", "env"] }
 http = "1.4.2"
 http-body-util = "0.1.3"
 jiff = { version = "0.2.31", default-features = false, features = ["std", "serde"] }
-# `kill(2)` / `killpg(2)` from the e2e harness, which runs in images without a `kill`
-# executable.
+# `killpg(2)` from the e2e harness crate, which kills the process group of the
+# `restate-server` it spawned and runs in images without a `kill` executable.
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 restate-sdk = "0.12.0"
