@@ -100,7 +100,9 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
         "one step, no query before it"
     );
     assert_eq!(
-        h.requests_mentioning("SZ-50").await.len(),
+        h.requests_mentioning("<szamlaszam>SZ-50</szamlaszam>")
+            .await
+            .len(),
         1,
         "the one send, nothing read"
     );

@@ -125,7 +125,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
     );
 
     // The same key: the stored completion, no request of this order.
-    let before = h.requests_mentioning("E2E-1").await.len();
+    let before = h.requests_of_order("E2E-1").await.len();
     let stored = h
         .call(
             "E2E-1",
@@ -142,7 +142,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         "the same invocation answered"
     );
     assert_eq!(
-        h.requests_mentioning("E2E-1").await.len(),
+        h.requests_of_order("E2E-1").await.len(),
         before,
         "a replayed completion reaches neither the query nor the create mock"
     );

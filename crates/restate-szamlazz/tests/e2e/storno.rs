@@ -191,7 +191,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
         ]
     );
     assert_eq!(
-        h.requests_mentioning("E2E-4D").await.len(),
+        h.requests_of_order("E2E-4D").await.len(),
         1,
         "the hint is the one request naming the order; the verify names the number"
     );

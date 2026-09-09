@@ -41,7 +41,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .await;
     assert_eq!(reply.status, 400, "a private service: {}", reply.body);
     assert_eq!(reply.invocation_id, None, "no invocation was created");
-    assert!(h.requests_mentioning("E2E-16").await.is_empty());
+    assert!(h.requests_of_order("E2E-16").await.is_empty());
 
     h.switch_to_multi_account().await;
 
@@ -104,7 +104,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope, None, "{invocation:?}");
     assert!(
-        h.requests_mentioning("E2E-16").await.is_empty(),
+        h.requests_of_order("E2E-16").await.is_empty(),
         "nothing reached szamlazz.hu"
     );
 
@@ -122,7 +122,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     let fault = reply.fault();
     assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("gamma"), "{fault:?}");
-    assert!(h.requests_mentioning("E2E-16").await.is_empty());
+    assert!(h.requests_of_order("E2E-16").await.is_empty());
 }
 
 /// The scope namespaces both identities Restate keys an invocation by. The
@@ -249,7 +249,7 @@ pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h
     );
 
     // The key again under each scope replays that scope's own completion.
-    let before = h.requests_mentioning("E2E-17B").await.len();
+    let before = h.requests_of_order("E2E-17B").await.len();
     for (scope, original) in [("acme", &acme), ("beta", &beta)] {
         let replay = h
             .call_scoped(scope, "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
@@ -262,7 +262,7 @@ pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h
         assert_eq!(replay.invocation_id(), original.invocation_id(), "{scope}");
     }
     assert_eq!(
-        h.requests_mentioning("E2E-17B").await.len(),
+        h.requests_of_order("E2E-17B").await.len(),
         before,
         "replays, not calls"
     );

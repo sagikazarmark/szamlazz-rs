@@ -855,11 +855,11 @@ order, the newest holder under every external id"), which no stub can express. N
 without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested in the **decision layer**,
 the decide fns: each handler body is `read → decide → (answer | proceed) → next read`, where every `decide` is a pure
 function of the journaled outcome the read returned and the request, beside its async shell, and the shell is held to
-holding no `match` on a gateway outcome that returns a response. On `main` the storno, delete and `get` shells
-(`service/storno.rs`), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup decision and the responses
-(`service/support.rs`) and the prologue's (`service/prologue.rs`) are in that shape; the create side's
-(`service/create.rs`) has `respond_to`, `exclusive_with` and `prepare` pure and the rest of its decisions in flight
-(#137). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
+holding no `match` on a gateway outcome that returns a response. Every shell is in that shape: the storno, delete
+and `get` shells (`service/storno.rs`, #138), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup
+decision and the responses (`service/support.rs`), the prologue's (`service/prologue.rs`), and the create side's
+(`service/create.rs`, #137: `decide_lookup`, `decide_exclusivity`, `decide_prepayment_for_final`,
+`decide_proforma_link`, `decide_proforma_by_number`, `decide_base`, `respond_to`, `prepare`). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
 classifiers (which answer is settled, which document is foreign, which failure is which class) are the same kind of
 function one layer down, table-tested in `gateway`'s unit tests; and the e2e is left with what only a server can
 show: the durable sequence (one scenario per handler path of `RUN_NAMES`, walked in full), replay, the run

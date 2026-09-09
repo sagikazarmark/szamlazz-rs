@@ -455,11 +455,33 @@ impl Harness {
     }
 
     /// The bodies of the requests szamlazz.hu has seen so far that mention
-    /// `needle`: an order key, a number, an external id. How a scenario says
+    /// `needle`, a **delimited** marker (`<torzsszam>12345678</torzsszam>`,
+    /// `acct:check-account`, `acct:E2E-K:proforma`): how a scenario says
     /// "nothing of mine reached szamlazz.hu" beside scenarios whose requests
-    /// it does not count.
+    /// it does not count. A bare order key is not a marker: `E2E-1` is a
+    /// prefix of `E2E-11`; an order's requests are
+    /// [`Self::requests_of_order`].
     pub(crate) async fn requests_mentioning(&self, needle: &str) -> Vec<String> {
         self.bodies(None, needle).await
+    }
+
+    /// The bodies of the requests of `order` szamlazz.hu has seen so far: the
+    /// creates and the order-number queries (`<rendelesSzam>{order}</rendelesSzam>`)
+    /// and the external-id queries of its documents (`acct:{order}:…`), each
+    /// matched with its delimiter, so an order whose key is a prefix of
+    /// another's (`E2E-1`, `E2E-11`) counts only its own. A query by number
+    /// names no order and is not counted.
+    pub(crate) async fn requests_of_order(&self, order: &str) -> Vec<String> {
+        let by_order = format!("<rendelesSzam>{order}</rendelesSzam>");
+        let by_external_id = format!("<szamlaKulsoAzon>acct:{order}:");
+        self.mock
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .filter(|body| body.contains(&by_order) || body.contains(&by_external_id))
+            .collect()
     }
 
     /// The bodies of the create requests of `order` szamlazz.hu has seen so

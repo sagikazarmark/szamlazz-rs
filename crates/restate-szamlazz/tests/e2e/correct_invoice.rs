@@ -9,7 +9,7 @@ use rust_decimal::dec;
 use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
-use crate::harness::szamlazz::{Doc, create_for, created, order_query};
+use crate::harness::szamlazz::{Doc, create_for, created, number_query, order_query};
 use crate::harness::{Harness, document};
 
 /// The base is verified by number (it must carry this order's number); then
@@ -20,7 +20,13 @@ use crate::harness::{Harness, document};
 /// taken (a live foreign invoice under the order is never met); the same
 /// `correction_id` again (a new key) finds it: `already_issued`.
 pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
-    h.holds(&Doc::of("SZ-C1", "SZ", "E2E-C1")).await;
+    // The base, by number only: `holds` would mount the order selector too,
+    // ahead of the `expect(0)` below, and wiremock answers with the first
+    // mounted match, so the zero expectation could never fire.
+    number_query("SZ-C1")
+        .respond_with(Doc::of("SZ-C1", "SZ", "E2E-C1").response())
+        .mount(&h.mock)
+        .await;
     // A live invoice of another channel under the order: never queried.
     order_query("E2E-C1")
         .respond_with(Doc::of("SZ-FOREIGN-C1", "SZ", "E2E-C1").response())

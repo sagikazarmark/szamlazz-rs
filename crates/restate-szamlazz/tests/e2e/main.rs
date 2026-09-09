@@ -131,9 +131,14 @@ impl Concurrently {
         self.names.insert(handle.id(), name);
     }
 
-    /// Joins every scenario; panics naming each one that failed, with its
-    /// panic message.
-    async fn join_all(mut self) {
+    /// Joins every scenario, then verifies every mock the scenarios mounted
+    /// (`expect(n)`; wiremock checks the counts on `verify`, which panics
+    /// naming the mock, so it runs as a task of its own and its failure is one
+    /// more line); panics naming each scenario that failed, with its panic
+    /// message, and the expectations that were not met. Verified here, not at
+    /// the flag day's `reset`, so a failed scenario cannot hide another's
+    /// unmet expectation, and so the report is phase 1's.
+    async fn join_all(mut self, h: &Arc<Harness>) {
         let mut failures = Vec::new();
         while let Some(joined) = self.set.join_next_with_id().await {
             match joined {
@@ -148,6 +153,13 @@ impl Concurrently {
                     failures.push(format!("{name}: {error}"));
                 }
             }
+        }
+        let mocks = Arc::clone(h);
+        if let Err(error) = tokio::spawn(async move { mocks.mock.verify().await }).await {
+            eprintln!("[phase 1] wiremock expectations: FAIL");
+            failures.push(format!("wiremock expectations: {error}"));
+        } else {
+            eprintln!("[phase 1] wiremock expectations: pass");
         }
         assert!(
             failures.is_empty(),
@@ -206,7 +218,7 @@ async fn e2e_order_protocol() {
         faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
         pins::plant_the_leak_positive_control,
     )
-    .join_all()
+    .join_all(&h)
     .await;
     let mut h = Arc::try_unwrap(h)
         .ok()

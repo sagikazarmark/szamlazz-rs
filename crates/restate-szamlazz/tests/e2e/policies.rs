@@ -187,7 +187,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     );
 
     // The same key: the stored fault, nothing read.
-    let before = h.requests_mentioning("E2E-11").await.len();
+    let before = h.requests_of_order("E2E-11").await.len();
     let replayed = h
         .call(
             "E2E-11",
@@ -200,7 +200,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     assert_eq!(replayed.fault().code, TerminalCode::OutcomeUnknown);
     assert_eq!(replayed.invocation_id(), reply.invocation_id());
     assert_eq!(
-        h.requests_mentioning("E2E-11").await.len(),
+        h.requests_of_order("E2E-11").await.len(),
         before,
         "a replayed completion reaches nothing"
     );

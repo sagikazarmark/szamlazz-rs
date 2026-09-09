@@ -67,7 +67,7 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
         "{invocation:?}"
     );
     assert!(
-        h.requests_mentioning("E2E-10b").await.is_empty(),
+        h.requests_of_order("E2E-10b").await.is_empty(),
         "nothing reached szamlazz.hu"
     );
 
@@ -94,7 +94,7 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
         "refused before the prologue: nothing journaled"
     );
     assert!(
-        h.requests_mentioning("E2E-10c").await.is_empty(),
+        h.requests_of_order("E2E-10c").await.is_empty(),
         "nothing reached szamlazz.hu"
     );
 

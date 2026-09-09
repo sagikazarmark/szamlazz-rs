@@ -126,7 +126,7 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
         "the queued call waits behind the lock: {waiting:?}"
     );
     assert!(
-        h.requests_mentioning("E2E-K").await.is_empty(),
+        h.requests_of_order("E2E-K").await.is_empty(),
         "nothing read while the lock is held"
     );
 
