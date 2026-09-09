@@ -31,8 +31,16 @@ use crate::harness::{Harness, create_body};
 /// leading query sees the same reversed document and issues).
 pub(crate) async fn storno_then_reissue(h: &Harness) {
     // The storno: the original by number, nothing under the storno id.
+    // An e-invoice original (`eszamla` 3, what szamlazz.hu reports for a
+    // create with `eszamla=true`) on an account whose default is paper.
     number_query("SZ-4")
-        .respond_with(Doc::of("SZ-4", "SZ", "E2E-4").response())
+        .respond_with(
+            Doc {
+                eszamla: Some(3),
+                ..Doc::of("SZ-4", "SZ", "E2E-4")
+            }
+            .response(),
+        )
         .mount(&h.mock)
         .await;
     external_id_query("acct:E2E-4:storno:SZ-4")
@@ -102,7 +110,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
     );
     assert!(
         stornos[0].contains("<eszamla>true</eszamla>"),
-        "an e-invoice original (eszamla 2) is reversed as an e-invoice, whatever the account default (paper): {}",
+        "an e-invoice original (eszamla 3) is reversed as an e-invoice, whatever the account default (paper): {}",
         stornos[0]
     );
 

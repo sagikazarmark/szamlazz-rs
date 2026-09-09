@@ -145,7 +145,10 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     assert_eq!(status["invoice"]["number"], "SZ-7");
     assert_eq!(status["invoice"]["referenced_proforma"], "D-7");
     assert_eq!(status["invoice"]["gross"], "1270");
-    assert_eq!(status["invoice"]["e_invoice"], true);
+    assert_eq!(
+        status["invoice"]["e_invoice"], false,
+        "the fixture's default `eszamla` is `1`, paper"
+    );
     assert_eq!(status["prepayment"], serde_json::Value::Null);
     assert_eq!(status["final"], serde_json::Value::Null);
     assert_eq!(

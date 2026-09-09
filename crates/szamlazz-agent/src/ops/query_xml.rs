@@ -1502,7 +1502,7 @@ mod tests {
         );
     }
 
-    /// The reading of the code is `From<i32>`'s: `2` and `3` are e-invoices,
+    /// The reading of the code is `From<i64>`'s: `2` and `3` are e-invoices,
     /// `1` paper, `0` not an invoice, anything else unknown; `is_e_invoice`
     /// is the `Electronic` variant, whatever code it carries.
     #[test]

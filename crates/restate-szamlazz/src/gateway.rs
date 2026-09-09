@@ -1729,6 +1729,11 @@ impl Gateway {
                 }
                 outcome
             }
+            // The wire contract refused before the send: nothing left, so
+            // never `Lost`.
+            Err(ClientError::Request(error)) => {
+                DeleteOutcome::Rejected(Rejection::request(error.to_string()))
+            }
             Err(error) => DeleteOutcome::Lost(Unanswered::from_exchange(error)),
         }
     }

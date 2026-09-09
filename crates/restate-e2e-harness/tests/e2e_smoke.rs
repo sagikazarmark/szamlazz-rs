@@ -4,7 +4,7 @@
 //! the fault envelope, killed and purged, and the server stops on drop.
 //!
 //! Ignored: `cargo test -p restate-e2e-harness -- --ignored` with
-//! `RESTATE_SERVER_BIN` set. Never a reused server (`Reuse::Never`): the test
+//! `RESTATE_SERVER_BIN` set. Never a reused server (`ReusePolicy::Never`): the test
 //! deploys a service of its own and leaves its invocations retained for a
 //! day, which a suite sharing that server (one whose step-name table check
 //! scans every invocation the server holds) would meet as an untabled
@@ -86,7 +86,7 @@ async fn e2e_smoke() {
     };
     assert!(
         matches!(launcher, Launcher::Binary { .. }),
-        "Reuse::Never yields a binary"
+        "ReusePolicy::Never yields a binary"
     );
     let restate = launcher.launch(&SERVER).await;
     let admin_url = restate.admin_url().to_owned();

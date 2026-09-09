@@ -416,7 +416,7 @@ fn wire_document(number: &str, reversed: bool) -> InvoiceDocument {
             <adoszam>12345678-2-42</adoszam><csoportazonosito>17777777-5-44</csoportazonosito><adoszameu>HU12345678</adoszameu>
             <bank><nev>Test Bank</nev><bankszamla>11111111-22222222-33333333</bankszamla></bank></szallito>
           <alap><id>924307747</id><szamlaszam>{number}</szamlaszam><gazdEsemAzon>924307700</gazdEsemAzon><forras>34</forras>
-            <iktatoszam>IKT-2026-1</iktatoszam><tipus>SZ</tipus><eszamla>2</eszamla><hivszamlaszam>SZ-0</hivszamlaszam>
+            <iktatoszam>IKT-2026-1</iktatoszam><tipus>SZ</tipus><eszamla>1</eszamla><hivszamlaszam>SZ-0</hivszamlaszam>
             <hivdijbekszam>D-1</hivdijbekszam><kelt>2026-07-04</kelt><telj>2026-07-04</telj><fizh>2026-07-12</fizh>
             <fizmod>Átutalás</fizmod><fizmodunified>transfer</fizmodunified><keszpenz>false</keszpenz>
             <rendelesszam>ORD-1</rendelesszam><nyelv>hu</nyelv><devizanem>HUF</devizanem><devizabank>MNB</devizabank>

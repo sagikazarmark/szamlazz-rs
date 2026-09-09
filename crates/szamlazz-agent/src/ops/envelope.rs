@@ -269,14 +269,12 @@ fn nonblank_invoice_number(value: &str) -> Option<InvoiceNumber> {
     (!value.is_empty()).then(|| InvoiceNumber::new(value))
 }
 
-/// The document identifier from the `szlahu_id` header.
+/// The document identifier from the `szlahu_id` header: szamlazz.hu's id of
+/// the issued document, `alap/id` on a query.
 ///
 /// Lenient on purpose: the identifier is auxiliary, and a successful issuance
 /// must never be reported as a parse failure because of it. An absent, blank,
-/// or non-numeric header is `None`.
-/// The `szlahu_id` header, szamlazz.hu's id of the issued document (`alap/id`
-/// on a query), read leniently: it is auxiliary, so a blank, malformed or
-/// negative value (an id is never negative) is `None`, never a failure.
+/// non-numeric or negative header (an id is never negative) is `None`.
 fn parse_document_id_header(response: &RawResponse) -> Option<i64> {
     response
         .header("szlahu_id")
