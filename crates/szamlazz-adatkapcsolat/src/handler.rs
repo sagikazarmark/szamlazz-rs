@@ -39,13 +39,13 @@ impl<T> MaybeSync for T {}
 /// connection cannot silently acknowledge and discard its documents.
 ///
 /// The contract per method:
-/// - `Ok(ack)` → HTTP 200 with the proper response XML; the document is
+/// - `Ok(ack)` → HTTP 200 with the proper Ack XML; the document is
 ///   considered delivered. Return it only once the document is durably
 ///   accepted.
 /// - `Err(_)` → HTTP 500; szamlazz.hu retries the delivery for up to 72
 ///   hours. Use this for transient failures (database down, …).
 /// - `KEY_ERR` / `KEY_DEL` are protocol speech, not errors: return them via
-///   the ack constructors ([`InvoiceAck::key_error`], [`Ack::disconnect`],
+///   the ack constructors ([`InvoiceAck::key_unknown`], [`Ack::disconnect`],
 ///   …). Key *verification* normally happens in the integration layer (see
 ///   `axum::router` when the `axum` feature is enabled) before your handler
 ///   runs.
@@ -56,10 +56,16 @@ impl<T> MaybeSync for T {}
 pub trait Handler {
     /// The transient-failure type. It is *not* sent to szamlazz.hu: a handler
     /// failure answers a bare HTTP 500 (the status alone drives the 72-hour
-    /// retry), so the error may carry internal detail. Log it yourself for
-    /// diagnostics; the `Display` bound is what the integration layer uses to
-    /// do so.
-    type Error: std::fmt::Display;
+    /// retry), so the error may carry internal detail. The `axum` router
+    /// logs it at `warn` through [`tracing`](https://docs.rs/tracing) when
+    /// the `tracing` feature is enabled and drops it otherwise, so a handler
+    /// without that feature logs its own errors; [`Fanout`](crate::Fanout)
+    /// keeps every member's error, with its
+    /// [`source`](std::error::Error::source) chain, in its report.
+    ///
+    /// Breaking change in 0.4: the bound was `Display`; `std::error::Error`
+    /// implies it, and [`Infallible`](std::convert::Infallible) satisfies it.
+    type Error: std::error::Error;
 
     /// An outgoing invoice (`<szamla>`) was pushed.
     fn outgoing_invoice(

@@ -9,12 +9,20 @@ Adatkapcsolat pushes outgoing invoices, incoming invoices, bank transactions, an
 
 ## Quick Start
 
-After verifying `X-Szamlazzhu-Key`, parse the body and return the matching Ack XML:
+Identify the pushed kind, verify `X-Szamlazzhu-Key`, then parse the body and return the matching Ack XML; an unknown key is answered `KEY_ERR` in the Ack shape of the pushed kind, with nothing of the body parsed:
 
 ```rust
-use szamlazz_adatkapcsolat::{Ack, Document, InvoiceAck, InvoiceDirection};
+use szamlazz_adatkapcsolat::{Ack, ControlCode, Document, InvoiceAck, InvoiceDirection, keys_match};
 
-fn acknowledge(body: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn acknowledge(
+    presented_key: &str,
+    configured_key: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let kind = Document::identify(body)?;
+    if !keys_match(presented_key, configured_key) {
+        return Ok(ControlCode::KeyUnknown.to_xml(kind));
+    }
     match Document::parse(body)? {
         Document::OutgoingInvoice(invoice) => {
             Ok(InvoiceAck::accept(invoice.info.id).to_xml(InvoiceDirection::Outgoing)?)
@@ -26,15 +34,23 @@ fn acknowledge(body: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Document::Receipts(_) => Ok(Ack::accept().to_receipts_xml()),
     }
 }
+#
+# let body = br#"<banktranz xmlns="http://www.szamlazz.hu/banktranz"><id>987</id></banktranz>"#;
+# let ack = String::from_utf8(acknowledge("k-1", "k-1", body)?)?;
+# assert!(ack.contains("<banktranzvalasz") && !ack.contains("hibakod"));
+# let ack = String::from_utf8(acknowledge("k-2", "k-1", body)?)?;
+# assert!(ack.contains("<hibakod>KEY_ERR</hibakod>"));
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Use the `axum` feature when you want `axum::router` to verify the key, dispatch documents to a `Handler`, and render Acks for you.
+`Document` is exhaustive: the four variants are the four streams a connection can push, and a fifth would be a new `Handler` method, a breaking change by design. Use the `axum` feature when you want `axum::router` to verify the key, dispatch documents to a `Handler`, and render Acks for you.
 
 ## Feature Flags
 
 No features are enabled by default. Serde serialization and deserialization of the parsed invoice, transaction, and receipt types are part of the core crate and do not require a feature. The [crate documentation](https://docs.rs/szamlazz-adatkapcsolat/latest/szamlazz_adatkapcsolat/#features) is authoritative for feature semantics and platform constraints.
 
 - **`axum`** provides the ready-made receiver router, including key verification; it supports native Rust and Cloudflare Workers.
+- **`tracing`** makes the router log a handler's or a key resolver's error at `warn` (the response is a bare status either way; without the feature the error is dropped, so log your own).
 - **`opendal`** provides `Archiver`, a `Handler` that persists documents through an OpenDAL operator. Enable the required storage services on your own `opendal` dependency.
 
 ## Receiver Contract
@@ -47,17 +63,32 @@ An invoice Ack echoes its document id and can include the registration number as
 
 ## Shape, Not Content
 
-A push is at-most-N-times delivery: szamlazz.hu retries a non-200 identically for 72 hours and then drops the record (for a bank transaction or a receipt, for good). A deterministic refusal therefore loses data, so `Document::parse` refuses only what it cannot Ack: a body that is not UTF-8 or XML, an unknown root or namespace, a missing document id (and, for an invoice, its number), a number or boolean that is not one. Everything else is content and reads as the wire delivers it: an element the XSD requires but the push omits is `None`, an unknown `<irany>` is `TransactionDirection::Other`, a `<pdf>` that does not decode is `None` with the encoded text still in `raw_xml()`, a date that is not a date is `None` with its text likewise in `raw_xml()`, an empty receipt batch has no receipts. Nearly every field is therefore an `Option`; only the identity (`info.id`, `info.invoice_number`, a transaction's `id`) is not.
+A push is at-most-N-times delivery: szamlazz.hu retries a non-200 identically for 72 hours and then drops the record (for a bank transaction or a receipt, for good). A deterministic refusal therefore loses data, so `Document::parse` refuses only a body that is not the pushed record: one that is not UTF-8 or XML, an unknown root or namespace, a record without its identity (an invoice's `alap/id` and `szamlaszam`, a bank transaction's `id`, a receipt's `alap/id`; missing or not an integer), a number or boolean that is not one. Everything else is content and reads as the wire delivers it: an element the XSD requires but the push omits is `None`, an unknown `<irany>` is `TransactionDirection::Other`, a `<pdf>` that does not decode is `None` with the encoded text still in `raw_xml()`, a date that is not a date is `None` with its text likewise in `raw_xml()`, an empty receipt batch has no receipts. Nearly every field is therefore an `Option`; only the identity (`info.id`, `info.invoice_number`, a transaction's `id`) is not.
 
-The XSD's requirements are a signal, not a gate: `Document::validate` (and `InvoiceDocument::validate`, `BankTransaction::validate`, `ReceiptBatch::validate` from inside a `Handler`) reports the first one a parsed document misses, and `Document::parse_strict` refuses such a document for a caller that would rather have szamlazz.hu retry it.
+The identity is shape because it is what you key the record by, not because every Ack echoes it: an invoice Ack echoes `alap/id`, a bank transaction's or a receipt batch's Ack carries no id at all, yet redelivery is the protocol's normal case (a lost Ack, a failed fan-out member) and a receiver tolerates it by the id (the archiver names its objects by it). szamlazz.hu assigns the id and its schemas type it an integer, so a push without one is not a record it holds. The cost: a receipt batch with one id-less `<nyugta>` is refused whole.
 
-Breaking change in 0.4: before it, the parse enforced the XSD's requirements and refused a non-conforming push. `BankTransaction`'s `bank_account`, `value_date`, `direction`, `technical`, `amount` and `currency` were required fields and are `Option`s now; `TransactionDirection` gained `Other(String)` (and is no longer `Copy`); `InvoiceInfo::invoice_number` is a `String` where it was an `Option` the parse required anyway; `ParseError::Validation` carries a `ValidationError`. A receiver that relied on the old refusals calls `Document::parse_strict`.
+The XSD's requirements are a signal, not a gate: `Document::validate` (and `InvoiceDocument::validate`, `BankTransaction::validate`, `ReceiptBatch::validate` from inside a `Handler`) reports the first one a parsed document misses as a typed `ValidationError` (`MissingRequired { path }`, `UnknownToken { path, token }`, `Negative { path }`, `Empty { path, child }`, each displaying as before: `missing required invoice alap/kelt`), and `Document::parse_strict` refuses such a document for a caller that would rather have szamlazz.hu retry it.
 
-Several accounts behind one URL use `axum::router_with_resolver` with a `KeyResolver`, whose `resolve` is async and returns `Ok(Some(handler))`, `Ok(None)` for a key that is definitely unknown (→ `KEY_ERR`), or `Err(_)` when the lookup itself failed (→ `503`, so the record stays retryable). A resolver backed by a database or a secrets service must return `Err` on a timeout, never `Ok(None)`.
+Several connections behind one URL (several szamlazz.hu accounts, each pushing under its own key) use `axum::router_with_resolver` with a `KeyResolver`, whose `resolve` is async and returns `Ok(Some(handler))` (an `Arc`, so the handler may be one the resolver holds or one built per request from what the lookup found), `Ok(None)` for a key that is definitely unknown (→ `KEY_ERR`), or `Err(_)` when the lookup itself failed (→ `503`, so the record stays retryable). A resolver backed by a database or a secrets service must return `Err` on a timeout, never `Ok(None)`. Compare keys that are secrets with `keys_match`, in constant time.
+
+Without the router, `Document::identify` names the pushed kind (`RootKind`) from the root element alone, so a receiver can follow the protocol's order (identify, authenticate, then parse) and answer an unknown key with `ControlCode::KeyUnknown.to_xml(kind)` having parsed nothing.
 
 The router caps request bodies at `BodyLimit::DEFAULT` (64 MiB; over it is `413`). Számlázz.hu publishes no maximum and receipt batches are unbounded in principle, so `axum::router_with_body_limit` / `router_with_resolver_and_body_limit` take a `BodyLimit` to raise the cap or, as an explicit choice, lift it with `BodyLimit::Unlimited`.
 
 The core is framework-free and `wasm32`-clean. On wasm, `Handler` drops its `Send` bounds so JavaScript futures can implement it. The axum router applies the same single-thread `Send` assertion as `#[worker::send]`; your own routes still need their usual Workers integration. Invoice Ack rendering is fallible so an invalid registration number cannot produce malformed XML.
+
+## Breaking Changes in 0.4
+
+One release, so a receiver pays the migration once:
+
+- The parse is lenient (above): `BankTransaction`'s `bank_account`, `value_date`, `direction`, `technical`, `amount` and `currency` were required fields and are `Option`s; `TransactionDirection` gained `Other(String)` (and is no longer `Copy`); `InvoiceInfo::invoice_number` is a `String` where it was an `Option` the parse required anyway. A receiver that relied on the old refusals calls `Document::parse_strict`.
+- `ValidationError` is an enum naming the element (`MissingRequired`, `UnknownToken`, `Negative`, `Empty`), not an opaque string; its `Display` text is unchanged.
+- `ControlCode::KeyError`, `InvoiceAck::key_error()` and `Ack::key_error()` are `KeyUnknown` / `key_unknown()`: a control code is not an error.
+- `Document`, `InvoiceDirection` and the new public `RootKind` are exhaustive; a `_ =>` arm over them is now an unreachable-pattern warning.
+- `KeyResolver::resolve` returns `Option<Arc<Self::Handler>>` (owned) where it returned `Option<&Self::Handler>`; a resolver that held handlers wraps them in `Arc` once and clones the `Arc` per request.
+- `Handler::Error` and `KeyResolver::Error` are bound by `std::error::Error` where they were bound by `Display`; `String` no longer qualifies, `std::convert::Infallible` and any `thiserror` type do. `HandlerFailure::error` is the member's boxed error (`BoxError`), not a `String`.
+- `Fanout::with` requires the member's `Error` to be `'static`, and `Send + Sync` on native targets (not on `wasm32`).
+- `InvoiceAck::for_document` is public and no longer behind the `axum` feature.
 
 ## Archiving
 

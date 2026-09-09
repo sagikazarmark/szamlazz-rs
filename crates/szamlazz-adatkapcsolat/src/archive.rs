@@ -34,26 +34,16 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ack::{Ack, InvoiceAck, InvoiceDirection};
-use crate::document::{BankTransaction, InvoiceDocument, ReceiptBatch, ReceiptDocument};
+use crate::document::{BankTransaction, InvoiceDocument, ReceiptBatch, ReceiptDocument, RootKind};
 use crate::handler::Handler;
 
-/// Which document stream an archived object came from; selects the directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DocumentKind {
-    OutgoingInvoice,
-    IncomingInvoice,
-    BankTransaction,
-    Receipt,
-}
-
-impl DocumentKind {
-    fn directory(self) -> &'static str {
-        match self {
-            Self::OutgoingInvoice => "outgoing-invoices",
-            Self::IncomingInvoice => "incoming-invoices",
-            Self::BankTransaction => "bank-transactions",
-            Self::Receipt => "receipts",
-        }
+/// The directory an archived object of `kind` lands in.
+fn directory(kind: RootKind) -> &'static str {
+    match kind {
+        RootKind::OutgoingInvoice => "outgoing-invoices",
+        RootKind::IncomingInvoice => "incoming-invoices",
+        RootKind::BankTransaction => "bank-transactions",
+        RootKind::Receipts => "receipts",
     }
 }
 
@@ -195,10 +185,7 @@ impl Archiver {
         direction: InvoiceDirection,
         invoice: &InvoiceDocument,
     ) -> Result<(), ArchiveError> {
-        let kind = match direction {
-            InvoiceDirection::Outgoing => DocumentKind::OutgoingInvoice,
-            InvoiceDirection::Incoming => DocumentKind::IncomingInvoice,
-        };
+        let kind = RootKind::from(direction);
         let name = invoice.info.id.to_string();
         let date = invoice.info.issue_date;
 
@@ -227,7 +214,7 @@ impl Archiver {
         &self,
         transaction: &BankTransaction,
     ) -> Result<(), ArchiveError> {
-        let kind = DocumentKind::BankTransaction;
+        let kind = RootKind::BankTransaction;
         let name = transaction.id.to_string();
         let date = transaction.value_date;
 
@@ -257,7 +244,7 @@ impl Archiver {
         let json = serde_json::to_vec_pretty(receipt)?;
 
         self.write(
-            DocumentKind::Receipt,
+            RootKind::Receipts,
             &name,
             receipt.info.issue_date,
             "json",
@@ -287,7 +274,7 @@ impl Archiver {
             .find_map(|receipt| receipt.info.issue_date);
 
         self.write(
-            DocumentKind::Receipt,
+            RootKind::Receipts,
             &format!("batch-{first_id}-{last_id}"),
             date,
             "xml",
@@ -298,7 +285,7 @@ impl Archiver {
 
     async fn write(
         &self,
-        kind: DocumentKind,
+        kind: RootKind,
         name: &str,
         date: Option<Date>,
         extension: &str,
@@ -360,9 +347,9 @@ impl Archiver {
         }
     }
 
-    fn path(&self, kind: DocumentKind, name: &str, date: Option<Date>) -> String {
+    fn path(&self, kind: RootKind, name: &str, date: Option<Date>) -> String {
         let mut path = String::new();
-        path.push_str(kind.directory());
+        path.push_str(directory(kind));
         path.push('/');
 
         if self.layout == Layout::Monthly {

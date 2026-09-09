@@ -22,6 +22,9 @@ axum = ["dep:axum", "dep:http", "dep:send_wrapper", "dep:tower"]
 ## OpenDAL operator. Enable the storage services you need on your own opendal
 ## dependency.
 opendal = ["dep:opendal", "dep:serde_json"]
+## The axum router logs a handler's or a key resolver's error at `warn`
+## through `tracing` (the response stays a bare status either way).
+tracing = ["dep:tracing"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -33,8 +36,10 @@ quick-xml = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
+subtle = { version = "2.6.1", default-features = false }
 thiserror = { workspace = true }
 tower = { workspace = true, optional = true, features = ["util"] }
+tracing = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 send_wrapper = { version = "0.6.0", optional = true, features = ["futures"] }
@@ -46,6 +51,7 @@ opendal = { version = "0.58.1", default-features = false, features = ["services-
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [lints]
 workspace = true

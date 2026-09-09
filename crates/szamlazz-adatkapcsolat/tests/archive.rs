@@ -2,38 +2,14 @@
 
 #![cfg(feature = "opendal")]
 
+mod common;
+
 use std::path::Path;
 
+use common::{BANK_TRANSACTION, OUTGOING_INVOICE, RECEIPT_BATCH};
 use opendal::Operator;
 use szamlazz_adatkapcsolat::archive::{Archiver, Layout, Redelivery};
 use szamlazz_adatkapcsolat::{Document, Handler as _};
-
-const OUTGOING_INVOICE: &str = include_str!("synthetic/szamla.xml");
-
-const BANK_TRANSACTION: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<banktranz xmlns="http://www.szamlazz.hu/banktranz">
-  <id>987</id>
-  <bankszamla>11111111-22222222-33333333</bankszamla>
-  <erteknap>2026-07-03</erteknap>
-  <irany>BE</irany>
-  <technikai>false</technikai>
-  <osszeg>12700.0</osszeg>
-  <devizanem>HUF</devizanem>
-</banktranz>"#;
-
-const RECEIPT_BATCH: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv">
-  <nyugta>
-    <alap><id>1</id><nyugtaszam>NYGTA-2026-1</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>készpénz</fizmod><penznem>HUF</penznem><fokonyvVevo>311</fokonyvVevo><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap>
-    <tetelek><tetel><megnevezes>Item</megnevezes><nettoEgysegar>100</nettoEgysegar><mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>100</netto><afakulcs>27</afakulcs><afa>27</afa><brutto>127</brutto><fokonyv><arbevetel>911</arbevetel><afa>467</afa></fokonyv></tetel></tetelek>
-    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>100</netto><afa>27</afa><brutto>127</brutto></afakulcsossz><totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz></osszegek>
-  </nyugta>
-  <nyugta>
-    <alap><id>2</id><nyugtaszam></nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>bankkártya</fizmod><penznem>HUF</penznem><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap>
-    <tetelek><tetel><megnevezes>Item</megnevezes><nettoEgysegar>100</nettoEgysegar><mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>100</netto><afakulcs>27</afakulcs><afa>27</afa><brutto>127</brutto></tetel></tetelek>
-    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>100</netto><afa>27</afa><brutto>127</brutto></afakulcsossz><totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz></osszegek>
-  </nyugta>
-</xmlnyugtaarchiv>"#;
 
 fn memory() -> Operator {
     Operator::new(opendal::services::Memory::default()).expect("memory operator")
@@ -59,10 +35,7 @@ fn invoice_with_pdf() -> szamlazz_adatkapcsolat::InvoiceDocument {
         "<qutetek><qutet><nev>Fee</nev><afakulcs>27</afakulcs><netto>10</netto><afa>2.7</afa><brutto>12.7</brutto><afalevon>1</afalevon><cimkek><cimke>finance</cimke></cimkek></qutet></qutetek><cimkek><cimke>priority</cimke></cimkek><osszegek>",
         1,
     );
-    match Document::parse(body.as_bytes()).expect("parse") {
-        Document::OutgoingInvoice(invoice) => invoice,
-        other => panic!("expected outgoing invoice, got {other:?}"),
-    }
+    common::outgoing(&body).expect("parse")
 }
 
 async fn keys(op: &Operator) -> Vec<String> {
@@ -265,17 +238,16 @@ async fn bank_transactions_and_receipt_batches() {
     let op = memory();
     let archiver = Archiver::new(op.clone());
 
-    let Document::BankTransaction(tx) =
-        Document::parse(BANK_TRANSACTION.as_bytes()).expect("parse")
-    else {
-        panic!("expected bank transaction");
-    };
+    let tx = common::bank_transaction(BANK_TRANSACTION).expect("parse");
     let _ = archiver.bank_transaction(tx).await.expect("archive tx");
 
-    let Document::Receipts(batch) = Document::parse(RECEIPT_BATCH.as_bytes()).expect("parse")
-    else {
-        panic!("expected receipts");
-    };
+    // The second receipt without its number, to see the id fallback.
+    let batch_xml = RECEIPT_BATCH.replacen(
+        "<nyugtaszam>NYGTA-2026-2</nyugtaszam>",
+        "<nyugtaszam></nyugtaszam>",
+        1,
+    );
+    let batch = common::receipts(&batch_xml).expect("parse");
     let _ = archiver.receipts(batch).await.expect("archive receipts");
 
     let bank_xml = op
@@ -287,7 +259,7 @@ async fn bank_transactions_and_receipt_batches() {
         .read("receipts/2026/07/batch-1-2.xml")
         .await
         .expect("read receipt XML");
-    assert_eq!(receipt_xml.to_vec(), RECEIPT_BATCH.as_bytes());
+    assert_eq!(receipt_xml.to_vec(), batch_xml.as_bytes());
 
     let receipt = op
         .read("receipts/2026/07/NYGTA-2026-1.json")

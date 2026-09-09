@@ -2,22 +2,287 @@
 //! `validate` carry the XSD conformance checks. Feature-free, so they run in
 //! every configuration.
 
+mod common;
+
+use common::{
+    BANK_TRANSACTION, OUTGOING_INVOICE, RECEIPT_BATCH, as_incoming, bank_transaction, incoming,
+    incoming_invoice, outgoing, receipts, with, without,
+};
+use rust_decimal::dec;
 use szamlazz_adatkapcsolat::{
-    BankTransaction, Document, ParseError, Pdf, ReceiptBatch, TransactionDirection,
+    Document, InvoiceAppearance, ParseError, Pdf, TransactionDirection, ValidationError, VatRate,
 };
 
-const OUTGOING_INVOICE: &str = include_str!("synthetic/szamla.xml");
-
-/// An outgoing invoice carrying nothing but what the receiver needs to Ack:
-/// the root, `alap/id` and `alap/szamlaszam`.
+/// An outgoing invoice carrying nothing but its identity: the root,
+/// `alap/id` and `alap/szamlaszam`.
 const IDENTITY_ONLY_INVOICE: &str = r#"<szamla xmlns="http://www.szamlazz.hu/szamla">
   <alap><id>123456</id><szamlaszam>2015-123</szamlaszam></alap>
 </szamla>"#;
 
-fn outgoing(body: &str) -> Result<szamlazz_adatkapcsolat::InvoiceDocument, ParseError> {
-    match Document::parse(body.as_bytes())? {
-        Document::OutgoingInvoice(invoice) => Ok(invoice),
-        other => panic!("expected outgoing invoice, got {other:?}"),
+#[test]
+fn parses_outgoing_invoice_fixture() {
+    let invoice = outgoing(OUTGOING_INVOICE).expect("parse fixture");
+    assert!(invoice.info.id > 0);
+    assert_eq!(invoice.info.invoice_number, "2015-123");
+    assert!(invoice.supplier.name.is_some());
+    assert!(!invoice.items.is_empty());
+    assert_eq!(invoice.info.source, Some(34));
+    assert_eq!(invoice.info.registration_number, None);
+    assert_eq!(invoice.info.e_invoice, Some(InvoiceAppearance::Paper));
+    assert_eq!(invoice.info.kata_ledger, Some(false));
+    assert!(invoice.info.email.is_some());
+    assert_eq!(invoice.buyer.location, Some(1));
+    assert_eq!(invoice.buyer.private_person, Some(false));
+    assert_eq!(
+        invoice
+            .buyer
+            .buyer_ledger
+            .as_ref()
+            .and_then(|ledger| ledger.customer.as_deref()),
+        Some("12345A")
+    );
+    assert_eq!(invoice.items[0].vat_type.as_deref(), Some("ÁKK"));
+    assert_eq!(invoice.items[0].vat_rate, Some(dec!(0)));
+    assert_eq!(invoice.items[0].ordering, Some(1));
+    assert_eq!(
+        invoice.items[0]
+            .ledger
+            .as_ref()
+            .and_then(|ledger| ledger.revenue.as_deref()),
+        Some("12345A")
+    );
+    assert_eq!(invoice.payments[0].exchange_rate, Some(dec!(275)));
+    assert_eq!(invoice.totals.per_vat_rate[0].vat_rate, Some(dec!(0)));
+    assert_eq!(
+        invoice.items[0].effective_vat(),
+        Some(VatRate::Special("ÁKK"))
+    );
+    assert_eq!(invoice.raw_xml(), Some(OUTGOING_INVOICE));
+}
+
+#[test]
+fn preserves_all_invoice_appearance_codes() {
+    for (code, expected) in [
+        (0, InvoiceAppearance::NotInvoice),
+        (1, InvoiceAppearance::Paper),
+        (2, InvoiceAppearance::Electronic(2)),
+        (3, InvoiceAppearance::Electronic(3)),
+        (91, InvoiceAppearance::Unknown(91)),
+    ] {
+        let body = with(
+            OUTGOING_INVOICE,
+            "<eszamla>1</eszamla>",
+            &format!("<eszamla>{code}</eszamla>"),
+        );
+        let invoice = outgoing(&body).expect("parse");
+        assert_eq!(invoice.info.e_invoice, Some(expected));
+        assert_eq!(
+            invoice.info.e_invoice.map(InvoiceAppearance::code),
+            Some(code)
+        );
+    }
+}
+
+#[test]
+fn preserves_extended_invoice_fields_in_both_directions() {
+    let enriched = with(
+        &with(
+            OUTGOING_INVOICE,
+            "<megjegyzes></megjegyzes>",
+            "<megjegyzes></megjegyzes><afatipus>EU-OSS</afatipus>",
+        ),
+        "<osszegek>",
+        "<qutetek><qutet><nev>Fee</nev><afatipus>AAM</afatipus><afakulcs>27</afakulcs><netto>10</netto><afa>0</afa><brutto>10</brutto><elszdattol>2026-01-01</elszdattol><elszdatig>2026-01-31</elszdatig><afalevon>0</afalevon><cimkek><cimke>finance</cimke></cimkek></qutet></qutetek><cimkek><cimke>priority</cimke></cimkek><osszegek>",
+    );
+    let outgoing = outgoing(&enriched).expect("outgoing");
+    assert_eq!(outgoing.info.vat_type.as_deref(), Some("EU-OSS"));
+    assert_eq!(outgoing.tags, ["priority"]);
+    assert_eq!(outgoing.financial_items.len(), 1);
+    assert_eq!(outgoing.financial_items[0].vat_rate, Some(dec!(27)));
+    assert_eq!(outgoing.financial_items[0].tags, ["finance"]);
+
+    let incoming_body = with(
+        &with(
+            &as_incoming(&enriched),
+            "<telj>2015-12-02</telj>",
+            "<telj>2015-12-02</telj><folyamatostelj>true</folyamatostelj><elszDatTol>2015-12-01</elszDatTol><elszDatIg>2015-12-31</elszDatIg>",
+        ),
+        "<teszt>false</teszt>",
+        "<teszt>false</teszt><dobdel>true</dobdel>",
+    );
+    let incoming = incoming(&incoming_body).expect("incoming");
+    assert_eq!(incoming.info.continuous_fulfillment, Some(true));
+    assert!(incoming.info.settlement_start.is_some());
+    assert!(incoming.info.settlement_end.is_some());
+    assert_eq!(incoming.info.deleted, Some(true));
+    assert_eq!(incoming.buyer.location, Some(1));
+}
+
+#[test]
+fn parses_bank_transaction() {
+    let tx = bank_transaction(BANK_TRANSACTION).expect("parse");
+    assert_eq!(tx.id, 987);
+    assert_eq!(tx.direction, Some(TransactionDirection::Incoming));
+    assert_eq!(tx.amount, Some(dec!(12700.0)));
+    assert_eq!(tx.technical, Some(false));
+    assert_eq!(
+        tx.partner.as_ref().and_then(|p| p.name.as_deref()),
+        Some("Kovács Bt.")
+    );
+    assert_eq!(tx.memo.as_deref(), Some("E-2026-123"));
+    assert_eq!(tx.raw_xml(), Some(BANK_TRANSACTION));
+}
+
+#[test]
+fn parses_receipt_batch() {
+    let batch = receipts(RECEIPT_BATCH).expect("parse");
+    assert_eq!(batch.receipts.len(), 2);
+    let first = &batch.receipts[0];
+    assert_eq!(first.info.receipt_number.as_deref(), Some("NYGTA-2026-1"));
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].quantity, Some(dec!(2.0)));
+    assert_eq!(first.items[0].gross_value, Some(dec!(25400.0)));
+    assert_eq!(first.info.customer_ledger.as_deref(), Some("311"));
+    assert_eq!(first.info.exchange_rate, Some(dec!(1)));
+    assert_eq!(first.items[0].vat_rate, Some(dec!(27)));
+    assert_eq!(first.items[0].vat_type.as_deref(), Some("AAM"));
+    assert_eq!(
+        first.items[0].effective_vat(),
+        Some(VatRate::Special("AAM"))
+    );
+    assert_eq!(
+        first.items[0]
+            .ledger
+            .as_ref()
+            .and_then(|ledger| ledger.revenue.as_deref()),
+        Some("911")
+    );
+    assert_eq!(first.payments[0].amount, Some(dec!(25400)));
+    assert_eq!(
+        batch.receipts[1].info.receipt_number.as_deref(),
+        Some("NYGTA-2026-2")
+    );
+    assert_eq!(batch.raw_xml(), Some(RECEIPT_BATCH));
+}
+
+#[test]
+fn accepts_receipts_without_issuer_tax_number_seen_in_official_batches() {
+    let body = without(RECEIPT_BATCH, "<adoszam>12345678-1-42</adoszam>");
+    let batch = receipts(&body).expect("parse");
+    assert_eq!(batch.receipts[0].info.tax_number, None);
+}
+
+#[test]
+fn unknown_root_is_an_error() {
+    let error = Document::parse(b"<?xml version=\"1.0\"?><whatever/>").expect_err("error");
+    assert!(matches!(&error, ParseError::UnknownRoot(root) if root == "whatever"));
+    assert!(error.to_string().contains("whatever"));
+}
+
+// `Document::parse` refuses shape only: what is not the pushed record at all.
+// Content (a missing element, an unknown token, an undecodable PDF) is read
+// leniently and is `parse_strict`'s concern (below).
+#[test]
+fn rejects_shapes_that_are_not_the_document() {
+    let truncated = &OUTGOING_INVOICE.as_bytes()[..OUTGOING_INVOICE.len() - 20];
+    assert!(Document::parse(truncated).is_err());
+
+    for root in ["szamla", "szamlabe", "banktranz", "xmlnyugtaarchiv"] {
+        let body = format!(r#"<{root} xmlns="https://wrong.example"/>"#);
+        assert!(Document::parse(body.as_bytes()).is_err(), "accepted {root}");
+    }
+
+    let wrong_child_namespace = with(OUTGOING_INVOICE, "<szallito>", "<szallito xmlns=\"\">");
+    assert!(Document::parse(wrong_child_namespace.as_bytes()).is_err());
+
+    assert!(Document::parse(b"<szamla>\xff</szamla>").is_err());
+    assert!(Document::parse(b"not xml at all").is_err());
+}
+
+// The identity is shape: the id (and an invoice's number) is what a receiver
+// keys the record by, whether or not the Ack of its kind echoes it (a bank
+// transaction's and a receipt batch's do not). Missing or not an integer,
+// the body is not a record szamlazz.hu holds.
+#[test]
+fn a_record_without_its_identity_is_refused() {
+    let without_id = without(OUTGOING_INVOICE, "<id>123456</id>");
+    assert!(Document::parse(without_id.as_bytes()).is_err());
+    let without_number = without(OUTGOING_INVOICE, "<szamlaszam>2015-123</szamlaszam>");
+    assert!(Document::parse(without_number.as_bytes()).is_err());
+
+    let transaction_without_id = without(BANK_TRANSACTION, "<id>987</id>");
+    assert!(Document::parse(transaction_without_id.as_bytes()).is_err());
+    // One id-less receipt refuses the whole batch: the cost the rule states.
+    let receipt_without_id = without(RECEIPT_BATCH, "<id>2</id>");
+    assert!(Document::parse(receipt_without_id.as_bytes()).is_err());
+
+    for (body, element) in [
+        (OUTGOING_INVOICE, "<id>123456</id>"),
+        (BANK_TRANSACTION, "<id>987</id>"),
+        (RECEIPT_BATCH, "<id>1</id>"),
+    ] {
+        for not_an_integer in ["<id>abc</id>", "<id>1.5</id>", "<id></id>"] {
+            let body = with(body, element, not_an_integer);
+            assert!(
+                matches!(Document::parse(body.as_bytes()), Err(ParseError::Xml(_))),
+                "{element} as {not_an_integer}"
+            );
+        }
+    }
+}
+
+// A value not of its lexical type is shape (the one exception, a date, is
+// content): a decimal or an integer the type cannot hold is not an omission
+// and must not read as one.
+#[test]
+fn a_number_that_is_not_a_number_is_refused() {
+    for not_a_decimal in ["abc", "1,5", "12 700", "NaN"] {
+        let body = with(
+            BANK_TRANSACTION,
+            "<osszeg>12700.0</osszeg>",
+            &format!("<osszeg>{not_a_decimal}</osszeg>"),
+        );
+        assert!(
+            matches!(Document::parse(body.as_bytes()), Err(ParseError::Xml(_))),
+            "osszeg {not_a_decimal:?}"
+        );
+        let body = with(
+            OUTGOING_INVOICE,
+            "<netto>200</netto>",
+            &format!("<netto>{not_a_decimal}</netto>"),
+        );
+        assert!(
+            matches!(Document::parse(body.as_bytes()), Err(ParseError::Xml(_))),
+            "netto {not_a_decimal:?}"
+        );
+    }
+    for not_an_integer in ["abc", "1.5", "1e3"] {
+        let body = with(
+            OUTGOING_INVOICE,
+            "<forras>34</forras>",
+            &format!("<forras>{not_an_integer}</forras>"),
+        );
+        assert!(
+            matches!(Document::parse(body.as_bytes()), Err(ParseError::Xml(_))),
+            "forras {not_an_integer:?}"
+        );
+    }
+
+    // The lexical forms a decimal does hold parse as one.
+    for (text, expected) in [
+        ("12700", dec!(12700)),
+        ("12700.50", dec!(12700.50)),
+        ("-1", dec!(-1)),
+    ] {
+        let body = with(
+            BANK_TRANSACTION,
+            "<osszeg>12700.0</osszeg>",
+            &format!("<osszeg>{text}</osszeg>"),
+        );
+        assert_eq!(
+            bank_transaction(&body).expect("parses").amount,
+            Some(expected)
+        );
     }
 }
 
@@ -272,7 +537,11 @@ const XSD_REQUIRED_QUTET_ELEMENTS: &[(&str, &str)] = &[
 
 #[test]
 fn each_xsd_required_qutet_element_is_optional_to_parse_and_required_by_parse_strict() {
-    let with_qutet = OUTGOING_INVOICE.replacen("<osszegek>", &format!("{QUTET}<osszegek>"), 1);
+    let with_qutet = with(
+        OUTGOING_INVOICE,
+        "<osszegek>",
+        &format!("{QUTET}<osszegek>"),
+    );
     Document::parse_strict(with_qutet.as_bytes()).expect("the enriched fixture conforms");
 
     for (element, field) in XSD_REQUIRED_QUTET_ELEMENTS {
@@ -299,10 +568,9 @@ fn strict_parse_requires_line_items_and_totals() {
         "invalid document structure: invoice tetelek must contain at least one tetel"
     );
 
-    let without_vat_totals = OUTGOING_INVOICE.replacen(
+    let without_vat_totals = without(
+        OUTGOING_INVOICE,
         "<afakulcsossz><afatipus>ÁKK</afatipus><afakulcs>0</afakulcs><netto>200</netto><afa>0</afa><brutto>200</brutto></afakulcsossz>",
-        "",
-        1,
     );
     assert!(
         outgoing(&without_vat_totals)
@@ -319,33 +587,92 @@ fn strict_parse_requires_line_items_and_totals() {
 
 #[test]
 fn negative_vat_rate_parses_and_fails_strict() {
-    let body = OUTGOING_INVOICE.replacen("<afakulcs>0</afakulcs>", "<afakulcs>-5</afakulcs>", 1);
+    let body = with(
+        OUTGOING_INVOICE,
+        "<afakulcs>0</afakulcs>",
+        "<afakulcs>-5</afakulcs>",
+    );
     let invoice = outgoing(&body).expect("a negative rate is content");
-    assert_eq!(invoice.items[0].vat_rate, Some(rust_decimal::dec!(-5)));
+    assert_eq!(invoice.items[0].vat_rate, Some(dec!(-5)));
     assert_eq!(
         strict_refusal(&body),
         "invalid document structure: invoice tetel/afakulcs must not be negative"
     );
+    assert_eq!(
+        Document::parse(body.as_bytes())
+            .expect("parses")
+            .validate()
+            .expect_err("negative"),
+        ValidationError::Negative {
+            path: "invoice tetel/afakulcs".to_owned()
+        }
+    );
+}
+
+// Every verdict is a variant naming the element, so a receiver can act on
+// which requirement failed; the text of each is the 0.3 message.
+#[test]
+fn validation_verdicts_are_typed_and_display_verbatim() {
+    let cases: [(String, ValidationError, &str); 4] = [
+        (
+            without(OUTGOING_INVOICE, "<kelt>2015-12-01</kelt>"),
+            ValidationError::MissingRequired {
+                path: "invoice alap/kelt".to_owned(),
+            },
+            "missing required invoice alap/kelt",
+        ),
+        (
+            with(BANK_TRANSACTION, "<irany>BE</irany>", "<irany>XX</irany>"),
+            ValidationError::UnknownToken {
+                path: "bank transaction irany".to_owned(),
+                token: "XX".to_owned(),
+            },
+            "bank transaction irany has unknown value XX",
+        ),
+        (
+            with(
+                OUTGOING_INVOICE,
+                "<afakulcs>0</afakulcs>",
+                "<afakulcs>-5</afakulcs>",
+            ),
+            ValidationError::Negative {
+                path: "invoice tetel/afakulcs".to_owned(),
+            },
+            "invoice tetel/afakulcs must not be negative",
+        ),
+        (
+            r#"<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv"/>"#.to_owned(),
+            ValidationError::Empty {
+                path: "receipt archive".to_owned(),
+                child: "nyugta",
+            },
+            "receipt archive must contain at least one nyugta",
+        ),
+    ];
+    for (body, verdict, text) in cases {
+        let error = Document::parse(body.as_bytes())
+            .expect("parses")
+            .validate()
+            .expect_err("the XSD minds");
+        assert_eq!(error, verdict);
+        assert_eq!(error.to_string(), text);
+        assert_eq!(
+            strict_refusal(&body),
+            format!("invalid document structure: {text}")
+        );
+    }
 }
 
 #[test]
 fn incoming_invoice_does_not_require_private_person_indicator() {
-    let incoming = OUTGOING_INVOICE
-        .replace(
-            "http://www.szamlazz.hu/szamla",
-            "http://www.szamlazz.hu/szamlabe",
-        )
-        .replace("<szamla xmlns=", "<szamlabe xmlns=")
-        .replace("</szamla>", "</szamlabe>")
-        .replacen(
-            "<privatePersonIndicator>false</privatePersonIndicator>",
-            "",
-            1,
-        );
+    let incoming = without(
+        &incoming_invoice(),
+        "<privatePersonIndicator>false</privatePersonIndicator>",
+    );
     let document = Document::parse_strict(incoming.as_bytes()).expect("conforms to szamlabe.xsd");
     assert!(matches!(document, Document::IncomingInvoice(_)));
 
-    let without_location = incoming.replacen("<lokacio>1</lokacio>", "<lokacio></lokacio>", 1);
+    let without_location = with(&incoming, "<lokacio>1</lokacio>", "<lokacio></lokacio>");
     assert_eq!(
         strict_refusal(&without_location),
         "invalid document structure: missing required invoice vevo/lokacio"
@@ -354,7 +681,7 @@ fn incoming_invoice_does_not_require_private_person_indicator() {
 
 #[test]
 fn validate_on_a_parsed_document_reports_the_same_verdict_as_parse_strict() {
-    let body = OUTGOING_INVOICE.replacen("<kelt>2015-12-01</kelt>", "", 1);
+    let body = without(OUTGOING_INVOICE, "<kelt>2015-12-01</kelt>");
     let document = Document::parse(body.as_bytes()).expect("parses");
     let verdict = document
         .validate()
@@ -365,23 +692,6 @@ fn validate_on_a_parsed_document_reports_the_same_verdict_as_parse_strict() {
         .expect("parses")
         .validate()
         .expect("the fixture conforms");
-}
-
-const BANK_TRANSACTION: &str = r#"<banktranz xmlns="http://www.szamlazz.hu/banktranz">
-  <id>987</id>
-  <bankszamla>11111111-22222222-33333333</bankszamla>
-  <erteknap>2026-07-03</erteknap>
-  <irany>BE</irany>
-  <technikai>false</technikai>
-  <osszeg>12700.0</osszeg>
-  <devizanem>HUF</devizanem>
-</banktranz>"#;
-
-fn bank_transaction(body: &str) -> Result<BankTransaction, ParseError> {
-    match Document::parse(body.as_bytes())? {
-        Document::BankTransaction(transaction) => Ok(transaction),
-        other => panic!("expected bank transaction, got {other:?}"),
-    }
 }
 
 #[test]
@@ -434,13 +744,17 @@ fn each_xsd_required_transaction_element_is_optional_to_parse_and_required_by_pa
     }
 
     // An empty element reads as absent, like every other optional element.
-    let body = BANK_TRANSACTION.replacen("<technikai>false</technikai>", "<technikai/>", 1);
+    let body = with(
+        BANK_TRANSACTION,
+        "<technikai>false</technikai>",
+        "<technikai/>",
+    );
     assert_eq!(bank_transaction(&body).expect("parses").technical, None);
 }
 
 #[test]
 fn unknown_transaction_direction_is_kept_as_other() {
-    let body = BANK_TRANSACTION.replacen("<irany>BE</irany>", "<irany>XX</irany>", 1);
+    let body = with(BANK_TRANSACTION, "<irany>BE</irany>", "<irany>XX</irany>");
     let transaction = bank_transaction(&body).expect("an unknown token is content");
     assert_eq!(
         transaction.direction,
@@ -464,9 +778,12 @@ fn unknown_transaction_direction_is_kept_as_other() {
         known.direction.as_ref().map(TransactionDirection::code),
         Some("BE")
     );
-    let outgoing =
-        bank_transaction(&BANK_TRANSACTION.replacen("<irany>BE</irany>", "<irany>KI</irany>", 1))
-            .expect("parses");
+    let outgoing = bank_transaction(&with(
+        BANK_TRANSACTION,
+        "<irany>BE</irany>",
+        "<irany>KI</irany>",
+    ))
+    .expect("parses");
     assert_eq!(outgoing.direction, Some(TransactionDirection::Outgoing));
 }
 
@@ -477,8 +794,11 @@ fn transaction_direction_serializes_as_a_plain_string_for_every_variant() {
         ("KI", "\"Outgoing\""),
         ("XX", "\"XX\""),
     ] {
-        let body =
-            BANK_TRANSACTION.replacen("<irany>BE</irany>", &format!("<irany>{token}</irany>"), 1);
+        let body = with(
+            BANK_TRANSACTION,
+            "<irany>BE</irany>",
+            &format!("<irany>{token}</irany>"),
+        );
         let transaction = bank_transaction(&body).expect("parses");
         let json = serde_json::to_string(&transaction.direction).expect("json");
         assert_eq!(json, expected_json, "token {token}");
@@ -486,7 +806,11 @@ fn transaction_direction_serializes_as_a_plain_string_for_every_variant() {
 }
 
 fn with_pdf(encoded: &str) -> String {
-    OUTGOING_INVOICE.replacen("<pdf></pdf>", &format!("<pdf>{encoded}</pdf>"), 1)
+    with(
+        OUTGOING_INVOICE,
+        "<pdf></pdf>",
+        &format!("<pdf>{encoded}</pdf>"),
+    )
 }
 
 #[test]
@@ -528,22 +852,6 @@ fn non_canonical_base64_decodes_when_it_can_and_reads_as_absent_when_it_cannot()
         assert!(invoice.pdf.is_none(), "{garbage}");
         assert_eq!(invoice.raw_xml(), Some(body.as_str()));
         assert_eq!(invoice.info.id, 123_456);
-    }
-}
-
-const RECEIPT_BATCH: &str = r#"<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv">
-  <nyugta>
-    <alap><id>1</id><nyugtaszam>NYGTA-2026-1</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>készpénz</fizmod><penznem>HUF</penznem><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap>
-    <tetelek><tetel><megnevezes>Service</megnevezes><nettoEgysegar>100</nettoEgysegar><mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>100</netto><afakulcs>27</afakulcs><afa>27</afa><brutto>127</brutto></tetel></tetelek>
-    <kifizetesek><kifizetes><fizetoeszkoz>készpénz</fizetoeszkoz><osszeg>127</osszeg></kifizetes></kifizetesek>
-    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>100</netto><afa>27</afa><brutto>127</brutto></afakulcsossz><totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz></osszegek>
-  </nyugta>
-</xmlnyugtaarchiv>"#;
-
-fn receipts(body: &str) -> Result<ReceiptBatch, ParseError> {
-    match Document::parse(body.as_bytes())? {
-        Document::Receipts(batch) => Ok(batch),
-        other => panic!("expected receipts, got {other:?}"),
     }
 }
 
@@ -592,14 +900,14 @@ const XSD_REQUIRED_RECEIPT_ELEMENTS: &[(&str, &str)] = &[
     ("<penznem>HUF</penznem>", "receipt alap/penznem"),
     ("<teszt>false</teszt>", "receipt alap/teszt"),
     (
-        "<megnevezes>Service</megnevezes>",
+        "<megnevezes>Kitten doormat</megnevezes>",
         "receipt tetel/megnevezes",
     ),
     (
-        "<nettoEgysegar>100</nettoEgysegar>",
+        "<nettoEgysegar>10000</nettoEgysegar>",
         "receipt tetel/nettoEgysegar",
     ),
-    ("<mennyiseg>1</mennyiseg>", "receipt tetel/mennyiseg"),
+    ("<mennyiseg>2.0</mennyiseg>", "receipt tetel/mennyiseg"),
     (
         "<mennyisegiEgyseg>db</mennyisegiEgyseg>",
         "receipt tetel/mennyisegiEgyseg",
@@ -609,7 +917,7 @@ const XSD_REQUIRED_RECEIPT_ELEMENTS: &[(&str, &str)] = &[
         "receipt kifizetes/fizetoeszkoz",
     ),
     (
-        "<totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz>",
+        "<totalossz><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></totalossz>",
         "osszegek/totalossz",
     ),
 ];
@@ -617,12 +925,8 @@ const XSD_REQUIRED_RECEIPT_ELEMENTS: &[(&str, &str)] = &[
 #[test]
 fn each_xsd_required_receipt_element_is_optional_to_parse_and_required_by_parse_strict() {
     Document::parse_strict(RECEIPT_BATCH.as_bytes()).expect("the fixture conforms");
-    Document::parse_strict(
-        RECEIPT_BATCH
-            .replacen("<adoszam>12345678-1-42</adoszam>", "", 1)
-            .as_bytes(),
-    )
-    .expect("official batches omit adoszam");
+    Document::parse_strict(without(RECEIPT_BATCH, "<adoszam>12345678-1-42</adoszam>").as_bytes())
+        .expect("official batches omit adoszam");
 
     for (element, field) in XSD_REQUIRED_RECEIPT_ELEMENTS {
         assert!(

@@ -1,373 +1,23 @@
-//! End-to-end protocol tests: fixture documents through parsing, the Handler
-//! trait, and the axum router.
+//! Protocol tests: fixture documents through the axum router, in the order
+//! the router documents (header, body limit, root, key, parse, handler).
+//! The parse itself is `tests/document.rs`, feature-free.
 
 #![cfg(feature = "axum")]
 
+mod common;
+
 use axum::Router;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt as _;
-use rust_decimal::dec;
+use axum::http::StatusCode;
+use common::axum::{TestHandler, UnavailableResolver, call, call_at, request, request_at, send};
+use common::{BANK_TRANSACTION, OUTGOING_INVOICE, RECEIPT_BATCH, incoming_invoice};
 use std::convert::Infallible;
 use std::future::ready;
 use std::sync::{Arc, Mutex};
 use szamlazz_adatkapcsolat::axum::BodyLimit;
 use szamlazz_adatkapcsolat::{
-    Ack, BankTransaction, Document, Handler, InvoiceAck, InvoiceAppearance, InvoiceDocument,
-    KEY_HEADER, MaybeSend, ReceiptBatch, TransactionDirection, VatRate,
+    Ack, BankTransaction, Handler, InvoiceAck, InvoiceDocument, MaybeSend, ReceiptBatch,
 };
 use tower::util::ServiceExt as _;
-
-const OUTGOING_INVOICE: &[u8] = include_bytes!("synthetic/szamla.xml");
-
-const BANK_TRANSACTION: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<banktranz xmlns="http://www.szamlazz.hu/banktranz">
-  <id>987</id>
-  <bankszamla>11111111-22222222-33333333</bankszamla>
-  <erteknap>2026-07-03</erteknap>
-  <irany>BE</irany>
-  <technikai>false</technikai>
-  <osszeg>12700.0</osszeg>
-  <devizanem>HUF</devizanem>
-  <partner><nev>Kovács Bt.</nev><bankszamla>44444444-55555555</bankszamla></partner>
-  <kozlemeny>E-2026-123</kozlemeny>
-</banktranz>"#;
-
-const RECEIPT_BATCH: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv">
-  <nyugta>
-    <alap>
-      <id>1</id>
-      <nyugtaszam>NYGTA-2026-1</nyugtaszam>
-      <tipus>NY</tipus>
-      <stornozott>false</stornozott>
-      <kelt>2026-07-03</kelt>
-      <fizmod>készpénz</fizmod>
-      <penznem>HUF</penznem>
-      <devizaarf>1</devizaarf>
-      <fokonyvVevo>311</fokonyvVevo>
-      <teszt>false</teszt>
-      <adoszam>12345678-1-42</adoszam>
-    </alap>
-    <tetelek>
-      <tetel><megnevezes>Kitten doormat</megnevezes><nettoEgysegar>10000</nettoEgysegar><mennyiseg>2.0</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>20000.0</netto><afatipus>AAM</afatipus><afakulcs>27</afakulcs><afa>5400.0</afa><brutto>25400.0</brutto><fokonyv><arbevetel>911</arbevetel><afa>467</afa></fokonyv></tetel>
-    </tetelek>
-    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></afakulcsossz><totalossz><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></totalossz></osszegek>
-  </nyugta>
-  <nyugta>
-    <alap><id>2</id><nyugtaszam>NYGTA-2026-2</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>bankkártya</fizmod><penznem>HUF</penznem><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap>
-    <tetelek><tetel><megnevezes>Service</megnevezes><nettoEgysegar>100</nettoEgysegar><mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>100</netto><afakulcs>27</afakulcs><afa>27</afa><brutto>127</brutto></tetel></tetelek>
-    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>100</netto><afa>27</afa><brutto>127</brutto></afakulcsossz><totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz></osszegek>
-  </nyugta>
-</xmlnyugtaarchiv>"#;
-
-#[test]
-fn parses_outgoing_invoice_fixture() {
-    let Document::OutgoingInvoice(invoice) =
-        Document::parse(OUTGOING_INVOICE).expect("parse fixture")
-    else {
-        panic!("expected outgoing invoice");
-    };
-    assert!(invoice.info.id > 0);
-    assert_eq!(invoice.info.invoice_number, "2015-123");
-    assert!(invoice.supplier.name.is_some());
-    assert!(!invoice.items.is_empty());
-    assert_eq!(invoice.info.source, Some(34));
-    assert_eq!(invoice.info.registration_number, None);
-    assert_eq!(invoice.info.e_invoice, Some(InvoiceAppearance::Paper));
-    assert_eq!(invoice.info.kata_ledger, Some(false));
-    assert!(invoice.info.email.is_some());
-    assert_eq!(invoice.buyer.location, Some(1));
-    assert_eq!(invoice.buyer.private_person, Some(false));
-    assert_eq!(
-        invoice
-            .buyer
-            .buyer_ledger
-            .as_ref()
-            .and_then(|ledger| ledger.customer.as_deref()),
-        Some("12345A")
-    );
-    assert_eq!(invoice.items[0].vat_type.as_deref(), Some("ÁKK"));
-    assert_eq!(invoice.items[0].vat_rate, Some(dec!(0)));
-    assert_eq!(invoice.items[0].ordering, Some(1));
-    assert_eq!(
-        invoice.items[0]
-            .ledger
-            .as_ref()
-            .and_then(|ledger| ledger.revenue.as_deref()),
-        Some("12345A")
-    );
-    assert_eq!(invoice.payments[0].exchange_rate, Some(dec!(275)));
-    assert_eq!(invoice.totals.per_vat_rate[0].vat_rate, Some(dec!(0)));
-    assert_eq!(
-        invoice.items[0].effective_vat(),
-        Some(VatRate::Special("ÁKK"))
-    );
-    assert_eq!(invoice.raw_xml().map(str::as_bytes), Some(OUTGOING_INVOICE));
-}
-
-#[test]
-fn preserves_all_invoice_appearance_codes() {
-    let fixture = std::str::from_utf8(OUTGOING_INVOICE).expect("fixture UTF-8");
-    for (code, expected) in [
-        (0, InvoiceAppearance::NotInvoice),
-        (1, InvoiceAppearance::Paper),
-        (2, InvoiceAppearance::Electronic(2)),
-        (3, InvoiceAppearance::Electronic(3)),
-        (91, InvoiceAppearance::Unknown(91)),
-    ] {
-        let body = fixture.replace(
-            "<eszamla>1</eszamla>",
-            &format!("<eszamla>{code}</eszamla>"),
-        );
-        let Document::OutgoingInvoice(invoice) = Document::parse(body.as_bytes()).expect("parse")
-        else {
-            panic!("expected outgoing invoice");
-        };
-        assert_eq!(invoice.info.e_invoice, Some(expected));
-        assert_eq!(
-            invoice.info.e_invoice.map(InvoiceAppearance::code),
-            Some(code)
-        );
-    }
-}
-
-#[test]
-fn preserves_extended_invoice_fields_in_both_directions() {
-    let fixture = std::str::from_utf8(OUTGOING_INVOICE).expect("fixture UTF-8");
-    let enriched = fixture
-        .replacen(
-            "<megjegyzes></megjegyzes>",
-            "<megjegyzes></megjegyzes><afatipus>EU-OSS</afatipus>",
-            1,
-        )
-        .replacen(
-            "<osszegek>",
-            "<qutetek><qutet><nev>Fee</nev><afatipus>AAM</afatipus><afakulcs>27</afakulcs><netto>10</netto><afa>0</afa><brutto>10</brutto><elszdattol>2026-01-01</elszdattol><elszdatig>2026-01-31</elszdatig><afalevon>0</afalevon><cimkek><cimke>finance</cimke></cimkek></qutet></qutetek><cimkek><cimke>priority</cimke></cimkek><osszegek>",
-            1,
-        );
-    let Document::OutgoingInvoice(outgoing) =
-        Document::parse(enriched.as_bytes()).expect("outgoing")
-    else {
-        panic!("expected outgoing invoice");
-    };
-    assert_eq!(outgoing.info.vat_type.as_deref(), Some("EU-OSS"));
-    assert_eq!(outgoing.tags, ["priority"]);
-    assert_eq!(outgoing.financial_items.len(), 1);
-    assert_eq!(outgoing.financial_items[0].vat_rate, Some(dec!(27)));
-    assert_eq!(outgoing.financial_items[0].tags, ["finance"]);
-
-    let incoming = enriched
-        .replace("http://www.szamlazz.hu/szamla", "http://www.szamlazz.hu/szamlabe")
-        .replace("<szamla xmlns=", "<szamlabe xmlns=")
-        .replace("</szamla>", "</szamlabe>")
-        .replacen(
-            "<telj>2015-12-02</telj>",
-            "<telj>2015-12-02</telj><folyamatostelj>true</folyamatostelj><elszDatTol>2015-12-01</elszDatTol><elszDatIg>2015-12-31</elszDatIg>",
-            1,
-        )
-        .replacen("<teszt>false</teszt>", "<teszt>false</teszt><dobdel>true</dobdel>", 1);
-    let Document::IncomingInvoice(incoming) =
-        Document::parse(incoming.as_bytes()).expect("incoming")
-    else {
-        panic!("expected incoming invoice");
-    };
-    assert_eq!(incoming.info.continuous_fulfillment, Some(true));
-    assert!(incoming.info.settlement_start.is_some());
-    assert!(incoming.info.settlement_end.is_some());
-    assert_eq!(incoming.info.deleted, Some(true));
-    assert_eq!(incoming.buyer.location, Some(1));
-}
-
-#[test]
-fn parses_bank_transaction() {
-    let Document::BankTransaction(tx) =
-        Document::parse(BANK_TRANSACTION.as_bytes()).expect("parse")
-    else {
-        panic!("expected bank transaction");
-    };
-    assert_eq!(tx.id, 987);
-    assert_eq!(tx.direction, Some(TransactionDirection::Incoming));
-    assert_eq!(tx.amount, Some(dec!(12700.0)));
-    assert_eq!(tx.technical, Some(false));
-    assert_eq!(
-        tx.partner.as_ref().and_then(|p| p.name.as_deref()),
-        Some("Kovács Bt.")
-    );
-    assert_eq!(tx.memo.as_deref(), Some("E-2026-123"));
-    assert_eq!(tx.raw_xml(), Some(BANK_TRANSACTION));
-}
-
-#[test]
-fn parses_receipt_batch() {
-    let Document::Receipts(batch) = Document::parse(RECEIPT_BATCH.as_bytes()).expect("parse")
-    else {
-        panic!("expected receipts");
-    };
-    assert_eq!(batch.receipts.len(), 2);
-    let first = &batch.receipts[0];
-    assert_eq!(first.info.receipt_number.as_deref(), Some("NYGTA-2026-1"));
-    assert_eq!(first.items.len(), 1);
-    assert_eq!(first.items[0].gross_value, Some(dec!(25400.0)));
-    assert_eq!(first.info.customer_ledger.as_deref(), Some("311"));
-    assert_eq!(first.info.exchange_rate, Some(dec!(1)));
-    assert_eq!(first.items[0].vat_rate, Some(dec!(27)));
-    assert_eq!(first.items[0].vat_type.as_deref(), Some("AAM"));
-    assert_eq!(
-        first.items[0].effective_vat(),
-        Some(VatRate::Special("AAM"))
-    );
-    assert_eq!(
-        first.items[0]
-            .ledger
-            .as_ref()
-            .and_then(|ledger| ledger.revenue.as_deref()),
-        Some("911")
-    );
-    assert_eq!(batch.raw_xml(), Some(RECEIPT_BATCH));
-}
-
-#[test]
-fn accepts_receipts_without_issuer_tax_number_seen_in_official_batches() {
-    let body = RECEIPT_BATCH.replacen("<adoszam>12345678-1-42</adoszam>", "", 1);
-    let Document::Receipts(batch) = Document::parse(body.as_bytes()).expect("parse") else {
-        panic!("expected receipts");
-    };
-    assert_eq!(batch.receipts[0].info.tax_number, None);
-}
-
-#[test]
-fn unknown_root_is_an_error() {
-    let error = Document::parse(b"<?xml version=\"1.0\"?><whatever/>").expect_err("error");
-    assert!(error.to_string().contains("whatever"));
-}
-
-// `Document::parse` refuses shape only: what is not the pushed document at
-// all. Content (a missing element, an unknown token, an undecodable PDF) is
-// read leniently and is `parse_strict`'s concern (`tests/document.rs`).
-#[test]
-fn rejects_shapes_that_are_not_the_document() {
-    let truncated = &OUTGOING_INVOICE[..OUTGOING_INVOICE.len() - 20];
-    assert!(Document::parse(truncated).is_err());
-
-    for root in ["szamla", "szamlabe", "banktranz", "xmlnyugtaarchiv"] {
-        let body = format!(r#"<{root} xmlns="https://wrong.example"/>"#);
-        assert!(Document::parse(body.as_bytes()).is_err(), "accepted {root}");
-    }
-
-    let wrong_child_namespace = std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("UTF-8")
-        .replacen("<szallito>", "<szallito xmlns=\"\">", 1);
-    assert!(Document::parse(wrong_child_namespace.as_bytes()).is_err());
-
-    // The identity the receiver Acks with: the id and, for an invoice, its
-    // number.
-    let without_id = std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("UTF-8")
-        .replacen("<id>123456</id>", "", 1);
-    assert!(Document::parse(without_id.as_bytes()).is_err());
-    let without_number = std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("UTF-8")
-        .replacen("<szamlaszam>2015-123</szamlaszam>", "", 1);
-    assert!(Document::parse(without_number.as_bytes()).is_err());
-    let receipt_without_id = RECEIPT_BATCH.replacen("<id>1</id>", "", 1);
-    assert!(Document::parse(receipt_without_id.as_bytes()).is_err());
-    let transaction_without_id = BANK_TRANSACTION.replacen("<id>987</id>", "", 1);
-    assert!(Document::parse(transaction_without_id.as_bytes()).is_err());
-
-    assert!(Document::parse(b"<szamla>\xff</szamla>").is_err());
-    assert!(Document::parse(b"not xml at all").is_err());
-}
-
-/// Accepts everything by default; `fail` answers every invoice with an error,
-/// `invalid_ack` with a registration number that cannot be rendered.
-#[derive(Clone, Default)]
-struct TestHandler {
-    fail: bool,
-    invalid_ack: bool,
-}
-
-impl Handler for TestHandler {
-    type Error = String;
-
-    fn outgoing_invoice(
-        &self,
-        invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
-        if self.fail {
-            return ready(Err("database down".to_owned()));
-        }
-        let registration = if self.invalid_ack {
-            "invalid\0registration"
-        } else {
-            "IKT-1"
-        };
-        ready(Ok(
-            InvoiceAck::accept(invoice.info.id).with_registration_number(registration)
-        ))
-    }
-
-    fn incoming_invoice(
-        &self,
-        invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
-        ready(Ok(InvoiceAck::accept(invoice.info.id)))
-    }
-
-    fn bank_transaction(
-        &self,
-        _tx: BankTransaction,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
-        ready(Ok(Ack::accept()))
-    }
-
-    fn receipts(
-        &self,
-        _batch: ReceiptBatch,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
-        ready(Ok(Ack::accept()))
-    }
-}
-
-fn request(key: Option<&str>, body: &[u8]) -> Request<Body> {
-    request_at("/", key, body)
-}
-
-fn request_at(path: &str, key: Option<&str>, body: &[u8]) -> Request<Body> {
-    let mut builder = Request::post(path).header("content-type", "application/xml");
-    if let Some(key) = key {
-        builder = builder.header(KEY_HEADER, key);
-    }
-    builder.body(Body::from(body.to_vec())).expect("request")
-}
-
-async fn call(key: Option<&str>, body: &[u8], fail: bool) -> (StatusCode, String) {
-    call_at("/", key, body, fail).await
-}
-
-async fn call_at(path: &str, key: Option<&str>, body: &[u8], fail: bool) -> (StatusCode, String) {
-    let app = szamlazz_adatkapcsolat::axum::router(
-        "secret-key",
-        TestHandler {
-            fail,
-            ..TestHandler::default()
-        },
-    );
-    send(app, request_at(path, key, body)).await
-}
-
-/// Runs one request through `app` and returns the status with the body as text.
-async fn send(app: Router, request: Request<Body>) -> (StatusCode, String) {
-    let response = app.oneshot(request).await.expect("response");
-    let status = response.status();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
-}
 
 #[tokio::test]
 async fn acks_document_with_valid_key() {
@@ -380,33 +30,33 @@ async fn acks_document_with_valid_key() {
 struct MismatchedAck;
 
 impl Handler for MismatchedAck {
-    type Error = String;
+    type Error = Infallible;
 
     fn outgoing_invoice(
         &self,
         _invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<InvoiceAck, Infallible>> + MaybeSend {
         ready(Ok(InvoiceAck::accept(-1)))
     }
 
     fn incoming_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<InvoiceAck, Infallible>> + MaybeSend {
         ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
     fn bank_transaction(
         &self,
         _tx: BankTransaction,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<Ack, Infallible>> + MaybeSend {
         ready(Ok(Ack::accept()))
     }
 
     fn receipts(
         &self,
         _batch: ReceiptBatch,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<Ack, Infallible>> + MaybeSend {
         ready(Ok(Ack::accept()))
     }
 }
@@ -414,17 +64,8 @@ impl Handler for MismatchedAck {
 #[tokio::test]
 async fn normalizes_handler_ack_to_the_pushed_invoice_id() {
     let app = szamlazz_adatkapcsolat::axum::router("secret-key", MismatchedAck);
-    let response = app
-        .oneshot(request(Some("secret-key"), OUTGOING_INVOICE))
-        .await
-        .expect("response");
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body);
+    let (status, body) = send(app, request(Some("secret-key"), OUTGOING_INVOICE)).await;
+    assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<id>123456</id>"));
     assert!(!body.contains("<id>-1</id>"));
 }
@@ -443,9 +84,7 @@ async fn wrong_key_answers_key_err_without_handler() {
 // `tests/document.rs`).
 #[tokio::test]
 async fn undecodable_pdf_does_not_fail_the_push() {
-    let body = std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("fixture UTF-8")
-        .replace("<pdf></pdf>", "<pdf>not base64!</pdf>");
+    let body = OUTGOING_INVOICE.replace("<pdf></pdf>", "<pdf>not base64!</pdf>");
 
     let (status, response) = call(Some("not-the-key"), body.as_bytes(), false).await;
     assert_eq!(status, StatusCode::OK);
@@ -465,9 +104,8 @@ async fn undecodable_pdf_does_not_fail_the_push() {
 #[tokio::test]
 async fn date_that_is_not_a_date_is_acked_whatever_its_bytes() {
     for kelt in ["é12345", "éé€", "12345é", "2015-12-01junk"] {
-        let body = std::str::from_utf8(OUTGOING_INVOICE)
-            .expect("fixture UTF-8")
-            .replace("<kelt>2015-12-01</kelt>", &format!("<kelt>{kelt}</kelt>"));
+        let body =
+            OUTGOING_INVOICE.replace("<kelt>2015-12-01</kelt>", &format!("<kelt>{kelt}</kelt>"));
 
         let (status, response) = call(Some("secret-key"), body.as_bytes(), false).await;
         assert_eq!(status, StatusCode::OK, "{kelt:?}: {response}");
@@ -483,14 +121,12 @@ async fn date_that_is_not_a_date_is_acked_whatever_its_bytes() {
 // requires: that one is Acked.
 #[tokio::test]
 async fn authenticated_400_is_reserved_for_a_body_that_is_not_a_document() {
-    let truncated = &OUTGOING_INVOICE[..OUTGOING_INVOICE.len() - 20];
+    let truncated = &OUTGOING_INVOICE.as_bytes()[..OUTGOING_INVOICE.len() - 20];
     let (status, response) = call(Some("secret-key"), truncated, false).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(!response.contains("valasz"), "{response}");
 
-    let without_id = std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("fixture UTF-8")
-        .replacen("<id>123456</id>", "", 1);
+    let without_id = OUTGOING_INVOICE.replacen("<id>123456</id>", "", 1);
     let (status, _) = call(Some("secret-key"), without_id.as_bytes(), false).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
@@ -539,9 +175,7 @@ async fn missing_key_is_401_before_the_body_is_inspected() {
 // wrong key and 400 under the right one.
 #[tokio::test]
 async fn namespace_validation_runs_only_after_the_key_is_accepted() {
-    let body = std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("fixture UTF-8")
-        .replacen("<szallito>", "<szallito xmlns=\"\">", 1);
+    let body = OUTGOING_INVOICE.replacen("<szallito>", "<szallito xmlns=\"\">", 1);
 
     let (status, response) = call(Some("not-the-key"), body.as_bytes(), false).await;
     assert_eq!(status, StatusCode::OK);
@@ -738,105 +372,106 @@ async fn key_appended_url_still_authenticates_header() {
     assert!(!body.contains("KEY_ERR"));
 }
 
+/// The handler of one connection, recording which connection was called.
 #[derive(Clone)]
-struct TenantHandler {
-    tenant: &'static str,
+struct ConnectionHandler {
+    connection: &'static str,
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
-impl Handler for TenantHandler {
-    type Error = String;
+impl Handler for ConnectionHandler {
+    type Error = Infallible;
 
     fn outgoing_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
-        self.calls.lock().expect("calls").push(self.tenant);
+    ) -> impl Future<Output = Result<InvoiceAck, Infallible>> + MaybeSend {
+        self.calls.lock().expect("calls").push(self.connection);
         ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
     fn incoming_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<InvoiceAck, Infallible>> + MaybeSend {
         ready(Ok(InvoiceAck::accept(invoice.info.id)))
     }
 
     fn bank_transaction(
         &self,
         _tx: BankTransaction,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<Ack, Infallible>> + MaybeSend {
         ready(Ok(Ack::accept()))
     }
 
     fn receipts(
         &self,
         _batch: ReceiptBatch,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<Ack, Infallible>> + MaybeSend {
         ready(Ok(Ack::accept()))
     }
 }
 
-struct Tenants {
-    first: TenantHandler,
-    second: TenantHandler,
+/// Two connections, `first-key` and `second-key`, each with a handler held
+/// by the resolver and handed out by `Arc::clone`; the keys are compared in
+/// constant time, as a resolver holding secrets should.
+struct Connections {
+    first: Arc<ConnectionHandler>,
+    second: Arc<ConnectionHandler>,
 }
 
-/// Two tenants, `first-key` and `second-key`, recording which one was called.
-fn tenants(calls: &Arc<Mutex<Vec<&'static str>>>) -> Tenants {
-    Tenants {
-        first: TenantHandler {
-            tenant: "first",
+fn connections(calls: &Arc<Mutex<Vec<&'static str>>>) -> Connections {
+    Connections {
+        first: Arc::new(ConnectionHandler {
+            connection: "first",
             calls: calls.clone(),
-        },
-        second: TenantHandler {
-            tenant: "second",
+        }),
+        second: Arc::new(ConnectionHandler {
+            connection: "second",
             calls: calls.clone(),
-        },
+        }),
     }
 }
 
-impl szamlazz_adatkapcsolat::axum::KeyResolver for Tenants {
-    type Handler = TenantHandler;
+impl szamlazz_adatkapcsolat::axum::KeyResolver for Connections {
+    type Handler = ConnectionHandler;
     type Error = Infallible;
 
     fn resolve(
         &self,
         key: &str,
-    ) -> impl Future<Output = Result<Option<&Self::Handler>, Infallible>> + MaybeSend {
-        ready(Ok(match key {
-            "first-key" => Some(&self.first),
-            "second-key" => Some(&self.second),
-            _ => None,
-        }))
+    ) -> impl Future<Output = Result<Option<Arc<Self::Handler>>, Infallible>> + MaybeSend {
+        ready(Ok([
+            ("first-key", &self.first),
+            ("second-key", &self.second),
+        ]
+        .into_iter()
+        .find(|(known, _)| szamlazz_adatkapcsolat::keys_match(key, known))
+        .map(|(_, handler)| Arc::clone(handler))))
     }
 }
 
-/// A database-shaped resolver whose lookup is down: it cannot tell a wrong key
-/// from a right one, so it must not answer either way. Written as an
-/// `async fn` that awaits, the way a real lookup would.
-struct UnavailableResolver;
+/// A resolver that builds the connection's handler per request from what the
+/// lookup found, the shape a database-backed resolver takes: nothing is held
+/// across requests.
+struct PerRequest {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
 
-impl szamlazz_adatkapcsolat::axum::KeyResolver for UnavailableResolver {
-    type Handler = TestHandler;
-    type Error = String;
+impl szamlazz_adatkapcsolat::axum::KeyResolver for PerRequest {
+    type Handler = ConnectionHandler;
+    type Error = Infallible;
 
-    async fn resolve(&self, _key: &str) -> Result<Option<&Self::Handler>, String> {
+    async fn resolve(&self, key: &str) -> Result<Option<Arc<Self::Handler>>, Infallible> {
         tokio::task::yield_now().await;
-        Err("key store timed out".to_owned())
+        Ok(match key {
+            "first-key" => Some(Arc::new(ConnectionHandler {
+                connection: "first",
+                calls: self.calls.clone(),
+            })),
+            _ => None,
+        })
     }
-}
-
-fn incoming_invoice() -> Vec<u8> {
-    std::str::from_utf8(OUTGOING_INVOICE)
-        .expect("fixture UTF-8")
-        .replace(
-            "http://www.szamlazz.hu/szamla",
-            "http://www.szamlazz.hu/szamlabe",
-        )
-        .replace("<szamla xmlns=", "<szamlabe xmlns=")
-        .replace("</szamla>", "</szamlabe>")
-        .into_bytes()
 }
 
 // KEY_ERR is "your key is wrong": szamlazz.hu never resends a bank
@@ -847,8 +482,8 @@ fn incoming_invoice() -> Vec<u8> {
 async fn unavailable_resolver_answers_503_without_an_ack_for_every_root() {
     let incoming = incoming_invoice();
     for (name, body) in [
-        ("szamla", OUTGOING_INVOICE),
-        ("szamlabe", incoming.as_slice()),
+        ("szamla", OUTGOING_INVOICE.as_bytes()),
+        ("szamlabe", incoming.as_bytes()),
         ("banktranz", BANK_TRANSACTION.as_bytes()),
         ("xmlnyugtaarchiv", RECEIPT_BATCH.as_bytes()),
     ] {
@@ -866,13 +501,13 @@ async fn unavailable_resolver_answers_503_without_an_ack_for_every_root() {
 async fn unknown_key_answers_key_err_of_the_pushed_kind_for_every_root() {
     let incoming = incoming_invoice();
     for (body, ack_root) in [
-        (OUTGOING_INVOICE, "<szamlavalasz"),
-        (incoming.as_slice(), "<szamlabevalasz"),
+        (OUTGOING_INVOICE.as_bytes(), "<szamlavalasz"),
+        (incoming.as_bytes(), "<szamlabevalasz"),
         (BANK_TRANSACTION.as_bytes(), "<banktranzvalasz"),
         (RECEIPT_BATCH.as_bytes(), "<nyugtavalasz"),
     ] {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let app = szamlazz_adatkapcsolat::axum::router_with_resolver(tenants(&calls));
+        let app = szamlazz_adatkapcsolat::axum::router_with_resolver(connections(&calls));
         let (status, text) = send(app, request(Some("third-key"), body)).await;
         assert_eq!(status, StatusCode::OK, "{ack_root}");
         assert!(text.contains(ack_root), "{text}");
@@ -882,9 +517,9 @@ async fn unknown_key_answers_key_err_of_the_pushed_kind_for_every_root() {
 }
 
 #[tokio::test]
-async fn resolver_selects_business_context_for_each_key() {
+async fn resolver_selects_the_connection_for_each_key() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let app = szamlazz_adatkapcsolat::axum::router_with_resolver(tenants(&calls));
+    let app = szamlazz_adatkapcsolat::axum::router_with_resolver(connections(&calls));
 
     for key in ["first-key", "second-key"] {
         let response = app
@@ -895,4 +530,22 @@ async fn resolver_selects_business_context_for_each_key() {
         assert_eq!(response.status(), StatusCode::OK);
     }
     assert_eq!(*calls.lock().expect("calls"), ["first", "second"]);
+}
+
+// The matched handler is owned, so a resolver may build it per request.
+#[tokio::test]
+async fn resolver_may_build_the_connection_per_request() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = szamlazz_adatkapcsolat::axum::router_with_resolver(PerRequest {
+        calls: calls.clone(),
+    });
+
+    let (status, text) = send(app.clone(), request(Some("first-key"), OUTGOING_INVOICE)).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(text.contains("<id>123456</id>"), "{text}");
+
+    let (status, text) = send(app, request(Some("other-key"), OUTGOING_INVOICE)).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(text.contains("<hibakod>KEY_ERR</hibakod>"), "{text}");
+    assert_eq!(*calls.lock().expect("calls"), ["first"]);
 }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv">
+  <nyugta>
+    <alap><id>1</id><nyugtaszam>NYGTA-2026-1</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>készpénz</fizmod><penznem>HUF</penznem><devizaarf>1</devizaarf><fokonyvVevo>311</fokonyvVevo><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap>
+    <tetelek><tetel><megnevezes>Kitten doormat</megnevezes><nettoEgysegar>10000</nettoEgysegar><mennyiseg>2.0</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>20000.0</netto><afatipus>AAM</afatipus><afakulcs>27</afakulcs><afa>5400.0</afa><brutto>25400.0</brutto><fokonyv><arbevetel>911</arbevetel><afa>467</afa></fokonyv></tetel></tetelek>
+    <kifizetesek><kifizetes><fizetoeszkoz>készpénz</fizetoeszkoz><osszeg>25400</osszeg></kifizetes></kifizetesek>
+    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></afakulcsossz><totalossz><netto>20000</netto><afa>5400</afa><brutto>25400</brutto></totalossz></osszegek>
+  </nyugta>
+  <nyugta>
+    <alap><id>2</id><nyugtaszam>NYGTA-2026-2</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>bankkártya</fizmod><penznem>HUF</penznem><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap>
+    <tetelek><tetel><megnevezes>Service</megnevezes><nettoEgysegar>100</nettoEgysegar><mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>100</netto><afakulcs>27</afakulcs><afa>27</afa><brutto>127</brutto></tetel></tetelek>
+    <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>100</netto><afa>27</afa><brutto>127</brutto></afakulcsossz><totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz></osszegek>
+  </nyugta>
+</xmlnyugtaarchiv>
