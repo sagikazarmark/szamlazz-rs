@@ -3,29 +3,45 @@
 //! documents found under our external ids and the account check of documents
 //! found by number.
 
+use std::error::Error as StdError;
 use std::fmt;
+use std::future::Future;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
+use restate_sdk::context::{ContextSideEffects, RunFuture as _, RunRetryPolicy};
 use restate_sdk::errors::{HandlerError, TerminalError};
+use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
+use restate_sdk::serde::Json;
 use szamlazz_agent::Date;
+use tracing::Instrument as _;
 
-use crate::account::Account;
-use crate::contract::{IssuedKind, StornoOutcome, StornoResponse, TerminalCode};
+use crate::account::{Account, Accounts};
+use crate::config::{ValidatedWorkerConfig, WorkerConfig};
+use crate::contract::{IssuedKind, Selector, StornoOutcome, StornoResponse, TerminalCode};
 use crate::gateway::{
     FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-    SzamlazzAnswer,
+    StornoStepRequest, SzamlazzAnswer, Unanswered,
 };
 use crate::identity::{ExternalId, Namespace, OrderKey};
+use crate::service::Deployment;
+use crate::service::prologue::{self, Execution};
+
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub(super) use self::journaled::Journaled;
 #[cfg(test)]
 pub(super) use self::journaled::journaled_types;
 
-/// The `Journaled` trait, its seal and the one list of its implementors. A
-/// module of its own so that the seal is nameable nowhere else: a type
-/// becomes journalable by being added to the `journaled!` list below and in
-/// no other way, and the list is what `service::journal`'s registry is
-/// checked against.
+/// The [`Journaled`] marker, its seal and the one list of its implementors.
+///
+/// Not a compatibility contract (ADR 0009: a journal entry is never decoded
+/// by a later release). The list exists for one invariant: every type the
+/// services can journal is one `service::journal` scans for the agent key and
+/// the document body, since an entry is shown in the Restate UI for the
+/// retention period. A type becomes journalable by being added here and in no
+/// other way, and the same list is what the scan's registry is checked
+/// against, so a type journaled without samples fails that test by name.
 mod journaled {
     use serde::Serialize;
     use serde::de::DeserializeOwned;
@@ -39,37 +55,16 @@ mod journaled {
     use crate::service::prologue::Resolution;
 
     /// A type the services journal as the result of a `ctx.run`: the bound
-    /// of `run_once`, `run_retrying` and `run_reading`, so this list is
-    /// exactly what the journal can hold.
-    ///
-    /// Implementing it is a promise that the type's serde layout is
-    /// **additive-only**, as the [`gateway`](crate::gateway) module docs
-    /// state. The promise is checked by the fixtures under
-    /// `tests/journal/<type>/` (`service::journal`), one per variant: a new
-    /// implementor is pinned there before it is journaled, and a new variant
-    /// of one of these enums fails to compile until it is named in the pins'
-    /// `variants!` list, and fails the generator by name until it has a
-    /// sample.
-    ///
-    /// Implemented through the `journaled!` list in this module only: the
-    /// trait is sealed by a supertrait private to this module, so an `impl`
-    /// anywhere else fails to compile, and the same list yields the
-    /// implementors' names ([`journaled_types`]) that `service::journal`'s
-    /// registry is held to, so a type journaled without pins fails that test
-    /// by name.
+    /// of the run helpers, so this list is exactly what the journal can hold.
     pub(in crate::service) trait Journaled:
         sealed::Sealed + Serialize + DeserializeOwned
     {
     }
 
-    /// The seal on [`Journaled`]: a supertrait only this module can
-    /// implement.
     mod sealed {
         pub trait Sealed {}
     }
 
-    /// Implements [`Journaled`] (and its seal) for each listed type and
-    /// writes their names into [`journaled_types`].
     macro_rules! journaled {
         ($($ty:ty),+ $(,)?) => {
             $(
@@ -77,10 +72,7 @@ mod journaled {
                 impl Journaled for $ty {}
             )+
 
-            /// The names of every [`Journaled`] implementor (the `journaled!`
-            /// list), as [`std::any::type_name`] writes them, so an alias
-            /// (`GatewayStornoOutcome`) names its type: what
-            /// `service::journal`'s registry is checked against.
+            /// The implementors' names, as [`std::any::type_name`] writes them.
             #[cfg(test)]
             pub(in crate::service) fn journaled_types() -> Vec<&'static str> {
                 vec![$(::std::any::type_name::<$ty>()),+]
@@ -573,417 +565,429 @@ impl Lookup {
     }
 }
 
-/// The context-bound helpers, stamped out per Restate context type.
+/// The one thing the helpers below need of a Restate context: its scope, its
+/// invocation id and a journaled run. Implemented for the SDK's three context
+/// types, so the helpers are plain generic fns rather than three stamps of a
+/// macro.
 ///
-/// They are deliberately not generic over the SDK's sealed context traits: a
-/// generic `async fn` over them trips rust-lang/rust#100013 (`Send` is not
-/// general enough) inside the macro-generated dispatcher.
-macro_rules! journal_helpers {
-    ($module:ident, $ctx:ident) => {
-        #[allow(
-            dead_code,
-            unused_imports,
-            reason = "each context type uses a different subset of the helpers"
-        )]
-        pub(in crate::service) mod $module {
-            use std::error::Error as StdError;
-            use std::future::Future;
-            use std::sync::Arc;
+/// Why a trait of our own and not the SDK's `ContextSideEffects`: its `run`
+/// returns an `impl RunFuture` from a trait method, whose `Send`-ness a
+/// generic caller cannot see (rust-lang/rust#100013, "`Send` is not general
+/// enough" inside the handler dispatcher). [`RunCtx::run`] returns a boxed
+/// `Send` future, which is `Send` for every caller.
+pub(in crate::service) trait RunCtx<'ctx>: Sync {
+    /// The scope the request arrived under, `None` when unscoped.
+    fn scope(&self) -> Option<&str>;
+    /// The invocation id, as the ingress returns it in `x-restate-id`.
+    fn invocation_id(&self) -> &str;
+    /// Journals the result of `f` under `name`, re-executing it under `policy`
+    /// while it fails with a retryable error; the SDK's `ctx.run` with a JSON
+    /// result.
+    fn run<T, F, Fut>(
+        &self,
+        name: String,
+        policy: RunRetryPolicy,
+        f: F,
+    ) -> BoxFuture<'ctx, Result<T, TerminalError>>
+    where
+        T: Journaled + Send + 'static,
+        F: FnOnce() -> Fut + Send + 'ctx,
+        Fut: Future<Output = Result<T, HandlerError>> + Send + 'ctx;
+}
 
-            use super::{Fault, Journaled, Lookup, StornoIntent};
-            use crate::account::Accounts;
-            use crate::config::{ValidatedWorkerConfig, WorkerConfig};
-            use crate::contract::{IssuedKind, Selector};
-            use crate::gateway::{
-                QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-                StornoStepRequest, Unanswered,
-            };
-            use crate::identity::{ExternalId, OrderKey};
-            use crate::service::Deployment;
-            use crate::service::prologue::{self as decisions, Execution};
-            use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
-            use restate_sdk::errors::{HandlerError, TerminalError};
-            use restate_sdk::prelude::$ctx;
-            use restate_sdk::serde::Json;
-            use tracing::Instrument as _;
-
-            /// Runs one handler execution: the prologue, then `body` on the
-            /// execution it built, the whole inside the execution span
-            /// (`prologue::execution_span`), so every log line from the
-            /// prologue's first step to the handler's answer carries the
-            /// scope, the key, the invocation id and, once resolved, the
-            /// account id. `key` is the Virtual Object key on the object
-            /// contexts, `None` on the stateless service. The body takes the
-            /// execution by value: nothing of it outlives the call.
-            pub(in crate::service) async fn execute<T, F, Fut>(
-                ctx: &$ctx<'_>,
-                key: Option<&str>,
-                deployment: &Deployment,
-                body: F,
-            ) -> Result<T, HandlerError>
-            where
-                F: FnOnce(Execution) -> Fut + Send,
-                Fut: Future<Output = Result<T, HandlerError>> + Send,
-            {
-                let span = decisions::execution_span(ctx.scope(), key, ctx.invocation_id());
-                async move {
-                    let execution =
-                        prologue(ctx, &deployment.accounts, &deployment.config).await?;
-                    body(execution).await
-                }
-                .instrument(span)
-                .await
+macro_rules! run_ctx {
+    ($ctx:ident) => {
+        impl<'ctx> RunCtx<'ctx> for $ctx<'ctx> {
+            fn scope(&self) -> Option<&str> {
+                $ctx::scope(self)
             }
 
-            /// The prologue of every handler: pin → resolve →
-            /// fetch → open. Runs inside the execution span [`execute`]
-            /// opened, on which it records the account id once resolved.
-            ///
-            /// 1. **Pin** the namespace in a pure durable step (`namespace`):
-            ///    a redeploy with a changed namespace cannot make a running
-            ///    invocation issue under a new id.
-            /// 2. **Resolve** the request's scope to its account in a durable
-            ///    step named `account` under the resolve policy: unscoped and
-            ///    unknown are journaled as data and become the terminal
-            ///    `unknown_account`; an unavailable resolver (reporting so,
-            ///    or silent past `prologue::CALL_DEADLINE`) is retryable and
-            ///    journals nothing; exhaustion is `unavailable`.
-            /// 3. **Fetch** the account's credentials outside the journal
-            ///    (on every execution, including replays) with a short
-            ///    in-process retry, each attempt bounded by the same
-            ///    deadline, then terminal `unavailable`.
-            /// 4. **Open** the gateway for this execution over a fresh client.
-            async fn prologue(
-                ctx: &$ctx<'_>,
-                accounts: &Accounts,
-                config: &ValidatedWorkerConfig,
-            ) -> Result<Execution, HandlerError> {
-                // 1. Pin.
-                let pinned = {
-                    let namespace = config.namespace.clone();
-                    run_once(ctx, "namespace", move || async move { namespace }).await?
-                };
-                // The pin replaces the namespace alone, which no policy
-                // invariant reads: the execution's settings are the validated
-                // ones with the journaled namespace.
-                let config = WorkerConfig {
-                    namespace: pinned,
-                    ..WorkerConfig::clone(config)
-                };
-
-                // 2. Resolve.
-                let scope = ctx.scope().map(str::to_owned);
-                let resolution = {
-                    let accounts = accounts.clone();
-                    run_retrying(
-                        ctx,
-                        "account",
-                        config.resolve.run_retry_policy(),
-                        move || async move { decisions::resolve(&accounts, scope.as_deref()).await },
-                    )
-                    .await
-                    .map_err(|error| decisions::resolve_exhausted(&error))?
-                };
-                let account = decisions::account_of(resolution)?;
-                decisions::record_account(&account);
-
-                // 3. Fetch, outside the journal.
-                let credentials = decisions::fetch_credentials(accounts, &account).await?;
-
-                // 4. Open.
-                let gateway = decisions::open(account, credentials)?;
-                Ok(Execution { gateway, config })
+            fn invocation_id(&self) -> &str {
+                $ctx::invocation_id(self)
             }
 
-            /// Journals the result of `f` under `name`, executing it at most
-            /// once per journal entry (`RunRetryPolicy::max_attempts(1)`):
-            /// the pure `namespace` pin and the write steps that have no
-            /// retry of their own (`delete-proforma-*`, `set-payments-*`)
-            /// return every outcome as data, so a closure failure is a bug,
-            /// not a retry. Reads go through [`run_reading`].
-            pub(in crate::service) async fn run_once<'ctx, T, F, Fut>(
-                ctx: &$ctx<'ctx>,
-                name: impl Into<String>,
-                f: F,
-            ) -> Result<T, HandlerError>
-            where
-                F: FnOnce() -> Fut + Send + 'ctx,
-                Fut: Future<Output = T> + Send + 'ctx,
-                T: Journaled + Send + 'static,
-            {
-                let Json(value) = ctx
-                    .run(|| async move { Ok(Json(f().await)) })
-                    .name(name)
-                    .retry_policy(RunRetryPolicy::new().max_attempts(1))
-                    .await?;
-                Ok(value)
-            }
-
-            /// Journals the result of `f` under `name`, re-executing it under
-            /// `policy` while it fails with `E`, the step's own "not
-            /// settled" error, which the SDK treats as retryable. The whole
-            /// handler replays to this entry after the policy's delay, so the
-            /// closure begins again from its first line.
-            ///
-            /// # Errors
-            ///
-            /// The `TerminalError` the run ends with: exhaustion of the
-            /// policy (500, carrying the last `E`'s message) or cancellation
-            /// (409). The caller decides what it means.
-            pub(in crate::service) async fn run_retrying<'ctx, T, E, F, Fut>(
-                ctx: &$ctx<'ctx>,
-                name: impl Into<String>,
+            fn run<T, F, Fut>(
+                &self,
+                name: String,
                 policy: RunRetryPolicy,
                 f: F,
-            ) -> Result<T, TerminalError>
+            ) -> BoxFuture<'ctx, Result<T, TerminalError>>
             where
-                F: FnOnce() -> Fut + Send + 'ctx,
-                Fut: Future<Output = Result<T, E>> + Send + 'ctx,
                 T: Journaled + Send + 'static,
-                E: StdError + Send + Sync + 'static,
+                F: FnOnce() -> Fut + Send + 'ctx,
+                Fut: Future<Output = Result<T, HandlerError>> + Send + 'ctx,
             {
-                let Json(value) = ctx
-                    .run(|| async move { Ok(Json(f().await?)) })
+                let run = ContextSideEffects::run(self, || async move { Ok(Json(f().await?)) })
                     .name(name)
-                    .retry_policy(policy)
-                    .await?;
-                Ok(value)
-            }
-
-            /// A read-only durable step under the read policy: journals the
-            /// answer of `f` under `name`, re-executing it while szamlazz.hu
-            /// does not answer (`Unanswered`). Every answer is data; a read
-            /// writes nothing, so a re-executed closure's answer is exactly as
-            /// fresh as a first one.
-            ///
-            /// # Errors
-            ///
-            /// The `unavailable` fault of a read that ended without an answer
-            /// (the read policy exhausted or the invocation cancelled),
-            /// naming the step and the last failure. The caller attaches the
-            /// document when it knows one.
-            pub(in crate::service) async fn run_reading<'ctx, T, F, Fut>(
-                ctx: &$ctx<'ctx>,
-                name: impl Into<String>,
-                exec: &Execution,
-                f: F,
-            ) -> Result<T, Fault>
-            where
-                F: FnOnce() -> Fut + Send + 'ctx,
-                Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-                T: Journaled + Send + 'static,
-            {
-                let name = name.into();
-                run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)
-                    .await
-                    .map_err(|error| super::read_exhausted(&name, &error))
-            }
-
-            /// A **best-effort** read under the read policy: [`run_reading`]
-            /// for a step whose handler already knows its answer and only
-            /// lacks a detail: the answer of `f` as `Some`, or `None` when the
-            /// read policy is exhausted (logged at `warn` naming the step;
-            /// [`super::best_effort`]).
-            ///
-            /// # Errors
-            ///
-            /// A cancellation of the invocation, as it came: never swallowed,
-            /// so a cancelled invocation does not complete as if nothing had
-            /// happened.
-            pub(in crate::service) async fn run_best_effort<'ctx, T, F, Fut>(
-                ctx: &$ctx<'ctx>,
-                name: impl Into<String>,
-                exec: &Execution,
-                f: F,
-            ) -> Result<Option<T>, TerminalError>
-            where
-                F: FnOnce() -> Fut + Send + 'ctx,
-                Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-                T: Journaled + Send + 'static,
-            {
-                let name = name.into();
-                match run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f).await
-                {
-                    Ok(value) => Ok(Some(value)),
-                    Err(error) => super::best_effort(&name, error).map(|()| None),
-                }
-            }
-
-            /// Journaled query of document `number` (a verify), under the read
-            /// policy.
-            pub(in crate::service) async fn verify(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                name: impl Into<String>,
-                number: &str,
-            ) -> Result<QueryOutcome, Fault> {
-                let gateway = Arc::clone(&exec.gateway);
-                let number = number.to_owned();
-                run_reading(ctx, name, exec, move || async move {
-                    gateway.verify(&number).await
+                    .retry_policy(policy);
+                Box::pin(async move {
+                    let Json(value) = run.await?;
+                    Ok(value)
                 })
-                .await
-            }
-
-            /// Journaled query by external id, under the read policy.
-            pub(in crate::service) async fn query_external_id(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                name: impl Into<String>,
-                external_id: &ExternalId,
-            ) -> Result<QueryOutcome, Fault> {
-                let gateway = Arc::clone(&exec.gateway);
-                let selector = Selector::ExternalId(external_id.as_str().to_owned());
-                run_reading(ctx, name, exec, move || async move {
-                    gateway.query(&selector).await
-                })
-                .await
-            }
-
-            /// Journaled query by one of our external ids, under the read
-            /// policy, validated against the identity the document should
-            /// have. A fault carries that identity.
-            pub(in crate::service) async fn lookup(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                name: impl Into<String>,
-                external_id: &ExternalId,
-                order: &OrderKey,
-                kind: IssuedKind,
-            ) -> Result<Lookup, Fault> {
-                let about = |fault: Fault| fault.about(order, Some(kind), &external_id);
-                let outcome = query_external_id(ctx, exec, name, external_id)
-                    .await
-                    .map_err(about)?;
-                Lookup::classify(outcome, &exec.config.namespace, order, kind).map_err(about)
-            }
-
-            /// The storno lookup step: one read-only
-            /// journaled query of the storno external id, under the read
-            /// policy.
-            pub(in crate::service) async fn lookup_storno(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                intent: &StornoIntent,
-            ) -> Result<StornoLookupOutcome, Fault> {
-                let gateway = Arc::clone(&exec.gateway);
-                let external_id = intent.storno_id.clone();
-                let number = intent.number.clone();
-                run_reading(
-                    ctx,
-                    format!("lookup-storno-{number}"),
-                    exec,
-                    move || async move { gateway.lookup_storno(&external_id, &number).await },
-                )
-                .await
-            }
-
-            /// The storno step: one durable step under the
-            /// issue policy's run retry policy, query-first on every execution
-            /// (the query is inside the closure: a separate journaled query
-            /// would replay its stale "nothing" on the retry and re-send).
-            /// The request is rebuilt from the intent on every execution
-            /// (the date included), so every send is byte-identical.
-            ///
-            /// # Errors
-            ///
-            /// The `TerminalError` the run ends with: exhaustion (500) or
-            /// cancellation (409); the caller maps it to `outcome_unknown`
-            /// about its document. Nothing is recorded: the next call's
-            /// lookup finds whatever landed.
-            pub(in crate::service) async fn storno_step(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                intent: &StornoIntent,
-            ) -> Result<GatewayStornoOutcome, TerminalError> {
-                let gateway = Arc::clone(&exec.gateway);
-                let number = intent.number.clone();
-                let external_id = intent.storno_id.clone();
-                let comment = intent.comment.clone();
-                let e_invoice = intent.e_invoice;
-                let fulfillment_date = intent.fulfillment_date;
-                run_retrying(
-                    ctx,
-                    format!("storno-{}", intent.number),
-                    exec.config.issue.run_retry_policy(),
-                    move || async move {
-                        gateway
-                            .storno(StornoStepRequest {
-                                invoice_number: &number,
-                                external_id: &external_id,
-                                comment: comment.as_deref(),
-                                e_invoice,
-                                fulfillment_date,
-                            })
-                            .await
-                    },
-                )
-                .await
-            }
-
-            /// The storno number of a reversed document of `order`, when the
-            /// order-number hint is the `SS` referencing it (step
-            /// `hint-storno-{number}`, a best-effort read under the read
-            /// policy, [`run_best_effort`]). Rejected credentials are a fault
-            /// about the storno (`storno_id`); everything else the hint can
-            /// answer is data ([`super::storno_number_from_hint`]).
-            pub(in crate::service) async fn storno_number_of(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                order: &OrderKey,
-                number: &str,
-                storno_id: &ExternalId,
-            ) -> Result<Option<String>, HandlerError> {
-                let gateway = Arc::clone(&exec.gateway);
-                let hinted = order.clone();
-                let Some(outcome) = run_best_effort(
-                    ctx,
-                    format!("hint-storno-{number}"),
-                    exec,
-                    move || async move { gateway.hint(&hinted).await },
-                )
-                .await?
-                else {
-                    return Ok(None);
-                };
-                super::storno_number_from_hint(outcome, number, &exec.config.namespace)
-                    .map_err(|fault| fault.about(order, None, &storno_id).into())
-            }
-
-            /// The storno number of a reversed document no `Order` manages,
-            /// when a storno of ours holds `{namespace}:by-number:{number}:storno`
-            /// (step `lookup-storno-{number}`, the same entry the storno
-            /// protocol's lookup step writes, which this path never reaches;
-            /// a best-effort read under the read policy, [`run_best_effort`]).
-            /// The only read that can name an unmanaged document's storno: it
-            /// carries no order number for the hint. Rejected credentials are
-            /// a fault; everything else is data
-            /// ([`super::storno_number_from_lookup`]).
-            pub(in crate::service) async fn storno_number_of_unmanaged(
-                ctx: &$ctx<'_>,
-                exec: &Execution,
-                number: &str,
-            ) -> Result<Option<String>, HandlerError> {
-                let gateway = Arc::clone(&exec.gateway);
-                let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
-                let looked_up = number.to_owned();
-                let Some(outcome) = run_best_effort(
-                    ctx,
-                    format!("lookup-storno-{number}"),
-                    exec,
-                    move || async move { gateway.lookup_storno(&external_id, &looked_up).await },
-                )
-                .await?
-                else {
-                    return Ok(None);
-                };
-                super::storno_number_from_lookup(outcome, &exec.config.namespace)
-                    .map_err(Into::into)
             }
         }
     };
 }
 
-journal_helpers!(object, ObjectContext);
-journal_helpers!(shared, SharedObjectContext);
-journal_helpers!(service, Context);
+run_ctx!(ObjectContext);
+run_ctx!(SharedObjectContext);
+run_ctx!(Context);
+
+/// Runs one handler execution: the prologue, then `body` on the execution it
+/// built, the whole inside the execution span (`prologue::execution_span`),
+/// so every log line from the prologue's first step to the handler's answer
+/// carries the scope, the key, the invocation id and, once resolved, the
+/// account id. `key` is the Virtual Object key on the object contexts, `None`
+/// on the stateless service. The body takes the execution by value: nothing
+/// of it outlives the call.
+pub(in crate::service) async fn execute<'ctx, C, T, F, Fut>(
+    ctx: &C,
+    key: Option<&str>,
+    deployment: &Deployment,
+    body: F,
+) -> Result<T, HandlerError>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce(Execution) -> Fut + Send,
+    Fut: Future<Output = Result<T, HandlerError>> + Send,
+{
+    let span = prologue::execution_span(ctx.scope(), key, ctx.invocation_id());
+    async move {
+        let execution = run_prologue(ctx, &deployment.accounts, &deployment.config).await?;
+        body(execution).await
+    }
+    .instrument(span)
+    .await
+}
+
+/// The prologue of every handler: pin → resolve → fetch → open. Runs inside
+/// the execution span [`execute`] opened, on which it records the account id
+/// once resolved.
+///
+/// 1. **Pin** the namespace in a pure durable step (`namespace`): a redeploy
+///    with a changed namespace cannot make a running invocation issue under a
+///    new id.
+/// 2. **Resolve** the request's scope to its account in a durable step named
+///    `account` under the resolve policy: unscoped and unknown are journaled
+///    as data and become the terminal `unknown_account`; an unavailable
+///    resolver (reporting so, or silent past `prologue::CALL_DEADLINE`) is
+///    retryable and journals nothing; exhaustion is `unavailable`.
+/// 3. **Fetch** the account's credentials outside the journal (on every
+///    execution, including replays) with a short in-process retry, each
+///    attempt bounded by the same deadline, then terminal `unavailable`.
+/// 4. **Open** the gateway for this execution over a fresh client.
+async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    accounts: &Accounts,
+    config: &ValidatedWorkerConfig,
+) -> Result<Execution, HandlerError> {
+    // 1. Pin.
+    let pinned = {
+        let namespace = config.namespace.clone();
+        run_once(ctx, "namespace", move || async move { namespace }).await?
+    };
+    // The pin replaces the namespace alone, which no policy invariant reads:
+    // the execution's settings are the validated ones with the journaled
+    // namespace.
+    let config = WorkerConfig {
+        namespace: pinned,
+        ..WorkerConfig::clone(config)
+    };
+
+    // 2. Resolve.
+    let scope = ctx.scope().map(str::to_owned);
+    let resolution = {
+        let accounts = accounts.clone();
+        run_retrying(
+            ctx,
+            "account",
+            config.resolve.run_retry_policy(),
+            move || async move { prologue::resolve(&accounts, scope.as_deref()).await },
+        )
+        .await
+        .map_err(|error| prologue::resolve_exhausted(&error))?
+    };
+    let account = prologue::account_of(resolution)?;
+    prologue::record_account(&account);
+
+    // 3. Fetch, outside the journal.
+    let credentials = prologue::fetch_credentials(accounts, &account).await?;
+
+    // 4. Open.
+    let gateway = prologue::open(account, credentials)?;
+    Ok(Execution { gateway, config })
+}
+
+/// Journals the result of `f` under `name`, executing it at most once per
+/// journal entry (`RunRetryPolicy::max_attempts(1)`): the pure `namespace`
+/// pin and the write steps that have no retry of their own
+/// (`delete-proforma-*`, `set-payments-*`) return every outcome as data, so a
+/// closure failure is a bug, not a retry. Reads go through [`run_reading`].
+pub(in crate::service) async fn run_once<'ctx, C, T, F, Fut>(
+    ctx: &C,
+    name: impl Into<String>,
+    f: F,
+) -> Result<T, HandlerError>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce() -> Fut + Send + 'ctx,
+    Fut: Future<Output = T> + Send + 'ctx,
+    T: Journaled + Send + 'static,
+{
+    let value = ctx
+        .run(
+            name.into(),
+            RunRetryPolicy::new().max_attempts(1),
+            || async move { Ok(f().await) },
+        )
+        .await?;
+    Ok(value)
+}
+
+/// Journals the result of `f` under `name`, re-executing it under `policy`
+/// while it fails with `E`, the step's own "not settled" error, which the SDK
+/// treats as retryable. The whole handler replays to this entry after the
+/// policy's delay, so the closure begins again from its first line.
+///
+/// # Errors
+///
+/// The `TerminalError` the run ends with: exhaustion of the policy (500,
+/// carrying the last `E`'s message) or cancellation (409). The caller decides
+/// what it means.
+pub(in crate::service) async fn run_retrying<'ctx, C, T, E, F, Fut>(
+    ctx: &C,
+    name: impl Into<String>,
+    policy: RunRetryPolicy,
+    f: F,
+) -> Result<T, TerminalError>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce() -> Fut + Send + 'ctx,
+    Fut: Future<Output = Result<T, E>> + Send + 'ctx,
+    T: Journaled + Send + 'static,
+    E: StdError + Send + Sync + 'static,
+{
+    ctx.run(name.into(), policy, || async move { Ok(f().await?) })
+        .await
+}
+
+/// A read-only durable step under the read policy: journals the answer of
+/// `f` under `name`, re-executing it while szamlazz.hu does not answer
+/// (`Unanswered`). Every answer is data; a read writes nothing, so a
+/// re-executed closure's answer is exactly as fresh as a first one.
+///
+/// # Errors
+///
+/// The `unavailable` fault of a read that ended without an answer (the read
+/// policy exhausted or the invocation cancelled), naming the step and the
+/// last failure. The caller attaches the document when it knows one.
+pub(in crate::service) async fn run_reading<'ctx, C, T, F, Fut>(
+    ctx: &C,
+    name: impl Into<String>,
+    exec: &Execution,
+    f: F,
+) -> Result<T, Fault>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce() -> Fut + Send + 'ctx,
+    Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
+    T: Journaled + Send + 'static,
+{
+    let name = name.into();
+    run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)
+        .await
+        .map_err(|error| read_exhausted(&name, &error))
+}
+
+/// A **best-effort** read under the read policy: [`run_reading`] for a step
+/// whose handler already knows its answer and only lacks a detail: the answer
+/// of `f` as `Some`, or `None` when the read policy is exhausted (logged at
+/// `warn` naming the step; [`best_effort`]).
+///
+/// # Errors
+///
+/// A cancellation of the invocation, as it came: never swallowed, so a
+/// cancelled invocation does not complete as if nothing had happened.
+pub(in crate::service) async fn run_best_effort<'ctx, C, T, F, Fut>(
+    ctx: &C,
+    name: impl Into<String>,
+    exec: &Execution,
+    f: F,
+) -> Result<Option<T>, TerminalError>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce() -> Fut + Send + 'ctx,
+    Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
+    T: Journaled + Send + 'static,
+{
+    let name = name.into();
+    match run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f).await {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => best_effort(&name, error).map(|()| None),
+    }
+}
+
+/// Journaled query of document `number` (a verify), under the read policy.
+pub(in crate::service) async fn verify<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    name: impl Into<String>,
+    number: &str,
+) -> Result<QueryOutcome, Fault> {
+    let gateway = Arc::clone(&exec.gateway);
+    let number = number.to_owned();
+    run_reading(ctx, name, exec, move || async move {
+        gateway.verify(&number).await
+    })
+    .await
+}
+
+/// Journaled query by external id, under the read policy.
+pub(in crate::service) async fn query_external_id<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    name: impl Into<String>,
+    external_id: &ExternalId,
+) -> Result<QueryOutcome, Fault> {
+    let gateway = Arc::clone(&exec.gateway);
+    let selector = Selector::ExternalId(external_id.as_str().to_owned());
+    run_reading(ctx, name, exec, move || async move {
+        gateway.query(&selector).await
+    })
+    .await
+}
+
+/// Journaled query by one of our external ids, under the read policy,
+/// validated against the identity the document should have. A fault carries
+/// that identity.
+pub(in crate::service) async fn lookup<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    name: impl Into<String>,
+    external_id: &ExternalId,
+    order: &OrderKey,
+    kind: IssuedKind,
+) -> Result<Lookup, Fault> {
+    let about = |fault: Fault| fault.about(order, Some(kind), external_id);
+    let outcome = query_external_id(ctx, exec, name, external_id)
+        .await
+        .map_err(about)?;
+    Lookup::classify(outcome, &exec.config.namespace, order, kind).map_err(about)
+}
+
+/// The storno lookup step: one read-only journaled query of the storno
+/// external id, under the read policy.
+pub(in crate::service) async fn lookup_storno<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    intent: &StornoIntent,
+) -> Result<StornoLookupOutcome, Fault> {
+    let gateway = Arc::clone(&exec.gateway);
+    let external_id = intent.storno_id.clone();
+    let number = intent.number.clone();
+    run_reading(
+        ctx,
+        format!("lookup-storno-{number}"),
+        exec,
+        move || async move { gateway.lookup_storno(&external_id, &number).await },
+    )
+    .await
+}
+
+/// The storno step: one durable step under the issue policy's run retry
+/// policy, query-first on every execution (the query is inside the closure: a
+/// separate journaled query would replay its stale "nothing" on the retry and
+/// re-send). The request is rebuilt from the intent on every execution (the
+/// date included), so every send is byte-identical.
+///
+/// # Errors
+///
+/// The `TerminalError` the run ends with: exhaustion (500) or cancellation
+/// (409); the caller maps it to `outcome_unknown` about its document. Nothing
+/// is recorded: the next call's lookup finds whatever landed.
+pub(in crate::service) async fn storno_step<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    intent: &StornoIntent,
+) -> Result<GatewayStornoOutcome, TerminalError> {
+    let gateway = Arc::clone(&exec.gateway);
+    let number = intent.number.clone();
+    let external_id = intent.storno_id.clone();
+    let comment = intent.comment.clone();
+    let e_invoice = intent.e_invoice;
+    let fulfillment_date = intent.fulfillment_date;
+    run_retrying(
+        ctx,
+        format!("storno-{}", intent.number),
+        exec.config.issue.run_retry_policy(),
+        move || async move {
+            gateway
+                .storno(StornoStepRequest {
+                    invoice_number: &number,
+                    external_id: &external_id,
+                    comment: comment.as_deref(),
+                    e_invoice,
+                    fulfillment_date,
+                })
+                .await
+        },
+    )
+    .await
+}
+
+/// The storno number of a reversed document of `order`, when the
+/// order-number hint is the `SS` referencing it (step `hint-storno-{number}`,
+/// a best-effort read under the read policy, [`run_best_effort`]). Rejected
+/// credentials are a fault about the storno (`storno_id`); everything else
+/// the hint can answer is data ([`storno_number_from_hint`]).
+pub(in crate::service) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    order: &OrderKey,
+    number: &str,
+    storno_id: &ExternalId,
+) -> Result<Option<String>, HandlerError> {
+    let gateway = Arc::clone(&exec.gateway);
+    let hinted = order.clone();
+    let Some(outcome) = run_best_effort(
+        ctx,
+        format!("hint-storno-{number}"),
+        exec,
+        move || async move { gateway.hint(&hinted).await },
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    storno_number_from_hint(outcome, number, &exec.config.namespace)
+        .map_err(|fault| fault.about(order, None, storno_id).into())
+}
+
+/// The storno number of a reversed document no `Order` manages, when a storno
+/// of ours holds `{namespace}:by-number:{number}:storno` (step
+/// `lookup-storno-{number}`, the same entry the storno protocol's lookup step
+/// writes, which this path never reaches; a best-effort read under the read
+/// policy, [`run_best_effort`]). The only read that can name an unmanaged
+/// document's storno: it carries no order number for the hint. Rejected
+/// credentials are a fault; everything else is data
+/// ([`storno_number_from_lookup`]).
+pub(in crate::service) async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    number: &str,
+) -> Result<Option<String>, HandlerError> {
+    let gateway = Arc::clone(&exec.gateway);
+    let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
+    let looked_up = number.to_owned();
+    let Some(outcome) = run_best_effort(
+        ctx,
+        format!("lookup-storno-{number}"),
+        exec,
+        move || async move { gateway.lookup_storno(&external_id, &looked_up).await },
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    storno_number_from_lookup(outcome, &exec.config.namespace).map_err(Into::into)
+}

@@ -6,7 +6,7 @@
 //! only a server can show: the `Idempotency-Key` replay, run retries and
 //! their exhaustion, the re-executed closure, the per-key lock, the scope
 //! namespacing keys, the `account` entry across a re-execution, a rotation,
-//! purge, kill, the flag day, the journal scan and the run-name pin). The
+//! purge, kill, the flag day, the journal scan and the step-name table check). The
 //! decisions each handler takes are unit tests of `service`; the wire of each
 //! gateway step is `tests/gateway.rs`.
 //!
@@ -64,7 +64,7 @@
 //! executions; and, last, over the whole run, that the object kept no state,
 //! that no agent key was ever journaled (the hex-decoded `raw` of every
 //! journal entry of every invocation), and that every invocation's `ctx.run`
-//! names are a prefix of its handler's pinned path and every path was walked
+//! names are a prefix of one of its handler's paths and every path was walked
 //! in full. The second test is the protocol-v7 canary on a server of its own
 //! without the flag.
 
@@ -248,7 +248,7 @@ async fn e2e_order_protocol() {
     sequentially!(h;
         pins::the_order_keeps_no_state,
         pins::no_agent_key_in_any_journal_of_the_run,
-        pins::every_handler_journals_its_pinned_run_names,
+        pins::every_handler_journals_its_tabled_steps,
     );
 }
 

@@ -4,12 +4,12 @@
 //! A [`FoundDocument`] is what the services read off a queried `<szamla>`
 //! (the Számla Agent crate's [`InvoiceDocument`]) and an [`IssuedDocument`]
 //! what they read off a create or storno reply ([`InvoiceCreationResult`],
-//! [`CreatedInvoice`]). Both are crate-owned and **additive-only** (the
-//! journal rule of the [`gateway`](crate::gateway) module docs), so a change
-//! to the agent crate's response types cannot reach a journaled entry, and
-//! neither carries what the worker never reads: the buyer block, the seller
-//! block, the line items, the PDF. What a document *is* to the worker (live,
-//! ours, a storno of a number, an e-invoice) is read here, once.
+//! [`CreatedInvoice`]). Both are crate-owned (the journal rule of the
+//! [`gateway`](crate::gateway) module docs), so neither carries what the
+//! worker never reads into an entry the Restate UI shows: the buyer block,
+//! the seller block, the line items, the PDF. What a document *is* to the
+//! worker (live, ours, a storno of a number, an e-invoice) is read here,
+//! once.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,6 @@ use crate::identity::OrderKey;
 /// a journal entry is visible in the Restate UI for the retention period. The
 /// external id the document was queried by is not here either: szamlazz.hu
 /// never echoes `szamlaKulsoAzon`, and the handler holds it from the key.
-///
-/// Additive-only: a field may be added with a serde default; nothing is
-/// renamed, removed or retyped (the `gateway` module docs). Pinned under
-/// `tests/journal/` by every outcome that carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FoundDocument {

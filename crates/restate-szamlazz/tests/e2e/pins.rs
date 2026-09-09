@@ -1,6 +1,6 @@
-//! The run-wide pins, last: the `Szamlazz.Order` object keeps no state, no
+//! The run-wide checks, last: the `Szamlazz.Order` object keeps no state, no
 //! agent key in any journal of the run, and every handler journals its
-//! pinned run names ([`RUN_NAMES`](crate::harness::run_names::RUN_NAMES));
+//! steps in the table ([`RUN_NAMES`](crate::harness::run_names::RUN_NAMES));
 //! and, in phase 1, the leak scan's positive control planted.
 
 use std::collections::BTreeSet;
@@ -163,15 +163,17 @@ pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
     );
 }
 
-/// The run-name pin over the whole run ([`RUN_NAMES`]): for every invocation
-/// the server still holds, the `ctx.run` names in journal order are a prefix
-/// of one of its handler's pinned paths, every handler seen is pinned, and
-/// every pinned path was walked in full by at least one invocation, so a
+/// The step-name table check over the whole run ([`RUN_NAMES`]): for every
+/// invocation the server still holds, the `ctx.run` names in journal order
+/// are a prefix of one of its handler's paths, every handler seen is in the
+/// table, and every path was walked in full by at least one invocation, so a
 /// renamed, inserted, reordered or dropped step, on any handler of either
-/// service, fails here rather than stranding an in-flight invocation on the
-/// next deploy. The floor of the suite: a scenario that is the only walker of
-/// a path stays, however plain its decision.
-pub(crate) async fn every_handler_journals_its_pinned_run_names(h: &Harness) {
+/// service, fails here and shows in the table's diff (the sequence half of
+/// what a pause-and-resume onto a new deployment depends on; ADR 0009). The
+/// floor of the suite: a
+/// scenario that is the only walker of a path stays, however plain its
+/// decision.
+pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {
     let journals = h.all_journals().await;
     let invocations = h.all_invocations().await;
     let mut unpinned = BTreeSet::new();
@@ -216,14 +218,15 @@ pub(crate) async fn every_handler_journals_its_pinned_run_names(h: &Harness) {
     }
     assert!(
         unpinned.is_empty(),
-        "handlers with no pinned run names: {unpinned:?}; pin their steps in RUN_NAMES"
+        "handlers not in the table: {unpinned:?}; add their steps to RUN_NAMES"
     );
     assert!(
         unexplained.is_empty(),
-        "run sequences no pinned path of their handler explains:\n  {}\n\n\
-         A renamed, inserted, reordered or dropped step strands every in-flight invocation of the \
-         previous deployment on replay. Keep the names and their order; a step that must \
-         change is a new row in RUN_NAMES and a deploy that drains first, never an edited row.",
+        "run sequences no path of their handler explains:\n  {}\n\n\
+         The table is the record of which steps a handler journals and in what order: the sequence \
+         half of what a pause-and-resume of a stuck invocation onto a new deployment replays (ADR \
+         0009; the result types and the inputs are the other half, reviewed by hand). Bring \
+         RUN_NAMES to match the code; a changed row means such a resume across this release fails.",
         unexplained.join("\n  ")
     );
     let not_walked: Vec<String> = RUN_NAMES
@@ -234,12 +237,12 @@ pub(crate) async fn every_handler_journals_its_pinned_run_names(h: &Harness) {
         .collect();
     assert!(
         not_walked.is_empty(),
-        "pinned paths no invocation of the run walked in full:\n  {}\n\n\
+        "paths no invocation of the run walked in full:\n  {}\n\n\
          Either a scenario must exercise the path or its last step was dropped from the handler.",
         not_walked.join("\n  ")
     );
     eprintln!(
-        "  (every run sequence of {} invocations is a prefix of its handler's pinned path; all {} paths walked in full)",
+        "  (every run sequence of {} invocations is a prefix of one of its handler's paths; all {} paths walked in full)",
         invocations.len(),
         RUN_NAMES.len()
     );

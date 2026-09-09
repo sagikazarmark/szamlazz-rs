@@ -6,8 +6,8 @@
 //! the prologue's two calls into an embedder's trait objects, each under the
 //! worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of the
 //! `account` step's closure, and the credential fetch, the one step that runs
-//! outside the journal. The durable steps themselves are stamped per context
-//! type in `support::{object, shared, service}::prologue`.
+//! outside the journal. The durable steps themselves are
+//! `support::run_prologue`, generic over `support::RunCtx`.
 
 use std::borrow::Cow;
 use std::future::Future;

@@ -27,11 +27,10 @@
 //! and it is what szamlazz.hu actually says (tests state the answer
 //! szamlazz.hu gives).
 //!
-//! `service::journal`'s `document()` is not a fixture of this kind and stays
-//! where it is: it renders *every* element the `szamla` XML can carry, so
-//! that a rename anywhere in the journaled types is caught, and its output is
-//! pinned as JSON under `tests/journal/`; porting it here would churn the
-//! pinned fixtures for no test.
+//! `service::journal`'s `wire_document()` is not a fixture of this kind and
+//! stays where it is: it renders *every* element the `szamla` XML can carry,
+//! so that the data guard's positive control carries every key the
+//! projection drops.
 //!
 //! [`LogCapture`] is what the sentinel tests assert a warning through: what
 //! it says, and that no agent key is in it.

@@ -25,38 +25,25 @@
 //! Tracing events carry external ids, kinds, numbers and codes, never buyer
 //! data.
 //!
-//! # Journaled types are crate-owned and additive-only
+//! # Journaled types are crate-owned
 //!
 //! The outcome types derive `serde` so that the Restate services can journal
-//! them as the result of a `ctx.run`. An in-flight invocation replays the
-//! entries the *previous* deployment wrote, and an entry the new code cannot
-//! decode is a retryable SDK error: the invocation replays into the same
-//! failure until its attempts are spent (holding the order key the whole time),
-//! and is killed. So every type the services journal is **additive-only**: a
-//! new field carries a serde default, a new variant may be added, and no field
-//! or variant is renamed, removed or retyped, with one admitted widening: a
-//! field `T` may become `Option<T>` when every value the old type wrote decodes
-//! to `Some` and re-encodes byte for byte, which the compatibility test proves
-//! on the committed fixtures.
-//! This holds for the outcomes here
-//! ([`LookupOutcome`], [`CreateOutcome`], [`QueryOutcome`],
-//! [`StornoLookupOutcome`], [`StornoOutcome`], [`DeleteOutcome`],
-//! [`SetPaymentsOutcome`], [`ProbeOutcome`], [`TaxpayerOutcome`]), for the
-//! prologue's journaled [`Account`] and pinned namespace, and for what the
-//! outcomes carry, which is **crate-owned, never a `szamlazz_agent` response
-//! type**: the document outcomes carry the worker's projections
+//! them as the result of a `ctx.run`. Restate replays an entry only on the
+//! deployment that wrote it (deployments are immutable, ADR 0009), so the
+//! types carry no cross-version compatibility contract; what matters is what
+//! an entry holds, since the Restate UI shows every entry for the retention
+//! period. So the outcomes here ([`LookupOutcome`], [`CreateOutcome`],
+//! [`QueryOutcome`], [`StornoLookupOutcome`], [`StornoOutcome`],
+//! [`DeleteOutcome`], [`SetPaymentsOutcome`], [`ProbeOutcome`],
+//! [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
+//! response type**: the document outcomes carry the worker's projections
 //! [`FoundDocument`] (of a queried `InvoiceDocument`) and [`IssuedDocument`]
 //! (of a create or storno reply), [`TaxpayerOutcome`] the crate-owned
 //! [`QueryTaxpayerResponse`]. A projection holds what the handlers read and
-//! nothing else, so a change to the agent crate's response types cannot reach
-//! a journal entry, and what the worker never reads of a document (the buyer
-//! block, the seller block, the line items, the PDF) is not in the journal
-//! for the retention period (ADR 0005, the crate-owned projection amendment,
-//! #127). The rule is checked in CI: `service::journal` pins one JSON fixture
-//! per variant of every journaled type under `tests/journal/` and replays
-//! every fixture ever committed through the current types; the `Journaled`
-//! marker trait the run helpers require is the link from the `ctx.run` sites
-//! to that directory.
+//! nothing else: what the worker never reads of a document (the buyer block,
+//! the seller block, the line items, the PDF) is not in the journal, and the
+//! agent key never is. `service::journal` checks both on a sample of every
+//! variant, and that each round-trips through serde.
 //!
 //! What szamlazz.hu answers with when it answers a code is one type wherever
 //! it appears: [`SzamlazzAnswer`] (`code`, `message`) in every
@@ -104,8 +91,8 @@ pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 /// document: the code (numeric for szamlazz.hu's own, `OPERATION_FAILED`-like
 /// for a NAV code the taxpayer query relays) and the message beside it, as
 /// the outcome variants carry them (`CredentialsRejected`, `Api`, the
-/// duplicate-order-number answer). Journaled inside those outcomes, so
-/// additive-only; serialises as the two fields, which is what the variants
+/// duplicate-order-number answer). Journaled inside those outcomes;
+/// serialises as the two fields, which is what the variants
 /// carried before it existed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -579,9 +566,9 @@ pub enum ProbeOutcome {
 /// [`TaxpayerOutcome::CredentialsRejected`], any other `funcCode ≠ OK` (a
 /// NAV-side failure szamlazz.hu relays, a szamlazz.hu code of its own) is
 /// [`TaxpayerOutcome::Api`]. An exchange that produced no answer is
-/// [`Unanswered`], never an outcome. Journaled as the read step's result, so
-/// additive-only; it carries the crate-owned [`QueryTaxpayerResponse`], never
-/// the agent crate's `TaxpayerInfo`.
+/// [`Unanswered`], never an outcome. Journaled as the read step's result; it
+/// carries the crate-owned [`QueryTaxpayerResponse`], never the agent crate's
+/// `TaxpayerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum TaxpayerOutcome {

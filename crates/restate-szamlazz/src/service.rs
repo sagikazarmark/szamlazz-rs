@@ -108,7 +108,7 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::object::execute(ctx, Some(ctx.key()), &self.deployment, body).await
+        support::execute(ctx, Some(ctx.key()), &self.deployment, body).await
     }
 
     /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
@@ -121,7 +121,7 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::shared::execute(ctx, Some(ctx.key()), &self.deployment, body).await
+        support::execute(ctx, Some(ctx.key()), &self.deployment, body).await
     }
 }
 
@@ -176,7 +176,7 @@ impl Agent {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::service::execute(ctx, None, &self.deployment, body).await
+        support::execute(ctx, None, &self.deployment, body).await
     }
 }
 

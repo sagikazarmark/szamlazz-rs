@@ -14,7 +14,7 @@
 //! - [`ingress`]: an ingress reply with the worker's [`Fault`] decoded out
 //!   of the crate's envelope check;
 //! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]), the
-//!   *run-name pin*, over the crate's matcher.
+//!   *step-name table*, over the crate's matcher.
 //!
 //! The harness's own tests (the fetch hold and the resolution script, the
 //! stub helpers against wiremock alone) live beside what they test and need

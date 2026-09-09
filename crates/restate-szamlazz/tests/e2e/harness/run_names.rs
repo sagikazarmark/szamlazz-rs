@@ -1,9 +1,10 @@
-//! The *run-name pin*'s table: the durable steps of every handler of both
+//! The *step-name table*: the durable steps of every handler of both
 //! services as the `ctx.run` names they journal ([`RUN_NAMES`]), read
 //! through the harness crate's matcher (`restate_e2e_harness::run_names`: a
 //! journaled name as its pattern, [`run_pattern`], and the prefix rule,
-//! [`is_prefix_of_path`]). The pin itself (over every invocation of the run)
-//! is the last scenario (`pins`); the matcher's own tests are the crate's.
+//! [`is_prefix_of_path`]). The check itself (over every invocation of the
+//! run) is the last scenario (`pins`); the matcher's own tests are the
+//! crate's.
 
 use std::sync::LazyLock;
 
@@ -11,21 +12,22 @@ pub(crate) use restate_e2e_harness::is_prefix_of_path;
 use restate_e2e_harness::{RunPath, RunPatterns};
 
 /// The durable steps of every handler of both services, in order, as the
-/// `ctx.run` names they journal: the part of the journal contract the type
-/// fixtures (`tests/journal/`) do not cover. An in-flight invocation replays
-/// the *previous* deployment's entries by name and position, so a
-/// renamed, inserted or reordered step strands it; this table makes that a
-/// failing test instead of a killed invocation. A `{number}` / `{prefix}`
-/// segment is a parameter ([`run_pattern`]); a handler with two rows has two
-/// paths. The pin holds when every observed sequence of a handler is a prefix
-/// of one of its paths (a handler that answers early journals the first steps
-/// only; see [`is_prefix_of_path`]) and every path is observed in full at
-/// least once in the run. The parameter of a parametrized name is pinned by
-/// its prefix only: a number that itself began with a pinned stem (`storno-1`)
-/// would read as the longer pattern; none of the suite's do. The walk
-/// requirement sizes the suite: every row is walked by at least one phase-1
-/// or phase-2 scenario, and a row whose only walker were removed fails the pin
-/// (#134).
+/// `ctx.run` names they journal. Deployments are immutable (ADR 0009), so an
+/// in-flight invocation never replays against a later release's code by
+/// itself; what does replay a journal on other code is Restate's *pause and
+/// resume on a new deployment*, which needs the same run sequence, result
+/// types that decode and unchanged inputs: this table is the sequence part,
+/// and its diff between two releases is that part's answer. A
+/// `{number}` / `{prefix}` segment is a parameter ([`run_pattern`]); a
+/// handler with two rows has two paths. The check holds when every observed
+/// sequence of a handler is a prefix of one of its paths (a handler that
+/// answers early journals the first steps only; see [`is_prefix_of_path`])
+/// and every path is observed in full at least once in the run. The
+/// parameter of a parametrized name is matched by its prefix only: a number
+/// that itself began with a fixed stem (`storno-1`) would read as the longer
+/// pattern; none of the suite's do. The walk requirement sizes the suite:
+/// every row is walked by at least one phase-1 or phase-2 scenario, and a row
+/// whose only walker were removed fails the check (#134).
 pub(crate) const RUN_NAMES: &[RunPath] = &[
     RunPath::new(
         "Szamlazz.Order",

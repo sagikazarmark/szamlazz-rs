@@ -632,40 +632,19 @@ The synthetic szamlazz.hu answers are stated once, in `tests/common/mod.rs`: the
 tests, the e2e suite and (by path) the crate's unit tests, so a fact learned about szamlazz.hu's XML is edited in
 one place.
 
-### Journal compatibility
+### Journal entries
 
-The same run checks that every type the services journal as a `ctx.run` result is crate-owned and additive-only
-(the rule is in the `gateway` module docs), and `tests/journal/<type>/<variant>.json` pins one fixture per
-variant. The generator fails when the current code writes a different shape; the compatibility test replays every
-fixture ever committed through the current types.
-
-No `szamlazz_agent` response type is journaled: the document outcomes carry the worker's own projections
+The same run checks what a `ctx.run` result may hold (`service::journal`): a sample of every variant of every
+journaled type round-trips through serde; none carries the agent key (an account resolved from configuration whose
+key is a sentinel, and the two `Transport` write outcomes from a gateway opened with the sentinel credentials, are
+scanned for it); and none carries the document body: no `supplier`, `buyer`, `items`, `financial_items`, `labels`
+or `pdf` key at any depth, since the document outcomes carry the worker's own projections
 (`gateway::document::{FoundDocument, IssuedDocument}`: what the handlers read of a queried document or a create
-reply, never the buyer block, the seller block, the line items or the PDF), so a change to an agent response type is
-a compile error in a `From` impl, not a journal entry the next deployment cannot decode. A guard in the same module
-asserts no variant of any journaled type serialises a `supplier`, `buyer`, `items`, `financial_items`, `labels` or
-`pdf` key.
+reply) and a journal entry is shown in the Restate UI for the retention period.
 
-After an additive change, regenerate with `UPDATE_JOURNAL_FIXTURES=1 cargo test -p restate-szamlazz journal`; it
-writes missing fixtures and archives a differing one beside the new shape. Review the diff as a contract change.
-Never regenerate away a rename: an in-flight invocation of the previous deployment would be killed on upgrade. The
-twelve `<variant>.1.json` archives of the pre-#127 document outcomes are the one deliberate break, of the pre-go-live
-window (ADR 0005, #127 amendment): `DELIBERATE_BREAKS` lists them, and the compatibility test asserts each still
-fails to replay. **Once the first production deployment exists, never delete an archived shape
-(`<variant>.<n>.json`) of a type the code still journals, and never regenerate a fixture without its archive**: the
-archive is the only record of a shape a running deployment may have journaled, and no test can tell a legitimate
-deletion from an illegitimate one. A shape that must change beyond additive is a new journaled type under a new
-directory; the old type is retired with its directory, archives included, in a deploy that drains first (the rule,
-the retirement path and the pre-go-live exceptions are in the `service::journal` module docs).
-
-The registry of pinned types is complete by mechanism: the `Journaled` trait is sealed and implemented through one
-`journaled!` list beside it, which the registry test holds the pins to (a type journaled without pins fails by
-name), and each enum's pins name its variants through `variants!`, whose list the pins check the samples against
-(a variant that compiles but has no fixture fails by name).
-
-The same module's leak guard builds every journaled type around an account whose agent key is a sentinel (the
-`account` entry through the static resolver, the two `Transport` write outcomes through a gateway opened with the
-sentinel credentials) and asserts the sentinel serialises into none of them.
+There is no cross-version compatibility contract on the journal: a release is a new Restate deployment, and Restate
+replays an invocation only on the deployment that started it (ADR 0009, [*Deploying*](#deploying)), so a journaled type may
+be reshaped freely between releases.
 
 ### End to end
 
@@ -676,7 +655,7 @@ for szamlazz.hu, in two phases on one server. It is two things and nothing else:
 
 - **the sequence test**: one scenario per handler path of `RUN_NAMES` (the ordered `ctx.run` names each
   handler journals; a handler with two shapes has two paths), proving the steps run in that order under Restate
-  and walking every path in full at least once, which the run-name pin at the end demands. A scenario that is the
+  and walking every path in full at least once, which the step-name table check at the end demands. A scenario that is the
   only walker of a path stays however plain its decision; the decision itself (what a handler answers to a given
   read) is a unit test of `service`, and the wire of each step is `tests/gateway.rs`'s;
 - **the durable-execution proof**: what only a server can show. The `Idempotency-Key` replaying a stored
@@ -690,7 +669,7 @@ for szamlazz.hu, in two phases on one server. It is two things and nothing else:
   Restate has no memory of after a purge; a stuck invocation killed off the key; the wire faults (a malformed body
   and an untrimmed key as the structured `invalid_input`, a szamlazz.hu code inside the ingress envelope); the
   protocol-v7 canary; and, over the whole run, the object keeping no state, no agent key in any journal entry
-  (the hex-decoded `raw`) with a planted positive control found, and the run-name pin.
+  (the hex-decoded `raw`) with a planted positive control found, and the step-name table check.
 
 **Phase 1** registers the single-account deployment (the static resolver's `[account]`) and runs its fourteen
 scenarios **concurrently**, unscoped, on one runtime (a `JoinSet`): every scenario owns its order keys, numbers
@@ -728,11 +707,13 @@ entry winning and staying byte-identical.
 
 **Last**, over every invocation the server holds: the `state` table holds no row for `Szamlazz.Order`; no agent
 key of the run appears in the hex-decoded `raw` of any journal entry nor in any `completion_failure`, while the
-same scan finds the positive control's sentinel; and the **run-name pin**: `RUN_NAMES` in the harness lists, per
-handler of both services, the ordered `ctx.run` names of every path it journals, and the scenario asserts that
-every invocation's run sequence is a prefix of one of its handler's paths, that every handler seen is pinned and
-that every path was walked in full. A renamed, inserted, reordered or dropped step strands every in-flight
-invocation on replay and fails here instead.
+same scan finds the positive control's sentinel; and the **step-name table check**: `RUN_NAMES` in the harness
+lists, per handler of both services, the ordered `ctx.run` names of every path it journals, and the scenario
+asserts that every invocation's run sequence is a prefix of one of its handler's paths, that every handler seen is
+in the table and that every path was walked in full. Under immutable deployments the table serves one path,
+Restate's *pause and resume on a new deployment*: it is the **sequence half** of what that resume needs (the other
+two, the result types decoding and the inputs unchanged, are a review; *Deploying*), and a step renamed, inserted,
+reordered or dropped since the invocation's journal was written shows in its diff.
 
 The harness calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses
 fault bodies out of the ingress envelope (asserting on every fault that the body is
@@ -820,6 +801,27 @@ szamlazz.hu facts on a target account before the worker is enabled; every step i
 a deploy, call `Szamlazz.Agent.check_account` under each configured scope, then `Szamlazz.Agent.query` a document
 known to be the account's and read its `test` and seller block: that is what tells the right key under the right
 scope, since the worker holds no account pin.
+
+### Deploying
+
+A release is a **new Restate deployment** (ADR 0009): register it under a URI of its own (`restate deployments
+register http://worker-v2/`, a new Lambda version, a new `RestateDeployment` under the Kubernetes operator), never
+re-register the same URI in place. Restate routes new invocations to the latest deployment and keeps every in-flight
+invocation, retries included, on the deployment it started on; the worker therefore has no journal compatibility
+logic and needs none. Keep the previous release running until `restate deployment describe <id> --extra` reports no
+invocations on it, then remove it; that report, not a clock, is the drain. The run policies bound one step's retries
+(and `max_duration` is a threshold checked between attempts, not a hard cut), but same-key invocations queue behind
+the one holding the key, a crashed handler is re-dispatched under its invocation retry policy, and a paused invocation
+waits for an operator, so a deployment with a backlog can hold invocations for hours. `restate deployments register
+--force` is for local development: it replaces the code an in-flight invocation will replay against, which is the
+one way to strand it.
+
+A stuck invocation can be moved onto a newer deployment (`restate invocations pause` / `resume --deployment`); the
+newer code then replays the old journal, which needs **three** things to hold, none of which this crate checks
+mechanically: the `ctx.run` sequence (the *step-name table* below is the diff to read), the journaled result types
+still decoding (a release may reshape them; review the diff of `gateway`'s outcome enums and `Resolution`), and the
+steps' inputs unchanged. Review all three before a resume, or kill and let the caller retry with a new
+`Idempotency-Key`.
 
 ## License
 

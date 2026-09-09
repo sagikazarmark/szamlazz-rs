@@ -33,16 +33,14 @@ pub use static_resolver::{
 /// the seller block. The credentials are fetched separately, by
 /// [`Account::credential_ref`], on every handler execution.
 ///
-/// # Journal compatibility
+/// # Journaled
 ///
-/// The type is **additive-only**, like every type the services journal (the
-/// [`gateway`](crate::gateway) module docs state the rule once): a new field
-/// gets a `#[serde(default)]`, and no field is renamed or removed, so a
-/// journaled account written by an earlier version reads back under a later
-/// one. `id` and `credential_ref` are the only required fields. The struct is
-/// `#[non_exhaustive]` for the same reason; build one with [`Account::new`]
-/// and set the rest. Its journaled shape is pinned under
-/// `tests/journal/resolution/`.
+/// The `account` step journals the resolved account, so it is shown in the
+/// Restate UI for the retention period: it carries the credential
+/// *reference*, never the agent key (the [`gateway`](crate::gateway) module
+/// docs state what a journal entry may hold). `id` and `credential_ref` are
+/// the only required fields; the struct is `#[non_exhaustive]`, so build one
+/// with [`Account::new`] and set the rest.
 ///
 /// # No account pin
 ///
@@ -50,16 +48,11 @@ pub use static_resolver::{
 /// against**. Ownership validation is about the *document*: under one of our
 /// external ids a document is ours when it carries the order number and the
 /// `tipus` of the kind, and found by number it must carry this order's number
-/// (`Szamlazz.Order`'s verifies); nothing about the account. 0.3 pinned two
-/// fields of a queried document, `szallito/id` (`supplier_id`) and `teszt`
-/// (`mode`); both were dropped. Neither is in a create response (a create's
-/// reply is a number and totals), so neither
-/// could fire before the first document of a fresh order was issued: a key
-/// configured under the wrong scope issued into the wrong account and answered
-/// `issued`, and the pin tripped on the *next* found document. A tripwire with
-/// that blind spot, on fields the operator had to read off the very account
-/// being checked (`szallito/id`, undocumented) or that only tell test from
-/// live (`teszt`), was not worth a fault code and a configuration field.
+/// (`Szamlazz.Order`'s verifies); nothing about the account. A pin on a
+/// field of a queried document (`szallito/id`, `teszt`) was considered and
+/// rejected (ADR 0006, account-pin amendment): neither is in a create
+/// response, so no such pin can fire before the first document of a fresh
+/// order has been issued into whatever account the key opens.
 ///
 /// So **the right key under the right scope is the resolver's guarantee**,
 /// and the deployment's to verify: under each scope, at go-live and after
@@ -108,8 +101,8 @@ impl Account {
 /// `exchange_rate.bank`; `extra_logo`, `aggregator` and `guardian` are the
 /// account's alone.
 ///
-/// Journaled inside the [`Account`], so
-/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
+/// [`Default::default`]
 /// and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -159,8 +152,8 @@ impl Default for Defaults {
 
 /// The seller (`eladó`) block; the account's own data is used where absent.
 ///
-/// Journaled inside the [`Account`], so
-/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
+/// [`Default::default`]
 /// and set fields.
 ///
 /// Deliberately not the agent crate's [`Seller`], although the fields mirror
@@ -202,7 +195,7 @@ impl SellerConfig {
 /// Settings of the notification email szamlazz.hu sends to buyers.
 ///
 /// Journaled inside the [`Account`] through
-/// [`SellerConfig`], so additive-only and `#[non_exhaustive]`: start from
+/// [`SellerConfig`]; `#[non_exhaustive]`: start from
 /// [`Default::default`] and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
