@@ -69,11 +69,15 @@ impl From<quick_xml::DeError> for ParseError {
 /// it misses, as [`Document::validate`] reports it.
 ///
 /// The parse does not need what the schema requires; this is the signal for a
-/// receiver that does. Every variant names the element by its wire path,
-/// prefixed with the document it sits in (`invoice alap/kelt`, `bank
-/// transaction irany`, `receipt tetel/afakulcs`), so a receiver can act on
-/// *which* requirement failed without parsing the message; the `Display` text
-/// is unchanged from 0.3 (`missing required invoice alap/kelt`).
+/// receiver that does. Every variant names the element by its wire path, so a
+/// receiver can act on *which* requirement failed without parsing the
+/// message. Most paths are prefixed with the document the element sits in
+/// (`invoice alap/kelt`, `bank transaction irany`, `receipt tetel/afakulcs`);
+/// the totals block, whose shape an invoice and a receipt share, is named
+/// without one (`afakulcsossz/afakulcs`, `osszegek/totalossz`,
+/// `totalossz/netto`), since the `Display` text is kept verbatim from 0.3
+/// (`missing required invoice alap/kelt`). A receiver that needs the
+/// document knows it from the [`Document`](crate::Document) it validated.
 ///
 /// Breaking change in 0.4: this was an opaque struct carrying the message.
 ///
@@ -85,14 +89,14 @@ pub enum ValidationError {
     /// holds a text that is not one.
     #[error("missing required {path}")]
     MissingRequired {
-        /// The element's wire path, prefixed with the document.
+        /// The element's wire path (see the type's docs for the prefix).
         path: String,
     },
     /// An enumerated element carries a token outside the XSD's enumeration
     /// (an `<irany>` other than `BE` / `KI`).
     #[error("{path} has unknown value {token}")]
     UnknownToken {
-        /// The element's wire path, prefixed with the document.
+        /// The element's wire path (see the type's docs for the prefix).
         path: String,
         /// The token as received.
         token: String,
@@ -100,7 +104,7 @@ pub enum ValidationError {
     /// A VAT rate is negative.
     #[error("{path} must not be negative")]
     Negative {
-        /// The element's wire path, prefixed with the document.
+        /// The element's wire path (see the type's docs for the prefix).
         path: String,
     },
     /// A list the XSD requires at least one child of has none (`tetelek`
@@ -108,7 +112,7 @@ pub enum ValidationError {
     /// without a `nyugta`).
     #[error("{path} must contain at least one {child}")]
     Empty {
-        /// The list's wire path, prefixed with the document.
+        /// The list's wire path (see the type's docs for the prefix).
         path: String,
         /// The child element the list lacks.
         child: &'static str,
