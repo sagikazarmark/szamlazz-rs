@@ -11,7 +11,8 @@
 //! gateway step is `tests/gateway.rs`.
 //!
 //! The two end-to-end tests are ignored by default:
-//! `cargo test -p restate-szamlazz --test e2e -- --ignored`.
+//! `cargo test -p restate-szamlazz --test e2e -- --ignored`; `E2E_ONLY=<needle,…>`
+//! runs one family's scenarios and their prerequisites ([`Only`]).
 //! The server comes from the environment, decided once (the server gate of
 //! the `restate-e2e-harness` crate): `RESTATE_ADMIN_URL` /
 //! `RESTATE_INGRESS_URL` reuse a running server (with the three experimental
@@ -96,6 +97,7 @@ mod storno;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use restate_szamlazz::contract::TerminalCode;
@@ -172,16 +174,92 @@ impl Concurrently {
     }
 }
 
-/// Spawns each scenario of the list on the harness, under its own name.
-macro_rules! concurrently {
-    ($h:expr; $($scenario:path),+ $(,)?) => {{
-        let mut run = Concurrently::new();
-        $(
-            let h = Arc::clone(&$h);
-            run.spawn(stringify!($scenario), async move { $scenario(&h).await });
-        )+
-        run
+/// What a scenario runs as: a future on the shared harness.
+type Run = Box<dyn FnOnce(Arc<Harness>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+/// One scenario as a phase lists it: its name (`family::scenario`, what a
+/// report and the `E2E_ONLY` filter read) and what it runs as.
+type Scenario = (&'static str, Run);
+
+/// The scenarios of a phase, in the order they are listed, each under its own
+/// name.
+macro_rules! scenarios {
+    ($($scenario:path),+ $(,)?) => {{
+        let scenarios: Vec<Scenario> = vec![$((
+            stringify!($scenario),
+            Box::new(|h: Arc<Harness>| -> Pin<Box<dyn Future<Output = ()> + Send>> {
+                Box::pin(async move { $scenario(&h).await })
+            }),
+        ),)+];
+        scenarios
     }};
+}
+
+/// The `E2E_ONLY` filter: a developer iterating on one handler runs that
+/// family's scenarios and their prerequisites rather than the whole run.
+/// Comma-separated needles, each a **substring** of a scenario's
+/// `family::scenario` name (`E2E_ONLY=storno,create_final`; `storno` selects
+/// the `storno` family and `agent_writes::agent_storno_and_…`); a scenario is
+/// selected when any needle matches. The prerequisites follow from what was
+/// selected: the flag day runs when a phase-2 scenario is selected; the three
+/// run-wide checks are **skipped** under any filter, since they count over
+/// the whole run, and a needle that selects nothing is a failure (a typo must
+/// not pass as an empty run). Unset or empty, the run is unchanged.
+#[derive(Debug, PartialEq, Eq)]
+struct Only(Vec<String>);
+
+impl Only {
+    /// The filter `E2E_ONLY` holds, `None` when unset or empty.
+    fn from_env() -> Option<Self> {
+        std::env::var("E2E_ONLY")
+            .ok()
+            .and_then(|value| Self::parse(&value))
+    }
+
+    /// The needles of `value`: comma-separated, trimmed, the empty ones
+    /// dropped; `None` when none is left.
+    fn parse(value: &str) -> Option<Self> {
+        let needles: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|needle| !needle.is_empty())
+            .map(str::to_owned)
+            .collect();
+        (!needles.is_empty()).then_some(Self(needles))
+    }
+
+    /// Whether any needle is a substring of `name`.
+    fn selects(&self, name: &str) -> bool {
+        self.0.iter().any(|needle| name.contains(needle.as_str()))
+    }
+
+    /// Splits `scenarios` into the selected ones (in their order) and the
+    /// names of the skipped; `None` selects everything and skips nothing.
+    fn select<T>(
+        only: Option<&Self>,
+        scenarios: Vec<(&'static str, T)>,
+    ) -> (Vec<(&'static str, T)>, Vec<&'static str>) {
+        let Some(only) = only else {
+            return (scenarios, Vec::new());
+        };
+        let mut selected = Vec::new();
+        let mut skipped = Vec::new();
+        for (name, scenario) in scenarios {
+            if only.selects(name) {
+                selected.push((name, scenario));
+            } else {
+                skipped.push(name);
+            }
+        }
+        (selected, skipped)
+    }
+}
+
+/// Reports the scenarios a phase skips under `E2E_ONLY`.
+fn report_skipped(phase: &str, skipped: &[&str]) {
+    for name in skipped {
+        eprintln!("[{phase}] {name}: skip (E2E_ONLY)");
+    }
 }
 
 /// The scenarios of phase 2 and the run-wide checks, run one after another
@@ -240,6 +318,14 @@ impl Sequentially {
         }
     }
 
+    /// Runs `scenarios` in order under `phase`.
+    async fn run_all(&mut self, phase: &str, scenarios: Vec<Scenario>) {
+        for (name, scenario) in scenarios {
+            let h = Arc::clone(&self.h);
+            self.run(phase, name, scenario(h)).await;
+        }
+    }
+
     /// Panics naming each scenario and check that failed, with its panic
     /// message.
     fn finish(self) {
@@ -252,79 +338,110 @@ impl Sequentially {
     }
 }
 
-/// Runs each scenario of the list in sequence on the collector, under its
-/// own name.
-macro_rules! sequentially {
-    ($run:expr, $phase:literal; $($scenario:path),+ $(,)?) => {{
-        $(
-            let h = Arc::clone(&$run.h);
-            $run.run($phase, stringify!($scenario), async move { $scenario(&h).await }).await;
-        )+
-    }};
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a Restate server: RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
 async fn e2e_order_protocol() {
     let Some(launcher) = launcher_or_skip(Reuse::Allowed) else {
         return;
     };
+    let only = Only::from_env();
+    let (phase1, skipped1) = Only::select(
+        only.as_ref(),
+        scenarios![
+            create_invoice::issued_already_issued_and_the_key_replays,
+            create_invoice::reversal_between_executions_is_reversed_not_reissued,
+            create_proforma::proforma_then_the_invoice_naming_it_then_get_consumed,
+            create_prepayment::prepayment_converts_the_proforma_under_auto_and_by_number,
+            create_final::create_final_names_its_live_prepayment_invoice,
+            correct_invoice::corrective_is_issued_under_its_correction_id,
+            storno::storno_then_reissue,
+            storno::storno_answers_from_the_hint_or_re_executes_a_lost_send,
+            delete_proforma::proforma_is_deleted_by_the_orders_handler,
+            policies::run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault,
+            policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,
+            get::run_retries_do_not_spend_invocation_attempts,
+            faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
+            invariants::plant_the_leak_positive_control,
+        ],
+    );
+    let (phase2, skipped2) = Only::select(
+        only.as_ref(),
+        scenarios![
+            multi_account::the_scope_namespaces_the_order_key_and_the_idempotency_key,
+            concurrency::same_key_same_scope_concurrent_creates_issue_once,
+            concurrency::same_key_same_scope_second_call_between_the_first_calls_executions,
+            concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation,
+            agent_reads::the_scope_selects_the_account_for_every_agent_read,
+            agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account,
+            storno::purged_order_is_stornoed_and_reissued,
+            prologue::a_flaky_resolver_is_retried_by_the_resolve_policy,
+            prologue::a_killed_invocation_releases_the_order_key,
+            multi_account::account_change_between_executions_does_not_reach_the_invocation,
+            multi_account::credential_rotation_between_executions_is_picked_up,
+        ],
+    );
+    if let Some(only) = &only {
+        assert!(
+            !(phase1.is_empty() && phase2.is_empty()),
+            "E2E_ONLY={:?} selects no scenario; a needle is a substring of a `family::scenario` name",
+            only.0
+        );
+        eprintln!(
+            "E2E_ONLY={:?}: {} of {} scenario(s) selected; the run-wide checks are skipped",
+            only.0,
+            phase1.len() + phase2.len(),
+            phase1.len() + phase2.len() + skipped1.len() + skipped2.len()
+        );
+    }
+
     let h = Arc::new(Harness::start(launcher.launch(&MAIN_SERVER).await).await);
 
     // Phase 1: the single-account deployment, unscoped, every scenario at
     // once on its own order keys.
-    concurrently!(h;
-        create_invoice::issued_already_issued_and_the_key_replays,
-        create_invoice::reversal_between_executions_is_reversed_not_reissued,
-        create_proforma::proforma_then_the_invoice_naming_it_then_get_consumed,
-        create_prepayment::prepayment_converts_the_proforma_under_auto_and_by_number,
-        create_final::create_final_names_its_live_prepayment_invoice,
-        correct_invoice::corrective_is_issued_under_its_correction_id,
-        storno::storno_then_reissue,
-        storno::storno_answers_from_the_hint_or_re_executes_a_lost_send,
-        delete_proforma::proforma_is_deleted_by_the_orders_handler,
-        policies::run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault,
-        policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,
-        get::run_retries_do_not_spend_invocation_attempts,
-        faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
-        invariants::plant_the_leak_positive_control,
-    )
-    .join_all(&h)
-    .await;
+    report_skipped("phase 1", &skipped1);
+    let mut run = Concurrently::new();
+    for (name, scenario) in phase1 {
+        run.spawn(name, scenario(Arc::clone(&h)));
+    }
+    run.join_all(&h).await;
     let mut h = Arc::try_unwrap(h)
         .ok()
         .expect("every phase-1 scenario has been joined");
 
     // Phase 2: the flag day (the prerequisite of everything after it, so its
-    // failure ends the run), then the multi-account deployment by scope, in
+    // failure ends the run; skipped with the whole phase when the filter
+    // selects nothing of it), then the multi-account deployment by scope, in
     // sequence (the scenarios script the shared resolver and store), every
     // failure collected.
+    report_skipped("phase 2", &skipped2);
+    if phase2.is_empty() {
+        eprintln!(
+            "[phase 2] multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls: skip \
+             (E2E_ONLY selects no phase-2 scenario)"
+        );
+        return;
+    }
     multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
     eprintln!(
         "[phase 2] multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls: pass"
     );
     let mut run = Sequentially::new(Arc::new(h));
-    sequentially!(run, "phase 2";
-        multi_account::the_scope_namespaces_the_order_key_and_the_idempotency_key,
-        concurrency::same_key_same_scope_concurrent_creates_issue_once,
-        concurrency::same_key_same_scope_second_call_between_the_first_calls_executions,
-        concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation,
-        agent_reads::the_scope_selects_the_account_for_every_agent_read,
-        agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account,
-        storno::purged_order_is_stornoed_and_reissued,
-        prologue::a_flaky_resolver_is_retried_by_the_resolve_policy,
-        prologue::a_killed_invocation_releases_the_order_key,
-        multi_account::account_change_between_executions_does_not_reach_the_invocation,
-        multi_account::credential_rotation_between_executions_is_picked_up,
-    );
+    run.run_all("phase 2", phase2).await;
 
     // The run-wide checks, last; run whether or not a scenario failed, and
-    // reported with it.
-    sequentially!(run, "checks";
+    // reported with it; skipped under `E2E_ONLY`, since they count over the
+    // whole run.
+    let checks = scenarios![
         invariants::the_order_keeps_no_state,
         invariants::no_agent_key_in_any_journal_of_the_run,
         invariants::every_handler_journals_its_tabled_steps,
-    );
+    ];
+    if only.is_some() {
+        let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
+        report_skipped("checks", &names);
+    } else {
+        run.run_all("checks", checks).await;
+    }
     run.finish();
 }
 
@@ -408,4 +525,71 @@ async fn e2e_check_account_without_protocol_v7() {
     eprintln!(
         "(canary) without protocol v7: scoped check_account → scope: null on the single-account deployment, unknown_account on the multi-account one: pass"
     );
+}
+
+// ----- the E2E_ONLY filter, without a server ---------------------------------------
+
+#[cfg(test)]
+mod only_tests {
+    use super::Only;
+
+    /// The needles are comma-separated and trimmed; nothing left is no
+    /// filter.
+    #[test]
+    fn e2e_only_parses_comma_separated_needles() {
+        assert_eq!(
+            Only::parse("storno, create_final,"),
+            Some(Only(vec!["storno".to_owned(), "create_final".to_owned()]))
+        );
+        assert_eq!(Only::parse(""), None);
+        assert_eq!(Only::parse(" , "), None);
+    }
+
+    /// A needle is a substring of the `family::scenario` name: a family
+    /// selects every scenario of its file and any scenario naming it; the
+    /// skipped keep their order for the report; no filter selects everything.
+    #[test]
+    fn e2e_only_selects_by_substring_and_reports_the_skipped() {
+        let scenarios = || {
+            vec![
+                ("storno::storno_then_reissue", ()),
+                (
+                    "create_final::create_final_names_its_live_prepayment_invoice",
+                    (),
+                ),
+                (
+                    "agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account",
+                    (),
+                ),
+                ("get::run_retries_do_not_spend_invocation_attempts", ()),
+            ]
+        };
+        let only = Only::parse("storno").expect("a filter");
+        let (selected, skipped) = Only::select(Some(&only), scenarios());
+        assert_eq!(
+            selected.iter().map(|(name, ())| *name).collect::<Vec<_>>(),
+            [
+                "storno::storno_then_reissue",
+                "agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account",
+            ]
+        );
+        assert_eq!(
+            skipped,
+            [
+                "create_final::create_final_names_its_live_prepayment_invoice",
+                "get::run_retries_do_not_spend_invocation_attempts",
+            ]
+        );
+        let (selected, skipped) = Only::select(None, scenarios());
+        assert_eq!(selected.len(), 4);
+        assert!(skipped.is_empty());
+        let none = Only::parse("nothing-named-so").expect("a filter");
+        let (selected, skipped) = Only::select(Some(&none), scenarios());
+        assert!(selected.is_empty());
+        assert_eq!(
+            skipped.len(),
+            4,
+            "the run refuses a filter that selects nothing"
+        );
+    }
 }

@@ -755,6 +755,16 @@ handler's file and is listed in `main.rs`, in phase 1 when it needs only the sin
 order keys, in phase 2 when it needs a scope or scripts the resolver or store. The suite runs in about 20 s
 (from about 50 s before the prune and the concurrent phase 1; #134).
 
+**One family at a time.** A developer iterating on one handler sets `E2E_ONLY=<needle,…>`
+(`E2E_ONLY=storno cargo test -p restate-szamlazz --test e2e -- --ignored e2e_order`): each needle is a substring of
+a scenario's `family::scenario` name, so a family name selects its file's scenarios and any scenario naming it
+(`storno` also selects `agent_writes::agent_storno_and_…`), and the run is the selected scenarios plus their
+prerequisites: phase 1's run concurrently as always, the flag day runs when a phase-2 scenario is selected and is
+skipped with the whole phase otherwise, and the three run-wide checks are skipped under any filter (they count over
+the whole run). Every skipped scenario is printed as `skip (E2E_ONLY)`, a needle that selects nothing fails the run
+(a typo must not pass as an empty run), and unset or empty the run is unchanged, so CI is unaffected. `E2E_ONLY=storno`
+runs in about five seconds.
+
 **The protocol-v7 canary** (`e2e_check_account_without_protocol_v7`) runs in the same command on a server of its
 own with `protocol_v7` off: the ingress accepts the scoped path and keys the invocation by the scope, but the SDK
 sees none, so a scoped `check_account` answers `scope: null` with the account on the single-account deployment
