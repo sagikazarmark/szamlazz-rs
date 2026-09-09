@@ -6,8 +6,9 @@
 //! Ignored: `cargo test -p restate-e2e-harness -- --ignored` with
 //! `RESTATE_SERVER_BIN` set. Never a reused server (`Reuse::Never`): the test
 //! deploys a service of its own and leaves its invocations retained for a
-//! day, which a suite sharing that server (one whose step-name table check scans every
-//! invocation the server holds) would meet as an unpinned handler.
+//! day, which a suite sharing that server (one whose step-name table check
+//! scans every invocation the server holds) would meet as an untabled
+//! handler.
 
 #![cfg(unix)]
 #![allow(

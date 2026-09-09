@@ -28,7 +28,7 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   it runs.
 - **The step-name table**: a consumer tables, per handler, the ordered `ctx.run` names of every path it journals
   (`RunPath`), and `Table::check` verifies a whole run against it: every invocation's run sequence is a prefix of
-  one of its handler's paths (a journaled name read as its pattern, `verify-{number}` by its prefix), every handler
+  one of its handler's paths (a journaled name read as its pattern, `lookup-{sku}` by its prefix), every handler
   the deployments offer is tabled, and every path was walked in full. Under in-place re-registration a renamed,
   inserted or reordered step strands every in-flight invocation on the next deploy; under immutable deployments the
   same sequence is what a pause-and-resume onto new code needs; either way the test fails first.

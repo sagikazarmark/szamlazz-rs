@@ -21,7 +21,7 @@ use std::fmt;
 use crate::introspection::{Handler, Invocation, JournalEntry};
 
 /// One path: a handler of a service and the ordered `ctx.run` names it
-/// journals on that path. A `{…}` segment in a name (`verify-{number}`) is a
+/// journals on that path. A `{…}` segment in a name (`lookup-{sku}`) is a
 /// parameter, matched by the prefix before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunPath {
@@ -51,9 +51,9 @@ impl RunPath {
 
 /// The parametrized run names of a table (every `{…}` pattern) by the prefix
 /// that names the step, longest prefix first, so that a name is read as the
-/// most specific pattern it starts with: `verify-storno-…` is
-/// `verify-storno-{number}`, never `verify-{number}`. Derived from the table,
-/// so the two cannot disagree.
+/// most specific pattern it starts with: `release-hold-…` is
+/// `release-hold-{sku}`, never `release-{sku}`. Derived from the table, so
+/// the two cannot disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPatterns {
     parametrized: Vec<(&'static str, &'static str)>,
@@ -61,14 +61,14 @@ pub struct RunPatterns {
 
 impl RunPatterns {
     /// The patterns of `paths`. Panics on a parametrized name with no fixed
-    /// prefix (`{number}` alone): it would read every journaled name as
-    /// itself, and the pin would explain anything. Panics likewise on two
-    /// different patterns with one prefix (`step-{id}` beside
-    /// `step-{number}`): a journaled `step-7` would read as whichever sorted
-    /// first, and the other handler's path would go unexplained. And on a
-    /// fixed name a parametrized prefix shadows (`step-special` beside
-    /// `step-{id}`): [`Self::pattern`] would read the fixed name as the
-    /// parameter, and its path could never be observed.
+    /// prefix (`{sku}` alone): it would read every journaled name as itself,
+    /// and the table would explain anything. Panics likewise on two different
+    /// patterns with one prefix (`step-{id}` beside `step-{sku}`): a
+    /// journaled `step-7` would read as whichever sorted first, and the other
+    /// handler's path would go unexplained. And on a fixed name a parametrized
+    /// prefix shadows (`step-special` beside `step-{id}`): [`Self::pattern`]
+    /// would read the fixed name as the parameter, and its path could never
+    /// be observed.
     #[must_use]
     pub fn of(paths: &[RunPath]) -> Self {
         let mut parametrized: Vec<(&str, &str)> = paths
@@ -119,8 +119,8 @@ impl RunPatterns {
 
     /// The table's pattern of a journaled run name: a parametrized name by
     /// its prefix, any other name as it is. The parameter is matched by its
-    /// prefix only: a name that itself began with a pinned stem (`storno-1`
-    /// under a `storno-{number}` and a `storno-1-{x}`) would read as the
+    /// prefix only: a name that itself began with a tabled stem (`release-1`
+    /// under a `release-{sku}` and a `release-1-{x}`) would read as the
     /// longer pattern.
     #[must_use]
     pub fn pattern(&self, name: &str) -> String {
@@ -383,74 +383,46 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
 
-    const PATHS: &[RunPath] = &[
+    /// A table of an endpoint with two services: a Virtual Object whose
+    /// `reserve` has two paths (a hold placed, or answered from an existing
+    /// one), whose `release` has one and whose `release_hold` shares a stem
+    /// with it, and a service with one probe. The one table of this module's
+    /// tests.
+    const TABLE: &[RunPath] = &[
         RunPath::new(
-            "Svc.Object",
-            "storno_invoice",
-            &[
-                "namespace",
-                "account",
-                "verify-storno-{number}",
-                "lookup-storno-{number}",
-                "storno-{number}",
-            ],
+            "Inv.Stock",
+            "reserve",
+            &["settings", "lookup-{sku}", "place-hold-{sku}"],
         ),
         RunPath::new(
-            "Svc.Object",
-            "storno_invoice",
-            &[
-                "namespace",
-                "account",
-                "verify-storno-{number}",
-                "hint-storno-{number}",
-            ],
+            "Inv.Stock",
+            "reserve",
+            &["settings", "lookup-{sku}", "existing-hold-{sku}"],
         ),
+        RunPath::new("Inv.Stock", "release", &["settings", "release-{sku}"]),
         RunPath::new(
-            "Svc.Object",
-            "delete_proforma",
-            &[
-                "namespace",
-                "account",
-                "proforma-for-delete",
-                "delete-proforma-{number}",
-            ],
+            "Inv.Stock",
+            "release_hold",
+            &["settings", "release-hold-{sku}"],
         ),
-        RunPath::new(
-            "Svc.Agent",
-            "storno",
-            &[
-                "namespace",
-                "account",
-                "verify-{number}",
-                "lookup-storno-{number}",
-                "storno-{number}",
-            ],
-        ),
-        RunPath::new(
-            "Svc.Agent",
-            "query_taxpayer",
-            &["namespace", "account", "taxpayer-{prefix}"],
-        ),
+        RunPath::new("Inv.Api", "probe", &["settings", "probe"]),
     ];
 
     /// A parametrized run name is read as its pattern by its prefix, the
-    /// longest prefix first: `verify-storno-SZ-1` is `verify-storno-{number}`,
-    /// never `verify-{number}`; a fixed name is itself.
+    /// longest prefix first: `release-hold-SKU-1` is `release-hold-{sku}`,
+    /// never `release-{sku}`; a fixed name is itself.
     #[test]
     fn run_patterns_read_a_parametrized_name_by_its_longest_prefix() {
-        let patterns = RunPatterns::of(PATHS);
+        let patterns = RunPatterns::of(TABLE);
         for (name, pattern) in [
-            ("namespace", "namespace"),
-            ("lookup-invoice", "lookup-invoice"),
-            ("lookup-storno-SZ-1", "lookup-storno-{number}"),
-            ("storno-SZ-1", "storno-{number}"),
-            ("verify-SZ-1", "verify-{number}"),
-            ("verify-storno-E-TST-2026-1", "verify-storno-{number}"),
-            ("hint-storno-SZ-1", "hint-storno-{number}"),
-            ("delete-proforma-D-1", "delete-proforma-{number}"),
-            ("taxpayer-12345678", "taxpayer-{prefix}"),
-            ("proforma-for-delete", "proforma-for-delete"),
-            ("verify-", "verify-"),
+            ("settings", "settings"),
+            ("probe", "probe"),
+            ("lookup-SKU-1", "lookup-{sku}"),
+            ("place-hold-SKU-1", "place-hold-{sku}"),
+            ("existing-hold-SKU-1", "existing-hold-{sku}"),
+            ("release-SKU-1", "release-{sku}"),
+            ("release-hold-A-2026-1", "release-hold-{sku}"),
+            ("release-", "release-"),
         ] {
             assert_eq!(patterns.pattern(name), pattern, "{name}");
         }
@@ -460,13 +432,13 @@ mod tests {
     /// is refused when built, naming the pattern.
     #[test]
     fn a_parametrized_name_without_a_prefix_is_refused() {
-        let bare = [RunPath::new("Svc", "h", &["namespace", "{number}"])];
+        let bare = [RunPath::new("Svc", "h", &["settings", "{sku}"])];
         let outcome = std::panic::catch_unwind(|| RunPatterns::of(&bare));
         let message = outcome
             .expect_err("refused")
             .downcast::<String>()
             .expect("a message");
-        assert!(message.contains("{number}"), "{message}");
+        assert!(message.contains("{sku}"), "{message}");
     }
 
     /// Two patterns with one prefix would make a journaled name ambiguous;
@@ -475,13 +447,13 @@ mod tests {
     #[test]
     fn two_patterns_with_one_prefix_are_refused() {
         let same = [
-            RunPath::new("A", "h", &["step-{number}"]),
-            RunPath::new("B", "h", &["step-{number}"]),
+            RunPath::new("A", "h", &["step-{sku}"]),
+            RunPath::new("B", "h", &["step-{sku}"]),
         ];
-        assert_eq!(RunPatterns::of(&same).pattern("step-7"), "step-{number}");
+        assert_eq!(RunPatterns::of(&same).pattern("step-7"), "step-{sku}");
         let clashing = [
             RunPath::new("A", "h", &["step-{id}"]),
-            RunPath::new("B", "h", &["step-{number}"]),
+            RunPath::new("B", "h", &["step-{sku}"]),
         ];
         let outcome = std::panic::catch_unwind(|| RunPatterns::of(&clashing));
         let message = outcome
@@ -489,29 +461,25 @@ mod tests {
             .downcast::<String>()
             .expect("a message");
         assert!(
-            message.contains("step-{id}") && message.contains("step-{number}"),
+            message.contains("step-{id}") && message.contains("step-{sku}"),
             "{message}"
         );
     }
 
     /// A fixed name under a parametrized prefix would never be read as
     /// itself; the table is refused when built, naming both. A fixed name
-    /// that merely shares letters with a prefix (`lookup-proforma` beside
-    /// `lookup-storno-{number}`) is fine.
+    /// that merely shares letters with a prefix (`lookup-settings` beside
+    /// `lookup-hold-{sku}`) is fine.
     #[test]
     fn a_fixed_name_shadowed_by_a_parametrized_prefix_is_refused() {
         let fine = [RunPath::new(
             "A",
             "h",
-            &[
-                "lookup-proforma",
-                "lookup-storno-{number}",
-                "storno-{number}",
-            ],
+            &["lookup-settings", "lookup-hold-{sku}", "hold-{sku}"],
         )];
         assert_eq!(
-            RunPatterns::of(&fine).pattern("lookup-proforma"),
-            "lookup-proforma"
+            RunPatterns::of(&fine).pattern("lookup-settings"),
+            "lookup-settings"
         );
         let shadowed = [
             RunPath::new("A", "h", &["step-special"]),
@@ -533,10 +501,10 @@ mod tests {
     /// step, an inserted one or one out of order is explained by none.
     #[test]
     fn an_observed_run_sequence_is_a_prefix_of_one_of_its_handlers_paths_or_unexplained() {
-        let patterns = RunPatterns::of(PATHS);
-        let paths: Vec<&[&str]> = PATHS
+        let patterns = RunPatterns::of(TABLE);
+        let paths: Vec<&[&str]> = TABLE
             .iter()
-            .filter(|row| row.handler == "storno_invoice")
+            .filter(|row| row.handler == "reserve")
             .map(|row| row.path)
             .collect();
         let explained = |observed: &[&str]| {
@@ -554,76 +522,44 @@ mod tests {
             explained(&[]),
             "nothing journaled (refused before the first step)"
         );
-        assert!(explained(&["namespace", "account"]), "answered early");
+        assert!(explained(&["settings"]), "answered early");
         assert!(
-            explained(&["namespace", "account", "verify-storno-SZ-1"]),
-            "answered after the verify"
+            explained(&["settings", "lookup-SKU-1"]),
+            "answered after the lookup"
         );
         assert!(explained(&[
-            "namespace",
-            "account",
-            "verify-storno-SZ-1",
-            "hint-storno-SZ-1"
+            "settings",
+            "lookup-SKU-1",
+            "existing-hold-SKU-1"
         ]));
-        assert!(explained(&[
-            "namespace",
-            "account",
-            "verify-storno-SZ-1",
-            "lookup-storno-SZ-1",
-            "storno-SZ-1"
-        ]));
-        assert!(
-            !explained(&["namespace", "account", "check-storno-SZ-1"]),
-            "a renamed step"
-        );
+        assert!(explained(&["settings", "lookup-SKU-1", "place-hold-SKU-1"]));
+        assert!(!explained(&["settings", "check-SKU-1"]), "a renamed step");
         assert!(
             !explained(&[
-                "namespace",
-                "account",
-                "verify-storno-SZ-1",
-                "lookup-storno-SZ-1",
-                "confirm-SZ-1",
-                "storno-SZ-1"
+                "settings",
+                "lookup-SKU-1",
+                "confirm-SKU-1",
+                "place-hold-SKU-1"
             ]),
             "an inserted step"
         );
         assert!(
-            !explained(&["namespace", "account", "verify-storno-SZ-1", "storno-SZ-1"]),
+            !explained(&["settings", "place-hold-SKU-1"]),
             "a removed step"
         );
-        assert!(!explained(&["account", "namespace"]), "out of order");
+        assert!(!explained(&["lookup-SKU-1", "settings"]), "out of order");
         assert!(
             !explained(&[
-                "namespace",
-                "account",
-                "verify-storno-SZ-1",
-                "lookup-storno-SZ-1",
-                "storno-SZ-1",
-                "storno-SZ-1"
+                "settings",
+                "lookup-SKU-1",
+                "place-hold-SKU-1",
+                "place-hold-SKU-1"
             ]),
             "a step past the path's end"
         );
     }
 
     // ----- the check over a run, on scripted rows --------------------------------
-
-    /// A table of an endpoint with two services: a Virtual Object whose
-    /// `reserve` has two paths (a hold placed, or answered from an existing
-    /// one) and whose `release` has one, and a service with one probe.
-    const TABLE: &[RunPath] = &[
-        RunPath::new(
-            "Inv.Stock",
-            "reserve",
-            &["settings", "lookup-{sku}", "place-hold-{sku}"],
-        ),
-        RunPath::new(
-            "Inv.Stock",
-            "reserve",
-            &["settings", "lookup-{sku}", "existing-hold-{sku}"],
-        ),
-        RunPath::new("Inv.Stock", "release", &["settings", "release-{sku}"]),
-        RunPath::new("Inv.Api", "probe", &["settings", "probe"]),
-    ];
 
     fn table() -> Table {
         Table::new(TABLE)
@@ -641,6 +577,7 @@ mod tests {
         vec![
             handler("Inv.Stock", "reserve"),
             handler("Inv.Stock", "release"),
+            handler("Inv.Stock", "release_hold"),
             handler("Inv.Api", "probe"),
         ]
     }
@@ -716,6 +653,12 @@ mod tests {
                 &["settings", "release-SKU-1"],
             ),
             invocation("inv_5", "Inv.Api", "probe", &["settings", "probe"]),
+            invocation(
+                "inv_6",
+                "Inv.Stock",
+                "release_hold",
+                &["settings", "release-hold-SKU-1"],
+            ),
         ]
         .into_iter()
         .unzip()
@@ -733,14 +676,14 @@ mod tests {
         assert_eq!(
             walked,
             Walked {
-                invocations: 5,
-                handlers: 3,
-                paths: 4,
+                invocations: 6,
+                handlers: 4,
+                paths: 5,
             }
         );
         let report = walked.to_string();
-        assert!(report.contains("5 invocations"), "{report}");
-        assert!(report.contains("4 paths"), "{report}");
+        assert!(report.contains("6 invocations"), "{report}");
+        assert!(report.contains("5 paths"), "{report}");
     }
 
     /// A handler with no row is reported whether an invocation of it exists
@@ -763,7 +706,7 @@ mod tests {
         assert!(violations.unwalked.is_empty());
         assert!(violations.to_string().contains("Inv.Api.audit"));
 
-        let (row, journal) = invocation("inv_6", "Inv.Stock", "restock", &["settings"]);
+        let (row, journal) = invocation("inv_7", "Inv.Stock", "restock", &["settings"]);
         invocations.push(row);
         journals.insert(journal.0, journal.1);
         let violations = table()
@@ -802,7 +745,7 @@ mod tests {
     fn an_unexplained_run_sequence_is_reported_by_invocation() {
         let (mut invocations, mut journals) = full_walk();
         let (row, journal) = invocation(
-            "inv_6",
+            "inv_7",
             "Inv.Stock",
             "reserve",
             &["settings", "check-SKU-2", "place-hold-SKU-2"],
@@ -815,7 +758,7 @@ mod tests {
         assert_eq!(
             violations.unexplained,
             [
-                "inv_6 Inv.Stock.reserve: [\"settings\", \"check-SKU-2\", \"place-hold-{sku}\"]"
+                "inv_7 Inv.Stock.reserve: [\"settings\", \"check-SKU-2\", \"place-hold-{sku}\"]"
                     .to_owned()
             ]
         );
@@ -824,7 +767,7 @@ mod tests {
             "every path was still walked"
         );
         let message = violations.to_string();
-        assert!(message.contains("inv_6"), "{message}");
+        assert!(message.contains("inv_7"), "{message}");
         assert!(
             message.contains("pause-and-resume"),
             "the message says what the table is for: {message}"
@@ -863,11 +806,11 @@ mod tests {
     #[test]
     fn an_invocation_without_a_journal_is_an_empty_sequence() {
         let (mut invocations, journals) = full_walk();
-        let (row, _) = invocation("inv_7", "Inv.Api", "probe", &["settings", "probe"]);
+        let (row, _) = invocation("inv_8", "Inv.Api", "probe", &["settings", "probe"]);
         invocations.push(row);
         let walked = table()
             .check(&deployed(), &invocations, &journals)
             .expect("an empty sequence is a prefix of every path");
-        assert_eq!(walked.invocations, 6);
+        assert_eq!(walked.invocations, 7);
     }
 }

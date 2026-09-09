@@ -271,8 +271,8 @@ reply is `outcome_unknown`. Two reads do not fault on exhaustion, the best-effor
 that saw the document reversed: `hint-storno-{number}` (§6 step 1) and `Szamlazz.Agent.storno`'s
 `lookup-storno-{number}` on that path (§4, its row; the same entry name the storno protocol's lookup step writes,
 which the reversed path never reaches). The parametrized names are read by their prefix (`verify-storno-…` is
-`verify-storno-{number}`, never `verify-{number}`), so the pin would misread only an invoice number that itself began
-with a pinned stem (`verify-storno-1` for a `Szamlazz.Agent.storno` of `storno-1`); none of the suite's do, and the
+`verify-storno-{number}`, never `verify-{number}`), so the table check would misread only an invoice number that itself
+began with a tabled stem (`verify-storno-1` for a `Szamlazz.Agent.storno` of `storno-1`); none of the suite's do, and the
 misread would be the test's, not the worker's: the names themselves are unambiguous to the journal.
 
 ## 5. Create protocol (`create_invoice`; other kinds analogous)

@@ -262,7 +262,7 @@ mod tests {
                     "backing-off",
                     Some(2),
                     Some("transport failure: reply lost"),
-                    Some("create-invoice"),
+                    Some("place-hold"),
                 ),
             ]),
             Progress::Sampling,
@@ -275,7 +275,7 @@ mod tests {
                     "running",
                     Some(2),
                     Some("transport failure: reply lost"),
-                    Some("create-invoice"),
+                    Some("place-hold"),
                 ),
             ]),
             Progress::Sampling,
@@ -291,7 +291,7 @@ mod tests {
             Retries {
                 max_retry_count: 2,
                 failures: vec!["transport failure: reply lost".to_owned()],
-                failing_commands: vec!["create-invoice".to_owned()],
+                failing_commands: vec!["place-hold".to_owned()],
                 samples: 6,
                 observed_completion: true,
                 query_errors: 0,
@@ -338,7 +338,7 @@ mod tests {
                 "backing-off",
                 Some(2),
                 Some("transport failure"),
-                Some("lookup-invoice"),
+                Some("lookup-stock"),
             )]),
             Ok(vec![row("completed", None, None, None)]),
         ]));
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(retries.samples, 4);
         assert_eq!(retries.query_errors, 1);
         assert_eq!(retries.max_retry_count, 2);
-        assert_eq!(retries.failing_commands, ["lookup-invoice"]);
+        assert_eq!(retries.failing_commands, ["lookup-stock"]);
         assert!(retries.observed_completion);
         assert!(script.lock().expect("script").is_empty());
     }
