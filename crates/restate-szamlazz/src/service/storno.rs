@@ -128,7 +128,10 @@ fn storno_verdict(found: &FoundDocument, order: &OrderKey, number: &str) -> Stor
         return StornoVerdict::AlreadyReversed;
     }
     if !matches!(found.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
-        return StornoVerdict::Answered(not_stornoable(number.to_owned()));
+        return StornoVerdict::Answered(StornoResponse::not_stornoable(
+            number,
+            "the document cannot be reversed: only invoices can be stornoed",
+        ));
     }
     StornoVerdict::Proceed
 }
@@ -152,14 +155,6 @@ fn unmanaged_storno_verdict(found: &FoundDocument, number: &str) -> StornoVerdic
         return StornoVerdict::AlreadyReversed;
     }
     StornoVerdict::Proceed
-}
-
-/// The answer for a document the verify step sees szamlazz.hu cannot reverse
-/// (proformas, delivery notes, stornos), before anything is sent.
-fn not_stornoable(number: String) -> StornoResponse {
-    StornoResponse::new(StornoOutcome::Rejected, number)
-        .with_code("not_stornoable")
-        .with_message("the document cannot be reversed: only invoices can be stornoed")
 }
 
 /// The `reversed` answer of both storno handlers: `storno_number` as the
@@ -219,14 +214,12 @@ fn storno_response(
             StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno.number)
         }
         GatewayStornoOutcome::AlreadyReversed { storno_number } => {
-            StornoResponse::new(StornoOutcome::Reversed, number)
-                .with_storno_number(storno_number)
+            StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno_number)
         }
-        GatewayStornoOutcome::NotStornoable => StornoResponse::new(StornoOutcome::Rejected, number)
-            .with_code("not_stornoable")
-            .with_message(
-                "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
-            ),
+        GatewayStornoOutcome::NotStornoable => StornoResponse::not_stornoable(
+            number,
+            "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
+        ),
         GatewayStornoOutcome::Rejected(rejection) => {
             StornoResponse::new(StornoOutcome::Rejected, number)
                 .with_code(rejection.code)
@@ -610,24 +603,6 @@ mod tests {
         (error.code(), body)
     }
 
-    /// The answer for a document szamlazz.hu cannot reverse, as the verdict
-    /// wraps it: `rejected` under the worker's own code `not_stornoable`
-    /// (no szamlazz.hu code: nothing was sent), echoing the number as the
-    /// caller named it, with no storno number and no conflict reason.
-    #[test]
-    fn not_stornoable_is_a_rejection_under_the_workers_own_code() {
-        let response = not_stornoable("D-1".to_owned());
-        assert_eq!(response.outcome, StornoOutcome::Rejected);
-        assert_eq!(response.invoice_number, "D-1");
-        assert_eq!(response.code.as_deref(), Some("not_stornoable"));
-        assert_eq!(
-            response.message.as_deref(),
-            Some("the document cannot be reversed: only invoices can be stornoed")
-        );
-        assert_eq!(response.storno_number, None);
-        assert_eq!(response.conflict_reason, None);
-    }
-
     /// Step 1 of the storno protocol on the verified document: this order's
     /// live invoice kind (`SZ`, `ES`, `VS`, `HS`) proceeds; a document that
     /// does not carry this order's number (another order's, none, an empty
@@ -712,7 +687,11 @@ mod tests {
                 panic!("{tipus} is answered");
             };
             assert_eq!(response.outcome, StornoOutcome::Rejected, "{tipus}");
-            assert_eq!(response.code.as_deref(), Some("not_stornoable"), "{tipus}");
+            assert_eq!(
+                response.code.as_deref(),
+                Some(StornoResponse::NOT_STORNOABLE),
+                "{tipus}"
+            );
             assert_eq!(response.invoice_number, number, "{tipus}");
             assert_eq!(response.conflict_reason, None, "{tipus}");
             assert!(

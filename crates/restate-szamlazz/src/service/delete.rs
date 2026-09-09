@@ -10,7 +10,9 @@ use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, lookup, run_once};
-use crate::contract::{DeleteProformaRequest, DeleteProformaResponse, DocumentKind, IssuedKind};
+use crate::contract::{
+    DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentKind, IssuedKind,
+};
 use crate::gateway::{DeleteOutcome, FoundDocument, OwnershipOutcome};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
@@ -81,7 +83,7 @@ fn delete_guard(
         }
         OwnershipOutcome::Collision(_) => {
             return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
-                "external_id_collision",
+                DeleteReason::ExternalIdCollision,
             )));
         }
         OwnershipOutcome::Live(found) => found,
@@ -94,7 +96,7 @@ fn delete_guard(
     };
     if !found.payments.is_empty() && !force {
         return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
-            "proforma_paid",
+            DeleteReason::ProformaPaid,
         )));
     }
     Ok(ControlFlow::Continue(found))
@@ -118,7 +120,7 @@ fn delete_response(
             Ok(DeleteProformaResponse::deleted())
         }
         DeleteOutcome::Rejected(rejection) => {
-            Ok(DeleteProformaResponse::not_deleted(rejection.code))
+            Ok(DeleteProformaResponse::not_deleted(rejection.code.into()))
         }
         DeleteOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
@@ -188,7 +190,9 @@ mod tests {
             );
             assert_eq!(
                 guard(OwnershipOutcome::Collision(other.boxed()), force).expect("data"),
-                ControlFlow::Break(DeleteProformaResponse::not_deleted("external_id_collision")),
+                ControlFlow::Break(DeleteProformaResponse::not_deleted(
+                    DeleteReason::ExternalIdCollision
+                )),
                 "force {force}"
             );
             assert_eq!(
@@ -199,7 +203,9 @@ mod tests {
         }
         assert_eq!(
             guard(OwnershipOutcome::Live(paid.boxed()), false).expect("data"),
-            ControlFlow::Break(DeleteProformaResponse::not_deleted("proforma_paid"))
+            ControlFlow::Break(DeleteProformaResponse::not_deleted(
+                DeleteReason::ProformaPaid
+            ))
         );
         assert_eq!(
             guard(OwnershipOutcome::Live(paid.boxed()), true).expect("data"),
@@ -250,7 +256,7 @@ mod tests {
                 &namespace,
             )
             .expect("data"),
-            DeleteProformaResponse::not_deleted("57")
+            DeleteProformaResponse::not_deleted(DeleteReason::Szamlazz("57".to_owned()))
         );
 
         let (status, body) = fault_body(

@@ -82,7 +82,7 @@ use szamlazz_agent::{
 use tracing::Instrument as _;
 
 use crate::account::Account;
-use crate::contract::{IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
+use crate::contract::{DeleteReason, IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
@@ -219,6 +219,16 @@ impl From<RejectionCode> for String {
             RejectionCode::Szamlazz(code) => code,
             RejectionCode::Request => RejectionCode::REQUEST.to_owned(),
         }
+    }
+}
+
+/// A refused deletion's code as the delete response's reason: szamlazz.hu's
+/// code as itself. (The wire contract refuses nothing on a delete, so
+/// [`RejectionCode::Request`] does not arise there; were it to, it would read
+/// as the `request` pseudo-code, as every other response carries it.)
+impl From<RejectionCode> for DeleteReason {
+    fn from(code: RejectionCode) -> Self {
+        Self::Szamlazz(String::from(code))
     }
 }
 
