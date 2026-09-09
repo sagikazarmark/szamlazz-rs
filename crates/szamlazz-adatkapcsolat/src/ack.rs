@@ -71,7 +71,7 @@ pub enum InvoiceDirection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct InvoiceAck {
-    id: Option<i32>,
+    id: Option<i64>,
     registration_number: Option<String>,
     control: Option<ControlCode>,
 }
@@ -83,7 +83,7 @@ impl InvoiceAck {
     /// invoice's [`info.id`](crate::InvoiceInfo::id). Under the `axum` router
     /// it is overridden, because a successful Ack must echo the pushed id
     /// whatever a handler supplied ([`for_document`](Self::for_document)).
-    pub fn accept(id: i32) -> Self {
+    pub fn accept(id: i64) -> Self {
         Self {
             id: Some(id),
             registration_number: None,
@@ -118,7 +118,7 @@ impl InvoiceAck {
     }
 
     /// Decomposes the ack for merging (fan-out).
-    pub(crate) fn parts(&self) -> (Option<i32>, Option<&str>, Option<ControlCode>) {
+    pub(crate) fn parts(&self) -> (Option<i64>, Option<&str>, Option<ControlCode>) {
         (self.id, self.registration_number.as_deref(), self.control)
     }
 
@@ -128,7 +128,7 @@ impl InvoiceAck {
     /// handler-produced Ack; call it yourself when dispatching without it.
     /// Breaking change in 0.4: public, and no longer behind the `axum`
     /// feature.
-    pub fn for_document(mut self, id: i32) -> Self {
+    pub fn for_document(mut self, id: i64) -> Self {
         if self.control.is_some() {
             self.id = None;
             self.registration_number = None;

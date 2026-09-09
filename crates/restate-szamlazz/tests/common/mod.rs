@@ -54,7 +54,7 @@ pub fn http_client() -> reqwest::Client {
 /// otherwise: the `id` of the seller block as szamlazz.hu prints it in a query body
 /// (972720 on the test account). Wire realism only: the worker holds no
 /// account pin, and a test that renders another value asserts exactly that.
-pub const SUPPLIER: u64 = 972_720;
+pub const SUPPLIER: i64 = 972_720;
 
 /// The `telj` every document carries unless a test says otherwise: the
 /// fulfillment date a storno of it must repeat.
@@ -88,7 +88,7 @@ pub struct Doc<'a> {
     pub test: Option<bool>,
     /// `szallito/id`: the `id` of the seller block (`<szallito>`).
     /// Parsed, compared with nothing.
-    pub supplier_id: u64,
+    pub supplier_id: i64,
     /// `<sztornozott>true</sztornozott>`: the document is reversed (as
     /// observed); `false` renders no element, as on a live document and on
     /// the storno invoice itself.
@@ -100,7 +100,7 @@ pub struct Doc<'a> {
     /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `1` (paper) on
     /// anything else. szamlazz.hu reports `1` for a default create and `3`
     /// for one created with `eszamla=true`; `2` was never observed (#73).
-    pub eszamla: Option<i32>,
+    pub eszamla: Option<i64>,
     /// `kelt`; `None` renders no element.
     pub issue_date: Option<Date>,
     /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.

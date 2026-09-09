@@ -31,6 +31,22 @@
 //! logic; with the `axum` feature, `axum::router` wires everything (key check
 //! included) into a ready `Router`.
 //!
+//! # Integer widths
+//!
+//! Every integer element of a pushed document (`xs:int`, `xs:integer` and
+//! `xs:long` in the four schemas: an invoice's `alap/id`, `gazdEsemAzon`,
+//! `forras`, the parties' `id` and `lokacio`, an item's `sztetordering`, a
+//! credit entry's `banktranzid`, a financial item's `afalevon`, a bank
+//! transaction's `id`, a receipt's `alap/id`, and the [`InvoiceAppearance`]
+//! code of `eszamla`) is an `i64`, signed and wide, whatever the schema's
+//! declared width: the schema is szamlazz.hu's description of its own output
+//! and has been wrong about presence before, so the reader does not bet on a
+//! width either, and one width means a consumer of both this crate and
+//! `szamlazz-agent` (which models the same `<szamla>` from the same schema
+//! and follows the same rule) compares ids without a cast. An identity
+//! element that is not an integer at all is still a shape error. The
+//! [`InvoiceAck`] echoes the id at the same width.
+//!
 //! # Quick start
 //!
 //! Parse the pushed body and dispatch on its root element:

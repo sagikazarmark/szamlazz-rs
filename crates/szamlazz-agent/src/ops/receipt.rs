@@ -505,7 +505,7 @@ impl AgentRequest for SendReceipt {
 #[non_exhaustive]
 pub struct Receipt {
     /// Internal szamlazz.hu identifier (`id`).
-    pub id: u64,
+    pub id: i64,
     /// The call identifier supplied at creation (`hivasAzonosito`), if any.
     #[doc(alias = "hivasAzonosito")]
     pub call_id: Option<String>,
@@ -715,7 +715,7 @@ impl From<NyugtaXml> for Receipt {
 
 #[derive(Debug, serde::Deserialize)]
 struct AlapXml {
-    id: u64,
+    id: i64,
     #[serde(
         default,
         rename(deserialize = "hivasAzonosito"),

@@ -44,8 +44,9 @@ pub struct FoundDocument {
     /// identifier, not an account's or a seller's. Read by no handler;
     /// carried so that a journal entry names the document the way
     /// szamlazz.hu's own records do (the same value a create reply's
-    /// `szlahu_id` header carries, [`IssuedDocument::document_id`]).
-    pub document_id: u64,
+    /// `szlahu_id` header carries, [`IssuedDocument::document_id`]). An
+    /// `i64`, the agent crate's width for every XSD integer.
+    pub document_id: i64,
     /// The document number (`szamlaszam`).
     pub number: String,
     /// The document type (`tipus`): `SZ` invoice, `D` proforma, `ES`
@@ -74,8 +75,9 @@ pub struct FoundDocument {
     /// The `eszamla` code as szamlazz.hu reports it: `0` not an invoice (a
     /// proforma), `1` paper, `2`/`3` e-invoice; the agent crate's
     /// [`InvoiceAppearance`] reads it, and [`Self::e_invoice`] is the reading
-    /// the storno handlers take.
-    pub appearance: i32,
+    /// the storno handlers take. An `i64`, the code's width in the agent
+    /// crate.
+    pub appearance: i64,
     /// The issue date (`kelt`).
     pub issue_date: Option<Date>,
     /// The fulfillment date (`telj`): what a storno of this document must
@@ -284,7 +286,7 @@ pub struct IssuedDocument {
     /// the same value a query returns as [`FoundDocument::document_id`];
     /// `None` when the header is absent or not a number. Read by no handler;
     /// carried for the same correlation.
-    pub document_id: Option<u64>,
+    pub document_id: Option<i64>,
     /// The net total (`szamlanetto`).
     pub net_total: Option<Decimal>,
     /// The gross total (`szamlabrutto`).

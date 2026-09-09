@@ -261,7 +261,7 @@ fn escalate(current: Option<ControlCode>, next: Option<ControlCode>) -> Option<C
     }
 }
 
-fn merge_invoice_acks(document_id: i32, acks: &[InvoiceAck]) -> InvoiceAck {
+fn merge_invoice_acks(document_id: i64, acks: &[InvoiceAck]) -> InvoiceAck {
     let mut control = None;
     let mut registration: Option<String> = None;
 

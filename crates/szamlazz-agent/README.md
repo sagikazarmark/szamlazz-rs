@@ -235,6 +235,14 @@ szamlazz.hu verifies every row's arithmetic server-side (net = unit price × qua
 - Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length: a parse failure can be logged as is.
 - A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live".
 - The vocabulary follows the domain: a `kifizetes` registered against an invoice is a *credit entry* (`CreditEntry` out, `RecordedCreditEntry` back, `InvoiceDocument::credit_entries`; its `jogcim` is the `title`, a `PaymentMethod` on both sides), a `stornozott` receipt is *reversed*, and a queried document's `eszamla` is its `appearance` (a code), while the `e_invoice` of a create or storno request is a flag.
+- Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
+
+## Breaking Changes in 0.4
+
+One release, so a consumer pays the migration once. The naming and shape changes of the 2026-09-09 review are listed in [PR #191](https://github.com/sagikazarmark/szamlazz-rs/pull/191) (the verdict envelope, `CreationOutcome`, `try_calculated`, credit entry / reversed / `title` / `appearance`, the typed `DocumentType`, the Rust-convention batch). On top of them, from the integer-width policy (ADR 0010):
+
+- `InvoiceInfo::id`, `Supplier::id`, `BuyerInfo::id`, `InvoiceInfo::economic_event_id`, `InvoiceInfo::source`, `DocumentItem::ordering`, `FinancialItem::deductible_vat`, `RecordedCreditEntry::bank_transaction_id`, `CreatedInvoice::document_id` and `Receipt`'s `id` are `i64` (they were `u64`, `u32` or `i32`).
+- `InvoiceAppearance` carries and returns an `i64` (`Electronic(i64)`, `Unknown(i64)`, `code() -> i64`, `From<i64>`) and serialises as the integer code (`1`), not the string `"1"`; the CLI's `--json` output of a queried invoice changes with it. A JSON string is no longer read back.
 
 ## License
 

@@ -96,7 +96,11 @@ async fn archives_invoice_pdf_and_data_monthly() {
     let value: serde_json::Value = serde_json::from_slice(&json.to_vec()).expect("json");
     assert_eq!(value["info"]["invoice_number"], "2015-123");
     assert_eq!(value["info"]["source"], 34);
-    assert_eq!(value["info"]["e_invoice"], 1);
+    assert_eq!(
+        value["info"]["appearance"], 1,
+        "the code as an integer; `e_invoice` in 0.3"
+    );
+    assert_eq!(value["info"]["document_type"], "SZ", "`kind` in 0.3");
     assert_eq!(value["info"]["kata_ledger"], false);
     assert_eq!(value["info"]["vat_type"], "EU-OSS");
     assert_eq!(value["buyer"]["location"], 1);

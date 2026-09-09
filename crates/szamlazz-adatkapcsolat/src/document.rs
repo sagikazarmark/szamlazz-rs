@@ -379,7 +379,10 @@ fn root_kind(text: &str) -> Result<RootKind, ParseError> {
 ///
 /// Values `2` and `3` both mean e-invoice. Unknown values are retained so a
 /// future protocol extension can be archived and inspected without data loss.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The same enum, width (`i64`) and JSON shape (the integer code) as the
+/// `szamlazz-agent` crate's `InvoiceAppearance`; the two are separate types
+/// by decision (ADR 0010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum InvoiceAppearance {
     /// `0`: the document is not an invoice (for example a proforma).
@@ -403,10 +406,12 @@ impl InvoiceAppearance {
         }
     }
 
-    /// Whether this is one of the documented e-invoice values (`2` or `3`).
+    /// Whether this is an e-invoice: the [`Electronic`](Self::Electronic)
+    /// variant, whatever code it carries (the wire puts only `2` or `3`
+    /// there; a hand-built `Electronic(4)` is an e-invoice too, not a trap).
     #[must_use]
     pub fn is_e_invoice(self) -> bool {
-        matches!(self, Self::Electronic(2 | 3))
+        matches!(self, Self::Electronic(_))
     }
 }
 
@@ -554,7 +559,7 @@ pub struct Party {
         rename(deserialize = "lokacio"),
         deserialize_with = "de::empty_as_none"
     )]
-    pub location: Option<i32>,
+    pub location: Option<i64>,
     /// Whether the buyer is a private individual (`privatePersonIndicator`).
     #[serde(
         default,
@@ -624,10 +629,11 @@ pub struct Bank {
 #[non_exhaustive]
 pub struct InvoiceInfo {
     /// The document id (`id`): this is the value an [`InvoiceAck`] must
-    /// echo.
+    /// echo. An `i64` like every integer of a pushed document (the crate's
+    /// [integer-width policy](crate#integer-widths)); it was an `i32` in 0.3.
     ///
     /// [`InvoiceAck`]: crate::InvoiceAck
-    pub id: i32,
+    pub id: i64,
     /// Invoice number (`szamlaszam`). With [`id`](Self::id) the identity of
     /// the pushed document: the one element besides the id
     /// [`Document::parse`] requires, so a push without it is a shape error.
@@ -659,18 +665,25 @@ pub struct InvoiceInfo {
         deserialize_with = "de::empty_string_as_none"
     )]
     pub registration_number: Option<String>,
-    /// Document type code (`tipus`), e.g. `SZ`, `SS`, `D`.
+    /// Document type code (`tipus`): `SZ` invoice, `D` proforma, `ES`
+    /// prepayment invoice, `VS` final invoice, `HS` corrective, `SS` storno,
+    /// `SL` delivery note. Kept as the wire token (the `szamlazz-agent`
+    /// crate's `DocumentType` is the typed reading; the two crates share the
+    /// vocabulary, not the type: ADR 0010). Named `kind` in 0.3.
+    #[doc(alias = "tipus")]
     #[serde(default, rename(deserialize = "tipus"))]
-    pub kind: Option<String>,
+    pub document_type: Option<String>,
     /// Document appearance (`eszamla`): `0` not an invoice, `1` paper, and
-    /// `2`/`3` e-invoice. Unknown integer values are preserved.
+    /// `2`/`3` e-invoice. Unknown integer values are preserved. Named
+    /// `e_invoice` in 0.3; it is a code, not a flag.
     #[doc(alias = "e-számla")]
+    #[doc(alias = "eszamla")]
     #[serde(
         default,
         rename(deserialize = "eszamla"),
         deserialize_with = "de::opt_invoice_appearance"
     )]
-    pub e_invoice: Option<InvoiceAppearance>,
+    pub appearance: Option<InvoiceAppearance>,
     /// The invoice this one reverses or corrects (`hivszamlaszam`).
     #[serde(default, rename(deserialize = "hivszamlaszam"))]
     pub referenced_invoice_number: Option<String>,
@@ -1193,8 +1206,8 @@ impl InvoiceDocument {
             self.info.economic_event_id.as_ref(),
             "invoice alap/gazdEsemAzon",
         )?;
-        required_text(self.info.kind.as_deref(), "invoice alap/tipus")?;
-        required(self.info.e_invoice.as_ref(), "invoice alap/eszamla")?;
+        required_text(self.info.document_type.as_deref(), "invoice alap/tipus")?;
+        required(self.info.appearance.as_ref(), "invoice alap/eszamla")?;
         required(self.info.issue_date.as_ref(), "invoice alap/kelt")?;
         required(self.info.fulfillment_date.as_ref(), "invoice alap/telj")?;
         required(self.info.due_date.as_ref(), "invoice alap/fizh")?;
@@ -1415,9 +1428,10 @@ pub struct BankTransaction {
         deserialize_with = "de::opt_transaction_direction"
     )]
     pub direction: Option<TransactionDirection>,
-    /// Transaction type (`tipus`).
+    /// Transaction type (`tipus`). Named `kind` in 0.3.
+    #[doc(alias = "tipus")]
     #[serde(default, rename(deserialize = "tipus"))]
-    pub kind: Option<String>,
+    pub transaction_type: Option<String>,
     /// Technical (non-business) transaction flag (`technikai`).
     #[serde(
         default,
@@ -1493,10 +1507,11 @@ pub struct ReceiptInfo {
     #[doc(alias = "nyugtaszám")]
     #[serde(default, rename(deserialize = "nyugtaszam"))]
     pub receipt_number: Option<String>,
-    /// Receipt type (`tipus`): `NY` receipt, `SN` reversal. Unknown codes
-    /// are preserved.
+    /// Receipt type (`tipus`): `NY` receipt, `SN` storno receipt. Unknown
+    /// codes are preserved. Named `kind` in 0.3.
+    #[doc(alias = "tipus")]
     #[serde(default, rename(deserialize = "tipus"))]
-    pub kind: Option<String>,
+    pub document_type: Option<String>,
     /// Whether the receipt has been reversed (`stornozott`).
     #[serde(
         default,
@@ -1723,7 +1738,7 @@ impl ReceiptBatch {
                 receipt.info.receipt_number.as_deref(),
                 "receipt alap/nyugtaszam",
             )?;
-            required_text(receipt.info.kind.as_deref(), "receipt alap/tipus")?;
+            required_text(receipt.info.document_type.as_deref(), "receipt alap/tipus")?;
             required(receipt.info.reversed.as_ref(), "receipt alap/stornozott")?;
             required(receipt.info.issue_date.as_ref(), "receipt alap/kelt")?;
             required_text(
@@ -2130,7 +2145,7 @@ mod tests {
         else {
             panic!("expected receipt batch");
         };
-        assert_eq!(batch.receipts[0].info.kind.as_deref(), Some("XX"));
+        assert_eq!(batch.receipts[0].info.document_type.as_deref(), Some("XX"));
     }
 
     #[test]

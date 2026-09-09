@@ -35,7 +35,7 @@ pub struct CreatedInvoice {
     /// [`economic_event_id`](crate::ops::query_xml::InvoiceInfo::economic_event_id).
     /// A document identifier, not an account or supplier identifier. `None`
     /// when the header is absent or not a number.
-    pub document_id: Option<u64>,
+    pub document_id: Option<i64>,
     /// Net total (`szamlanetto`).
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
@@ -274,10 +274,14 @@ fn nonblank_invoice_number(value: &str) -> Option<InvoiceNumber> {
 /// Lenient on purpose: the identifier is auxiliary, and a successful issuance
 /// must never be reported as a parse failure because of it. An absent, blank,
 /// or non-numeric header is `None`.
-fn parse_document_id_header(response: &RawResponse) -> Option<u64> {
+/// The `szlahu_id` header, szamlazz.hu's id of the issued document (`alap/id`
+/// on a query), read leniently: it is auxiliary, so a blank, malformed or
+/// negative value (an id is never negative) is `None`, never a failure.
+fn parse_document_id_header(response: &RawResponse) -> Option<i64> {
     response
         .header("szlahu_id")
-        .and_then(|value| value.trim().parse().ok())
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|id| *id >= 0)
 }
 
 fn parse_decimal(value: &str, field: &'static str) -> Result<Decimal, ParseError> {

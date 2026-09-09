@@ -89,6 +89,8 @@ One release, so a receiver pays the migration once:
 - `Handler::Error` and `KeyResolver::Error` are bound by `std::error::Error` where they were bound by `Display`; `String` no longer qualifies, `std::convert::Infallible` and any `thiserror` type do. `HandlerFailure::error` is the member's boxed error (`BoxError`), not a `String`.
 - `Fanout::with` requires the member's `Error` to be `'static`, and `Send + Sync` on native targets (not on `wasm32`).
 - `InvoiceAck::for_document` is public and no longer behind the `axum` feature.
+- The integer-width policy (ADR 0010): every integer of a pushed document is an `i64`, so `InvoiceInfo::id` and `Party::location` are `i64` (they were `i32`), and `InvoiceAck::accept` / `for_document` take an `i64`. `InvoiceAppearance::is_e_invoice` is the `Electronic` variant, whatever code it carries.
+- The English names of two wire elements follow the workspace's vocabulary: `InvoiceInfo::kind` is `document_type` and `InvoiceInfo::e_invoice` is `appearance` (a code, not a flag); `BankTransaction::kind` is `transaction_type`, `ReceiptInfo::kind` is `document_type`. The archived JSON carries the new keys.
 
 ## Archiving
 

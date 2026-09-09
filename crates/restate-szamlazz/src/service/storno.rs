@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn the_storno_intent_lifts_eszamla_from_the_original_not_the_default() {
         let mut account = Account::new("acct", "acct");
-        let intent = |eszamla: i32, account: &Account| {
+        let intent = |eszamla: i64, account: &Account| {
             StornoIntent::from_verified(
                 &Doc {
                     eszamla: Some(eszamla),

@@ -28,7 +28,7 @@ fn parses_outgoing_invoice_fixture() {
     assert!(!invoice.items.is_empty());
     assert_eq!(invoice.info.source, Some(34));
     assert_eq!(invoice.info.registration_number, None);
-    assert_eq!(invoice.info.e_invoice, Some(InvoiceAppearance::Paper));
+    assert_eq!(invoice.info.appearance, Some(InvoiceAppearance::Paper));
     assert_eq!(invoice.info.kata_ledger, Some(false));
     assert!(invoice.info.email.is_some());
     assert_eq!(invoice.buyer.location, Some(1));
@@ -75,12 +75,38 @@ fn preserves_all_invoice_appearance_codes() {
             &format!("<eszamla>{code}</eszamla>"),
         );
         let invoice = outgoing(&body).expect("parse");
-        assert_eq!(invoice.info.e_invoice, Some(expected));
+        assert_eq!(invoice.info.appearance, Some(expected));
         assert_eq!(
-            invoice.info.e_invoice.map(InvoiceAppearance::code),
+            invoice.info.appearance.map(InvoiceAppearance::code),
             Some(code)
         );
+        assert_eq!(
+            expected.is_e_invoice(),
+            matches!(expected, InvoiceAppearance::Electronic(_)),
+            "e-invoice is the variant"
+        );
     }
+    assert!(InvoiceAppearance::Electronic(4).is_e_invoice());
+}
+
+/// The integer-width policy: every integer of a pushed document is an `i64`,
+/// so an id past `i32::MAX` (the XSD says `int`; the reader does not bet on
+/// it) is the record's identity, not a shape error, and the Ack echoes it.
+#[test]
+fn ids_are_i64_and_echo_through_the_ack() {
+    let id: i64 = i64::from(i32::MAX) + 1;
+    let body = with(
+        OUTGOING_INVOICE,
+        "<id>123456</id>",
+        &format!("<id>{id}</id>"),
+    );
+    let invoice = outgoing(&body).expect("parse");
+    assert_eq!(invoice.info.id, id);
+    let ack = szamlazz_adatkapcsolat::InvoiceAck::accept(invoice.info.id)
+        .to_xml(szamlazz_adatkapcsolat::InvoiceDirection::Outgoing)
+        .expect("ack");
+    let ack = String::from_utf8(ack).expect("utf-8");
+    assert!(ack.contains(&format!("<id>{id}</id>")), "{ack}");
 }
 
 #[test]
@@ -302,8 +328,8 @@ fn identity_only_invoice_parses_with_every_other_field_absent() {
     assert_eq!(invoice.info.id, 123_456);
     assert_eq!(invoice.info.invoice_number, "2015-123");
     assert_eq!(invoice.info.issue_date, None);
-    assert_eq!(invoice.info.kind, None);
-    assert_eq!(invoice.info.e_invoice, None);
+    assert_eq!(invoice.info.document_type, None);
+    assert_eq!(invoice.info.appearance, None);
     assert_eq!(invoice.info.test, None);
     assert_eq!(invoice.supplier.name, None);
     assert_eq!(invoice.supplier.id, None);
@@ -863,7 +889,7 @@ fn identity_only_receipt_parses_with_every_other_field_absent() {
     let receipt = &batch.receipts[0];
     assert_eq!(receipt.info.id, 1);
     assert_eq!(receipt.info.receipt_number, None);
-    assert_eq!(receipt.info.kind, None);
+    assert_eq!(receipt.info.document_type, None);
     assert_eq!(receipt.info.issue_date, None);
     assert!(receipt.items.is_empty());
     assert!(receipt.totals.grand.is_none());

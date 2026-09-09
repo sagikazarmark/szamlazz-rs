@@ -6,6 +6,25 @@
 //! journaling or caching) independently of the XML schema. The wire mapping
 //! (Hungarian element names, list wrappers, lenient empty-element handling)
 //! lives in the private `*Xml` structs after the [`AgentRequest`] impl.
+//!
+//! # Integer widths
+//!
+//! Every integer element of a queried document (`xs:int`, `xs:integer` and
+//! `xs:long` in `szamla.xsd`: `alap/id`, `gazdEsemAzon`, `forras`,
+//! `szallito/id`, `vevo/id`, `lokacio`, `sztetordering`, `afalevon`,
+//! `banktranzid`, and the [`InvoiceAppearance`] code of `eszamla`) is an
+//! `i64`, signed and wide, whatever the schema's declared width: the schema
+//! is szamlazz.hu's own description of its output and has been wrong about
+//! presence before, so the reader does not bet on a width either, and one
+//! width means a consumer of both this crate and `szamlazz-adatkapcsolat`
+//! (which models the same `<szamla>` from the same schema and follows the
+//! same rule) compares ids without a cast. Request-side counts
+//! (`download_copies`, a waybill's `parcel_count`) are not covered: they
+//! are the caller's numbers, typed as narrowly as the writer can range-check
+//! them. The `szlahu_id` header of a create reply, the same id, is read to
+//! the same `i64` ([`CreatedInvoice::document_id`]).
+//!
+//! [`CreatedInvoice::document_id`]: crate::ops::invoice::CreatedInvoice::document_id
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -106,7 +125,7 @@ pub struct Bank {
 #[non_exhaustive]
 pub struct Supplier {
     /// Internal szamlazz.hu identifier (`id`).
-    pub id: Option<u64>,
+    pub id: Option<i64>,
     /// Name (`nev`).
     pub name: String,
     /// Billing address (`cim`).
@@ -132,7 +151,12 @@ pub struct Supplier {
 /// invoice, 2: e-invoice, 3: e-invoice") and was confirmed against a test
 /// account: an invoice created with `<eszamla>true</eszamla>` is queried back
 /// as `3`, one created with `false` as `1`; `2` was not observed there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The code is an `i64` like every XSD integer of a queried document (the
+/// crate's [integer-width policy](self#integer-widths)), and serialises as
+/// the integer it is (`1`, never `"1"`), the same shape the
+/// `szamlazz-adatkapcsolat` crate's twin has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum InvoiceAppearance {
     /// `0`: the document is not an invoice, for example a proforma.
@@ -142,15 +166,15 @@ pub enum InvoiceAppearance {
     Paper,
     /// `2` or `3`: e-invoice, retaining the exact code. A create with
     /// `eszamla` `true` was observed to issue `3`.
-    Electronic(i32),
+    Electronic(i64),
     /// Any future integer code.
-    Unknown(i32),
+    Unknown(i64),
 }
 
 impl InvoiceAppearance {
     /// Returns the exact integer received from szamlazz.hu.
     #[must_use]
-    pub fn code(self) -> i32 {
+    pub fn code(self) -> i64 {
         match self {
             Self::NotInvoice => 0,
             Self::Paper => 1,
@@ -170,8 +194,8 @@ impl InvoiceAppearance {
 /// the one way to an [`InvoiceAppearance`] a wire value maps to
 /// (`Electronic` carries `2` or `3` from here; a code built by hand carries
 /// whatever it was built with).
-impl From<i32> for InvoiceAppearance {
-    fn from(code: i32) -> Self {
+impl From<i64> for InvoiceAppearance {
+    fn from(code: i64) -> Self {
         match code {
             0 => Self::NotInvoice,
             1 => Self::Paper,
@@ -183,17 +207,15 @@ impl From<i32> for InvoiceAppearance {
 
 impl serde::Serialize for InvoiceAppearance {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.code().to_string())
+        serializer.serialize_i64(self.code())
     }
 }
 
+/// The integer, from JSON (`1`) or from the element text of the queried XML
+/// (`<eszamla>1</eszamla>`), which quick-xml parses as one.
 impl<'de> serde::Deserialize<'de> for InvoiceAppearance {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let code: i32 = <String as serde::Deserialize>::deserialize(deserializer)?
-            .trim()
-            .parse()
-            .map_err(serde::de::Error::custom)?;
-        Ok(Self::from(code))
+        i64::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -205,14 +227,14 @@ impl<'de> serde::Deserialize<'de> for InvoiceAppearance {
 #[non_exhaustive]
 pub struct InvoiceInfo {
     /// Internal szamlazz.hu identifier (`id`).
-    pub id: u64,
+    pub id: i64,
     /// The invoice number (`szamlaszam`).
     pub invoice_number: InvoiceNumber,
     /// Economic-event identifier (`gazdEsemAzon`).
     #[doc(alias = "gazdEsemAzon")]
-    pub economic_event_id: Option<u64>,
+    pub economic_event_id: Option<i64>,
     /// Source system code (`forras`) for externally issued invoices.
-    pub source: Option<u32>,
+    pub source: Option<i64>,
     /// Registration number (`iktatoszam`).
     pub registration_number: Option<String>,
     /// Document type (`tipus`): an invoice, a proforma, a storno, …; a code
@@ -336,7 +358,7 @@ pub struct BuyerLedgerInfo {
 #[non_exhaustive]
 pub struct BuyerInfo {
     /// Internal szamlazz.hu identifier (`id`).
-    pub id: Option<u64>,
+    pub id: Option<i64>,
     /// Name (`nev`).
     pub name: String,
     /// Partner identifier (`azonosito`).
@@ -396,7 +418,7 @@ pub struct DocumentItem {
     /// Row comment (`megjegyzes`).
     pub comment: Option<String>,
     /// Stable item ordering (`sztetordering`).
-    pub ordering: Option<u32>,
+    pub ordering: Option<i64>,
     /// Item ledger metadata (`fokonyv`).
     pub ledger: Option<DocumentItemLedger>,
 }
@@ -455,7 +477,7 @@ pub struct FinancialItem {
     /// Settlement period end (`elszdatig`).
     pub settlement_to: Option<Date>,
     /// Deductible VAT percentage (`afalevon`).
-    pub deductible_vat: i32,
+    pub deductible_vat: i64,
     /// Labels (`cimkek`).
     pub labels: Vec<String>,
 }
@@ -489,7 +511,7 @@ pub struct RecordedCreditEntry {
     /// Bank account the amount arrived on (`bankszamlaszam`).
     pub bank_account: Option<String>,
     /// Bank transaction identifier (`banktranzid`).
-    pub bank_transaction_id: Option<u64>,
+    pub bank_transaction_id: Option<i64>,
     /// Exchange rate used for the credit entry (`devizaarf`).
     pub exchange_rate: Option<Decimal>,
 }
@@ -626,7 +648,7 @@ impl From<BankXml> for Bank {
 #[derive(Debug, serde::Deserialize)]
 struct SzallitoXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    id: Option<u64>,
+    id: Option<i64>,
     nev: String,
     cim: CimXml,
     #[serde(default)]
@@ -660,16 +682,16 @@ impl From<SzallitoXml> for Supplier {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, serde::Deserialize)]
 struct AlapXml {
-    id: u64,
+    id: i64,
     szamlaszam: InvoiceNumber,
     #[serde(
         rename(deserialize = "gazdEsemAzon"),
         default,
         deserialize_with = "xml::de::empty_as_none"
     )]
-    gazd_esem_azon: Option<u64>,
+    gazd_esem_azon: Option<i64>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    forras: Option<u32>,
+    forras: Option<i64>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     iktatoszam: Option<String>,
     tipus: DocumentType,
@@ -819,7 +841,7 @@ impl From<VevoFokonyvXml> for BuyerLedgerInfo {
 #[derive(Debug, serde::Deserialize)]
 struct VevoXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    id: Option<u64>,
+    id: Option<i64>,
     nev: String,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     azonosito: Option<String>,
@@ -896,7 +918,7 @@ struct TetelXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     megjegyzes: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    sztetordering: Option<u32>,
+    sztetordering: Option<i64>,
     #[serde(default)]
     fokonyv: Option<TetelFokonyvXml>,
 }
@@ -974,7 +996,7 @@ struct QutetXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     elszdatig: Option<Date>,
     #[serde(deserialize_with = "xml::de::from_text")]
-    afalevon: i32,
+    afalevon: i64,
     #[serde(default)]
     cimkek: CimkekXml,
 }
@@ -1020,7 +1042,7 @@ struct KifizetesXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     bankszamlaszam: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    banktranzid: Option<u64>,
+    banktranzid: Option<i64>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     devizaarf: Option<Decimal>,
 }
@@ -1378,7 +1400,7 @@ mod tests {
 
         let json = serde_json::to_value(&document).expect("serialize");
         assert_eq!(json["info"]["invoice_number"], "INV-1");
-        assert_eq!(json["info"]["appearance"], "3");
+        assert_eq!(json["info"]["appearance"], 3, "the code as an integer");
         assert_eq!(json["info"]["document_type"], "E");
         assert_eq!(json["info"]["currency"], "EUR");
         assert_eq!(json["credit_entries"][0]["title"], "transfer");
@@ -1454,14 +1476,29 @@ mod tests {
         assert!(!document.info.appearance.is_e_invoice());
     }
 
+    /// The appearance is its integer code in JSON (the same shape as the
+    /// `szamlazz-adatkapcsolat` crate's), and every code round-trips: the
+    /// three named ones, both e-invoice codes, and one the crate does not
+    /// know.
     #[test]
     fn invoice_appearance_round_trips_as_json_code() {
-        let appearance = InvoiceAppearance::Electronic(2);
-        let json = serde_json::to_string(&appearance).expect("serialize");
-        assert_eq!(json, "\"2\"");
-        assert_eq!(
-            serde_json::from_str::<InvoiceAppearance>(&json).expect("deserialize"),
-            appearance
+        for (appearance, code) in [
+            (InvoiceAppearance::NotInvoice, 0),
+            (InvoiceAppearance::Paper, 1),
+            (InvoiceAppearance::Electronic(2), 2),
+            (InvoiceAppearance::Electronic(3), 3),
+            (InvoiceAppearance::Unknown(9), 9),
+        ] {
+            let json = serde_json::to_string(&appearance).expect("serialize");
+            assert_eq!(json, code.to_string(), "{appearance:?}");
+            assert_eq!(
+                serde_json::from_str::<InvoiceAppearance>(&json).expect("deserialize"),
+                appearance
+            );
+        }
+        assert!(
+            serde_json::from_str::<InvoiceAppearance>("\"2\"").is_err(),
+            "the 0.3 string form is not read back"
         );
     }
 
