@@ -5,7 +5,7 @@
 //! 1.7.8), recorded as [`Retries`]; the watch ends as soon as it observes the
 //! invocation completed.
 //!
-//! The sampling decision (the [`Sampler`] behind [`Watch`]) is a pure function
+//! The sampling decision (the sampler behind [`Watch`]) is a pure function
 //! of the rows, tested here without a server.
 
 use std::time::Duration;
