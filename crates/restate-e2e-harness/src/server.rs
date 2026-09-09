@@ -24,7 +24,7 @@ use restate_sdk::prelude::{Endpoint, HttpServer};
 use serde_json::Value;
 
 use crate::admin::{Admin, poll_until};
-use crate::gate::{Feature, ServerSpec};
+use crate::gate::{Feature, SPAWNED_ENDPOINT_HOST, ServerSpec};
 use crate::ingress::{Call, Reply};
 use crate::plain_http;
 
@@ -432,17 +432,19 @@ impl Restate {
     /// `http://{endpoint_host}:{port}` with `force: true`, retried until the
     /// admin API accepts it. Repeatable: a new URI is a new revision of the
     /// services it binds, and new invocations route to it, so a redeploy is a
-    /// second call. Bound to the loopback for a spawned server, which is on
-    /// the loopback itself; on every interface for a reused one, which may be
-    /// a container reaching back to this host (the endpoint has no identity
-    /// key, so it is offered to the network only where the server needs it).
+    /// second call. Bound to the loopback when the server reaches this process
+    /// there (a spawned server without a `RESTATE_ENDPOINT_HOST` override); on
+    /// every interface otherwise (a reused server, which may be a container
+    /// reaching back to this host, or a spawned one told to reach the endpoint
+    /// by another address). The endpoint has no identity key, so it is offered
+    /// to the network only where the server needs it.
     ///
     /// Served with `serve_with_cancel` over a future that never completes
     /// rather than the SDK's `serve`, whose shutdown future is `ctrl_c()`: the
     /// harness owns SIGINT (it stops the servers it started and exits), and an
     /// endpoint that installed its own handler per deployment would race it.
     pub async fn deploy(&self, endpoint: Endpoint) -> Deployment {
-        let bind = if self.process.is_some() {
+        let bind = if self.endpoint_host == SPAWNED_ENDPOINT_HOST {
             "127.0.0.1:0"
         } else {
             "0.0.0.0:0"
@@ -561,7 +563,7 @@ impl Drop for Restate {
 pub struct Deployment {
     /// The URI the server was given (`http://{endpoint_host}:{port}`).
     pub uri: String,
-    /// The port the endpoint listens on: on the loopback for a spawned
-    /// server, on every interface of this host for a reused one.
+    /// The port the endpoint listens on: on the loopback when the server
+    /// reaches it there, on every interface of this host otherwise.
     pub port: u16,
 }

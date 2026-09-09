@@ -114,7 +114,7 @@ pub use admin::{Admin, Target, sql_literal};
 pub use gate::{Feature, Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::{Call, Mode, Reply};
 pub use introspection::{Handler, Invocation, JournalEntry, run_result};
-pub use run_names::{RunPath, RunPatterns, Table, Violations, Walked, is_prefix_of_path};
+pub use run_names::{RunPath, Table, Violations, Walked};
 #[cfg(unix)]
 pub use server::{Deployment, Restate};
 pub use watch::{Retries, Watch};

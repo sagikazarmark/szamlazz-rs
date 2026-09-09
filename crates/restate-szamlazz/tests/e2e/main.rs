@@ -52,7 +52,8 @@
 //! its scenarios **concurrently**, unscoped: every scenario owns its order
 //! keys, numbers and `Idempotency-Key`s, every stub is mounted once and
 //! discriminated by them, nothing is reset between scenarios, and every
-//! scenario's failure is reported (a panic in one does not hide the rest). The
+//! scenario's failure is reported (a panic in one does not hide the rest, and
+//! the run goes on to the second phase). The
 //! second performs the documented single → multi **flag day** (private,
 //! drain, register the **multi-account** deployment (two accounts, reachable
 //! by scope only, behind a test-local mutable resolver and store), public;
@@ -138,11 +139,13 @@ impl Concurrently {
     /// Joins every scenario, then verifies every mock the scenarios mounted
     /// (`expect(n)`; wiremock checks the counts on `verify`, which panics
     /// naming the mock, so it runs as a task of its own and its failure is one
-    /// more line); panics naming each scenario that failed, with its panic
-    /// message, and the expectations that were not met. Verified here, not at
-    /// the flag day's `reset`, so a failed scenario cannot hide another's
-    /// unmet expectation, and so the report is phase 1's.
-    async fn join_all(mut self, h: &Arc<Harness>) {
+    /// more line). The failures, each naming its scenario with its panic
+    /// message, or the expectations that were not met: the run goes on to
+    /// phase 2 and the checks and reports them all together
+    /// ([`Sequentially::finish`]). Verified here, not at the flag day's
+    /// `reset`, so a failed scenario cannot hide another's unmet expectation,
+    /// and so the report is phase 1's.
+    async fn join_all(mut self, h: &Arc<Harness>) -> Vec<String> {
         let mut failures = Vec::new();
         while let Some(joined) = self.set.join_next_with_id().await {
             match joined {
@@ -165,12 +168,7 @@ impl Concurrently {
         } else {
             eprintln!("[phase 1] wiremock expectations: pass");
         }
-        assert!(
-            failures.is_empty(),
-            "{} phase-1 scenario(s) failed:\n  {}",
-            failures.len(),
-            failures.join("\n  ")
-        );
+        failures
     }
 }
 
@@ -262,6 +260,26 @@ fn report_skipped(phase: &str, skipped: &[&str]) {
     }
 }
 
+/// What a sequential step of the run is: a phase-2 scenario, or one of the
+/// run-wide checks. The difference decides what a failure does: a failed
+/// scenario resets the mock so the next starts clean and makes the checks'
+/// counts suspect; a failed check mounts nothing and resets nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Scenario,
+    Check,
+}
+
+impl Step {
+    /// The tag a report line carries.
+    fn phase(self) -> &'static str {
+        match self {
+            Self::Scenario => "phase 2",
+            Self::Check => "checks",
+        }
+    }
+}
+
 /// The scenarios of phase 2 and the run-wide checks, run one after another
 /// on one harness: each as a task of its own, so a panic in one is a
 /// `JoinError` recorded under the scenario's name and the next scenario runs;
@@ -277,11 +295,13 @@ struct Sequentially {
 }
 
 impl Sequentially {
-    fn new(h: Arc<Harness>) -> Self {
+    /// The collector after phase 1, carrying its `failures` (a failed phase-1
+    /// scenario makes the checks' counts suspect too).
+    fn after_phase_1(h: Arc<Harness>, failures: Vec<String>) -> Self {
         Self {
             h,
-            failures: Vec::new(),
-            a_scenario_failed: false,
+            a_scenario_failed: !failures.is_empty(),
+            failures,
         }
     }
 
@@ -289,24 +309,25 @@ impl Sequentially {
     /// a failed scenario the mock is reset **without** verifying its
     /// expectations (the failed scenario's unmet `expect(n)` would otherwise
     /// be blamed on the next scenario's `reset`), and said so; a failed
-    /// run-wide check (`phase == "checks"`) mounts nothing and resets nothing.
+    /// run-wide check mounts nothing and resets nothing.
     async fn run(
         &mut self,
-        phase: &str,
+        step: Step,
         name: &'static str,
         scenario: impl Future<Output = ()> + Send + 'static,
     ) {
+        let phase = step.phase();
         match tokio::spawn(scenario).await {
             Ok(()) => eprintln!("[{phase}] {name}: pass"),
             Err(error) => {
                 eprintln!("[{phase}] {name}: FAIL");
-                let suspect = if phase == "checks" && self.a_scenario_failed {
+                let suspect = if step == Step::Check && self.a_scenario_failed {
                     " (an earlier scenario failed; the run-wide counts are suspect)"
                 } else {
                     ""
                 };
                 self.failures.push(format!("{name}{suspect}: {error}"));
-                if phase != "checks" {
+                if step == Step::Scenario {
                     self.a_scenario_failed = true;
                     self.h.mock.reset().await;
                     eprintln!(
@@ -318,20 +339,20 @@ impl Sequentially {
         }
     }
 
-    /// Runs `scenarios` in order under `phase`.
-    async fn run_all(&mut self, phase: &str, scenarios: Vec<Scenario>) {
+    /// Runs `scenarios` in order, each as a `step`.
+    async fn run_all(&mut self, step: Step, scenarios: Vec<Scenario>) {
         for (name, scenario) in scenarios {
             let h = Arc::clone(&self.h);
-            self.run(phase, name, scenario(h)).await;
+            self.run(step, name, scenario(h)).await;
         }
     }
 
-    /// Panics naming each scenario and check that failed, with its panic
-    /// message.
+    /// Panics naming each scenario and check of the run that failed, with its
+    /// panic message.
     fn finish(self) {
         assert!(
             self.failures.is_empty(),
-            "{} phase-2 scenario(s) or run-wide check(s) failed:\n  {}",
+            "{} scenario(s) or run-wide check(s) failed:\n  {}",
             self.failures.len(),
             self.failures.join("\n  ")
         );
@@ -403,7 +424,17 @@ async fn e2e_order_protocol() {
     for (name, scenario) in phase1 {
         run.spawn(name, scenario(Arc::clone(&h)));
     }
-    run.join_all(&h).await;
+    let phase1_failures = run.join_all(&h).await;
+    if !phase1_failures.is_empty() {
+        // As after a failed phase-2 scenario: the flag day's `reset` verifies
+        // the mock, and a failed scenario's unmet expectation was reported
+        // above already; it must not end the run a second time there.
+        h.mock.reset().await;
+        eprintln!(
+            "[phase 1] the mock was reset without verifying its expectations, so phase 2 starts \
+             clean"
+        );
+    }
     let mut h = Arc::try_unwrap(h)
         .ok()
         .expect("every phase-1 scenario has been joined");
@@ -412,37 +443,41 @@ async fn e2e_order_protocol() {
     // failure ends the run; skipped with the whole phase when the filter
     // selects nothing of it), then the multi-account deployment by scope, in
     // sequence (the scenarios script the shared resolver and store), every
-    // failure collected.
+    // failure collected. The run-wide checks, last; run whether or not a
+    // scenario failed, and reported with it; skipped under `E2E_ONLY`, since
+    // they count over the whole run.
+    let checks = scenarios![
+        invariants::the_order_keeps_no_state,
+        invariants::no_agent_key_in_any_journal_of_the_run,
+        invariants::every_handler_journals_its_tabled_steps,
+    ];
     report_skipped("phase 2", &skipped2);
     if phase2.is_empty() {
         eprintln!(
             "[phase 2] multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls: skip \
              (E2E_ONLY selects no phase-2 scenario)"
         );
+        report_skipped("checks", &names_of(&checks));
+        Sequentially::after_phase_1(Arc::new(h), phase1_failures).finish();
         return;
     }
     multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
     eprintln!(
         "[phase 2] multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls: pass"
     );
-    let mut run = Sequentially::new(Arc::new(h));
-    run.run_all("phase 2", phase2).await;
-
-    // The run-wide checks, last; run whether or not a scenario failed, and
-    // reported with it; skipped under `E2E_ONLY`, since they count over the
-    // whole run.
-    let checks = scenarios![
-        invariants::the_order_keeps_no_state,
-        invariants::no_agent_key_in_any_journal_of_the_run,
-        invariants::every_handler_journals_its_tabled_steps,
-    ];
+    let mut run = Sequentially::after_phase_1(Arc::new(h), phase1_failures);
+    run.run_all(Step::Scenario, phase2).await;
     if only.is_some() {
-        let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
-        report_skipped("checks", &names);
+        report_skipped("checks", &names_of(&checks));
     } else {
-        run.run_all("checks", checks).await;
+        run.run_all(Step::Check, checks).await;
     }
     run.finish();
+}
+
+/// The names of `scenarios`.
+fn names_of(scenarios: &[Scenario]) -> Vec<&'static str> {
+    scenarios.iter().map(|(name, _)| *name).collect()
 }
 
 /// The deploy-time canary for protocol v7, provoked: on a server without

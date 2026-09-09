@@ -8,7 +8,7 @@ use rust_decimal::dec;
 use crate::harness::accounts::AGENT_KEYS;
 use crate::harness::run_names::TABLE;
 use crate::harness::szamlazz::{api_error, create_for, not_found, order_query};
-use crate::harness::{Harness, create_body};
+use crate::harness::{Harness, SERVICES, create_body};
 
 /// The sentinel the leak scan must find: planted in phase 1
 /// ([`plant_the_leak_positive_control`]), looked for by
@@ -175,15 +175,12 @@ pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
 /// plain its decision.
 pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {
     let deployed = h.admin().handlers().await;
-    assert!(
-        deployed
-            .iter()
-            .any(|handler| handler.service == "Szamlazz.Order")
-            && deployed
-                .iter()
-                .any(|handler| handler.service == "Szamlazz.Agent"),
-        "both services are registered: {deployed:?}"
-    );
+    for service in SERVICES {
+        assert!(
+            deployed.iter().any(|handler| handler.service == service),
+            "{service} is registered: {deployed:?}"
+        );
+    }
     let journals = h.admin().all_journals().await;
     let invocations = h.admin().all_invocations().await;
     let walked = TABLE

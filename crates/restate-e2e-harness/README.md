@@ -53,8 +53,9 @@ RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness -- --ig
 ```
 
 `RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
-server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback for a spawned server and to
-every interface for a reused one, which may be a container reaching back to the host.
+server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback when the server reaches it
+there (a spawned server, no override) and to every interface otherwise (a reused server may be a container reaching
+back to the host).
 
 ## Example
 

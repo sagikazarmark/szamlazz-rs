@@ -676,7 +676,8 @@ scenarios **concurrently**, unscoped, on one runtime (a `JoinSet`): every scenar
 and `Idempotency-Key`s, every stub is mounted once and discriminated by them (`create_for(order)` matches the
 `<rendelesSzam>` the worker puts on every create, a storno or credit entry by its `<szamlaszam>`, a query by its
 external id or order), nothing is reset between scenarios, every count is per order or per number, and every
-scenario's failure is reported at the end rather than the first one ending the run. Restate's per-key lock makes
+scenario's failure is reported at the end rather than the first one ending the run; the run goes on to phase 2 and
+the checks, whose report then notes that their counts are suspect. Restate's per-key lock makes
 distinct order keys non-interfering. The scenarios: the first create `issued` then `already_issued` then the key
 replayed; a reversal between two executions of the create step; the proforma, the invoice naming it by number and
 `get` reporting it `consumed`; the prepayment invoice under `auto` and by number; the final invoice naming its

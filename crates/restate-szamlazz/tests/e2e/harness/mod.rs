@@ -62,8 +62,8 @@ pub(crate) const MAIN_SERVER: ServerSpec = ServerSpec {
 };
 
 /// The protocol-v7 canary's server: vqueues and scoped Virtual Objects on,
-/// protocol v7 **off**, explicitly (a deployment that forgot the one flag the
-/// scope needs to reach the SDK); `/version` is checked to report it off.
+/// protocol v7 **off**, explicitly (a deployment that forgot the one feature
+/// the scope needs to reach the SDK); `/version` is checked to report it off.
 pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
     name: "canary",
     features: &[
@@ -75,7 +75,7 @@ pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
 };
 
 /// The two Restate services of the worker, as the admin API names them.
-const SERVICES: [&str; 2] = ["Szamlazz.Order", "Szamlazz.Agent"];
+pub(crate) const SERVICES: [&str; 2] = ["Szamlazz.Order", "Szamlazz.Agent"];
 
 /// The `Szamlazz.Order` object `key`, in whatever scope: the suite's keys are
 /// unique across the run, so no scenario watches one key under two scopes.

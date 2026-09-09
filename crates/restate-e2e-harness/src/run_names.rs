@@ -1,9 +1,10 @@
 //! The *step-name table*: a table of the `ctx.run` names every handler
 //! journals, per path ([`RunPath`]), held as a [`Table`] that reads a
 //! journaled name as its pattern ([`Table::pattern`]) and checks a whole run
-//! against the table ([`Table::check`]); the prefix rule alone is
-//! [`is_prefix_of_path`]. The table's rows are the consumer's: they name the
-//! consumer's handlers and steps.
+//! against the table ([`Table::check`]). The table's rows are the consumer's:
+//! they name the consumer's handlers and steps; the patterns
+//! ([`RunPatterns`]) and the prefix rule ([`is_prefix_of_path`]) are the
+//! table's parts, reachable for a consumer that composes its own check.
 //!
 //! A journal replays by name and position. Under in-place re-registration an
 //! in-flight invocation replays the *previous* deployment's entries, so a
@@ -160,12 +161,6 @@ impl Table {
             rows,
             patterns: RunPatterns::of(rows),
         }
-    }
-
-    /// The rows.
-    #[must_use]
-    pub fn rows(&self) -> &'static [RunPath] {
-        self.rows
     }
 
     /// The table's pattern of a journaled run name ([`RunPatterns::pattern`]).
