@@ -231,10 +231,11 @@ corrupt.
 ### Durable step names
 
 Every `ctx.run` of both services, per handler path, in the order the handler journals them. **The authority is the
-run-name pin**: `RUN_NAMES` in the e2e harness (`tests/e2e/harness/run_names.rs`), verified against a live
+step-name table**: `RUN_NAMES` in the e2e harness (`tests/e2e/harness/run_names.rs`), verified against a live
 `sys_journal` whenever the suite runs (§11; CI, on every pull request), and this table follows it: a step added,
-renamed or reordered in the code fails the pin first, and the table is then brought to match, never the other way
-round. The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
+renamed or reordered in the code fails the check first, and the table is then brought to match, never the other way
+round. Under immutable deployments (ADR 0009) the table's diff between two releases is what says whether a stuck
+invocation can be *paused and resumed* on the newer one. The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
 what an `unavailable` fault's message means by "the step". `{kind}` is the document kind the handler issues or reads:
 `proforma | invoice | prepayment | final`, and `corrective` on `correct_invoice`'s lookup and create; `{number}` is an
 invoice number, the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
@@ -822,8 +823,13 @@ own). What a host is responsible for, and what the library cannot do for it:
 - **Shutdown.** Serve through the SDK's `serve_with_cancel` on `SIGTERM` as well as `SIGINT` (the SDK's own `serve`
   waits for `SIGINT` alone, and an unhandled `SIGTERM` ends PID 1 on the spot): accepting stops, open connections get
   the SDK's 10 s connection drain, the process exits 0. An invocation the drain cuts resumes on Restate's next dispatch
-  after the handler's retry interval, query-first (ADR 0004), so a rolling update is safe; a drain-first update (make
-  the services private, wait for `sys_invocation` to settle, register the new revision) is the quieter one.
+  after the handler's retry interval, query-first (ADR 0004), on the **same deployment**, so the process must come
+  back under the same URI (a restart), never be replaced there by other code.
+- **Releases.** A release is a new Restate deployment (ADR 0009): registered under a URI of its own, with the
+  previous release kept running until `restate deployment describe <id> --extra` reports it drained, then removed.
+  Restate routes new invocations to the latest deployment and pins in-flight ones to theirs, so the worker carries no
+  journal compatibility logic. The drain is bounded by the issue policy's `max_duration` plus the read policy's
+  (about 40 minutes with the defaults). `restate deployments register --force` is for local development only.
 - **Go-live.** After a deploy, `Szamlazz.Agent.check_account` under each configured scope (§4), then
   `Szamlazz.Agent.query` a document known to be the account's and read its `test` and seller block: the worker holds no
   account pin (ADR 0006, account-pin amendment), so the right key under the right scope is verified here and nowhere
@@ -972,31 +978,23 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   pause; a store that never answers is bounded per attempt by `CALL_DEADLINE`; and one that recovers within the
   attempts (unavailable, then silent, then the key) answers the credentials it gave after two pauses and one
   deadline.
-- `service::journal` (journal compatibility, ADR 0005 #47): one pinned JSON fixture per variant of every type the
-  services journal as a `ctx.run` result, `Namespace`, `Resolution` (with an `Account` carrying every optional
-  field), `QueryOutcome`, `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`,
-  `DeleteOutcome`, `SetPaymentsOutcome`, `ProbeOutcome`, `TaxpayerOutcome`, under
-  `tests/journal/<type>/<variant>.json`, the document-carrying ones with every element the `szamla` XML can hold
-  (postal addresses, ledger blocks, a financial item, labels, two payments, a PDF) and the taxpayer one with a
-  detailed and a simple address. The generator asserts the JSON the current code writes equals the committed
-  fixture byte for byte and never writes unless `UPDATE_JOURNAL_FIXTURES=1`, which writes missing fixtures and
-  archives a differing one as `<variant>.<n>.json` before writing the new shape; the compatibility test replays
-  every fixture in every directory (current and archived) through the current types, requiring each to decode
-  and re-encode to a superset of itself, and refuses a fixture directory no journaled type claims. The `Journaled`
-  marker trait bounds the run helpers, and each enum's pins name its variants exhaustively, so a new variant
-  fails to compile until pinned. Harness tests cover the superset check and the verify / update / archive
-  behaviour on a scratch directory. The same module's leak guard serialises every variant of every journaled type
-  built around an account whose agent key is a sentinel: the `account` step's entry through the static resolver
-  from configuration carrying the key, `DeleteOutcome::Transport` and `SetPaymentsOutcome::Transport` from a gateway
-  opened with the sentinel credentials against an endpoint that refuses connections, the registry's samples for the
-  rest, and asserts the sentinel is in none of them: the cheap complement to the `assert_not_impl_any!` guard and
-  to the e2e's byte scan, which needs a server.
+- `service::journal` (what a `ctx.run` result may hold; ADR 0009): a sample of every variant of every type the
+  services journal, `Namespace`, `Resolution` (with an `Account` carrying every optional field), `QueryOutcome`,
+  `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`, `DeleteOutcome`, `SetPaymentsOutcome`,
+  `ProbeOutcome`, `TaxpayerOutcome`, the document-carrying ones projected from a `szamla` XML with every element
+  it can hold. Three checks: each round-trips through serde; none carries the agent key (the `account` entry from
+  configuration carrying a sentinel key, `DeleteOutcome::Transport` and `SetPaymentsOutcome::Transport` from a
+  gateway opened with the sentinel credentials against an endpoint that refuses connections: the cheap complement to
+  the `assert_not_impl_any!` guard and to the e2e's byte scan, which needs a server); none carries a `supplier`,
+  `buyer`, `items`, `financial_items`, `labels` or `pdf` key at any depth (the agent crate's own `InvoiceDocument`
+  from the same XML is the positive control). No fixture files and no compatibility test: deployments are
+  immutable, so no entry is decoded by a later release.
 - End to end (`tests/e2e/`, ignored; a Restate server from one of two sources: see "What CI runs" below):
   Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts on `/version` exactly the features the server's flags enable;
   `compose.yaml` matches) + wiremock as szamlazz.hu. The suite is two things (#134): **the sequence test**, one
   scenario per handler path of `RUN_NAMES` proving the steps run in that order under Restate and walking every
-  path in full (the run-name pin's demand, and the floor of the suite: a scenario that is the only walker of a
+  path in full (the step-name table's demand, and the floor of the suite: a scenario that is the only walker of a
   path stays however plain its decision), and **the durable-execution proof**, what only a server can show. The
   decisions a handler takes on a given read are unit tests of `service`; the wire of a step is the gateway's.
   **Phase 1**, the single-account deployment (the static resolver's `[account]`), unscoped, fourteen scenarios run
@@ -1076,14 +1074,13 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   run: the `state` table holding no row for `Szamlazz.Order` after the run's invocations on both deployments (the
   object keeps no state); over every `sys_journal` row of every invocation the server holds (hex-decoded `raw`)
   plus every `sys_invocation.completion_failure`, none of the three agent keys of the run, while the same scan
-  finds the positive control's sentinel; and the **run-name pin**: for every invocation the server holds, the
-  `ctx.run` names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES` (the
-  durable steps of every handler of both services, parametrized names, `verify-storno-{number}`,
-  `taxpayer-{prefix}`, pinned by their prefix), every handler seen is in the table, and every path in the table
-  was walked in full by at least one invocation. The type fixtures pin what an entry holds; this pins which
-  entries a handler writes and in what order, the other half of what an in-flight invocation replays across a
-  deploy (ADR 0005). A renamed, inserted, reordered or dropped step fails here rather than stranding the
-  invocation.
+  finds the positive control's sentinel; and the **step-name table check**: for every invocation the server
+  holds, the `ctx.run` names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES`
+  (the durable steps of every handler of both services, parametrized names, `verify-storno-{number}`,
+  `taxpayer-{prefix}`, matched by their prefix), every handler seen is in the table, and every path in the table
+  was walked in full by at least one invocation. The table is which entries a handler writes and in what order:
+  what Restate's pause-and-resume onto a new deployment replays (ADR 0009). A renamed, inserted, reordered or
+  dropped step fails here, and shows in the table's diff, rather than surprising that resume.
   The harness (`tests/e2e/harness/`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, submits
   without waiting through `/restate/scope/{scope}/send/…`, returns the `x-restate-id` and a parsed fault body,
   reads `sys_journal` (`raw` hex-decoded to bytes, run results are bytes and render as integer arrays in

@@ -76,9 +76,8 @@ Resolution is split so that the *decision* is durable and the *secret* is not.
    the account's bank account or defaults, or a redeploy with a new resolver reaches only new invocations
    (verified: `account_change_between_executions_does_not_reach_the_invocation`). The journaled `Account` is
    visible in the Restate UI for the journal retention period and contains no secret, so that is safe. The
-   type is additive-only, a new field gets `#[serde(default)]`, nothing is renamed or removed, so an old
-   journal replays on new code (since #47 the rule covers every journaled type and is pinned by fixtures;
-   [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md), *Journal compatibility*).
+   type was additive-only until [ADR 0009](0009-immutable-deployments-no-journal-compatibility-contract.md):
+   deployments are immutable, so no entry is decoded by a later release and the rule is gone.
    `unscoped` and `unknown` are journaled and never retried; only the
    resolver's *unavailability* is a retryable error, whose display text never echoes the resolver's own
    message (it becomes `last_failure` on `sys_invocation`).

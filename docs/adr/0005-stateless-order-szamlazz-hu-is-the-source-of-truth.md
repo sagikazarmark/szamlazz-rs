@@ -9,6 +9,11 @@ retype the rule admits (the *Widening* paragraph); amended by #127; every journa
 deliberate break of the pre-go-live window; amended by #125; the registry is complete by mechanism, and after
 go-live an archived fixture of a type still journaled is never deleted: a shape that must break is a new type and
 the old one retired with its directory (the *Completeness by mechanism, and the archive rule* section).
+The three journal amendments (#47, #125, #127) are **superseded by
+[ADR 0009](0009-immutable-deployments-no-journal-compatibility-contract.md)**: deployments are immutable, so an
+in-flight invocation never replays against a later release's code and the journal carries no cross-version
+compatibility contract. The crate-owned projections of #127 stay for the reason that was never about replay
+(nothing a handler does not read, and never the agent key, in an entry the UI shows). The rest of this ADR stands.
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,

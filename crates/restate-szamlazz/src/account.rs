@@ -33,16 +33,14 @@ pub use static_resolver::{
 /// the seller block. The credentials are fetched separately, by
 /// [`Account::credential_ref`], on every handler execution.
 ///
-/// # Journal compatibility
+/// # Journaled
 ///
-/// The type is **additive-only**, like every type the services journal (the
-/// [`gateway`](crate::gateway) module docs state the rule once): a new field
-/// gets a `#[serde(default)]`, and no field is renamed or removed, so a
-/// journaled account written by an earlier version reads back under a later
-/// one. `id` and `credential_ref` are the only required fields. The struct is
-/// `#[non_exhaustive]` for the same reason; build one with [`Account::new`]
-/// and set the rest. Its journaled shape is pinned under
-/// `tests/journal/resolution/`.
+/// The `account` step journals the resolved account, so it is shown in the
+/// Restate UI for the retention period: it carries the credential
+/// *reference*, never the agent key (the [`gateway`](crate::gateway) module
+/// docs state what a journal entry may hold). `id` and `credential_ref` are
+/// the only required fields; the struct is `#[non_exhaustive]`, so build one
+/// with [`Account::new`] and set the rest.
 ///
 /// # No account pin
 ///
@@ -108,8 +106,8 @@ impl Account {
 /// `exchange_rate.bank`; `extra_logo`, `aggregator` and `guardian` are the
 /// account's alone.
 ///
-/// Journaled inside the [`Account`], so
-/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
+/// [`Default::default`]
 /// and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -159,8 +157,8 @@ impl Default for Defaults {
 
 /// The seller (`eladó`) block; the account's own data is used where absent.
 ///
-/// Journaled inside the [`Account`], so
-/// additive-only and `#[non_exhaustive]`: start from [`Default::default`]
+/// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
+/// [`Default::default`]
 /// and set fields.
 ///
 /// Deliberately not the agent crate's [`Seller`], although the fields mirror
@@ -202,7 +200,7 @@ impl SellerConfig {
 /// Settings of the notification email szamlazz.hu sends to buyers.
 ///
 /// Journaled inside the [`Account`] through
-/// [`SellerConfig`], so additive-only and `#[non_exhaustive]`: start from
+/// [`SellerConfig`]; `#[non_exhaustive]`: start from
 /// [`Default::default`] and set fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]

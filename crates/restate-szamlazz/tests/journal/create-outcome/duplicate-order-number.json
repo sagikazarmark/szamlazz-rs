@@ -1,7 +1,0 @@
-{
-  "DuplicateOrderNumber": {
-    "code": "152",
-    "message": "A rendelésszám már szerepel egy számlán: SZ-2",
-    "existing_number": "SZ-2"
-  }
-}

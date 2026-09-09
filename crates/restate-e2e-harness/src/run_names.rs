@@ -1,4 +1,4 @@
-//! The *run-name pin*'s matching: a table of the `ctx.run` names every
+//! The *step-name table*'s matching: a table of the `ctx.run` names every
 //! handler journals, per path ([`RunPath`]), a journaled name read as its
 //! pattern ([`RunPatterns::pattern`]) and the prefix rule
 //! ([`is_prefix_of_path`]). The table itself is the consumer's: it names the
@@ -11,7 +11,7 @@
 //! its handler's paths and that every path was walked in full, makes that a
 //! failing test instead of a killed invocation.
 
-/// One pinned path: a handler of a service and the ordered `ctx.run` names it
+/// One path: a handler of a service and the ordered `ctx.run` names it
 /// journals on that path. A `{…}` segment in a name (`verify-{number}`) is a
 /// parameter, matched by the prefix before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub struct RunPath {
 }
 
 impl RunPath {
-    /// A pinned path of `handler` on `service`.
+    /// A path of `handler` on `service`.
     #[must_use]
     pub const fn new(
         service: &'static str,
@@ -133,7 +133,7 @@ pub fn is_prefix_of_path(observed: &[String], path: &[&str]) -> bool {
             .all(|(seen, expected)| seen == expected)
 }
 
-// ----- the run-name pin's matching, without a server ----------------------------
+// ----- the step-name table's matching, without a server ----------------------------
 
 #[cfg(test)]
 mod tests {

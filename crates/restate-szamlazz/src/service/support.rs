@@ -17,92 +17,6 @@ use crate::gateway::{
 };
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
-pub(super) use self::journaled::Journaled;
-#[cfg(test)]
-pub(super) use self::journaled::journaled_types;
-
-/// The `Journaled` trait, its seal and the one list of its implementors. A
-/// module of its own so that the seal is nameable nowhere else: a type
-/// becomes journalable by being added to the `journaled!` list below and in
-/// no other way, and the list is what `service::journal`'s registry is
-/// checked against.
-mod journaled {
-    use serde::Serialize;
-    use serde::de::DeserializeOwned;
-
-    use crate::gateway::{
-        CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
-        SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-        TaxpayerOutcome,
-    };
-    use crate::identity::Namespace;
-    use crate::service::prologue::Resolution;
-
-    /// A type the services journal as the result of a `ctx.run`: the bound
-    /// of `run_once`, `run_retrying` and `run_reading`, so this list is
-    /// exactly what the journal can hold.
-    ///
-    /// Implementing it is a promise that the type's serde layout is
-    /// **additive-only**, as the [`gateway`](crate::gateway) module docs
-    /// state. The promise is checked by the fixtures under
-    /// `tests/journal/<type>/` (`service::journal`), one per variant: a new
-    /// implementor is pinned there before it is journaled, and a new variant
-    /// of one of these enums fails to compile until it is named in the pins'
-    /// `variants!` list, and fails the generator by name until it has a
-    /// sample.
-    ///
-    /// Implemented through the `journaled!` list in this module only: the
-    /// trait is sealed by a supertrait private to this module, so an `impl`
-    /// anywhere else fails to compile, and the same list yields the
-    /// implementors' names ([`journaled_types`]) that `service::journal`'s
-    /// registry is held to, so a type journaled without pins fails that test
-    /// by name.
-    pub(in crate::service) trait Journaled:
-        sealed::Sealed + Serialize + DeserializeOwned
-    {
-    }
-
-    /// The seal on [`Journaled`]: a supertrait only this module can
-    /// implement.
-    mod sealed {
-        pub trait Sealed {}
-    }
-
-    /// Implements [`Journaled`] (and its seal) for each listed type and
-    /// writes their names into [`journaled_types`].
-    macro_rules! journaled {
-        ($($ty:ty),+ $(,)?) => {
-            $(
-                impl sealed::Sealed for $ty {}
-                impl Journaled for $ty {}
-            )+
-
-            /// The names of every [`Journaled`] implementor (the `journaled!`
-            /// list), as [`std::any::type_name`] writes them, so an alias
-            /// (`GatewayStornoOutcome`) names its type: what
-            /// `service::journal`'s registry is checked against.
-            #[cfg(test)]
-            pub(in crate::service) fn journaled_types() -> Vec<&'static str> {
-                vec![$(::std::any::type_name::<$ty>()),+]
-            }
-        };
-    }
-
-    journaled!(
-        Namespace,
-        Resolution,
-        QueryOutcome,
-        LookupOutcome,
-        CreateOutcome,
-        StornoLookupOutcome,
-        GatewayStornoOutcome,
-        DeleteOutcome,
-        SetPaymentsOutcome,
-        ProbeOutcome,
-        TaxpayerOutcome,
-    );
-}
-
 pub(super) use crate::contract::Fault;
 
 /// The service-side constructors of the contract's [`Fault`], one per way the
@@ -590,7 +504,7 @@ macro_rules! journal_helpers {
             use std::future::Future;
             use std::sync::Arc;
 
-            use super::{Fault, Journaled, Lookup, StornoIntent};
+            use super::{Fault, Lookup, StornoIntent};
             use crate::account::Accounts;
             use crate::config::{ValidatedWorkerConfig, WorkerConfig};
             use crate::contract::{IssuedKind, Selector};
@@ -605,6 +519,8 @@ macro_rules! journal_helpers {
             use restate_sdk::errors::{HandlerError, TerminalError};
             use restate_sdk::prelude::$ctx;
             use restate_sdk::serde::Json;
+            use serde::Serialize;
+            use serde::de::DeserializeOwned;
             use tracing::Instrument as _;
 
             /// Runs one handler execution: the prologue, then `body` on the
@@ -709,7 +625,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = T> + Send + 'ctx,
-                T: Journaled + Send + 'static,
+                T: Serialize + DeserializeOwned + Send + 'static,
             {
                 let Json(value) = ctx
                     .run(|| async move { Ok(Json(f().await)) })
@@ -739,7 +655,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, E>> + Send + 'ctx,
-                T: Journaled + Send + 'static,
+                T: Serialize + DeserializeOwned + Send + 'static,
                 E: StdError + Send + Sync + 'static,
             {
                 let Json(value) = ctx
@@ -771,7 +687,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-                T: Journaled + Send + 'static,
+                T: Serialize + DeserializeOwned + Send + 'static,
             {
                 let name = name.into();
                 run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)
@@ -799,7 +715,7 @@ macro_rules! journal_helpers {
             where
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-                T: Journaled + Send + 'static,
+                T: Serialize + DeserializeOwned + Send + 'static,
             {
                 let name = name.into();
                 match run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f).await
