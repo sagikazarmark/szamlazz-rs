@@ -2052,7 +2052,7 @@ mod tests {
     // The pure classifiers behind the async steps, each on its own table.
     // The wiremock suite (`tests/gateway.rs`) reaches them through HTTP and
     // keeps one exchange per operation for the header-vs-body parse path;
-    // the branches are pinned here.
+    // the branches are asserted here.
 
     /// Step 2 of the lookup: the order-number hint is foreign when it is a
     /// **live** document of the invoice family (`SZ`, `ES`, `VS`) that is

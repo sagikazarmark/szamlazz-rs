@@ -40,21 +40,21 @@ use crate::identity::{ExternalId, Namespace, OrderKey};
 /// Shared by `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`,
 /// whose storno external ids differ.
 #[derive(Debug, Clone)]
-pub(super) struct StornoIntent {
+struct StornoIntent {
     /// The invoice to reverse.
-    pub(super) number: String,
+    number: String,
     /// `{namespace}:{order}:storno:{number}` or
     /// `{namespace}:by-number:{number}:storno`.
-    pub(super) storno_id: ExternalId,
-    pub(super) comment: Option<String>,
+    storno_id: ExternalId,
+    comment: Option<String>,
     /// The verified document's `eszamla` when known, else the account
     /// default: an open code set for which the account's own default is a
     /// legitimate choice.
-    pub(super) e_invoice: bool,
+    e_invoice: bool,
     /// The verified document's `telj`, which the storno repeats as its
     /// `teljesitesDatum`: a fiscal fact of the document for which
     /// no default can be right, so it is never defaulted.
-    pub(super) fulfillment_date: Date,
+    fulfillment_date: Date,
 }
 
 impl StornoIntent {
@@ -68,7 +68,7 @@ impl StornoIntent {
     ///
     /// [`Fault::missing_fulfillment_date`] when the document carries no
     /// `telj`; the callers raise it after every answer that needs no send.
-    pub(super) fn from_verified(
+    fn from_verified(
         found: &FoundDocument,
         account: &Account,
         number: String,
@@ -94,7 +94,7 @@ impl StornoIntent {
 /// `Szamlazz.Agent.storno`'s [`unmanaged_storno_verdict`]), and the handler
 /// dispatches on it: proceed, read the storno number, or answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum StornoVerdict {
+enum StornoVerdict {
     /// A live document the handler may reverse: on to the intent and the
     /// lookup step.
     Proceed,
@@ -524,7 +524,7 @@ impl Execution {
     /// one already reversed is `reversed` with the storno number the
     /// by-number storno lookup names, best effort (ours when we issued the
     /// storno, unknown otherwise). By-number faults carry no order identity.
-    pub(super) async fn storno_request(
+    pub(super) async fn storno_by_number(
         &self,
         ctx: &Context<'_>,
         request: StornoRequest,

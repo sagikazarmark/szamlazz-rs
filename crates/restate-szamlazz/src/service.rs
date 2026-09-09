@@ -68,6 +68,21 @@ pub(crate) struct Deployment {
     pub(crate) config: ValidatedWorkerConfig,
 }
 
+impl Deployment {
+    /// Runs a handler's execution on any of the SDK's contexts: the prologue
+    /// (pin → resolve → fetch → open), then `body` on the execution it built,
+    /// inside the execution span carrying the scope, the key (on an object
+    /// context), the invocation id and the account id.
+    async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
+    where
+        C: RunCtx<'ctx>,
+        F: FnOnce(Execution) -> Fut + Send,
+        Fut: Future<Output = Result<T, HandlerError>> + Send,
+    {
+        prologue::execute(ctx, self, body).await
+    }
+}
+
 /// The `Order` Virtual Object: one instance per order number. Registered as
 /// `Szamlazz.Order`.
 ///
@@ -101,17 +116,15 @@ impl Order {
         &self.deployment.config
     }
 
-    /// Runs a handler's execution, exclusive or shared (`get`): the prologue
-    /// (pin → resolve → fetch → open), then `body` on the execution it built,
-    /// inside the execution span carrying the scope, the key, the invocation
-    /// id and the account id.
+    /// Runs a handler's execution, exclusive or shared (`get`):
+    /// [`Deployment::execute`].
     async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
     where
         C: RunCtx<'ctx>,
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        prologue::execute(ctx, &self.deployment, body).await
+        self.deployment.execute(ctx, body).await
     }
 }
 
@@ -158,16 +171,14 @@ impl Agent {
         &self.deployment.config
     }
 
-    /// Runs a handler's execution: the prologue (pin → resolve → fetch →
-    /// open), then `body` on the execution it built, inside the execution
-    /// span carrying the scope, the invocation id and the account id.
+    /// Runs a handler's execution: [`Deployment::execute`].
     async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
     where
         C: RunCtx<'ctx>,
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        prologue::execute(ctx, &self.deployment, body).await
+        self.deployment.execute(ctx, body).await
     }
 }
 

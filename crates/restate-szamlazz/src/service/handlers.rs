@@ -464,7 +464,7 @@ impl Agent {
         let request = request.into_request()?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
-            execution.storno_request(ctx, request).await
+            execution.storno_by_number(ctx, request).await
         })
         .await
         .map(Json)

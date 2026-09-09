@@ -549,6 +549,33 @@ mod tests {
         assert!(status["$defs"]["DocumentStatus"].is_object());
     }
 
+    /// The delete response's `reason` is a string in the schema (an open
+    /// set: the worker's three tokens and any szamlazz.hu code), referenced
+    /// as its own definition whose description names the tokens, so the
+    /// `OpenAPI` export tells a caller what to branch on; the tokens the
+    /// description names are the type's own constants.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_delete_reason_schema_is_a_string_naming_the_workers_tokens() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(DeleteProformaResponse)).expect("json");
+        assert_eq!(
+            schema["properties"]["reason"]["anyOf"][0]["$ref"], "#/$defs/DeleteReason",
+            "{schema}"
+        );
+        let reason = &schema["$defs"]["DeleteReason"];
+        assert_eq!(reason["type"], "string", "{reason}");
+        let description = reason["description"].as_str().expect("description");
+        for token in [
+            DeleteReason::ABSENT,
+            DeleteReason::PROFORMA_PAID,
+            DeleteReason::EXTERNAL_ID_COLLISION,
+        ] {
+            assert!(description.contains(token), "{token}: {description}");
+        }
+        assert!(reason.get("enum").is_none(), "an open set: {reason}");
+    }
+
     /// Every request type's schema (and every object it nests, the object
     /// variants of its enums included) is closed (`additionalProperties:
     /// false`), so the `OpenAPI` export tightens with the code. Response

@@ -62,10 +62,12 @@ impl Execution {
 
 /// The guard before the delete step, on what the lookup of the proforma's
 /// external id found: `Break(response)` for a proforma nothing will be sent
-/// for (nothing under the id, or a reversed one: deleted earlier or consumed,
-/// `get` tells which; another document under it, never touched; one with a
-/// credit entry without `force`: szamlazz.hu has no guard against deleting a
-/// paid proforma, so this is it), `Continue(found)` for the one to delete.
+/// for (nothing under the id: deleted earlier or consumed, `get` tells which;
+/// another document under it, never touched; one with a credit entry without
+/// `force`: szamlazz.hu has no guard against deleting a paid proforma, so
+/// this is it), `Continue(found)` for the one to delete: a proforma of ours,
+/// live or, were szamlazz.hu ever to report one so, reversed (a proforma
+/// cannot be stornoed; the delete is what removes it).
 ///
 /// # Errors
 ///
@@ -78,7 +80,7 @@ fn delete_guard(
     namespace: &Namespace,
 ) -> Result<ControlFlow<DeleteProformaResponse, Box<FoundDocument>>, Fault> {
     let found = match found {
-        OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => {
+        OwnershipOutcome::Absent => {
             return Ok(ControlFlow::Break(DeleteProformaResponse::absent()));
         }
         OwnershipOutcome::Collision(_) => {
@@ -86,7 +88,7 @@ fn delete_guard(
                 DeleteReason::ExternalIdCollision,
             )));
         }
-        OwnershipOutcome::Live(found) => found,
+        OwnershipOutcome::Live(found) | OwnershipOutcome::Reversed(found) => found,
         OwnershipOutcome::Api(answer) => {
             return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
         }
@@ -151,14 +153,15 @@ mod tests {
     }
 
     /// The guard before the delete step: nothing under the proforma's
-    /// external id, or a reversed proforma of ours, is `deleted{reason:
-    /// absent}` (deleted earlier or consumed; `get` tells which); another
-    /// document under it is `not_deleted{external_id_collision}`, never
-    /// touched, `force` or not; a proforma with a credit entry is
-    /// `not_deleted{proforma_paid}` without `force` (szamlazz.hu has no such
-    /// guard) and the one to delete with it; an unpaid one is the one to
-    /// delete. An answered code is a fault: another code `unavailable`
-    /// carrying it, a credential code `credentials_rejected`.
+    /// external id is `deleted{reason: absent}` (deleted earlier or consumed;
+    /// `get` tells which); another document under it is
+    /// `not_deleted{external_id_collision}`, never touched, `force` or not; a
+    /// proforma with a credit entry is `not_deleted{proforma_paid}` without
+    /// `force` (szamlazz.hu has no such guard) and the one to delete with it;
+    /// an unpaid one is the one to delete, whether szamlazz.hu reports it
+    /// live or reversed (a proforma of ours is a proforma of ours). An
+    /// answered code is a fault: another code `unavailable` carrying it, a
+    /// credential code `credentials_rejected`.
     #[test]
     fn the_delete_guard_refuses_a_paid_proforma_unless_forced() {
         let namespace = namespace();
@@ -185,8 +188,8 @@ mod tests {
             );
             assert_eq!(
                 guard(OwnershipOutcome::Reversed(reversed.boxed()), force).expect("data"),
-                ControlFlow::Break(DeleteProformaResponse::absent()),
-                "force {force}: a reversed proforma is nothing to delete"
+                ControlFlow::Continue(reversed.boxed()),
+                "force {force}: a proforma of ours, however reported, is the one to delete"
             );
             assert_eq!(
                 guard(OwnershipOutcome::Collision(other.boxed()), force).expect("data"),
