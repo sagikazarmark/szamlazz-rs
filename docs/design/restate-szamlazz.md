@@ -179,7 +179,7 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
 
 The four steps and the handler body run inside one tracing span, **`execution{scope, order, restate.invocation.id,
-account.id}`** (`support::execute`, generic over `support::RunCtx`): `scope` is what the SDK saw (`<unscoped>` when none),
+account.id}`** (`prologue::execute`, generic over `support::RunCtx`): `scope` is what the SDK saw (`<unscoped>` when none),
 `order` the Virtual Object key (absent on `Szamlazz.Agent`), `restate.invocation.id` the value the ingress returns as
 `x-restate-id`, and `account.id` the resolved account's id, recorded once the `account` step has answered. Every log
 line the execution emits, the prologue's warnings, the gateway steps' `gateway.*` spans and events, the paging
@@ -868,9 +868,10 @@ order, the newest holder under every external id"), which no stub can express. N
 without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested in the **decision layer**,
 the decide fns: each handler body is `read → decide → (answer | proceed) → next read`, where every `decide` is a pure
 function of the journaled outcome the read returned and the request, beside its async shell, and the shell is held to
-holding no `match` on a gateway outcome that returns a response. Every shell is in that shape: the storno, delete
-and `get` shells (`service/storno.rs`, #138), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup
-decision and the responses (`service/support.rs`), the prologue's (`service/prologue.rs`), and the create side's
+holding no `match` on a gateway outcome that returns a response. Every shell is in that shape: the two storno shells
+with the protocol they share (`service/storno.rs`: the verdicts, the intent, the after-lookup decision, the responses,
+#138, #174), the delete (`service/delete.rs`) and `get` (`service/status.rs`) shells, `Szamlazz.Agent`'s
+(`service/agent.rs`), the prologue's (`service/prologue.rs`), and the create side's
 (`service/create.rs`, #137: `decide_lookup`, `decide_exclusivity`, `decide_prepayment_for_final`,
 `decide_proforma_link`, `decide_proforma_by_number`, `decide_base`, `respond_to`, `prepare`). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
 classifiers (which answer is settled, which document is foreign, which failure is which class) are the same kind of

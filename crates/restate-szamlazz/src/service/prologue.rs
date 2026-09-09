@@ -1,26 +1,31 @@
 //! The prologue every handler runs after parsing its key: pin the
 //! namespace, resolve the account, fetch its credentials, open the gateway.
-//! This module holds the decisions of those steps: functions of their inputs
-//! whose only effect is a log line, which is what can be unit-tested (the SDK
-//! has no mock context; the durable behaviour is asserted end to end), and
-//! the prologue's two calls into an embedder's trait objects, each under the
-//! worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of the
-//! `account` step's closure, and the credential fetch, the one step that runs
-//! outside the journal. The durable steps themselves are
-//! `support::run_prologue`, generic over `support::RunCtx`.
+//!
+//! [`execute`] runs one handler execution: the prologue's durable steps
+//! ([`run_prologue`], generic over [`RunCtx`], so one fn serves the SDK's
+//! three contexts), then the handler's body on the [`Execution`] they built,
+//! inside the execution span. The steps' decisions are functions of their
+//! inputs whose only effect is a log line, which is what can be unit-tested
+//! (the SDK has no mock context; the durable behaviour is asserted end to
+//! end); the prologue's two calls into an embedder's trait objects run under
+//! the worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of
+//! the `account` step's closure, and the credential fetch, the one step that
+//! runs outside the journal.
 
 use std::borrow::Cow;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use restate_sdk::errors::TerminalError;
+use restate_sdk::errors::{HandlerError, TerminalError};
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
+use tracing::Instrument as _;
 
-use super::support::Fault;
+use super::Deployment;
+use super::support::{Fault, RunCtx, run_once, run_retrying};
 use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
-use crate::config::{WorkerConfig, format_duration};
+use crate::config::{ValidatedWorkerConfig, WorkerConfig, format_duration};
 use crate::gateway::Gateway;
 
 /// What one handler execution runs on: the gateway opened for this execution
@@ -32,6 +37,90 @@ use crate::gateway::Gateway;
 pub(super) struct Execution {
     pub(super) gateway: Arc<Gateway>,
     pub(super) config: WorkerConfig,
+}
+
+/// Runs one handler execution: the prologue ([`run_prologue`]), then `body`
+/// on the execution it built, the whole inside the execution span
+/// ([`execution_span`]), so every log line from the prologue's first step to
+/// the handler's answer carries the scope, the key, the invocation id and,
+/// once resolved, the account id. The key is the Virtual Object key on the
+/// object contexts, none on the stateless service ([`RunCtx::key`]). The
+/// body takes the execution by value: nothing of it outlives the call.
+pub(super) async fn execute<'ctx, C, T, F, Fut>(
+    ctx: &C,
+    deployment: &Deployment,
+    body: F,
+) -> Result<T, HandlerError>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce(Execution) -> Fut + Send,
+    Fut: Future<Output = Result<T, HandlerError>> + Send,
+{
+    let span = execution_span(ctx.scope(), ctx.key(), ctx.invocation_id());
+    async move {
+        let execution = run_prologue(ctx, &deployment.accounts, &deployment.config).await?;
+        body(execution).await
+    }
+    .instrument(span)
+    .await
+}
+
+/// The prologue of every handler: pin → resolve → fetch → open. Runs inside
+/// the execution span [`execute`] opened, on which it records the account id
+/// once resolved.
+///
+/// 1. **Pin** the namespace in a pure durable step (`namespace`): a redeploy
+///    with a changed namespace cannot make a running invocation issue under a
+///    new id.
+/// 2. **Resolve** the request's scope to its account in a durable step named
+///    `account` under the resolve policy: unscoped and unknown are journaled
+///    as data and become the terminal `unknown_account`; an unavailable
+///    resolver (reporting so, or silent past [`CALL_DEADLINE`]) is
+///    retryable and journals nothing; exhaustion is `unavailable`.
+/// 3. **Fetch** the account's credentials outside the journal (on every
+///    execution, including replays) with a short in-process retry, each
+///    attempt bounded by the same deadline, then terminal `unavailable`.
+/// 4. **Open** the gateway for this execution over a fresh client.
+async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    accounts: &Accounts,
+    config: &ValidatedWorkerConfig,
+) -> Result<Execution, HandlerError> {
+    // 1. Pin.
+    let pinned = {
+        let namespace = config.namespace.clone();
+        run_once(ctx, "namespace", move || async move { namespace }).await?
+    };
+    // The pin replaces the namespace alone, which no policy invariant reads:
+    // the execution's settings are the validated ones with the journaled
+    // namespace.
+    let config = WorkerConfig {
+        namespace: pinned,
+        ..WorkerConfig::clone(config)
+    };
+
+    // 2. Resolve.
+    let scope = ctx.scope().map(str::to_owned);
+    let resolution = {
+        let accounts = accounts.clone();
+        run_retrying(
+            ctx,
+            "account",
+            config.resolve.run_retry_policy(),
+            move || async move { resolve(&accounts, scope.as_deref()).await },
+        )
+        .await
+        .map_err(|error| resolve_exhausted(&error))?
+    };
+    let account = account_of(resolution)?;
+    record_account(&account);
+
+    // 3. Fetch, outside the journal.
+    let credentials = fetch_credentials(accounts, &account).await?;
+
+    // 4. Open.
+    let gateway = open(account, credentials)?;
+    Ok(Execution { gateway, config })
 }
 
 /// The span every handler execution runs in, from the handler's first line to
@@ -49,11 +138,7 @@ pub(super) struct Execution {
 /// ingress returns as `x-restate-id`, the caller's handle on the invocation.
 /// Never the key: the account id is journaled and shown in the Restate UI
 /// already, so logging it leaks nothing.
-pub(super) fn execution_span(
-    scope: Option<&str>,
-    order: Option<&str>,
-    invocation_id: &str,
-) -> tracing::Span {
+fn execution_span(scope: Option<&str>, order: Option<&str>, invocation_id: &str) -> tracing::Span {
     tracing::info_span!(
         "execution",
         scope = %scope.unwrap_or("<unscoped>"),
@@ -66,7 +151,7 @@ pub(super) fn execution_span(
 
 /// Records the resolved account's id on the current execution span: a no-op
 /// outside one, since the field is declared there only.
-pub(super) fn record_account(account: &Account) {
+fn record_account(account: &Account) {
     tracing::Span::current().record("account.id", tracing::field::display(&account.id));
 }
 
@@ -163,7 +248,7 @@ pub(super) enum ResolverUnavailable {
 /// [`ResolverUnavailable`]: the resolver answered `Unavailable`, or had not
 /// answered at the deadline. Retryable: the resolve policy re-executes the
 /// step.
-pub(super) async fn resolve(
+async fn resolve(
     accounts: &Accounts,
     scope: Option<&str>,
 ) -> Result<Resolution, ResolverUnavailable> {
@@ -181,9 +266,7 @@ pub(super) async fn resolve(
 /// worker could advise on here; whether the key under a scope opens the
 /// account the scope names is the operator's go-live check, not a runtime
 /// signal.
-pub(super) fn resolution(
-    result: Result<Account, ResolveError>,
-) -> Result<Resolution, ResolverUnavailable> {
+fn resolution(result: Result<Account, ResolveError>) -> Result<Resolution, ResolverUnavailable> {
     match result {
         Ok(account) => Ok(Resolution::Account(Box::new(account))),
         Err(ResolveError::Unscoped) => Ok(Resolution::Unscoped),
@@ -195,7 +278,7 @@ pub(super) fn resolution(
 /// The account of a journaled [`Resolution`]: unscoped and unknown are the
 /// terminal fault `unknown_account` (HTTP 400): the request named no account
 /// of this deployment, and no retry with the same request changes that.
-pub(super) fn account_of(resolution: Resolution) -> Result<Account, Fault> {
+fn account_of(resolution: Resolution) -> Result<Account, Fault> {
     match resolution {
         Resolution::Account(account) => Ok(*account),
         Resolution::Unscoped => Err(Fault::unknown_account(
@@ -209,7 +292,7 @@ pub(super) fn account_of(resolution: Resolution) -> Result<Account, Fault> {
 
 /// The fault of an `account` step that ended without a resolution: the
 /// resolve policy is exhausted (500) or the invocation was cancelled (409).
-pub(super) fn resolve_exhausted(error: &TerminalError) -> Fault {
+fn resolve_exhausted(error: &TerminalError) -> Fault {
     Fault::unavailable(format!(
         "the account could not be resolved ({}): {}; retry with a new Idempotency-Key",
         error.code(),
@@ -263,10 +346,7 @@ impl FetchFailure {
 /// a replay of an invocation whose create already landed surfaces as
 /// `unavailable` although the document exists) is reconciled by `get` or a
 /// retry with a new `Idempotency-Key`.
-pub(super) async fn fetch_credentials(
-    accounts: &Accounts,
-    account: &Account,
-) -> Result<Credentials, Fault> {
+async fn fetch_credentials(accounts: &Accounts, account: &Account) -> Result<Credentials, Fault> {
     let mut attempt = 1;
     loop {
         let failure = match bounded(BoundedCall::Store, accounts.fetch(account)).await {
@@ -295,7 +375,7 @@ pub(super) async fn fetch_credentials(
 /// does tell the causes apart: a reference the store does not know is
 /// configuration, an unavailable store is an outage, a store silent past the
 /// deadline is the worker giving up on it.
-pub(super) fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
+fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
     tracing::warn!(
         account = %account.id,
         credential_ref = %account.credential_ref,
@@ -317,7 +397,7 @@ pub(super) fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
 }
 
 /// Opens the gateway for this execution over a fresh client.
-pub(super) fn open(account: Account, credentials: Credentials) -> Result<Arc<Gateway>, Fault> {
+fn open(account: Account, credentials: Credentials) -> Result<Arc<Gateway>, Fault> {
     Gateway::open(account, credentials)
         .map(Arc::new)
         .map_err(|error| {

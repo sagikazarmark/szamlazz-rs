@@ -283,7 +283,7 @@ impl Order {
     async fn get(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<Json<OrderStatus>> {
         let order = order_key(ctx.key())?;
         let ctx = &ctx;
-        self.execute_shared(ctx, |execution| async move {
+        self.execute(ctx, |execution| async move {
             execution.status(ctx, order).await
         })
         .await

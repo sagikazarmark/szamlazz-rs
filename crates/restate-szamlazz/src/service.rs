@@ -36,7 +36,6 @@
 use std::future::Future;
 
 use restate_sdk::errors::HandlerError;
-use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 
 use crate::account::Accounts;
 use crate::config::ValidatedWorkerConfig;
@@ -44,10 +43,12 @@ use crate::config::ValidatedWorkerConfig;
 mod agent;
 mod body;
 mod create;
+mod delete;
 mod handlers;
 #[cfg(test)]
 mod journal;
 mod prologue;
+mod status;
 mod storno;
 mod support;
 
@@ -55,6 +56,7 @@ pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
 
 use prologue::Execution;
+use support::RunCtx;
 
 /// What both services hold: the accounts bundle and the validated
 /// deployment-level settings. One struct, since the two services are built
@@ -99,29 +101,17 @@ impl Order {
         &self.deployment.config
     }
 
-    /// Runs an exclusive handler's execution: the prologue (pin → resolve →
-    /// fetch → open), then `body` on the execution it built, inside the
-    /// execution span carrying the scope, the key, the invocation id and the
-    /// account id.
-    async fn execute<T, F, Fut>(&self, ctx: &ObjectContext<'_>, body: F) -> Result<T, HandlerError>
+    /// Runs a handler's execution, exclusive or shared (`get`): the prologue
+    /// (pin → resolve → fetch → open), then `body` on the execution it built,
+    /// inside the execution span carrying the scope, the key, the invocation
+    /// id and the account id.
+    async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
     where
+        C: RunCtx<'ctx>,
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::execute(ctx, Some(ctx.key()), &self.deployment, body).await
-    }
-
-    /// Runs a shared handler's (`get`) execution, as [`Order::execute`].
-    async fn execute_shared<T, F, Fut>(
-        &self,
-        ctx: &SharedObjectContext<'_>,
-        body: F,
-    ) -> Result<T, HandlerError>
-    where
-        F: FnOnce(Execution) -> Fut + Send,
-        Fut: Future<Output = Result<T, HandlerError>> + Send,
-    {
-        support::execute(ctx, Some(ctx.key()), &self.deployment, body).await
+        prologue::execute(ctx, &self.deployment, body).await
     }
 }
 
@@ -171,12 +161,13 @@ impl Agent {
     /// Runs a handler's execution: the prologue (pin → resolve → fetch →
     /// open), then `body` on the execution it built, inside the execution
     /// span carrying the scope, the invocation id and the account id.
-    async fn execute<T, F, Fut>(&self, ctx: &Context<'_>, body: F) -> Result<T, HandlerError>
+    async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
     where
+        C: RunCtx<'ctx>,
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        support::execute(ctx, None, &self.deployment, body).await
+        prologue::execute(ctx, &self.deployment, body).await
     }
 }
 
