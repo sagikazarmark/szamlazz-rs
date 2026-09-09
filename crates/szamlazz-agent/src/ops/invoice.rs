@@ -570,7 +570,8 @@ impl CreateInvoice {
 /// issues nothing.
 ///
 /// The two shapes share no field whose meaning depends on the other: an
-/// issued document always has its number and totals, a preview only its PDF.
+/// issued document always has its number (its totals and PDF are optional,
+/// as the reply reports them), a preview only its PDF.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]

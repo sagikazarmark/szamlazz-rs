@@ -485,8 +485,9 @@ pub enum RequestError {
     #[error("invalid foreign-currency exchange-rate details")]
     InvalidExchangeRate,
     /// A line item requests more data erasure codes than szamlazz.hu's
-    /// documented per-item maximum ([`MAX_ERASURE_CODE_COUNT`](crate::MAX_ERASURE_CODE_COUNT);
-    /// rejected server-side as error 537).
+    /// documented per-item maximum
+    /// ([`MAX_ERASURE_CODE_COUNT`](crate::MAX_ERASURE_CODE_COUNT); rejected
+    /// server-side as error 537).
     #[error(
         "line item requests {0} data erasure codes; the maximum is {max}",
         max = crate::item::MAX_ERASURE_CODE_COUNT
