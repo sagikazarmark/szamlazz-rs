@@ -56,7 +56,7 @@ use crate::contract::{
 use crate::gateway::{
     CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, OwnershipOutcome,
     ProbeOutcome, QueryOutcome, Rejection, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome,
-    SzamlazzAnswer, TaxpayerOutcome,
+    SzamlazzAnswer, TaxpayerOutcome, Unanswered,
 };
 use crate::identity::Namespace;
 use crate::test_support::open_gateway;
@@ -236,8 +236,9 @@ fn entries() -> Vec<Entry> {
             DeleteOutcome::AlreadyGone,
             DeleteOutcome::Rejected(Rejection::from(REJECTED.answer())),
             DeleteOutcome::CredentialsRejected(CREDENTIALS.answer()),
-            DeleteOutcome::Transport(TRANSPORT.to_owned()),
-        ], &variants!(DeleteOutcome { Deleted, AlreadyGone, Rejected(_), CredentialsRejected(_), Transport(_) })));
+            DeleteOutcome::Lost(Unanswered::Transport(TRANSPORT.to_owned())),
+            DeleteOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
+        ], &variants!(DeleteOutcome { Deleted, AlreadyGone, Rejected(_), CredentialsRejected(_), Lost(_) })));
     all.extend(entries_of(vec![
             SetPaymentsOutcome::Done {
                 outstanding: Some(dec!(0)),
@@ -248,8 +249,9 @@ fn entries() -> Vec<Entry> {
                 "Sztornózott számlára nem rögzíthető kifizetés.",
             ))),
             SetPaymentsOutcome::CredentialsRejected(CREDENTIALS.answer()),
-            SetPaymentsOutcome::Transport(TRANSPORT.to_owned()),
-        ], &variants!(SetPaymentsOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Transport(_) })));
+            SetPaymentsOutcome::Lost(Unanswered::Transport(TRANSPORT.to_owned())),
+            SetPaymentsOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
+        ], &variants!(SetPaymentsOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Lost(_) })));
     all.extend(entries_of(
         vec![
             ProbeOutcome::Accepted,
@@ -306,8 +308,8 @@ const NAV: Code = Code {
     message: "Az adatszolgáltatás jelenleg nem elérhető.",
 };
 
-/// The failure text of the `Transport` samples of the two write steps that
-/// keep one.
+/// The failure text of the `Lost(Transport)` samples of the two one-shot
+/// write steps.
 const TRANSPORT: &str = "error sending request for url (https://www.szamlazz.hu/szamla/)";
 
 /// The `szlahu_down` header value of the `Unavailable` samples: szamlazz.hu's
@@ -560,7 +562,7 @@ async fn no_journal_entry_carries_the_agent_key() {
 
     let gateway = open_gateway(account, credentials);
     let delete = gateway.delete_proforma("D-1").await;
-    assert!(matches!(delete, DeleteOutcome::Transport(_)), "{delete:?}");
+    assert!(matches!(delete, DeleteOutcome::Lost(_)), "{delete:?}");
     let payments = [PaymentEntry::new(
         jiff::civil::date(2026, 7, 4),
         ContractPaymentMethod::Transfer,
@@ -568,16 +570,16 @@ async fn no_journal_entry_carries_the_agent_key() {
     )];
     let set_payments = gateway.set_payments("SZ-1", &payments, false).await;
     assert!(
-        matches!(set_payments, SetPaymentsOutcome::Transport(_)),
+        matches!(set_payments, SetPaymentsOutcome::Lost(_)),
         "{set_payments:?}"
     );
     for (label, json) in [
         (
-            "DeleteOutcome::Transport",
+            "DeleteOutcome::Lost",
             serde_json::to_string(&delete).expect("serialises"),
         ),
         (
-            "SetPaymentsOutcome::Transport",
+            "SetPaymentsOutcome::Lost",
             serde_json::to_string(&set_payments).expect("serialises"),
         ),
     ] {

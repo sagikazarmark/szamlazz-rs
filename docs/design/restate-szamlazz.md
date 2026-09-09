@@ -520,7 +520,7 @@ delivery note reaching it is `unavailable` rather than `rejected{not_stornoable}
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
 live `D` with payments ∧ `!force` → `{deleted: false, reason: proforma_paid}` (the server has no guard, verified);
 `ctx.run(DeleteProforma{InvoiceNumber})` (`max_attempts(1)`): success | 335 → `{deleted: true}`; 3/135/136/164 →
-`TerminalError{credentials_rejected}`; other → `{deleted: false, reason: <code>}`; `Transport` → `TerminalError{outcome_unknown}`.
+`TerminalError{credentials_rejected}`; other → `{deleted: false, reason: <code>}`; no answer (a transport failure or `szlahu_down`) → `Lost(Unanswered)`, journaled as data since the step runs once, → `TerminalError{outcome_unknown}`.
 The response is `DeleteProformaResponse { deleted, reason? }` throughout, never a `rejected` outcome.
 
 `get`: four `ctx.run` queries under the read policy (`get-{kind}`, `…:proforma|invoice|prepayment|final`) → `OrderStatus { proforma?, invoice?,
@@ -998,7 +998,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`, `DeleteOutcome`, `SetPaymentsOutcome`,
   `ProbeOutcome`, `TaxpayerOutcome`, the document-carrying ones projected from a `szamla` XML with every element
   it can hold. Three checks: each round-trips through serde; none carries the agent key (the `account` entry from
-  configuration carrying a sentinel key, `DeleteOutcome::Transport` and `SetPaymentsOutcome::Transport` from a
+  configuration carrying a sentinel key, `DeleteOutcome::Lost` and `SetPaymentsOutcome::Lost` from a
   gateway opened with the sentinel credentials against an endpoint that refuses connections: the cheap complement to
   the `assert_not_impl_any!` guard and to the e2e's byte scan, which needs a server); none carries a `supplier`,
   `buyer`, `items`, `financial_items`, `labels` or `pdf` key at any depth (the agent crate's own `InvoiceDocument`

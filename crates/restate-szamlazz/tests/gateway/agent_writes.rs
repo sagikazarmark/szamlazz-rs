@@ -1,14 +1,15 @@
 //! The one-shot writes (`delete_proforma`, `set_payments`): every szamlazz.hu
-//! answer as data, including the one no answer leaves.
+//! answer as data, and the *Lost answer* (a send szamlazz.hu did not answer,
+//! by transport or `szlahu_down`) as data too, since the step runs once.
 
 use super::common::{
-    api_error, body_error, created, credit, delete, proforma_deleted, proforma_gone,
+    api_error, body_error, created, credit, delete, proforma_deleted, proforma_gone, szlahu_down,
 };
 use super::harness::*;
 use jiff::civil::date;
 use restate_szamlazz::contract::{PaymentEntry, PaymentMethod};
 use restate_szamlazz::gateway::{
-    DeleteOutcome, Rejection, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer,
+    DeleteOutcome, Rejection, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer, Unanswered,
 };
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
@@ -38,6 +39,11 @@ async fn delete_proforma_outcomes() {
         .mount(&h.server)
         .await;
     delete()
+        .and(body_string_contains("<szamlaszam>D-6</szamlaszam>"))
+        .respond_with(szlahu_down())
+        .mount(&h.server)
+        .await;
+    delete()
         .and(body_string_contains("<szamlaszam>D-5</szamlaszam>"))
         .respond_with(api_error("57", "malformed"))
         .mount(&h.server)
@@ -57,11 +63,18 @@ async fn delete_proforma_outcomes() {
     );
     assert!(matches!(
         h.gateway.delete_proforma("D-4").await,
-        DeleteOutcome::Transport(_)
+        DeleteOutcome::Lost(Unanswered::Transport(_))
     ));
     assert_eq!(
         h.gateway.delete_proforma("D-5").await,
         DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "malformed")))
+    );
+    assert!(
+        matches!(
+            h.gateway.delete_proforma("D-6").await,
+            DeleteOutcome::Lost(Unanswered::Unavailable(_))
+        ),
+        "szlahu_down after a send is a lost answer of its own kind, not a transport failure"
     );
 }
 
@@ -81,6 +94,11 @@ async fn set_payments_outcomes() {
     credit()
         .and(body_string_contains("<szamlaszam>SZ-3</szamlaszam>"))
         .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+    credit()
+        .and(body_string_contains("<szamlaszam>SZ-4</szamlaszam>"))
+        .respond_with(szlahu_down())
         .mount(&h.server)
         .await;
     let entry = PaymentEntry {
@@ -118,7 +136,13 @@ async fn set_payments_outcomes() {
         h.gateway
             .set_payments("SZ-3", std::slice::from_ref(&entry), false)
             .await,
-        SetPaymentsOutcome::Transport(_)
+        SetPaymentsOutcome::Lost(Unanswered::Transport(_))
+    ));
+    assert!(matches!(
+        h.gateway
+            .set_payments("SZ-4", std::slice::from_ref(&entry), false)
+            .await,
+        SetPaymentsOutcome::Lost(Unanswered::Unavailable(_))
     ));
     let six = vec![entry; 6];
     assert!(matches!(
@@ -140,7 +164,7 @@ async fn set_payments_outcomes() {
     }
     assert_eq!(
         h.bodies().await.len(),
-        3,
+        4,
         "six entries and an empty replace never reach the wire"
     );
 }

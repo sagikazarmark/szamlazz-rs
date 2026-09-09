@@ -521,6 +521,12 @@ impl Unconfirmed {
 /// re-executed closure's answer is exactly as fresh as a first one; its
 /// exhaustion is the handler's `unavailable` fault.
 ///
+/// The one-shot writes ([`delete_proforma`], [`set_payments`]) carry the same
+/// two shapes as data, [`DeleteOutcome::Lost`] / [`SetPaymentsOutcome::Lost`]
+/// (the *Lost answer*): their step runs once and re-executes nothing, so the
+/// send that drew no answer is journaled and answered as `outcome_unknown`.
+/// Serialisable for that one use; never journaled on its own.
+///
 /// [`lookup`]: Gateway::lookup
 /// [`lookup_ours`]: Gateway::lookup_ours
 /// [`verify`]: Gateway::verify
@@ -529,7 +535,9 @@ impl Unconfirmed {
 /// [`lookup_storno`]: Gateway::lookup_storno
 /// [`query_taxpayer`]: Gateway::query_taxpayer
 /// [`probe`]: Gateway::probe
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// [`delete_proforma`]: Gateway::delete_proforma
+/// [`set_payments`]: Gateway::set_payments
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unanswered {
     /// The HTTP exchange or the response parse failed.
@@ -538,6 +546,19 @@ pub enum Unanswered {
     /// szamlazz.hu reported unavailability (`szlahu_down`).
     #[error("szamlazz.hu is unavailable: {0}")]
     Unavailable(String),
+}
+
+impl Unanswered {
+    /// The failure of an exchange szamlazz.hu did not answer: `szlahu_down`
+    /// is [`Unanswered::Unavailable`], anything else [`Unanswered::Transport`].
+    /// The caller has matched the answers (`ClientError::Api`, and for a
+    /// write `ClientError::Request`) off first.
+    fn from_exchange(error: ClientError) -> Self {
+        match error {
+            ClientError::ServiceUnavailable(message) => Self::Unavailable(message),
+            other => Self::Transport(other.to_string()),
+        }
+    }
 }
 
 /// The answered result of a query by number, external id or order number
@@ -790,8 +811,11 @@ pub enum DeleteOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// was deleted. See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
-    /// The HTTP exchange, the response parse or the service failed.
-    Transport(String),
+    /// The *Lost answer*: the delete was sent and szamlazz.hu did not answer
+    /// it (a transport or parse failure, or `szlahu_down`), so whether it
+    /// acted is not known. Data, not an error: the step runs once
+    /// (`run_once`) and the handler answers `outcome_unknown`.
+    Lost(Unanswered),
 }
 
 /// A szamlazz.hu error on a deletion: 335 is [`DeleteOutcome::AlreadyGone`],
@@ -825,8 +849,12 @@ pub enum SetPaymentsOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// was registered. See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
-    /// The HTTP exchange, the response parse or the service failed.
-    Transport(String),
+    /// The *Lost answer*: the entries were sent and szamlazz.hu did not
+    /// answer (a transport or parse failure, or `szlahu_down`), so whether
+    /// they landed is not known. Data, not an error: the step runs once
+    /// (`run_once`) and the handler answers `outcome_unknown`; a replacing
+    /// call is repeated as is, an additive one queries the invoice first.
+    Lost(Unanswered),
 }
 
 /// A successful registration: [`SetPaymentsOutcome::Done`] with the reported
@@ -1448,8 +1476,7 @@ impl Gateway {
                 Ok(TaxpayerOutcome::CredentialsRejected(api.into()))
             }
             Err(ClientError::Api(api)) => Ok(TaxpayerOutcome::Api(api.into())),
-            Err(ClientError::ServiceUnavailable(message)) => Err(Unanswered::Unavailable(message)),
-            Err(error) => Err(Unanswered::Transport(error.to_string())),
+            Err(error) => Err(Unanswered::from_exchange(error)),
         }
     }
 
@@ -1702,7 +1729,7 @@ impl Gateway {
                 }
                 outcome
             }
-            Err(error) => DeleteOutcome::Transport(error.to_string()),
+            Err(error) => DeleteOutcome::Lost(Unanswered::from_exchange(error)),
         }
     }
 
@@ -1737,7 +1764,7 @@ impl Gateway {
             Err(ClientError::Request(error)) => {
                 SetPaymentsOutcome::Rejected(Rejection::request(error.to_string()))
             }
-            Err(error) => SetPaymentsOutcome::Transport(error.to_string()),
+            Err(error) => SetPaymentsOutcome::Lost(Unanswered::from_exchange(error)),
         }
     }
 

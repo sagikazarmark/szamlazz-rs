@@ -127,8 +127,8 @@ fn delete_response(
         DeleteOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        DeleteOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
-            "proforma deletion outcome unknown: {message}; retry with a new Idempotency-Key"
+        DeleteOutcome::Lost(lost) => Err(Fault::outcome_unknown(format!(
+            "proforma deletion outcome unknown: {lost}; retry with a new Idempotency-Key"
         ))),
     }
 }
@@ -139,7 +139,7 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::gateway::{Rejection, SzamlazzAnswer};
+    use crate::gateway::{Rejection, SzamlazzAnswer, Unanswered};
     use crate::test_support::{CreditRecord, Doc};
 
     fn namespace() -> Namespace {
@@ -278,7 +278,7 @@ mod tests {
 
         let (status, body) = fault_body(
             delete_response(
-                DeleteOutcome::Transport("connection reset".to_owned()),
+                DeleteOutcome::Lost(Unanswered::Transport("connection reset".to_owned())),
                 &namespace,
             )
             .expect_err("a fault"),

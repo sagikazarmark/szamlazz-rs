@@ -24,6 +24,7 @@ use crate::contract::{
 };
 use crate::gateway::{
     ProbeOutcome, QueryOutcome, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer, TaxpayerOutcome,
+    Unanswered,
 };
 use crate::identity::{ExternalId, Namespace};
 
@@ -62,14 +63,14 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
 /// caller does next depends on `additive`: a replacing call is idempotent and
 /// is simply repeated; an additive one is at-least-once (the lost send may
 /// have appended the entries), so the caller queries the invoice first.
-fn set_payments_unknown(additive: bool, message: &str) -> Fault {
+fn set_payments_unknown(additive: bool, lost: &Unanswered) -> Fault {
     let next = if additive {
         "the entries are additive and may have landed; query the invoice before re-sending"
     } else {
         "call set_payments again"
     };
     Fault::outcome_unknown(format!(
-        "credit entry registration outcome unknown: {message}; {next}"
+        "credit entry registration outcome unknown: {lost}; {next}"
     ))
 }
 
@@ -143,7 +144,7 @@ fn set_payments_response(
         SetPaymentsOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        SetPaymentsOutcome::Transport(message) => Err(set_payments_unknown(additive, &message)),
+        SetPaymentsOutcome::Lost(lost) => Err(set_payments_unknown(additive, &lost)),
     }
 }
 
@@ -358,7 +359,8 @@ mod tests {
     /// the invoice before re-sending; a replacing call is repeated as is.
     #[test]
     fn the_set_payments_fault_tells_an_additive_caller_to_query_first() {
-        let additive = TerminalError::from(set_payments_unknown(true, "connection reset"));
+        let lost = Unanswered::Transport("connection reset".to_owned());
+        let additive = TerminalError::from(set_payments_unknown(true, &lost));
         assert_eq!(additive.code(), 500);
         assert!(
             additive.message().contains("connection reset"),
@@ -378,7 +380,7 @@ mod tests {
             additive.message()
         );
 
-        let replacing = TerminalError::from(set_payments_unknown(false, "connection reset"));
+        let replacing = TerminalError::from(set_payments_unknown(false, &lost));
         assert_eq!(replacing.code(), 500);
         assert!(
             replacing.message().contains("call set_payments again"),
