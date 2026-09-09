@@ -48,16 +48,11 @@ pub use static_resolver::{
 /// against**. Ownership validation is about the *document*: under one of our
 /// external ids a document is ours when it carries the order number and the
 /// `tipus` of the kind, and found by number it must carry this order's number
-/// (`Szamlazz.Order`'s verifies); nothing about the account. 0.3 pinned two
-/// fields of a queried document, `szallito/id` (`supplier_id`) and `teszt`
-/// (`mode`); both were dropped. Neither is in a create response (a create's
-/// reply is a number and totals), so neither
-/// could fire before the first document of a fresh order was issued: a key
-/// configured under the wrong scope issued into the wrong account and answered
-/// `issued`, and the pin tripped on the *next* found document. A tripwire with
-/// that blind spot, on fields the operator had to read off the very account
-/// being checked (`szallito/id`, undocumented) or that only tell test from
-/// live (`teszt`), was not worth a fault code and a configuration field.
+/// (`Szamlazz.Order`'s verifies); nothing about the account. A pin on a
+/// field of a queried document (`szallito/id`, `teszt`) was considered and
+/// rejected (ADR 0006, account-pin amendment): neither is in a create
+/// response, so no such pin can fire before the first document of a fresh
+/// order has been issued into whatever account the key opens.
 ///
 /// So **the right key under the right scope is the resolver's guarantee**,
 /// and the deployment's to verify: under each scope, at go-live and after

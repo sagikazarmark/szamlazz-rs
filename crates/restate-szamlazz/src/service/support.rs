@@ -514,7 +514,7 @@ macro_rules! journal_helpers {
             };
             use crate::identity::{ExternalId, OrderKey};
             use crate::service::Deployment;
-            use crate::service::prologue::{self as decisions, Execution};
+            use crate::service::prologue::{self, Execution};
             use restate_sdk::context::{ContextSideEffects as _, RunFuture as _, RunRetryPolicy};
             use restate_sdk::errors::{HandlerError, TerminalError};
             use restate_sdk::prelude::$ctx;
@@ -541,10 +541,10 @@ macro_rules! journal_helpers {
                 F: FnOnce(Execution) -> Fut + Send,
                 Fut: Future<Output = Result<T, HandlerError>> + Send,
             {
-                let span = decisions::execution_span(ctx.scope(), key, ctx.invocation_id());
+                let span = prologue::execution_span(ctx.scope(), key, ctx.invocation_id());
                 async move {
                     let execution =
-                        prologue(ctx, &deployment.accounts, &deployment.config).await?;
+                        run_prologue(ctx, &deployment.accounts, &deployment.config).await?;
                     body(execution).await
                 }
                 .instrument(span)
@@ -569,7 +569,7 @@ macro_rules! journal_helpers {
             ///    in-process retry, each attempt bounded by the same
             ///    deadline, then terminal `unavailable`.
             /// 4. **Open** the gateway for this execution over a fresh client.
-            async fn prologue(
+            async fn run_prologue(
                 ctx: &$ctx<'_>,
                 accounts: &Accounts,
                 config: &ValidatedWorkerConfig,
@@ -595,19 +595,19 @@ macro_rules! journal_helpers {
                         ctx,
                         "account",
                         config.resolve.run_retry_policy(),
-                        move || async move { decisions::resolve(&accounts, scope.as_deref()).await },
+                        move || async move { prologue::resolve(&accounts, scope.as_deref()).await },
                     )
                     .await
-                    .map_err(|error| decisions::resolve_exhausted(&error))?
+                    .map_err(|error| prologue::resolve_exhausted(&error))?
                 };
-                let account = decisions::account_of(resolution)?;
-                decisions::record_account(&account);
+                let account = prologue::account_of(resolution)?;
+                prologue::record_account(&account);
 
                 // 3. Fetch, outside the journal.
-                let credentials = decisions::fetch_credentials(accounts, &account).await?;
+                let credentials = prologue::fetch_credentials(accounts, &account).await?;
 
                 // 4. Open.
-                let gateway = decisions::open(account, credentials)?;
+                let gateway = prologue::open(account, credentials)?;
                 Ok(Execution { gateway, config })
             }
 
