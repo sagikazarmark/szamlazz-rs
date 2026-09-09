@@ -1,27 +1,31 @@
-//! The unit tests' shared fixtures: [`Doc`], a queried document,
-//! [`LogCapture`], a `tracing` capture, and [`open_gateway`], a gateway over
-//! an HTTP client that loads no root certificates.
+//! The unit tests' shared fixtures: [`Doc`], a queried document, parsed into
+//! the worker's projection; [`LogCapture`], a `tracing` capture; and
+//! [`open_gateway`], a gateway over an HTTP client that loads no root
+//! certificates.
 //!
-//! [`Doc`] renders szamlazz.hu's `<szamla>` response XML, parses it into the
-//! Számla Agent crate's [`InvoiceDocument`] and projects it onto the worker's
-//! [`FoundDocument`] the way the gateway reads a query answer. The agent's
-//! response types are `#[non_exhaustive]` on purpose, so a unit test cannot
-//! construct one directly, and the projection is constructed through the wire
-//! by convention (ADR 0008; a literal would state a second model of the
-//! document): the XML is the seam, and it is what szamlazz.hu actually says
-//! (tests state the answer szamlazz.hu gives). Every unit test that needs a
-//! found document builds it here; the two renderers below are the deliberate
-//! exceptions.
-//!
-//! The wiremock integration tests (`tests/gateway.rs`, `tests/e2e/`)
-//! carry their own `Doc` and do not share this one: a `#[cfg(test)]` module is
-//! invisible to a `tests/` crate, and the alternative (a `test-support`
-//! cargo feature enabled by a `[dev-dependencies]` self-reference) would make
-//! a test fixture part of the crate's public feature set (docs.rs builds with
-//! `all-features`, and a public feature is semver surface). The e2e `Doc`
-//! also carries a harness-only `external_id` selector that is not part of any
-//! document body. Two small renderers of one verified XML shape were judged
-//! cheaper than that surface.
+//! [`Doc`] is the one synthetic szamlazz.hu document of the crate's tests,
+//! shared by path with the integration harnesses (`tests/common/mod.rs`: the
+//! renderer, the response templates and the wiremock selector matchers; the
+//! gateway's wiremock tests and the e2e suite declare the same module), so a
+//! fact learned about szamlazz.hu's XML is edited in one place. Until #134
+//! there were three renderers of one XML shape, and this module's docs argued
+//! for it: a `#[cfg(test)]` module is invisible to a `tests/` crate, and the
+//! alternative then considered (a `test-support` cargo feature enabled by a
+//! `[dev-dependencies]` self-reference) would have made a test fixture part
+//! of the crate's public feature set (docs.rs builds with `all-features`, and
+//! a public feature is semver surface). The `#[path]` include below sidesteps
+//! both: the file lives under `tests/`, where the integration binaries
+//! declare it as an ordinary module, and this `cfg(test)` module compiles the
+//! same source into the library's tests without any feature. What this
+//! module adds is the unit tests' seam: the rendered XML is parsed into the
+//! Számla Agent crate's [`InvoiceDocument`] ([`Doc::wire`]) and projected
+//! onto the worker's [`FoundDocument`] ([`Doc::parse`]) the way the gateway
+//! reads a query answer. The agent's response types are `#[non_exhaustive]`
+//! on purpose, so a unit test cannot construct one directly, and the
+//! projection is constructed through the wire by convention (ADR 0008; a
+//! literal would state a second model of the document): the XML is the seam,
+//! and it is what szamlazz.hu actually says (tests state the answer
+//! szamlazz.hu gives).
 //!
 //! `service::journal`'s `document()` is not a fixture of this kind and stays
 //! where it is: it renders *every* element the `szamla` XML can carry, so
@@ -33,37 +37,27 @@
 //! it says, and that no agent key is in it.
 //!
 //! [`open_gateway`] is how every unit test opens a [`Gateway`]: as the
-//! prologue does, but over [`http_client`], the default client's settings
-//! (a cookie jar, the request timeout, no redirects) with **no root
+//! prologue does, but over the shared [`http_client`], the default client's
+//! settings (a cookie jar, the request timeout, no redirects) with **no root
 //! certificates**. Building a default `reqwest::Client` parses the system CA
 //! store (about 28 ms of CPU per client through the platform verifier, and a
 //! failure on a host without a store), for tests whose every endpoint is plain
-//! `http://` (a wiremock, `127.0.0.1:1`). The wiremock and e2e harnesses
-//! build the same client for themselves; the e2e deployment's gateways are
-//! the prologue's own `Gateway::open`.
+//! `http://` (a wiremock, `127.0.0.1:1`). The integration harnesses open
+//! theirs over the same client; the e2e deployment's gateways are the
+//! prologue's own `Gateway::open`.
 
-use jiff::civil::{Date, date};
-use szamlazz_agent::client::REQUEST_TIMEOUT;
+/// The shared fixtures, by path (see the module docs).
+#[path = "../tests/common/mod.rs"]
+mod common;
+
+pub(crate) use common::{CreditRecord, Doc, ORIGINAL_TELJ, SUPPLIER, http_client};
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
-use szamlazz_agent::{Credentials, InvoiceNumber, reqwest};
+use szamlazz_agent::{Credentials, InvoiceNumber};
 
 use crate::account::Account;
 use crate::gateway::{FoundDocument, Gateway};
-
-/// The HTTP client [`open_gateway`] opens a gateway over: the default client
-/// (see `szamlazz_agent::client`) minus the root certificates (see the module
-/// docs).
-pub(crate) fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .tls_certs_only(std::iter::empty())
-        .cookie_store(true)
-        .timeout(REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("http client")
-}
 
 /// A gateway for `account` with `credentials`, opened as the prologue opens
 /// one per execution, over a fresh [`http_client`].
@@ -71,179 +65,7 @@ pub(crate) fn open_gateway(account: Account, credentials: Credentials) -> Gatewa
     Gateway::open_with_http(account, credentials, http_client()).expect("gateway")
 }
 
-/// The `szallito/id` of the documents [`Doc`] renders unless a test says
-/// otherwise: the seller record's id as szamlazz.hu prints it in a query body
-/// (972720 on the test account). Wire realism only: the worker holds no
-/// account pin, and tests that render another value assert exactly that.
-pub(crate) const SUPPLIER: u64 = 972_720;
-
-/// The `telj` every document carries unless a test says otherwise: the
-/// fulfillment date a storno of it must repeat.
-pub(crate) const ORIGINAL_TELJ: Date = date(2026, 7, 15);
-
-/// A queried document, rendered as szamlazz.hu's `<szamla>` response XML.
-///
-/// [`Doc::new`] is a live test-account document of `ORD-1` from [`SUPPLIER`]
-/// and [`Doc::default`] is its `SZ-1` invoice; override fields with
-/// struct-update syntax and call [`Doc::parse`].
-#[derive(Debug, Clone)]
-pub(crate) struct Doc<'a> {
-    /// `szamlaszam`.
-    pub(crate) number: &'a str,
-    /// `tipus`: `SZ`, `D`, `ES`, `VS`, `HS`, `SS`, …
-    pub(crate) tipus: &'a str,
-    /// `rendelesszam`; `None` renders no element: a document issued outside
-    /// any order.
-    pub(crate) order: Option<&'a str>,
-    /// `teszt`: whether a test account issued the document. Parsed and
-    /// projected by `query`, compared with nothing. `None` renders no element:
-    /// szamlazz.hu breaking its schema, a document that does not say (the
-    /// agent crate reports it as `None`).
-    pub(crate) test: Option<bool>,
-    /// `szallito/id`: the seller record's id in the `<szallito>` block.
-    /// Parsed, compared with nothing.
-    pub(crate) supplier_id: u64,
-    /// `<sztornozott>true</sztornozott>`: the document is reversed (as
-    /// observed); `false` renders no element, as on a live document and on
-    /// the storno invoice itself.
-    pub(crate) reversed: bool,
-    /// `hivszamlaszam`: the invoice a storno or a corrective references.
-    pub(crate) referenced_invoice: Option<&'a str>,
-    /// `hivdijbekszam`: the proforma an invoice or prepayment consumed.
-    pub(crate) referenced_proforma: Option<&'a str>,
-    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
-    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
-    /// invoice and `3` for one created with `eszamla=true` (P73).
-    pub(crate) eszamla: Option<i32>,
-    /// `kelt`; `None` renders no element.
-    pub(crate) issue_date: Option<Date>,
-    /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.
-    pub(crate) fulfillment_date: Option<Date>,
-    /// `osszegek/totalossz/netto`.
-    pub(crate) net: &'a str,
-    /// `osszegek/totalossz/afa`.
-    pub(crate) vat: &'a str,
-    /// `osszegek/totalossz/brutto`: what a document with no credit entries
-    /// owes in full.
-    pub(crate) gross: &'a str,
-    /// `kifizetesek`: the credit entries registered against the document;
-    /// empty renders no element.
-    pub(crate) payments: &'a [CreditRecord<'a>],
-    /// Further `<alap>` children, verbatim (`<fizh>…</fizh><devizanem>HUF</devizanem>`),
-    /// for what no field covers; appended after the fields' elements, which
-    /// the parser does not mind. Must not repeat an element a field renders.
-    pub(crate) alap_extra: &'a str,
-}
-
-/// A credit entry (`kifizetes`) on a [`Doc`].
-#[derive(Debug, Clone)]
-pub(crate) struct CreditRecord<'a> {
-    /// `datum`.
-    pub(crate) date: Date,
-    /// `jogcim`: the credit entry's title, e.g. `átutalás`.
-    pub(crate) title: &'a str,
-    /// `osszeg`.
-    pub(crate) amount: &'a str,
-    /// `megjegyzes`.
-    pub(crate) comment: Option<&'a str>,
-    /// `bankszamlaszam`.
-    pub(crate) bank_account: Option<&'a str>,
-}
-
-impl<'a> CreditRecord<'a> {
-    /// A credit entry of `amount` on `date` under `title`, with no comment
-    /// and no bank account.
-    pub(crate) const fn new(date: Date, title: &'a str, amount: &'a str) -> Self {
-        Self {
-            date,
-            title,
-            amount,
-            comment: None,
-            bank_account: None,
-        }
-    }
-}
-
-impl<'a> Doc<'a> {
-    /// A live test-account document of `ORD-1` from [`SUPPLIER`].
-    pub(crate) const fn new(number: &'a str, tipus: &'a str) -> Self {
-        Self {
-            number,
-            tipus,
-            order: Some("ORD-1"),
-            test: Some(true),
-            supplier_id: SUPPLIER,
-            reversed: false,
-            referenced_invoice: None,
-            referenced_proforma: None,
-            eszamla: None,
-            issue_date: Some(date(2026, 9, 3)),
-            fulfillment_date: Some(ORIGINAL_TELJ),
-            net: "1000",
-            vat: "270",
-            gross: "1270",
-            payments: &[],
-            alap_extra: "",
-        }
-    }
-
-    /// The document as szamlazz.hu's `<szamla>` response body.
-    pub(crate) fn xml(&self) -> String {
-        let opt = |tag: &str, value: Option<&str>| {
-            value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
-        };
-        let eszamla = self
-            .eszamla
-            .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
-        let kelt = self.issue_date.map(|date| date.to_string());
-        let telj = self.fulfillment_date.map(|date| date.to_string());
-        let teszt = self.test.map(|test| test.to_string());
-        let payments = if self.payments.is_empty() {
-            String::new()
-        } else {
-            let entries = self.payments.iter().fold(String::new(), |xml, entry| {
-                format!(
-                    "{xml}<kifizetes><datum>{}</datum><jogcim>{}</jogcim><osszeg>{}</osszeg>{}{}</kifizetes>",
-                    entry.date,
-                    entry.title,
-                    entry.amount,
-                    opt("megjegyzes", entry.comment),
-                    opt("bankszamlaszam", entry.bank_account),
-                )
-            });
-            format!("<kifizetesek>{entries}</kifizetesek>")
-        };
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}{kelt}{telj}{rendelesszam}{teszt}{sztornozott}{alap_extra}</alap>
-  <vevo><nev>Buyer</nev></vevo>
-  <tetelek></tetelek>
-  <osszegek><totalossz><netto>{net}</netto><afa>{vat}</afa><brutto>{gross}</brutto></totalossz></osszegek>
-  {payments}
-</szamla>"#,
-            supplier = self.supplier_id,
-            number = self.number,
-            tipus = self.tipus,
-            hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
-            hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
-            kelt = opt("kelt", kelt.as_deref()),
-            telj = opt("telj", telj.as_deref()),
-            rendelesszam = opt("rendelesszam", self.order),
-            teszt = opt("teszt", teszt.as_deref()),
-            sztornozott = if self.reversed {
-                "<sztornozott>true</sztornozott>"
-            } else {
-                ""
-            },
-            alap_extra = self.alap_extra,
-            net = self.net,
-            vat = self.vat,
-            gross = self.gross,
-        )
-    }
-
+impl Doc<'_> {
     /// The document as the Számla Agent crate parses a query answer, before
     /// the worker's projection: what the builder's own tests read (each field
     /// as the parser sees it), and the seam for a test that needs a value the
@@ -279,12 +101,6 @@ impl<'a> Doc<'a> {
     /// [`Doc::parse`] boxed, as the gateway outcomes carry a found document.
     pub(crate) fn boxed(&self) -> Box<FoundDocument> {
         Box::new(self.parse())
-    }
-}
-
-impl Default for Doc<'_> {
-    fn default() -> Self {
-        Self::new("SZ-1", "SZ")
     }
 }
 
@@ -346,6 +162,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
 /// renders as, read back through the Számla Agent parser (the projection's
 /// reading of it is `gateway::document`'s own test).
 mod tests {
+    use jiff::civil::date;
     use rust_decimal::dec;
 
     use super::*;
@@ -390,12 +207,10 @@ mod tests {
         assert_eq!(other.supplier.id, Some(1));
         assert_eq!(other.info.reversed, Some(true));
 
-        let unmanaged = Doc {
-            order: None,
-            ..Doc::default()
-        }
-        .wire();
+        let unmanaged = Doc::unmanaged("SZ-1", "SZ").wire();
         assert_eq!(unmanaged.info.order_number, None);
+        let of_order = Doc::of("SZ-1", "SZ", "E2E-1").wire();
+        assert_eq!(of_order.info.order_number.as_deref(), Some("E2E-1"));
 
         let unknown_mode = Doc {
             test: None,
@@ -453,8 +268,8 @@ mod tests {
 
     /// What `get` and the `Szamlazz.Agent.query` projection read beyond the
     /// pins: `kelt`, the totals, the credit entries (`kifizetesek`, each with
-    /// its date, title, amount and the optional comment and bank account), and
-    /// any further `<alap>` child a test needs verbatim.
+    /// its date, title, amount and the optional comment and bank account),
+    /// and any further `<alap>` child a test needs verbatim.
     #[test]
     fn dates_totals_credit_entries_and_extra_alap_children_render() {
         let document = Doc {

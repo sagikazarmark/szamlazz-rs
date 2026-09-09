@@ -1,7 +1,8 @@
 //! Phase 2: the single → multi flag day and the isolation multi-account mode
-//! leans on: the same order key under two scopes, the same `Idempotency-Key`
-//! under two scopes, an account change and a credential rotation between two
-//! executions.
+//! leans on: the scope namespacing the Virtual Object key and the
+//! `Idempotency-Key` (the same order key and the same key under two scopes
+//! are two objects, two invocations), an account change and a credential
+//! rotation between two executions of one step.
 
 use restate_e2e_harness::run_result;
 use rust_decimal::dec;
@@ -11,12 +12,12 @@ use restate_szamlazz::contract::TerminalCode;
 
 use crate::harness::accounts::{AGENT_KEY, BANK_ACCOUNT, BANK_ACCOUNT_CHANGED, KEY_B, KEY_B_V2};
 use crate::harness::szamlazz::{
-    Doc, agent_key_tag, create, create_with_bank_account, create_with_key, created, not_found,
-    order_query,
+    Doc, agent_key_tag, create_never_sent, create_with_bank_account, create_with_key, created,
+    not_found, order_query,
 };
 use crate::harness::{Harness, create_body};
 
-/// (xvi) the single → multi flag day. While the services are private the
+/// The single → multi flag day. While the services are private the
 /// ingress refuses a call without creating an invocation; after the drain
 /// and the switch (same namespace, the same szamlazz.hu account now under
 /// scope `acme`) the first scoped create for an order the single-account
@@ -40,24 +41,20 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .await;
     assert_eq!(reply.status, 400, "a private service: {}", reply.body);
     assert_eq!(reply.invocation_id, None, "no invocation was created");
-    assert_eq!(h.requests_seen().await, 0);
+    assert!(h.requests_of_order("E2E-16").await.is_empty());
 
     h.switch_to_multi_account().await;
 
-    // The document issued unscoped in phase 1 (E2E-1 → SZ-2) is found by the
+    // The document issued unscoped in phase 1 (E2E-1 → SZ-1) is found by the
     // first scoped create under `acme`: the external id did not change.
     h.absent("E2E-1", &["prepayment", "final", "proforma"])
         .await;
     h.holds(&Doc {
         external_id: Some("acct:E2E-1:invoice"),
-        ..Doc::new("SZ-2", "SZ", "E2E-1")
+        ..Doc::of("SZ-1", "SZ", "E2E-1")
     })
     .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.mock)
-        .await;
+    create_never_sent(&h.mock, "E2E-1").await;
     let reply = h
         .call_scoped(
             "acme",
@@ -69,7 +66,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
-    assert_eq!(reply.body["invoice_number"], "SZ-2");
+    assert_eq!(reply.body["invoice_number"], "SZ-1");
     assert_eq!(reply.body["external_id"], "acct:E2E-1:invoice");
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
@@ -106,7 +103,10 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     );
     let invocation = h.invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope, None, "{invocation:?}");
-    assert_eq!(h.requests_seen().await, 0, "nothing reached szamlazz.hu");
+    assert!(
+        h.requests_of_order("E2E-16").await.is_empty(),
+        "nothing reached szamlazz.hu"
+    );
 
     // A scope no account is reachable by is unknown the same way.
     let reply = h
@@ -122,19 +122,25 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     let fault = reply.fault();
     assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("gamma"), "{fault:?}");
-    assert_eq!(h.requests_seen().await, 0);
-    eprintln!(
-        "(xvi) flag day: private → drain → multi; scoped create finds the unscoped-phase document; unscoped → unknown_account: pass"
-    );
+    assert!(h.requests_of_order("E2E-16").await.is_empty());
 }
 
-/// (xvii) the same order key under scopes `acme` and `beta`, concurrently:
-/// two Virtual Objects, two `issued`, each account's own agent key on the
-/// create wire exactly once; Restate namespaces the Virtual Object key per
-/// scope, and the prologue opens each execution's gateway on its own
-/// account. (The lookup queries carry the key as well; the create bodies are
-/// what identify *which account issued*.)
-pub(crate) async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &Harness) {
+/// The scope namespaces both identities Restate keys an invocation by. The
+/// same order key under scopes `acme` and `beta`, concurrently, is two
+/// Virtual Objects: two `issued`, each account's own agent key on the create
+/// wire exactly once (the prologue opens each execution's gateway on its own
+/// account; the lookup queries carry the key as well, the create bodies are
+/// what identify *which account issued*), the same external id on two
+/// szamlazz.hu accounts. And the **same** `Idempotency-Key` under two scopes
+/// is two invocations (two `x-restate-id`s, two documents), because Restate
+/// hashes the scope into the idempotency identity; the key replayed under
+/// either scope returns that scope's own stored completion without a call.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the two identities the scope namespaces"
+)]
+pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h: &Harness) {
+    // The same order key, two scopes, at once.
     h.reset().await;
     h.absent("E2E-17", &["prepayment", "final", "proforma", "invoice"])
         .await;
@@ -175,8 +181,7 @@ pub(crate) async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &
         beta.body["external_id"], "acct:E2E-17:invoice",
         "the same namespace and order: the same external id on two szamlazz.hu accounts"
     );
-
-    let creates = h.create_bodies().await;
+    let creates = h.create_bodies_of("E2E-17").await;
     assert_eq!(creates.len(), 2, "one create per account");
     for key in [AGENT_KEY, KEY_B] {
         assert_eq!(
@@ -200,16 +205,8 @@ pub(crate) async fn same_order_key_under_two_scopes_issues_on_both_accounts(h: &
             String::from_utf8_lossy(&account.raw)
         );
     }
-    eprintln!(
-        "(xvii) same order key under two scopes concurrently → two issued, each key on the create wire once: pass"
-    );
-}
 
-/// (xvii-b) the **same** `Idempotency-Key` under two scopes is two
-/// invocations (two `x-restate-id`s, two documents), because Restate hashes
-/// the scope into the idempotency identity; and the key replayed under
-/// either scope returns that scope's own stored completion without a call.
-pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: &Harness) {
+    // The same `Idempotency-Key`, two scopes.
     h.reset().await;
     h.absent("E2E-17B", &["prepayment", "final", "proforma", "invoice"])
         .await;
@@ -228,7 +225,6 @@ pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: 
         .mount(&h.mock)
         .await;
 
-    let body = create_body(dec!(1000), false);
     let acme = h
         .call_scoped("acme", "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
         .await;
@@ -246,10 +242,14 @@ pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: 
         beta.invocation_id(),
         "the same Idempotency-Key under two scopes is two invocations"
     );
-    assert_eq!(h.create_bodies().await.len(), 2, "two documents");
+    assert_eq!(
+        h.create_bodies_of("E2E-17B").await.len(),
+        2,
+        "two documents"
+    );
 
     // The key again under each scope replays that scope's own completion.
-    let before = h.requests_seen().await;
+    let before = h.requests_of_order("E2E-17B").await.len();
     for (scope, original) in [("acme", &acme), ("beta", &beta)] {
         let replay = h
             .call_scoped(scope, "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
@@ -261,13 +261,14 @@ pub(crate) async fn same_idempotency_key_under_two_scopes_is_two_invocations(h: 
         );
         assert_eq!(replay.invocation_id(), original.invocation_id(), "{scope}");
     }
-    assert_eq!(h.requests_seen().await, before, "replays, not calls");
-    eprintln!(
-        "(xvii-b) same Idempotency-Key under two scopes → two invocation ids, two documents; each replays its own: pass"
+    assert_eq!(
+        h.requests_of_order("E2E-17B").await.len(),
+        before,
+        "replays, not calls"
     );
 }
 
-/// (xix) `acme`'s seller bank account changes between two executions of a
+/// `acme`'s seller bank account changes between two executions of a
 /// create step (the first loses its reply): the second execution's create
 /// carries the **journaled** account's bank account (the invocation
 /// finishes on the account it started on), and only new invocations see the
@@ -309,7 +310,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
     let change = async {
         hold.reached().await;
         assert_eq!(
-            h.create_bodies().await.len(),
+            h.create_bodies_of("E2E-19").await.len(),
             1,
             "the first execution sent before the second reached its fetch"
         );
@@ -322,7 +323,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-19");
-    let creates = h.create_bodies().await;
+    let creates = h.create_bodies_of("E2E-19").await;
     assert_eq!(creates.len(), 2, "two executions of the create step");
     assert!(
         creates
@@ -370,10 +371,9 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
-    eprintln!("(xix) account change between executions → the journaled account wins: pass");
 }
 
-/// (xx) `beta`'s agent key is rotated between two executions of a create
+/// `beta`'s agent key is rotated between two executions of a create
 /// step (the first loses its reply): the second execution fetches the
 /// credentials again and carries the new key, while the journaled `account`
 /// entry is byte-identical before and after; credentials are never in it.
@@ -413,7 +413,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
         // not part of it.)
         hold.reached().await;
         assert_eq!(
-            h.create_bodies().await.len(),
+            h.create_bodies_of("E2E-20").await.len(),
             1,
             "the first execution sent before the second reached its fetch"
         );
@@ -440,7 +440,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
     assert_eq!(reply.body["invoice_number"], "SZ-20");
     assert_eq!(reply.invocation_id(), id);
 
-    let creates = h.create_bodies().await;
+    let creates = h.create_bodies_of("E2E-20").await;
     assert_eq!(creates.len(), 2, "two executions of the create step");
     assert!(
         creates[0].contains(&agent_key_tag(KEY_B)),
@@ -468,8 +468,5 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
             .count(),
         1,
         "the re-execution replayed the account, it did not resolve again"
-    );
-    eprintln!(
-        "(xx) credential rotation between executions → new key on the wire, account entry unchanged: pass"
     );
 }

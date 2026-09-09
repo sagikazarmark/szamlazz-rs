@@ -1,9 +1,30 @@
 //! Wiremock tests of the `gateway` module: the lookup and create steps,
 //! storno validation, deletion, credit entries, credential rejections and
 //! failed exchanges (`Unanswered` on the reads, `Unconfirmed` on the writes)
-//! against synthetic szamlazz.hu responses.
+//! against synthetic szamlazz.hu responses, the shared fixtures of
+//! `tests/common` (the document renderer, the response templates, the
+//! selector matchers).
+//!
+//! What a test here proves is the **wire**: which requests a step sends and
+//! in what order (`expect(n)`, the recorded bodies), what it puts in them, and
+//! that each answer szamlazz.hu can give, in headers or in the body alone, is
+//! read into the outcome the gateway's classifiers name. The classifiers
+//! themselves (`settle_create`, `settle_storno`, `classify_failure`,
+//! `QueryError::answered`, `is_foreign`, the credential codes) are pure and
+//! table-tested in the module's unit tests; a decision they make is pinned
+//! here once per step, as a row of a table with one gateway per row, not once
+//! per code.
 
-use jiff::civil::{Date, date};
+mod common;
+
+use common::{
+    CreditRecord, Doc, ORIGINAL_TELJ, api_error, body_error, create, created,
+    created_but_notification_failed, created_without_a_number, credit, delete, external_id_query,
+    http_builder, http_client, not_found, number_query, order_query, original_telj_tag,
+    proforma_deleted, proforma_gone, storno, szlahu_down, taxpayer_known, taxpayer_nav_error,
+    taxpayer_query, taxpayer_unknown,
+};
+use jiff::civil::date;
 use restate_szamlazz::account::{Account, Endpoint};
 use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentEntry, PaymentMethod, Selector,
@@ -16,38 +37,12 @@ use restate_szamlazz::gateway::{
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
-use szamlazz_agent::client::REQUEST_TIMEOUT;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 use szamlazz_agent::{Credentials, reqwest};
 use wiremock::matchers::{body_string_contains, method};
-use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
-
-/// The `szallito/id` the rendered documents carry: wire realism; the gateway
-/// holds no account pin.
-const SUPPLIER: u64 = 972_720;
-
-/// The szamlazz.hu codes that mean "the agent credentials are wrong": 3
-/// invalid credentials, 135 browser session active, 136 login blocked, 164
-/// multiple accounts. Every operation answers them as `CredentialsRejected`.
-const CREDENTIAL_CODES: [&str; 4] = ["3", "135", "136", "164"];
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ----- fixtures --------------------------------------------------------------
-
-/// The HTTP client every gateway here is opened over: the default client's
-/// settings (a cookie jar of its own, the request timeout, no redirects) with
-/// **no root certificates**, so building it never parses the system CA store
-/// for a test whose every endpoint is plain `http://` (#136).
-fn http_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .tls_certs_only(std::iter::empty())
-        .cookie_store(true)
-        .timeout(REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-}
-
-fn http_client() -> reqwest::Client {
-    http_builder().build().expect("http client")
-}
 
 /// A gateway for the test account, opened as the prologue would open it.
 fn gateway(server: &MockServer) -> Gateway {
@@ -79,247 +74,6 @@ fn document() -> DocumentInput {
         date(2026, 9, 3),
         date(2026, 9, 11),
         PaymentMethod::Transfer,
-    )
-}
-
-/// The `telj` every document of these tests carries unless a test says
-/// otherwise: the fulfillment date a storno of it must repeat.
-const ORIGINAL_TELJ: Date = date(2026, 7, 15);
-
-/// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: what every
-/// storno of a fixture document must send.
-fn original_telj_tag() -> String {
-    format!("<teljesitesDatum>{ORIGINAL_TELJ}</teljesitesDatum>")
-}
-
-/// A queried document, rendered as the `szamla` response XML.
-struct Doc<'a> {
-    number: &'a str,
-    tipus: &'a str,
-    order: Option<&'a str>,
-    reversed: bool,
-    referenced_proforma: Option<&'a str>,
-    referenced_invoice: Option<&'a str>,
-    /// `teszt`; `None` renders no element: szamlazz.hu breaking its schema.
-    test: Option<bool>,
-    supplier_id: u64,
-    payments: &'a [&'a str],
-    /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.
-    fulfillment_date: Option<Date>,
-    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
-    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
-    /// invoice and `3` for one created with `eszamla=true` (P73).
-    eszamla: Option<i32>,
-}
-
-impl<'a> Doc<'a> {
-    const fn new(number: &'a str, tipus: &'a str) -> Self {
-        Self {
-            number,
-            tipus,
-            order: Some("ORD-1"),
-            reversed: false,
-            referenced_proforma: None,
-            referenced_invoice: None,
-            test: Some(true),
-            supplier_id: SUPPLIER,
-            payments: &[],
-            fulfillment_date: Some(ORIGINAL_TELJ),
-            eszamla: None,
-        }
-    }
-
-    /// A document of ours that carries `<sztornozott>true</sztornozott>`.
-    const fn reversed(number: &'a str, tipus: &'a str) -> Self {
-        Self {
-            reversed: true,
-            ..Self::new(number, tipus)
-        }
-    }
-
-    fn xml(&self) -> String {
-        let eszamla = self
-            .eszamla
-            .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
-        let opt = |tag: &str, value: Option<&str>| {
-            value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
-        };
-        let telj = self.fulfillment_date.map(|date| date.to_string());
-        let teszt = self.test.map(|test| test.to_string());
-        let payments = if self.payments.is_empty() {
-            String::new()
-        } else {
-            let mut entries = String::from("<kifizetesek>");
-            for amount in self.payments {
-                entries.push_str(
-                    "<kifizetes><datum>2026-09-03</datum><jogcim>transfer</jogcim><osszeg>",
-                );
-                entries.push_str(amount);
-                entries.push_str("</osszeg></kifizetes>");
-            }
-            entries.push_str("</kifizetesek>");
-            entries
-        };
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><gazdEsemAzon>924307338</gazdEsemAzon><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{telj}{rendelesszam}{teszt}{sztornozott}</alap>
-  <vevo><nev>Buyer</nev></vevo>
-  <tetelek></tetelek>
-  <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
-  {payments}
-</szamla>"#,
-            supplier = self.supplier_id,
-            number = self.number,
-            tipus = self.tipus,
-            hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
-            hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
-            telj = opt("telj", telj.as_deref()),
-            rendelesszam = opt("rendelesszam", self.order),
-            teszt = opt("teszt", teszt.as_deref()),
-            sztornozott = if self.reversed {
-                "<sztornozott>true</sztornozott>"
-            } else {
-                ""
-            },
-        )
-    }
-
-    fn response(&self) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_raw(self.xml(), "application/xml")
-    }
-}
-
-/// The body-only code 7 of the XML query.
-fn not_found() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[7]]></hibakod><hibauzenet><![CDATA[Hiányzó adat: számla xml (ismeretlen számlaszám, rendelésszám vagy külső azonosító).]]></hibauzenet></xmlszamlavalasz>"#,
-        "application/xml",
-    )
-}
-
-/// A successful create / storno / credit response (`xmlszamlavalasz`).
-fn created(number: &str, net: &str, gross: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_szamlaszam", number)
-        .insert_header("szlahu_id", "924307747")
-        .insert_header("szlahu_nettovegosszeg", net)
-        .insert_header("szlahu_bruttovegosszeg", gross)
-        .insert_header("szlahu_kintlevoseg", gross)
-        .set_body_raw(
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>{number}</szamlaszam><szamlanetto>{net}</szamlanetto><szamlabrutto>{gross}</szamlabrutto><kintlevoseg>{gross}</kintlevoseg></xmlszamlavalasz>"#
-            ),
-            "application/xml",
-        )
-}
-
-/// An error of an operation that reports in headers and body.
-fn api_error(code: &str, message: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_error_code", code)
-        .insert_header("szlahu_error", message)
-        .set_body_raw(
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>{code}</hibakod><hibauzenet>{message}</hibauzenet></xmlszamlavalasz>"#
-            ),
-            "application/xml",
-        )
-}
-
-/// An error of an operation that reports in the body only.
-fn body_error(code: &str, message: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>{code}</hibakod><hibauzenet>{message}</hibauzenet></xmlszamlavalasz>"#
-        ),
-        "application/xml",
-    )
-}
-
-fn op(action: &str) -> MockBuilder {
-    Mock::given(method("POST")).and(body_string_contains(format!("name=\"{action}\"")))
-}
-
-fn external_id_query(id: &str) -> MockBuilder {
-    op("action-szamla_agent_xml").and(body_string_contains(format!(
-        "<szamlaKulsoAzon>{id}</szamlaKulsoAzon>"
-    )))
-}
-
-fn order_query() -> MockBuilder {
-    op("action-szamla_agent_xml").and(body_string_contains("<rendelesSzam>ORD-1</rendelesSzam>"))
-}
-
-fn number_query(number: &str) -> MockBuilder {
-    op("action-szamla_agent_xml").and(body_string_contains(format!(
-        "<szamlaszam>{number}</szamlaszam>"
-    )))
-}
-
-fn create() -> MockBuilder {
-    op("action-xmlagentxmlfile")
-}
-
-fn storno() -> MockBuilder {
-    op("action-szamla_agent_st")
-}
-
-fn delete() -> MockBuilder {
-    op("action-szamla_agent_dijbekero_torlese")
-}
-
-fn credit() -> MockBuilder {
-    op("action-szamla_agent_kifiz")
-}
-
-/// The taxpayer query (`xmltaxpayer`) of the eight-digit `prefix`.
-fn taxpayer_query(prefix: &str) -> MockBuilder {
-    op("action-szamla_agent_taxpayer").and(body_string_contains(format!(
-        "<torzsszam>{prefix}</torzsszam>"
-    )))
-}
-
-/// NAV's answer for a known taxpayer: `taxpayerValidity` true with the
-/// registered name, tax number detail and one `HQ` address (the agent
-/// crate's synthetic fixture).
-fn taxpayer_known() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns:d="http://schemas.nav.gov.hu/OSA/2.0/data">
-  <result><funcCode>OK</funcCode></result><taxpayerValidity>true</taxpayerValidity>
-  <taxpayerData><taxpayerName>SYNTHETIC SOFTWARE KFT.</taxpayerName>
-    <taxNumberDetail><d:taxpayerId>12345678</d:taxpayerId><d:vatCode>2</d:vatCode></taxNumberDetail>
-    <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>HQ</taxpayerAddressType><taxpayerAddress>
-      <d:countryCode>HU</d:countryCode><d:postalCode>1111</d:postalCode><d:city>TESTVAROS</d:city>
-      <d:streetName>MINTA</d:streetName><d:publicPlaceCategory>UTCA</d:publicPlaceCategory><d:number>1.</d:number>
-    </taxpayerAddress></taxpayerAddressItem></taxpayerAddressList>
-  </taxpayerData>
-</QueryTaxpayerResponse>"#,
-        "application/xml",
-    )
-}
-
-/// NAV's answer for a well-formed prefix it knows no taxpayer under:
-/// `funcCode OK`, `taxpayerValidity` false, nothing else.
-fn taxpayer_unknown() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result><taxpayerValidity>false</taxpayerValidity></QueryTaxpayerResponse>"#,
-        "application/xml",
-    )
-}
-
-/// A NAV-side failure szamlazz.hu relays in the taxpayer response body:
-/// `funcCode ERROR` with NAV's `errorCode` and `message`.
-fn taxpayer_nav_error(code: &str, message: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>ERROR</funcCode><errorCode>{code}</errorCode><message>{message}</message></result></QueryTaxpayerResponse>"#
-        ),
-        "application/xml",
     )
 }
 
@@ -442,7 +196,7 @@ async fn lookup_with_nothing_under_the_id_or_the_order_is_absent() {
         .expect(1)
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(not_found())
         .expect(1)
         .mount(&h.server)
@@ -460,7 +214,7 @@ async fn lookup_finds_our_live_document_and_takes_no_hint() {
         .expect(1)
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(Doc::new("SZ-77", "SZ").response())
         .expect(0)
         .mount(&h.server)
@@ -499,7 +253,7 @@ async fn lookup_of_an_invalid_document_under_our_id_is_a_collision() {
             .respond_with(doc.response())
             .mount(&h.server)
             .await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(not_found())
             .expect(0)
             .mount(&h.server)
@@ -547,7 +301,7 @@ async fn lookup_holds_no_account_pin() {
             .expect(1)
             .mount(&h.server)
             .await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(not_found())
             .expect(0)
             .mount(&h.server)
@@ -570,7 +324,7 @@ async fn lookup_of_our_reversed_document_names_its_storno_from_the_hint() {
         .expect(1)
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(
             Doc {
                 referenced_invoice: Some("SZ-1"),
@@ -611,7 +365,7 @@ async fn lookup_of_our_reversed_document_has_no_storno_number_when_the_hint_is_n
             .respond_with(Doc::reversed("SZ-1", "SZ").response())
             .mount(&h.server)
             .await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(hint.response())
             .mount(&h.server)
             .await;
@@ -659,7 +413,7 @@ async fn lookup_reports_a_live_invoice_under_the_order_that_is_not_ours_as_forei
             .respond_with(under_id)
             .mount(&h.server)
             .await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(hint.response())
             .expect(1)
             .mount(&h.server)
@@ -697,7 +451,7 @@ async fn lookup_hint_ignores_our_documents_non_invoices_and_its_own_failure() {
             .respond_with(not_found())
             .mount(&h.server)
             .await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(hint)
             .expect(1)
             .mount(&h.server)
@@ -733,7 +487,7 @@ async fn lookup_without_an_answer_is_unanswered_not_data() {
         .respond_with(not_found())
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(ResponseTemplate::new(500))
         .mount(&h.server)
         .await;
@@ -781,7 +535,7 @@ async fn lookup_answered_with_another_code_is_data() {
         .respond_with(not_found())
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(body_error("57", "Ismeretlen hiba"))
         .mount(&h.server)
         .await;
@@ -798,7 +552,7 @@ async fn lookup_of_a_corrective_takes_no_hint() {
         .expect(1)
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(Doc::new("SZ-1", "SZ").response())
         .expect(0)
         .mount(&h.server)
@@ -823,7 +577,7 @@ async fn corrective_with_a_live_base_under_the_order_is_issued() {
         .expect(2)
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(Doc::new("SZ-1", "SZ").response())
         .expect(0)
         .mount(&h.server)
@@ -973,84 +727,6 @@ async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_noth
 }
 
 #[tokio::test]
-async fn create_past_the_reversed_document_the_lookup_saw_sends_the_create() {
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(Doc::reversed("SZ-1", "SZ").response())
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-2", "1000", "1270"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-
-    match h.create(Some("SZ-1")).await {
-        Ok(CreateOutcome::Issued(issued)) => assert_eq!(issued.number, "SZ-2"),
-        other => panic!("expected Issued, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn create_never_sends_past_a_reversal_the_lookup_did_not_see() {
-    // The hole this closes: the lookup saw nothing (or X reversed), an
-    // earlier execution's send landed with a lost reply, and the document
-    // was reversed in the UI before this execution. The leading query finds
-    // a reversed document that is not the lookup's: the step settles as
-    // `Reversed` and sends nothing; a new document needs an explicit
-    // `reissue`.
-    for (label, reversed) in [
-        ("lookup saw nothing", None),
-        ("reissue past X", Some("SZ-0")),
-    ] {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(Doc::reversed("SZ-1", "SZ").response())
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        create()
-            .respond_with(created("SZ-X", "1000", "1270"))
-            .expect(0)
-            .mount(&h.server)
-            .await;
-
-        match h.create(reversed).await {
-            Ok(CreateOutcome::Reversed(found)) => {
-                assert_eq!(found.number, "SZ-1", "{label}");
-                assert!(!found.is_live(), "{label}");
-            }
-            other => panic!("{label}: expected Reversed, got {other:?}"),
-        }
-        assert_eq!(h.bodies().await.len(), 1, "{label}: the leading query only");
-    }
-}
-
-#[tokio::test]
-async fn create_never_sends_when_the_lookups_reversed_document_is_reported_live() {
-    // The lookup saw SZ-1 reversed; the leading query reports it live. The
-    // server contradicts itself, and sending is the least safe answer: the
-    // step settles as `LiveAgain` (the handler's `conflict{live}`).
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(Doc::new("SZ-1", "SZ").response())
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-
-    match h.create(Some("SZ-1")).await {
-        Ok(CreateOutcome::LiveAgain(found)) => assert_eq!(found.number, "SZ-1"),
-        other => panic!("expected LiveAgain, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_settled() {
     // The send lands, its reply is lost, and the document is reversed before
     // the immediate re-query sees it. The re-query settles the step as
@@ -1090,93 +766,149 @@ async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_
     }
 }
 
+/// What the create step's **leading query** decides, on the wire: each answer
+/// the external id can give, against the number the lookup step saw reversed
+/// (`reversed`), and whether a create is sent (the create mock's `expect`).
+/// The decision is `settle_create`'s, table-tested in the gateway's unit
+/// tests; this pins that the step consults it before the send, and that each
+/// answer is read off the wire (code 7 and the credential code in the body
+/// alone, the document, a bare 500, `szlahu_down`) into the outcome it names.
+/// An *answer* that is neither 7 nor a credential code is settled data,
+/// never `Unconfirmed` (#63); only a lost reply is.
 #[tokio::test]
-async fn create_never_sends_when_the_leading_query_is_not_a_clean_miss() {
-    // A collision under the id settles the step; a failed query leaves it
-    // unconfirmed. Neither sends a create.
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(
-            Doc {
-                order: Some("ORD-2"),
-                ..Doc::new("SZ-9", "SZ")
-            }
-            .response(),
-        )
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-    match h.create(None).await {
-        Ok(CreateOutcome::Collision(found)) => assert_eq!(found.number, "SZ-9"),
-        other => panic!("expected Collision, got {other:?}"),
-    }
+#[allow(
+    clippy::too_many_lines,
+    reason = "one table: twelve rows, one gateway each"
+)]
+async fn the_create_steps_leading_query_settles_or_proceeds() {
+    let other_order = Doc {
+        order: Some("ORD-2"),
+        ..Doc::new("SZ-9", "SZ")
+    };
+    // (what the leading query answers, what the lookup saw reversed, creates
+    // sent, the outcome)
+    let rows: [(&str, ResponseTemplate, Option<&str>, u64, &str); 12] = [
+        ("a clean miss sends", not_found(), None, 1, "Issued SZ-2"),
+        (
+            "a live document is an earlier execution's",
+            Doc::new("SZ-1", "SZ").response(),
+            None,
+            0,
+            "Found SZ-1",
+        ),
+        (
+            "a live document that is not the lookup's reversed one",
+            Doc::new("SZ-1", "SZ").response(),
+            Some("SZ-0"),
+            0,
+            "Found SZ-1",
+        ),
+        (
+            "the lookup's reversed document, still reversed, sends",
+            Doc::reversed("SZ-1", "SZ").response(),
+            Some("SZ-1"),
+            1,
+            "Issued SZ-2",
+        ),
+        (
+            "a reversed document the lookup did not see",
+            Doc::reversed("SZ-1", "SZ").response(),
+            None,
+            0,
+            "Reversed SZ-1",
+        ),
+        (
+            "a reversed document that is not the lookup's",
+            Doc::reversed("SZ-1", "SZ").response(),
+            Some("SZ-0"),
+            0,
+            "Reversed SZ-1",
+        ),
+        (
+            "the lookup's reversed document reported live",
+            Doc::new("SZ-1", "SZ").response(),
+            Some("SZ-1"),
+            0,
+            "LiveAgain SZ-1",
+        ),
+        (
+            "another order's document under the id",
+            other_order.response(),
+            None,
+            0,
+            "Collision SZ-9",
+        ),
+        (
+            "another code is data",
+            body_error("57", "Ismeretlen hiba"),
+            None,
+            0,
+            "Api 57",
+        ),
+        (
+            "szlahu_down is data",
+            szlahu_down(),
+            None,
+            0,
+            "Unavailable maintenance",
+        ),
+        (
+            "a credential code never sends",
+            body_error("3", "login"),
+            None,
+            0,
+            "CredentialsRejected 3",
+        ),
+        (
+            "a lost reply is the one Unconfirmed before a send",
+            ResponseTemplate::new(500),
+            None,
+            0,
+            "Unconfirmed Transport",
+        ),
+    ];
+    for (label, under_id, reversed, sends, expected) in rows {
+        let h = Harness::start().await;
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(under_id)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        create()
+            .respond_with(created("SZ-2", "1000", "1270"))
+            .expect(sends)
+            .mount(&h.server)
+            .await;
 
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-    assert!(matches!(
-        h.create(None).await,
-        Err(Unconfirmed::Transport(message)) if message.contains("HTTP 500")
-    ));
+        let outcome = h.create(reversed).await;
+        assert_eq!(describe_create(&outcome), expected, "{label}: {outcome:?}");
+        assert_eq!(
+            h.bodies().await.len(),
+            1 + usize::try_from(sends).expect("0 or 1"),
+            "{label}: the leading query, then the send or nothing"
+        );
+    }
 }
 
-/// An *answer* to the leading query that is neither 7 nor a credential code
-/// (another API code, or `szlahu_down`) is settled data, as the lookup
-/// step answers the same code: nothing was sent, so nothing is unconfirmed,
-/// and the issue policy (sized for the post-send window) is not spent on a
-/// read. The create mock sees zero requests (#63).
-#[tokio::test]
-async fn create_leading_query_answered_with_another_code_or_szlahu_down_is_settled_without_a_send()
-{
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(body_error("57", "Ismeretlen hiba"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-    assert_eq!(
-        h.create(None).await,
-        Ok(CreateOutcome::Api(SzamlazzAnswer::new(
-            "57",
-            "Ismeretlen hiba"
-        )))
-    );
-    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
-
-    let h = Harness::start().await;
-    external_id_query("acct:ORD-1:invoice")
-        .respond_with(ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-    assert_eq!(
-        h.create(None).await,
-        Ok(CreateOutcome::Unavailable {
-            message: "maintenance".to_owned(),
-        })
-    );
-    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
+/// A create step's outcome in one line, for the table above: the variant and
+/// what it names. The document-carrying variants are `#[non_exhaustive]`
+/// projections a test cannot build to compare with, so the tables compare
+/// this line.
+fn describe_create(outcome: &Result<CreateOutcome, Unconfirmed>) -> String {
+    match outcome {
+        Ok(CreateOutcome::Issued(issued)) => format!("Issued {}", issued.number),
+        Ok(CreateOutcome::Found(found)) => format!("Found {}", found.number),
+        Ok(CreateOutcome::Reversed(found)) => format!("Reversed {}", found.number),
+        Ok(CreateOutcome::LiveAgain(found)) => format!("LiveAgain {}", found.number),
+        Ok(CreateOutcome::Collision(found)) => format!("Collision {}", found.number),
+        Ok(CreateOutcome::Api(answer)) => format!("Api {}", answer.code),
+        Ok(CreateOutcome::Unavailable { message }) => format!("Unavailable {message}"),
+        Ok(CreateOutcome::CredentialsRejected(answer)) => {
+            format!("CredentialsRejected {}", answer.code)
+        }
+        Err(Unconfirmed::Transport(_)) => "Unconfirmed Transport".to_owned(),
+        other => format!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1198,37 +930,6 @@ async fn create_rejection_is_settled_without_a_re_query() {
             SzamlazzAnswer::new("259", "net")
         )))
     );
-}
-
-/// A success without a number: `xmlszamlavalasz` without `<szamlaszam>`,
-/// which the agent crate refuses to parse for a create.
-fn created_without_a_number() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#,
-        "application/xml",
-    )
-}
-
-/// Code 56 with a number: szamlazz.hu issued `number` but could not deliver
-/// its notification. The error code in the headers and the body, the number
-/// and the totals in the headers: the shape the agent crate accepts;
-/// szamlazz.hu's own shape for 56 (header or body, with or without the
-/// number) is unverified, since the test account never produced the code.
-fn created_but_notification_failed(number: &str, net: &str, gross: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_error_code", "56")
-        .insert_header("szlahu_error", "notification failed")
-        .insert_header("szlahu_szamlaszam", number)
-        .insert_header("szlahu_id", "924307747")
-        .insert_header("szlahu_nettovegosszeg", net)
-        .insert_header("szlahu_bruttovegosszeg", gross)
-        .insert_header("szlahu_kintlevoseg", gross)
-        .set_body_raw(
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>{number}</szamlaszam></xmlszamlavalasz>"#
-            ),
-            "application/xml",
-        )
 }
 
 /// Code 56 **with** a number is not an open code: szamlazz.hu issued the
@@ -1549,7 +1250,7 @@ async fn duplicate_harness(under_id: ResponseTemplate) -> Harness {
 #[tokio::test]
 async fn duplicate_order_number_with_our_live_document_under_the_id_is_reconciled() {
     let h = duplicate_harness(Doc::new("SZ-3", "SZ").response()).await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(not_found())
         .expect(0)
         .mount(&h.server)
@@ -1584,7 +1285,7 @@ async fn duplicate_order_number_with_a_reversal_the_lookup_did_not_see_is_revers
     // lookup did not see: answered as `Reversed` like the leading query
     // would, without the order-number naming query.
     let h = duplicate_harness(Doc::reversed("SZ-3", "SZ").response()).await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(not_found())
         .expect(0)
         .mount(&h.server)
@@ -1605,7 +1306,7 @@ async fn duplicate_order_number_names_the_existing_document_when_our_kind_is_new
     let reversed = (Doc::reversed("SZ-1", "SZ").response(), Some("SZ-1"));
     for (label, (under_id, reversed)) in [("absent", absent), ("reversed", reversed)] {
         let h = duplicate_harness(under_id).await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(Doc::new("SZ-77", "SZ").response())
             .expect(1)
             .mount(&h.server)
@@ -1638,7 +1339,7 @@ async fn duplicate_order_number_has_no_existing_number_when_another_kind_is_newe
         ("reversed", reversed_of_our_kind),
     ] {
         let h = duplicate_harness(not_found()).await;
-        order_query()
+        order_query("ORD-1")
             .respond_with(newest.response())
             .mount(&h.server)
             .await;
@@ -1661,7 +1362,7 @@ async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_
     // (the harness's create mock expects exactly one send), without a number
     // to name.
     let h = duplicate_harness(not_found()).await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(not_found())
         .expect(1)
         .mount(&h.server)
@@ -1683,7 +1384,7 @@ async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_
 #[tokio::test]
 async fn duplicate_order_number_whose_re_query_fails_is_unconfirmed_naming_both() {
     let h = duplicate_harness(ResponseTemplate::new(500)).await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(not_found())
         .expect(0)
         .mount(&h.server)
@@ -1715,7 +1416,7 @@ async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_que
         .expect(2)
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(Doc::new("SZ-1", "SZ").response())
         .expect(0)
         .mount(&h.server)
@@ -1755,114 +1456,190 @@ async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_que
     }
 }
 
-// ----- credentials: lookup and create -----------------------------------------
+// ----- credentials -----------------------------------------------------------
 
+/// A credential code (3, 135, 136, 164) is `CredentialsRejected` on **every**
+/// operation, read off the wire where szamlazz.hu puts it: in the body alone
+/// (the XML query's shape) or in the headers and the body (the create's, the
+/// storno's, the delete's, the taxpayer query's). Which codes are credential
+/// codes is `ErrorCode::is_credential_error`'s table, unit-tested in the
+/// agent crate; that each step consults it before doing anything else is
+/// pinned here with one code per operation and the operation's own shape:
+/// `expect(1)` on the answering mock, `expect(0)` on the send that must not
+/// follow (the hint after a rejected external-id query, the create after a
+/// rejected leading query), and no re-query after a rejected send (settled
+/// data, never `Unconfirmed`: the run retry policy is not spent on a wrong
+/// key).
 #[tokio::test]
-async fn credential_codes_on_the_lookup_external_id_query_are_credentials_rejected() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(body_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        order_query()
-            .respond_with(Doc::new("SZ-77", "SZ").response())
-            .expect(0)
-            .mount(&h.server)
-            .await;
+#[allow(
+    clippy::too_many_lines,
+    reason = "one table: every operation, one gateway each"
+)]
+async fn a_credential_code_on_any_operation_is_credentials_rejected() {
+    let entry = PaymentEntry {
+        date: date(2026, 9, 3),
+        method: PaymentMethod::Card,
+        amount: dec!(1000),
+        description: None,
+    };
+    let rejected = |code: &str| SzamlazzAnswer::new(code, "login");
 
-        assert_eq!(
-            h.lookup(&[]).await,
-            LookupOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
-            "{code}"
-        );
-        assert_eq!(
-            h.bodies().await.len(),
-            1,
-            "{code}: no hint after the rejection"
-        );
-    }
-}
+    // The lookup's external-id query, in the body: no hint follows.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(body_error("3", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    order_query("ORD-1")
+        .respond_with(Doc::new("SZ-77", "SZ").response())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.lookup(&[]).await,
+        LookupOutcome::CredentialsRejected(rejected("3")),
+        "lookup, external id"
+    );
 
-#[tokio::test]
-async fn credential_codes_on_the_lookup_hint_are_credentials_rejected() {
-    // Unlike a miss or another API error, a credential rejection on the hint
-    // is conclusive: the lookup does not report `Absent` and nothing proceeds
-    // to the create step.
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(not_found())
-            .mount(&h.server)
-            .await;
-        order_query()
-            .respond_with(body_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
+    // The lookup's hint: conclusive, unlike a miss or another code on it.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    order_query("ORD-1")
+        .respond_with(body_error("135", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.lookup(&[]).await,
+        LookupOutcome::CredentialsRejected(rejected("135")),
+        "lookup, hint"
+    );
 
-        assert_eq!(
-            h.lookup(&[]).await,
-            LookupOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
-            "{code}"
-        );
-    }
-}
+    // The create's send, in the headers: settled without a re-query.
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("136", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.create(None).await,
+        Ok(CreateOutcome::CredentialsRejected(rejected("136"))),
+        "create, send"
+    );
+    assert_eq!(h.bodies().await.len(), 2, "create: no re-query");
 
-#[tokio::test]
-async fn credential_codes_on_the_create_leading_query_never_send() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(body_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        create()
-            .respond_with(created("SZ-X", "1000", "1270"))
-            .expect(0)
-            .mount(&h.server)
-            .await;
+    // The three reads of a query, in the body.
+    let h = Harness::start().await;
+    common::op("action-szamla_agent_xml")
+        .respond_with(body_error("164", "login"))
+        .mount(&h.server)
+        .await;
+    let expected = Ok(QueryOutcome::CredentialsRejected(rejected("164")));
+    assert_eq!(h.gateway.verify("SZ-1").await, expected, "verify");
+    assert_eq!(h.gateway.hint(&order()).await, expected, "hint");
+    assert_eq!(
+        h.gateway
+            .query(&Selector::ExternalId("acct:ORD-1:invoice".to_owned()))
+            .await,
+        expected,
+        "query"
+    );
 
-        assert_eq!(
-            h.create(None).await,
-            Ok(CreateOutcome::CredentialsRejected(SzamlazzAnswer::new(
-                code.to_owned(),
-                "login"
-            ))),
-            "{code}"
-        );
-    }
-}
+    // The probe: data, one request.
+    let h = Harness::start().await;
+    external_id_query(probe_id().as_str())
+        .respond_with(body_error("3", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.probe(&probe_id()).await,
+        Ok(ProbeOutcome::CredentialsRejected(rejected("3"))),
+        "probe"
+    );
 
-#[tokio::test]
-async fn credential_codes_on_the_create_send_are_settled_without_a_re_query() {
-    // Settled data, not `Unconfirmed`: re-executing the step with the same
-    // key would only repeat the answer, so the run retry policy must not be
-    // spent on it.
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        external_id_query("acct:ORD-1:invoice")
-            .respond_with(not_found())
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        create()
-            .respond_with(api_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
+    // The storno lookup.
+    let h = Harness::start().await;
+    external_id_query(storno_id().as_str())
+        .respond_with(body_error("135", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.lookup_storno(&storno_id(), "SZ-1").await,
+        Ok(StornoLookupOutcome::CredentialsRejected(rejected("135"))),
+        "storno lookup"
+    );
 
-        assert_eq!(
-            h.create(None).await,
-            Ok(CreateOutcome::CredentialsRejected(SzamlazzAnswer::new(
-                code.to_owned(),
-                "login"
-            ))),
-            "{code}"
-        );
-    }
+    // The storno's send, in the headers: settled without a re-query. (The
+    // storno's leading query is a row of its leading-query table.)
+    let h = Harness::start().await;
+    external_id_query(storno_id().as_str())
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(api_error("136", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.storno(storno_request(&storno_id())).await,
+        Ok(StornoOutcome::CredentialsRejected(rejected("136"))),
+        "storno, send"
+    );
+    assert_eq!(h.bodies().await.len(), 2, "storno: no re-query");
+
+    // The delete and the credit entries.
+    let h = Harness::start().await;
+    delete()
+        .respond_with(api_error("164", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.delete_proforma("D-1").await,
+        DeleteOutcome::CredentialsRejected(rejected("164")),
+        "delete"
+    );
+    let h = Harness::start().await;
+    credit()
+        .respond_with(body_error("3", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway
+            .set_payments("SZ-1", std::slice::from_ref(&entry), false)
+            .await,
+        SetPaymentsOutcome::CredentialsRejected(rejected("3")),
+        "set_payments"
+    );
+
+    // The taxpayer query, in the headers.
+    let h = Harness::start().await;
+    taxpayer_query("12345678")
+        .respond_with(api_error("135", "login"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.query_taxpayer(&prefix()).await,
+        Ok(TaxpayerOutcome::CredentialsRejected(rejected("135"))),
+        "taxpayer"
+    );
 }
 
 // ----- queries ---------------------------------------------------------------
@@ -1873,7 +1650,7 @@ async fn verify_query_and_hint() {
     number_query("SZ-1")
         .respond_with(
             Doc {
-                payments: &["500", "770"],
+                payments: &[CreditRecord::transfer("500"), CreditRecord::transfer("770")],
                 ..Doc::new("SZ-1", "SZ")
             }
             .response(),
@@ -1892,7 +1669,7 @@ async fn verify_query_and_hint() {
         .respond_with(body_error("57", "Ismeretlen hiba"))
         .mount(&h.server)
         .await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(
             Doc {
                 referenced_invoice: Some("SZ-1"),
@@ -1965,7 +1742,7 @@ async fn verify_query_and_hint() {
 
     // The hint alone: a lost reply is its `Unanswered` too.
     let h = Harness::start().await;
-    order_query()
+    order_query("ORD-1")
         .respond_with(ResponseTemplate::new(500))
         .mount(&h.server)
         .await;
@@ -1997,33 +1774,6 @@ async fn verify_of_a_document_without_telj_has_no_fulfillment_date() {
             assert_eq!(found.fulfillment_date, None);
         }
         other => panic!("expected Found, got {other:?}"),
-    }
-}
-
-// ----- credentials -------------------------------------------------------------
-
-#[tokio::test]
-async fn credential_codes_on_a_query_are_credentials_rejected() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        op("action-szamla_agent_xml")
-            .respond_with(body_error(code, "login"))
-            .mount(&h.server)
-            .await;
-
-        let expected = Ok(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
-            code.to_owned(),
-            "login",
-        )));
-        assert_eq!(h.gateway.verify("SZ-1").await, expected, "verify {code}");
-        assert_eq!(h.gateway.hint(&order()).await, expected, "hint {code}");
-        assert_eq!(
-            h.gateway
-                .query(&Selector::ExternalId("acct:ORD-1:invoice".to_owned()))
-                .await,
-            expected,
-            "query {code}"
-        );
     }
 }
 
@@ -2080,29 +1830,6 @@ async fn probe_accepts_a_document_under_the_sentinel_id() {
         Ok(ProbeOutcome::Accepted)
     );
     assert_eq!(h.bodies().await.len(), 1);
-}
-
-/// A wrong key is data (`CredentialsRejected` with szamlazz.hu's code), not
-/// an error, for every credential code; still exactly one request.
-#[tokio::test]
-async fn probe_reports_a_wrong_key_as_credentials_rejected() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        external_id_query(probe_id().as_str())
-            .respond_with(body_error(code, "Sikertelen bejelentkezés."))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        assert_eq!(
-            h.gateway.probe(&probe_id()).await,
-            Ok(ProbeOutcome::CredentialsRejected(SzamlazzAnswer::new(
-                code.to_owned(),
-                "Sikertelen bejelentkezés."
-            ))),
-            "{code}"
-        );
-        assert_eq!(h.bodies().await.len(), 1, "{code}");
-    }
 }
 
 /// A non-credential szamlazz.hu code on the probe still proves the key:
@@ -2219,23 +1946,7 @@ async fn storno_lookup_is_absent_on_a_miss_or_another_holder() {
 }
 
 #[tokio::test]
-async fn storno_lookup_reports_rejected_credentials_another_code_and_no_answer() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        let storno_id = storno_id();
-        external_id_query(storno_id.as_str())
-            .respond_with(body_error(code, "login"))
-            .mount(&h.server)
-            .await;
-        assert_eq!(
-            h.gateway.lookup_storno(&storno_id, "SZ-1").await,
-            Ok(StornoLookupOutcome::CredentialsRejected(
-                SzamlazzAnswer::new(code.to_owned(), "login")
-            )),
-            "{code}"
-        );
-    }
-
+async fn storno_lookup_answers_another_code_as_data_and_no_answer_as_unanswered() {
     // Another szamlazz.hu code is an answer: data.
     let h = Harness::start().await;
     external_id_query(storno_id().as_str())
@@ -2431,125 +2142,91 @@ async fn storno_rejections_are_typed() {
     }
 }
 
-#[tokio::test]
-async fn storno_leading_query_hit_is_already_reversed() {
-    let h = Harness::start().await;
-    let storno_id = storno_id();
-    external_id_query(storno_id.as_str())
-        .respond_with(
-            Doc {
-                referenced_invoice: Some("SZ-1"),
-                ..Doc::new("SS-1", "SS")
-            }
-            .response(),
-        )
-        .mount(&h.server)
-        .await;
-    storno()
-        .respond_with(created("SS-2", "-1000", "-1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-
-    assert_eq!(
-        h.gateway.storno(storno_request(&storno_id)).await,
-        Ok(StornoOutcome::AlreadyReversed {
-            storno_number: "SS-1".to_owned(),
-        })
-    );
+/// A storno step's outcome in one line, for the table below: the twin of
+/// [`describe_create`].
+fn describe_storno(outcome: &Result<StornoOutcome, Unconfirmed>) -> String {
+    match outcome {
+        Ok(StornoOutcome::Reversed(storno)) => format!("Reversed {}", storno.number),
+        Ok(StornoOutcome::AlreadyReversed { storno_number }) => {
+            format!("AlreadyReversed {storno_number}")
+        }
+        Ok(StornoOutcome::Api(answer)) => format!("Api {}", answer.code),
+        Ok(StornoOutcome::Unavailable { message }) => format!("Unavailable {message}"),
+        Ok(StornoOutcome::CredentialsRejected(answer)) => {
+            format!("CredentialsRejected {}", answer.code)
+        }
+        other => format!("{other:?}"),
+    }
 }
 
-/// The storno step's twin of the create step's rule (#63): an *answer* to
-/// the leading query that is neither 7 nor a credential code (another API
-/// code, or `szlahu_down`) is settled data, nothing is sent and nothing is
-/// unconfirmed.
+/// The storno step's twin of the create table: what its **leading query** of
+/// the storno external id decides, and whether a storno is sent. The decision
+/// is `settle_storno`'s, unit-tested; an answer that is neither 7 nor a
+/// credential code is settled data, nothing sent, nothing unconfirmed (#63).
 #[tokio::test]
-async fn storno_leading_query_answered_with_another_code_or_szlahu_down_is_settled_without_a_send()
-{
-    let h = Harness::start().await;
-    let storno_id = storno_id();
-    external_id_query(storno_id.as_str())
-        .respond_with(body_error("57", "Ismeretlen hiba"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    storno()
-        .respond_with(created("SS-1", "-1000", "-1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-    assert_eq!(
-        h.gateway.storno(storno_request(&storno_id)).await,
-        Ok(StornoOutcome::Api(SzamlazzAnswer::new(
-            "57",
-            "Ismeretlen hiba"
-        )))
-    );
-    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
-
-    let h = Harness::start().await;
-    external_id_query(storno_id.as_str())
-        .respond_with(ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    storno()
-        .respond_with(created("SS-1", "-1000", "-1270"))
-        .expect(0)
-        .mount(&h.server)
-        .await;
-    assert_eq!(
-        h.gateway.storno(storno_request(&storno_id)).await,
-        Ok(StornoOutcome::Unavailable {
-            message: "maintenance".to_owned(),
-        })
-    );
-    assert_eq!(h.bodies().await.len(), 1, "the leading query only");
-}
-
-#[tokio::test]
-async fn credential_codes_on_the_storno_are_credentials_rejected() {
-    // Both `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno` run
-    // this step; the leading query and the send each report the rejection.
-    for code in CREDENTIAL_CODES {
+async fn the_storno_steps_leading_query_settles_or_proceeds() {
+    let our_storno = Doc {
+        referenced_invoice: Some("SZ-1"),
+        ..Doc::new("SS-1", "SS")
+    };
+    let another_storno = Doc {
+        referenced_invoice: Some("SZ-9"),
+        ..Doc::new("SS-9", "SS")
+    };
+    // (what the leading query answers, stornos sent, the outcome)
+    let rows: [(&str, ResponseTemplate, u64, &str); 6] = [
+        ("a clean miss sends", not_found(), 1, "Reversed SS-1"),
+        (
+            "the storno of the original is already reversed",
+            our_storno.response(),
+            0,
+            "AlreadyReversed SS-1",
+        ),
+        (
+            "a holder that is not its storno is a miss (the server's storno is idempotent)",
+            another_storno.response(),
+            1,
+            "Reversed SS-1",
+        ),
+        (
+            "another code is data",
+            body_error("57", "Ismeretlen hiba"),
+            0,
+            "Api 57",
+        ),
+        (
+            "szlahu_down is data",
+            szlahu_down(),
+            0,
+            "Unavailable maintenance",
+        ),
+        (
+            "a credential code never sends",
+            body_error("3", "login"),
+            0,
+            "CredentialsRejected 3",
+        ),
+    ];
+    for (label, under_id, sends, expected) in rows {
         let h = Harness::start().await;
         let storno_id = storno_id();
         external_id_query(storno_id.as_str())
-            .respond_with(body_error(code, "login"))
+            .respond_with(under_id)
             .expect(1)
             .mount(&h.server)
             .await;
         storno()
             .respond_with(created("SS-1", "-1000", "-1270"))
-            .expect(0)
+            .expect(sends)
             .mount(&h.server)
             .await;
-        assert_eq!(
-            h.gateway.storno(storno_request(&storno_id)).await,
-            Ok(StornoOutcome::CredentialsRejected(SzamlazzAnswer::new(
-                code.to_owned(),
-                "login"
-            ))),
-            "leading query {code}"
-        );
 
-        let h = Harness::start().await;
-        external_id_query(storno_id.as_str())
-            .respond_with(not_found())
-            .mount(&h.server)
-            .await;
-        storno()
-            .respond_with(api_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
+        let outcome = h.gateway.storno(storno_request(&storno_id)).await;
+        assert_eq!(describe_storno(&outcome), expected, "{label}: {outcome:?}");
         assert_eq!(
-            h.gateway.storno(storno_request(&storno_id)).await,
-            Ok(StornoOutcome::CredentialsRejected(SzamlazzAnswer::new(
-                code.to_owned(),
-                "login"
-            ))),
-            "send {code}"
+            h.bodies().await.len(),
+            1 + usize::try_from(sends).expect("0 or 1"),
+            "{label}: the leading query, then the send or nothing"
         );
     }
 }
@@ -2680,21 +2357,14 @@ async fn storno_lost_reply_whose_re_query_finds_the_storno_is_reversed() {
 #[tokio::test]
 async fn delete_proforma_outcomes() {
     let h = Harness::start().await;
-    let ok = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>true</sikeres></xmlszamladbkdelvalasz>"#;
-    let gone = r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>false</sikeres><hibakod>335</hibakod><hibauzenet>Nincs ilyen díjbekérő</hibauzenet></xmlszamladbkdelvalasz>"#;
     delete()
         .and(body_string_contains("<szamlaszam>D-1</szamlaszam>"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(ok, "application/xml"))
+        .respond_with(proforma_deleted())
         .mount(&h.server)
         .await;
     delete()
         .and(body_string_contains("<szamlaszam>D-2</szamlaszam>"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("szlahu_error_code", "335")
-                .insert_header("szlahu_error", "Nincs+ilyen")
-                .set_body_raw(gone, "application/xml"),
-        )
+        .respond_with(proforma_gone())
         .mount(&h.server)
         .await;
     delete()
@@ -2733,48 +2403,6 @@ async fn delete_proforma_outcomes() {
         h.gateway.delete_proforma("D-5").await,
         DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "malformed")))
     );
-}
-
-#[tokio::test]
-async fn credential_codes_on_the_delete_are_credentials_rejected() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        delete()
-            .respond_with(api_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        assert_eq!(
-            h.gateway.delete_proforma("D-1").await,
-            DeleteOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
-            "{code}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn credential_codes_on_set_payments_are_credentials_rejected() {
-    let entry = PaymentEntry {
-        date: date(2026, 9, 3),
-        method: PaymentMethod::Card,
-        amount: dec!(1000),
-        description: None,
-    };
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        credit()
-            .respond_with(body_error(code, "login"))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        assert_eq!(
-            h.gateway
-                .set_payments("SZ-1", std::slice::from_ref(&entry), false)
-                .await,
-            SetPaymentsOutcome::CredentialsRejected(SzamlazzAnswer::new(code.to_owned(), "login")),
-            "{code}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -3067,29 +2695,6 @@ async fn taxpayer_query_of_an_unknown_prefix_is_found_invalid_as_data() {
     assert_eq!(taxpayer.vat_code, None);
     assert!(taxpayer.addresses.is_empty());
     assert_eq!(h.bodies().await.len(), 1);
-}
-
-/// A wrong key is data (`CredentialsRejected` with szamlazz.hu's code) for
-/// every credential code; exactly one request, nothing retried.
-#[tokio::test]
-async fn taxpayer_query_reports_a_wrong_key_as_credentials_rejected() {
-    for code in CREDENTIAL_CODES {
-        let h = Harness::start().await;
-        taxpayer_query("12345678")
-            .respond_with(api_error(code, "Sikertelen bejelentkezés."))
-            .expect(1)
-            .mount(&h.server)
-            .await;
-        assert_eq!(
-            h.gateway.query_taxpayer(&prefix()).await,
-            Ok(TaxpayerOutcome::CredentialsRejected(SzamlazzAnswer::new(
-                code.to_owned(),
-                "Sikertelen bejelentkezés."
-            ))),
-            "{code}"
-        );
-        assert_eq!(h.bodies().await.len(), 1, "{code}");
-    }
 }
 
 /// Any other `funcCode ≠ OK` is szamlazz.hu's *answer* (NAV's relayed

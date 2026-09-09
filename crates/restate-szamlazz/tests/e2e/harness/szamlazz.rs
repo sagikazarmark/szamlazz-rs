@@ -1,309 +1,50 @@
-//! What szamlazz.hu holds, as wiremock stubs (mirroring `tests/gateway.rs`):
-//! the document fixture ([`Doc`]) rendered as one `<szamla>` body, the
-//! selector matchers (by number, order number, external id; the create,
-//! storno, credit and delete operations), the response templates (code 7,
-//! a created document, an API code, …) and the document-centric helpers
-//! ([`holds`] and its siblings) that mount one body on every selector the
-//! document is reachable by, so the stubs cannot disagree. The
-//! helpers' own tests, against wiremock alone, close the file.
+//! What szamlazz.hu holds, as wiremock stubs: the shared fixtures of
+//! `tests/common` (the document renderer [`Doc`], the response templates,
+//! the selector matchers; re-exported) and the document-centric mount helpers
+//! this suite adds ([`holds`] and its siblings), which put one body on every
+//! selector a document is reachable by, so the stubs cannot disagree. Every
+//! stub a scenario mounts is discriminated by what it is about (an order key
+//! on a create, a number on a storno or a credit entry, an external id on a
+//! query), never by position in time: phase 1 mounts once and runs its
+//! scenarios concurrently, and nothing is reset between them. The helpers'
+//! own tests, against wiremock alone, close the file.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use jiff::civil::{Date, date};
 use serde_json::{Value, json};
-use szamlazz_agent::reqwest;
 use tokio::sync::watch;
-use wiremock::matchers::{body_string_contains, method};
-use wiremock::{Mock, MockBuilder, MockServer, Request, ResponseTemplate};
+use wiremock::matchers::body_string_contains;
+use wiremock::{MockBuilder, MockServer, Request, ResponseTemplate};
 
-use crate::harness::plain_http;
-
-/// The `szallito/id` the rendered documents carry: the seller record's id as
-/// szamlazz.hu prints it in a query body (972720 on the test account). Wire
-/// realism only: the worker holds no account pin; the scenario that renders
-/// [`SUPPLIER_B`] asserts exactly that.
-const SUPPLIER: u64 = 972_720;
-
-/// Another seller record's id: what a document of another szamlazz.hu account
-/// would carry. Compared with nothing.
-pub(crate) const SUPPLIER_B: u64 = 972_721;
-
-/// The `telj` every document of the run carries unless a scenario says
-/// otherwise: the fulfillment date a storno of it must repeat.
-const ORIGINAL_TELJ: Date = date(2026, 7, 15);
-
-pub(crate) struct Doc<'a> {
-    pub(crate) number: &'a str,
-    pub(crate) tipus: &'a str,
-    pub(crate) order: Option<&'a str>,
-    pub(crate) reversed: bool,
-    pub(crate) referenced_invoice: Option<&'a str>,
-    pub(crate) referenced_proforma: Option<&'a str>,
-    /// `teszt`: whether a test account issued the document. Projected by
-    /// `query`, compared with nothing.
-    pub(crate) test: bool,
-    /// `szallito/id`: the seller record's id in the `<szallito>` block.
-    /// Parsed, compared with nothing.
-    pub(crate) supplier_id: u64,
-    /// The external id the document sits under, when the test states it:
-    /// szamlazz.hu never echoes it, so it is not in the body, but it is a
-    /// selector the document is reachable by ([`holds`]).
-    pub(crate) external_id: Option<&'a str>,
-    /// `telj`; `None` renders no element: szamlazz.hu breaking its schema.
-    pub(crate) fulfillment_date: Option<Date>,
-    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
-    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
-    /// invoice and `3` for one created with `eszamla=true` (P73).
-    pub(crate) eszamla: Option<i32>,
-    /// The registered credit entries (`kifizetesek`), by amount; empty
-    /// renders no element. What makes a proforma *paid* for
-    /// `delete_proforma`.
-    pub(crate) payments: &'a [&'a str],
-}
-
-impl<'a> Doc<'a> {
-    /// A live test-account document of `order`.
-    pub(crate) const fn new(number: &'a str, tipus: &'a str, order: &'a str) -> Self {
-        Self {
-            order: Some(order),
-            ..Self::unmanaged(number, tipus)
-        }
-    }
-
-    /// A live test-account document carrying no order number: issued outside
-    /// the worker, reachable by number only.
-    pub(crate) const fn unmanaged(number: &'a str, tipus: &'a str) -> Self {
-        Self {
-            number,
-            tipus,
-            order: None,
-            reversed: false,
-            referenced_invoice: None,
-            referenced_proforma: None,
-            test: true,
-            supplier_id: SUPPLIER,
-            external_id: None,
-            fulfillment_date: Some(ORIGINAL_TELJ),
-            eszamla: None,
-            payments: &[],
-        }
-    }
-
-    pub(crate) fn response(&self) -> ResponseTemplate {
-        let opt = |tag: &str, value: Option<&str>| {
-            value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
-        };
-        let eszamla = self
-            .eszamla
-            .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
-        let telj = self.fulfillment_date.map(|date| date.to_string());
-        let payments = if self.payments.is_empty() {
-            String::new()
-        } else {
-            let mut entries = String::from("<kifizetesek>");
-            for amount in self.payments {
-                entries.push_str(
-                    "<kifizetes><datum>2026-09-03</datum><jogcim>transfer</jogcim><osszeg>",
-                );
-                entries.push_str(amount);
-                entries.push_str("</osszeg></kifizetes>");
-            }
-            entries.push_str("</kifizetesek>");
-            entries
-        };
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<szamla xmlns="http://www.szamlazz.hu/szamla">
-  <szallito><id>{supplier_id}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}<kelt>2026-09-03</kelt>{telj}{rendelesszam}<teszt>{test}</teszt>{sztornozott}</alap>
-  <vevo><nev>Buyer</nev></vevo>
-  <tetelek></tetelek>
-  <osszegek><totalossz><netto>1000</netto><afa>270</afa><brutto>1270</brutto></totalossz></osszegek>
-  {payments}
-</szamla>"#,
-            supplier_id = self.supplier_id,
-            number = self.number,
-            tipus = self.tipus,
-            hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),
-            hivdijbekszam = opt("hivdijbekszam", self.referenced_proforma),
-            telj = opt("telj", telj.as_deref()),
-            rendelesszam = opt("rendelesszam", self.order),
-            test = self.test,
-            sztornozott = if self.reversed {
-                "<sztornozott>true</sztornozott>"
-            } else {
-                ""
-            },
-        );
-        ResponseTemplate::new(200).set_body_raw(xml, "application/xml")
-    }
-}
-
-pub(crate) fn not_found() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod><![CDATA[7]]></hibakod><hibauzenet><![CDATA[Hiányzó adat]]></hibauzenet></xmlszamlavalasz>"#,
-        "application/xml",
-    )
-}
-
-pub(crate) fn created(number: &str, net: &str, gross: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_szamlaszam", number)
-        .insert_header("szlahu_id", "924307747")
-        .insert_header("szlahu_nettovegosszeg", net)
-        .insert_header("szlahu_bruttovegosszeg", gross)
-        .insert_header("szlahu_kintlevoseg", gross)
-        .set_body_raw(
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>{number}</szamlaszam><szamlanetto>{net}</szamlanetto><szamlabrutto>{gross}</szamlabrutto><kintlevoseg>{gross}</kintlevoseg></xmlszamlavalasz>"#
-            ),
-            "application/xml",
-        )
-}
-
-pub(crate) fn api_error(code: &str, message: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_error_code", code)
-        .insert_header("szlahu_error", message)
-        .set_body_raw(
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>{code}</hibakod><hibauzenet>{message}</hibauzenet></xmlszamlavalasz>"#
-            ),
-            "application/xml",
-        )
-}
-
-/// szamlazz.hu's 152 on a create: the order number already exists on another
-/// document, naming the order and never the existing document's number.
-pub(crate) fn duplicate_order_number(order: &str) -> ResponseTemplate {
-    api_error(
-        "152",
-        &format!(
-            "Már létező rendelésszám: {order}. Az ismétlődés engedélyezhető a Beállítások oldalon."
-        ),
-    )
-}
-
-/// The credit-entry operation's success: the invoice's totals after the
-/// update, with `outstanding` (`kintlevoseg`) distinct from `gross` so that
-/// the response's field mapping is observable.
-pub(crate) fn credited(number: &str, gross: &str, outstanding: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_szamlaszam", number)
-        .insert_header("szlahu_bruttovegosszeg", gross)
-        .insert_header("szlahu_kintlevoseg", outstanding)
-        .set_body_raw(
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>{number}</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>{gross}</szamlabrutto><kintlevoseg>{outstanding}</kintlevoseg></xmlszamlavalasz>"#
-            ),
-            "application/xml",
-        )
-}
-
-/// The proforma deletion's success (`xmlszamladbkdelvalasz`).
-pub(crate) fn proforma_deleted() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>true</sikeres></xmlszamladbkdelvalasz>"#,
-        "application/xml",
-    )
-}
-
-/// The proforma deletion's code 335 (no such proforma: deleted already), in
-/// headers and body as szamlazz.hu reports it.
-pub(crate) fn proforma_gone() -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("szlahu_error_code", "335")
-        .insert_header("szlahu_error", "Nincs+ilyen+d%C3%ADjbek%C3%A9r%C5%91")
-        .set_body_raw(
-            r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>false</sikeres><hibakod>335</hibakod><hibauzenet>Nincs ilyen díjbekérő</hibauzenet></xmlszamladbkdelvalasz>"#,
-            "application/xml",
-        )
-}
-
-fn op(action: &str) -> MockBuilder {
-    Mock::given(method("POST")).and(body_string_contains(format!("name=\"{action}\"")))
-}
-
-pub(crate) fn external_id_query(id: &str) -> MockBuilder {
-    op("action-szamla_agent_xml").and(body_string_contains(format!(
-        "<szamlaKulsoAzon>{id}</szamlaKulsoAzon>"
-    )))
-}
-
-pub(crate) fn order_query(order: &str) -> MockBuilder {
-    op("action-szamla_agent_xml").and(body_string_contains(format!(
-        "<rendelesSzam>{order}</rendelesSzam>"
-    )))
-}
-
-pub(crate) fn number_query(number: &str) -> MockBuilder {
-    op("action-szamla_agent_xml").and(body_string_contains(format!(
-        "<szamlaszam>{number}</szamlaszam>"
-    )))
-}
-
-pub(crate) fn create() -> MockBuilder {
-    op("action-xmlagentxmlfile")
-}
-
-/// The `<szamlaagentkulcs>` element carrying `agent_key`: what tells one
-/// account's traffic from another's on the wire.
-pub(crate) fn agent_key_tag(agent_key: &str) -> String {
-    format!("<szamlaagentkulcs>{agent_key}</szamlaagentkulcs>")
-}
-
-/// A create request carrying `agent_key`.
-pub(crate) fn create_with_key(agent_key: &str) -> MockBuilder {
-    create().and(body_string_contains(agent_key_tag(agent_key)))
-}
-
-/// A create request whose seller block carries `bank_account`.
-pub(crate) fn create_with_bank_account(bank_account: &str) -> MockBuilder {
-    create().and(body_string_contains(format!(
-        "<bankszamlaszam>{bank_account}</bankszamlaszam>"
-    )))
-}
-
-pub(crate) fn storno() -> MockBuilder {
-    op("action-szamla_agent_st")
-}
-
-/// The credit-entry operation (`set_payments`).
-pub(crate) fn credit() -> MockBuilder {
-    op("action-szamla_agent_kifiz")
-}
-
-/// The proforma deletion (`delete_proforma`) of `number`.
-pub(crate) fn delete_of(number: &str) -> MockBuilder {
-    op("action-szamla_agent_dijbekero_torlese").and(body_string_contains(format!(
-        "<szamlaszam>{number}</szamlaszam>"
-    )))
-}
-
-/// The `<teljesitesDatum>` element carrying [`ORIGINAL_TELJ`]: the storno
-/// repeating the original's fulfillment date.
-pub(crate) fn original_telj_tag() -> String {
-    format!("<teljesitesDatum>{ORIGINAL_TELJ}</teljesitesDatum>")
-}
-
-/// A storno request carrying the fixture's `telj` ([`ORIGINAL_TELJ`]) as its
-/// `teljesitesDatum`: what every storno of a fixture document must send.
-pub(crate) fn storno_repeating_telj() -> MockBuilder {
-    storno().and(body_string_contains(original_telj_tag()))
-}
+pub(crate) use crate::common::{
+    Doc, agent_key_tag, api_error, create_for, create_with_bank_account, create_with_key, created,
+    credit_of, credited, delete_of, external_id_query, http_client, not_found, number_query,
+    order_query, original_telj_tag, proforma_deleted, storno_of_number,
+    storno_of_number_repeating_telj, szlahu_down, taxpayer_known, taxpayer_query_with_key,
+    taxpayer_unknown,
+};
 
 /// The body of a `storno_invoice` / `Szamlazz.Agent.storno` call on `number`.
 pub(crate) fn storno_of(number: &str) -> Value {
     json!({ "invoice_number": number })
 }
 
-/// A storno request that must not reach szamlazz.hu: a handler that stops
-/// before sending.
-pub(crate) async fn storno_never_sent(mock: &MockServer) {
-    storno()
+/// A storno of `number` that must not reach szamlazz.hu: a handler that
+/// stops before sending.
+pub(crate) async fn storno_never_sent(mock: &MockServer, number: &str) {
+    storno_of_number(number)
         .respond_with(created("SS-X", "-1000", "-1270"))
+        .expect(0)
+        .mount(mock)
+        .await;
+}
+
+/// A create of `order` that must not reach szamlazz.hu.
+pub(crate) async fn create_never_sent(mock: &MockServer, order: &str) {
+    create_for(order)
+        .respond_with(created("X-NEVER", "1000", "1270"))
         .expect(0)
         .mount(mock)
         .await;
@@ -315,43 +56,6 @@ const PROBE_ID: &str = "acct:check-account";
 /// The probe's query carrying `agent_key`: which account's key was checked.
 pub(crate) fn probe_with_key(agent_key: &str) -> MockBuilder {
     external_id_query(PROBE_ID).and(body_string_contains(agent_key_tag(agent_key)))
-}
-
-/// The taxpayer query (`xmltaxpayer`) of `prefix` carrying `agent_key`:
-/// which account's key NAV was asked with.
-pub(crate) fn taxpayer_query_with_key(prefix: &str, agent_key: &str) -> MockBuilder {
-    op("action-szamla_agent_taxpayer")
-        .and(body_string_contains(format!(
-            "<torzsszam>{prefix}</torzsszam>"
-        )))
-        .and(body_string_contains(agent_key_tag(agent_key)))
-}
-
-/// NAV's answer for a known taxpayer (the agent crate's synthetic fixture).
-pub(crate) fn taxpayer_known() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns:d="http://schemas.nav.gov.hu/OSA/2.0/data">
-  <result><funcCode>OK</funcCode></result><taxpayerValidity>true</taxpayerValidity>
-  <taxpayerData><taxpayerName>SYNTHETIC SOFTWARE KFT.</taxpayerName>
-    <taxNumberDetail><d:taxpayerId>12345678</d:taxpayerId><d:vatCode>2</d:vatCode></taxNumberDetail>
-    <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>HQ</taxpayerAddressType><taxpayerAddress>
-      <d:countryCode>HU</d:countryCode><d:postalCode>1111</d:postalCode><d:city>TESTVAROS</d:city>
-      <d:streetName>MINTA</d:streetName><d:publicPlaceCategory>UTCA</d:publicPlaceCategory><d:number>1.</d:number>
-    </taxpayerAddress></taxpayerAddressItem></taxpayerAddressList>
-  </taxpayerData>
-</QueryTaxpayerResponse>"#,
-        "application/xml",
-    )
-}
-
-/// NAV's answer for a prefix it knows no taxpayer under.
-pub(crate) fn taxpayer_unknown() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_raw(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result><taxpayerValidity>false</taxpayerValidity></QueryTaxpayerResponse>"#,
-        "application/xml",
-    )
 }
 
 // ----- what szamlazz.hu holds: one document, every selector ------------------
@@ -402,13 +106,14 @@ pub(crate) async fn holds_after_misses(mock: &MockServer, misses: u64, doc: &Doc
         .await;
 }
 
-/// The create lands on szamlazz.hu but its reply is lost: `create()` answers
-/// 500, `expect(1)`, and `doc` is the holder of its external id from the
-/// moment the create request is received (code 7 before, the document after).
-/// The transition is the create stub being matched (one flag, flipped by the
-/// create's responder and read by the external id's), so how many queries
-/// precede the send is not the test's to know. `doc` must state its external
-/// id; the number and order selectors are not mounted.
+/// The create of the document's order lands on szamlazz.hu but its reply is
+/// lost: the create answers 500, `expect(1)`, and `doc` is the holder of its
+/// external id from the moment the create request is received (code 7
+/// before, the document after). The transition is the create stub being
+/// matched (one flag, flipped by the create's responder and read by the
+/// external id's), so how many queries precede the send is not the test's to
+/// know. `doc` must state its external id and its order; the number and
+/// order selectors are not mounted.
 pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>) {
     let _sends = create_lands_when(mock, doc, vec![(ResponseTemplate::new(500), true)]).await;
 }
@@ -420,8 +125,8 @@ pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>
 /// at receipt and sleeps the delay outside its lock, so a query in that window
 /// finds the document at once. The window a second caller on the same order
 /// or a cancellation arrives in, and the returned [`Sends`] is how a scenario
-/// knows the window is open. `expect(1)`; `doc` must state its external id;
-/// the number and order selectors are not mounted.
+/// knows the window is open. `expect(1)`; `doc` must state its external id and
+/// its order; the number and order selectors are not mounted.
 pub(crate) async fn create_lands_slowly(
     mock: &MockServer,
     doc: &Doc<'_>,
@@ -440,8 +145,8 @@ pub(crate) async fn create_lands_slowly(
 /// stays absent; the second lands, is answered `created` at once, and `doc` is
 /// the holder of its external id from that request's receipt. What a create
 /// step that re-executes after an *Unconfirmed* first send meets. `expect(2)`;
-/// `doc` must state its external id; the number and order selectors are not
-/// mounted.
+/// `doc` must state its external id and its order; the number and order
+/// selectors are not mounted.
 pub(crate) async fn create_lands_on_the_second_send(
     mock: &MockServer,
     doc: &Doc<'_>,
@@ -487,16 +192,16 @@ impl Sends {
     }
 }
 
-/// szamlazz.hu holds `doc` under its external id from the moment a create
-/// request **lands** (code 7 before). `answers` are szamlazz.hu's replies to
-/// the create requests in the order they are received, each with whether that
-/// request lands: the flag flips at its receipt, whatever the reply or its
-/// delay, since a document exists on szamlazz.hu once the send reaches it.
-/// The create stub expects exactly `answers.len()` requests; one beyond the
-/// list is answered 500 without landing and fails the `expect` at the next
-/// `reset`. Failure-injection sequencing, not a model of szamlazz.hu: one flag
-/// for one document. The three helpers above are its callers; the [`Sends`]
-/// counts the requests as they arrive.
+/// szamlazz.hu holds `doc` under its external id from the moment a create of
+/// its order **lands** (code 7 before). `answers` are szamlazz.hu's replies
+/// to the create requests in the order they are received, each with whether
+/// that request lands: the flag flips at its receipt, whatever the reply or
+/// its delay, since a document exists on szamlazz.hu once the send reaches
+/// it. The create stub expects exactly `answers.len()` requests of the order;
+/// one beyond the list is answered 500 without landing and fails the `expect`
+/// at the next `verify`. Failure-injection sequencing, not a model of
+/// szamlazz.hu: one flag for one document. The three helpers above are its
+/// callers; the [`Sends`] counts the requests as they arrive.
 async fn create_lands_when(
     mock: &MockServer,
     doc: &Doc<'_>,
@@ -505,11 +210,14 @@ async fn create_lands_when(
     let id = doc
         .external_id
         .expect("a landing create needs the document's external id");
+    let order = doc
+        .order
+        .expect("a landing create needs the document's order");
     let landed = Arc::new(AtomicBool::new(false));
     let flip = Arc::clone(&landed);
     let expected = u64::try_from(answers.len()).expect("a few answers");
     let (sends, received) = watch::channel(0u64);
-    create()
+    create_for(order)
         .respond_with(move |_: &Request| {
             // The answer is chosen and the landing recorded under the same
             // write that publishes the count: a receiver woken by the count
@@ -549,16 +257,11 @@ async fn create_lands_when(
 
 // ----- the harness's stub helpers, against wiremock alone -----------------------
 
-/// The client the raw posts below go through: [`plain_http`], built.
-fn http() -> reqwest::Client {
-    plain_http().build().expect("http client")
-}
-
 /// A query as the Számla Agent client puts it on the wire, reduced to what
 /// the selector matchers read: the operation's field name and the one
 /// selector element.
 async fn query_by(mock: &MockServer, selector: &str) -> (u16, String) {
-    let response = http()
+    let response = http_client()
         .post(mock.uri())
         .body(format!("name=\"action-szamla_agent_xml\"\n{selector}"))
         .send()
@@ -566,6 +269,12 @@ async fn query_by(mock: &MockServer, selector: &str) -> (u16, String) {
         .expect("query");
     let status = response.status().as_u16();
     (status, response.text().await.expect("body"))
+}
+
+/// A create as the Számla Agent client puts it on the wire, reduced to what
+/// the matchers read: the operation's field name and the order number.
+fn create_body(order: &str) -> String {
+    format!("name=\"action-xmlagentxmlfile\"\n<rendelesSzam>{order}</rendelesSzam>")
 }
 
 /// `holds` mounts one body on every selector the document is reachable by and
@@ -578,11 +287,11 @@ async fn holds_answers_every_selector_the_document_is_reachable_by_with_one_body
         &mock,
         &Doc {
             external_id: Some("acct:ORD-1:invoice"),
-            ..Doc::new("SZ-1", "SZ", "ORD-1")
+            ..Doc::of("SZ-1", "SZ", "ORD-1")
         },
     )
     .await;
-    holds(&mock, &Doc::new("SZ-2", "SZ", "ORD-2")).await;
+    holds(&mock, &Doc::of("SZ-2", "SZ", "ORD-2")).await;
     holds(&mock, &Doc::unmanaged("SZ-3", "SZ")).await;
 
     let mut bodies = Vec::new();
@@ -644,7 +353,7 @@ async fn holds_after_misses_answers_code_7_n_times_then_the_document() {
         &Doc {
             external_id: Some("acct:ORD-4:invoice"),
             reversed: true,
-            ..Doc::new("SZ-4", "SZ", "ORD-4")
+            ..Doc::of("SZ-4", "SZ", "ORD-4")
         },
     )
     .await;
@@ -677,9 +386,10 @@ async fn holds_after_misses_answers_code_7_n_times_then_the_document() {
 }
 
 /// `create_lands_but_reply_lost(doc)` answers the document's external id with
-/// code 7 until the create request is received (however many queries precede
-/// it), and with the document from that moment on; the create itself is a
-/// 500. The transition is the create stub being matched, not a query count.
+/// code 7 until a create **of its order** is received (however many queries
+/// precede it, and whatever another order's creates do), and with the
+/// document from that moment on; the create itself is a 500. The transition
+/// is the create stub being matched, not a query count.
 #[tokio::test]
 async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create_hit() {
     let mock = MockServer::start().await;
@@ -687,7 +397,7 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
         &mock,
         &Doc {
             external_id: Some("acct:ORD-5:invoice"),
-            ..Doc::new("SZ-5", "SZ", "ORD-5")
+            ..Doc::of("SZ-5", "SZ", "ORD-5")
         },
     )
     .await;
@@ -701,9 +411,23 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
             "query {query} before the create: {body}"
         );
     }
-    let response = http()
+    // Another order's create matches nothing here and lands nothing.
+    let other = http_client()
         .post(mock.uri())
-        .body("name=\"action-xmlagentxmlfile\"\n<xmlszamla/>")
+        .body(create_body("ORD-6"))
+        .send()
+        .await
+        .expect("another order's create");
+    assert_eq!(other.status().as_u16(), 404, "not this order's stub");
+    let (_, body) = query_by(&mock, by_id).await;
+    assert!(
+        body.contains("<hibakod><![CDATA[7]]></hibakod>"),
+        "another order's create landed nothing here: {body}"
+    );
+
+    let response = http_client()
+        .post(mock.uri())
+        .body(create_body("ORD-5"))
         .send()
         .await
         .expect("create");
@@ -734,7 +458,7 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
         &mock,
         &Doc {
             external_id: Some("acct:ORD-6:invoice"),
-            ..Doc::new("SZ-6", "SZ", "ORD-6")
+            ..Doc::of("SZ-6", "SZ", "ORD-6")
         },
         DELAY,
     )
@@ -751,9 +475,9 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
     let send = tokio::spawn({
         let uri = mock.uri();
         async move {
-            http()
+            http_client()
                 .post(uri)
-                .body("name=\"action-xmlagentxmlfile\"\n<xmlszamla/>")
+                .body(create_body("ORD-6"))
                 .send()
                 .await
                 .expect("create")
@@ -802,17 +526,17 @@ async fn create_lands_on_the_second_send_keeps_the_document_absent_until_the_sec
         &mock,
         &Doc {
             external_id: Some("acct:ORD-7:invoice"),
-            ..Doc::new("SZ-7", "SZ", "ORD-7")
+            ..Doc::of("SZ-7", "SZ", "ORD-7")
         },
-        ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
+        szlahu_down(),
     )
     .await;
 
     let by_id = "<szamlaKulsoAzon>acct:ORD-7:invoice</szamlaKulsoAzon>";
     let create = || {
-        http()
+        http_client()
             .post(mock.uri())
-            .body("name=\"action-xmlagentxmlfile\"\n<xmlszamla/>")
+            .body(create_body("ORD-7"))
             .send()
     };
     let first = create().await.expect("first create");

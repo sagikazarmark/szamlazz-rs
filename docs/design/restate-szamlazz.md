@@ -855,14 +855,18 @@ order, the newest holder under every external id"), which no stub can express. N
 without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested in the **decision layer**,
 the decide fns: each handler body is `read → decide → (answer | proceed) → next read`, where every `decide` is a pure
 function of the journaled outcome the read returned and the request, beside its async shell, and the shell is held to
-holding no `match` on a gateway outcome that returns a response. On `main` the storno, delete and `get` shells
-(`service/storno.rs`), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup decision and the responses
-(`service/support.rs`) and the prologue's (`service/prologue.rs`) are in that shape; the create side's
-(`service/create.rs`) has `respond_to`, `exclusive_with` and `prepare` pure and the rest of its decisions in flight
-(#137). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
+holding no `match` on a gateway outcome that returns a response. Every shell is in that shape: the storno, delete
+and `get` shells (`service/storno.rs`, #138), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup
+decision and the responses (`service/support.rs`), the prologue's (`service/prologue.rs`), and the create side's
+(`service/create.rs`, #137: `decide_lookup`, `decide_exclusivity`, `decide_prepayment_for_final`,
+`decide_proforma_link`, `decide_proforma_by_number`, `decide_base`, `respond_to`, `prepare`). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
 classifiers (which answer is settled, which document is foreign, which failure is which class) are the same kind of
 function one layer down, table-tested in `gateway`'s unit tests; and the e2e is left with what only a server can
-show: the durable sequence, replay, the per-key lock and the journal.
+show: the durable sequence (one scenario per handler path of `RUN_NAMES`, walked in full), replay, the run
+retries, the per-key lock and the journal (#134). Every synthetic szamlazz.hu answer the three layers state is
+rendered by one module, `tests/common/mod.rs` (the `<szamla>` document, the response templates, the selector
+matchers), declared by the gateway tests and the e2e suite and included by path into the crate's unit-test
+fixtures, so a fact learned about szamlazz.hu's XML is edited once.
 
 - `gateway`: wiremock tests using upstream-shaped responses; the lookup matrix (`Absent`, `Live`, `Reversed` with
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
@@ -877,10 +881,13 @@ show: the durable sequence, replay, the per-key lock and the journal.
   71/152 → `Rejected`), storno validation incl. the D/SL no-op, the zero-gross storno as `Reversed`, the storno body
   carrying `<teljesitesDatum>` equal to the step request's date and no `<keltDatum>`, the two sends of a
   re-executed storno step byte-identical (`assert_eq!` on the bodies), a verified document's `telj` surfaced as
-  `fulfillment_date` and a document without the element as `None`, 335, 7, and the
-  credential codes 3/135/136/164 as `CredentialsRejected` on
-  every operation (both lookup queries, the create's leading query and send, storno, delete, credit entries, query,
-  taxpayer query, probe); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
+  `fulfillment_date` and a document without the element as `None`, 335, 7; the create step's **leading-query
+  table** and the storno step's twin (one row per answer the external id can give, one gateway per row, with the
+  send mock's `expect(0|1)`: a clean miss sends, the document of an earlier execution settles, another code and
+  `szlahu_down` are data, a credential code never sends, a lost reply is the one `Unconfirmed` before a send;
+  #134), and **one credential-code table**, one code per operation in the operation's own shape (both lookup
+  queries, the create's send, the three reads, the probe, the storno lookup and send, the delete, the credit
+  entries, the taxpayer query; the codes themselves are the agent crate's `is_credential_error` table); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
   `probe`) answering a 500, an empty body or `szlahu_down` as `Err(Unanswered)` (the step's retryable error, never
   data), and another API code as `Ok(Api)` data (the probe: `Accepted`); the probe as exactly one query of the
   sentinel id and nothing else, with a wrong key as data; the taxpayer query as exactly one `xmltaxpayer` request of
@@ -987,175 +994,127 @@ show: the durable sequence, replay, the per-key lock and the journal.
 - End to end (`tests/e2e/`, ignored; a Restate server from one of two sources: see "What CI runs" below):
   Restate 1.7.8 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES`, `…_PROTOCOL_V7` and
   `…_SCOPED_VIRTUAL_OBJECTS` (the harness asserts on `/version` exactly the features the server's flags enable;
-  `compose.yaml` matches) + wiremock as
-  szamlazz.hu, issued → already_issued (new key) and Idempotency-Key replay (same key, create mock `expect(1)`);
-  152 → reconciled; 152 whose external-id re-query finds nothing of ours → `conflict{duplicate_order_number}`
-  settled after one send with no run failure recorded (#41); `existing_number` absent with nothing under the order,
-  and naming the live invoice another channel issued between the lookup step and the create when the naming query
-  finds one; storno → reversed with the storno mock matched on `<teljesitesDatum>` equal to the fixture's
-  `telj` and no `<keltDatum>` on the wire; a `telj`-less original → 503 `unavailable` naming the invoice with
-  `order`, `kind` and the storno external id, only `namespace`, `account` and `verify-storno-{number}` journaled and
-  the storno mock `expect(0)`, after a `telj`-less document of another order → `conflict{not_managed}`, a
-  `telj`-less proforma and a `telj`-less delivery note → `rejected{not_stornoable}` and a `telj`-less reversed invoice → `reversed` with its storno
-  number from the hint, nothing sent in any case; a storno whose first reply is lost re-executed under the issue
-  policy with two byte-identical bodies and one `storno-{number}` entry; szamlazz.hu's 14 and 221 on the storno →
-  `rejected{code, message}` after one send carrying the caller's comment; an exhausted storno step (every send's
-  reply lost) → a structured `outcome_unknown` naming the storno's identity with `storno-{number}` the failing
-  command in flight and one send per execution, and the next call (a new key) whose storno lookup finds the `SS`
-  under the storno external id → `reversed{storno_number}` through `verify-storno-{number}` and
-  `lookup-storno-{number}` alone, nothing sent; stale create → reversed; `reissue` → issued as newest holder; `reissue` on
-  live → `conflict{live}`; `sztornozott` → reversed; a document reversed in the UI between two executions of the
-  create step (the first loses its reply, a short test policy) → `reversed` with exactly one create on the wire; a
-  create whose reply is lost and whose immediate re-query finds the document → `issued` within the one execution,
-  no run failure recorded, exactly one create on the wire; proforma auto-link and `consumed` in `get`;
-  `options.proforma: {number}` checked like every found document, another order's proforma and one carrying no
-  order number → `conflict{not_managed}` naming it with `verify-proforma-{number}` the last step journaled and the
-  create mock `expect(0)`, this order's → `issued` with `dijbekeroSzamlaszam` on the wire whatever its `teszt`; `correct_invoice` on
-  a live invoice of the order → `issued` under `…:corrective:{correction_id}` with `helyesbitettSzamlaszam` naming
-  the base on the wire through `verify-base-{number}`, `lookup-corrective`, `create-corrective`, and the same
-  `correction_id` again → `already_issued`; `correct_invoice` on a base szamlazz.hu does not know → 404 `not_found`
-  carrying the corrective's identity, on a reversed base → `conflict{base_reversed, existing_number}`, on another
-  order's → `conflict{not_managed, existing_number}`, each after `verify-base-{number}` alone with the create mock
-  `expect(0)`; two `correction_id`s on one live base → two correctives, each under `…:corrective:{correction_id}` on
-  the wire (`szamlaKulsoAzon`) beside `helyesbitoszamla` and `helyesbitettSzamlaszam`, with the order-number query
-  mock `expect(0)`; correctives take no hint, so a live foreign invoice under the order is never met; 152 on a
-  corrective → `rejected{152}` after the external-id re-query and no order-number query, never
-  `conflict{duplicate_order_number}`; `delete_proforma` on the order's live proforma → `deleted` after one
-  `delete-proforma-{number}` send, and again → `deleted{reason: absent}` with nothing sent; a proforma with
-  registered credit entries → `{deleted: false, reason: proforma_paid}` after the lookup alone and, with `force`,
-  `deleted` after one send; another order's proforma under `…:proforma` → `{deleted: false, reason:
-  external_id_collision}`, nothing sent; szamlazz.hu's 335 → `deleted`; a lost reply → 500 `outcome_unknown` about
-  the proforma after exactly one send (the delete has no retry of its own); `get` shape; a
-  collision on the secondary (`…:prepayment`) lookup → `conflict{external_id_collision}` with the create mock
-  `expect(0)` and the slot absent in `get`; `create_prepayment` taking `options.proforma` as `create_invoice` does
-  (`none` beside a live `D` of ours → `conflict{proforma_live}` after `proforma-link` with nothing sent, `auto` →
-  `issued` with `dijbekeroSzamlaszam` before `elolegszamla` on the wire) while `create_final` and `create_proforma`
-  refuse it 400 `invalid_input` before any call; `create_proforma` on an order whose own invoice, then whose own prepayment invoice, is live under
-  `…:invoice` / `…:prepayment` → `conflict{order_invoiced, existing_number}`, and on an order whose live invoice is
-  under none of our ids → `conflict{foreign}`, the create mock `expect(0)` in every case; a live `VS` under `…:final`
-  beside a reversed `ES` (its `SS` the newest document under the order) → `create_invoice` and `create_prepayment`,
-  with and without `reissue`, `conflict{prepaid_chain, existing_number}` and `create_proforma`
-  `conflict{order_invoiced, existing_number}`, each refused by `exclusivity-final` with no lookup step journaled and
-  the create mock `expect(0)`; a reversed `VS` beside a reversed `ES` → `create_invoice`, and `create_prepayment`
-  with `reissue`, `issued` under their own external ids, and `create_final` after a reversed `VS` →
-  `reversed{storno_number}` then, with `reissue`, `issued` carrying `elolegSzamlaszam` (#62); a live `ES` under
-  `…:prepayment` → `create_invoice` `conflict{prepaid_chain, existing_number}` and a live `SZ` under `…:invoice` →
-  `create_prepayment` likewise, each from the first exclusivity row with one request seen, while a reversed `ES`
-  refuses nothing and the invoice issues past it; `create_invoice` with `none` beside a live `D` of ours →
-  `conflict{proforma_live}` after `proforma-link`, with `{number}` on 7 → `conflict{proforma_missing}` (an outcome,
-  never `not_found`), and with `{number}` naming an `SZ` of the order → 400 `invalid_input` naming the number and
-  its `tipus`, nothing sent in any case; `create_final` with nothing under `…:prepayment` →
-  `conflict{prepayment_missing}` without `existing_number`, with a reversed `ES` → `conflict{prepayment_reversed,
-  existing_number}`, both after `prepayment-for-final` alone, with a live `ES` → `issued` carrying `vegszamla`,
-  `elolegSzamlaszam` and `…:final` on the wire (the `ES`, the newest live invoice-kind document under the order,
-  never foreign), and szamlazz.hu's 73 → `rejected{73}` after one send; a create whose body
-  carries `options.resissue`, and one with `buyer.tax_numer`, and a
-  `delete_proforma` with `force: "yes"`; answered 400 with the structured `invalid_input` fault naming the field,
-  the create mock `expect(0)`, zero szamlazz.hu requests and no run journaled (refused before the prologue); a create
-  under an untrimmed key; a leading, a trailing and both `%20` around the order number, → 400 `invalid_input`
-  naming the trimming rule with nothing journaled and zero szamlazz.hu requests; an
-  exhausted create step (every reply lost, a short test policy) → a structured `outcome_unknown`
-  500 within the run policy's delays, not the handler's, with `sys_invocation.retry_count = 1` and
+  `compose.yaml` matches) + wiremock as szamlazz.hu. The suite is two things (#134): **the sequence test**, one
+  scenario per handler path of `RUN_NAMES` proving the steps run in that order under Restate and walking every
+  path in full (the run-name pin's demand, and the floor of the suite: a scenario that is the only walker of a
+  path stays however plain its decision), and **the durable-execution proof**, what only a server can show. The
+  decisions a handler takes on a given read are unit tests of `service`; the wire of a step is the gateway's.
+  **Phase 1**, the single-account deployment (the static resolver's `[account]`), unscoped, fourteen scenarios run
+  **concurrently** on one runtime (a `JoinSet`; every scenario owns its order keys, numbers and
+  `Idempotency-Key`s, every stub is mounted once and discriminated by them, `create_for(order)` on the
+  `<rendelesSzam>` of every create, a storno by its `<szamlaszam>`, nothing is reset between scenarios, every count
+  is per order or per number, and every failure is reported at the end): issued → already_issued (a new key) →
+  the same key replaying the stored completion byte for byte with no request, the journal opening with
+  `namespace` and exactly one `account` entry carrying the account's id and never the key; a document reversed in
+  the UI between two executions of the create step (the first loses its reply, a short test policy) → `reversed`
+  with exactly one create on the wire and one `create-invoice` entry; a proforma → `issued` with `dijbekero`, the
+  invoice naming it by number → `issued` with `dijbekeroSzamlaszam` through `verify-proforma-{number}`, `get` →
+  the proforma `consumed` by the invoice; `create_prepayment` under `auto` (`proforma-link`) and by number
+  (`verify-proforma-{number}`) → `issued` with `dijbekeroSzamlaszam` beside `elolegszamla`; `create_final` with a
+  live `ES` → `issued` carrying `vegszamla`, `elolegSzamlaszam` and `…:final` on the wire (the `ES`, the newest
+  live invoice-kind document under the order, never foreign); `correct_invoice` → `issued` under
+  `…:corrective:{correction_id}` with `helyesbitettSzamlaszam` and `helyesbitoszamla` on the wire, the
+  order-number query mock `expect(0)`, the same `correction_id` again → `already_issued`; storno → `reversed`
+  with `<teljesitesDatum>` equal to the fixture's `telj`, the original's `eszamla` and no `<keltDatum>`, then
+  `reissue` → `issued` as the newest holder; a reversed original → `reversed` from the hint through
+  `verify-storno-{number}` and `hint-storno-{number}` alone, and a storno whose first reply is lost re-executed
+  under the issue policy with two byte-identical bodies and one `storno-{number}` entry; `delete_proforma` →
+  `deleted` after one `delete-proforma-{number}` send, again → `deleted{reason: absent}` with nothing sent; the
+  three policies on three orders at once: an exhausted create step (every reply lost) → a structured
+  `outcome_unknown` 500 within the run policy's delays, not the handler's, with `retry_count` moved and
   `last_failure_related_command_name = create-invoice` observed **while in flight** (attempt state is cleared on
-  completion), and after it the same key → the stored fault without a request, a new key → `already_issued` from
-  the lookup step with nothing sent; the read policy (a 1 s test policy of three executions): a lookup whose external-id query answers 500
-  once → `issued` in one invocation with `last_failure_related_command_name = lookup-invoice` in flight, one journal
-  entry per step and exactly one create on the wire; a lookup that never answers → a structured `unavailable` 503
-  naming the order, kind and external id within the read policy's delays, `lookup-invoice` journaled, `create-invoice`
-  not, zero creates; the create step's leading query answered with code 57 (the lookup's own query having missed
-  cleanly) → a structured `unavailable` 503 with `szamlazz_code: "57"` at once; `retry_count` at the first
-  execution's 1, no failure and no failing command recorded, `create-invoice` journaled as data, zero creates (#63); the
-  lookup step's two queries answering code 57: on the order-number hint it is inconclusive (the hint looks for a
-  foreign document and a code says nothing about one), so the create proceeds to `issued` in one execution with no
-  run failure and the hint queried once, while on the external-id query it is the lookup's own `unavailable` 503
-  with `szamlazz_code: "57"`, the hint never asked and nothing sent; `get` with one of its four reads answering 500 once → the status, with `get-proforma` the
-  failing command in flight; `get` with **all four** reads answering 500 once → the status in one invocation, with
-  `sys_invocation.retry_count` observed past the handler's `max_attempts = 3` (read from discovery); run retries
-  spend no invocation attempts (ADR 0004, #87); a scoped `Szamlazz.Agent.query` and a scoped `Szamlazz.Order` call reaching the handlers with the
-  scope on `sys_invocation`; a purged `get` invocation querying szamlazz.hu again; and the leak check's positive
-  control; a sentinel in a szamlazz.hu rejection found in the hex-decoded `raw` of the create run's
+  completion), one `create-invoice` entry, and after it the same key → the stored fault without a request, a new
+  key → `already_issued` from the lookup step with nothing sent; a lookup whose external-id query answers 500
+  once → `issued` in one invocation with `lookup-invoice` the failing command, one entry per step, one create; a
+  lookup that never answers → a structured `unavailable` 503 naming the order, kind and external id, `create-invoice`
+  never journaled, zero creates; a cancellation (`PATCH /invocations/{id}/cancel`) while the create's reply is in
+  flight → the same `outcome_unknown` naming the SDK's 409, the completion releasing the key and the next call →
+  `already_issued`; `get` with **all four** reads answering 500 once → the status in one invocation with
+  `sys_invocation.retry_count` observed past the handler's `max_attempts = 3` (read from discovery): run retries
+  spend no invocation attempts (ADR 0004, #87); the wire faults: a create carrying `options.resissue` → 400 with
+  the structured `invalid_input` fault naming the field, nothing journaled and nothing sent; a create under
+  `%20E2E-…` → 400 naming the trimming rule likewise; a szamlazz.hu code on an unscoped `Szamlazz.Agent.query` →
+  422 `szamlazz_error` with `szamlazz_code: "57"` inside the ingress envelope; and the leak check's positive
+  control, a sentinel in a szamlazz.hu rejection found in the hex-decoded `raw` of the create run's
   `Notification: Run` row (under journal v2 the `Command: Run` row carries only the name; the result is in the
-  notification that follows), and nowhere else but the output. The prologue (on the same harness, through a
-  test-local scripted resolver and store wrapping the static one): every invocation's journal opens with
-  `namespace` and exactly one `account` run, and the journaled account carries its id and never the agent key; a
-  scoped call on the single-account deployment → 400 `unknown_account` with `namespace`, `account` and nothing
-  else journaled and zero szamlazz.hu requests; a resolver that fails twice then answers → the outcome, with the
-  `account` run's retries visible on `sys_invocation` (`last_failure_related_command_name = account`, the failure
-  text never echoing the resolver's message) within the resolve policy's delays, and still one `account` entry; a
-  store that fails every fetch → 503 `unavailable` after three fetches, zero szamlazz.hu requests, and the same
-  order issuing once the store is back; an invocation stuck in its `account` step (a resolver that never answers)
-  holding the order key with a second exclusive call queued behind it → after `PATCH /invocations/{id}/kill` the
-  stuck one completes as killed with `namespace` and `account` journaled and the queued `delete_proforma` completes
-  at once from szamlazz.hu, a killed invocation releases the key. `check_account` unscoped → the configured account with `scope: null` and
-  `credentials: ok` after exactly one szamlazz.hu request (the sentinel query carrying the account's key) and
-  `namespace`, `account`, `probe` journaled; szamlazz.hu's code 3 on the probe → `credentials: rejected` as a 200;
-  scoped on the single-account deployment → 400 `unknown_account`, zero requests.
-  Then, on the same server, the **flag day** and the **multi-account phase** (two accounts behind a test-local
-  mutable resolver and store seeded from the static resolver's `[accounts.<scope>]` shape: `acme` is the phase-1
-  account, same key, and `beta` a second one): while private the ingress answers 400 with no
-  invocation; after the drain and the switch the first scoped create for the order phase 1 invoiced →
-  `already_issued` under the unchanged external id; unscoped → 400 `unknown_account` naming the scoped path, with
-  `namespace` and `account` journaled and zero szamlazz.hu requests, and an unknown scope likewise; the same order
-  key under `acme` and `beta` concurrently → two `issued` with each account's own key on the create wire exactly
-  once; the **same** `Idempotency-Key` under the two scopes → two invocation ids and two documents, and the key
-  replayed under either scope returning that scope's own completion without a call; `check_account` under `acme`
-  and under `beta` → each its own account with `scope` as the SDK saw it, `credentials: ok`, and each account's
-  key on its probe query exactly once; unscoped → 400 `unknown_account`;
-  `create_invoice` → purge → `storno_invoice` → `reversed` → purge → `create_invoice {reissue}` → `issued` on an order
-  Restate holds nothing of, then the scoped `get` seeing the new holder; `Szamlazz.Agent.storno` under `acme` on a
-  document whose `teszt` is `false` and whose seller block carries another `szallito/id` → `reversed` with `acme`'s
-  key on the storno (compared with nothing); a document as `acme`'s own → `reversed` through verify, lookup and
-  storno; an order-bearing document → `managed_by_order{key}`, nothing sent; `Szamlazz.Agent.storno` under `acme`
-  → `reversed` with `<teljesitesDatum>` equal to the fixture's `telj` and `acme`'s key on the
-  storno and no `<keltDatum>`, on a `telj`-less document → 503 `unavailable` naming the invoice without `order`,
-  `kind` or `external_id`, only the verify journaled and the storno mock `expect(0)`, after a `telj`-less
-  order-bearing document → `managed_by_order` and a reversed one → `reversed`;
-  `Szamlazz.Agent.query` under `acme` → the projection (`test` as reported, `false` on a live account's document ,
-  totals; no `supplier_id`), 404 `not_found` on 7; `Szamlazz.Agent.set_payments` under `acme` → `<additiv>false</additiv>`
-  (replacing) and `<additiv>true</additiv>` (additive) on the wire with `acme`'s key and the entries as sent,
-  answered with the invoice's totals as szamlazz.hu reported them (`outstanding` distinct from `gross_total`) after
-  the one `set-payments-{number}` step and no query before it; a replacing call with no entries → 400
-  `invalid_input` before the wire; a lost reply → 500 `outcome_unknown` after exactly one send, its advice by
-  `additive` (repeat as is, or query the invoice first);
-  `acme`'s seller bank account changed between
-  two executions of a create step (the first loses its reply) → both executions carry the journaled bank account
-  and only a new invocation sees the change; `beta`'s key rotated between two executions → the second carries the
-  new key while the `account` entry read in flight and after completion is byte-identical; the `state` table holding
-  no row for `Szamlazz.Order` after the run's invocations on both deployments (the object keeps no state); and, over every
-  `sys_journal` row of every invocation the server holds (hex-decoded `raw`) plus every
-  `sys_invocation.completion_failure`, none of the three agent keys of the run, while the same scan finds the
-  positive control's sentinel; and, last, the **run-name pin**: for every invocation the server holds, the `ctx.run`
-  names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES` (the durable steps of
-  every handler of both services, parametrized names, `verify-storno-{number}`, `taxpayer-{prefix}`, pinned by
-  their prefix), every handler seen is in the table, and every path in the table was walked in full by at least one
-  invocation. The type fixtures pin what an entry holds; this pins which entries a handler writes and in what order,
-  the other half of what an in-flight invocation replays across a deploy (ADR 0005). A renamed, inserted, reordered
-  or dropped step fails here rather than stranding the invocation.
+  notification that follows), and nowhere else but the output.
+  Then, on the same server, the **flag day** and the **multi-account phase**, in sequence (two accounts behind a
+  test-local mutable resolver and store seeded from the static resolver's `[accounts.<scope>]` shape: `acme` is
+  the phase-1 account, same key, and `beta` a second one; a resolution can be failed per scope and a fetch held
+  per credential reference): while private the ingress answers 400 with no invocation; after the drain and the
+  switch the first scoped create for the order phase 1 invoiced → `already_issued` under the unchanged external id;
+  unscoped → 400 `unknown_account` naming the scoped path, with `namespace` and `account` journaled and zero
+  szamlazz.hu requests, and an unknown scope likewise; the same order key under `acme` and `beta` concurrently →
+  two `issued` with each account's own key on the create wire exactly once, and the **same** `Idempotency-Key`
+  under the two scopes → two invocation ids and two documents, the key replayed under either scope returning that
+  scope's own completion without a call; the order-key lock, same key, same scope (#125), with the first
+  invocation **held** at its credential fetch until the second call is on the server (two creates with distinct
+  keys, the first released into a three-second reply → `issued` + `already_issued`, one create, the second
+  answered after the first with its runs ending at `lookup-invoice`; the same with the second call between the
+  first's two create-step executions; the same key sent while the first is held attaching to it: unanswered while
+  held, no second row, one invocation id and one body on both replies); every `Szamlazz.Agent` read on the account
+  its scope selects (`check_account` under `acme` and under `beta` → each its own account with `scope` as the SDK
+  saw it and its key on the probe exactly once, unscoped → 400 `unknown_account`; `query` under `acme` → the
+  projection with `test` as reported and no `supplier_id`; `query_taxpayer` under `acme` with the full number and
+  under `beta` with the stem → each asks NAV with its own key, both journaling one `taxpayer-12345678` step,
+  `valid: false` as a 200); the `Szamlazz.Agent` writes under `acme` (`storno` of an unmanaged document →
+  `reversed` through `verify-{number}`, `lookup-storno-{number}` and `storno-{number}` with `<teljesitesDatum>`
+  equal to the fixture's `telj`, `acme`'s key and no `<keltDatum>`; `set_payments` → `<additiv>false</additiv>`,
+  the entries and `acme`'s key on the wire in the one `set-payments-{number}` step with no query before it,
+  answered with the totals as reported, `outstanding` distinct from `gross_total`); `create_invoice` → purge →
+  `storno_invoice` → `reversed` → purge → `create_invoice {reissue}` → `issued` on an order Restate holds nothing
+  of, then the scoped `get` seeing the new holder; a resolver under `beta` that fails twice then answers → the
+  outcome, with the `account` run's retries visible on `sys_invocation` (`last_failure_related_command_name =
+  account`, the failure text never echoing the resolver's message) within the resolve policy's delays, and one
+  `account` entry; an invocation under `beta` held at its credential fetch after its `account` step, holding the
+  order key with a second exclusive call queued behind it → after `PATCH /invocations/{id}/kill` the stuck one
+  completes as killed with `namespace` and `account` journaled and the queued `delete_proforma` completes at once
+  from szamlazz.hu: a killed invocation releases the key; `acme`'s seller bank account changed between two
+  executions of a create step (the first loses its reply) → both executions carry the journaled bank account and
+  only a new invocation sees the change; `beta`'s key rotated between two executions → the second carries the new
+  key while the `account` entry read in flight and after completion is byte-identical; **last**, over the whole
+  run: the `state` table holding no row for `Szamlazz.Order` after the run's invocations on both deployments (the
+  object keeps no state); over every `sys_journal` row of every invocation the server holds (hex-decoded `raw`)
+  plus every `sys_invocation.completion_failure`, none of the three agent keys of the run, while the same scan
+  finds the positive control's sentinel; and the **run-name pin**: for every invocation the server holds, the
+  `ctx.run` names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES` (the
+  durable steps of every handler of both services, parametrized names, `verify-storno-{number}`,
+  `taxpayer-{prefix}`, pinned by their prefix), every handler seen is in the table, and every path in the table
+  was walked in full by at least one invocation. The type fixtures pin what an entry holds; this pins which
+  entries a handler writes and in what order, the other half of what an in-flight invocation replays across a
+  deploy (ADR 0005). A renamed, inserted, reordered or dropped step fails here rather than stranding the
+  invocation.
   The harness (`tests/e2e/harness/`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, submits
-  without waiting through `/restate/send/…`, returns the
-  `x-restate-id` and a parsed fault body, reads `sys_journal` (`raw` hex-decoded to bytes, run results are bytes and
-  render as integer arrays in `entry_json`) and `sys_invocation`, purges and kills invocations (`PATCH
-  /invocations/{id}/purge`, `…/kill`), and verifies every mounted mock's `expect(n)` at the next scenario's reset
-  (wiremock checks the counts on `verify`, never on `reset`). `get`, `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and
-  `Szamlazz.Agent.check_account` set `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4).
-  The suite is one integration-test binary, `tests/e2e/main.rs`, which holds the two tests and the order the scenarios
-  run in; `harness/` is the szamlazz half of the harness, one module per concern (`mod.rs`, the `Harness` composing
-  the server, the wiremock and the accounts, and the two server specs; `accounts`, the scripted and mutable resolver
-  and store; `szamlazz`: the document fixture, selector matchers and stub helpers; `ingress`, a reply with the
-  contract's `Fault` decoded; `run_names`, the `RUN_NAMES` table), with the harness's own tests (the fetch hold, the
-  stub helpers against wiremock alone) beside what they test; the Restate half (the server gate and launcher, the
-  spawned server, the in-process deployment, `set_public` / `drain`, the ingress reply and envelope check, the admin
-  API's SQL, journals, `sys_invocation` rows, kill / cancel / purge and the in-flight sampler, the run-name matcher)
-  is the workspace's `restate-e2e-harness` crate (`crates/restate-e2e-harness`, published and versioned on its own,
-  unix only), a path dev-dependency that knows no szamlazz type and never depends on `restate-szamlazz` (a
-  dependency back would be a dev-dependency cycle Cargo resolves by compiling the crate twice, and every `Order`,
-  `Agent` or `Fault` crossing the boundary would be two types); its pure decisions (the gate, the sampler, the
-  matcher) are tested there, and its one ignored `e2e_smoke` proves its contract with a trivial service of its own
-  and no consumer. Every
-  other file is one handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`,
-  `create_final`, `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`,
-  `faults`, `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
-  scenario of a handler goes into that handler's file and is called from `main.rs` in sequence.
+  without waiting through `/restate/scope/{scope}/send/…`, returns the `x-restate-id` and a parsed fault body,
+  reads `sys_journal` (`raw` hex-decoded to bytes, run results are bytes and render as integer arrays in
+  `entry_json`) and `sys_invocation`, purges and kills invocations (`PATCH /invocations/{id}/purge`, `…/kill`),
+  counts requests per order or per number (never over the whole mock), and verifies every mounted mock's
+  `expect(n)` at the next `reset` (wiremock checks the counts on `verify`, never on `reset`): once after phase 1
+  for every mock its concurrent scenarios mounted, then at the start of each phase-2 scenario. `get`,
+  `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and `Szamlazz.Agent.check_account` set
+  `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4). The suite is one
+  integration-test binary, `tests/e2e/main.rs`, which holds the two tests and the order the scenarios run in (phase
+  1 as a `JoinSet`, phase 2 in sequence, the pins last); `harness/` is the szamlazz half of the harness, one module
+  per concern (`mod.rs`, the `Harness` composing the server, the wiremock and the accounts, and the two server
+  specs; `accounts`, the static resolver of phase 1 and the mutable resolver and store of phase 2; `szamlazz`: the
+  document-centric stub helpers over the shared fixtures of `tests/common`; `ingress`, a reply with the
+  contract's `Fault` decoded; `run_names`, the `RUN_NAMES` table), with the harness's own tests (the fetch hold
+  and the resolution script, the stub helpers against wiremock alone) beside what they test; the Restate half (the
+  server gate and launcher, the spawned server, the in-process deployment, `set_public` / `drain`, the ingress
+  reply and envelope check, the admin API's SQL, journals, `sys_invocation` rows, kill / cancel / purge and the
+  in-flight sampler, the run-name matcher) is the workspace's `restate-e2e-harness` crate
+  (`crates/restate-e2e-harness`, published and versioned on its own, unix only), a path dev-dependency that knows
+  no szamlazz type and never depends on `restate-szamlazz` (a dependency back would be a dev-dependency cycle
+  Cargo resolves by compiling the crate twice, and every `Order`, `Agent` or `Fault` crossing the boundary would
+  be two types); its pure decisions (the gate, the sampler, the matcher) are tested there, and its one ignored
+  `e2e_smoke` proves its contract with a trivial service of its own and no consumer. Every other file is one
+  handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`, `create_final`,
+  `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`, `faults`,
+  `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
+  scenario of a handler goes into that handler's file and is listed in `main.rs`: in phase 1 when it needs only
+  the single-account deployment and order keys of its own, in phase 2 when it needs a scope or scripts the resolver
+  or store. The suite runs in about 20 s on four cores (about 50 s before #134: 59 scenarios in sequence with a
+  `reset` between each); the fixed cost is the server's start-up and the one-second test policies' delays.
 - The protocol-v7 canary (`tests/e2e/main.rs`, a second ignored test on a server of its own, on its own ports, with
   vqueues and scoped Virtual Objects on and protocol v7 **off**): the ingress accepts a scoped path and the server
   keys the invocation by the scope (`sys_invocation.scope = acme`), but the SDK never sees it, a scoped

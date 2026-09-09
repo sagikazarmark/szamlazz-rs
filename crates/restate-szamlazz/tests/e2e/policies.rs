@@ -1,10 +1,14 @@
-//! The issue and read policies at the two durable steps of issuing, driven
-//! through `create_invoice`: an exhausted create step as a structured
-//! `outcome_unknown` and the next call's `already_issued`, a cancellation
-//! while the create's reply is in flight as the same fault (the other `Err` a
-//! write run can end with), a flaky and an exhausted lookup read, and a
-//! szamlazz.hu code answered to the create step's leading query or to the
-//! lookup's hint (#63).
+//! The run retry policies under Restate, driven through `create_invoice`: a
+//! read the issue or read policy re-executes and a step it gives up on, the
+//! exhaustion stored under the caller's `Idempotency-Key` as a structured
+//! fault and replayed by it, and a cancellation while a send's reply is in
+//! flight (the other `Err` a write run can end with). What a policy decides
+//! on a given answer is the gateway's (`Unanswered`, `Unconfirmed`) and the
+//! handlers' (`create_outcome_unknown`, the exhausted read's fault), unit
+//! tested; what is proved here is Restate's part: the re-execution and its
+//! delay, `retry_count` and the failing command on `sys_invocation` while in
+//! flight, one journal entry per step whatever the retries, and the stored
+//! completion.
 
 use std::time::{Duration, Instant};
 
@@ -14,31 +18,109 @@ use wiremock::ResponseTemplate;
 use restate_szamlazz::contract::{IssuedKind, TerminalCode};
 
 use crate::harness::szamlazz::{
-    Doc, api_error, create, created, external_id_query, not_found, order_query,
+    Doc, create_for, create_never_sent, created, external_id_query, not_found, order_query,
 };
 use crate::harness::{Harness, create_body};
 
-/// (xi) every execution of the create step loses its reply and the re-query
-/// finds nothing ⇒ the run retry policy re-executes the step (one second
-/// later under the test policy, not the handler's two-minute
-/// `initial_interval`), and its exhaustion is a structured `outcome_unknown`
-/// fault naming the order, kind and external id. That run retries spend
-/// none of the handler's `invocation_retry_policy` attempts is (xi-e)'s
-/// proof; here `retry_count` is only checked to have moved.
-pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Harness) {
-    h.reset().await;
-    h.absent("E2E-11", &["prepayment", "final", "proforma", "invoice"])
+/// The three policies' Restate half, on three orders at once:
+///
+/// - **the issue policy re-executes a write and its exhaustion is a
+///   structured fault the key replays** (`E2E-11`): every execution of the
+///   create step loses its reply and the re-query finds nothing, so the step
+///   is re-executed once (one second later under the test policy, not the
+///   handler's two-minute `initial_interval`; `retry_count` moves and
+///   `create-invoice` is the failing command while in flight) and its
+///   exhaustion is `outcome_unknown` (500) naming the order, kind and
+///   external id; the same `Idempotency-Key` then replays the stored fault
+///   without a request, and a new key finds the document that landed after
+///   all and answers `already_issued` from the lookup step with nothing sent;
+/// - **the read policy re-executes a read** (`E2E-27`): the lookup's
+///   external-id query answers 500 once and code 7 afterwards; the create
+///   completes `issued` in one invocation with `lookup-invoice` the failing
+///   command, one journal entry per step, exactly one create;
+/// - **the read policy's exhaustion is a structured `unavailable`**
+///   (`E2E-28`): a read szamlazz.hu never answers is, after three executions,
+///   `unavailable` (503) naming the step, the order, kind and external id,
+///   the create step never run and nothing sent.
+///
+/// The resolve policy's twin (the `account` step) runs in phase 2, where a
+/// resolution can be scripted per scope.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the three policies, each on its own order, concurrently"
+)]
+pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault(
+    h: &Harness,
+) {
+    // The exhausted create: the lookup, then two executions' leading query
+    // and re-query miss (five queries); the document that landed after all
+    // is found by the next call's lookup.
+    h.absent("E2E-11", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-11")
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    create()
+    h.holds_after_misses(
+        5,
+        &Doc {
+            external_id: Some("acct:E2E-11:invoice"),
+            ..Doc::of("SZ-11", "SZ", "E2E-11")
+        },
+    )
+    .await;
+    create_for("E2E-11")
         .respond_with(ResponseTemplate::new(500))
         .expect(2)
         .mount(&h.mock)
         .await;
+    // The flaky lookup: the first execution loses its reply; the second, and
+    // the create step's own leading query, miss cleanly.
+    h.absent("E2E-27", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-27")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    h.loses_reply_once("acct:E2E-27:invoice").await;
+    external_id_query("acct:E2E-27:invoice")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_for("E2E-27")
+        .respond_with(created("SZ-27", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    // The exhausted lookup: three executions, no answer.
+    h.absent("E2E-28", &["prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-28")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-28:invoice")
+        .respond_with(ResponseTemplate::new(500))
+        .expect(3)
+        .mount(&h.mock)
+        .await;
+    create_never_sent(&h.mock, "E2E-28").await;
 
+    tokio::join!(
+        exhausted_create_then_the_key_replays(h),
+        flaky_read_is_re_executed(h),
+        exhausted_read_is_unavailable(h),
+    );
+}
+
+/// The issue policy's half of the scenario above, on `E2E-11`: the
+/// exhaustion, the stored fault the same key replays, the next key's
+/// `already_issued`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustion, the stored fault, the next key"
+)]
+async fn exhausted_create_then_the_key_replays(h: &Harness) {
     let started = Instant::now();
     let watch = h.watch("E2E-11");
     let reply = h
@@ -56,9 +138,6 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
         "the run policy's delay (1 s initial) was honoured, not the handler's: {elapsed:?}"
     );
-
-    // The ingress wraps the handler's terminal error; the fault is the JSON
-    // in its message.
     let fault = reply.fault();
     assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
     assert_eq!(fault.order.as_deref(), Some("E2E-11"));
@@ -68,7 +147,6 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
         fault.message.contains("retry with a new Idempotency-Key"),
         "{fault:?}"
     );
-
     // The run's re-execution is visible while the invocation is in flight:
     // `retry_count` (the invoker's count of starts) counts it, with the
     // create step named as the failing command, and the completed invocation
@@ -96,43 +174,20 @@ pub(crate) async fn exhausted_create_step_is_a_structured_outcome_unknown(h: &Ha
             .is_some_and(|failure| failure.contains("outcome_unknown")),
         "{invocation:?}"
     );
-    let journal = h.journal(reply.invocation_id()).await;
-    let runs: Vec<_> = journal
-        .iter()
-        .filter(|entry| entry.is_run())
-        .filter_map(|entry| entry.name.as_deref())
-        .collect();
-    assert!(
-        runs.contains(&"lookup-invoice") && runs.contains(&"create-invoice"),
-        "the two steps are journaled by name: {runs:?}"
+    let runs = h.runs(reply.invocation_id()).await;
+    assert_eq!(
+        runs.iter().filter(|name| *name == "create-invoice").count(),
+        1,
+        "the re-executed step is one entry: {runs:?}"
     );
-    eprintln!("(xi) exhausted create step → structured outcome_unknown; run retries visible: pass");
-}
-
-/// (xi-a) what `outcome_unknown` asks the caller to do works: the next call
-/// on the same order with a **new** `Idempotency-Key`, after (xi) left the
-/// outcome of `E2E-11`'s create unknown, finds the document that landed
-/// after all under its external id and answers `already_issued` from the
-/// lookup step, with nothing sent; the same key would replay (xi)'s fault.
-/// (`reconciled` is the create step's own answer to a 152, see (iii); a lookup
-/// that finds the document never reaches the create step.)
-pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issued(h: &Harness) {
-    h.reset().await;
-    h.absent("E2E-11", &["prepayment", "final", "proforma"])
-        .await;
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-11:invoice"),
-        ..Doc::new("SZ-11", "SZ", "E2E-11")
-    })
-    .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.mock)
-        .await;
+    assert_eq!(
+        h.create_bodies_of("E2E-11").await.len(),
+        2,
+        "one send per execution"
+    );
 
     // The same key: the stored fault, nothing read.
-    let before = h.requests_seen().await;
+    let before = h.requests_of_order("E2E-11").await.len();
     let replayed = h
         .call(
             "E2E-11",
@@ -143,8 +198,9 @@ pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issue
         .await;
     assert_eq!(replayed.status, 500, "{}", replayed.body);
     assert_eq!(replayed.fault().code, TerminalCode::OutcomeUnknown);
+    assert_eq!(replayed.invocation_id(), reply.invocation_id());
     assert_eq!(
-        h.requests_seen().await,
+        h.requests_of_order("E2E-11").await.len(),
         before,
         "a replayed completion reaches nothing"
     );
@@ -163,6 +219,125 @@ pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issue
     assert_eq!(reply.body["invoice_number"], "SZ-11");
     assert_eq!(reply.body["external_id"], "acct:E2E-11:invoice");
     assert_eq!(
+        h.runs(reply.invocation_id())
+            .await
+            .last()
+            .map(String::as_str),
+        Some("lookup-invoice"),
+        "the lookup answered; no create step"
+    );
+    assert_eq!(
+        h.create_bodies_of("E2E-11").await.len(),
+        2,
+        "nothing more was sent"
+    );
+}
+
+/// The read policy's re-execution, on `E2E-27`: one lost reply, `issued` in
+/// one invocation.
+async fn flaky_read_is_re_executed(h: &Harness) {
+    let started = Instant::now();
+    let watch = h.watch("E2E-27");
+    let reply = h
+        .call(
+            "E2E-27",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-27-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.finish().await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["invoice_number"], "SZ-27");
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "the read policy's delay was honoured, not the handler's: {elapsed:?}"
+    );
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["lookup-invoice"],
+        "the lookup step is the failing command: {retries:?}"
+    );
+    assert!(
+        retries
+            .failures
+            .iter()
+            .all(|failure| failure.contains("transport failure")),
+        "the last failure is the Unanswered message: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert_eq!(invocation.completion_failure, None, "{invocation:?}");
+    assert_eq!(
+        h.runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "exclusivity-prepayment",
+            "exclusivity-final",
+            "proforma-link",
+            "lookup-invoice",
+            "create-invoice",
+        ],
+        "one journal entry per step; the retried read is one entry"
+    );
+    assert_eq!(
+        h.create_bodies_of("E2E-27").await.len(),
+        1,
+        "exactly one create"
+    );
+}
+
+/// The read policy's exhaustion, on `E2E-28`: three unanswered executions,
+/// the structured `unavailable`, nothing sent.
+async fn exhausted_read_is_unavailable(h: &Harness) {
+    let started = Instant::now();
+    let watch = h.watch("E2E-28");
+    let reply = h
+        .call(
+            "E2E-28",
+            "create_invoice",
+            &create_body(dec!(1000), false),
+            "e2e-28-k1",
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let retries = watch.finish().await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "three executions one second apart, not the handler's policy: {elapsed:?}"
+    );
+    let fault = reply.fault();
+    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
+    assert_eq!(fault.order.as_deref(), Some("E2E-28"));
+    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
+    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-28:invoice"));
+    assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
+    assert!(fault.message.contains("transport failure"), "{fault:?}");
+    assert!(
+        fault.message.contains("retry with a new Idempotency-Key"),
+        "{fault:?}"
+    );
+    assert!(retries.max_retry_count >= 1, "{retries:?}");
+    assert_eq!(
+        retries.failing_commands,
+        ["lookup-invoice"],
+        "the lookup step is the failing command: {retries:?}"
+    );
+    let invocation = h.invocation(reply.invocation_id()).await;
+    assert_eq!(invocation.status, "completed", "{invocation:?}");
+    assert!(
+        invocation
+            .completion_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("unavailable")),
+        "{invocation:?}"
+    );
+    assert_eq!(
         h.runs(reply.invocation_id()).await,
         [
             "namespace",
@@ -172,15 +347,15 @@ pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issue
             "proforma-link",
             "lookup-invoice",
         ],
-        "the lookup answered; no create step"
+        "the lookup is journaled by name, the create step never ran"
     );
-    assert!(h.create_bodies().await.is_empty(), "nothing sent");
-    eprintln!(
-        "(xi-a) after outcome_unknown: the same key replays the fault; a new key → already_issued from the lookup, nothing sent: pass"
+    assert!(
+        h.create_bodies_of("E2E-28").await.is_empty(),
+        "nothing was created"
     );
 }
 
-/// (xi-a') the other `Err` a write run can end with: a **cancellation**
+/// The other `Err` a write run can end with: a **cancellation**
 /// (`PATCH /invocations/{id}/cancel`, the SDK's 409) while the create step is
 /// mid-send is `outcome_unknown` like an exhausted policy (#142, #125). The
 /// send is delayed by szamlazz.hu; the cancel arrives while the reply is in
@@ -193,8 +368,11 @@ pub(crate) async fn after_an_outcome_unknown_the_next_call_answers_already_issue
 /// path (the step's command was journaled before the cancel arrived), so no
 /// `RUN_NAMES` row is added: a cancellation anywhere on the path leaves a
 /// prefix, which the pin admits.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: the cancelled send, then the released key"
+)]
 pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key(h: &Harness) {
-    h.reset().await;
     h.absent("E2E-L4", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-L4")
@@ -205,7 +383,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         .create_lands_slowly(
             &Doc {
                 external_id: Some("acct:E2E-L4:invoice"),
-                ..Doc::new("SZ-L4", "SZ", "E2E-L4")
+                ..Doc::of("SZ-L4", "SZ", "E2E-L4")
             },
             Duration::from_secs(4),
         )
@@ -270,7 +448,11 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         ],
         "the create step's command was journaled; the cancel ended its await"
     );
-    assert_eq!(h.create_bodies().await.len(), 1, "the one send that landed");
+    assert_eq!(
+        h.create_bodies_of("E2E-L4").await.len(),
+        1,
+        "the one send that landed"
+    );
 
     // The key is released by the completion: the next call runs at once and
     // finds what landed.
@@ -291,386 +473,9 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         Some("lookup-invoice"),
         "the next call answered from its lookup"
     );
-    assert_eq!(h.create_bodies().await.len(), 1, "nothing more was sent");
-    eprintln!(
-        "(xi-a') a cancellation while the create's reply is in flight → outcome_unknown (409 named), the key released, the next call → already_issued: pass"
-    );
-}
-
-/// (xi-b) a read that szamlazz.hu fails to answer once is retried by the
-/// **read policy**, not failed terminally: the lookup step's external-id
-/// query answers 500 to its first execution and code 7 afterwards; the create
-/// completes `issued` in one invocation, the `lookup-invoice` run is what
-/// retried (`last_failure_related_command_name` while in flight), and the
-/// create mock sees exactly one request.
-pub(crate) async fn flaky_lookup_read_is_retried_by_the_read_policy(h: &Harness) {
-    h.reset().await;
-    h.absent("E2E-27", &["prepayment", "final", "proforma"])
-        .await;
-    order_query("E2E-27")
-        .respond_with(not_found())
-        .mount(&h.mock)
-        .await;
-    // The first execution of the lookup step loses its reply; the second,
-    // and the create step's own leading query, miss cleanly.
-    h.loses_reply_once("acct:E2E-27:invoice").await;
-    external_id_query("acct:E2E-27:invoice")
-        .respond_with(not_found())
-        .mount(&h.mock)
-        .await;
-    create()
-        .respond_with(created("SZ-27", "1000", "1270"))
-        .expect(1)
-        .mount(&h.mock)
-        .await;
-
-    let started = Instant::now();
-    let watch = h.watch("E2E-27");
-    let reply = h
-        .call(
-            "E2E-27",
-            "create_invoice",
-            &create_body(dec!(1000), false),
-            "e2e-27-k1",
-        )
-        .await;
-    let elapsed = started.elapsed();
-    let retries = watch.finish().await;
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
-    assert_eq!(reply.body["invoice_number"], "SZ-27");
-    assert!(
-        elapsed < Duration::from_secs(60),
-        "the read policy's delay was honoured, not the handler's: {elapsed:?}"
-    );
-
-    // The run, not the handler, is what retried, and it was the lookup.
-    assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
-        retries.failing_commands,
-        ["lookup-invoice"],
-        "the lookup step is the failing command: {retries:?}"
-    );
-    assert!(
-        retries
-            .failures
-            .iter()
-            .all(|failure| failure.contains("transport failure")),
-        "the last failure is the Unanswered message: {retries:?}"
-    );
-    let invocation = h.invocation(reply.invocation_id()).await;
-    assert_eq!(invocation.handler, "create_invoice");
-    assert_eq!(invocation.status, "completed", "{invocation:?}");
-    assert_eq!(invocation.completion_failure, None, "{invocation:?}");
-    let runs = h.runs(reply.invocation_id()).await;
-    assert_eq!(
-        runs,
-        [
-            "namespace",
-            "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
-            "lookup-invoice",
-            "create-invoice",
-        ],
-        "one journal entry per step; the retried read is one entry: {runs:?}"
-    );
-    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
-    eprintln!("(xi-b) flaky lookup read → retried by the read policy, issued once: pass");
-}
-
-/// (xi-c) a read that szamlazz.hu never answers is, after the read policy
-/// is exhausted, a structured `unavailable` (503) naming the order, kind and
-/// external id (within the read policy's delays), and the create mock sees
-/// zero requests.
-pub(crate) async fn exhausted_lookup_read_is_a_structured_unavailable(h: &Harness) {
-    h.reset().await;
-    h.absent("E2E-28", &["prepayment", "final", "proforma"])
-        .await;
-    order_query("E2E-28")
-        .respond_with(not_found())
-        .mount(&h.mock)
-        .await;
-    external_id_query("acct:E2E-28:invoice")
-        .respond_with(ResponseTemplate::new(500))
-        .expect(3)
-        .mount(&h.mock)
-        .await;
-    create()
-        .respond_with(created("SZ-28", "1000", "1270"))
-        .expect(0)
-        .mount(&h.mock)
-        .await;
-
-    let started = Instant::now();
-    let watch = h.watch("E2E-28");
-    let reply = h
-        .call(
-            "E2E-28",
-            "create_invoice",
-            &create_body(dec!(1000), false),
-            "e2e-28-k1",
-        )
-        .await;
-    let elapsed = started.elapsed();
-    let retries = watch.finish().await;
-    assert_eq!(reply.status, 503, "{}", reply.body);
-    assert!(
-        elapsed < Duration::from_secs(60),
-        "three executions one second apart, not the handler's policy: {elapsed:?}"
-    );
-
-    let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
-    assert_eq!(fault.order.as_deref(), Some("E2E-28"));
-    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
-    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-28:invoice"));
-    assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
-    assert!(fault.message.contains("transport failure"), "{fault:?}");
-    assert!(
-        fault.message.contains("retry with a new Idempotency-Key"),
-        "{fault:?}"
-    );
-
-    assert!(retries.max_retry_count >= 1, "{retries:?}");
-    assert_eq!(
-        retries.failing_commands,
-        ["lookup-invoice"],
-        "the lookup step is the failing command: {retries:?}"
-    );
-    let invocation = h.invocation(reply.invocation_id()).await;
-    assert_eq!(invocation.handler, "create_invoice");
-    assert_eq!(invocation.status, "completed", "{invocation:?}");
-    assert!(
-        invocation
-            .completion_failure
-            .as_deref()
-            .is_some_and(|failure| failure.contains("unavailable")),
-        "{invocation:?}"
-    );
-    let runs = h.runs(reply.invocation_id()).await;
-    assert!(
-        runs.contains(&"lookup-invoice".to_owned()),
-        "the lookup is journaled by name: {runs:?}"
-    );
-    assert!(
-        !runs.contains(&"create-invoice".to_owned()),
-        "the create step never ran: {runs:?}"
-    );
-    assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
-    eprintln!("(xi-c) exhausted lookup read → structured unavailable, nothing created: pass");
-}
-
-/// (xi-c') an *answer* to the create step's leading query that is neither 7
-/// nor a credential code (here 57) is settled data, not `Unconfirmed`
-/// (#63): the handler answers the structured `unavailable` (503) at once with
-/// the code beside it, the `create-invoice` run is journaled as data with no
-/// failure and no failing command recorded (the issue policy is not spent on
-/// a read), and the create mock sees zero requests. The lookup step's own
-/// query misses cleanly so that the create step is reached.
-pub(crate) async fn answered_code_on_the_create_leading_query_is_an_immediate_unavailable(
-    h: &Harness,
-) {
-    h.reset().await;
-    h.absent("E2E-29", &["prepayment", "final", "proforma"])
-        .await;
-    order_query("E2E-29")
-        .respond_with(not_found())
-        .mount(&h.mock)
-        .await;
-    // The lookup step's query: code 7. The create step's leading query, the
-    // next query of the same id: code 57. Two queries in all.
-    external_id_query("acct:E2E-29:invoice")
-        .respond_with(not_found())
-        .up_to_n_times(1)
-        .mount(&h.mock)
-        .await;
-    external_id_query("acct:E2E-29:invoice")
-        .respond_with(api_error("57", "Hibás XML."))
-        .expect(1)
-        .mount(&h.mock)
-        .await;
-    create()
-        .respond_with(created("SZ-29", "1000", "1270"))
-        .expect(0)
-        .mount(&h.mock)
-        .await;
-
-    let watch = h.watch("E2E-29");
-    let reply = h
-        .call(
-            "E2E-29",
-            "create_invoice",
-            &create_body(dec!(1000), false),
-            "e2e-29-k1",
-        )
-        .await;
-    let retries = watch.finish().await;
-    assert_eq!(reply.status, 503, "{}", reply.body);
-
-    let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
-    assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
-    assert_eq!(fault.order.as_deref(), Some("E2E-29"));
-    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
-    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-29:invoice"));
-    assert!(fault.message.contains("code 57"), "{fault:?}");
-    assert!(
-        fault.message.contains("retry with a new Idempotency-Key"),
-        "{fault:?}"
-    );
-
-    // Settled inside the one execution: no run failed, so no failure and no
-    // failing command were recorded, and `retry_count` stayed at the first
-    // execution's 1 (the server's count includes it, as (vi-c) observed);
-    // the answer was data, not `Unconfirmed`.
-    assert!(retries.max_retry_count <= 1, "{retries:?}");
-    assert!(retries.failures.is_empty(), "{retries:?}");
-    assert!(retries.failing_commands.is_empty(), "{retries:?}");
-    let invocation = h.invocation(reply.invocation_id()).await;
-    assert_eq!(invocation.handler, "create_invoice");
-    assert_eq!(invocation.status, "completed", "{invocation:?}");
-    assert!(
-        invocation
-            .completion_failure
-            .as_deref()
-            .is_some_and(|failure| failure.contains("unavailable")),
-        "{invocation:?}"
-    );
-    let runs = h.runs(reply.invocation_id()).await;
-    assert!(
-        runs.contains(&"lookup-invoice".to_owned()) && runs.contains(&"create-invoice".to_owned()),
-        "the create step ran and journaled the answer: {runs:?}"
-    );
-    assert_eq!(h.create_bodies().await.len(), 0, "nothing was created");
-    eprintln!(
-        "(xi-c') answered code on the create step's leading query → immediate unavailable{{szamlazz_code}}, nothing created: pass"
-    );
-}
-
-/// (xi-c'') the two queries of the lookup step answer a szamlazz.hu code
-/// differently (`Gateway::lookup` steps 1–2). The order-number **hint**
-/// answered with a code that is neither 7 nor a credential code (here 57)
-/// is data the hint cannot conclude from: it looks for a foreign document,
-/// and a code says nothing about one, so the lookup continues as on a miss
-/// and the create proceeds to `issued` in one execution, no run failure
-/// recorded (the read policy is not spent on an answer), the hint queried
-/// exactly once, one create on the wire. The **external-id** query answered
-/// with the same code is the lookup's own `unavailable` (503) at once, with
-/// the code beside it and nothing sent; the hint is never asked.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one scenario: the same code on the hint, then on the external-id query"
-)]
-pub(crate) async fn an_answered_code_on_the_hint_is_inconclusive_and_the_create_proceeds(
-    h: &Harness,
-) {
-    // The hint.
-    h.reset().await;
-    h.absent("E2E-29B", &["prepayment", "final", "proforma", "invoice"])
-        .await;
-    order_query("E2E-29B")
-        .respond_with(api_error("57", "Hibás XML."))
-        .expect(1)
-        .mount(&h.mock)
-        .await;
-    create()
-        .respond_with(created("SZ-29B", "1000", "1270"))
-        .expect(1)
-        .mount(&h.mock)
-        .await;
-    let watch = h.watch("E2E-29B");
-    let reply = h
-        .call(
-            "E2E-29B",
-            "create_invoice",
-            &create_body(dec!(1000), false),
-            "e2e-29b-k1",
-        )
-        .await;
-    let retries = watch.finish().await;
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
-    assert_eq!(reply.body["invoice_number"], "SZ-29B");
-    assert!(retries.max_retry_count <= 1, "{retries:?}");
-    assert!(retries.failures.is_empty(), "{retries:?}");
-    assert!(retries.failing_commands.is_empty(), "{retries:?}");
-    assert_eq!(
-        h.runs(reply.invocation_id()).await,
-        [
-            "namespace",
-            "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
-            "lookup-invoice",
-            "create-invoice",
-        ]
-    );
-    assert_eq!(h.create_bodies().await.len(), 1, "exactly one create");
-    assert_eq!(
-        h.requests_seen().await,
-        7,
-        "two exclusivity lookups, the link, the external id, the hint, the leading query and the create"
-    );
-
-    // The external-id query.
-    h.reset().await;
-    h.absent("E2E-29C", &["prepayment", "final", "proforma"])
-        .await;
-    external_id_query("acct:E2E-29C:invoice")
-        .respond_with(api_error("57", "Hibás XML."))
-        .expect(1)
-        .mount(&h.mock)
-        .await;
-    order_query("E2E-29C")
-        .respond_with(not_found())
-        .expect(0)
-        .mount(&h.mock)
-        .await;
-    create()
-        .respond_with(created("SZ-X", "1000", "1270"))
-        .expect(0)
-        .mount(&h.mock)
-        .await;
-    let reply = h
-        .call(
-            "E2E-29C",
-            "create_invoice",
-            &create_body(dec!(1000), false),
-            "e2e-29c-k1",
-        )
-        .await;
-    assert_eq!(reply.status, 503, "{}", reply.body);
-    let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
-    assert_eq!(fault.szamlazz_code.as_deref(), Some("57"), "{fault:?}");
-    assert_eq!(fault.order.as_deref(), Some("E2E-29C"), "{fault:?}");
-    assert_eq!(fault.kind, Some(IssuedKind::Invoice), "{fault:?}");
-    assert_eq!(
-        fault.external_id.as_deref(),
-        Some("acct:E2E-29C:invoice"),
-        "{fault:?}"
-    );
-    assert_eq!(
-        h.runs(reply.invocation_id()).await,
-        [
-            "namespace",
-            "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
-            "lookup-invoice",
-        ],
-        "the lookup answered as data; no create step"
-    );
-    assert_eq!(
-        h.requests_seen().await,
-        4,
-        "the three reads before the lookup and its external-id query; no hint, nothing sent"
-    );
-    eprintln!(
-        "(xi-c'') code 57 on the hint → inconclusive, issued in one execution; on the lookup's external-id query → unavailable{{szamlazz_code}}, nothing sent: pass"
+        h.create_bodies_of("E2E-L4").await.len(),
+        1,
+        "nothing more was sent"
     );
 }

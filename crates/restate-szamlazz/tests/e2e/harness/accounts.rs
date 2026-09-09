@@ -1,14 +1,14 @@
 //! The accounts the two deployments serve and the resolver and store behind
-//! them: the single-account phase over [`ScriptedAccounts`] (a static resolver
-//! whose next resolutions can fail or hang and whose store can be taken
-//! down), the multi-account phase over [`MutableAccounts`] (accounts and keys
-//! the test changes while invocations are in flight, and a fetch it can hold
-//! ([`FetchHold`]) so the change lands between two executions in sequence),
-//! and the agent keys the run puts on the wire, sentinels the leak scan looks
-//! for.
+//! them: the single-account phase over the static resolver as a deployment
+//! would configure it, the multi-account phase over [`MutableAccounts`]
+//! (accounts and keys the test changes while invocations are in flight, a
+//! resolution it can fail per scope, and a fetch it can hold
+//! ([`FetchHold`]) so a change lands between two executions in sequence, or
+//! an invocation stands still where a scenario needs it), and the agent keys
+//! the run puts on the wire, sentinels the leak scan looks for.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use restate_szamlazz::account::{
@@ -39,106 +39,14 @@ pub(crate) const AGENT_KEYS: [&str; 3] = [AGENT_KEY, KEY_B, KEY_B_V2];
 pub(crate) const BANK_ACCOUNT: &str = "11111111-22222222-33333333";
 pub(crate) const BANK_ACCOUNT_CHANGED: &str = "44444444-55555555-66666666";
 
-/// The static resolver and store behind a script: the resolver fails the
-/// next N resolutions with `unavailable` or hangs the next N forever, and the
-/// store can be taken down. What the prologue's e2e drives (a resolver that
-/// fails then succeeds, one that never answers, a store that always fails)
-/// on the one deployment the harness registers.
-#[derive(Debug)]
-pub(crate) struct ScriptedAccounts {
-    inner: StaticResolver,
-    /// Resolutions left to fail with `unavailable`.
-    resolver_failures: AtomicU32,
-    /// Resolutions left to hang: a future that never completes, so the
-    /// invocation is stuck in its `account` step until it is killed.
-    resolver_hangs: AtomicU32,
-    /// How many times the resolver was asked.
-    resolutions: AtomicU32,
-    /// Whether every fetch fails with `unavailable`.
-    store_down: AtomicBool,
-    /// How many times the store was asked.
-    fetches: AtomicU32,
-}
-
-impl ScriptedAccounts {
-    fn new(inner: StaticResolver) -> Self {
-        Self {
-            inner,
-            resolver_failures: AtomicU32::new(0),
-            resolver_hangs: AtomicU32::new(0),
-            resolutions: AtomicU32::new(0),
-            store_down: AtomicBool::new(false),
-            fetches: AtomicU32::new(0),
-        }
-    }
-
-    pub(crate) fn fail_next_resolutions(&self, count: u32) {
-        self.resolver_failures.store(count, Ordering::SeqCst);
-    }
-
-    pub(crate) fn hang_next_resolutions(&self, count: u32) {
-        self.resolver_hangs.store(count, Ordering::SeqCst);
-    }
-
-    pub(crate) fn set_store_down(&self, down: bool) {
-        self.store_down.store(down, Ordering::SeqCst);
-    }
-
-    pub(crate) fn resolutions(&self) -> u32 {
-        self.resolutions.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn fetches(&self) -> u32 {
-        self.fetches.load(Ordering::SeqCst)
-    }
-}
-
-impl AccountResolver for ScriptedAccounts {
-    fn resolve<'a>(
-        &'a self,
-        scope: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Account, ResolveError>> {
-        Box::pin(async move {
-            self.resolutions.fetch_add(1, Ordering::SeqCst);
-            let hanging = self.resolver_hangs.load(Ordering::SeqCst);
-            if hanging > 0 {
-                self.resolver_hangs.store(hanging - 1, Ordering::SeqCst);
-                std::future::pending::<()>().await;
-            }
-            let outstanding = self.resolver_failures.load(Ordering::SeqCst);
-            if outstanding > 0 {
-                self.resolver_failures
-                    .store(outstanding - 1, Ordering::SeqCst);
-                return Err(ResolveError::unavailable(std::io::Error::other(
-                    "scripted resolver outage",
-                )));
-            }
-            self.inner.resolve(scope).await
-        })
-    }
-}
-
-impl CredentialStore for ScriptedAccounts {
-    fn fetch<'a>(
-        &'a self,
-        credential_ref: &'a CredentialRef,
-    ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
-        Box::pin(async move {
-            self.fetches.fetch_add(1, Ordering::SeqCst);
-            if self.store_down.load(Ordering::SeqCst) {
-                return Err(FetchError::unavailable(std::io::Error::other(
-                    "scripted store outage",
-                )));
-            }
-            self.inner.fetch(credential_ref).await
-        })
-    }
-}
-
-/// The two services for the test account at `endpoint`, over the scripted
-/// resolver and store, with short policies so that retries and exhaustion are
-/// observable within the test.
-pub(crate) fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) {
+/// The two services for the test account at `endpoint`, over the static
+/// resolver's `[account]` shape exactly as a single-account deployment would
+/// configure it, with short policies so that retries and exhaustion are
+/// observable within the test. Nothing scripts this phase's resolver or
+/// store: its scenarios run concurrently, and a script on a shared resolver
+/// (which sees no order key) would fire on whichever invocation resolved
+/// next; the scripted account steps run in phase 2, per scope.
+pub(crate) fn services(endpoint: &str) -> (Order, Agent) {
     let accounts: StaticConfig = serde_json::from_value(json!({
         "account": {
             "id": "acct",
@@ -147,18 +55,14 @@ pub(crate) fn services(endpoint: &str) -> (Arc<ScriptedAccounts>, Order, Agent) 
         },
     }))
     .expect("config");
-    // The static resolver behind the script, and a short resolve policy so a
-    // scripted outage is retried within the test.
-    let scripted = Arc::new(ScriptedAccounts::new(
-        StaticResolver::try_from(accounts).expect("resolver"),
-    ));
+    let resolver = Arc::new(StaticResolver::try_from(accounts).expect("resolver"));
     let accounts = Accounts::new(
-        Arc::clone(&scripted) as Arc<dyn AccountResolver>,
-        Arc::clone(&scripted) as Arc<dyn CredentialStore>,
+        Arc::clone(&resolver) as Arc<dyn AccountResolver>,
+        resolver as Arc<dyn CredentialStore>,
     );
     let order = Order::from_parts(accounts.clone(), worker_config());
     let agent = Agent::from_parts(accounts, worker_config());
-    (scripted, order, agent)
+    (order, agent)
 }
 
 /// The deployment-level settings of both phases (the flag day keeps the
@@ -220,15 +124,22 @@ fn worker_config() -> ValidatedWorkerConfig {
 
 /// A resolver and store whose accounts and keys the test can change while
 /// invocations are in flight: what a database-backed deployment looks like
-/// to the worker, and what the rotation and account-change scenarios drive.
-/// Seeded from the static resolver's multi-account shape, so the shape is
-/// exercised end to end too.
+/// to the worker, and what the rotation, account-change, resolve-policy and
+/// kill scenarios drive. Seeded from the static resolver's multi-account
+/// shape, so the shape is exercised end to end too. Every script is **per
+/// scope** (a resolution failure) or **per credential reference** (a held
+/// fetch), so a scenario under `beta` disturbs nothing under `acme`.
 #[derive(Debug)]
 pub(crate) struct MutableAccounts {
     /// The accounts by the scope each is reachable under.
     accounts: Mutex<BTreeMap<String, Account>>,
     /// The credentials by credential reference.
     keys: Mutex<BTreeMap<String, Credentials>>,
+    /// Per scope: how many of its next resolutions fail with `unavailable`
+    /// ([`Self::fail_next_resolutions`]).
+    resolver_failures: Mutex<BTreeMap<String, u32>>,
+    /// Per scope: how many times the resolver was asked.
+    resolutions: Mutex<BTreeMap<String, u32>>,
     /// The fetches a scenario holds ([`Self::hold_fetch`]).
     holds: Mutex<Vec<Arc<Hold>>>,
 }
@@ -258,8 +169,9 @@ struct Hold {
 /// the store parks that fetch until [`release`](Self::release), so a scenario
 /// can act **between two executions** of a handler with the second one
 /// waiting at its fetch (after it replayed its journal, before it opens its
-/// gateway) instead of racing the run retry delay before it. Dropping the
-/// hold releases it. Bounded by the prologue's fetch deadline: a hold
+/// gateway) instead of racing the run retry delay before it, or hold an
+/// invocation still where it needs one standing (the kill scenario). Dropping
+/// the hold releases it. Bounded by the prologue's fetch deadline: a hold
 /// released later than that is a fetch that timed out.
 pub(crate) struct FetchHold {
     hold: Arc<Hold>,
@@ -316,6 +228,8 @@ impl MutableAccounts {
         Self {
             accounts: Mutex::new(accounts),
             keys: Mutex::new(keys),
+            resolver_failures: Mutex::new(BTreeMap::new()),
+            resolutions: Mutex::new(BTreeMap::new()),
             holds: Mutex::new(Vec::new()),
         }
     }
@@ -336,6 +250,27 @@ impl MutableAccounts {
                 .get_mut(scope)
                 .unwrap_or_else(|| panic!("no account under scope {scope}")),
         );
+    }
+
+    /// The next `count` resolutions of `scope` fail with `unavailable` (the
+    /// resolver's own message never reaching the worker's fault), the ones
+    /// after answer: what the resolve policy re-executes the `account` step
+    /// on. Resolutions of other scopes pass.
+    pub(crate) fn fail_next_resolutions(&self, scope: &str, count: u32) {
+        self.resolver_failures
+            .lock()
+            .expect("failures")
+            .insert(scope.to_owned(), count);
+    }
+
+    /// How many times the resolver was asked for `scope`.
+    pub(crate) fn resolutions(&self, scope: &str) -> u32 {
+        self.resolutions
+            .lock()
+            .expect("resolutions")
+            .get(scope)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Holds the `nth` fetch of `credential_ref` from now on (`1` is the next
@@ -401,6 +336,25 @@ impl MutableAccounts {
             .await
             .expect("the hold outlives its receivers");
     }
+
+    /// Counts the resolution of `scope` and says whether it is a scripted
+    /// failure.
+    fn scripted_failure(&self, scope: &str) -> bool {
+        *self
+            .resolutions
+            .lock()
+            .expect("resolutions")
+            .entry(scope.to_owned())
+            .or_default() += 1;
+        let mut failures = self.resolver_failures.lock().expect("failures");
+        match failures.get_mut(scope) {
+            Some(outstanding) if *outstanding > 0 => {
+                *outstanding -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl AccountResolver for MutableAccounts {
@@ -412,6 +366,11 @@ impl AccountResolver for MutableAccounts {
             let Some(scope) = scope else {
                 return Err(ResolveError::Unscoped);
             };
+            if self.scripted_failure(scope) {
+                return Err(ResolveError::unavailable(std::io::Error::other(
+                    "scripted resolver outage",
+                )));
+            }
             self.accounts
                 .lock()
                 .expect("accounts")
@@ -476,7 +435,7 @@ pub(crate) async fn multi_account_services(endpoint: &str) -> (Arc<MutableAccoun
     (mutable, order, agent)
 }
 
-// ----- the fetch hold, against the store alone ----------------------------------------
+// ----- the scripts, against the resolver and store alone ------------------------
 
 /// The agent key a fetched credential carries.
 #[cfg(test)]
@@ -533,4 +492,48 @@ async fn a_held_fetch_parks_until_released_and_answers_what_was_changed_meanwhil
     // The third passes at once.
     let third = store.fetch(&beta).await.expect("the third fetch");
     assert_eq!(key_of(&third), KEY_B_V2);
+}
+
+/// `fail_next_resolutions(scope, 2)` fails the scope's next two resolutions
+/// with `unavailable` (the resolver's own message inside, for the worker to
+/// never echo), answers the third, counts all three, and leaves another
+/// scope's resolutions alone; a scope no account is under stays unknown, and
+/// no scope is unscoped.
+#[tokio::test]
+async fn scripted_resolutions_fail_per_scope_then_answer() {
+    let (resolver, _, _) = multi_account_services("http://127.0.0.1:1/").await;
+    resolver.fail_next_resolutions("beta", 2);
+
+    for attempt in 1..=2 {
+        let error = resolver
+            .resolve(Some("beta"))
+            .await
+            .expect_err("a scripted failure");
+        assert!(
+            matches!(error, ResolveError::Unavailable(_)),
+            "attempt {attempt}: {error:?}"
+        );
+    }
+    let account = resolver.resolve(Some("beta")).await.expect("the answer");
+    assert_eq!(account.id.as_str(), "beta");
+    assert_eq!(
+        resolver.resolutions("beta"),
+        3,
+        "two failures and the answer"
+    );
+
+    let acme = resolver
+        .resolve(Some("acme"))
+        .await
+        .expect("acme is not scripted");
+    assert_eq!(acme.id.as_str(), "acme");
+    assert_eq!(resolver.resolutions("acme"), 1);
+    assert!(matches!(
+        resolver.resolve(Some("gamma")).await,
+        Err(ResolveError::Unknown { .. })
+    ));
+    assert!(matches!(
+        resolver.resolve(None).await,
+        Err(ResolveError::Unscoped)
+    ));
 }
