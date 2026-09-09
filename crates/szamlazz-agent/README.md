@@ -12,11 +12,12 @@ The core performs no I/O: request types serialize into a ready-to-send `WireRequ
 Enable `client-reqwest` to use the ready-made async client. The happy path of an integration: issue an invoice under an order number and an external id, find it again by that id, and fetch its PDF.
 
 ```rust
-use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
-use szamlazz_agent::ops::query_pdf::{InvoiceSelector, QueryInvoicePdf};
+use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, CreationOutcome, InvoiceHeader, InvoiceKind};
+use szamlazz_agent::ops::query_pdf::QueryInvoicePdf;
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::{
-    Client, Credentials, Currency, Date, Language, LineItem, PaymentMethod, Rounding, VatRate,
+    Client, Credentials, Currency, Date, InvoiceSelector, Language, LineItem, PaymentMethod,
+    Rounding, VatRate,
 };
 
 async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,8 +53,12 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    let created = client.send(&request).await?;
-    println!("issued: {:?}", created.invoice_number);
+    // The outcome is the issued document, or the preview PDF when the header
+    // asked for one (`preview_pdf`) and nothing was issued.
+    let CreationOutcome::Issued(created) = client.send(&request).await? else {
+        unreachable!("no preview was requested");
+    };
+    println!("issued: {}", created.invoice_number);
 
     // Query by the external id: the newest document carrying it, in full.
     let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId("shop:ORD-1:invoice".to_owned()));
@@ -74,16 +79,16 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 Every failure is a `ClientError` variant, and each says something different about the document you asked for. Invoice creation has no idempotency key, so a failed create settles to one of three outcomes, and only one of them permits sending the same request again: `outcome_class()` says whether a document may already exist, and when it may, a query by the external id says whether one does.
 
 ```rust
-use szamlazz_agent::ops::invoice::CreateInvoice;
-use szamlazz_agent::ops::query_pdf::InvoiceSelector;
+use szamlazz_agent::ops::invoice::{CreateInvoice, CreationOutcome};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
-use szamlazz_agent::{Client, ClientError, InvoiceNumber, OutcomeClass};
+use szamlazz_agent::{Client, ClientError, InvoiceNumber, InvoiceSelector, OutcomeClass, Pdf};
 
 /// What one create settled to.
 enum Outcome {
     /// Issued, now, or by an earlier attempt whose reply was lost.
-    /// `None` only for a PDF preview, which issues nothing.
-    Issued(Option<InvoiceNumber>),
+    Issued(InvoiceNumber),
+    /// A preview was rendered (`header.preview_pdf`); no document exists.
+    Preview(Pdf),
     /// Nothing was issued: szamlazz.hu refused, or confirmed that nothing
     /// carries the external id. The one outcome after which the same
     /// request may be sent again, once its cause is fixed.
@@ -96,7 +101,12 @@ enum Outcome {
 
 async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
     let error = match client.send(request).await {
-        Ok(created) => return Outcome::Issued(created.invoice_number),
+        Ok(CreationOutcome::Issued(created)) => return Outcome::Issued(created.invoice_number),
+        Ok(CreationOutcome::Preview(preview)) => return Outcome::Preview(preview.pdf),
+        // An arm a later release adds is not an issued document either.
+        Ok(_) => return Outcome::NotIssued(ClientError::from(
+            szamlazz_agent::ParseError::Missing("szamlaszam"),
+        )),
         Err(error) => error,
     };
 
@@ -108,6 +118,7 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
         // No answer to conclude from: the request may have been acted on.
         ClientError::Transport(cause) => eprintln!("transport: {cause}"),
         ClientError::ServiceUnavailable(message) => eprintln!("szlahu_down: {message}"),
+        ClientError::HttpStatus { status, .. } => eprintln!("the endpoint answered {status}, not szamlazz.hu"),
         ClientError::Parse(cause) => eprintln!("unreadable response: {cause}"),
         _ => eprintln!("{error}"),
     }
@@ -126,7 +137,7 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
             let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId(external_id.clone()));
             match client.send(&query).await {
                 // An earlier attempt issued it; only the reply was lost.
-                Ok(document) => Outcome::Issued(Some(document.info.invoice_number)),
+                Ok(document) => Outcome::Issued(document.info.invoice_number),
                 // Code 7: szamlazz.hu confirms nothing carries the id, the create did not land.
                 Err(answer) if answer.outcome_class() == OutcomeClass::NotFound => {
                     Outcome::NotIssued(error)
@@ -172,7 +183,7 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
 
 To skip re-authentication on consecutive calls, replay `RawResponse::session_cookie()` as the `Cookie` header of the next request; the reqwest client does this through its cookie store.
 
-The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP 200 with `szlahu_*` headers and a `<hibakod>` body), so the parsers read those first, and the status only decides the case where neither carries an answer; a non-2xx there is `ParseError::HttpStatus`, a proxy or CDN speaking instead of szamlazz.hu, rather than a puzzling `UnexpectedBody`. Without the status that case is still an `UnexpectedBody` parse error; both are `OutcomeClass::Unknown`.
+The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP 200 with `szlahu_*` headers and a `<hibakod>` body), so the parsers read those first, and the status only decides the case where neither carries an answer; a non-2xx there is `ResponseError::HttpStatus` (`ClientError::HttpStatus` through the client), a proxy or CDN speaking instead of szamlazz.hu, rather than a puzzling `UnexpectedBody`. Without the status that case is still an `UnexpectedBody` parse error; both are `OutcomeClass::Unknown`.
 
 ## Feature Flags
 
@@ -184,33 +195,36 @@ No features are enabled by default. The [crate documentation](https://docs.rs/sz
 
 | Operation | Type |
 |---|---|
-| Invoice, proforma, prepayment invoice, final invoice, corrective invoice, or delivery note | `ops::invoice::CreateInvoice`, with the kind selected by `InvoiceKind` |
-| Storno an invoice | `ops::storno::StornoInvoice` |
-| Register credit entries | `ops::credit_entry::RegisterCreditEntry` |
-| Query invoice PDF or full XML | `ops::query_pdf::QueryInvoicePdf`, `ops::query_xml::QueryInvoiceXml` |
+| Invoice, proforma, prepayment invoice, final invoice, corrective invoice, or delivery note | `ops::invoice::CreateInvoice`, with the kind selected by `InvoiceKind`; answers a `CreationOutcome` (`Issued(CreatedInvoice)` or `Preview`) |
+| Storno an invoice | `ops::storno::StornoInvoice`; answers the storno `CreatedInvoice` (check `reverses`) |
+| Register credit entries | `ops::credit_entry::RegisterCreditEntry`; answers the `InvoiceBalance` |
+| Query invoice PDF or full XML | `ops::query_pdf::QueryInvoicePdf`, `ops::query_xml::QueryInvoiceXml`, both by an `InvoiceSelector` |
 | Delete a proforma | `ops::proforma::DeleteProforma` |
-| Create, storno, query, or send receipts | `ops::receipt::*` |
+| Create, storno, query, or send receipts | `ops::receipt::*`; the first three answer a `Receipt` |
 | Look up a taxpayer through NAV | `ops::taxpayer::QueryTaxpayer` |
+
+The shared request vocabulary (`ExchangeRate`, `InvoiceTemplate`, `SellerEmail`, `InvoiceSelector`) and the document codes (`DocumentType` for a queried invoice's `tipus`, `ReceiptType` for a receipt's) live in `types` and are re-exported at the crate root. Every code set is open: a token the crate does not know is kept in an `Other(String)` variant, a numeric code in an `Unknown(n)`.
 
 ## Line Items
 
-szamlazz.hu verifies every row's arithmetic server-side (net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT; error codes 259–264), and the crate does not duplicate that check. It offers three ways to fill the values:
+szamlazz.hu verifies every row's arithmetic server-side (net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT; error codes 259–264), and the crate does not duplicate that check. It offers two ways to fill the values:
 
-- **`LineItem::try_calculated(…, rounding)`** derives them and returns `ArithmeticError` instead of panicking when a value does not fit a `Decimal`. Use it on values you do not control. The rounding is an explicit choice:
+- **`LineItem::try_calculated(…, rounding)`** derives them and returns `ArithmeticError` instead of panicking when a value does not fit a `Decimal`. The rounding is an explicit choice:
   - `Rounding::minor_unit(&currency)`: the currency's minor unit, whole forints for HUF (`Currency::minor_unit_digits` returns 0 for HUF although ISO 4217 says 2: the fillér is out of circulation and szamlazz.hu works in whole forints), cents for EUR, thousandths for KWD, 2 for a code the table does not know. This is what the invoice can state and what NAV reporting takes, so it is the choice for a document that must reconcile to the caller's ledger.
   - `Rounding::Scale(n)`: a fixed number of decimal places.
   - `Rounding::Exact`: no rounding; a `100.005 EUR` net goes on the wire with a five-decimal VAT. szamlazz.hu then rounds each value to two decimals on its own and does not recompute the gross: `100.004 / 27.00108 / 127.00508` is stored as `100 / 27 / 127.01`, a document whose gross is not net + VAT (observed on the test account). Ask for this only when your business rule requires it and you accept that.
 
   Rounding is half away from zero and applied at each step (the net is rounded before the VAT is derived from it), so gross = net + VAT holds exactly on the wire, and what is sent is what szamlazz.hu stores. The rounded net can differ from unit price × quantity by up to half a minor unit (`2 × 1234.25 HUF = 2468.5 → 2469`); szamlazz.hu's `net = price × qty` check (259) tolerated discrepancies of 0.5, 1 and 2 HUF on the test account and rejected 5 and 10, so the half unit is safely inside: hand-computed values passed to `LineItem::new` are the ones that can hit it.
-- **`LineItem::calculated(…)`** and **`LineItem::calculated_for_currency(…, &currency)`** are the infallible forms: two decimals, and whole forints for HUF with **exact, unrounded** arithmetic for every other currency, respectively. Both panic on overflow; `calculated_for_currency` is kept for compatibility with the pre-0.4 non-HUF behaviour.
 - **`LineItem::new(…)`** takes net, VAT and gross as your system computed them and sends them as-is.
+
+`LineItem` is plain data like every request type: set the optional fields with functional update (`LineItem { comment: Some(..), ..item }`). A receipt row carries fewer fields than an invoice row; a `CreateReceipt` whose item sets `margin_vat_base` or the ledger's economic-event or settlement fields is refused before the wire (`RequestError::UnsupportedOnReceipt`) rather than sent without them.
 
 `VatRate::Percent` renders its wire token normalised: `27.00`, `27.0` and `27` all go out as `27`, `5.50` as `5.5`. szamlazz.hu accepts `27.00` and `27.0` as well (test account), so this is hygiene: the integer form is the one every fixture shows, and a queried rate comes back as a double (`27.0`) that round-trips to `27` this way.
 
 ## Protocol Notes
 
 - Identifiers are English; Rustdoc search also finds types by Hungarian names such as `díjbekérő` and `kintlévőség` through doc aliases.
-- Errors are typed as `ErrorCode` values while preserving the verbatim Hungarian message.
+- Errors are typed as `ErrorCode` values while preserving the verbatim Hungarian message. A failure szamlazz.hu reports without any code (`sikeres=false` and no `hibakod`) is `ErrorCode::Absent`, never an invented `0`.
 - Two different questions are answered per error. `ErrorCode::is_retryable()` says whether the same *query* can succeed later (codes 1 and 55). `outcome_class()` (on `ErrorCode`, `ResponseError` and `ClientError`) says whether a *document may exist* despite the error: `Rejected` (nothing was created), `Unknown` (1, 55, 56, `szlahu_down`, a transport or parse failure, any code the crate does not know; query by external id before re-sending), `DuplicateOrderNumber` (71/152) or `NotFound` (7). Re-sending a create because `is_retryable()` is true can issue a duplicate legal document; act on `outcome_class()` instead.
 - Agent code 56 means issuance succeeded but notification delivery failed. It sets `notification_delivery_failed = true`; do not retry that issued document.
 - An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused (it is silently ignored), so read the issued document's `hivdijbekszam` to see which link landed.
@@ -219,7 +233,8 @@ szamlazz.hu verifies every row's arithmetic server-side (net = unit price × qua
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client never retries automatically.
 - A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
 - Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length: a parse failure can be logged as is.
-- A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live". A reader that pins the account mode should treat `None` as a mismatch.
+- A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live".
+- The vocabulary follows the domain: a `kifizetes` registered against an invoice is a *credit entry* (`CreditEntry` out, `RecordedCreditEntry` back, `InvoiceDocument::credit_entries`; its `jogcim` is the `title`, a `PaymentMethod` on both sides), a `stornozott` receipt is *reversed*, and a queried document's `eszamla` is its `appearance` (a code), while the `e_invoice` of a create or storno request is a flag.
 
 ## License
 

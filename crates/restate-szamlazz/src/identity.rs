@@ -16,6 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use szamlazz_agent::DocumentType;
 use unicode_normalization::{UnicodeNormalization as _, is_nfc};
 
 /// The conversion set every bounded string newtype of the crate shares
@@ -353,6 +354,35 @@ impl IssuedKind {
             Self::Prepayment => "prepayment",
             Self::Final => "final",
             Self::Corrective => "corrective",
+        }
+    }
+
+    /// The `tipus` the documents of this kind carry on szamlazz.hu.
+    #[must_use]
+    pub const fn document_type(self) -> DocumentType {
+        match self {
+            Self::Proforma => DocumentType::Proforma,
+            Self::Invoice => DocumentType::Invoice,
+            Self::Prepayment => DocumentType::Prepayment,
+            Self::Final => DocumentType::Final,
+            Self::Corrective => DocumentType::Corrective,
+        }
+    }
+
+    /// The kind whose documents carry `document_type`, or `None` for a
+    /// storno, a delivery note and a code the agent crate does not know:
+    /// nothing the worker issues.
+    #[must_use]
+    pub fn for_document_type(document_type: &DocumentType) -> Option<Self> {
+        match document_type {
+            DocumentType::Proforma => Some(Self::Proforma),
+            DocumentType::Invoice => Some(Self::Invoice),
+            DocumentType::Prepayment => Some(Self::Prepayment),
+            DocumentType::Final => Some(Self::Final),
+            DocumentType::Corrective => Some(Self::Corrective),
+            // A storno, a delivery note, an unknown code, and a code the agent
+            // crate learns later: nothing the worker issues.
+            _ => None,
         }
     }
 
@@ -1317,5 +1347,43 @@ mod tests {
         assert_eq!(json["maxLength"], InvoiceNumber::MAX_LEN);
         assert_eq!(json["minLength"], 1);
         assert_eq!(json["pattern"], "^[^\\s\\x00-\\x1F\\x7F:]+$");
+    }
+
+    /// Every issued kind names the `tipus` its documents carry, and reads
+    /// back from it; a storno, a delivery note and an unknown code are no
+    /// kind the worker issues.
+    #[test]
+    fn issued_kinds_map_onto_document_types_and_back() {
+        use szamlazz_agent::DocumentType;
+
+        for kind in IssuedKind::ALL {
+            assert_eq!(
+                IssuedKind::for_document_type(&kind.document_type()),
+                Some(kind),
+                "{kind:?}"
+            );
+        }
+        assert_eq!(IssuedKind::Invoice.document_type(), DocumentType::Invoice);
+        assert_eq!(IssuedKind::Proforma.document_type(), DocumentType::Proforma);
+        assert_eq!(
+            IssuedKind::Prepayment.document_type(),
+            DocumentType::Prepayment
+        );
+        assert_eq!(IssuedKind::Final.document_type(), DocumentType::Final);
+        assert_eq!(
+            IssuedKind::Corrective.document_type(),
+            DocumentType::Corrective
+        );
+        for not_issued in [
+            DocumentType::Storno,
+            DocumentType::DeliveryNote,
+            DocumentType::Other("XX".to_owned()),
+        ] {
+            assert_eq!(
+                IssuedKind::for_document_type(&not_issued),
+                None,
+                "{not_issued}"
+            );
+        }
     }
 }

@@ -3,8 +3,8 @@
 //!
 //! A [`FoundDocument`] is what the services read off a queried `<szamla>`
 //! (the Számla Agent crate's [`InvoiceDocument`]) and an [`IssuedDocument`]
-//! what they read off a create or storno reply ([`InvoiceCreationResult`],
-//! [`CreatedInvoice`]). Both are crate-owned (the journal rule of the
+//! what they read off a create or storno reply (the [`CreatedInvoice`] of a
+//! `CreationOutcome::Issued` or of a storno). Both are crate-owned (the journal rule of the
 //! [`gateway`](crate::gateway) module docs), so neither carries what the
 //! worker never reads into an entry the Restate UI shows: the buyer block,
 //! the seller block, the line items, the PDF. What a document *is* to the
@@ -13,11 +13,10 @@
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use szamlazz_agent::Date;
-use szamlazz_agent::ops::invoice::{CreatedInvoice, InvoiceCreationResult};
-use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, RecordedPayment};
+use szamlazz_agent::ops::invoice::CreatedInvoice;
+use szamlazz_agent::ops::query_xml::{self, InvoiceAppearance, InvoiceDocument};
+use szamlazz_agent::{Date, DocumentType};
 
-use super::document_type_of;
 use crate::contract::IssuedKind;
 use crate::identity::OrderKey;
 
@@ -49,10 +48,12 @@ pub struct FoundDocument {
     pub document_id: u64,
     /// The document number (`szamlaszam`).
     pub number: String,
-    /// The document type code (`tipus`): `SZ` invoice, `D` proforma, `ES`
+    /// The document type (`tipus`): `SZ` invoice, `D` proforma, `ES`
     /// prepayment invoice, `VS` final invoice, `HS` corrective, `SS` storno,
-    /// `SL` delivery note, …; kept verbatim, the code set is open.
-    pub document_type: String,
+    /// `SL` delivery note, …; the agent crate's open [`DocumentType`], which
+    /// journals as the two-letter token, so a code the crate learns later is
+    /// read on replay.
+    pub document_type: DocumentType,
     /// The order number the document carries (`rendelesszam`), trimmed as
     /// szamlazz.hu matches it; `None` when the element is absent, empty or
     /// whitespace only: a document issued outside any order. The one reading
@@ -102,7 +103,8 @@ pub struct FoundDocument {
 }
 
 /// A credit entry as szamlazz.hu records it against a document (`kifizetes`):
-/// the projection of the agent crate's [`RecordedPayment`] with what
+/// the projection of the agent crate's
+/// [`RecordedCreditEntry`](query_xml::RecordedCreditEntry) with what
 /// `Szamlazz.Agent.query` shows of each entry. Crate-owned and journaled, like
 /// [`FoundDocument`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +112,8 @@ pub struct FoundDocument {
 pub struct RecordedCreditEntry {
     /// The payment date (`datum`).
     pub date: Date,
-    /// The title (`jogcim`): the payment method as text.
+    /// The title (`jogcim`): the payment method it was settled by, as its
+    /// wire token.
     pub title: String,
     /// The amount (`osszeg`), in the document's currency.
     pub amount: Decimal,
@@ -130,7 +133,35 @@ impl FoundDocument {
     /// Whether the document is the storno invoice (`SS`) reversing `number`.
     #[must_use]
     pub fn is_storno_of(&self, number: &str) -> bool {
-        self.document_type == "SS" && self.referenced_invoice_number.as_deref() == Some(number)
+        self.document_type == DocumentType::Storno
+            && self.referenced_invoice_number.as_deref() == Some(number)
+    }
+
+    /// Whether the document is a legal invoice of the kinds an order carries:
+    /// `SZ`, `ES` or `VS`. What the order-number hint treats as a *Foreign
+    /// document* when it is live and not ours; stornos, correctives,
+    /// proformas and delivery notes are not.
+    #[must_use]
+    pub fn is_invoice_family(&self) -> bool {
+        matches!(
+            self.document_type,
+            DocumentType::Invoice | DocumentType::Prepayment | DocumentType::Final
+        )
+    }
+
+    /// Whether szamlazz.hu can reverse the document: an `SZ`, `ES`, `VS` or
+    /// `HS`. A proforma or a delivery note is echoed unchanged by a storno, a
+    /// storno invoice is refused (14), and a code the agent crate does not
+    /// know is not sent for.
+    #[must_use]
+    pub fn is_stornoable(&self) -> bool {
+        matches!(
+            self.document_type,
+            DocumentType::Invoice
+                | DocumentType::Prepayment
+                | DocumentType::Final
+                | DocumentType::Corrective
+        )
     }
 
     /// Whether it is an e-invoice; `None` for non-invoices (proformas) and
@@ -175,7 +206,7 @@ impl FoundDocument {
     /// never compared).
     #[must_use]
     pub fn is_ours(&self, order: &OrderKey, kind: IssuedKind) -> bool {
-        self.carries_order(order) && self.document_type == document_type_of(kind)
+        self.carries_order(order) && self.document_type == kind.document_type()
     }
 }
 
@@ -202,17 +233,17 @@ impl From<InvoiceDocument> for FoundDocument {
             referenced_proforma_number: info
                 .referenced_proforma_number
                 .map(|number| number.as_str().to_owned()),
-            appearance: info.e_invoice.code(),
+            appearance: info.appearance.code(),
             issue_date: info.issue_date,
             fulfillment_date: info.fulfillment_date,
             due_date: info.due_date,
-            currency: info.currency,
+            currency: info.currency.map(|currency| currency.as_str().to_owned()),
             test: info.test,
             net_total: document.totals.total.net,
             vat_total: document.totals.total.vat,
             gross_total: document.totals.total.gross,
             payments: document
-                .payments
+                .credit_entries
                 .into_iter()
                 .map(RecordedCreditEntry::from)
                 .collect(),
@@ -220,29 +251,29 @@ impl From<InvoiceDocument> for FoundDocument {
     }
 }
 
-impl From<RecordedPayment> for RecordedCreditEntry {
-    fn from(payment: RecordedPayment) -> Self {
+impl From<query_xml::RecordedCreditEntry> for RecordedCreditEntry {
+    fn from(entry: query_xml::RecordedCreditEntry) -> Self {
         Self {
-            date: payment.date,
-            title: payment.title,
-            amount: payment.amount,
-            comment: payment.comment,
-            bank_account: payment.bank_account,
+            date: entry.date,
+            title: entry.title.as_wire().to_owned(),
+            amount: entry.amount,
+            comment: entry.comment,
+            bank_account: entry.bank_account,
         }
     }
 }
 
 /// A document szamlazz.hu issued in answer to a create or a storno, as the
 /// worker reads the reply: the projection of the Számla Agent crate's
-/// [`InvoiceCreationResult`] (a create) and [`CreatedInvoice`] (a storno)
-/// the write outcomes journal ([`CreateOutcome::Issued`](super::CreateOutcome::Issued),
+/// [`CreatedInvoice`] (the `Issued` arm of a create's `CreationOutcome`, and
+/// a storno's reply) the write outcomes journal
+/// ([`CreateOutcome::Issued`](super::CreateOutcome::Issued),
 /// [`StornoOutcome::Reversed`](super::StornoOutcome::Reversed)).
 ///
-/// Always numbered: a create reply without a number (a PDF preview, which
-/// the worker never asks for) is not an issued document
-/// ([`TryFrom<InvoiceCreationResult>`](Self::try_from) refuses it with
-/// [`Unnumbered`], and the create step re-queries instead). The PDF the
-/// reply may carry is not here. Crate-owned and journaled, like
+/// Always numbered, since a [`CreatedInvoice`] is: a create reply without a
+/// number (a PDF preview, which the worker never asks for) is the outcome's
+/// other arm, and the create step re-queries instead of reporting it. The PDF
+/// the reply may carry is not here. Crate-owned and journaled, like
 /// [`FoundDocument`] (ADR 0009: no compatibility rule).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -265,29 +296,6 @@ pub struct IssuedDocument {
     /// Whether szamlazz.hu issued the document but could not deliver its
     /// notification (code 56): issued all the same, with a warning.
     pub notification_delivery_failed: bool,
-}
-
-/// A create reply without a document number: nothing was issued that the
-/// worker can name, so the create step re-queries rather than reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("the create succeeded without a document number")]
-pub struct Unnumbered;
-
-impl TryFrom<InvoiceCreationResult> for IssuedDocument {
-    type Error = Unnumbered;
-
-    fn try_from(result: InvoiceCreationResult) -> Result<Self, Self::Error> {
-        let number = result.invoice_number.ok_or(Unnumbered)?;
-        Ok(Self {
-            number: number.as_str().to_owned(),
-            document_id: result.document_id,
-            net_total: result.net_total,
-            gross_total: result.gross_total,
-            outstanding: result.outstanding,
-            customer_account_url: result.customer_account_url,
-            notification_delivery_failed: result.notification_delivery_failed,
-        })
-    }
 }
 
 impl From<CreatedInvoice> for IssuedDocument {
@@ -345,7 +353,7 @@ mod tests {
 
         assert_eq!(found.document_id, 924_307_338);
         assert_eq!(found.number, "SZ-1");
-        assert_eq!(found.document_type, "SZ");
+        assert_eq!(found.document_type, DocumentType::Invoice);
         assert_eq!(found.order_number.as_deref(), Some("ORD-1"));
         assert_eq!(found.reversed, None, "a live document carries no marker");
         assert_eq!(found.referenced_invoice_number.as_deref(), Some("SZ-0"));
@@ -430,6 +438,7 @@ mod tests {
             ])
         );
         assert_eq!(json["appearance"], 2, "the code as an integer");
+        assert_eq!(json["document_type"], "SZ", "the tipus as its token");
         assert_eq!(json["net_total"], "1000", "decimals as strings");
         let back: FoundDocument = serde_json::from_value(json).expect("decodes");
         assert_eq!(back, Doc::default().parse());
@@ -500,6 +509,29 @@ mod tests {
             !corrective.is_storno_of("SZ-1"),
             "a corrective references its base and reverses nothing"
         );
+
+        // The two sets the services decide on, read off the type: the
+        // invoice family (what the hint treats as foreign when live and not
+        // ours) and what a storno can reverse.
+        for (tipus, family, stornoable) in [
+            ("SZ", true, true),
+            ("ES", true, true),
+            ("VS", true, true),
+            ("HS", false, true),
+            ("D", false, false),
+            ("SL", false, false),
+            ("SS", false, false),
+            ("XX", false, false),
+        ] {
+            let document = Doc::new("N-1", tipus).parse();
+            assert_eq!(document.is_invoice_family(), family, "{tipus}");
+            assert_eq!(document.is_stornoable(), stornoable, "{tipus}");
+        }
+        // An unknown code journals and reads back as itself.
+        let unknown = Doc::new("N-1", "XX").parse();
+        assert_eq!(unknown.document_type, DocumentType::Other("XX".to_owned()));
+        let json = serde_json::to_value(&unknown).expect("serialises");
+        assert_eq!(json["document_type"], "XX");
 
         for (code, e_invoice) in [(1, Some(false)), (2, Some(true)), (3, Some(true))] {
             let document = Doc {

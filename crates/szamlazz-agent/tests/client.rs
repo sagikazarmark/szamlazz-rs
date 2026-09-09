@@ -10,7 +10,7 @@ use szamlazz_agent::client::REQUEST_TIMEOUT;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::{
     Client, ClientError, Credentials, Currency, Language, LineItem, OutcomeClass, PaymentMethod,
-    VatRate, reqwest,
+    Rounding, VatRate, reqwest,
 };
 use wiremock::matchers::{header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -48,14 +48,17 @@ fn sample_invoice() -> CreateInvoice {
             Language::Hungarian,
         ),
         Buyer::new("Kovács Bt.", "2030", "Érd", "Tárnoki út 23."),
-        vec![LineItem::calculated_for_currency(
-            "Fejlesztés",
-            dec!(1),
-            "db",
-            dec!(10000),
-            VatRate::percent(27),
-            &Currency::HUF,
-        )],
+        vec![
+            LineItem::try_calculated(
+                "Fejlesztés",
+                dec!(1),
+                "db",
+                dec!(10000),
+                VatRate::percent(27),
+                Rounding::minor_unit(&Currency::HUF),
+            )
+            .expect("fits"),
+        ],
     )
 }
 
@@ -78,14 +81,13 @@ async fn sends_multipart_and_parses_success() {
 
     let client = client_for(server.uri());
 
-    let created = client.send(&sample_invoice()).await.expect("success");
-    assert_eq!(
-        created
-            .invoice_number
-            .as_ref()
-            .map(szamlazz_agent::InvoiceNumber::as_str),
-        Some("E-TST-2026-3")
-    );
+    let created = client
+        .send(&sample_invoice())
+        .await
+        .expect("success")
+        .into_issued()
+        .expect("an issued document");
+    assert_eq!(created.invoice_number.as_str(), "E-TST-2026-3");
     assert_eq!(created.gross_total, Some(dec!(38100)));
 
     // The multipart body must carry the operation-selecting field name.
@@ -135,12 +137,15 @@ async fn maps_system_unavailability() {
     ));
 }
 
+/// A URL nothing listens on is a transport error on send; a string that is
+/// not a URL never gets that far (`BuildError::InvalidEndpoint` at build).
 #[tokio::test]
 async fn maps_transport_errors() {
-    let client = client_for("not a valid URL");
+    let client = client_for("http://127.0.0.1:1/");
 
     let error = client.send(&sample_invoice()).await.expect_err("error");
-    assert!(matches!(error, ClientError::Transport(_)));
+    assert!(matches!(error, ClientError::Transport(_)), "{error:?}");
+    assert_eq!(error.outcome_class(), OutcomeClass::Unknown);
 }
 
 #[tokio::test]
@@ -183,7 +188,7 @@ async fn classifies_every_failure_by_outcome() {
             .expect_err("error")
     }
 
-    let transport = client_for("not a valid URL")
+    let transport = client_for("http://127.0.0.1:1/")
         .send(&sample_invoice())
         .await
         .expect_err("error");
@@ -207,10 +212,7 @@ async fn classifies_every_failure_by_outcome() {
     )
     .await;
     assert!(
-        matches!(
-            proxy,
-            ClientError::Parse(szamlazz_agent::ParseError::HttpStatus { status: 502, .. })
-        ),
+        matches!(proxy, ClientError::HttpStatus { status: 502, .. }),
         "{proxy:?}"
     );
     assert_eq!(proxy.outcome_class(), OutcomeClass::Unknown);

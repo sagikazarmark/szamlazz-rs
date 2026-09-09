@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use szamlazz_agent::ops::receipt::{
-    CreateReceipt, QueryReceipt, ReceiptEmail, ReceiptResult, ReceiptSelector, SendReceipt,
-    StornoReceipt,
+    CreateReceipt, QueryReceipt, Receipt, ReceiptEmail, ReceiptSelector, SendReceipt, StornoReceipt,
 };
 
 use crate::output;
@@ -76,30 +75,29 @@ pub struct SendArgs {
     body: Option<String>,
 }
 
-fn print_result(
+fn print_receipt(
     cli: &crate::Cli,
-    result: &ReceiptResult,
+    receipt: &Receipt,
     pdf_target: Option<&Path>,
 ) -> anyhow::Result<()> {
-    output::warn_missing_pdf(pdf_target.is_some(), result.pdf.is_some());
+    output::warn_missing_pdf(pdf_target.is_some(), receipt.pdf.is_some());
     let pdf_on_stdout = pdf_target.is_some_and(output::is_stdout);
 
-    if let (Some(target), Some(pdf)) = (pdf_target, &result.pdf) {
+    if let (Some(target), Some(pdf)) = (pdf_target, &receipt.pdf) {
         output::write_pdf(pdf.as_bytes(), target)?;
     }
     let out = output::report(pdf_on_stdout);
 
     if cli.json {
-        return out.json(result);
+        return out.json(receipt);
     }
-    let receipt = &result.receipt;
     out.field_required("Receipt number", &receipt.receipt_number);
-    out.field_required("Type", &receipt.kind);
+    out.field_required("Type", &receipt.document_type);
     out.field_required("Issued", &receipt.issue_date);
     out.field_required("Payment method", &receipt.payment_method);
     out.field_required("Currency", &receipt.currency);
-    out.field_required("Cancelled", &receipt.cancelled);
-    out.field("Cancels", receipt.cancelled_receipt_number.as_ref());
+    out.field_required("Reversed", &receipt.reversed);
+    out.field("Reverses", receipt.reversed_receipt_number.as_ref());
 
     Ok(())
 }
@@ -115,16 +113,16 @@ pub async fn run(cli: &crate::Cli, command: &ReceiptCommand) -> anyhow::Result<(
             if args.pdf.is_some() {
                 request.download_pdf = true;
             }
-            let result = client.send(&request).await?;
+            let receipt = client.send(&request).await?;
 
-            print_result(cli, &result, args.pdf.as_deref())
+            print_receipt(cli, &receipt, args.pdf.as_deref())
         }
         ReceiptCommand::Storno(args) => {
             let mut request = StornoReceipt::new(args.number.as_str());
             request.download_pdf = args.pdf.is_some();
-            let result = client.send(&request).await?;
+            let receipt = client.send(&request).await?;
 
-            print_result(cli, &result, args.pdf.as_deref())
+            print_receipt(cli, &receipt, args.pdf.as_deref())
         }
         ReceiptCommand::Get(args) => {
             let selector = match (&args.number, &args.order) {
@@ -134,9 +132,9 @@ pub async fn run(cli: &crate::Cli, command: &ReceiptCommand) -> anyhow::Result<(
             };
             let mut request = QueryReceipt::new(selector);
             request.download_pdf = args.pdf.is_some();
-            let result = client.send(&request).await?;
+            let receipt = client.send(&request).await?;
 
-            print_result(cli, &result, args.pdf.as_deref())
+            print_receipt(cli, &receipt, args.pdf.as_deref())
         }
         ReceiptCommand::Send(args) => {
             let email = (args.to.is_some()

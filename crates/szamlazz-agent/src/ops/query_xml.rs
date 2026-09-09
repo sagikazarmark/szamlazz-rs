@@ -10,13 +10,19 @@
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
-use super::query_pdf::InvoiceSelector;
+use super::envelope;
 use crate::credentials::Credentials;
 use crate::error::{ParseError, ResponseError};
-use crate::types::{InvoiceNumber, Pdf, VatRate};
+use crate::types::{
+    Currency, DocumentType, InvoiceNumber, InvoiceSelector, PaymentMethod, Pdf, Totals, VatRate,
+};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
-use crate::xml::totals::{AfakulcsosszXml, OsszegekXml, TotalosszXml};
+use crate::xml::totals::OsszegekXml;
+
+/// The `szamla` response document's root and namespace.
+const SZAMLA_ROOT: &str = "szamla";
+const SZAMLA_NAMESPACE: &str = "http://www.szamlazz.hu/szamla";
 
 /// The invoice XML query (`xmlszamlaxml`, `action-szamla_agent_xml`).
 ///
@@ -64,8 +70,8 @@ pub struct InvoiceDocument {
     pub labels: Vec<String>,
     /// Totals (`osszegek`).
     pub totals: Totals,
-    /// Payments recorded against the invoice (`kifizetesek`).
-    pub payments: Vec<RecordedPayment>,
+    /// The credit entries registered against the invoice (`kifizetesek`).
+    pub credit_entries: Vec<RecordedCreditEntry>,
     /// The invoice PDF, when requested via [`QueryInvoiceXml::include_pdf`].
     pub pdf: Option<Pdf>,
 }
@@ -152,14 +158,18 @@ impl InvoiceAppearance {
         }
     }
 
-    /// Whether this is one of the documented e-invoice values (`2` or `3`).
+    /// Whether this is an e-invoice: the [`Electronic`](Self::Electronic)
+    /// variant, whatever code it carries.
     #[must_use]
     pub fn is_e_invoice(self) -> bool {
-        matches!(self, Self::Electronic(2 | 3))
+        matches!(self, Self::Electronic(_))
     }
 }
 
-/// Creates the semantic value while retaining `code` exactly.
+/// Reads the code as szamlazz.hu documents it while retaining it exactly:
+/// the one way to an [`InvoiceAppearance`] a wire value maps to
+/// (`Electronic` carries `2` or `3` from here; a code built by hand carries
+/// whatever it was built with).
 impl From<i32> for InvoiceAppearance {
     fn from(code: i32) -> Self {
         match code {
@@ -204,12 +214,14 @@ pub struct InvoiceInfo {
     pub source: Option<u32>,
     /// Registration number (`iktatoszam`).
     pub registration_number: Option<String>,
-    /// Document type code (`tipus`), e.g. `SZ` for an invoice or `D` for a
-    /// proforma; kept verbatim as the code set is not documented exhaustively.
-    pub document_type: String,
+    /// Document type (`tipus`): an invoice, a proforma, a storno, …; a code
+    /// the crate does not know is [`DocumentType::Other`].
+    pub document_type: DocumentType,
     /// Document appearance (`eszamla`): not an invoice, paper, or electronic.
-    #[doc(alias = "e-számla")]
-    pub e_invoice: InvoiceAppearance,
+    /// A code, not a flag: the create and storno requests take the boolean
+    /// `e_invoice`; the queried document reports one of the integers.
+    #[doc(alias = "eszamla")]
+    pub appearance: InvoiceAppearance,
     /// Referenced invoice number (`hivszamlaszam`).
     pub referenced_invoice_number: Option<InvoiceNumber>,
     /// Referenced proforma number (`hivdijbekszam`).
@@ -222,8 +234,9 @@ pub struct InvoiceInfo {
     /// Payment due date (`fizh`).
     #[doc(alias = "fizetési határidő")]
     pub due_date: Option<Date>,
-    /// Payment method as recorded (`fizmod`), free text.
-    pub payment_method: Option<String>,
+    /// Payment method as recorded (`fizmod`); a token the crate does not know
+    /// is [`PaymentMethod::Other`].
+    pub payment_method: Option<PaymentMethod>,
     /// Payment method normalized to szamlazz.hu's unified set
     /// (`fizmodunified`).
     pub unified_payment_method: Option<String>,
@@ -235,7 +248,7 @@ pub struct InvoiceInfo {
     pub language: Option<String>,
     /// Currency (`devizanem`).
     #[doc(alias = "pénznem")]
-    pub currency: Option<String>,
+    pub currency: Option<Currency>,
     /// Foreign-currency quoting bank (`devizabank`).
     pub exchange_bank: Option<String>,
     /// Exchange rate (`devizaarf`).
@@ -258,13 +271,8 @@ pub struct InvoiceInfo {
     ///
     /// Mirrors the wire: the schema has the element mandatory
     /// (`minOccurs="1"`) and every observed document carries it, so `None`
-    /// (absent or empty) is a document that does not say which account mode
-    /// issued it, not a live one. A reader that pins the account mode (the
-    /// worker's `teszt == mode` check) treats `None` as a mismatch rather
-    /// than inventing `false`.
-    ///
-    /// Breaking change in 0.x: this was a `bool` defaulting to `false` when
-    /// the element was absent or empty.
+    /// (absent or empty) is a document that does not say which account
+    /// issued it, not a live one; nothing is invented in its place.
     pub test: Option<bool>,
     /// Whether the invoice has been reversed (`sztornozott`).
     ///
@@ -276,12 +284,11 @@ pub struct InvoiceInfo {
     ///   on the storno invoice; it references its original through
     ///   [`referenced_invoice_number`](Self::referenced_invoice_number)).
     /// - `Some(true)`: `<sztornozott>true</sztornozott>`: this invoice has
-    ///   been reversed by a storno invoice. Reversal also removes its recorded
-    ///   [`payments`](InvoiceDocument::payments) from the response.
+    ///   been reversed by a storno invoice. Reversal also removes its
+    ///   [`credit_entries`](InvoiceDocument::credit_entries) from the response.
     /// - `Some(false)`: accepted for schema completeness; not observed.
     ///
-    /// Breaking change in 0.x: this was a `bool` defaulting to `false` when the
-    /// element was absent. Treat `reversed != Some(true)` as "live".
+    /// Treat `reversed != Some(true)` as "live".
     #[doc(alias = "sztornózott")]
     pub reversed: Option<bool>,
 }
@@ -419,44 +426,6 @@ impl DocumentItem {
     }
 }
 
-/// Invoice totals (`osszegek`).
-#[doc(alias = "összegek")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct Totals {
-    /// Per-VAT-rate subtotals (`afakulcsossz`).
-    pub by_vat_rate: Vec<VatTotal>,
-    /// Grand total (`totalossz`).
-    pub total: GrandTotal,
-}
-
-/// Subtotal for one VAT rate (`afakulcsossz`).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct VatTotal {
-    /// VAT category (`afatipus`), when this subtotal uses a special VAT code.
-    #[doc(alias = "áfatípus")]
-    pub vat_type: Option<String>,
-    /// Numeric VAT rate wire token (`afakulcs`); see [`VatTotal::vat_rate`].
-    #[doc(alias = "áfakulcs")]
-    pub vat_rate_code: String,
-    /// Net subtotal (`netto`).
-    pub net: Decimal,
-    /// VAT subtotal (`afa`).
-    pub vat: Decimal,
-    /// Gross subtotal (`brutto`).
-    pub gross: Decimal,
-}
-
-impl VatTotal {
-    /// The VAT type (`afatipus`) when present, otherwise the numeric rate
-    /// (`afakulcs`), parsed into a [`VatRate`].
-    #[must_use]
-    pub fn vat_rate(&self) -> VatRate {
-        VatRate::from(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
-    }
-}
-
 /// A financial item (`qutet`) returned alongside invoice line items.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -491,37 +460,29 @@ impl FinancialItem {
     }
 }
 
-/// The invoice grand total (`totalossz`).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct GrandTotal {
-    /// Net total (`netto`).
-    pub net: Decimal,
-    /// VAT total (`afa`).
-    pub vat: Decimal,
-    /// Gross total (`brutto`).
-    pub gross: Decimal,
-}
-
-/// A payment recorded against the invoice (`kifizetes`).
+/// A credit entry as recorded against the invoice (`kifizetes`): what a
+/// [`CreditEntry`](crate::ops::credit_entry::CreditEntry) registered, as
+/// szamlazz.hu reports it back.
 #[doc(alias = "kifizetés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
-pub struct RecordedPayment {
-    /// Payment date (`datum`).
+pub struct RecordedCreditEntry {
+    /// The date of the credit entry (`datum`).
     pub date: Date,
-    /// Payment title (`jogcim`), e.g. `transfer`.
+    /// The title of the credit entry (`jogcim`): the payment method it was
+    /// settled by, as recorded; a token the crate does not know is
+    /// [`PaymentMethod::Other`].
     #[doc(alias = "jogcím")]
-    pub title: String,
+    pub title: PaymentMethod,
     /// Amount (`osszeg`).
     pub amount: Decimal,
     /// Comment (`megjegyzes`).
     pub comment: Option<String>,
-    /// Bank account the payment arrived on (`bankszamlaszam`).
+    /// Bank account the amount arrived on (`bankszamlaszam`).
     pub bank_account: Option<String>,
     /// Bank transaction identifier (`banktranzid`).
     pub bank_transaction_id: Option<u64>,
-    /// Exchange rate used for the payment (`devizaarf`).
+    /// Exchange rate used for the credit entry (`devizaarf`).
     pub exchange_rate: Option<Decimal>,
 }
 
@@ -550,22 +511,26 @@ impl AgentRequest for QueryInvoiceXml {
         )
     }
 
+    /// The body is the `szamla` document, or the `xmlszamlavalasz` envelope
+    /// szamlazz.hu answers an unknown selector with (code 7, in the body
+    /// only); a *successful* envelope is not an answer to an XML query.
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
         response.check()?;
-        match response_root(response.body())? {
-            ResponseRoot::AgentResponse => {
-                crate::ops::invoice::InvoiceResponse::from_body(response.body())?.into_success()?;
-                return Err(ParseError::UnexpectedBody(
-                    "successful xmlszamlavalasz for an XML query".to_owned(),
-                )
-                .into());
-            }
-            ResponseRoot::Invoice => {}
+        let (root, text) = xml::response_root(
+            response.body(),
+            &[
+                (SZAMLA_ROOT, SZAMLA_NAMESPACE),
+                (envelope::ROOT, envelope::NAMESPACE),
+            ],
+        )?;
+        if root == 1 {
+            let verdict: xml::Verdict = quick_xml::de::from_str(text).map_err(ParseError::from)?;
+            verdict.check()?;
+            return Err(ParseError::UnexpectedBody(
+                "successful xmlszamlavalasz for an XML query".to_owned(),
+            )
+            .into());
         }
-        let text = std::str::from_utf8(response.body()).map_err(|error| ParseError::Invalid {
-            field: "response body",
-            message: error.to_string(),
-        })?;
         let szamla: SzamlaXml = quick_xml::de::from_str(text).map_err(ParseError::from)?;
 
         Ok(InvoiceDocument {
@@ -576,7 +541,7 @@ impl AgentRequest for QueryInvoiceXml {
             financial_items: szamla.qutetek.qutet.into_iter().map(Into::into).collect(),
             labels: szamla.cimkek.cimke,
             totals: szamla.osszegek.into(),
-            payments: szamla
+            credit_entries: szamla
                 .kifizetesek
                 .kifizetes
                 .into_iter()
@@ -587,54 +552,6 @@ impl AgentRequest for QueryInvoiceXml {
                 None => None,
             },
         })
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ResponseRoot {
-    AgentResponse,
-    Invoice,
-}
-
-fn response_root(body: &[u8]) -> Result<ResponseRoot, ParseError> {
-    use quick_xml::name::{Namespace, ResolveResult};
-
-    let mut reader = quick_xml::reader::NsReader::from_reader(body);
-
-    loop {
-        let (namespace, event) = reader
-            .read_resolved_event()
-            .map_err(quick_xml::DeError::from)?;
-
-        match event {
-            quick_xml::events::Event::Start(start) | quick_xml::events::Event::Empty(start) => {
-                let local = start.local_name();
-                let local = local.as_ref();
-                let (root, expected_namespace) = match local {
-                    "xmlszamlavalasz" => (
-                        ResponseRoot::AgentResponse,
-                        "http://www.szamlazz.hu/xmlszamlavalasz",
-                    ),
-                    "szamla" => (ResponseRoot::Invoice, "http://www.szamlazz.hu/szamla"),
-                    other => {
-                        return Err(ParseError::UnexpectedBody(format!(
-                            "unexpected XML query response root {other}"
-                        )));
-                    }
-                };
-
-                if namespace != ResolveResult::Bound(Namespace(expected_namespace)) {
-                    return Err(ParseError::UnexpectedBody(format!(
-                        "wrong namespace for XML query response root {local}"
-                    )));
-                }
-                return Ok(root);
-            }
-            quick_xml::events::Event::Eof => {
-                return Err(ParseError::UnexpectedBody(crate::error::body_excerpt(body)));
-            }
-            _ => {}
-        }
     }
 }
 
@@ -747,7 +664,7 @@ struct AlapXml {
     forras: Option<u32>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     iktatoszam: Option<String>,
-    tipus: String,
+    tipus: DocumentType,
     eszamla: InvoiceAppearance,
     #[serde(default, deserialize_with = "empty_invoice_number")]
     hivszamlaszam: Option<InvoiceNumber>,
@@ -760,7 +677,7 @@ struct AlapXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     fizh: Option<Date>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    fizmod: Option<String>,
+    fizmod: Option<PaymentMethod>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     fizmodunified: Option<String>,
     #[serde(default, deserialize_with = "xml::de::flexible_bool")]
@@ -770,7 +687,7 @@ struct AlapXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     nyelv: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    devizanem: Option<String>,
+    devizanem: Option<Currency>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     devizabank: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
@@ -802,7 +719,7 @@ impl From<AlapXml> for InvoiceInfo {
             source: alap.forras,
             registration_number: alap.iktatoszam,
             document_type: alap.tipus,
-            e_invoice: alap.eszamla,
+            appearance: alap.eszamla,
             referenced_invoice_number: alap.hivszamlaszam,
             referenced_proforma_number: alap.hivdijbekszam,
             issue_date: alap.kelt,
@@ -1078,37 +995,6 @@ struct CimkekXml {
     cimke: Vec<String>,
 }
 
-impl From<OsszegekXml> for Totals {
-    fn from(osszegek: OsszegekXml) -> Self {
-        Self {
-            by_vat_rate: osszegek.afakulcsossz.into_iter().map(Into::into).collect(),
-            total: osszegek.totalossz.into(),
-        }
-    }
-}
-
-impl From<AfakulcsosszXml> for VatTotal {
-    fn from(ossz: AfakulcsosszXml) -> Self {
-        Self {
-            vat_type: ossz.afatipus,
-            vat_rate_code: ossz.afakulcs,
-            net: ossz.netto,
-            vat: ossz.afa,
-            gross: ossz.brutto,
-        }
-    }
-}
-
-impl From<TotalosszXml> for GrandTotal {
-    fn from(total: TotalosszXml) -> Self {
-        Self {
-            net: total.netto,
-            vat: total.afa,
-            gross: total.brutto,
-        }
-    }
-}
-
 #[derive(Debug, Default, serde::Deserialize)]
 struct KifizetesekXml {
     #[serde(default)]
@@ -1118,7 +1004,7 @@ struct KifizetesekXml {
 #[derive(Debug, serde::Deserialize)]
 struct KifizetesXml {
     datum: Date,
-    jogcim: String,
+    jogcim: PaymentMethod,
     #[serde(deserialize_with = "xml::de::from_text")]
     osszeg: Decimal,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
@@ -1131,7 +1017,7 @@ struct KifizetesXml {
     devizaarf: Option<Decimal>,
 }
 
-impl From<KifizetesXml> for RecordedPayment {
+impl From<KifizetesXml> for RecordedCreditEntry {
     fn from(kifizetes: KifizetesXml) -> Self {
         Self {
             date: kifizetes.datum,
@@ -1300,11 +1186,14 @@ mod tests {
         );
 
         assert_eq!(document.info.invoice_number.as_str(), "E-TST-2026-66");
-        assert_eq!(document.info.document_type, "D");
+        assert_eq!(document.info.document_type, DocumentType::Proforma);
         assert_eq!(document.info.economic_event_id, None);
-        assert_eq!(document.info.e_invoice, InvoiceAppearance::NotInvoice);
+        assert_eq!(document.info.appearance, InvoiceAppearance::NotInvoice);
         assert_eq!(document.info.issue_date, Some(date(2026, 1, 9)));
-        assert_eq!(document.info.payment_method.as_deref(), Some("credit_card"));
+        assert_eq!(
+            document.info.payment_method,
+            Some(PaymentMethod::Other("credit_card".into()))
+        );
         assert_eq!(document.info.exchange_rate, Some(dec!(0)));
         assert_eq!(document.info.comment, None);
         assert!(!document.info.cash_accounting);
@@ -1342,10 +1231,13 @@ mod tests {
         assert_eq!(document.totals.total.vat, dec!(93));
         assert_eq!(document.totals.total.gross, dec!(557));
 
-        assert_eq!(document.payments.len(), 1);
-        assert_eq!(document.payments[0].date, date(2026, 1, 22));
-        assert_eq!(document.payments[0].title, "transfer");
-        assert_eq!(document.payments[0].amount, dec!(15));
+        assert_eq!(document.credit_entries.len(), 1);
+        assert_eq!(document.credit_entries[0].date, date(2026, 1, 22));
+        assert_eq!(
+            document.credit_entries[0].title,
+            PaymentMethod::Other("transfer".into())
+        );
+        assert_eq!(document.credit_entries[0].amount, dec!(15));
 
         assert!(document.pdf.is_none());
     }
@@ -1455,8 +1347,14 @@ mod tests {
         assert_eq!(document.financial_items[0].vat_rate(), VatRate::Tam);
         assert_eq!(document.financial_items[0].labels, ["fee"]);
         assert_eq!(document.labels, ["invoice"]);
-        assert_eq!(document.payments[0].bank_transaction_id, Some(99));
-        assert_eq!(document.payments[0].exchange_rate, Some(dec!(401)));
+        assert_eq!(
+            document.info.payment_method,
+            Some(PaymentMethod::Other("transfer".into()))
+        );
+        assert_eq!(document.info.currency, Some(Currency::EUR));
+        assert_eq!(document.info.document_type, DocumentType::Other("E".into()));
+        assert_eq!(document.credit_entries[0].bank_transaction_id, Some(99));
+        assert_eq!(document.credit_entries[0].exchange_rate, Some(dec!(401)));
         let json = serde_json::to_value(&document).expect("serialize");
         assert_eq!(json["financial_items"][0]["labels"][0], "fee");
         assert_eq!(json["labels"][0], "invoice");
@@ -1472,7 +1370,10 @@ mod tests {
 
         let json = serde_json::to_value(&document).expect("serialize");
         assert_eq!(json["info"]["invoice_number"], "INV-1");
-        assert_eq!(json["info"]["e_invoice"], "3");
+        assert_eq!(json["info"]["appearance"], "3");
+        assert_eq!(json["info"]["document_type"], "E");
+        assert_eq!(json["info"]["currency"], "EUR");
+        assert_eq!(json["credit_entries"][0]["title"], "transfer");
         assert_eq!(json["supplier"]["address"]["city"], "B");
         assert_eq!(json["items"][0]["vat_rate_code"], "0");
         assert_eq!(json["totals"]["total"]["gross"], "110");
@@ -1535,14 +1436,14 @@ mod tests {
              </szamla>";
         let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
         let document = sample().parse(&response).expect("success");
-        assert_eq!(document.info.e_invoice, InvoiceAppearance::Electronic(3));
-        assert!(document.info.e_invoice.is_e_invoice());
+        assert_eq!(document.info.appearance, InvoiceAppearance::Electronic(3));
+        assert!(document.info.appearance.is_e_invoice());
 
         let paper = body.replace("<eszamla>3</eszamla>", "<eszamla>1</eszamla>");
         let response = RawResponse::new::<&str, &str>([], paper.into_bytes());
         let document = sample().parse(&response).expect("success");
-        assert_eq!(document.info.e_invoice, InvoiceAppearance::Paper);
-        assert!(!document.info.e_invoice.is_e_invoice());
+        assert_eq!(document.info.appearance, InvoiceAppearance::Paper);
+        assert!(!document.info.appearance.is_e_invoice());
     }
 
     #[test]
@@ -1553,6 +1454,31 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<InvoiceAppearance>(&json).expect("deserialize"),
             appearance
+        );
+    }
+
+    /// The reading of the code is `From<i32>`'s: `2` and `3` are e-invoices,
+    /// `1` paper, `0` not an invoice, anything else unknown; `is_e_invoice`
+    /// is the `Electronic` variant, whatever code it carries.
+    #[test]
+    fn invoice_appearance_reads_the_documented_codes() {
+        assert_eq!(InvoiceAppearance::from(0), InvoiceAppearance::NotInvoice);
+        assert_eq!(InvoiceAppearance::from(1), InvoiceAppearance::Paper);
+        assert_eq!(InvoiceAppearance::from(2), InvoiceAppearance::Electronic(2));
+        assert_eq!(InvoiceAppearance::from(3), InvoiceAppearance::Electronic(3));
+        assert_eq!(InvoiceAppearance::from(9), InvoiceAppearance::Unknown(9));
+        for code in [0, 1, 2, 3, 9, -1] {
+            let appearance = InvoiceAppearance::from(code);
+            assert_eq!(appearance.code(), code);
+            assert_eq!(
+                appearance.is_e_invoice(),
+                matches!(appearance, InvoiceAppearance::Electronic(_)),
+                "{code}"
+            );
+        }
+        assert!(
+            InvoiceAppearance::Electronic(4).is_e_invoice(),
+            "the variant decides"
         );
     }
 
@@ -1594,7 +1520,7 @@ mod tests {
             );
         let response = RawResponse::new::<&str, &str>([], storno.into_bytes());
         let document = sample().parse(&response).expect("success");
-        assert_eq!(document.info.document_type, "SS");
+        assert_eq!(document.info.document_type, DocumentType::Storno);
         assert_eq!(document.info.reversed, None);
         assert_eq!(
             document
@@ -1618,8 +1544,7 @@ mod tests {
 
     /// `<teszt>` mirrors the wire too: the schema has it mandatory, so a
     /// document without it (or with an empty one) reports `None` (unknown,
-    /// never `false` = live), and the reader decides what an unknown mode
-    /// means (the worker treats it as another account's).
+    /// never `false` = live), and the reader decides what that means.
     #[test]
     fn test_marker_mirrors_the_wire() {
         let live = "<szamla xmlns=\"http://www.szamlazz.hu/szamla\">\
@@ -1666,9 +1591,7 @@ mod tests {
 
     /// A body with no XML root at all (a proxy's text page, a stack trace)
     /// is quoted as a bounded excerpt with the length noted, never whole; a
-    /// blank body reads as `empty response`. (The XML query has its own root
-    /// dispatch, so the bound is checked on this path too, not only through
-    /// `xml::response_text`.)
+    /// blank body reads as `empty response`.
     #[test]
     fn unexpected_body_is_quoted_as_a_bounded_excerpt() {
         let page = format!("Bad Gateway {}", "z".repeat(4000));
@@ -1706,9 +1629,9 @@ mod tests {
              </szamla>";
         let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
         let document = sample().parse(&response).expect("success");
-        assert_eq!(document.info.e_invoice, InvoiceAppearance::Paper);
+        assert_eq!(document.info.appearance, InvoiceAppearance::Paper);
         assert!(document.items.is_empty());
-        assert!(document.payments.is_empty());
+        assert!(document.credit_entries.is_empty());
         assert_eq!(document.pdf.expect("pdf").as_bytes(), b"%PDF-");
     }
 }

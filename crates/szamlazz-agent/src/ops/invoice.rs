@@ -4,12 +4,19 @@
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
+use super::envelope::{self, Reply};
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ParseError, RequestError, ResponseError};
+use crate::error::{ParseError, RequestError, ResponseError};
 use crate::item::LineItem;
-use crate::types::{Currency, InvoiceNumber, Language, PaymentMethod, Pdf, TaxpayerStatus};
+use crate::types::{
+    Currency, ExchangeRate, InvoiceNumber, InvoiceTemplate, Language, PaymentMethod, Pdf,
+    SellerEmail, TaxpayerStatus,
+};
 use crate::wire::{AgentRequest, MultipartFile, RawResponse};
 use crate::xml;
+
+pub use super::envelope::CreatedInvoice;
+pub use super::waybill::{Mpl, PickPackPoint, Sprinter, TransOFlex, Waybill};
 
 /// What kind of document the invoice operation issues.
 ///
@@ -108,73 +115,6 @@ impl InvoiceKind {
     }
 }
 
-/// Exchange rate information, required on non-HUF documents.
-#[doc(alias = "árfolyam")]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ExchangeRate {
-    /// The quoting bank (`arfolyamBank`), e.g. `MNB`.
-    pub bank: String,
-    /// The rate (`arfolyam`). May be omitted only for automatic current-rate
-    /// MNB lookup.
-    pub rate: Option<Decimal>,
-}
-
-impl ExchangeRate {
-    /// An exchange rate quoted by `bank`.
-    pub fn new(bank: impl Into<String>, rate: Decimal) -> Self {
-        Self {
-            bank: bank.into(),
-            rate: Some(rate),
-        }
-    }
-
-    /// Uses Számlázz.hu's automatic current MNB exchange-rate lookup.
-    #[must_use]
-    pub fn automatic_mnb() -> Self {
-        Self {
-            bank: "MNB".to_owned(),
-            rate: None,
-        }
-    }
-}
-
-/// Invoice PDF template (`szamlaSablon`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum InvoiceTemplate {
-    /// `SzlaMost`.
-    Most,
-    /// `SzlaAlap`.
-    Default,
-    /// `SzlaNoEnv`.
-    NoEnvelope,
-    /// `Szla8cm`.
-    EightCentimeter,
-    /// `SzlaTomb`.
-    Continuous,
-    /// `SzlaFuvarlevelesAlap`, the delivery-note invoice layout.
-    DeliveryNote,
-    /// A future or account-specific template token.
-    Other(String),
-}
-
-impl InvoiceTemplate {
-    /// The exact `szamlaSablon` wire token.
-    #[must_use]
-    pub fn as_wire(&self) -> &str {
-        match self {
-            Self::Most => "SzlaMost",
-            Self::Default => "SzlaAlap",
-            Self::NoEnvelope => "SzlaNoEnv",
-            Self::EightCentimeter => "Szla8cm",
-            Self::Continuous => "SzlaTomb",
-            Self::DeliveryNote => "SzlaFuvarlevelesAlap",
-            Self::Other(value) => value,
-        }
-    }
-}
-
 /// Buyer general-ledger metadata (`vevoFokonyv`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct BuyerLedger {
@@ -190,102 +130,6 @@ pub struct BuyerLedger {
     pub settlement_from: Option<Date>,
     /// Settlement period end (`elszDatumIg`).
     pub settlement_to: Option<Date>,
-}
-
-/// Trans-O-Flex carrier data (`fuvarlevel` / `tof`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub struct TransOFlex {
-    /// Carrier-provided five-digit identifier (`azonosito`).
-    pub id: Option<String>,
-    /// Shipment identifier (`shipmentID`).
-    pub shipment_id: Option<String>,
-    /// Number of parcels (`csomagszam`).
-    pub parcel_count: Option<u32>,
-    /// Destination country code (`countryCode`).
-    pub country_code: Option<String>,
-    /// Destination ZIP code (`zip`).
-    pub zip: Option<String>,
-    /// Service code (`service`).
-    pub service: Option<String>,
-}
-
-/// Pick Pack Pont carrier data (`fuvarlevel` / `ppp`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub struct PickPackPoint {
-    /// Barcode prefix (`vonalkodPrefix`).
-    pub barcode_prefix: Option<String>,
-    /// Per-invoice barcode suffix (`vonalkodPostfix`).
-    pub barcode_suffix: Option<String>,
-}
-
-/// Sprinter carrier data (`fuvarlevel` / `sprinter`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub struct Sprinter {
-    /// Agreed carrier identifier (`azonosito`).
-    pub id: Option<String>,
-    /// Sender code (`feladokod`).
-    pub sender_code: Option<String>,
-    /// Routing code (`iranykod`).
-    pub routing_code: Option<String>,
-    /// Number of parcels (`csomagszam`).
-    pub parcel_count: Option<u32>,
-    /// Per-invoice barcode suffix (`vonalkodPostfix`).
-    pub barcode_suffix: Option<String>,
-    /// Delivery-time text (`szallitasiIdo`).
-    pub delivery_time: Option<String>,
-}
-
-/// MPL carrier data (`fuvarlevel` / `mpl`).
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub struct Mpl {
-    /// MPL customer code (`vevokod`).
-    pub customer_code: String,
-    /// Barcode source (`vonalkod`).
-    pub barcode: String,
-    /// Parcel weight (`tomeg`).
-    pub weight: String,
-    /// Extra-service icon configuration (`kulonszolgaltatasok`).
-    pub extra_services: Option<String>,
-    /// Declared value (`erteknyilvanitas`).
-    pub declared_value: Option<Decimal>,
-}
-
-impl Mpl {
-    /// Creates MPL data with the three XSD-required fields.
-    pub fn new(
-        customer_code: impl Into<String>,
-        barcode: impl Into<String>,
-        weight: impl Into<String>,
-    ) -> Self {
-        Self {
-            customer_code: customer_code.into(),
-            barcode: barcode.into(),
-            weight: weight.into(),
-            extra_services: None,
-            declared_value: None,
-        }
-    }
-}
-
-/// Optional carrier waybill block (`fuvarlevel`).
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub struct Waybill {
-    /// Legacy destination (`uticel`).
-    pub destination: Option<String>,
-    /// Carrier service token (`futarSzolgalat`).
-    pub carrier: Option<String>,
-    /// General barcode (`vonalkod`).
-    pub barcode: Option<String>,
-    /// Waybill comment (`megjegyzes`).
-    pub comment: Option<String>,
-    /// Trans-O-Flex details (`tof`).
-    pub trans_o_flex: Option<TransOFlex>,
-    /// Pick Pack Pont details (`ppp`).
-    pub pick_pack_point: Option<PickPackPoint>,
-    /// Sprinter details (`sprinter`).
-    pub sprinter: Option<Sprinter>,
-    /// MPL details (`mpl`).
-    pub mpl: Option<Mpl>,
 }
 
 /// Invoice header (`fejlec`): dates, payment terms, and identifiers.
@@ -387,17 +231,6 @@ pub struct Seller {
     pub email: Option<SellerEmail>,
     /// Name of the signer shown on the document (`alairoNeve`).
     pub signer_name: Option<String>,
-}
-
-/// Settings for the notification email szamlazz.hu sends to the buyer.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub struct SellerEmail {
-    /// Reply-to address (`emailReplyto`).
-    pub reply_to: Option<String>,
-    /// Subject (`emailTargy`).
-    pub subject: Option<String>,
-    /// Body (`emailSzoveg`); supports `BBCode` (`[b]`, `[i]`, `[h1]`…).
-    pub body: Option<String>,
 }
 
 /// Postal/delivery address of the buyer (`postazasi*` fields).
@@ -523,6 +356,10 @@ impl EmailAttachment {
 const MAX_ATTACHMENT_BYTES: usize = 2_000_000;
 
 /// A bounded collection of at most five invoice email attachments.
+///
+/// Dereferences to the slice of attachments and iterates over them, so the
+/// collection idioms (`len`, `is_empty`, `iter`, `for`) read as on a `Vec`;
+/// growth goes through [`InvoiceAttachments::push`], which keeps the bound.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(transparent)]
 pub struct InvoiceAttachments(Vec<EmailAttachment>);
@@ -555,11 +392,37 @@ impl InvoiceAttachments {
     pub fn as_slice(&self) -> &[EmailAttachment] {
         &self.0
     }
+}
 
-    /// Whether no files are attached.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+impl std::ops::Deref for InvoiceAttachments {
+    type Target = [EmailAttachment];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[EmailAttachment]> for InvoiceAttachments {
+    fn as_ref(&self) -> &[EmailAttachment] {
+        &self.0
+    }
+}
+
+impl IntoIterator for InvoiceAttachments {
+    type Item = EmailAttachment;
+    type IntoIter = std::vec::IntoIter<EmailAttachment>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a InvoiceAttachments {
+    type Item = &'a EmailAttachment;
+    type IntoIter = std::slice::Iter<'a, EmailAttachment>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -604,9 +467,11 @@ pub enum AttachmentError {
 /// The invoice-creation operation (`xmlszamla`, `action-xmlagentxmlfile`).
 ///
 /// Issues the document kind selected by [`CreateInvoice::kind`]. The response
-/// is always requested in structured form (response version 2); the PDF, when
-/// [`CreateInvoice::download_pdf`] is set, arrives decoded in
-/// [`InvoiceCreationResult::pdf`].
+/// is always requested in structured form (response version 2) and is a
+/// [`CreationOutcome`]: the issued document, or the preview PDF when
+/// [`InvoiceHeader::preview_pdf`] asked for one. The PDF of an issued
+/// document, when [`CreateInvoice::download_pdf`] is set, arrives decoded in
+/// [`CreatedInvoice::pdf`].
 #[doc(alias = "xmlszamla")]
 #[doc(alias = "számla készítés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -700,94 +565,66 @@ impl CreateInvoice {
     }
 }
 
-/// A successful invoice-creation result, including PDF previews that do not
-/// issue a numbered document.
+/// What a successful [`CreateInvoice`] answered: a numbered document, or the
+/// preview a request with [`InvoiceHeader::preview_pdf`] asked for, which
+/// issues nothing.
+///
+/// The two shapes share no field whose meaning depends on the other: an
+/// issued document always has its number (its totals and PDF are optional,
+/// as the reply reports them), a preview only its PDF.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
-pub struct InvoiceCreationResult {
-    /// The assigned invoice number (`szamlaszam`). Absent for PDF previews,
-    /// which do not issue a document.
-    pub invoice_number: Option<InvoiceNumber>,
-    /// szamlazz.hu's internal document identifier (`szlahu_id` header).
-    ///
-    /// The same value the XML query returns as
-    /// [`InvoiceInfo::id`](crate::ops::query_xml::InvoiceInfo::id); it is a
-    /// document identifier, not an account or supplier identifier, and is
-    /// distinct for every issued document. `None` when the header is absent
-    /// (as on PDF previews) or not a number.
-    pub document_id: Option<u64>,
-    /// Net total (`szamlanetto`).
-    pub net_total: Option<Decimal>,
-    /// Gross total (`szamlabrutto`).
-    pub gross_total: Option<Decimal>,
-    /// Outstanding amount (`kintlevoseg`).
-    #[doc(alias = "kintlévőség")]
-    pub outstanding: Option<Decimal>,
-    /// Buyer-facing account/payment URL (`vevoifiokurl`).
-    pub customer_account_url: Option<String>,
-    /// The document PDF, when requested.
-    pub pdf: Option<Pdf>,
-    /// Whether the invoice was issued but Számlázz.hu could not deliver its
-    /// notification (`56`). The issued invoice must not be retried.
-    pub notification_delivery_failed: bool,
+#[serde(rename_all = "snake_case")]
+pub enum CreationOutcome {
+    /// A document was issued.
+    Issued(CreatedInvoice),
+    /// A preview was rendered; no document exists.
+    Preview(InvoicePreview),
 }
 
-/// A successfully issued numbered invoice, such as a storno invoice.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct CreatedInvoice {
-    /// The assigned invoice number (`szamlaszam`).
-    pub invoice_number: InvoiceNumber,
-    /// szamlazz.hu's internal document identifier (`szlahu_id` header).
-    ///
-    /// The same value the XML query returns as
-    /// [`InvoiceInfo::id`](crate::ops::query_xml::InvoiceInfo::id); for a
-    /// storno invoice, the original's identifier reappears as the storno's
-    /// [`economic_event_id`](crate::ops::query_xml::InvoiceInfo::economic_event_id).
-    /// A document identifier, not an account or supplier identifier. `None`
-    /// when the header is absent or not a number.
-    pub document_id: Option<u64>,
-    /// Net total (`szamlanetto`).
-    pub net_total: Option<Decimal>,
-    /// Gross total (`szamlabrutto`).
-    pub gross_total: Option<Decimal>,
-    /// Outstanding amount (`kintlevoseg`).
-    #[doc(alias = "kintlévőség")]
-    pub outstanding: Option<Decimal>,
-    /// Buyer-facing account/payment URL (`vevoifiokurl`).
-    pub customer_account_url: Option<String>,
-    /// The document PDF, when requested.
-    pub pdf: Option<Pdf>,
-    /// Whether the invoice was issued but Számlázz.hu could not deliver its
-    /// notification (`56`). The issued invoice must not be retried.
-    pub notification_delivery_failed: bool,
-}
-
-impl CreatedInvoice {
-    /// Whether this document is a reversal of `original`: a *different*
-    /// invoice number with a gross total that is not positive.
-    ///
-    /// The check every caller must make after a
-    /// [`StornoInvoice`](crate::ops::storno::StornoInvoice): szamlazz.hu
-    /// answers a storno request for a proforma or a delivery note with a
-    /// success-shaped response that merely echoes the requested document
-    /// (same number, positive totals) and reverses nothing. A repeat storno of
-    /// an already reversed invoice also passes this check: it echoes the
-    /// existing storno invoice, which is a genuine reversal. So does the
-    /// storno of a zero-total invoice, whose storno document carries a gross
-    /// of `0`.
-    ///
-    /// Returns `false` when the gross total is unknown.
+impl CreationOutcome {
+    /// The issued document, or `None` for a preview.
     #[must_use]
-    pub fn reverses(&self, original: &InvoiceNumber) -> bool {
-        self.invoice_number != *original
-            && self.gross_total.is_some_and(|gross| gross <= Decimal::ZERO)
+    pub fn issued(&self) -> Option<&CreatedInvoice> {
+        match self {
+            Self::Issued(created) => Some(created),
+            Self::Preview(_) => None,
+        }
     }
+
+    /// The issued document by value, or `None` for a preview.
+    #[must_use]
+    pub fn into_issued(self) -> Option<CreatedInvoice> {
+        match self {
+            Self::Issued(created) => Some(created),
+            Self::Preview(_) => None,
+        }
+    }
+
+    /// The PDF the reply carried: the preview's, or the issued document's
+    /// when [`CreateInvoice::download_pdf`] asked for it.
+    #[must_use]
+    pub fn pdf(&self) -> Option<&Pdf> {
+        match self {
+            Self::Issued(created) => created.pdf.as_ref(),
+            Self::Preview(preview) => Some(&preview.pdf),
+        }
+    }
+}
+
+/// The preview a create with [`InvoiceHeader::preview_pdf`] renders: the PDF
+/// of the document as it would be issued, and nothing else, since nothing
+/// was.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct InvoicePreview {
+    /// The rendered PDF.
+    pub pdf: Pdf,
 }
 
 impl AgentRequest for CreateInvoice {
     const ACTION: &'static str = "action-xmlagentxmlfile";
-    type Response = InvoiceCreationResult;
+    type Response = CreationOutcome;
 
     fn validate(&self) -> Result<(), RequestError> {
         if self.items.is_empty() {
@@ -818,24 +655,13 @@ impl AgentRequest for CreateInvoice {
         {
             return Err(RequestError::ErasureCodeCountOutOfRange(count));
         }
-        if let Some(waybill) = &self.waybill {
-            for count in [
-                waybill
-                    .trans_o_flex
-                    .as_ref()
-                    .and_then(|carrier| carrier.parcel_count),
-                waybill
-                    .sprinter
-                    .as_ref()
-                    .and_then(|carrier| carrier.parcel_count),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if count > i32::MAX as u32 {
-                    return Err(RequestError::ParcelCountOutOfRange(count));
-                }
-            }
+        if let Some(count) = self
+            .waybill
+            .iter()
+            .flat_map(Waybill::parcel_counts)
+            .find(|&count| count > i32::MAX as u32)
+        {
+            return Err(RequestError::ParcelCountOutOfRange(count));
         }
         if !self.header.currency.is_huf() {
             let rate = self
@@ -993,53 +819,7 @@ impl AgentRequest for CreateInvoice {
                 v.text_opt("megjegyzes", b.comment.as_deref());
             });
             if let Some(waybill) = &self.waybill {
-                root.node("fuvarlevel", |w| {
-                    w.text_opt("uticel", waybill.destination.as_deref());
-                    w.text_opt("futarSzolgalat", waybill.carrier.as_deref());
-                    w.text_opt("vonalkod", waybill.barcode.as_deref());
-                    w.text_opt("megjegyzes", waybill.comment.as_deref());
-                    if let Some(tof) = &waybill.trans_o_flex {
-                        w.node("tof", |c| {
-                            c.text_opt("azonosito", tof.id.as_deref());
-                            c.text_opt("shipmentID", tof.shipment_id.as_deref());
-                            if let Some(count) = tof.parcel_count {
-                                c.text("csomagszam", &count.to_string());
-                            }
-                            c.text_opt("countryCode", tof.country_code.as_deref());
-                            c.text_opt("zip", tof.zip.as_deref());
-                            c.text_opt("service", tof.service.as_deref());
-                        });
-                    }
-                    if let Some(ppp) = &waybill.pick_pack_point {
-                        w.node("ppp", |c| {
-                            c.text_opt("vonalkodPrefix", ppp.barcode_prefix.as_deref());
-                            c.text_opt("vonalkodPostfix", ppp.barcode_suffix.as_deref());
-                        });
-                    }
-                    if let Some(sprinter) = &waybill.sprinter {
-                        w.node("sprinter", |c| {
-                            c.text_opt("azonosito", sprinter.id.as_deref());
-                            c.text_opt("feladokod", sprinter.sender_code.as_deref());
-                            c.text_opt("iranykod", sprinter.routing_code.as_deref());
-                            if let Some(count) = sprinter.parcel_count {
-                                c.text("csomagszam", &count.to_string());
-                            }
-                            c.text_opt("vonalkodPostfix", sprinter.barcode_suffix.as_deref());
-                            c.text_opt("szallitasiIdo", sprinter.delivery_time.as_deref());
-                        });
-                    }
-                    if let Some(mpl) = &waybill.mpl {
-                        w.node("mpl", |c| {
-                            c.text("vevokod", &mpl.customer_code);
-                            c.text("vonalkod", &mpl.barcode);
-                            c.text("tomeg", &mpl.weight);
-                            c.text_opt("kulonszolgaltatasok", mpl.extra_services.as_deref());
-                            if let Some(value) = mpl.declared_value {
-                                c.decimal("erteknyilvanitas", value);
-                            }
-                        });
-                    }
-                });
+                root.node("fuvarlevel", |w| waybill.write(w));
             }
             root.node("tetelek", |t| {
                 for item in &self.items {
@@ -1082,19 +862,23 @@ impl AgentRequest for CreateInvoice {
         })
     }
 
+    /// A numbered reply is the issued document. A success without a number is
+    /// the preview this request asked for (`preview_pdf`), which must carry
+    /// its PDF; without the request asking, it is a reply missing its
+    /// `szamlaszam`.
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        let result = parse_creation_result(response)?;
-
-        if self.header.preview_pdf != Some(true) && result.invoice_number.is_none() {
-            return Err(ParseError::Missing("szamlaszam").into());
+        match envelope::parse_reply(response)? {
+            Reply::Issued(created) => Ok(CreationOutcome::Issued(created)),
+            Reply::Unnumbered { pdf } if self.header.preview_pdf == Some(true) => {
+                let pdf = pdf.ok_or(ParseError::Missing("pdf"))?;
+                Ok(CreationOutcome::Preview(InvoicePreview { pdf }))
+            }
+            Reply::Unnumbered { .. } => Err(ParseError::Missing("szamlaszam").into()),
         }
-
-        Ok(result)
     }
 
     fn multipart_files(&self) -> Vec<MultipartFile<'_>> {
         self.attachments
-            .as_slice()
             .iter()
             .enumerate()
             .map(|(index, attachment)| MultipartFile {
@@ -1104,301 +888,6 @@ impl AgentRequest for CreateInvoice {
                 content: &attachment.content,
             })
             .collect()
-    }
-}
-
-/// Parses the common `xmlszamlavalasz` (response version 2) body, preserving
-/// the optional invoice number used by preview responses.
-pub(crate) fn parse_creation_result(
-    response: &RawResponse,
-) -> Result<InvoiceCreationResult, ResponseError> {
-    // The one header error a creation tolerates is 56: issued, notification
-    // not delivered. Everything else the headers or the status say is final.
-    let header_error = response.header_verdict()?;
-
-    if let Some(error) = &header_error
-        && error.code != crate::ErrorCode::InvoiceNotificationDeliveryFailed
-    {
-        return Err(error.clone().into());
-    }
-
-    let valasz = match InvoiceResponse::from_body(response.body()) {
-        Ok(valasz) => valasz,
-        Err(parse_error) => {
-            return parse_notification_fallback(response, header_error.as_ref(), parse_error);
-        }
-    };
-    let body_error = (!valasz.sikeres).then(|| valasz.api_error());
-
-    if let Some(error) = &body_error
-        && error.code != crate::ErrorCode::InvoiceNotificationDeliveryFailed
-    {
-        return Err(error.clone().into());
-    }
-
-    let notification_delivery_failed = header_error.is_some() || body_error.is_some();
-    let invoice_number = valasz
-        .szamlaszam
-        .as_deref()
-        .and_then(nonblank_invoice_number)
-        .or_else(|| {
-            response
-                .szlahu("szlahu_szamlaszam")
-                .as_deref()
-                .and_then(nonblank_invoice_number)
-        });
-
-    if notification_delivery_failed && invoice_number.is_none() {
-        if let Some(error) = header_error.or(body_error) {
-            return Err(error.into());
-        }
-        return Err(ParseError::Missing("notification error").into());
-    }
-
-    let net_total = decimal_body_or_header(valasz.szamlanetto, response, "szlahu_nettovegosszeg");
-    let gross_total =
-        decimal_body_or_header(valasz.szamlabrutto, response, "szlahu_bruttovegosszeg");
-    let outstanding = decimal_body_or_header(valasz.kintlevoseg, response, "szlahu_kintlevoseg");
-    let pdf = valasz
-        .pdf
-        .filter(|value| !value.is_empty())
-        .map(|encoded| Pdf::from_base64(&encoded))
-        .transpose();
-
-    Ok(InvoiceCreationResult {
-        invoice_number,
-        document_id: parse_document_id_header(response),
-        net_total: if notification_delivery_failed {
-            net_total.unwrap_or(None)
-        } else {
-            net_total?
-        },
-        gross_total: if notification_delivery_failed {
-            gross_total.unwrap_or(None)
-        } else {
-            gross_total?
-        },
-        outstanding: if notification_delivery_failed {
-            outstanding.unwrap_or(None)
-        } else {
-            outstanding?
-        },
-        customer_account_url: valasz.vevoifiokurl.filter(|s| !s.is_empty()).or_else(|| {
-            response
-                .szlahu("szlahu_vevoifiokurl")
-                .filter(|s| !s.is_empty())
-        }),
-        pdf: if notification_delivery_failed {
-            pdf.unwrap_or(None)
-        } else {
-            pdf?
-        },
-        notification_delivery_failed,
-    })
-}
-
-fn parse_notification_fallback(
-    response: &RawResponse,
-    header_error: Option<&ApiError>,
-    parse_error: ParseError,
-) -> Result<InvoiceCreationResult, ResponseError> {
-    let body_notification = MinimalInvoiceResponse::from_body(response.body()).ok();
-    let notification_error = header_error
-        .filter(|error| error.code == crate::ErrorCode::InvoiceNotificationDeliveryFailed)
-        .cloned()
-        .or_else(|| {
-            body_notification
-                .as_ref()
-                .filter(|body| {
-                    body.hibakod.as_deref().map(crate::ErrorCode::from)
-                        == Some(crate::ErrorCode::InvoiceNotificationDeliveryFailed)
-                })
-                .map(MinimalInvoiceResponse::api_error)
-        });
-    let Some(notification_error) = notification_error else {
-        return Err(parse_error.into());
-    };
-    let invoice_number = response
-        .szlahu("szlahu_szamlaszam")
-        .as_deref()
-        .and_then(nonblank_invoice_number)
-        .or_else(|| {
-            body_notification
-                .as_ref()
-                .and_then(|body| body.szamlaszam.as_deref())
-                .and_then(nonblank_invoice_number)
-        });
-    let Some(invoice_number) = invoice_number else {
-        return Err(notification_error.into());
-    };
-
-    Ok(InvoiceCreationResult {
-        invoice_number: Some(invoice_number),
-        document_id: parse_document_id_header(response),
-        net_total: parse_decimal_header(response, "szlahu_nettovegosszeg").unwrap_or(None),
-        gross_total: parse_decimal_header(response, "szlahu_bruttovegosszeg").unwrap_or(None),
-        outstanding: parse_decimal_header(response, "szlahu_kintlevoseg").unwrap_or(None),
-        customer_account_url: response
-            .szlahu("szlahu_vevoifiokurl")
-            .filter(|url| !url.is_empty()),
-        pdf: None,
-        notification_delivery_failed: true,
-    })
-}
-
-fn nonblank_invoice_number(value: &str) -> Option<InvoiceNumber> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| InvoiceNumber::new(value))
-}
-
-/// The document identifier from the `szlahu_id` header.
-///
-/// Lenient on purpose: the identifier is auxiliary, and a successful issuance
-/// must never be reported as a parse failure because of it. An absent, blank,
-/// or non-numeric header is `None`.
-fn parse_document_id_header(response: &RawResponse) -> Option<u64> {
-    response
-        .header("szlahu_id")
-        .and_then(|value| value.trim().parse().ok())
-}
-
-fn parse_decimal_header(
-    response: &RawResponse,
-    name: &'static str,
-) -> Result<Option<Decimal>, ParseError> {
-    response
-        .header(name)
-        .map(|value| {
-            value
-                .trim()
-                .parse()
-                .map_err(|error: rust_decimal::Error| ParseError::Invalid {
-                    field: name,
-                    message: error.to_string(),
-                })
-        })
-        .transpose()
-}
-
-pub(crate) fn decimal_body_or_header(
-    body_value: Option<Decimal>,
-    response: &RawResponse,
-    header: &'static str,
-) -> Result<Option<Decimal>, ParseError> {
-    match body_value {
-        Some(value) => Ok(Some(value)),
-        None => parse_decimal_header(response, header),
-    }
-}
-
-/// Parses an operation that must issue a numbered document, such as storno.
-pub(crate) fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, ResponseError> {
-    let result = parse_creation_result(response)?;
-
-    Ok(CreatedInvoice {
-        invoice_number: result
-            .invoice_number
-            .ok_or(ParseError::Missing("szamlaszam"))?,
-        document_id: result.document_id,
-        net_total: result.net_total,
-        gross_total: result.gross_total,
-        outstanding: result.outstanding,
-        customer_account_url: result.customer_account_url,
-        pdf: result.pdf,
-        notification_delivery_failed: result.notification_delivery_failed,
-    })
-}
-
-/// The `xmlszamlavalasz` response document (response version 2), shared with
-/// the PDF-query operation.
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct InvoiceResponse {
-    #[serde(deserialize_with = "xml::de::flexible_bool")]
-    pub(crate) sikeres: bool,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    pub hibakod: Option<String>,
-    #[serde(default)]
-    pub hibauzenet: Option<String>,
-    #[serde(default)]
-    pub szamlaszam: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    pub szamlanetto: Option<Decimal>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    pub szamlabrutto: Option<Decimal>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    pub kintlevoseg: Option<Decimal>,
-    #[serde(default)]
-    pub vevoifiokurl: Option<String>,
-    #[serde(default)]
-    pub pdf: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct MinimalInvoiceResponse {
-    #[serde(default)]
-    hibakod: Option<String>,
-    #[serde(default)]
-    hibauzenet: Option<String>,
-    #[serde(default)]
-    szamlaszam: Option<String>,
-}
-
-impl MinimalInvoiceResponse {
-    fn from_body(body: &[u8]) -> Result<Self, ParseError> {
-        let text = xml::response_text(
-            body,
-            "xmlszamlavalasz",
-            "http://www.szamlazz.hu/xmlszamlavalasz",
-        )?;
-
-        Ok(quick_xml::de::from_str(text)?)
-    }
-
-    fn api_error(&self) -> ApiError {
-        ApiError {
-            code: self
-                .hibakod
-                .as_deref()
-                .map_or_else(|| crate::ErrorCode::Unknown("0".to_owned()), Into::into),
-            message: self.hibauzenet.clone().unwrap_or_default(),
-        }
-    }
-}
-
-impl InvoiceResponse {
-    pub(crate) fn from_body(body: &[u8]) -> Result<Self, ParseError> {
-        let text = xml::response_text(
-            body,
-            "xmlszamlavalasz",
-            "http://www.szamlazz.hu/xmlszamlavalasz",
-        )?;
-
-        Ok(quick_xml::de::from_str(text)?)
-    }
-
-    /// Converts a `sikeres=false` response into the reported [`ApiError`].
-    pub(crate) fn into_success(self) -> Result<Self, ResponseError> {
-        if self.sikeres {
-            Ok(self)
-        } else {
-            Err(ApiError {
-                code: self
-                    .hibakod
-                    .map_or_else(|| crate::ErrorCode::Unknown("0".to_owned()), Into::into),
-                message: self.hibauzenet.unwrap_or_default(),
-            }
-            .into())
-        }
-    }
-
-    fn api_error(&self) -> ApiError {
-        ApiError {
-            code: self
-                .hibakod
-                .as_deref()
-                .map_or_else(|| crate::ErrorCode::Unknown("0".to_owned()), Into::into),
-            message: self.hibauzenet.clone().unwrap_or_default(),
-        }
     }
 }
 
@@ -1430,16 +919,24 @@ mod tests {
             seller: Seller::default(),
             buyer: Buyer::new("Kovács Bt.", "2030", "Érd", "Tárnoki út 23."),
             waybill: None,
-            items: vec![LineItem::calculated_for_currency(
-                "Eladó izé",
-                dec!(1),
-                "db",
-                dec!(10000),
-                VatRate::percent(27),
-                &Currency::HUF,
-            )],
+            items: vec![
+                LineItem::try_calculated(
+                    "Eladó izé",
+                    dec!(1),
+                    "db",
+                    dec!(10000),
+                    VatRate::percent(27),
+                    crate::Rounding::minor_unit(&Currency::HUF),
+                )
+                .expect("fits"),
+            ],
             attachments: InvoiceAttachments::new(),
         }
+    }
+
+    /// The issued document of a create's outcome; a preview is a test failure.
+    fn issued(outcome: CreationOutcome) -> CreatedInvoice {
+        outcome.into_issued().expect("an issued document")
     }
 
     #[test]
@@ -1725,6 +1222,29 @@ mod tests {
         assert_eq!(wire.body, expected);
     }
 
+    /// The bounded collection reads like a slice: length, emptiness,
+    /// iteration by reference and by value.
+    #[test]
+    fn invoice_attachments_have_the_collection_idioms() {
+        let attachments = InvoiceAttachments::try_from(vec![
+            EmailAttachment::new("a.txt", b"one".to_vec(), "text/plain"),
+            EmailAttachment::new("b.txt", b"two".to_vec(), "text/plain"),
+        ])
+        .expect("two attachments");
+        assert_eq!(attachments.len(), 2);
+        assert!(!attachments.is_empty());
+        assert_eq!(attachments.iter().count(), 2);
+        assert_eq!((&attachments).into_iter().count(), 2);
+        assert_eq!(attachments.as_ref().len(), 2);
+        assert_eq!(attachments.as_slice()[1].filename, "b.txt");
+        let names: Vec<String> = attachments
+            .into_iter()
+            .map(|attachment| attachment.filename)
+            .collect();
+        assert_eq!(names, ["a.txt", "b.txt"]);
+        assert!(InvoiceAttachments::new().is_empty());
+    }
+
     #[test]
     fn sixth_invoice_attachment_is_rejected() {
         let attachments = (0..6)
@@ -1753,11 +1273,8 @@ mod tests {
     fn parses_success_response() {
         let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
-        let created = sample().parse(&response).expect("success");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("E-TST-2026-3")
-        );
+        let created = issued(sample().parse(&response).expect("success"));
+        assert_eq!(created.invoice_number.as_str(), "E-TST-2026-3");
         assert_eq!(created.document_id, None);
         assert_eq!(created.net_total, Some(dec!(30000)));
         assert_eq!(created.gross_total, Some(dec!(38100)));
@@ -1765,23 +1282,24 @@ mod tests {
         assert!(!created.notification_delivery_failed);
     }
 
-    /// The creation result is journal-safe: it round-trips through JSON with
-    /// the PDF as base64.
+    /// The creation outcome is journal-safe: it round-trips through JSON as a
+    /// tagged enum with the PDF as base64.
     #[test]
-    fn creation_result_round_trips_through_json() {
+    fn creation_outcome_round_trips_through_json() {
         let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>E-TST-2026-3</szamlaszam><szamlanetto>30000</szamlanetto><szamlabrutto>38100</szamlabrutto><kintlevoseg>38100</kintlevoseg><vevoifiokurl>https://example.test/acct</vevoifiokurl><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
         let response = RawResponse::new([("szlahu_id", "924307402")], body.to_vec());
-        let created = sample().parse(&response).expect("success");
-        assert_eq!(created.pdf.as_ref().map(Pdf::as_bytes), Some(&b"%PDF-"[..]));
+        let outcome = sample().parse(&response).expect("success");
+        assert_eq!(outcome.pdf().map(Pdf::as_bytes), Some(&b"%PDF-"[..]));
+        let created = outcome.issued().expect("issued");
         assert_eq!(created.document_id, Some(924_307_402));
 
-        let json = serde_json::to_value(&created).expect("serialize");
-        assert_eq!(json["invoice_number"], "E-TST-2026-3");
-        assert_eq!(json["gross_total"], "38100");
-        assert_eq!(json["pdf"], "JVBERi0=");
+        let json = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(json["issued"]["invoice_number"], "E-TST-2026-3");
+        assert_eq!(json["issued"]["gross_total"], "38100");
+        assert_eq!(json["issued"]["pdf"], "JVBERi0=");
 
-        let restored: InvoiceCreationResult = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(restored, created);
+        let restored: CreationOutcome = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, outcome);
     }
 
     #[test]
@@ -1794,246 +1312,88 @@ mod tests {
             ],
             body.to_vec(),
         );
-        let created = sample().parse(&response).expect("success");
+        let created = issued(sample().parse(&response).expect("success"));
         assert_eq!(created.document_id, Some(924_307_402));
 
         // The identifier is auxiliary: a blank or malformed header never
         // turns a successful issuance into a parse failure.
         for value in ["", "not-a-number", "-1"] {
             let response = RawResponse::new([("szlahu_id", value)], body.to_vec());
-            let created = sample().parse(&response).expect("success");
+            let created = issued(sample().parse(&response).expect("success"));
             assert_eq!(created.document_id, None, "header {value:?}");
         }
     }
 
+    /// The one error a create tolerates is 56 (issued, notification not
+    /// delivered), which the envelope parser reads from either channel; the
+    /// create reports the issued document with the flag set. The full table
+    /// is the envelope's own (`ops::envelope`).
     #[test]
-    fn notification_failure_keeps_document_id() {
+    fn notification_failure_preserves_successful_issuance() {
         let response = RawResponse::new(
             [
                 ("szlahu_error_code", "56"),
-                ("szlahu_error", "notification failed"),
+                ("szlahu_error", "Az+%C3%A9rtes%C3%ADt%C3%A9s+sikertelen"),
                 ("szlahu_szamlaszam", "E-2026-123"),
+                ("szlahu_bruttovegosszeg", "38100"),
                 ("szlahu_id", "924307402"),
             ],
             b"notification failed".to_vec(),
         );
-        let created = sample().parse(&response).expect("invoice was issued");
+        let created = issued(sample().parse(&response).expect("invoice was issued"));
+        assert_eq!(created.invoice_number.as_str(), "E-2026-123");
+        assert_eq!(created.gross_total, Some(dec!(38100)));
         assert_eq!(created.document_id, Some(924_307_402));
         assert!(created.notification_delivery_failed);
 
-        let body = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>E-2026-123</szamlaszam></xmlszamlavalasz>"#;
-        let response = RawResponse::new([("szlahu_id", "924307402")], body.to_vec());
-        let created = sample().parse(&response).expect("invoice was issued");
-        assert_eq!(created.document_id, Some(924_307_402));
-        assert!(created.notification_delivery_failed);
-    }
-
-    fn created(number: &str, gross: Option<Decimal>) -> CreatedInvoice {
-        CreatedInvoice {
-            invoice_number: InvoiceNumber::new(number),
-            document_id: None,
-            net_total: None,
-            gross_total: gross,
-            outstanding: None,
-            customer_account_url: None,
-            pdf: None,
-            notification_delivery_failed: false,
-        }
-    }
-
-    #[test]
-    fn reverses_requires_a_new_number_with_a_non_positive_gross() {
-        let original = InvoiceNumber::new("CTEST-2026-40");
-
-        // A genuine storno invoice (also what a repeat storno echoes).
-        assert!(created("CTEST-2026-42", Some(dec!(-1270))).reverses(&original));
-        // The storno of a zero-total invoice: a new number, a gross of 0.
-        assert!(created("CTEST-2026-42", Some(dec!(0))).reverses(&original));
-
-        // Storno of a proforma or delivery note: the requested document is
-        // echoed unchanged.
-        assert!(!created("CTEST-2026-40", Some(dec!(1270))).reverses(&original));
-        // A different number with positive totals reversed nothing either.
-        assert!(!created("CTEST-2026-41", Some(dec!(1270))).reverses(&original));
-        // Same number, negative gross (not observed) is not a reversal.
-        assert!(!created("CTEST-2026-40", Some(dec!(-1270))).reverses(&original));
-        // Same number, zero gross: the echo of a zero-total proforma.
-        assert!(!created("CTEST-2026-40", Some(dec!(0))).reverses(&original));
-        // Unknown totals cannot prove a reversal.
-        assert!(!created("CTEST-2026-42", None).reverses(&original));
-    }
-
-    #[test]
-    fn notification_failure_preserves_successful_issuance() {
-        let body = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet></xmlszamlavalasz>"#;
-        let response = RawResponse::new(
-            [
-                ("szlahu_error_code", "56"),
-                ("szlahu_error", "Az+%C3%A9rtes%C3%ADt%C3%A9s+sikertelen"),
-                ("szlahu_szamlaszam", "E-2026-123"),
-                ("szlahu_nettovegosszeg", "30000"),
-                ("szlahu_bruttovegosszeg", "38100"),
-            ],
-            body.to_vec(),
-        );
-        let created = sample().parse(&response).expect("invoice was issued");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("E-2026-123")
-        );
-        assert_eq!(created.gross_total, Some(dec!(38100)));
-        assert!(created.notification_delivery_failed);
-    }
-
-    #[test]
-    fn notification_failure_with_non_xml_body_preserves_successful_issuance() {
-        let response = RawResponse::new(
-            [
-                ("szlahu_error_code", "56"),
-                ("szlahu_error", "Az+%C3%A9rtes%C3%ADt%C3%A9s+sikertelen"),
-                ("szlahu_szamlaszam", "E-2026-123"),
-                ("szlahu_nettovegosszeg", "30000"),
-                ("szlahu_bruttovegosszeg", "38100"),
-                ("szlahu_kintlevoseg", "38100"),
-                ("szlahu_vevoifiokurl", "https%3A%2F%2Fexample.com%2Finvoice"),
-            ],
-            b"notification failed".to_vec(),
-        );
-
-        let created = sample().parse(&response).expect("invoice was issued");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("E-2026-123")
-        );
-        assert_eq!(created.net_total, Some(dec!(30000)));
-        assert_eq!(created.gross_total, Some(dec!(38100)));
-        assert_eq!(created.outstanding, Some(dec!(38100)));
-        assert_eq!(
-            created.customer_account_url.as_deref(),
-            Some("https://example.com/invoice")
-        );
-        assert!(created.pdf.is_none());
-        assert!(created.notification_delivery_failed);
-    }
-
-    /// The create parser reads the headers on its own path (56 is an error
-    /// header on a success); a proxy's 502 with no `szlahu_*` header is
-    /// refused by status here too, while a 56 answered with a 500 is still
-    /// szamlazz.hu's answer.
-    #[test]
-    fn create_refuses_a_non_2xx_without_a_szamlazz_answer_by_status() {
+        // A proxy's 502 with no szamlazz.hu header is refused by status on
+        // this path too, while a 56 answered with a 500 is szamlazz.hu's.
         let proxy =
             RawResponse::new([("content-type", "text/html")], b"<html/>".to_vec()).with_status(502);
         assert!(matches!(
             sample().parse(&proxy),
-            Err(ResponseError::Parse(ParseError::HttpStatus {
-                status: 502,
-                ..
-            }))
+            Err(ResponseError::HttpStatus { status: 502, .. })
         ));
-
-        let answered = RawResponse::new(
-            [
-                ("szlahu_error_code", "56"),
-                ("szlahu_error", "notification failed"),
-                ("szlahu_szamlaszam", "E-2026-123"),
-            ],
-            b"notification failed".to_vec(),
-        )
-        .with_status(500);
-        let created = sample().parse(&answered).expect("szamlazz.hu answered");
-        assert!(created.notification_delivery_failed);
+        let answered = response.with_status(500);
+        assert!(
+            issued(sample().parse(&answered).expect("szamlazz.hu answered"))
+                .notification_delivery_failed
+        );
     }
 
+    /// A success without a number is the preview the request asked for, with
+    /// its PDF; a request that asked for none is missing its `szamlaszam`,
+    /// and a preview request answered without a PDF is missing that.
     #[test]
-    fn notification_failure_ignores_malformed_optional_headers_after_issuance() {
-        let response = RawResponse::new(
-            [
-                ("szlahu_error_code", "56"),
-                ("szlahu_error", "notification failed"),
-                ("szlahu_szamlaszam", "E-2026-123"),
-                ("szlahu_nettovegosszeg", "not-a-number"),
-                ("szlahu_bruttovegosszeg", ""),
-            ],
-            b"notification failed".to_vec(),
-        );
-
-        let created = sample().parse(&response).expect("invoice was issued");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("E-2026-123")
-        );
-        assert_eq!(created.net_total, None);
-        assert_eq!(created.gross_total, None);
-        assert!(created.notification_delivery_failed);
-    }
-
-    #[test]
-    fn notification_failure_with_xml_ignores_malformed_optional_metadata() {
-        let body = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><pdf>not-base64</pdf></xmlszamlavalasz>"#;
-        let response = RawResponse::new(
-            [
-                ("szlahu_error_code", "56"),
-                ("szlahu_error", "notification failed"),
-                ("szlahu_szamlaszam", "E-2026-123"),
-                ("szlahu_nettovegosszeg", "not-a-number"),
-            ],
-            body.to_vec(),
-        );
-
-        let created = sample().parse(&response).expect("invoice was issued");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("E-2026-123")
-        );
-        assert_eq!(created.net_total, None);
-        assert!(created.pdf.is_none());
-        assert!(created.notification_delivery_failed);
-    }
-
-    #[test]
-    fn notification_failure_recovers_issuance_from_body_only() {
-        let body = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod> 56 </hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>E-2026-123</szamlaszam><szamlanetto>not-a-number</szamlanetto></xmlszamlavalasz>"#;
-        let response = RawResponse::new::<&str, &str>([], body.to_vec());
-
-        let created = sample().parse(&response).expect("invoice was issued");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("E-2026-123")
-        );
-        assert_eq!(created.net_total, None);
-        assert!(created.notification_delivery_failed);
-    }
-
-    #[test]
-    fn notification_failure_without_invoice_number_is_an_error() {
-        let body = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet></xmlszamlavalasz>"#;
-        let response = RawResponse::new([("szlahu_szamlaszam", "%20")], body.to_vec());
-        assert!(matches!(
-            sample().parse(&response),
-            Err(ResponseError::Api(api))
-                if api.code == crate::ErrorCode::InvoiceNotificationDeliveryFailed
-        ));
-    }
-
-    #[test]
-    fn parses_preview_without_invoice_number() {
+    fn a_preview_is_the_pdf_and_no_document() {
         let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let mut request = sample();
         request.header.preview_pdf = Some(true);
-        let preview = request.parse(&response).expect("preview");
-        assert_eq!(preview.invoice_number, None);
-        assert_eq!(preview.pdf.expect("PDF").as_bytes(), b"%PDF-");
-    }
+        let outcome = request.parse(&response).expect("preview");
+        assert_eq!(outcome.issued(), None);
+        assert_eq!(outcome.pdf().map(Pdf::as_bytes), Some(&b"%PDF-"[..]));
+        match &outcome {
+            CreationOutcome::Preview(preview) => assert_eq!(preview.pdf.as_bytes(), b"%PDF-"),
+            other => panic!("expected a preview, got {other:?}"),
+        }
+        let json = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(json["preview"]["pdf"], "JVBERi0=");
+        assert_eq!(
+            serde_json::from_value::<CreationOutcome>(json).expect("deserialize"),
+            outcome
+        );
 
-    #[test]
-    fn non_preview_success_requires_invoice_number() {
-        let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#;
-        let response = RawResponse::new::<&str, &str>([], body.to_vec());
         assert!(matches!(
             sample().parse(&response),
             Err(ResponseError::Parse(ParseError::Missing("szamlaszam")))
+        ));
+
+        let no_pdf = br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#;
+        let response = RawResponse::new::<&str, &str>([], no_pdf.to_vec());
+        assert!(matches!(
+            request.parse(&response),
+            Err(ResponseError::Parse(ParseError::Missing("pdf")))
         ));
     }
 

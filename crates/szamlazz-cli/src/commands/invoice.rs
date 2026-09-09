@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, InvoiceCreationResult};
-use szamlazz_agent::ops::query_pdf::{InvoiceSelector, QueryInvoicePdf};
+use szamlazz_agent::InvoiceSelector;
+use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, CreationOutcome};
+use szamlazz_agent::ops::query_pdf::QueryInvoicePdf;
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::storno::StornoInvoice;
 
@@ -110,21 +111,27 @@ fn print_created(
     Ok(())
 }
 
-fn print_creation_result(
+/// The create's outcome: the issued document, or the preview that issued
+/// nothing (`header.preview_pdf` in the JSON description).
+fn print_creation_outcome(
     cli: &crate::Cli,
     out: &output::Report,
-    result: &InvoiceCreationResult,
+    outcome: &CreationOutcome,
 ) -> anyhow::Result<()> {
     if cli.json {
-        return out.json(result);
+        return out.json(outcome);
     }
-    out.field("Invoice number", result.invoice_number.as_ref());
-    out.field("Net total", result.net_total.as_ref());
-    out.field("Gross total", result.gross_total.as_ref());
-    out.field("Outstanding", result.outstanding.as_ref());
-    out.field("Customer account URL", result.customer_account_url.as_ref());
-
-    Ok(())
+    match outcome {
+        CreationOutcome::Issued(created) => print_created(cli, out, created),
+        CreationOutcome::Preview(_) => {
+            out.field_required("Preview", &"rendered; no document was issued");
+            Ok(())
+        }
+        _ => {
+            out.field_required("Outcome", &"no document number in the reply");
+            Ok(())
+        }
+    }
 }
 
 /// Runs an invoice subcommand.
@@ -138,14 +145,14 @@ pub async fn run(cli: &crate::Cli, command: &InvoiceCommand) -> anyhow::Result<(
             if args.pdf.is_some() {
                 request.download_pdf = true;
             }
-            let created = client.send(&request).await?;
-            output::warn_missing_pdf(args.pdf.is_some(), created.pdf.is_some());
+            let outcome = client.send(&request).await?;
+            output::warn_missing_pdf(args.pdf.is_some(), outcome.pdf().is_some());
             let pdf_on_stdout = args.pdf.as_deref().is_some_and(output::is_stdout);
 
-            if let (Some(target), Some(pdf)) = (&args.pdf, &created.pdf) {
+            if let (Some(target), Some(pdf)) = (&args.pdf, outcome.pdf()) {
                 output::write_pdf(pdf.as_bytes(), target)?;
             }
-            print_creation_result(cli, &output::report(pdf_on_stdout), &created)
+            print_creation_outcome(cli, &output::report(pdf_on_stdout), &outcome)
         }
         InvoiceCommand::Get(args) => {
             let request = QueryInvoiceXml::new(selector(

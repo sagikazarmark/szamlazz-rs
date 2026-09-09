@@ -22,9 +22,14 @@
 /// A documented Számla Agent error code.
 ///
 /// The set is open: codes not documented (or added later by szamlazz.hu) parse
-/// as [`ErrorCode::Unknown`]. Codes marked *observed* are undocumented but were
-/// reproduced against a szamlazz.hu test account; their Hungarian messages are
-/// quoted verbatim.
+/// as [`ErrorCode::Unknown`], and a failure reported without any code
+/// (`sikeres=false` with no `hibakod`) is [`ErrorCode::Absent`]. Codes marked
+/// *observed* are undocumented but were reproduced against a szamlazz.hu test
+/// account; their Hungarian messages are quoted verbatim.
+///
+/// Parsed from the wire with [`FromStr`](std::str::FromStr) (infallible) or
+/// `From<&str>` / `From<String>` / `From<u16>`; the text is trimmed, and a
+/// numeric token is matched as a number, so `007` is code 7.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -162,10 +167,16 @@ pub enum ErrorCode {
     ErasureCodesDisabled,
     /// Any code without documented meaning, preserved exactly from the wire.
     Unknown(String),
+    /// szamlazz.hu reported a failure (`sikeres=false`, or NAV's `funcCode`
+    /// other than `OK`) and sent no code with it: no `hibakod`, or an empty
+    /// one. Nothing is invented in its place; [`code`](Self::code) is the
+    /// empty string and the [`Display`](std::fmt::Display) reads `absent`.
+    Absent,
 }
 
 impl ErrorCode {
-    /// The wire code.
+    /// The wire code; the empty string for [`ErrorCode::Absent`], which has
+    /// none.
     #[must_use]
     pub fn code(&self) -> &str {
         match self {
@@ -200,7 +211,46 @@ impl ErrorCode {
             Self::ErasureCodesUnavailable => "538",
             Self::ErasureCodesDisabled => "539",
             Self::Unknown(code) => code,
+            Self::Absent => "",
         }
+    }
+
+    /// The named variant of a numeric wire code, or `None` when the crate
+    /// does not know it. The one table the string and numeric parsers share.
+    fn known(code: u16) -> Option<Self> {
+        Some(match code {
+            1 => Self::Maintenance,
+            3 => Self::InvalidCredentials,
+            7 => Self::MissingData,
+            14 => Self::StornoOfReversalInvoice,
+            53 => Self::XmlNotAFile,
+            54 => Self::EInvoiceNotEnabled,
+            55 => Self::EInvoiceSigningFailed,
+            56 => Self::InvoiceNotificationDeliveryFailed,
+            57 => Self::MalformedXml,
+            71 => Self::DuplicateOrderNumber,
+            73 => Self::PrepaymentInvoiceNotIdentifiable,
+            135 => Self::BrowserSessionActive,
+            136 => Self::LoginBlocked,
+            152 => Self::DuplicateOrderNumberNamed,
+            164 => Self::MultipleAccounts,
+            202 => Self::UnregisteredPrefix,
+            221 => Self::HasCorrectiveInvoice,
+            259 => Self::NetValueMismatch,
+            260 => Self::VatValueMismatch,
+            261 => Self::GrossValueMismatch,
+            262 => Self::NetValueInvalid,
+            263 => Self::VatValueInvalid,
+            264 => Self::GrossValueInvalid,
+            335 => Self::ProformaNotFound,
+            338 => Self::DuplicateReceiptCallId,
+            352 => Self::IssueDateMustBeToday,
+            463 => Self::PaymentOnReversedInvoice,
+            537 => Self::ErasureCodeLimit,
+            538 => Self::ErasureCodesUnavailable,
+            539 => Self::ErasureCodesDisabled,
+            _ => return None,
+        })
     }
 
     /// Whether the *same request* can succeed later, for a **query**: `true`
@@ -250,7 +300,7 @@ impl ErrorCode {
     ///
     /// | Class | Codes |
     /// |---|---|
-    /// | [`Unknown`](OutcomeClass::Unknown) | 1, 55, 56, and every code this crate does not know ([`ErrorCode::Unknown`]) |
+    /// | [`Unknown`](OutcomeClass::Unknown) | 1, 55, 56, every code this crate does not know ([`ErrorCode::Unknown`]) and a failure without a code ([`ErrorCode::Absent`]) |
     /// | [`DuplicateOrderNumber`](OutcomeClass::DuplicateOrderNumber) | 71, 152 |
     /// | [`NotFound`](OutcomeClass::NotFound) | 7 |
     /// | [`Rejected`](OutcomeClass::Rejected) | everything else, the credential codes 3, 135, 136 and 164 included |
@@ -266,7 +316,8 @@ impl ErrorCode {
             Self::Maintenance
             | Self::EInvoiceSigningFailed
             | Self::InvoiceNotificationDeliveryFailed
-            | Self::Unknown(_) => OutcomeClass::Unknown,
+            | Self::Unknown(_)
+            | Self::Absent => OutcomeClass::Unknown,
             Self::DuplicateOrderNumber | Self::DuplicateOrderNumberNamed => {
                 OutcomeClass::DuplicateOrderNumber
             }
@@ -328,43 +379,20 @@ pub enum OutcomeClass {
     NotFound,
 }
 
+/// Parses a wire code: the text is trimmed, a numeric token is matched as a
+/// number (`007` is code 7), an empty token is [`ErrorCode::Absent`] and
+/// anything else is [`ErrorCode::Unknown`] with the trimmed text.
 impl From<&str> for ErrorCode {
     fn from(code: &str) -> Self {
         let code = code.trim();
 
-        match code {
-            "1" => Self::Maintenance,
-            "3" => Self::InvalidCredentials,
-            "7" => Self::MissingData,
-            "14" => Self::StornoOfReversalInvoice,
-            "53" => Self::XmlNotAFile,
-            "54" => Self::EInvoiceNotEnabled,
-            "55" => Self::EInvoiceSigningFailed,
-            "56" => Self::InvoiceNotificationDeliveryFailed,
-            "57" => Self::MalformedXml,
-            "71" => Self::DuplicateOrderNumber,
-            "73" => Self::PrepaymentInvoiceNotIdentifiable,
-            "135" => Self::BrowserSessionActive,
-            "136" => Self::LoginBlocked,
-            "152" => Self::DuplicateOrderNumberNamed,
-            "164" => Self::MultipleAccounts,
-            "202" => Self::UnregisteredPrefix,
-            "221" => Self::HasCorrectiveInvoice,
-            "259" => Self::NetValueMismatch,
-            "260" => Self::VatValueMismatch,
-            "261" => Self::GrossValueMismatch,
-            "262" => Self::NetValueInvalid,
-            "263" => Self::VatValueInvalid,
-            "264" => Self::GrossValueInvalid,
-            "335" => Self::ProformaNotFound,
-            "338" => Self::DuplicateReceiptCallId,
-            "352" => Self::IssueDateMustBeToday,
-            "463" => Self::PaymentOnReversedInvoice,
-            "537" => Self::ErasureCodeLimit,
-            "538" => Self::ErasureCodesUnavailable,
-            "539" => Self::ErasureCodesDisabled,
-            other => Self::Unknown(other.to_owned()),
+        if code.is_empty() {
+            return Self::Absent;
         }
+        code.parse::<u16>()
+            .ok()
+            .and_then(Self::known)
+            .unwrap_or_else(|| Self::Unknown(code.to_owned()))
     }
 }
 
@@ -374,23 +402,38 @@ impl From<String> for ErrorCode {
     }
 }
 
+/// Matches the number against the known codes without formatting it; an
+/// unknown number is [`ErrorCode::Unknown`] with its decimal text.
 impl From<u16> for ErrorCode {
     fn from(code: u16) -> Self {
-        Self::from(code.to_string())
+        Self::known(code).unwrap_or_else(|| Self::Unknown(code.to_string()))
     }
 }
 
+/// Parses a wire code; never fails, since an unknown code is
+/// [`ErrorCode::Unknown`] and an empty one [`ErrorCode::Absent`].
+impl std::str::FromStr for ErrorCode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(code: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from(code))
+    }
+}
+
+/// The wire code, or `absent` for [`ErrorCode::Absent`].
 impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.code())
+        match self {
+            Self::Absent => f.write_str("absent"),
+            code => f.write_str(code.code()),
+        }
     }
 }
 
 /// A derived line-item value that does not fit a [`Decimal`](rust_decimal::Decimal).
 ///
-/// Returned by [`LineItem::try_calculated`](crate::LineItem::try_calculated);
-/// the infallible constructors panic with the same message instead. Each
-/// variant names the step of the arithmetic szamlazz.hu verifies server-side
+/// Returned by [`LineItem::try_calculated`](crate::LineItem::try_calculated).
+/// Each variant names the step of the arithmetic szamlazz.hu verifies server-side
 /// (net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -442,16 +485,36 @@ pub enum RequestError {
     #[error("invalid foreign-currency exchange-rate details")]
     InvalidExchangeRate,
     /// A line item requests more data erasure codes than szamlazz.hu's
-    /// documented per-item maximum of 400 (rejected server-side as error 537).
-    #[error("line item requests {0} data erasure codes; the maximum is 400")]
+    /// documented per-item maximum
+    /// ([`MAX_ERASURE_CODE_COUNT`](crate::MAX_ERASURE_CODE_COUNT); rejected
+    /// server-side as error 537).
+    #[error(
+        "line item requests {0} data erasure codes; the maximum is {max}",
+        max = crate::item::MAX_ERASURE_CODE_COUNT
+    )]
     ErasureCodeCountOutOfRange(u32),
     /// A waybill parcel count exceeds the nonnegative XML Schema `int` range.
-    #[error("waybill parcel count {0} exceeds 2147483647")]
+    #[error("waybill parcel count {0} exceeds {max}", max = i32::MAX)]
     ParcelCountOutOfRange(u32),
+    /// A receipt line item carries a field the receipt row has no element
+    /// for: `margin_vat_base`, or the ledger's `economic_event`,
+    /// `vat_economic_event`, `settlement_from` or `settlement_to`, which are
+    /// invoice-only. Named as the `LineItem` field path. Refused rather than
+    /// silently dropped, so a value the caller set never vanishes on the
+    /// wire.
+    #[error("receipt line items cannot carry `{0}`: the field is invoice-only")]
+    UnsupportedOnReceipt(&'static str),
     /// An operation produced bytes that are not UTF-8 XML.
     #[error("request XML is not valid UTF-8")]
     InvalidXmlEncoding,
-    /// An operation contains a character forbidden by XML 1.0.
+    /// An operation contains a character forbidden by XML 1.0, given as its
+    /// code point.
+    ///
+    /// The document is scanned once, after it is written, so the offending
+    /// field is not known here: a text field of the request carries the
+    /// character (a `NUL` from a truncated database column is the usual
+    /// case), and the caller finds it by searching its own values for the
+    /// code point.
     #[error("request XML contains character U+{0:04X}, which XML 1.0 forbids")]
     InvalidXmlCharacter(u32),
 }
@@ -515,22 +578,6 @@ pub enum ParseError {
     /// The body is quoted as a [bounded excerpt](body_excerpt), never whole.
     #[error("unexpected response body: {0}")]
     UnexpectedBody(String),
-    /// The endpoint answered with a non-2xx status and no `szlahu_*` header:
-    /// a proxy, a CDN or a misconfigured URL spoke, not szamlazz.hu.
-    ///
-    /// Raised only when the client supplied the status
-    /// ([`RawResponse::with_status`](crate::wire::RawResponse::with_status));
-    /// szamlazz.hu's own in-band answer (`szlahu_error_code`, `szlahu_down`)
-    /// is read first whatever the status. Like every parse failure its
-    /// [outcome class](ResponseError::outcome_class) is `Unknown`: a gateway
-    /// timeout may have cut a request the server went on to act on.
-    #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
-    HttpStatus {
-        /// The HTTP status.
-        status: u16,
-        /// A [bounded excerpt](body_excerpt) of the body.
-        body: String,
-    },
 }
 
 /// The most of a response body an error message quotes.
@@ -547,7 +594,7 @@ pub const BODY_EXCERPT_LEN: usize = 256;
 /// reads as `empty response`.
 ///
 /// Every excerpt this crate's errors quote ([`ParseError::UnexpectedBody`],
-/// [`ParseError::HttpStatus`]) goes through here. Public so that an
+/// [`ResponseError::HttpStatus`]) goes through here. Public so that an
 /// integration with its own HTTP client, logging a
 /// [`RawResponse`](crate::wire::RawResponse) body of its own (a status its
 /// parsers never saw, a body it rejected before parsing), quotes it under the
@@ -595,6 +642,22 @@ pub enum ResponseError {
     /// `szlahu_down` response header.
     #[error("szamlazz.hu is temporarily unavailable: {0}")]
     ServiceUnavailable(String),
+    /// The endpoint answered with a non-2xx status and no `szlahu_*` header:
+    /// a proxy, a CDN or a misconfigured URL spoke, not szamlazz.hu.
+    ///
+    /// Raised only when the client supplied the status
+    /// ([`RawResponse::with_status`](crate::wire::RawResponse::with_status));
+    /// szamlazz.hu's own in-band answer (`szlahu_error_code`, `szlahu_down`)
+    /// is read first whatever the status. Its [outcome
+    /// class](Self::outcome_class) is `Unknown`: a gateway timeout may have
+    /// cut a request the server went on to act on.
+    #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
+    HttpStatus {
+        /// The HTTP status.
+        status: u16,
+        /// A [bounded excerpt](body_excerpt) of the body.
+        body: String,
+    },
     /// The response could not be parsed.
     #[error(transparent)]
     Parse(#[from] ParseError),
@@ -605,14 +668,17 @@ impl ResponseError {
     /// one exist despite the error? See [`OutcomeClass`].
     ///
     /// An API error's class is its [`ErrorCode::outcome_class`]. Unavailability
-    /// (`szlahu_down`) and an unparseable response are
-    /// [`OutcomeClass::Unknown`]: szamlazz.hu produced no answer the caller
-    /// can conclude from, so a document may have been issued.
+    /// (`szlahu_down`), an answer from the endpoint rather than szamlazz.hu
+    /// and an unparseable response are [`OutcomeClass::Unknown`]: szamlazz.hu
+    /// produced no answer the caller can conclude from, so a document may
+    /// have been issued.
     #[must_use]
     pub fn outcome_class(&self) -> OutcomeClass {
         match self {
             Self::Api(api) => api.code.outcome_class(),
-            Self::ServiceUnavailable(_) | Self::Parse(_) => OutcomeClass::Unknown,
+            Self::ServiceUnavailable(_) | Self::HttpStatus { .. } | Self::Parse(_) => {
+                OutcomeClass::Unknown
+            }
         }
     }
 }
@@ -673,7 +739,46 @@ mod tests {
         for code in NAMED {
             let numeric: u16 = code.code().parse().expect("named codes are numeric");
             assert_eq!(ErrorCode::from(numeric), code, "{code:?}");
+            assert_eq!(
+                code.code().parse::<ErrorCode>(),
+                Ok(code.clone()),
+                "{code:?}"
+            );
         }
+        assert_eq!(
+            ErrorCode::from(999_u16),
+            ErrorCode::Unknown("999".to_owned())
+        );
+        assert_eq!(
+            ErrorCode::from("007"),
+            ErrorCode::MissingData,
+            "a number is a number"
+        );
+        assert_eq!(
+            ErrorCode::from("70000"),
+            ErrorCode::Unknown("70000".to_owned())
+        );
+    }
+
+    /// A failure without a code is `Absent`: parsed from an empty token, the
+    /// empty string as its wire code, `absent` in a display, and the outcome
+    /// left open like any code the crate cannot read.
+    #[test]
+    fn an_absent_code_is_honest_about_itself() {
+        assert_eq!(ErrorCode::from(""), ErrorCode::Absent);
+        assert_eq!(ErrorCode::from("  "), ErrorCode::Absent);
+        assert_eq!("".parse::<ErrorCode>(), Ok(ErrorCode::Absent));
+        assert_eq!(ErrorCode::Absent.code(), "");
+        assert_eq!(ErrorCode::Absent.to_string(), "absent");
+        assert_eq!(ErrorCode::Absent.outcome_class(), OutcomeClass::Unknown);
+        assert!(!ErrorCode::Absent.is_retryable());
+        assert!(!ErrorCode::Absent.is_credential_error());
+        assert!(!NAMED.contains(&ErrorCode::Absent));
+        let error = ApiError {
+            code: ErrorCode::Absent,
+            message: "Hiba".to_owned(),
+        };
+        assert_eq!(error.to_string(), "szamlazz.hu error absent: Hiba");
     }
 
     /// The excerpt keeps a short body whole, cuts a long one on a character
@@ -874,5 +979,12 @@ mod tests {
 
         let parse = ResponseError::Parse(ParseError::Missing("szamlaszam"));
         assert_eq!(parse.outcome_class(), OutcomeClass::Unknown);
+
+        let proxy = ResponseError::HttpStatus {
+            status: 502,
+            body: "<html/>".to_owned(),
+        };
+        assert_eq!(proxy.outcome_class(), OutcomeClass::Unknown);
+        assert!(proxy.to_string().starts_with("HTTP 502"));
     }
 }

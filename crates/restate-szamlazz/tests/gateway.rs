@@ -223,7 +223,7 @@ async fn lookup_finds_our_live_document_and_takes_no_hint() {
     match h.lookup(&[]).await {
         LookupOutcome::Live(found) => {
             assert_eq!(found.number, "SZ-1");
-            assert_eq!(found.document_type, "SZ");
+            assert_eq!(found.document_type, szamlazz_agent::DocumentType::Invoice);
             assert!(found.is_live());
             assert_eq!(found.order_number.as_deref(), Some("ORD-1"));
             assert_eq!(found.gross_total, dec!(1270));
@@ -468,9 +468,9 @@ async fn lookup_hint_ignores_our_documents_non_invoices_and_its_own_failure() {
 #[tokio::test]
 async fn lookup_without_an_answer_is_unanswered_not_data() {
     // A bare 500 with no `szlahu_*` header is refused by its status in the
-    // agent crate (`ParseError::HttpStatus`, a `Parse` error): szamlazz.hu did
-    // not answer, so the step's result is its retryable error, never a
-    // journaled outcome. The external id first; then the hint, whose own
+    // agent crate (`ResponseError::HttpStatus`, the endpoint's answer, not
+    // szamlazz.hu's): szamlazz.hu did not answer, so the step's result is its
+    // retryable error, never a journaled outcome. The external id first; then the hint, whose own
     // failure is not conclusive either.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
@@ -1817,7 +1817,7 @@ async fn verify_query_and_hint() {
     );
     match h.gateway.hint(&order()).await {
         Ok(QueryOutcome::Found(found)) => {
-            assert_eq!(found.document_type, "SS");
+            assert_eq!(found.document_type, szamlazz_agent::DocumentType::Storno);
             assert!(found.is_storno_of("SZ-1"));
         }
         other => panic!("expected Found, got {other:?}"),

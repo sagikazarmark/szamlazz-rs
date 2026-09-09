@@ -29,10 +29,10 @@ use super::support::{
     verify,
 };
 use crate::account::Account;
-use crate::contract::{ConflictReason, StornoOutcome, StornoRequest, StornoResponse};
+use crate::contract::{ConflictReason, IssuedKind, StornoOutcome, StornoRequest, StornoResponse};
 use crate::gateway::{
     FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-    StornoStepRequest, issued_kind_of,
+    StornoStepRequest,
 };
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
@@ -127,7 +127,7 @@ fn storno_verdict(found: &FoundDocument, order: &OrderKey, number: &str) -> Stor
     if !found.is_live() {
         return StornoVerdict::AlreadyReversed;
     }
-    if !matches!(found.document_type.as_str(), "SZ" | "ES" | "VS" | "HS") {
+    if !found.is_stornoable() {
         return StornoVerdict::Answered(StornoResponse::not_stornoable(
             number,
             "the document cannot be reversed: only invoices can be stornoed",
@@ -447,7 +447,7 @@ impl Execution {
             ControlFlow::Continue(found) => found,
             ControlFlow::Break(response) => return Ok(response),
         };
-        let kind = issued_kind_of(&found.document_type);
+        let kind = IssuedKind::for_document_type(&found.document_type);
         // Every fault from here on is about this storno.
         let about = |fault: Fault| fault.about(&order, kind, &storno_id);
         // The intent is a pure function of the verified document: a `telj`

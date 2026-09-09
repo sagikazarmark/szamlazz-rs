@@ -204,19 +204,19 @@ impl TaxpayerResponse {
     /// elements, which the serde deserializer cannot express. Both NAV OSA 2.0
     /// and 3.0 response namespaces are accepted; unknown elements are skipped.
     fn from_body(body: &[u8]) -> Result<Self, ParseError> {
-        let text = match xml::response_text(
+        let (_, text) = xml::response_root(
             body,
-            "QueryTaxpayerResponse",
-            "http://schemas.nav.gov.hu/OSA/2.0/api",
-        ) {
-            Ok(text) => text,
-            Err(ParseError::UnexpectedBody(_)) => xml::response_text(
-                body,
-                "QueryTaxpayerResponse",
-                "http://schemas.nav.gov.hu/OSA/3.0/api",
-            )?,
-            Err(error) => return Err(error),
-        };
+            &[
+                (
+                    "QueryTaxpayerResponse",
+                    "http://schemas.nav.gov.hu/OSA/2.0/api",
+                ),
+                (
+                    "QueryTaxpayerResponse",
+                    "http://schemas.nav.gov.hu/OSA/3.0/api",
+                ),
+            ],
+        )?;
         let mut reader = Reader::from_str(text);
         let mut parsed = Self::default();
         let mut content = String::new();
@@ -356,7 +356,7 @@ impl TaxpayerResponse {
         let code = self
             .error_code
             .as_deref()
-            .map_or_else(|| ErrorCode::Unknown("0".to_owned()), ErrorCode::from);
+            .map_or(ErrorCode::Absent, ErrorCode::from);
         let message = match (self.error_code, self.message) {
             (_, Some(message)) => message,
             (Some(raw_code), None) => raw_code,

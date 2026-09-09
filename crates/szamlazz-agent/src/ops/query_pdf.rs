@@ -3,39 +3,20 @@
 
 use rust_decimal::Decimal;
 
+use super::envelope::parse_issued;
 use crate::credentials::Credentials;
 use crate::error::{ParseError, ResponseError};
-use crate::types::{InvoiceNumber, Pdf};
+use crate::types::{InvoiceNumber, InvoiceSelector, Pdf};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
-
-/// How a query identifies the invoice; shared by the PDF and XML queries.
-///
-/// The wire carries one of `szamlaszam`, `rendelesSzam`, or
-/// `szamlaKulsoAzon`; this enum makes
-/// sending both (or neither) unrepresentable.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum InvoiceSelector {
-    /// By invoice number (`szamlaszam`).
-    #[doc(alias = "számlaszám")]
-    InvoiceNumber(InvoiceNumber),
-    /// By order number (`rendelesSzam`); the *last* invoice issued with this
-    /// order number is returned.
-    #[doc(alias = "rendelésszám")]
-    OrderNumber(String),
-    /// By the external identifier supplied when the invoice was created
-    /// (`szamlaKulsoAzon`).
-    ExternalId(String),
-}
 
 /// The invoice PDF query (`xmlszamlapdf`, `action-szamla_agent_pdf`).
 ///
 /// Unlike most operations, this request document has no `beallitasok` block:
-/// the credentials sit directly under the root element. The response is
-/// always requested in structured form (response version 2), so the PDF
-/// arrives decoded in [`InvoicePdf::pdf`].
+/// the credentials sit directly under the root element. The invoice is named
+/// by an [`InvoiceSelector`]; the response is always requested in structured
+/// form (response version 2), so the PDF arrives decoded in
+/// [`InvoicePdf::pdf`].
 #[doc(alias = "xmlszamlapdf")]
 #[doc(alias = "számla pdf lekérdezés")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -92,7 +73,7 @@ impl AgentRequest for QueryInvoicePdf {
     }
 
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        let created = crate::ops::invoice::parse_issued(response)?;
+        let created = parse_issued(response)?;
 
         Ok(InvoicePdf {
             invoice_number: created.invoice_number,

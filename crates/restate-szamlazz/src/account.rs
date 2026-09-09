@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use http::Uri;
 use serde::{Deserialize, Serialize};
-use szamlazz_agent::Credentials;
-use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
+use szamlazz_agent::ops::invoice::Seller;
+use szamlazz_agent::{Credentials, SellerEmail};
 
 use crate::identity::bounded_conversions;
 

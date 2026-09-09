@@ -13,8 +13,8 @@
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use szamlazz_agent::ops::invoice::{Buyer, ExchangeRate, PostalAddress};
-use szamlazz_agent::{ArithmeticError, Currency, LineItem, Rounding, VatRate};
+use szamlazz_agent::ops::invoice::{Buyer, PostalAddress};
+use szamlazz_agent::{ArithmeticError, Currency, ExchangeRate, LineItem, Rounding, VatRate};
 
 /// One document to issue: everything the caller decides per call.
 ///
@@ -92,7 +92,7 @@ pub struct DocumentOverrides {
     /// Exchange rate for non-HUF documents.
     pub exchange_rate: Option<ExchangeRateInput>,
     /// PDF template token (`SzlaAlap`, `SzlaMost`, …) or one of the
-    /// `szamlazz_agent::ops::invoice::InvoiceTemplate` names.
+    /// `szamlazz_agent::InvoiceTemplate` names.
     pub template: Option<String>,
     /// Whether szamlazz.hu should email the document to the buyer.
     pub send_email: Option<bool>,

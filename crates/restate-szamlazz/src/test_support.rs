@@ -50,10 +50,9 @@
 mod common;
 
 pub(crate) use common::{CreditRecord, Doc, ORIGINAL_TELJ, SUPPLIER, http_client};
-use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
-use szamlazz_agent::{Credentials, InvoiceNumber};
+use szamlazz_agent::{Credentials, InvoiceNumber, InvoiceSelector};
 
 use crate::account::Account;
 use crate::gateway::{FoundDocument, Gateway};
@@ -174,16 +173,19 @@ mod tests {
     fn the_default_document_is_a_live_test_invoice_of_ord_1() {
         let document = Doc::default().wire();
         assert_eq!(document.info.invoice_number.as_str(), "SZ-1");
-        assert_eq!(document.info.document_type, "SZ");
+        assert_eq!(
+            document.info.document_type,
+            szamlazz_agent::DocumentType::Invoice
+        );
         assert_eq!(document.info.order_number.as_deref(), Some("ORD-1"));
         assert_eq!(document.info.test, Some(true));
         assert_eq!(document.supplier.id, Some(SUPPLIER));
         assert_eq!(document.info.fulfillment_date, Some(ORIGINAL_TELJ));
-        assert_eq!(document.info.e_invoice.code(), 2);
+        assert_eq!(document.info.appearance.code(), 2);
         assert_eq!(document.info.reversed, None);
         assert_eq!(document.info.referenced_invoice_number, None);
         assert_eq!(document.info.referenced_proforma_number, None);
-        assert!(document.payments.is_empty());
+        assert!(document.credit_entries.is_empty());
     }
 
     /// Each marker the worker reads renders from its field (`rendelesszam`,
@@ -223,7 +225,10 @@ mod tests {
             ..Doc::new("SS-1", "SS")
         }
         .wire();
-        assert_eq!(storno.info.document_type, "SS");
+        assert_eq!(
+            storno.info.document_type,
+            szamlazz_agent::DocumentType::Storno
+        );
         assert_eq!(
             storno
                 .info
@@ -253,13 +258,13 @@ mod tests {
     /// on anything else) unless a test sets the code itself.
     #[test]
     fn eszamla_follows_the_kind_unless_set() {
-        assert_eq!(Doc::new("D-1", "D").wire().info.e_invoice.code(), 0);
-        assert_eq!(Doc::new("ES-1", "ES").wire().info.e_invoice.code(), 2);
+        assert_eq!(Doc::new("D-1", "D").wire().info.appearance.code(), 0);
+        assert_eq!(Doc::new("ES-1", "ES").wire().info.appearance.code(), 2);
         let paper = Doc {
             eszamla: Some(1),
             ..Doc::default()
         };
-        assert_eq!(paper.wire().info.e_invoice.code(), 1);
+        assert_eq!(paper.wire().info.appearance.code(), 1);
     }
 
     /// What `get` and the `Szamlazz.Agent.query` projection read beyond the
@@ -293,18 +298,18 @@ mod tests {
         assert_eq!(document.totals.total.vat, dec!(5400));
         assert_eq!(document.totals.total.gross, dec!(25400));
         assert_eq!(document.info.due_date, Some(date(2026, 7, 12)));
-        assert_eq!(document.info.currency.as_deref(), Some("HUF"));
+        assert_eq!(document.info.currency, Some(szamlazz_agent::Currency::HUF));
 
-        let [first, second] = document.payments.as_slice() else {
-            panic!("two credit entries, got {:?}", document.payments);
+        let [first, second] = document.credit_entries.as_slice() else {
+            panic!("two credit entries, got {:?}", document.credit_entries);
         };
         assert_eq!(first.date, date(2026, 7, 10));
-        assert_eq!(first.title, "átutalás");
+        assert_eq!(first.title, szamlazz_agent::PaymentMethod::Transfer);
         assert_eq!(first.amount, dec!(10000));
         assert_eq!(first.comment.as_deref(), Some("first"));
         assert_eq!(first.bank_account.as_deref(), Some("1234-5678"));
         assert_eq!(second.date, date(2026, 7, 11));
-        assert_eq!(second.title, "bankkártya");
+        assert_eq!(second.title, szamlazz_agent::PaymentMethod::Card);
         assert_eq!(second.amount, dec!(5000));
         assert_eq!(second.comment, None);
         assert_eq!(second.bank_account, None);

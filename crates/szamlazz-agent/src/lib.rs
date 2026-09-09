@@ -38,6 +38,8 @@
 //! constructor's result with functional update
 //! (`CreateInvoice { external_id: Some(..), ..CreateInvoice::new(..) }`).
 //! Response types are `#[non_exhaustive]`, since szamlazz.hu grows them.
+//! Every wire code set is open: a token the crate does not know is kept in
+//! an `Other(String)`, a numeric code in an `Unknown(n)` (see [`types`]).
 //!
 //! # Features
 //!
@@ -91,7 +93,9 @@ pub use error::{
 };
 pub use item::{LineItem, LineItemLedger, MAX_ERASURE_CODE_COUNT, Rounding};
 pub use types::{
-    Currency, InvoiceNumber, Language, PaymentMethod, Pdf, ReceiptNumber, TaxpayerStatus, VatRate,
+    Currency, DocumentType, ExchangeRate, GrandTotal, InvoiceNumber, InvoiceSelector,
+    InvoiceTemplate, Language, PaymentMethod, Pdf, ReceiptNumber, ReceiptType, SellerEmail,
+    TaxpayerStatus, Totals, VatRate, VatTotal,
 };
 
 /// Calendar date type used across the API (re-exported from [`jiff`]).

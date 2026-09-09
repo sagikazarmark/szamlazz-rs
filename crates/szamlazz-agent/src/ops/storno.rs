@@ -3,10 +3,10 @@
 
 use jiff::civil::Date;
 
+use super::envelope::{CreatedInvoice, parse_issued};
 use crate::credentials::Credentials;
 use crate::error::ResponseError;
-use crate::ops::invoice::{CreatedInvoice, InvoiceTemplate, SellerEmail, parse_issued};
-use crate::types::InvoiceNumber;
+use crate::types::{InvoiceNumber, InvoiceTemplate, SellerEmail};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
 
@@ -14,8 +14,10 @@ use crate::xml;
 ///
 /// Reverses the invoice named by [`StornoInvoice::invoice_number`]. The storno
 /// invoice is itself a newly issued document, so the response is a
-/// [`CreatedInvoice`]; its PDF, when [`StornoInvoice::download_pdf`] is set,
-/// arrives decoded in [`CreatedInvoice::pdf`].
+/// [`CreatedInvoice`] (the same type a create's
+/// [`CreationOutcome::Issued`](crate::ops::invoice::CreationOutcome::Issued)
+/// carries); its PDF, when [`StornoInvoice::download_pdf`] is set, arrives
+/// decoded in [`CreatedInvoice::pdf`].
 ///
 /// # Server behaviour
 ///
@@ -59,8 +61,8 @@ pub struct StornoInvoice {
     /// storno of an e-invoice and an e-invoice storno of a paper invoice are
     /// both accepted silently, and the storno invoice takes *this* value
     /// (observed on a test account; its queried
-    /// [`e_invoice`](crate::ops::query_xml::InvoiceInfo::e_invoice) is `3` or
-    /// `1` as sent here, whatever the original's). To reverse an invoice in
+    /// [`appearance`](crate::ops::query_xml::InvoiceInfo::appearance) is `3`
+    /// or `1` as sent here, whatever the original's). To reverse an invoice in
     /// its own form, read the original's
     /// [`InvoiceAppearance`](crate::ops::query_xml::InvoiceAppearance) first
     /// and set this from it.
@@ -74,7 +76,7 @@ pub struct StornoInvoice {
     ///
     /// Deprecated by szamlazz.hu: the element remains schema-valid but the
     /// server ignores it, so it no longer affects the returned PDF.
-    pub copies: Option<u8>,
+    pub download_copies: Option<u8>,
     /// Aggregator identifier (`aggregator`) for contracted integrations.
     pub aggregator: Option<String>,
     /// Guardian processing flag (`guardian`) for contracted integrations.
@@ -86,7 +88,7 @@ pub struct StornoInvoice {
     /// invoice. Observed behaviour, sent together with
     /// [`invoice_number`](Self::invoice_number): the value is stored on the
     /// *created storno invoice*, which then resolves through
-    /// [`InvoiceSelector::ExternalId`](crate::ops::query_pdf::InvoiceSelector::ExternalId);
+    /// [`InvoiceSelector::ExternalId`](crate::types::InvoiceSelector::ExternalId);
     /// the original keeps its own external identifier. It is not used to look
     /// up the original when `invoice_number` is present. It attaches only on
     /// the call that actually creates the storno invoice: a repeat storno
@@ -139,7 +141,7 @@ impl StornoInvoice {
             invoice_number: invoice_number.into(),
             e_invoice: false,
             download_pdf: false,
-            copies: None,
+            download_copies: None,
             aggregator: None,
             guardian: None,
             external_id: None,
@@ -168,7 +170,7 @@ impl AgentRequest for StornoInvoice {
                     s.credentials(credentials);
                     s.bool("eszamla", self.e_invoice);
                     s.bool("szamlaLetoltes", self.download_pdf);
-                    if let Some(copies) = self.copies {
+                    if let Some(copies) = self.download_copies {
                         s.text("szamlaLetoltesPld", &copies.to_string());
                     }
                     s.text_opt("aggregator", self.aggregator.as_deref());
@@ -219,7 +221,7 @@ mod tests {
     fn sample() -> StornoInvoice {
         StornoInvoice {
             download_pdf: true,
-            copies: Some(1),
+            download_copies: Some(1),
             issue_date: Some(date(2026, 7, 4)),
             comment: Some("Hibás vevő".to_owned()),
             seller_email: Some(SellerEmail {
@@ -363,6 +365,18 @@ mod tests {
                 "szamlaszam"
             )))
         ));
+    }
+
+    /// The storno request is a plain-data literal over its constructor, the
+    /// shared request vocabulary imported from `types`.
+    #[test]
+    fn shared_request_types_come_from_types() {
+        let storno = StornoInvoice {
+            template: Some(InvoiceTemplate::Most),
+            seller_email: Some(SellerEmail::default()),
+            ..StornoInvoice::new("E-1")
+        };
+        assert_eq!(storno.template, Some(crate::types::InvoiceTemplate::Most));
     }
 
     #[test]

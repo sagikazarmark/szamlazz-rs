@@ -117,11 +117,10 @@ mod examples {
     use jiff::civil::date;
     use szamlazz_agent::ops::credit_entry::{CreditEntries, CreditEntry, RegisterCreditEntry};
     use szamlazz_agent::ops::invoice::{
-        Buyer, CreateInvoice, ExchangeRate, InvoiceHeader, InvoiceKind, PostalAddress, Seller,
-        SellerEmail,
+        Buyer, CreateInvoice, InvoiceHeader, InvoiceKind, PostalAddress, Seller,
     };
     use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
-    use szamlazz_agent::ops::query_pdf::{InvoiceSelector, QueryInvoicePdf};
+    use szamlazz_agent::ops::query_pdf::QueryInvoicePdf;
     use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
     use szamlazz_agent::ops::receipt::{
         CreateReceipt, QueryReceipt, ReceiptEmail, ReceiptPayment, ReceiptSelector, SendReceipt,
@@ -130,7 +129,8 @@ mod examples {
     use szamlazz_agent::ops::storno::StornoInvoice;
     use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
     use szamlazz_agent::{
-        Currency, InvoiceNumber, Language, LineItem, LineItemLedger, PaymentMethod, VatRate,
+        Currency, ExchangeRate, InvoiceNumber, InvoiceSelector, Language, LineItem, LineItemLedger,
+        PaymentMethod, SellerEmail, VatRate,
     };
 
     use super::*;
@@ -218,7 +218,7 @@ mod examples {
     pub fn storno_invoice() -> StornoInvoice {
         StornoInvoice {
             download_pdf: true,
-            copies: Some(1),
+            download_copies: Some(1),
             issue_date: Some(date(2010, 9, 12)),
             seller_email: Some(SellerEmail {
                 reply_to: Some(MASKED_EMAIL.to_owned()),
@@ -363,8 +363,8 @@ mod responses {
     use jiff::civil::date;
     use szamlazz_agent::ops::query_xml::InvoiceAppearance;
     use szamlazz_agent::{
-        ApiError, Currency, ErrorCode, InvoiceNumber, OutcomeClass, ParseError, PaymentMethod,
-        ResponseError, VatRate, error::BODY_EXCERPT_LEN,
+        ApiError, Currency, ErrorCode, OutcomeClass, ParseError, PaymentMethod, ResponseError,
+        VatRate, error::BODY_EXCERPT_LEN,
     };
 
     use super::*;
@@ -469,12 +469,11 @@ mod responses {
     fn invoice_created(body: &[u8]) {
         let created = examples::create_invoice()
             .parse(&delivered(body))
-            .expect("the success example parses");
+            .expect("the success example parses")
+            .into_issued()
+            .expect("an issued document");
 
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("XXX-2012-3")
-        );
+        assert_eq!(created.invoice_number.as_str(), "XXX-2012-3");
         assert_eq!(created.net_total, Some(dec!(30000)));
         assert_eq!(created.gross_total, Some(dec!(38100)));
         assert_eq!(created.outstanding, None);
@@ -505,11 +504,10 @@ mod responses {
 
         let created = request
             .parse(&delivered(&without_abbreviation(body)))
-            .expect("the unabbreviated example parses");
-        assert_eq!(
-            created.invoice_number.as_ref().map(InvoiceNumber::as_str),
-            Some("XXX-2012-3")
-        );
+            .expect("the unabbreviated example parses")
+            .into_issued()
+            .expect("an issued document");
+        assert_eq!(created.invoice_number.as_str(), "XXX-2012-3");
         assert_eq!(created.net_total, Some(dec!(30000)));
         assert_eq!(created.gross_total, Some(dec!(38100)));
         assert_is_the_docs_pdf(created.pdf.as_ref().expect("the PDF was requested"));
@@ -619,15 +617,18 @@ mod responses {
         let info = &document.info;
         assert_eq!(info.id, 529_992);
         assert_eq!(info.invoice_number.as_str(), "D-LOLO-66");
-        assert_eq!(info.document_type, "D");
-        assert_eq!(info.e_invoice, InvoiceAppearance::NotInvoice);
+        assert_eq!(info.document_type, szamlazz_agent::DocumentType::Proforma);
+        assert_eq!(info.appearance, InvoiceAppearance::NotInvoice);
         assert_eq!(info.issue_date, Some(date(2024, 10, 9)));
         assert_eq!(info.fulfillment_date, Some(date(2024, 10, 9)));
         assert_eq!(info.due_date, Some(date(2024, 10, 9)));
-        assert_eq!(info.payment_method.as_deref(), Some("credit_card"));
+        assert_eq!(
+            info.payment_method,
+            Some(PaymentMethod::Other("credit_card".to_owned()))
+        );
         assert_eq!(info.unified_payment_method.as_deref(), Some("other"));
         assert_eq!(info.language.as_deref(), Some("hu"));
-        assert_eq!(info.currency.as_deref(), Some("HUF"));
+        assert_eq!(info.currency, Some(Currency::HUF));
         assert_eq!(info.exchange_rate, Some(dec!(0)));
         assert_eq!(info.comment, None, "an empty <megjegyzes> is none");
         assert!(!info.cash_accounting);
@@ -686,14 +687,14 @@ mod responses {
         assert_eq!(document.totals.total.vat, dec!(93));
         assert_eq!(document.totals.total.gross, dec!(557));
 
-        assert_eq!(document.payments.len(), 1);
-        let payment = &document.payments[0];
-        assert_eq!(payment.date, date(2020, 9, 22));
-        assert_eq!(payment.title, "transfer");
-        assert_eq!(payment.amount, dec!(15));
-        assert_eq!(payment.comment.as_deref(), Some("comment"));
-        assert_eq!(payment.bank_account.as_deref(), Some("-"));
-        assert_eq!(payment.bank_transaction_id, None);
+        assert_eq!(document.credit_entries.len(), 1);
+        let entry = &document.credit_entries[0];
+        assert_eq!(entry.date, date(2020, 9, 22));
+        assert_eq!(entry.title, PaymentMethod::Other("transfer".to_owned()));
+        assert_eq!(entry.amount, dec!(15));
+        assert_eq!(entry.comment.as_deref(), Some("comment"));
+        assert_eq!(entry.bank_account.as_deref(), Some("-"));
+        assert_eq!(entry.bank_transaction_id, None);
 
         assert_eq!(
             document.pdf.expect("the PDF put in its place").as_bytes(),
@@ -729,23 +730,26 @@ mod responses {
         refused_as_base64(&request, body);
 
         let with_pdf = with_pdf_in_place(body, "<nyugtaPdf>...</nyugtaPdf>", "nyugtaPdf");
-        let result = request
+        let receipt = request
             .parse(&delivered(&with_pdf))
             .expect("the example with a PDF parses");
 
         assert_eq!(
-            result.pdf.expect("the PDF put in its place").as_bytes(),
+            receipt
+                .pdf
+                .as_ref()
+                .expect("the PDF put in its place")
+                .as_bytes(),
             b"%PDF-"
         );
-        let receipt = &result.receipt;
         assert_eq!(receipt.id, 123_456);
         assert_eq!(receipt.call_id, None, "an empty <hivasAzonosito> is none");
         assert_eq!(receipt.receipt_number.as_str(), "NYGT-2017-123");
-        assert_eq!(receipt.kind, "NY");
-        assert!(!receipt.cancelled);
+        assert_eq!(receipt.document_type, szamlazz_agent::ReceiptType::Receipt);
+        assert!(!receipt.reversed);
         assert_eq!(
             receipt
-                .cancelled_receipt_number
+                .reversed_receipt_number
                 .as_ref()
                 .map(szamlazz_agent::ReceiptNumber::as_str),
             Some("NYGT-2017-100")
@@ -798,10 +802,10 @@ mod responses {
         assert_eq!(receipt.payments[1].amount, dec!(3000.0));
         assert_eq!(receipt.payments[1].description, None);
 
-        assert_eq!(receipt.totals.by_rate.len(), 1);
-        let by_rate = &receipt.totals.by_rate[0];
+        assert_eq!(receipt.totals.by_vat_rate.len(), 1);
+        let by_rate = &receipt.totals.by_vat_rate[0];
         assert_eq!(by_rate.vat_type.as_deref(), Some("ÁKK"));
-        assert_eq!(by_rate.vat_code, "0");
+        assert_eq!(by_rate.vat_rate_code, "0");
         assert_eq!(by_rate.vat_rate(), VatRate::Akk);
         assert_eq!(by_rate.net, dec!(200));
         assert_eq!(by_rate.vat, dec!(54));

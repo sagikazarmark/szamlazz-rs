@@ -47,8 +47,10 @@ impl Rounding {
 
 /// General-ledger metadata attached to an invoice or receipt line item.
 ///
-/// Receipt creation supports only `revenue_account` and `vat_account`; the
-/// economic-event and settlement fields are invoice-only protocol fields.
+/// A receipt row carries only `revenue_account` and `vat_account`; the
+/// economic-event and settlement fields are invoice-only, and a receipt
+/// request that sets one is refused
+/// ([`RequestError::UnsupportedOnReceipt`](crate::RequestError::UnsupportedOnReceipt)).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LineItemLedger {
     /// Economic-event code (`gazdasagiEsem`).
@@ -71,8 +73,10 @@ pub struct LineItemLedger {
 /// quantity, VAT = net × rate / 100, gross = net + VAT (error codes 259–264).
 /// This crate does **not** duplicate that validation: the server is the
 /// authority. Use [`LineItem::try_calculated`] to have the values computed
-/// with an explicit [`Rounding`] and no risk of a panic, or [`LineItem::new`]
-/// when your system already computed them and must match.
+/// with an explicit [`Rounding`], or [`LineItem::new`] when your system
+/// already computed them and must match. Plain data like every request
+/// type: the optional fields are set with functional update
+/// (`LineItem { comment: Some(..), ..item }`).
 #[doc(alias = "tétel")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LineItem {
@@ -144,93 +148,15 @@ impl LineItem {
         }
     }
 
-    /// A line item with two-decimal net, VAT, and gross values computed from
-    /// quantity, unit price, and rate.
-    ///
-    /// The infallible form of [`LineItem::try_calculated`] with
-    /// [`Rounding::Scale`]`(2)`: suitable for currencies with two decimal
-    /// places. For HUF and currency-aware code use `try_calculated` with
-    /// [`Rounding::minor_unit`]. Non-percentage VAT codes (AAM, EUT, …) yield
-    /// a VAT value of 0.
-    ///
-    /// # Panics
-    ///
-    /// When a derived value overflows a [`Decimal`] (see
-    /// [`ArithmeticError`]). Use [`LineItem::try_calculated`] on values you do
-    /// not control.
-    pub fn calculated(
-        name: impl Into<String>,
-        quantity: Decimal,
-        unit: impl Into<String>,
-        unit_price: Decimal,
-        vat_rate: VatRate,
-    ) -> Self {
-        Self::calculated_or_panic(
-            name,
-            quantity,
-            unit,
-            unit_price,
-            vat_rate,
-            Rounding::Scale(2),
-        )
-    }
-
-    /// Computes net, VAT, and gross using protocol currency rules: whole
-    /// forints for HUF (`HUF`/`Ft`), **exact, unrounded** decimal arithmetic
-    /// for every other currency, so a `100.005 EUR` net goes on the wire with
-    /// sub-cent VAT and gross values, which szamlazz.hu rounds to two decimals
-    /// each on its own, possibly to a gross that is not net + VAT (see
-    /// [`Rounding::Exact`]).
-    ///
-    /// Kept for compatibility. Prefer [`LineItem::try_calculated`] with
-    /// [`Rounding::minor_unit`], which rounds every currency to its minor unit
-    /// (the same whole forints for HUF) and returns an error instead of
-    /// panicking; the exact arithmetic is [`Rounding::Exact`] there, chosen
-    /// explicitly. Use [`LineItem::new`] when your system already computed the
-    /// values and they must match.
-    ///
-    /// # Panics
-    ///
-    /// When a derived value overflows a [`Decimal`] (see
-    /// [`ArithmeticError`]).
-    pub fn calculated_for_currency(
-        name: impl Into<String>,
-        quantity: Decimal,
-        unit: impl Into<String>,
-        unit_price: Decimal,
-        vat_rate: VatRate,
-        currency: &Currency,
-    ) -> Self {
-        let rounding = if currency.is_huf() {
-            Rounding::Scale(0)
-        } else {
-            Rounding::Exact
-        };
-        Self::calculated_or_panic(name, quantity, unit, unit_price, vat_rate, rounding)
-    }
-
-    /// The infallible forms' shared body: [`LineItem::try_calculated`], with
-    /// the [`ArithmeticError`] as the panic message.
-    fn calculated_or_panic(
-        name: impl Into<String>,
-        quantity: Decimal,
-        unit: impl Into<String>,
-        unit_price: Decimal,
-        vat_rate: VatRate,
-        rounding: Rounding,
-    ) -> Self {
-        Self::try_calculated(name, quantity, unit, unit_price, vat_rate, rounding)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
     /// A line item with net, VAT, and gross computed from quantity, unit
     /// price, and rate, rounded as `rounding` says, or an error when a value
     /// does not fit a [`Decimal`].
     ///
-    /// The fallible form of [`LineItem::calculated`] (`Rounding::Scale(2)`)
-    /// and [`LineItem::calculated_for_currency`] (`Rounding::minor_unit` for
-    /// HUF; `Rounding::Exact` for anything else). Non-percentage VAT codes
-    /// (AAM, EUT, …) yield a VAT value of 0.
+    /// The one derived constructor: the rounding is the caller's explicit
+    /// choice ([`Rounding::minor_unit`] for a document that must reconcile
+    /// to a ledger), and an overflow of caller-supplied money is an error,
+    /// never a panic. Non-percentage VAT codes (AAM, EUT, …) yield a VAT
+    /// value of 0.
     ///
     /// # Errors
     ///
@@ -271,13 +197,6 @@ impl LineItem {
             gross_value,
         ))
     }
-
-    /// Sets the row comment (`megjegyzes`).
-    #[must_use]
-    pub fn with_comment(mut self, comment: impl Into<String>) -> Self {
-        self.comment = Some(comment.into());
-        self
-    }
 }
 
 #[cfg(test)]
@@ -287,69 +206,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn calculated_matches_docs_example() {
+    fn try_calculated_matches_docs_example() {
         // The docs' example invoice: 2 × 10000 at 27%.
-        let item = LineItem::calculated(
+        let item = LineItem::try_calculated(
             "Elado izé 2",
             dec!(2),
             "db",
             dec!(10000),
             VatRate::percent(27),
-        );
+            Rounding::minor_unit(&Currency::HUF),
+        )
+        .expect("fits");
         assert_eq!(item.net_value, dec!(20000));
         assert_eq!(item.vat_value, dec!(5400));
         assert_eq!(item.gross_value, dec!(25400));
     }
 
     #[test]
-    fn calculated_rounds_half_up() {
-        // 3 × 33.335 = 100.005 → 100.01 (half-up), VAT 27% = 27.0027 → 27.00
-        let item = LineItem::calculated("x", dec!(3), "db", dec!(33.335), VatRate::percent(27));
-        assert_eq!(item.net_value, dec!(100.01));
-        assert_eq!(item.vat_value, dec!(27.00));
-        assert_eq!(item.gross_value, dec!(127.01));
-    }
-
-    #[test]
-    fn huf_calculation_rounds_monetary_totals_to_whole_forints() {
-        let item = LineItem::calculated_for_currency(
-            "x",
-            dec!(3),
-            "db",
-            dec!(33.335),
-            VatRate::percent(27),
-            &crate::Currency::HUF,
-        );
-        assert_eq!(item.net_value, dec!(100));
-        assert_eq!(item.vat_value, dec!(27));
-        assert_eq!(item.gross_value, dec!(127));
-    }
-
-    #[test]
-    fn foreign_currency_calculation_preserves_exact_decimal_values() {
-        let item = LineItem::calculated_for_currency(
-            "x",
-            dec!(3),
-            "db",
-            dec!(33.335),
-            VatRate::percent(27),
-            &crate::Currency::EUR,
-        );
-        assert_eq!(item.net_value, dec!(100.005));
-        assert_eq!(item.vat_value, dec!(27.00135));
-        assert_eq!(item.gross_value, dec!(127.00635));
-    }
-
-    #[test]
-    fn foreign_currency_calculation_does_not_discard_sub_cent_values() {
-        let item = LineItem::calculated_for_currency(
+    fn exact_rounding_does_not_discard_sub_unit_values() {
+        let item = LineItem::try_calculated(
             "x",
             dec!(1),
             "db",
             dec!(0.001),
             VatRate::percent(5),
-            &crate::Currency::new("KWD"),
-        );
+            Rounding::Exact,
+        )
+        .expect("fits");
         assert_eq!(item.net_value, dec!(0.001));
         assert_eq!(item.vat_value, dec!(0.00005));
         assert_eq!(item.gross_value, dec!(0.00105));
@@ -357,7 +240,15 @@ mod tests {
 
     #[test]
     fn special_codes_have_zero_vat() {
-        let item = LineItem::calculated("x", dec!(1), "db", dec!(100), VatRate::Aam);
+        let item = LineItem::try_calculated(
+            "x",
+            dec!(1),
+            "db",
+            dec!(100),
+            VatRate::Aam,
+            Rounding::Scale(2),
+        )
+        .expect("fits");
         assert_eq!(item.vat_value, Decimal::ZERO);
         assert_eq!(item.gross_value, dec!(100));
     }
@@ -414,7 +305,7 @@ mod tests {
             .expect("fits")
         };
 
-        // Whole forints: the same values `calculated_for_currency` sends.
+        // Whole forints.
         let huf = calculate(Rounding::minor_unit(&Currency::HUF));
         assert_eq!(huf.net_value, dec!(100));
         assert_eq!(huf.vat_value, dec!(27));
@@ -441,19 +332,6 @@ mod tests {
         assert_eq!(exact.net_value, dec!(100.005));
         assert_eq!(exact.vat_value, dec!(27.00135));
         assert_eq!(exact.gross_value, dec!(127.00635));
-    }
-
-    #[test]
-    #[should_panic(expected = "line item net value (unit price × quantity) overflows a decimal")]
-    fn calculated_for_currency_panics_on_overflow() {
-        let _ = LineItem::calculated_for_currency(
-            "x",
-            dec!(10),
-            "db",
-            Decimal::MAX,
-            VatRate::percent(27),
-            &Currency::EUR,
-        );
     }
 
     #[test]

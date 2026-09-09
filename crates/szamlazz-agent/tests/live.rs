@@ -17,9 +17,9 @@
 
 use jiff::civil::Date;
 use rust_decimal::dec;
+use szamlazz_agent::InvoiceSelector;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
-use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
@@ -94,17 +94,16 @@ async fn invoice_lifecycle() {
     let created = client
         .send(&document(InvoiceKind::invoice()))
         .await
-        .expect("create");
+        .expect("create")
+        .into_issued()
+        .expect("an issued document");
     assert!(created.pdf.is_some(), "requested PDF must be present");
     // HUF totals round to whole forints at each monetary step:
     // 2 × 1234.25 = 2468.5 → 2469; VAT 27% = 666.63 → 667; gross 3136.
     assert_eq!(created.net_total, Some(dec!(2469)));
     assert_eq!(created.gross_total, Some(dec!(3136)));
 
-    let created_number = created
-        .invoice_number
-        .clone()
-        .expect("issued invoice number");
+    let created_number = created.invoice_number.clone();
     let storno = client
         .send(&StornoInvoice::new(created_number.clone()))
         .await
@@ -120,11 +119,13 @@ async fn proforma_lifecycle() {
     let created = client
         .send(&document(InvoiceKind::Proforma))
         .await
-        .expect("create proforma");
+        .expect("create proforma")
+        .into_issued()
+        .expect("an issued proforma");
 
     client
         .send(&DeleteProforma::new(ProformaSelector::InvoiceNumber(
-            created.invoice_number.expect("issued proforma number"),
+            created.invoice_number,
         )))
         .await
         .expect("delete proforma");
@@ -134,7 +135,7 @@ async fn proforma_lifecycle() {
 
 /// A `<eszamla>` code as szamlazz.hu reports it, for the probe table.
 fn appearance_cell(document: &InvoiceDocument) -> String {
-    let appearance = document.info.e_invoice;
+    let appearance = document.info.appearance;
     format!("{} ({appearance:?})", appearance.code())
 }
 
@@ -202,13 +203,16 @@ async fn eszamla_semantics() {
         let created = client
             .send(&invoice)
             .await
-            .unwrap_or_else(|error| panic!("{label}: create refused: {error}"));
-        let number = created
-            .invoice_number
-            .clone()
-            .expect("issued invoice number");
+            .unwrap_or_else(|error| panic!("{label}: create refused: {error}"))
+            .into_issued()
+            .expect("an issued document");
+        let number = created.invoice_number.clone();
         let original = query_by_number(&client, &number).await;
-        assert_eq!(original.info.document_type, "SZ", "{label}");
+        assert_eq!(
+            original.info.document_type,
+            szamlazz_agent::DocumentType::Invoice,
+            "{label}"
+        );
         assert_eq!(
             original.info.order_number.as_deref(),
             Some(order.as_str()),
@@ -228,7 +232,11 @@ async fn eszamla_semantics() {
             "{label}: storno of {number} echoed the original"
         );
         let storno_document = query_by_number(&client, &reversal.invoice_number).await;
-        assert_eq!(storno_document.info.document_type, "SS", "{label}");
+        assert_eq!(
+            storno_document.info.document_type,
+            szamlazz_agent::DocumentType::Storno,
+            "{label}"
+        );
 
         println!(
             "| `{create_e_invoice}` | `{number}`: {} | `{storno_e_invoice}` | `sikeres=true`, `{}` | {} |",
@@ -240,23 +248,27 @@ async fn eszamla_semantics() {
         // The mapping the crate publishes: a document created as an e-invoice
         // reports an e-invoice code, a paper one reports `1`.
         assert_eq!(
-            original.info.e_invoice.is_e_invoice(),
+            original.info.appearance.is_e_invoice(),
             create_e_invoice,
             "{label}: {number} queried as {:?}",
-            original.info.e_invoice
+            original.info.appearance
         );
         if !create_e_invoice {
-            assert_eq!(original.info.e_invoice, InvoiceAppearance::Paper, "{label}");
+            assert_eq!(
+                original.info.appearance,
+                InvoiceAppearance::Paper,
+                "{label}"
+            );
         }
         // The storno takes the request's form, whatever the original's: a
         // mismatch is neither refused nor corrected, so a caller that wants
         // the reversal in its original's form must derive the flag itself.
         assert_eq!(
-            storno_document.info.e_invoice.is_e_invoice(),
+            storno_document.info.appearance.is_e_invoice(),
             storno_e_invoice,
             "{label}: storno {} queried as {:?}",
             reversal.invoice_number,
-            storno_document.info.e_invoice
+            storno_document.info.appearance
         );
     }
 }
