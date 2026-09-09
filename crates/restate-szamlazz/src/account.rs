@@ -16,6 +16,8 @@ use http::Uri;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
 
+use crate::identity::bounded_conversions;
+
 use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
 
 pub mod static_resolver;
@@ -430,17 +432,7 @@ impl TryFrom<String> for Endpoint {
     }
 }
 
-impl fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Endpoint {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+bounded_conversions!(Endpoint, InvalidEndpoint);
 
 /// Serializes as the plain string.
 impl Serialize for Endpoint {
@@ -831,6 +823,42 @@ mod tests {
         assert_eq!(account.endpoint.as_str(), "https://www.szamlazz.hu/szamla/");
         assert_eq!(account.defaults, Defaults::default());
         assert_eq!(account.seller, SellerConfig::default());
+    }
+
+    /// `Endpoint` implements the conversion set the crate's bounded newtypes
+    /// share (`identity::tests::the_bounded_newtypes_share_one_conversion_set`):
+    /// `FromStr`, `TryFrom<&str>` and `TryFrom<String>` through one
+    /// validation, `Display`, `AsRef<str>`, `as_str` and `From<_> for String`
+    /// giving the text back as written; `parse` stays as the inherent
+    /// spelling a caller reads best.
+    #[test]
+    fn endpoint_shares_the_bounded_newtypes_conversion_set() {
+        const VALID: &str = "https://www.szamlazz.hu/szamla/";
+        const INVALID: &str = "ftp://example.com/";
+        let parsed = Endpoint::parse(VALID).expect("parse");
+        assert_eq!(VALID.parse::<Endpoint>().expect("FromStr"), parsed);
+        assert_eq!(Endpoint::try_from(VALID).expect("TryFrom<&str>"), parsed);
+        assert_eq!(
+            Endpoint::try_from(VALID.to_owned()).expect("TryFrom<String>"),
+            parsed
+        );
+        assert_eq!(parsed.to_string(), VALID);
+        assert_eq!(parsed.as_ref(), VALID);
+        assert_eq!(parsed.as_str(), VALID);
+        assert_eq!(String::from(parsed), VALID);
+
+        assert!(matches!(
+            INVALID.parse::<Endpoint>(),
+            Err(InvalidEndpoint::Scheme)
+        ));
+        assert!(matches!(
+            Endpoint::try_from(INVALID),
+            Err(InvalidEndpoint::Scheme)
+        ));
+        assert!(matches!(
+            Endpoint::try_from(INVALID.to_owned()),
+            Err(InvalidEndpoint::Scheme)
+        ));
     }
 
     #[test]

@@ -18,6 +18,45 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::{UnicodeNormalization as _, is_nfc};
 
+/// The conversion set every bounded string newtype of the crate shares
+/// (C-CONV), derived from its `FromStr` (the one validation): `TryFrom<&str>`
+/// through it, and `Display`, `AsRef<str>` and `From<_> for String` giving
+/// the text back unchanged. The type writes its `FromStr` and its
+/// `TryFrom<String>` (so an owned string is validated without a copy) and
+/// stamps the rest with this; `identity::tests` holds the four identity types
+/// and `account`'s tests `Endpoint` to the whole set.
+macro_rules! bounded_conversions {
+    ($name:ident, $error:ty) => {
+        impl TryFrom<&str> for $name {
+            type Error = $error;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+    };
+}
+
+pub(crate) use bounded_conversions;
+
 /// The namespace: the external-id prefix of this deployment, 1–16 bytes of
 /// `[a-z0-9-]`.
 ///
@@ -73,17 +112,7 @@ impl TryFrom<String> for Namespace {
     }
 }
 
-impl fmt::Display for Namespace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Namespace {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+bounded_conversions!(Namespace, InvalidNamespace);
 
 /// Serializes as the plain string.
 impl Serialize for Namespace {
@@ -193,23 +222,7 @@ impl TryFrom<String> for OrderKey {
     }
 }
 
-impl fmt::Display for OrderKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for OrderKey {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<OrderKey> for String {
-    fn from(key: OrderKey) -> Self {
-        key.0
-    }
-}
+bounded_conversions!(OrderKey, InvalidOrderKey);
 
 /// Serializes as the plain string.
 impl Serialize for OrderKey {
@@ -440,31 +453,7 @@ impl TryFrom<String> for CorrectionId {
     }
 }
 
-impl TryFrom<&str> for CorrectionId {
-    type Error = InvalidCorrectionId;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        value.parse()
-    }
-}
-
-impl fmt::Display for CorrectionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for CorrectionId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<CorrectionId> for String {
-    fn from(id: CorrectionId) -> Self {
-        id.0
-    }
-}
+bounded_conversions!(CorrectionId, InvalidCorrectionId);
 
 /// Serializes as the plain string.
 impl Serialize for CorrectionId {
@@ -593,31 +582,7 @@ impl TryFrom<String> for InvoiceNumber {
     }
 }
 
-impl TryFrom<&str> for InvoiceNumber {
-    type Error = InvalidInvoiceNumber;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        value.parse()
-    }
-}
-
-impl fmt::Display for InvoiceNumber {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for InvoiceNumber {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<InvoiceNumber> for String {
-    fn from(number: InvoiceNumber) -> Self {
-        number.0
-    }
-}
+bounded_conversions!(InvoiceNumber, InvalidInvoiceNumber);
 
 /// Serializes as the plain string.
 impl Serialize for InvoiceNumber {
@@ -870,6 +835,54 @@ mod tests {
 
     fn namespace() -> Namespace {
         "acct".parse().expect("valid namespace")
+    }
+
+    /// Every bounded newtype of the crate implements one conversion set
+    /// (C-CONV): `FromStr`, `TryFrom<&str>`, `TryFrom<String>` (the three
+    /// through the same validation), `Display`, `AsRef<str>`, `as_str` and
+    /// `From<_> for String` (the four giving the text back unchanged), so a
+    /// caller reads any of them the same way. `Endpoint` (a URL, not a bounded
+    /// string) is held to the same set in `account`'s tests.
+    #[test]
+    fn the_bounded_newtypes_share_one_conversion_set() {
+        fn assert_set<T, E>(valid: &str, invalid: &str)
+        where
+            T: FromStr<Err = E>
+                + for<'a> TryFrom<&'a str, Error = E>
+                + TryFrom<String, Error = E>
+                + fmt::Display
+                + AsRef<str>
+                + Into<String>
+                + PartialEq
+                + fmt::Debug,
+            E: fmt::Debug + PartialEq,
+        {
+            let parsed: T = valid.parse().unwrap_or_else(|e| panic!("{valid}: {e:?}"));
+            assert_eq!(T::try_from(valid).expect("TryFrom<&str>"), parsed);
+            assert_eq!(
+                T::try_from(valid.to_owned()).expect("TryFrom<String>"),
+                parsed
+            );
+            assert_eq!(parsed.to_string(), valid);
+            assert_eq!(parsed.as_ref(), valid);
+            assert_eq!(Into::<String>::into(parsed), valid);
+
+            let by_str = invalid.parse::<T>().expect_err("FromStr refuses");
+            assert_eq!(
+                T::try_from(invalid).expect_err("TryFrom<&str> refuses"),
+                by_str
+            );
+            assert_eq!(
+                T::try_from(invalid.to_owned()).expect_err("TryFrom<String> refuses"),
+                by_str,
+                "one validation behind the three"
+            );
+        }
+
+        assert_set::<Namespace, _>("acct", "Acct");
+        assert_set::<OrderKey, _>("ORD-1", "ORD:1");
+        assert_set::<CorrectionId, _>("c-1", "-c");
+        assert_set::<InvoiceNumber, _>("SZ-1", "SZ 1");
     }
 
     /// The namespace is 1–16 bytes of `[a-z0-9-]`; `:` is excluded because it
