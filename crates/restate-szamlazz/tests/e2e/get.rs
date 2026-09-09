@@ -88,7 +88,12 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
     );
     assert_eq!(
         retries.failing_commands,
-        ["get-proforma", "get-invoice", "get-prepayment", "get-final"],
+        [
+            "lookup-proforma",
+            "lookup-invoice",
+            "lookup-prepayment",
+            "lookup-final"
+        ],
         "each read failed once, in order: {retries:?}"
     );
     let invocation = h.admin().invocation(reply.invocation_id()).await;
@@ -100,10 +105,10 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
         [
             "namespace",
             "account",
-            "get-proforma",
-            "get-invoice",
-            "get-prepayment",
-            "get-final",
+            "lookup-proforma",
+            "lookup-invoice",
+            "lookup-prepayment",
+            "lookup-final",
         ],
         "one journal entry per step, the retries invisible in the journal: {runs:?}"
     );

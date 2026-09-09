@@ -46,7 +46,8 @@ restate-e2e-harness = { path = "../restate-e2e-harness" }
 static_assertions = "1.1.0"
 # `sync` for the e2e harness's fetch hold and send counter (`watch` channels).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util"] }
-tracing-subscriber = { workspace = true }
+# `env-filter` for the crate docs' subscriber example (`RUST_LOG` + `ReplayAwareFilter`).
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 wiremock = { workspace = true }
 
 [lints]

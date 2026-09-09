@@ -383,10 +383,21 @@ pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
 /// `factor` up to `max_delay`, until `max_attempts` executions (when set) or
 /// `max_duration`, whichever comes first.
 ///
-/// Durations are written as `"90s"`, `"2m"`, `"1h"` or a bare non-negative
-/// integer read as seconds (`90`). Closed: an unknown key is a parse error.
-/// `#[non_exhaustive]`: deserialize it, or start from [`Default::default`]
-/// (the table's defaults) and set fields.
+/// Durations are written in the grammar Restate's own handler attributes
+/// take (jiff's friendly format: `"90s"`, `"2m"`, `"1h 30m"`, `"3d"`,
+/// `"500ms"`) or as a bare non-negative integer read as seconds (`90`).
+/// Closed: an unknown key is a parse error. `#[non_exhaustive]`: deserialize
+/// it, or start from [`Default::default`] (the table's defaults) and set
+/// fields.
+///
+/// The field names are the SDK's [`RunRetryPolicy`] setters' (`initial_delay`,
+/// `max_delay`, `max_attempts`, `max_duration`), which this maps onto field
+/// for field, with the one shortening the SDK's handler attribute also makes
+/// (`factor` for `exponentiation_factor`). They are **not** the handler
+/// attribute's names (`initial_interval`, `max_interval`): those configure
+/// the *invocation* retry policy, which the handlers pin in code; these
+/// configure a *run* retry policy, and an operator writing `initial_interval`
+/// here is refused by name (the table is closed).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -516,40 +527,61 @@ impl IssueConfig {
         szamlazz_agent::client::REQUEST_TIMEOUT.saturating_add(Self::RE_CHECK_MARGIN);
 }
 
-/// Parses a duration written as `"90s"`, `"2m"`, `"1h"` or a plain number of
-/// seconds (`"90"`). The string form of what a duration field of the policies
+/// Parses a duration written in the grammar Restate's own `#[handler(...)]`
+/// attributes take, jiff's "friendly" format (`"90s"`, `"2m"`, `"1h"`,
+/// `"3d"`, `"500ms"`, `"1h 30m"`, `"2 days"`), or as a plain number of
+/// seconds (`"90"`). One grammar for the deployment configuration and the
+/// handler attributes, so a value copied from one to the other parses; the
+/// parser mirrors the SDK macro's (`restate-sdk-macros`, `parse_duration_lit`):
+/// a [`jiff::Span`] totalled in milliseconds with days as 24 hours and weeks as
+/// 7 days, months and years refused (they have no fixed length without a
+/// reference date). The string form of what a duration field of the policies
 /// takes; a field also takes the number as a bare integer. The grammar is
 /// part of the configuration contract; the parser is not part of the API.
 ///
 /// # Errors
 ///
-/// Returns an error for an empty string, an unknown suffix, a non-integer
-/// amount or an amount that overflows.
+/// Returns an error for an empty string, a string jiff does not read as a
+/// span (an unknown unit, a fraction on a non-terminal unit, months or
+/// years), a negative span or one that overflows.
 pub(crate) fn parse_duration(value: &str) -> Result<Duration, InvalidDuration> {
     let value = value.trim();
     if value.is_empty() {
         return Err(InvalidDuration::Empty);
     }
-    let (amount, multiplier) = match value.as_bytes()[value.len() - 1] {
-        b's' => (&value[..value.len() - 1], 1),
-        b'm' => (&value[..value.len() - 1], 60),
-        b'h' => (&value[..value.len() - 1], 60 * 60),
-        b'0'..=b'9' => (value, 1),
-        other => return Err(InvalidDuration::UnknownUnit(char::from(other))),
-    };
-    let amount: u64 = amount
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|_| InvalidDuration::Overflow);
+    }
+    let span: jiff::Span = value
         .parse()
-        .map_err(|_| InvalidDuration::InvalidAmount(amount.to_owned()))?;
-    amount
-        .checked_mul(multiplier)
-        .map(Duration::from_secs)
-        .ok_or(InvalidDuration::Overflow)
+        .map_err(|error: jiff::Error| InvalidDuration::Invalid(error.to_string()))?;
+    let millis = span
+        .total((
+            jiff::Unit::Millisecond,
+            jiff::SpanRelativeTo::days_are_24_hours(),
+        ))
+        .map_err(|error| InvalidDuration::Invalid(error.to_string()))?;
+    if millis < 0.0 {
+        return Err(InvalidDuration::Negative);
+    }
+    // A `u64` of milliseconds is 584 million years; anything a policy takes
+    // is far inside, and `Duration::from_secs_f64` refuses what is not.
+    Duration::try_from_secs_f64(millis / 1000.0).map_err(|_| InvalidDuration::Overflow)
 }
 
-/// Formats a whole-second duration in the largest unit that divides it
-/// evenly: `"1h"`, `"2m"`, `"90s"`. Sub-second precision is dropped.
+/// Formats a duration in the largest unit that divides it evenly: `"1h"`,
+/// `"2m"`, `"90s"`, `"1500ms"`. Every output parses back with
+/// [`parse_duration`] to the same value (sub-millisecond precision is
+/// dropped).
 #[must_use]
 pub(crate) fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis > 0 && !millis.is_multiple_of(1000) {
+        return format!("{millis}ms");
+    }
     let secs = duration.as_secs();
     if secs > 0 && secs.is_multiple_of(3600) {
         format!("{}h", secs / 3600)
@@ -567,13 +599,16 @@ pub(crate) enum InvalidDuration {
     /// The string is empty.
     #[error("duration must not be empty")]
     Empty,
-    /// The suffix is not one of `s`, `m`, `h`.
-    #[error("unknown duration unit {0:?}; use s, m or h")]
-    UnknownUnit(char),
-    /// The amount before the suffix is not a non-negative integer.
-    #[error("invalid duration amount {0:?}")]
-    InvalidAmount(String),
-    /// The amount does not fit in seconds.
+    /// jiff does not read the string as a span of fixed length: an unknown
+    /// unit, months or years, a malformed amount. Carries jiff's message.
+    #[error(
+        "invalid duration: {0}; write it as Restate does, e.g. \"90s\", \"2m\", \"1h 30m\", \"3d\""
+    )]
+    Invalid(String),
+    /// The span is negative.
+    #[error("duration must not be negative")]
+    Negative,
+    /// The amount does not fit.
     #[error("duration is too large")]
     Overflow,
 }
@@ -589,8 +624,7 @@ mod duration_str {
     use serde::{Deserializer, Serializer};
 
     /// What a duration field expects, as serde's error message names it.
-    const EXPECTED: &str =
-        "a duration such as \"90s\", \"2m\", \"1h\" or a non-negative number of seconds";
+    const EXPECTED: &str = "a duration such as \"90s\", \"2m\", \"1h 30m\", \"3d\" or a non-negative number of seconds";
 
     pub(super) fn serialize<S: Serializer>(
         duration: &Duration,
@@ -1100,42 +1134,54 @@ mod tests {
         assert_eq!(*unchecked, below);
     }
 
+    /// The grammar is Restate's: what `#[handler(initial_interval = "2m")]`
+    /// accepts, `[issue] initial_delay = "2m"` accepts, `"3d"` and
+    /// `"1h 30m"` included; a bare number of seconds besides.
     #[test]
     fn duration_parsing_table() {
         let cases = [
-            ("2m", 120),
-            ("90s", 90),
-            ("10m", 600),
-            ("1h", 3600),
-            ("45", 45),
+            ("2m", 120_000),
+            ("90s", 90_000),
+            ("10m", 600_000),
+            ("1h", 3_600_000),
+            ("45", 45_000),
             ("0s", 0),
-            (" 3m ", 180),
+            (" 3m ", 180_000),
+            ("3d", 3 * 24 * 3_600_000),
+            ("1h 30m", 5_400_000),
+            ("1h30m", 5_400_000),
+            ("500ms", 500),
+            ("2 days", 2 * 24 * 3_600_000),
+            ("1 week", 7 * 24 * 3_600_000),
+            ("1.5m", 90_000),
         ];
-        for (input, secs) in cases {
+        for (input, millis) in cases {
             assert_eq!(
                 parse_duration(input),
-                Ok(Duration::from_secs(secs)),
+                Ok(Duration::from_millis(millis)),
                 "{input:?}"
             );
         }
         assert_eq!(parse_duration(""), Err(InvalidDuration::Empty));
-        assert_eq!(parse_duration("2d"), Err(InvalidDuration::UnknownUnit('d')));
-        assert_eq!(
-            parse_duration("m"),
-            Err(InvalidDuration::InvalidAmount(String::new()))
+        assert!(
+            matches!(parse_duration("2x"), Err(InvalidDuration::Invalid(_))),
+            "an unknown unit"
         );
-        assert_eq!(
-            parse_duration("1.5m"),
-            Err(InvalidDuration::InvalidAmount("1.5".to_owned()))
+        assert!(
+            matches!(parse_duration("m"), Err(InvalidDuration::Invalid(_))),
+            "no amount"
         );
-        assert_eq!(
-            parse_duration("-1s"),
-            Err(InvalidDuration::InvalidAmount("-1".to_owned()))
+        assert!(
+            matches!(parse_duration("1 month"), Err(InvalidDuration::Invalid(_))),
+            "months have no fixed length"
         );
+        assert_eq!(parse_duration("-1s"), Err(InvalidDuration::Negative));
         assert_eq!(
-            parse_duration(&format!("{}h", u64::MAX)),
+            parse_duration(&format!("{}", u64::MAX).repeat(2)),
             Err(InvalidDuration::Overflow)
         );
+        let message = InvalidDuration::Invalid("x".to_owned()).to_string();
+        assert!(message.contains("\"3d\""), "names the grammar: {message}");
     }
 
     #[test]
@@ -1145,7 +1191,15 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(120)), "2m");
         assert_eq!(format_duration(Duration::from_secs(90)), "90s");
         assert_eq!(format_duration(Duration::from_secs(0)), "0s");
-        assert_eq!(format_duration(Duration::from_millis(1500)), "1s");
+        assert_eq!(format_duration(Duration::from_millis(1500)), "1500ms");
+        for millis in [0, 1, 999, 1500, 90_000, 3_600_000, 3 * 24 * 3_600_000] {
+            let duration = Duration::from_millis(millis);
+            assert_eq!(
+                parse_duration(&format_duration(duration)),
+                Ok(duration),
+                "round trip of {millis} ms"
+            );
+        }
     }
 
     /// A policy serialises to its configuration shape: durations as strings,
@@ -1207,7 +1261,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("expected a duration such as \"90s\", \"2m\", \"1h\""),
+                    .contains("expected a duration such as \"90s\", \"2m\", \"1h 30m\", \"3d\""),
                 "the error says what a duration is: {rejected}: {error}"
             );
         }

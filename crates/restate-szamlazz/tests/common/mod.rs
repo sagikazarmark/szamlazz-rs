@@ -115,7 +115,7 @@ pub struct Doc<'a> {
     /// `kifizetesek`: the credit entries registered against the document;
     /// empty renders no element. What makes a proforma *paid* for
     /// `delete_proforma`.
-    pub payments: &'a [CreditRecord<'a>],
+    pub credit_entries: &'a [CreditRecord<'a>],
     /// Further `<alap>` children, verbatim (`<fizh>…</fizh><devizanem>HUF</devizanem>`),
     /// for what no field covers; appended after the fields' elements, which
     /// the parser does not mind. Must not repeat an element a field renders.
@@ -194,7 +194,7 @@ impl<'a> Doc<'a> {
             net: "1000",
             vat: "270",
             gross: "1270",
-            payments: &[],
+            credit_entries: &[],
             alap_extra: "",
             external_id: None,
         }
@@ -221,10 +221,10 @@ impl<'a> Doc<'a> {
         let kelt = self.issue_date.map(|date| date.to_string());
         let telj = self.fulfillment_date.map(|date| date.to_string());
         let teszt = self.test.map(|test| test.to_string());
-        let payments = if self.payments.is_empty() {
+        let credit_entries = if self.credit_entries.is_empty() {
             String::new()
         } else {
-            let entries = self.payments.iter().fold(String::new(), |xml, entry| {
+            let entries = self.credit_entries.iter().fold(String::new(), |xml, entry| {
                 format!(
                     "{xml}<kifizetes><datum>{}</datum><jogcim>{}</jogcim><osszeg>{}</osszeg>{}{}</kifizetes>",
                     entry.date,
@@ -244,7 +244,7 @@ impl<'a> Doc<'a> {
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>{net}</netto><afa>{vat}</afa><brutto>{gross}</brutto></totalossz></osszegek>
-  {payments}
+  {credit_entries}
 </szamla>"#,
             supplier = self.supplier_id,
             number = self.number,

@@ -8,10 +8,10 @@ use super::common::{
 };
 use super::harness::*;
 use jiff::civil::date;
-use restate_szamlazz::contract::{PaymentEntry, PaymentMethod, Selector};
+use restate_szamlazz::contract::{CreditEntryInput, PaymentMethod, Selector};
 use restate_szamlazz::gateway::{
-    CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome, SetPaymentsOutcome,
-    StornoLookupOutcome, StornoOutcome, SzamlazzAnswer, TaxpayerOutcome,
+    CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
+    SetCreditEntriesOutcome, StornoLookupOutcome, StornoOutcome, SzamlazzAnswer, TaxpayerOutcome,
 };
 use rust_decimal::dec;
 
@@ -33,11 +33,11 @@ use rust_decimal::dec;
     reason = "one table: every operation, one gateway each"
 )]
 async fn a_credential_code_on_any_operation_is_credentials_rejected() {
-    let entry = PaymentEntry {
+    let entry = CreditEntryInput {
         date: date(2026, 9, 3),
-        method: PaymentMethod::Card,
+        title: PaymentMethod::Card,
         amount: dec!(1000),
-        description: None,
+        comment: None,
     };
     let rejected = |code: &str| SzamlazzAnswer::new(code, "login");
 
@@ -179,10 +179,10 @@ async fn a_credential_code_on_any_operation_is_credentials_rejected() {
         .await;
     assert_eq!(
         h.gateway
-            .set_payments("SZ-1", std::slice::from_ref(&entry), false)
+            .set_credit_entries("SZ-1", std::slice::from_ref(&entry), false)
             .await,
-        SetPaymentsOutcome::CredentialsRejected(rejected("3")),
-        "set_payments"
+        SetCreditEntriesOutcome::CredentialsRejected(rejected("3")),
+        "set_credit_entries"
     );
 
     // The taxpayer query, in the headers.

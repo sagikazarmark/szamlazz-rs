@@ -29,7 +29,7 @@ use crate::harness::szamlazz::{
 /// `supplier_id` (the go-live check reads `test` and the seller block off a
 /// known document this way). `query_taxpayer` under `acme` with the full tax
 /// number and under `beta` with the bare stem asks NAV with each account's own
-/// key, both journaling the one `taxpayer-{prefix}` step; `valid: false` is
+/// key, both journaling the one `lookup-taxpayer-{prefix}` step; `valid: false` is
 /// data.
 #[allow(
     clippy::too_many_lines,
@@ -159,7 +159,7 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
     assert_eq!(reply.body["addresses"][0]["kind"], "HQ", "{}", reply.body);
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
-        ["namespace", "account", "taxpayer-12345678"]
+        ["namespace", "account", "lookup-taxpayer-12345678"]
     );
     let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
@@ -180,7 +180,7 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
     );
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
-        ["namespace", "account", "taxpayer-12345678"]
+        ["namespace", "account", "lookup-taxpayer-12345678"]
     );
     assert_eq!(
         h.requests_mentioning("<torzsszam>12345678</torzsszam>")

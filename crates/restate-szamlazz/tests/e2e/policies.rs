@@ -279,9 +279,9 @@ async fn flaky_read_is_re_executed(h: &Harness) {
         [
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-prepayment",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-invoice",
             "create-invoice",
         ],
@@ -345,9 +345,9 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
         [
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-prepayment",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-invoice",
         ],
         "the lookup is journaled by name, the create step never ran"
@@ -422,8 +422,10 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         "the fault names how the run ended: {fault:?}"
     );
     assert!(
-        fault.message.contains("retry with a new Idempotency-Key"),
-        "{fault:?}"
+        fault
+            .message
+            .contains("a send may have landed: read get, then retry with a new Idempotency-Key"),
+        "a cancelled write reconciles before it retries: {fault:?}"
     );
     assert!(
         elapsed < Duration::from_secs(60),
@@ -443,9 +445,9 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         [
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-prepayment",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-invoice",
             "create-invoice",
         ],

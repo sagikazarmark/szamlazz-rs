@@ -1,5 +1,5 @@
 //! `Szamlazz.Order.delete_proforma` under Restate: its one path, the order's
-//! live proforma found under its external id (`proforma-for-delete`) and
+//! live proforma found under its external id (`lookup-proforma`) and
 //! deleted (`delete-proforma-{number}`), then a second call finding nothing.
 //! The guard (a paid proforma, `force`, a collision) and the answers (335, a
 //! refusal, a lost reply) are unit tests of `service::storno` and
@@ -41,7 +41,7 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
         [
             "namespace",
             "account",
-            "proforma-for-delete",
+            "lookup-proforma",
             "delete-proforma-D-D1"
         ]
     );
@@ -54,7 +54,7 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     assert_eq!(again.body["reason"], "absent", "{}", again.body);
     assert_eq!(
         h.admin().runs(again.invocation_id()).await,
-        ["namespace", "account", "proforma-for-delete"],
+        ["namespace", "account", "lookup-proforma"],
         "the lookup answered; no delete step"
     );
     assert_eq!(h.delete_bodies_of("D-D1").await.len(), 1, "one send in all");

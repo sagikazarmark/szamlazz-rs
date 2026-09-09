@@ -284,7 +284,7 @@ mod tests {
             net: "20000",
             vat: "5400",
             gross: "25400",
-            payments: &[
+            credit_entries: &[
                 CreditRecord {
                     comment: Some("first"),
                     bank_account: Some("1234-5678"),

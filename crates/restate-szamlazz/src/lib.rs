@@ -44,28 +44,101 @@
 //! stateless service registered as `Szamlazz.Agent`. Both hold the [`Accounts`] bundle (the
 //! account resolver and the credential store) and a [`WorkerConfig`]; every handler resolves
 //! its account and opens a [`Gateway`] for its own execution. Build the bundle from the static
-//! resolver's configuration and bind both to an endpoint:
+//! resolver's configuration and bind both to an endpoint, with the two things Restate's own
+//! guidance asks of an endpoint: the SDK's replay-aware log filter, and the request identity key:
 //!
 //! ```no_run
 //! # async fn serve(
 //! #     accounts: restate_szamlazz::account::StaticConfig,
 //! #     worker: restate_szamlazz::WorkerConfig,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
+//! use restate_sdk::filter::ReplayAwareFilter;
 //! use restate_sdk::prelude::{Endpoint, HttpServer};
 //! use restate_szamlazz::account::StaticResolver;
 //! use restate_szamlazz::{Accounts, Agent, Order};
+//! use tracing_subscriber::layer::SubscriberExt as _;
+//! use tracing_subscriber::util::SubscriberInitExt as _;
+//! use tracing_subscriber::{EnvFilter, Layer as _};
+//!
+//! // Logs: `RUST_LOG` selects, and the SDK's `ReplayAwareFilter` drops what a
+//! // replayed handler emits again. Every handler execution of this crate runs
+//! // in an `execution{scope, order, restate.invocation.id, account.id}` span
+//! // and the prologue warns outside the durable steps; without the filter a
+//! // retried invocation repeats those lines on every replay.
+//! tracing_subscriber::registry()
+//!     .with(
+//!         tracing_subscriber::fmt::layer()
+//!             .with_filter(EnvFilter::from_default_env())
+//!             .with_filter(ReplayAwareFilter),
+//!     )
+//!     .init();
 //!
 //! let worker = worker.validate()?;
 //! let accounts = Accounts::from(StaticResolver::try_from(accounts)?);
 //! let order = Order::from_parts(accounts.clone(), worker.clone());
 //! let agent = Agent::from_parts(accounts, worker);
-//! let endpoint = Endpoint::builder().bind(order).bind(agent).build();
+//! let endpoint = Endpoint::builder()
+//!     .bind(order)
+//!     .bind(agent)
+//!     // Restate's request identity: with a key registered, the endpoint
+//!     // refuses every request the runtime did not sign. Required wherever
+//!     // anything but the runtime can reach this port, and always in the
+//!     // multi-account shape: the scope that selects the account is protocol
+//!     // data inside the request, so an unsigned request could invoke either
+//!     // service under any scope. The value is the runtime's public key, which
+//!     // the server logs at start-up when it holds the private half
+//!     // (`RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE`); it is not a secret.
+//!     .identity_key("publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f")?
+//!     .build();
 //! HttpServer::new(endpoint)
 //!     .listen_and_serve("0.0.0.0:9080".parse()?)
 //!     .await;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Register the endpoint with the server, then call a handler through the ingress; the
+//! ingress URL grammar is Restate's, `/{service}/{key}/{handler}` for a Virtual Object,
+//! `/{service}/{handler}` for a service, and `/restate/scope/{scope}/call/…` under a scope
+//! (the multi-account shape; see [`account`]):
+//!
+//! ```text
+//! restate deployments register http://worker:9080
+//!
+//! # Single-account shape: unscoped. The key is the order number, already trimmed.
+//! curl -X POST http://localhost:8080/Szamlazz.Order/ORD-1/create_invoice \
+//!   -H 'Idempotency-Key: 4c8f5a1e-…' -H 'content-type: application/json' \
+//!   -d '{"document": {"buyer": {"name": "Kovács Bt.", "zip": "2030", "city": "Érd",
+//!                               "address": "Tárnoki út 23."},
+//!                     "items": [{"name": "Jegy", "quantity": "1", "unit": "db",
+//!                                "unit_price": "1000", "vat_rate": "27"}],
+//!                     "fulfillment_date": "2026-09-03", "due_date": "2026-09-11",
+//!                     "payment_method": "transfer"}}'
+//!
+//! # Multi-account shape: the account's scope on every call.
+//! curl -X POST http://localhost:8080/restate/scope/acme/call/Szamlazz.Order/ORD-1/create_invoice …
+//! curl -X POST http://localhost:8080/restate/scope/acme/call/Szamlazz.Agent/check_account
+//! ```
+//!
+//! ## Restate's words and this crate's
+//!
+//! The crate's documentation uses a few words of its own beside Restate's; where they meet:
+//!
+//! - **Fault**: a `TerminalError` one of the services raises, whose message is a
+//!   [`contract::Fault`] JSON body with a [`contract::TerminalCode`]; a domain result that is
+//!   not a fault (`rejected`, `conflict{…}`) is a 200 with an *outcome*, never an error.
+//! - **Execution**: one run of a handler on one deployment, the unit a run retry re-executes
+//!   with replay; Restate's *attempt* counts the server's re-dispatches of the invocation, which
+//!   the handlers' `invocation_retry_policy` bounds. A *step* is one named `ctx.run`.
+//! - **Prologue**: the first lines of every handler (pin the namespace, resolve the account,
+//!   fetch the credentials, open the gateway), not an interception layer; nothing in the SDK
+//!   corresponds to it.
+//! - **Deployment**: Restate's word, a registered endpoint revision (ADR 0009); the crate never
+//!   uses it for anything else. What both services hold in common (the accounts and the
+//!   validated configuration) is their *parts* (`from_parts`).
+//! - **Account**, **scope**: an account is one szamlazz.hu account; the Restate *scope* of a
+//!   request is the caller's identifier for it, resolved by the [`AccountResolver`]. Neither is
+//!   a Restate *service* or *key*.
 //!
 //! ## Your own resolver and store
 //!
@@ -162,6 +235,9 @@
 //!     .bind(Order::from_parts(accounts.clone(), worker.clone()))
 //!     .bind(Agent::from_parts(accounts, worker))
 //!     .bind(Backoffice)
+//!     // A resolver of your own is the multi-account shape; the identity key
+//!     // is what keeps the scope trustworthy (see the quick start).
+//!     .identity_key("publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f")?
 //!     .build();
 //! HttpServer::new(endpoint)
 //!     .listen_and_serve("0.0.0.0:9080".parse()?)

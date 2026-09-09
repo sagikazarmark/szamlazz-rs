@@ -21,7 +21,7 @@ use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, verified_document};
-use super::support::{lookup, run_reading, run_retrying, verify};
+use super::support::{is_cancelled, lookup, run_reading, run_retrying, verify};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateOutcome, CreateRequest, CreateResponse, DocumentInput,
     DocumentKind, IssuedKind, ProformaLink, Warning, outstanding,
@@ -73,7 +73,7 @@ impl Identity {
         let mut response = self.respond(outcome).with_invoice_number(&found.number);
         response.net_total = Some(found.net_total);
         response.gross_total = gross;
-        response.outstanding = outstanding(gross, &found.payment_amounts());
+        response.outstanding = outstanding(gross, &found.credit_entry_amounts());
 
         response
     }
@@ -448,17 +448,27 @@ fn decide_base(
 /// The fault of a create step whose run ended without a settled outcome:
 /// the issue policy exhausted (500, carrying the last `Unconfirmed`'s
 /// display) or the invocation cancelled (409). `outcome_unknown` about the
-/// document being created: nothing is recorded, and the next invocation's
-/// lookup finds whatever landed.
+/// document being created either way, because a cancelled write step is
+/// exactly that: its send may have landed (the e2e cancels one mid-send and
+/// the document exists), so the SDK's bare `409 cancelled` would lose what
+/// the caller needs, the document's identity and that it may exist. The
+/// message tells the two apart: an exhausted step is retried with a new
+/// `Idempotency-Key`, a cancelled one is reconciled by `get` first. Nothing
+/// is recorded, and the next invocation's lookup finds whatever landed.
 fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Identity) -> Fault {
-    identity.about(
-        order,
-        Fault::outcome_unknown(format!(
+    let message = if is_cancelled(error) {
+        format!(
+            "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: read get, then retry with a new Idempotency-Key",
+            error.code()
+        )
+    } else {
+        format!(
             "the create step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
             error.code(),
             error.message()
-        )),
-    )
+        )
+    };
+    identity.about(order, Fault::outcome_unknown(message))
 }
 
 /// Step 3's decision on what the lookup step found, pure: every case that
@@ -703,7 +713,7 @@ impl Execution {
         let found = lookup(
             ctx,
             self,
-            format!("exclusivity-{other}"),
+            format!("lookup-{other}"),
             &other_id,
             &prepared.order,
             other.into(),
@@ -727,7 +737,7 @@ impl Execution {
         let found = lookup(
             ctx,
             self,
-            "prepayment-for-final",
+            "lookup-prepayment",
             &prepayment_id,
             &prepared.order,
             kind.into(),
@@ -740,7 +750,7 @@ impl Execution {
     // ----- step 2: the proforma link ---------------------------------------
 
     /// `options.proforma` for an invoice or a prepayment invoice
-    /// ([`links_proforma`]): under `auto` and `none` the `proforma-link`
+    /// ([`links_proforma`]): under `auto` and `none` the `lookup-proforma`
     /// lookup of `…:proforma`, decided by [`decide_proforma_link`]; under
     /// `{number}` the `verify-proforma-{number}` read, decided by
     /// [`decide_proforma_by_number`].
@@ -759,7 +769,7 @@ impl Execution {
                 let found = lookup(
                     ctx,
                     self,
-                    "proforma-link",
+                    "lookup-proforma",
                     &proforma_id,
                     &prepared.order,
                     kind.into(),
@@ -1486,13 +1496,13 @@ mod tests {
             ("exclusivity", &|found| {
                 decide_exclusivity(found, ConflictReason::PrepaidChain, &identity, &namespace)
             }),
-            ("prepayment-for-final", &|found| {
+            ("lookup-prepayment", &|found| {
                 let mut refs = Refs::default();
                 let decided = decide_prepayment_for_final(found, &identity, &namespace, &mut refs);
                 assert_eq!(refs.prepayment, None, "nothing recorded on a fault");
                 decided
             }),
-            ("proforma-link", &|found| {
+            ("lookup-proforma", &|found| {
                 let mut refs = Refs::default();
                 let decided = decide_proforma_link(
                     found,
@@ -1787,8 +1797,8 @@ mod tests {
             "SZ-42 is not a proforma (tipus SZ)"
         );
         assert_eq!(
-            body.get("order"),
-            None,
+            body["order"],
+            serde_json::Value::Null,
             "about the caller's request, not a document: {body}"
         );
 
@@ -1954,7 +1964,7 @@ mod tests {
         assert_eq!(body["order"], "ORD-1", "{body}");
         assert_eq!(body["kind"], "invoice", "{body}");
         assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
-        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
 
         let cancelled = TerminalError::new_with_code(409, "cancelled");
         let (status, body) = fault_body(create_outcome_unknown(&cancelled, &ord_1(), &identity));
@@ -1962,6 +1972,11 @@ mod tests {
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("(409)"), "{message}");
         assert!(message.contains("cancelled"), "{message}");
+        assert!(
+            message.contains("a send may have landed: read get"),
+            "a cancelled write reconciles before it retries: {message}"
+        );
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
     }
 
     /// A create reply parsed the way the gateway parses it and projected the
@@ -2145,7 +2160,7 @@ mod tests {
         let (status, body) = fault_body(fault);
         assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], TerminalCode::Unavailable.as_str());
-        assert!(body.get("szamlazz_code").is_none(), "{body}");
+        assert!(body["szamlazz_code"].is_null(), "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("szlahu_down"), "{message}");
         assert!(message.contains("maintenance"), "{message}");

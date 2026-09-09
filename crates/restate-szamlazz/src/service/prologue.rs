@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
 use tracing::Instrument as _;
 
-use super::Deployment;
-use super::support::{Fault, RunCtx, run_once, run_retrying};
+use super::Parts;
+use super::support::{Fault, RunCtx, is_cancelled, run_once, run_retrying};
 use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
 use crate::config::{ValidatedWorkerConfig, WorkerConfig, format_duration};
 use crate::gateway::Gateway;
@@ -48,7 +48,7 @@ pub(super) struct Execution {
 /// body takes the execution by value: nothing of it outlives the call.
 pub(super) async fn execute<'ctx, C, T, F, Fut>(
     ctx: &C,
-    deployment: &Deployment,
+    parts: &Parts,
     body: F,
 ) -> Result<T, HandlerError>
 where
@@ -58,7 +58,7 @@ where
 {
     let span = execution_span(ctx.scope(), ctx.key(), ctx.invocation_id());
     async move {
-        let execution = run_prologue(ctx, &deployment.accounts, &deployment.config).await?;
+        let execution = run_prologue(ctx, &parts.accounts, &parts.config).await?;
         body(execution).await
     }
     .instrument(span)
@@ -292,7 +292,15 @@ fn account_of(resolution: Resolution) -> Result<Account, Fault> {
 
 /// The fault of an `account` step that ended without a resolution: the
 /// resolve policy is exhausted (500) or the invocation was cancelled (409).
+/// Both `unavailable`; the message tells them apart, and only the exhausted
+/// one is told to retry (nothing was sent either way).
 fn resolve_exhausted(error: &TerminalError) -> Fault {
+    if is_cancelled(error) {
+        return Fault::unavailable(format!(
+            "the account resolution was cancelled ({}); nothing was sent",
+            error.code()
+        ));
+    }
     Fault::unavailable(format!(
         "the account could not be resolved ({}): {}; retry with a new Idempotency-Key",
         error.code(),
@@ -771,6 +779,16 @@ mod tests {
                 .contains("retry with a new Idempotency-Key"),
             "{body}"
         );
+
+        let (status, body) = fault_body(resolve_exhausted(&TerminalError::new_with_code(
+            409,
+            "cancelled",
+        )));
+        assert_eq!(status, 503);
+        assert_eq!(body["code"], "unavailable");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("cancelled (409)"), "{body}");
+        assert!(!message.contains("retry"), "not told to retry: {body}");
     }
 
     /// The `unavailable` fault of a failed credential fetch tells the caller

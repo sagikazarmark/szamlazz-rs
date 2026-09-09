@@ -85,9 +85,9 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         [
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-prepayment",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-invoice",
             "create-invoice",
         ],

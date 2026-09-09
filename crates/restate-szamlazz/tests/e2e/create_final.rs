@@ -1,5 +1,5 @@
 //! `Szamlazz.Order.create_final` under Restate: its one path, the prepayment
-//! invoice settled first (`prepayment-for-final`), then the lookup and the
+//! invoice settled first (`lookup-prepayment`), then the lookup and the
 //! create naming it on the wire. The refusals (nothing under `…:prepayment`,
 //! a reversed one, a collision) and the exclusivity rows a live final invoice
 //! closes the order with (#62) are unit tests of `service::create`.
@@ -11,7 +11,7 @@ use crate::harness::szamlazz::{Doc, create_for, created, holds};
 use crate::harness::{Harness, create_body};
 
 /// A live prepayment invoice under `…:prepayment` is recorded by
-/// `prepayment-for-final` and named on the wire (`elolegSzamlaszam` beside
+/// `lookup-prepayment` and named on the wire (`elolegSzamlaszam` beside
 /// the `vegszamla` flag, under the `…:final` external id), and is never
 /// foreign to the lookup step's hint although it is the newest live
 /// invoice-kind document under the order.
@@ -56,7 +56,7 @@ pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) 
         [
             "namespace",
             "account",
-            "prepayment-for-final",
+            "lookup-prepayment",
             "lookup-final",
             "create-final",
         ]

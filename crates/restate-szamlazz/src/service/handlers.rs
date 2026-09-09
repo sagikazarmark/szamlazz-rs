@@ -18,7 +18,7 @@ use super::{Agent, Body, Order};
 use crate::contract::{
     CheckAccountResponse, CorrectRequest, CreateRequest, CreateResponse, DeleteProformaRequest,
     DeleteProformaResponse, DocumentKind, OrderStatus, QueryRequest, QueryResponse,
-    QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
+    QueryTaxpayerRequest, QueryTaxpayerResponse, SetCreditEntriesRequest, SetCreditEntriesResponse,
     StornoRequest, StornoResponse,
 };
 
@@ -270,12 +270,21 @@ impl Order {
     /// What szamlazz.hu holds under the order's external ids right now: four
     /// queries, no state. Read-only, so it runs concurrently with the
     /// exclusive handlers. The journal is retained a day so that it can be
-    /// inspected; there is nothing to replay. The timeouts are the reads': a
-    /// read step is one round trip bounded by the 60 s client timeout, and
-    /// szamlazz.hu has been seen to stall for a minute and still answer, so
-    /// the server's 1 m default would suspend exactly such a read.
+    /// inspected; there is nothing to replay. The retry policy is the reads'
+    /// (`10s → 1m`, three attempts, the same as `Szamlazz.Agent.query`'s):
+    /// pinned like every other handler's, so no server default leaks through.
+    /// The timeouts are the reads': a read step is one round trip bounded by
+    /// the 60 s client timeout, and szamlazz.hu has been seen to stall for a
+    /// minute and still answer, so the server's 1 m default would suspend
+    /// exactly such a read.
     #[handler(
-        invocation_retry_policy(max_attempts = 3, on_max_attempts = "kill"),
+        invocation_retry_policy(
+            initial_interval = "10s",
+            factor = 2.0,
+            max_interval = "1m",
+            max_attempts = 3,
+            on_max_attempts = "kill"
+        ),
         inactivity_timeout = "2m",
         abort_timeout = "2m",
         journal_retention = "1d"
@@ -420,15 +429,15 @@ impl Agent {
         journal_retention = "3d",
         idempotency_retention = "30d"
     )]
-    async fn set_payments(
+    async fn set_credit_entries(
         &self,
         ctx: Context<'_>,
-        request: Body<SetPaymentsRequest>,
-    ) -> HandlerResult<Json<SetPaymentsResponse>> {
+        request: Body<SetCreditEntriesRequest>,
+    ) -> HandlerResult<Json<SetCreditEntriesResponse>> {
         let request = request.into_request()?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
-            execution.set_payments_request(ctx, request).await
+            execution.set_credit_entries_request(ctx, request).await
         })
         .await
         .map(Json)

@@ -44,7 +44,7 @@ mod journaled {
 
     use crate::gateway::{
         CreateOutcome, DeleteOutcome, LookupOutcome, OwnershipOutcome, ProbeOutcome, QueryOutcome,
-        SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
+        SetCreditEntriesOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
     };
     use crate::identity::Namespace;
     use crate::service::prologue::Resolution;
@@ -85,7 +85,7 @@ mod journaled {
         StornoLookupOutcome,
         StornoOutcome,
         DeleteOutcome,
-        SetPaymentsOutcome,
+        SetCreditEntriesOutcome,
         ProbeOutcome,
         TaxpayerOutcome,
     );
@@ -266,9 +266,19 @@ impl From<Fault> for HandlerError {
 
 /// The fault of a read step that ended without an answer: the read policy is
 /// exhausted (500, carrying the last `Unanswered`'s message) or the
-/// invocation was cancelled (409). The caller attaches the document it was
-/// reading about when it knows one.
+/// invocation was cancelled (409). Both are the `unavailable` fault (the
+/// fault vocabulary is the seven codes, and a cancelled read sent nothing,
+/// so nothing is unknown about the document), but the message tells them
+/// apart: an exhausted read says to retry, a cancelled one does not, since
+/// Restate's guidance on a cancellation is that the caller does not retry it.
+/// The caller attaches the document it was reading about when it knows one.
 pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
+    if is_cancelled(error) {
+        return Fault::unavailable(format!(
+            "the {step} read was cancelled ({}) before szamlazz.hu answered; nothing was sent",
+            error.code()
+        ));
+    }
     Fault::unavailable(format!(
         "the {step} read ended without an answer from szamlazz.hu ({}): {}; retry with a new Idempotency-Key or read get",
         error.code(),
@@ -281,8 +291,19 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
 /// message: "cancelled" }`). A closure's own error never reaches a run's
 /// `TerminalError` with this code (`run_retrying` turns it into a retryable
 /// failure and exhaustion is 500), so on a run's error the code alone tells a
-/// cancellation from an exhausted policy.
+/// cancellation from an exhausted policy. The SDK exports no constant for it;
+/// the e2e's cancellation mid-send
+/// (`a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key`) is
+/// what holds this one to a real cancelled run.
 const CANCELLED: u16 = 409;
+
+/// Whether the `TerminalError` a run ended with is the SDK's cancellation
+/// ([`CANCELLED`]) rather than an exhausted retry policy. What every mapping
+/// of a run's error onto a fault asks first, so a cancelled invocation is
+/// never told to retry as if its policy had run out.
+pub(super) fn is_cancelled(error: &TerminalError) -> bool {
+    error.code() == CANCELLED
+}
 
 /// What a **best-effort** read makes of a run that ended without an answer:
 /// the storno-number hint after a verify found the document already reversed,
@@ -300,7 +321,7 @@ const CANCELLED: u16 = 409;
 ///
 /// The cancellation, unchanged.
 pub(super) fn best_effort(step: &str, error: TerminalError) -> Result<(), TerminalError> {
-    if error.code() == CANCELLED {
+    if is_cancelled(&error) {
         return Err(error);
     }
     tracing::warn!(
@@ -368,6 +389,21 @@ pub(super) fn verified_document(
 /// generic caller cannot see (rust-lang/rust#100013, "`Send` is not general
 /// enough" inside the handler dispatcher). [`RunCtx::run`] returns a boxed
 /// `Send` future, which is `Send` for every caller.
+///
+/// **Step names.** A run's name is what the Restate UI, `sys_journal` and the
+/// e2e's step-name table show: kebab-case, `{verb}-{object}[-{parameter}]`
+/// (`lookup-invoice`, `create-proforma`, `verify-original-{number}`,
+/// `storno-{number}`, `lookup-taxpayer-{prefix}`, `set-credit-entries-{number}`)
+/// or a bare noun where the step is the handler's one read of that thing
+/// (`namespace`, `account`, `probe`, `query`). The verb is the gateway's
+/// question: `lookup-{kind}` is every ownership read of one of the order's
+/// external ids, whatever the handler then decides (an exclusivity check, a
+/// proforma link, `get`'s four reads, the lookup step; the table lists which
+/// handler journals it where), `verify-*` a read by number, `hint-*` a
+/// best-effort read, `create-*` / `storno-*` / `delete-*` / `set-*` a write. A
+/// `{number}` / `{prefix}` parameter is bounded (the contract's
+/// `InvoiceNumber`, the `TaxpayerPrefix`) so the name is. The table in
+/// `tests/e2e/harness/run_names.rs` lists every name in order.
 pub(in crate::service) trait RunCtx<'ctx>: Sync {
     /// The scope the request arrived under, `None` when unscoped.
     fn scope(&self) -> Option<&str>;
@@ -437,7 +473,7 @@ run_ctx!(Context, |_ctx| None);
 /// Journals the result of `f` under `name`, executing it at most once per
 /// journal entry (`RunRetryPolicy::max_attempts(1)`): the pure `namespace`
 /// pin and the write steps that have no retry of their own
-/// (`delete-proforma-*`, `set-payments-*`) return every outcome as data, so a
+/// (`delete-proforma-*`, `set-credit-entries-*`) return every outcome as data, so a
 /// closure failure is a bug, not a retry. Reads go through [`run_reading`].
 pub(in crate::service) async fn run_once<'ctx, C, T, F, Fut>(
     ctx: &C,
@@ -608,8 +644,8 @@ mod tests {
         assert_eq!(body["order"], "ORD-1");
         assert_eq!(body["kind"], "invoice");
         assert_eq!(body["external_id"], "acct:ORD-1:invoice");
-        assert_eq!(body.get("gen"), None);
-        assert_eq!(body.get("request_id"), None);
+        assert_eq!(body["gen"], serde_json::Value::Null);
+        assert_eq!(body["request_id"], serde_json::Value::Null);
 
         let cases = [
             (Fault::invalid_input("x"), 400, "invalid_input"),
@@ -634,7 +670,7 @@ mod tests {
             assert_eq!(error.code(), status);
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             assert_eq!(body["code"], code);
-            assert_eq!(body.get("order"), None);
+            assert_eq!(body["order"], serde_json::Value::Null);
         }
     }
 
@@ -670,7 +706,7 @@ mod tests {
         ] {
             let error = TerminalError::from(fault);
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-            assert_eq!(body.get("szamlazz_code"), None, "{body}");
+            assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
         }
     }
 
@@ -743,7 +779,11 @@ mod tests {
             );
             assert!(!message.contains("attempt"), "{label}: {message}");
             assert!(!message.contains("issued nothing"), "{label}: {message}");
-            assert_eq!(body.get("order"), None, "{label}: nothing attached");
+            assert_eq!(
+                body["order"],
+                serde_json::Value::Null,
+                "{label}: nothing attached"
+            );
         }
         drop(guard);
 
@@ -812,7 +852,11 @@ mod tests {
         );
         assert!(message.contains("500"), "{message}");
         assert!(message.contains("Idempotency-Key"), "{message}");
-        assert_eq!(body.get("order"), None, "nothing attached yet");
+        assert_eq!(
+            body["order"],
+            serde_json::Value::Null,
+            "nothing attached yet"
+        );
 
         let order = OrderKey::parse("ORD-1").expect("order");
         let about = fault.about(
@@ -827,9 +871,19 @@ mod tests {
         assert_eq!(body["external_id"], "acct:ORD-1:invoice");
 
         let cancelled = TerminalError::new_with_code(409, "cancelled");
-        let error = TerminalError::from(read_exhausted("get-proforma", &cancelled));
-        assert_eq!(error.code(), 503, "a cancellation is the same fault");
-        assert!(error.message().contains("409"), "{}", error.message());
+        let error = TerminalError::from(read_exhausted("lookup-proforma", &cancelled));
+        assert_eq!(error.code(), 503, "a cancellation is the same fault code");
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("lookup-proforma"), "{message}");
+        assert!(
+            message.contains("cancelled") && message.contains("(409)"),
+            "names the cancellation: {message}"
+        );
+        assert!(
+            !message.contains("retry"),
+            "a cancelled request is not told to retry: {message}"
+        );
     }
 
     /// The best-effort reads (the storno-number hint after a verify found the
@@ -905,7 +959,11 @@ mod tests {
                 message.contains("must not have leading or trailing whitespace"),
                 "{raw:?}: names the rule: {message}"
             );
-            assert_eq!(body.get("order"), None, "{raw:?}: no order identity yet");
+            assert_eq!(
+                body["order"],
+                serde_json::Value::Null,
+                "{raw:?}: no order identity yet"
+            );
         }
 
         // The type's own alphabet still applies to a trimmed key, with its
@@ -927,7 +985,11 @@ mod tests {
                 body["message"].as_str().expect("message").contains(rule),
                 "{raw:?}: names the rule: {body}"
             );
-            assert_eq!(body.get("order"), None, "{raw:?}: no order identity yet");
+            assert_eq!(
+                body["order"],
+                serde_json::Value::Null,
+                "{raw:?}: no order identity yet"
+            );
         }
     }
 }

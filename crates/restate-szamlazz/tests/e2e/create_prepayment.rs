@@ -1,5 +1,5 @@
 //! `Szamlazz.Order.create_prepayment` under Restate: its two paths, the
-//! proforma linked under the default `auto` (`proforma-link`) and the one
+//! proforma linked under the default `auto` (`lookup-proforma`) and the one
 //! named by number (`verify-proforma-{number}`), each ending in an issued
 //! prepayment invoice with the reference beside the `elolegszamla` flag on
 //! the wire (#69). The refusals (`none` beside a live proforma, the other
@@ -13,7 +13,7 @@ use wiremock::matchers::body_string_contains;
 use crate::harness::szamlazz::{Doc, create_for, created, holds};
 use crate::harness::{Harness, document};
 
-/// Under `auto` the order's live proforma is found by the `proforma-link` read
+/// Under `auto` the order's live proforma is found by the `lookup-proforma` read
 /// and linked explicitly; under `{number}` the named proforma is verified by
 /// number (this order's) in place of the link read and linked. Both creates
 /// carry `dijbekeroSzamlaszam` and `elolegszamla`; one order each.
@@ -72,9 +72,9 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
         [
             "namespace",
             "account",
-            "exclusivity-invoice",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-invoice",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-prepayment",
             "create-prepayment",
         ]
@@ -100,8 +100,8 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
         [
             "namespace",
             "account",
-            "exclusivity-invoice",
-            "exclusivity-final",
+            "lookup-invoice",
+            "lookup-final",
             "verify-proforma-D-10P",
             "lookup-prepayment",
             "create-prepayment",

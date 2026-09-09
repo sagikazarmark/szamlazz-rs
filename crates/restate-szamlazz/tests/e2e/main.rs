@@ -393,7 +393,7 @@ async fn e2e_order_protocol() {
             concurrency::same_key_same_scope_second_call_between_the_first_calls_executions,
             concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation,
             agent_reads::the_scope_selects_the_account_for_every_agent_read,
-            agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account,
+            agent_writes::agent_storno_and_set_credit_entries_run_on_the_scoped_account,
             storno::purged_order_is_stornoed_and_reissued,
             prologue::a_flaky_resolver_is_retried_by_the_resolve_policy,
             prologue::a_killed_invocation_releases_the_order_key,
@@ -593,7 +593,7 @@ mod only_tests {
                     (),
                 ),
                 (
-                    "agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account",
+                    "agent_writes::agent_storno_and_set_credit_entries_run_on_the_scoped_account",
                     (),
                 ),
                 ("get::run_retries_do_not_spend_invocation_attempts", ()),
@@ -605,7 +605,7 @@ mod only_tests {
             selected.iter().map(|(name, ())| *name).collect::<Vec<_>>(),
             [
                 "storno::storno_then_reissue",
-                "agent_writes::agent_storno_and_set_payments_run_on_the_scoped_account",
+                "agent_writes::agent_storno_and_set_credit_entries_run_on_the_scoped_account",
             ]
         );
         assert_eq!(

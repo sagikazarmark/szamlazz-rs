@@ -34,7 +34,7 @@ impl Execution {
         let found = lookup(
             ctx,
             self,
-            "proforma-for-delete",
+            "lookup-proforma",
             &proforma_id,
             &order,
             kind.into(),
@@ -96,7 +96,7 @@ fn delete_guard(
             return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     };
-    if !found.payments.is_empty() && !force {
+    if !found.credit_entries.is_empty() && !force {
         return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
             DeleteReason::ProformaPaid,
         )));
@@ -167,7 +167,7 @@ mod tests {
         let namespace = namespace();
         let guard = |found, force| delete_guard(found, force, &namespace);
         let paid = Doc {
-            payments: &[CreditRecord::new(date(2026, 9, 4), "átutalás", "1270")],
+            credit_entries: &[CreditRecord::new(date(2026, 9, 4), "átutalás", "1270")],
             ..Doc::new("D-1", "D")
         };
         let unpaid = Doc::new("D-1", "D");
@@ -285,7 +285,7 @@ mod tests {
         );
         assert_eq!(status, 500, "{body}");
         assert_eq!(body["code"], "outcome_unknown", "{body}");
-        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("connection reset"), "{message}");
         assert!(

@@ -70,7 +70,7 @@ Verified practice facts that bear on the decision:
    the form "identical means bug" is wrong.
 5. Credit entries do not carry over, and the server erases `<kifizetesek>` from the original on
    storno (verified). The service snapshots them into history before a storno; the caller
-   re-registers on the new invoice via `Szamlazz.Agent.set_payments`.
+   re-registers on the new invoice via `Szamlazz.Agent.set_credit_entries`.
 6. The new invoice carries the true, caller-supplied fulfillment date; the service never defaults
    it on reissue.
 

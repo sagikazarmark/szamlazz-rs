@@ -51,12 +51,12 @@ use crate::account::{
     SellerEmailConfig, StaticConfig, StaticResolver,
 };
 use crate::contract::{
-    PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
+    CreditEntryInput, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
 use crate::gateway::{
     CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, OwnershipOutcome,
-    ProbeOutcome, QueryOutcome, Rejection, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome,
-    SzamlazzAnswer, TaxpayerOutcome, Unanswered,
+    ProbeOutcome, QueryOutcome, Rejection, SetCreditEntriesOutcome, StornoLookupOutcome,
+    StornoOutcome, SzamlazzAnswer, TaxpayerOutcome, Unanswered,
 };
 use crate::identity::Namespace;
 use crate::test_support::open_gateway;
@@ -240,18 +240,18 @@ fn entries() -> Vec<Entry> {
             DeleteOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
         ], &variants!(DeleteOutcome { Deleted, AlreadyGone, Rejected(_), CredentialsRejected(_), Lost(_) })));
     all.extend(entries_of(vec![
-            SetPaymentsOutcome::Done {
+            SetCreditEntriesOutcome::Done {
                 outstanding: Some(dec!(0)),
                 gross: Some(dec!(12700)),
             },
-            SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
+            SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
                 "463",
                 "Sztornózott számlára nem rögzíthető kifizetés.",
             ))),
-            SetPaymentsOutcome::CredentialsRejected(CREDENTIALS.answer()),
-            SetPaymentsOutcome::Lost(Unanswered::Transport(TRANSPORT.to_owned())),
-            SetPaymentsOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
-        ], &variants!(SetPaymentsOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Lost(_) })));
+            SetCreditEntriesOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            SetCreditEntriesOutcome::Lost(Unanswered::Transport(TRANSPORT.to_owned())),
+            SetCreditEntriesOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
+        ], &variants!(SetCreditEntriesOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Lost(_) })));
     all.extend(entries_of(
         vec![
             ProbeOutcome::Accepted,
@@ -401,7 +401,7 @@ fn reply(number: &str, net: &str, gross: &str, outstanding: &str) -> RawResponse
 
 /// A queried invoice (`SZ`) with every element szamlazz.hu's `szamla` XML can
 /// carry, parsed through the agent crate: a test-account e-invoice of
-/// `ORD-1` referencing `SZ-0` and the proforma `D-1`, with two payments, a
+/// `ORD-1` referencing `SZ-0` and the proforma `D-1`, with two credit entries, a
 /// seller block, a buyer block, line items, ledger blocks, labels and a PDF.
 fn wire_document(number: &str, reversed: bool) -> InvoiceDocument {
     let sztornozott = if reversed {
@@ -515,7 +515,7 @@ fn every_journaled_type_is_sampled() {
 /// credential store as a journalable value (`Credentials` has no serde
 /// implementation; the `account` tests' compile-time guard), so the one path
 /// with key-adjacent input is a transport failure's text: `DeleteOutcome` and
-/// `SetPaymentsOutcome` journal one, produced here by a gateway holding a
+/// `SetCreditEntriesOutcome` journal one, produced here by a gateway holding a
 /// sentinel key against an endpoint that refuses connections. Every other
 /// sample is scanned too, so the claim stays "every entry" when a variant
 /// gains an input. The e2e scan of every journal byte, which needs a server,
@@ -563,15 +563,17 @@ async fn no_journal_entry_carries_the_agent_key() {
     let gateway = open_gateway(account, credentials);
     let delete = gateway.delete_proforma("D-1").await;
     assert!(matches!(delete, DeleteOutcome::Lost(_)), "{delete:?}");
-    let payments = [PaymentEntry::new(
+    let credit_entries = [CreditEntryInput::new(
         jiff::civil::date(2026, 7, 4),
         ContractPaymentMethod::Transfer,
         dec!(12700),
     )];
-    let set_payments = gateway.set_payments("SZ-1", &payments, false).await;
+    let set_credit_entries = gateway
+        .set_credit_entries("SZ-1", &credit_entries, false)
+        .await;
     assert!(
-        matches!(set_payments, SetPaymentsOutcome::Lost(_)),
-        "{set_payments:?}"
+        matches!(set_credit_entries, SetCreditEntriesOutcome::Lost(_)),
+        "{set_credit_entries:?}"
     );
     for (label, json) in [
         (
@@ -579,8 +581,8 @@ async fn no_journal_entry_carries_the_agent_key() {
             serde_json::to_string(&delete).expect("serialises"),
         ),
         (
-            "SetPaymentsOutcome::Lost",
-            serde_json::to_string(&set_payments).expect("serialises"),
+            "SetCreditEntriesOutcome::Lost",
+            serde_json::to_string(&set_credit_entries).expect("serialises"),
         ),
     ] {
         assert!(!contains_sentinel(&json), "{label}: {json}");

@@ -545,7 +545,7 @@ pub enum InvalidCorrectionId {
 }
 
 /// A caller-supplied invoice number (`számlaszám`), as the by-number requests
-/// take it: `Szamlazz.Agent.query`'s selector, `set_payments`, `storno`,
+/// take it: `Szamlazz.Agent.query`'s selector, `set_credit_entries`, `storno`,
 /// `Szamlazz.Order.storno_invoice`, the base of `correct_invoice` and the
 /// `options.proforma: {number}` link.
 ///
@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     /// A caller-supplied invoice number as the by-number requests take it
-    /// (`Szamlazz.Agent.query`'s selector, `set_payments`, `storno`,
+    /// (`Szamlazz.Agent.query`'s selector, `set_credit_entries`, `storno`,
     /// `Szamlazz.Order.storno_invoice`, `correct_invoice`'s base and the
     /// `options.proforma: {number}` link): at most 40 bytes, no whitespace, no
     /// control character, no `:`. It flows into step names and into the

@@ -36,9 +36,9 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "exclusivity-invoice",
-            "exclusivity-prepayment",
-            "exclusivity-final",
+            "lookup-invoice",
+            "lookup-prepayment",
+            "lookup-final",
             "lookup-proforma",
             "create-proforma",
         ],
@@ -49,9 +49,9 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-prepayment",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-invoice",
             "create-invoice",
         ],
@@ -62,8 +62,8 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
+            "lookup-prepayment",
+            "lookup-final",
             "verify-proforma-{number}",
             "lookup-invoice",
             "create-invoice",
@@ -75,9 +75,9 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "exclusivity-invoice",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-invoice",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-prepayment",
             "create-prepayment",
         ],
@@ -88,8 +88,8 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "exclusivity-invoice",
-            "exclusivity-final",
+            "lookup-invoice",
+            "lookup-final",
             "verify-proforma-{number}",
             "lookup-prepayment",
             "create-prepayment",
@@ -101,7 +101,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "prepayment-for-final",
+            "lookup-prepayment",
             "lookup-final",
             "create-final",
         ],
@@ -123,7 +123,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "verify-storno-{number}",
+            "verify-original-{number}",
             "lookup-storno-{number}",
             "storno-{number}",
         ],
@@ -134,7 +134,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "verify-storno-{number}",
+            "verify-original-{number}",
             "hint-storno-{number}",
         ],
     ),
@@ -144,7 +144,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "proforma-for-delete",
+            "lookup-proforma",
             "delete-proforma-{number}",
         ],
     ),
@@ -154,10 +154,10 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "get-proforma",
-            "get-invoice",
-            "get-prepayment",
-            "get-final",
+            "lookup-proforma",
+            "lookup-invoice",
+            "lookup-prepayment",
+            "lookup-final",
         ],
     ),
     RunPath::new(
@@ -173,12 +173,12 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
     RunPath::new(
         "Szamlazz.Agent",
         "query_taxpayer",
-        &["namespace", "account", "taxpayer-{prefix}"],
+        &["namespace", "account", "lookup-taxpayer-{prefix}"],
     ),
     RunPath::new(
         "Szamlazz.Agent",
-        "set_payments",
-        &["namespace", "account", "set-payments-{number}"],
+        "set_credit_entries",
+        &["namespace", "account", "set-credit-entries-{number}"],
     ),
     RunPath::new(
         "Szamlazz.Agent",
@@ -186,7 +186,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
-            "verify-{number}",
+            "verify-original-{number}",
             "lookup-storno-{number}",
             "storno-{number}",
         ],

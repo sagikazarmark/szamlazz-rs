@@ -163,7 +163,7 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     assert_eq!(done.completion_failure, None, "{done:?}");
     assert_eq!(
         h.admin().runs(&queued).await,
-        ["namespace", "account", "proforma-for-delete"],
+        ["namespace", "account", "lookup-proforma"],
         "the queued delete ran to its answer (absent)"
     );
     assert_eq!(

@@ -27,9 +27,10 @@ correcting, storno and delete handlers carry `invocation_retry_policy(initial_in
 factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "kill")` with
 `inactivity_timeout = "4m"` and `abort_timeout = "3m"` (the create closure may take up to 180 s:
 the leading external-id query, the create, a re-query, 60 s each), and so does `Szamlazz.Agent.storno` (#87).
-`Szamlazz.Agent.set_payments` uses `initial_interval = "2m", max_attempts = 2, kill` (its timeouts and retry
-interval: #41 and #61, below; why two: #87); read-only handlers (`Szamlazz.Order.get` with `verify`, `Szamlazz.Agent.query`) may retry more freely
-because queries are safe to repeat, but they kill too. The external-id query inside the create step
+`Szamlazz.Agent.set_credit_entries` uses `initial_interval = "2m", max_attempts = 2, kill` (its timeouts and retry
+interval: #41 and #61, below; why two: #87); read-only handlers (`Szamlazz.Order.get`, `Szamlazz.Agent.query`, `query_taxpayer`, `check_account`) may retry more freely
+because queries are safe to repeat (`initial_interval = "10s", factor = 2.0, max_interval = "1m", max_attempts = 3`, pinned on
+every one of them since the Restate-conventions review, so no server default leaks through), but they kill too. The external-id query inside the create step
 is what makes kill safe; kill is what keeps the key reachable.
 
 ## Verified Restate facts
@@ -159,12 +160,12 @@ re-query at up to 60 s each, ~180 s in the worst case) but carried `inactivity_t
 re-execution's leading query finds a landed storno, but a full prologue replay and a needless round. It now
 carries `Szamlazz.Order`'s `4m` / `3m`; the discovery test asserts them.
 
-`Szamlazz.Agent.set_payments` had `max_attempts = 2, kill` with no `initial_interval`, so the one retry after a
+`Szamlazz.Agent.set_credit_entries` had `max_attempts = 2, kill` with no `initial_interval`, so the one retry after a
 crash ran on the server's ~500 ms default. Its send is **at-least-once** under `additive: true` (every send that
 reaches szamlazz.hu appends the entries, and the handler cannot tell a lost reply from a lost request), so a retry
 that fires while the first send is still in flight (the client waits up to 60 s) could append twice. It now
 carries an explicit `initial_interval = "2m"`, longer than the client timeout; the `outcome_unknown` message is
-conditional on `additive` ("query the invoice before re-sending" rather than "call set_payments again"), and the
+conditional on `additive` ("query the invoice before re-sending" rather than "call set_credit_entries again"), and the
 hazard is stated on the request field and in both READMEs. Its timeouts stay `2m` / `2m` (one send).
 
 Amended #41 also settled the 71/152 contradiction (design §5 step 4): a duplicate-order-number refusal with nothing
@@ -180,7 +181,7 @@ still issuing (behaviour notes; [ADR 0002](0002-order-keyed-idempotency-via-exte
 ~90 s" bound). Until #61 the rule held by convention, with two gaps.
 
 `Szamlazz.Agent.storno` had `max_attempts = 2, kill` with no `initial_interval` (the same omission #41 closed on
-`set_payments`), so the one retry after a crash (a rollout cutting the connection mid-storno) was re-dispatched at the
+`set_credit_entries`), so the one retry after a crash (a rollout cutting the connection mid-storno) was re-dispatched at the
 server's ~500 ms default while the first `xmlszamlast` could still be in flight; its re-execution's leading query
 would then find nothing and send a second storno. Not lossy (szamlazz.hu answers a repeated storno with the existing
 storno number), but a second send the rule forbids, and the endpoint README documented the 500 ms as the behaviour. It
@@ -232,7 +233,7 @@ Consequences for the numbers of this ADR:
   `Szamlazz.Order.storno_invoice` (the same closure) survived ~24 min. Nothing about an unmanaged storno justifies
   the asymmetry: the step is query-first and szamlazz.hu's storno is idempotent server-side. It now carries
   `Szamlazz.Order`'s policy (`2m`, factor 2, `10m`, 5, kill); the discovery test pins it.
-- **`Szamlazz.Agent.set_payments` stays at 2.** Its send is at-least-once under `additive: true` and has no query
+- **`Szamlazz.Agent.set_credit_entries` stays at 2.** Its send is at-least-once under `additive: true` and has no query
   in front of it, so every invocation attempt is a potential second copy of the entries; the one handler where the
   attempt count is a duplicate hazard rather than an availability knob.
 - **The 500 of a killed invocation is the last retryable error's text**, not the worker's `{code, message}` fault
@@ -254,7 +255,7 @@ Two waits the worker could sit in had no bound of their own (review 2026-09-06, 
 and `check_account` set neither `inactivity_timeout` nor `abort_timeout`, so they took Restate's 1 m / 1 m, while
 every write handler sized its own from one rule, a step's szamlazz.hu round trips at the Számla Agent client's
 `REQUEST_TIMEOUT` (60 s) each, plus margin: `4m` / `3m` for the create and storno steps' three trips, `2m` / `2m` for
-`set_payments`' one send. A read step is one trip bounded by the same 60 s, and szamlazz.hu has been observed to stall
+`set_credit_entries`' one send. A read step is one trip bounded by the same 60 s, and szamlazz.hu has been observed to stall
 for a minute at a time and still answer (behaviour notes), so a stalled read landed exactly on the default inactivity
 boundary: suspended, then aborted, an invocation attempt spent on a read that would have completed, and `get` is
 four such reads back to back. The four read handlers now carry `inactivity_timeout = 2m`, `abort_timeout = 2m`, the

@@ -27,7 +27,7 @@ impl Execution {
             let looked_up = lookup(
                 ctx,
                 self,
-                format!("get-{kind}"),
+                format!("lookup-{kind}"),
                 &external_id,
                 &order,
                 kind.into(),
@@ -101,7 +101,7 @@ fn document_status(found: &FoundDocument) -> DocumentStatus {
     let mut status = DocumentStatus::new(&found.number, state);
     status.gross = Some(found.gross_total);
     status.net = Some(found.net_total);
-    status.payments = found.payment_amounts();
+    status.credit_entries = found.credit_entry_amounts();
     status
         .referenced_proforma
         .clone_from(&found.referenced_proforma_number);
@@ -133,7 +133,7 @@ mod tests {
     fn the_document_status_projects_what_szamlazz_reports() {
         let live = document_status(
             &Doc {
-                payments: &[
+                credit_entries: &[
                     CreditRecord::new(date(2026, 9, 4), "átutalás", "500"),
                     CreditRecord::new(date(2026, 9, 5), "átutalás", "770"),
                 ],
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(live.state, DocumentState::Live);
         assert_eq!(live.gross, Some(dec!(1270)));
         assert_eq!(live.net, Some(dec!(1000)));
-        assert_eq!(live.payments, [dec!(500), dec!(770)]);
+        assert_eq!(live.credit_entries, [dec!(500), dec!(770)]);
         assert_eq!(live.referenced_proforma.as_deref(), Some("D-1"));
         assert_eq!(live.e_invoice, Some(false), "eszamla 1 is paper");
 
@@ -165,7 +165,7 @@ mod tests {
                 storno_number: None
             }
         );
-        assert!(reversed_status.payments.is_empty());
+        assert!(reversed_status.credit_entries.is_empty());
         assert_eq!(reversed_status.referenced_proforma, None);
         assert_eq!(
             reversed_status.e_invoice,

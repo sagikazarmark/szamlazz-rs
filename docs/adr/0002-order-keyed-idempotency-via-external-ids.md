@@ -181,7 +181,7 @@ J-07-12). The decisions:
   110 is what was verified.
 - **The caller's `invoice_number` is a contract type**, `contract::InvoiceNumber`: 1–40 bytes, no whitespace,
   no control character, no `:`, refused by its `Deserialize` so a bad number is a *Malformed body*
-  (`invalid_input` before the prologue). It flows into step names (`verify-{number}`, `storno-{number}`) and
+  (`invalid_input` before the prologue). It flows into step names (`verify-original-{number}`, `storno-{number}`) and
   into the storno external ids, so it is bounded like the other segments. Nothing is trimmed: a padded number
   would be answered 7 by szamlazz.hu, and the rule is the better diagnosis. szamlazz.hu's own numbers are far
   inside the bound; NAV allows 50 characters, so 40 is a bet that no real prefix approaches it: raise it,

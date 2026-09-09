@@ -1,4 +1,4 @@
-//! The one-shot writes (`delete_proforma`, `set_payments`): every szamlazz.hu
+//! The one-shot writes (`delete_proforma`, `set_credit_entries`): every szamlazz.hu
 //! answer as data, and the *Lost answer* (a send szamlazz.hu did not answer,
 //! by transport or `szlahu_down`) as data too, since the step runs once.
 
@@ -7,9 +7,9 @@ use super::common::{
 };
 use super::harness::*;
 use jiff::civil::date;
-use restate_szamlazz::contract::{PaymentEntry, PaymentMethod};
+use restate_szamlazz::contract::{CreditEntryInput, PaymentMethod};
 use restate_szamlazz::gateway::{
-    DeleteOutcome, Rejection, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer, Unanswered,
+    DeleteOutcome, Rejection, RejectionCode, SetCreditEntriesOutcome, SzamlazzAnswer, Unanswered,
 };
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
@@ -79,7 +79,7 @@ async fn delete_proforma_outcomes() {
 }
 
 #[tokio::test]
-async fn set_payments_outcomes() {
+async fn set_credit_entries_outcomes() {
     let h = Harness::start().await;
     credit()
         .and(body_string_contains("<szamlaszam>SZ-1</szamlaszam>"))
@@ -101,19 +101,19 @@ async fn set_payments_outcomes() {
         .respond_with(szlahu_down())
         .mount(&h.server)
         .await;
-    let entry = PaymentEntry {
+    let entry = CreditEntryInput {
         date: date(2026, 9, 3),
-        method: PaymentMethod::Card,
+        title: PaymentMethod::Card,
         amount: dec!(1000),
-        description: Some("card".to_owned()),
+        comment: Some("card".to_owned()),
     };
 
     match h
         .gateway
-        .set_payments("SZ-1", std::slice::from_ref(&entry), true)
+        .set_credit_entries("SZ-1", std::slice::from_ref(&entry), true)
         .await
     {
-        SetPaymentsOutcome::Done { outstanding, gross } => {
+        SetCreditEntriesOutcome::Done { outstanding, gross } => {
             // The body's <kintlevoseg> takes precedence over the header.
             assert_eq!(outstanding, Some(dec!(1270)));
             assert_eq!(gross, Some(dec!(1270)));
@@ -128,34 +128,34 @@ async fn set_payments_outcomes() {
 
     assert_eq!(
         h.gateway
-            .set_payments("SZ-2", std::slice::from_ref(&entry), false)
+            .set_credit_entries("SZ-2", std::slice::from_ref(&entry), false)
             .await,
-        SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("463", "reversed")))
+        SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("463", "reversed")))
     );
     assert!(matches!(
         h.gateway
-            .set_payments("SZ-3", std::slice::from_ref(&entry), false)
+            .set_credit_entries("SZ-3", std::slice::from_ref(&entry), false)
             .await,
-        SetPaymentsOutcome::Lost(Unanswered::Transport(_))
+        SetCreditEntriesOutcome::Lost(Unanswered::Transport(_))
     ));
     assert!(matches!(
         h.gateway
-            .set_payments("SZ-4", std::slice::from_ref(&entry), false)
+            .set_credit_entries("SZ-4", std::slice::from_ref(&entry), false)
             .await,
-        SetPaymentsOutcome::Lost(Unanswered::Unavailable(_))
+        SetCreditEntriesOutcome::Lost(Unanswered::Unavailable(_))
     ));
     let six = vec![entry; 6];
     assert!(matches!(
-        h.gateway.set_payments("SZ-9", &six, false).await,
-        SetPaymentsOutcome::Rejected(Rejection {
+        h.gateway.set_credit_entries("SZ-9", &six, false).await,
+        SetCreditEntriesOutcome::Rejected(Rejection {
             code: RejectionCode::Request,
             ..
         })
     ));
-    // A replacing call with no entries would clear the invoice's payments:
+    // A replacing call with no entries would clear the invoice's credit entries:
     // refused by the agent crate before the wire, the caller's request.
-    match h.gateway.set_payments("SZ-9", &[], false).await {
-        SetPaymentsOutcome::Rejected(Rejection { code, message, .. }) => {
+    match h.gateway.set_credit_entries("SZ-9", &[], false).await {
+        SetCreditEntriesOutcome::Rejected(Rejection { code, message, .. }) => {
             assert_eq!(code, RejectionCode::Request);
             assert_eq!(code.as_str(), RejectionCode::REQUEST);
             assert!(message.contains("at least one entry"), "{message}");

@@ -1,5 +1,5 @@
 //! Contract of the `Szamlazz.Agent` handlers that are not a storno:
-//! `query`, `query_taxpayer`, `set_payments` and `check_account`.
+//! `query`, `query_taxpayer`, `set_credit_entries` and `check_account`.
 //!
 //! `Szamlazz.Agent.storno` shares the storno contract with
 //! `Szamlazz.Order.storno_invoice`; see [`storno`](super::storno).
@@ -56,7 +56,7 @@ pub enum Selector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
-pub struct PaymentRecord {
+pub struct CreditEntryRecord {
     /// Payment date.
     #[serde(default)]
     pub date: Option<Date>,
@@ -68,12 +68,12 @@ pub struct PaymentRecord {
     /// Free-text comment.
     #[serde(default)]
     pub comment: Option<String>,
-    /// Bank account the payment arrived on.
+    /// Bank account the credit entry arrived on.
     #[serde(default)]
     pub bank_account: Option<String>,
 }
 
-impl PaymentRecord {
+impl CreditEntryRecord {
     /// A record of `amount` with every optional field absent.
     #[must_use]
     pub const fn new(amount: Decimal) -> Self {
@@ -87,13 +87,13 @@ impl PaymentRecord {
     }
 }
 
-impl From<&RecordedCreditEntry> for PaymentRecord {
-    fn from(payment: &RecordedCreditEntry) -> Self {
-        let mut record = Self::new(payment.amount);
-        record.date = Some(payment.date);
-        record.title = Some(payment.title.clone());
-        record.comment.clone_from(&payment.comment);
-        record.bank_account.clone_from(&payment.bank_account);
+impl From<&RecordedCreditEntry> for CreditEntryRecord {
+    fn from(entry: &RecordedCreditEntry) -> Self {
+        let mut record = Self::new(entry.amount);
+        record.date = Some(entry.date);
+        record.title = Some(entry.title.clone());
+        record.comment.clone_from(&entry.comment);
+        record.bank_account.clone_from(&entry.bank_account);
         record
     }
 }
@@ -146,8 +146,8 @@ pub struct QueryResponse {
     pub gross_total: Option<Decimal>,
     /// Registered credit entries.
     #[serde(default)]
-    pub payments: Vec<PaymentRecord>,
-    /// Outstanding amount: gross total minus the sum of payments.
+    pub credit_entries: Vec<CreditEntryRecord>,
+    /// Outstanding amount: gross total minus the sum of credit entries.
     #[serde(default)]
     pub outstanding: Option<Decimal>,
     /// Issued from a test account (`teszt`), as szamlazz.hu reported it:
@@ -177,7 +177,7 @@ impl QueryResponse {
             net_total: None,
             vat_total: None,
             gross_total: None,
-            payments: Vec::new(),
+            credit_entries: Vec::new(),
             outstanding: None,
             test: None,
         }
@@ -185,8 +185,8 @@ impl QueryResponse {
 }
 
 /// The projection of a found document: identity, references, dates, totals
-/// and payments; no buyer data (the journaled document carries none either).
-/// `outstanding` is `gross − Σ payments`; `test` is `teszt` exactly as
+/// and credit entries; no buyer data (the journaled document carries none either).
+/// `outstanding` is `gross − Σ credit entries`; `test` is `teszt` exactly as
 /// reported, `None` included.
 impl From<&FoundDocument> for QueryResponse {
     fn from(document: &FoundDocument) -> Self {
@@ -206,8 +206,12 @@ impl From<&FoundDocument> for QueryResponse {
         response.net_total = Some(document.net_total);
         response.vat_total = Some(document.vat_total);
         response.gross_total = Some(document.gross_total);
-        response.payments = document.payments.iter().map(PaymentRecord::from).collect();
-        response.outstanding = outstanding(response.gross_total, &document.payment_amounts());
+        response.credit_entries = document
+            .credit_entries
+            .iter()
+            .map(CreditEntryRecord::from)
+            .collect();
+        response.outstanding = outstanding(response.gross_total, &document.credit_entry_amounts());
         response.test = document.test;
         response
     }
@@ -383,18 +387,18 @@ impl From<AgentTaxpayerAddress> for TaxpayerAddress {
     }
 }
 
-/// Input of `Szamlazz.Agent.set_payments`.
+/// Input of `Szamlazz.Agent.set_credit_entries`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct SetPaymentsRequest {
+pub struct SetCreditEntriesRequest {
     /// The invoice to register credit entries on.
     pub invoice_number: InvoiceNumber,
     /// The credit entries (`jóváírások`); szamlazz.hu accepts at most five,
     /// and a replacing request (`additive: false`) needs at least one: with
-    /// none it would clear the invoice's payments, and is refused as
+    /// none it would clear the invoice's credit entries, and is refused as
     /// `invalid_input` with nothing sent.
-    pub entries: Vec<PaymentEntry>,
+    pub entries: Vec<CreditEntryInput>,
     /// Add to the existing entries instead of replacing them.
     ///
     /// **At-least-once.** Replacing is idempotent (a repeat sends the same
@@ -408,11 +412,11 @@ pub struct SetPaymentsRequest {
     pub additive: bool,
 }
 
-impl SetPaymentsRequest {
+impl SetCreditEntriesRequest {
     /// A replacing request: `entries` become the invoice's credit entries.
     /// Set [`additive`](Self::additive) to append instead.
     #[must_use]
-    pub fn new(invoice_number: InvoiceNumber, entries: Vec<PaymentEntry>) -> Self {
+    pub fn new(invoice_number: InvoiceNumber, entries: Vec<CreditEntryInput>) -> Self {
         Self {
             invoice_number,
             entries,
@@ -421,49 +425,49 @@ impl SetPaymentsRequest {
     }
 }
 
-/// One credit entry (`jóváírás`).
+/// One credit entry (`jóváírás`) as the caller sends it: the input side of
+/// [`CreditEntryRecord`], with the same words (`title`, `comment`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct PaymentEntry {
-    /// Payment date.
+pub struct CreditEntryInput {
+    /// The date of the credit entry.
     pub date: Date,
-    /// Payment method.
-    pub method: PaymentMethod,
+    /// The entry's title (`jogcim`): the payment method it was settled by.
+    pub title: PaymentMethod,
     /// Amount in the invoice currency.
     pub amount: Decimal,
-    /// Free-text description.
+    /// Free-text comment (`megjegyzes`).
     #[serde(default)]
-    pub description: Option<String>,
+    pub comment: Option<String>,
 }
 
-impl PaymentEntry {
-    /// An entry of `amount` paid by `method` on `date`, without a
-    /// description.
+impl CreditEntryInput {
+    /// An entry of `amount` settled by `title` on `date`, without a comment.
     #[must_use]
-    pub const fn new(date: Date, method: PaymentMethod, amount: Decimal) -> Self {
+    pub const fn new(date: Date, title: PaymentMethod, amount: Decimal) -> Self {
         Self {
             date,
-            method,
+            title,
             amount,
-            description: None,
+            comment: None,
         }
     }
 }
 
-impl From<&PaymentEntry> for CreditEntry {
-    fn from(entry: &PaymentEntry) -> Self {
-        let mut credit = Self::new(entry.date, entry.method.clone().into(), entry.amount);
-        credit.description.clone_from(&entry.description);
+impl From<&CreditEntryInput> for CreditEntry {
+    fn from(entry: &CreditEntryInput) -> Self {
+        let mut credit = Self::new(entry.date, entry.title.clone().into(), entry.amount);
+        credit.description.clone_from(&entry.comment);
         credit
     }
 }
 
-/// Output of `Szamlazz.Agent.set_payments`.
+/// Output of `Szamlazz.Agent.set_credit_entries`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
-pub struct SetPaymentsResponse {
+pub struct SetCreditEntriesResponse {
     /// The invoice the entries were registered on.
     pub invoice_number: String,
     /// Outstanding amount after the update (`kintlévőség`).
@@ -474,7 +478,7 @@ pub struct SetPaymentsResponse {
     pub gross_total: Option<Decimal>,
 }
 
-impl SetPaymentsResponse {
+impl SetCreditEntriesResponse {
     /// A response for `invoice_number` without totals.
     #[must_use]
     pub fn new(invoice_number: impl Into<String>) -> Self {
@@ -608,23 +612,23 @@ mod tests {
     }
 
     #[test]
-    fn set_payments_request_round_trips() {
-        let request = SetPaymentsRequest {
+    fn set_credit_entries_request_round_trips() {
+        let request = SetCreditEntriesRequest {
             invoice_number: "SZ-1".parse().expect("valid number"),
-            entries: vec![PaymentEntry {
+            entries: vec![CreditEntryInput {
                 date: date(2026, 7, 10),
-                method: PaymentMethod::Card,
+                title: PaymentMethod::Card,
                 amount: dec!(25400),
-                description: Some("card".to_owned()),
+                comment: Some("card".to_owned()),
             }],
             additive: false,
         };
         let json = round_trip(&request);
-        assert_eq!(json["entries"][0]["method"], "card");
+        assert_eq!(json["entries"][0]["title"], "card");
         assert_eq!(json["entries"][0]["amount"], "25400");
-        let minimal: SetPaymentsRequest = serde_json::from_value(json!({
+        let minimal: SetCreditEntriesRequest = serde_json::from_value(json!({
             "invoice_number": "SZ-1",
-            "entries": [{"date": "2026-07-10", "method": "cash", "amount": 100}],
+            "entries": [{"date": "2026-07-10", "title": "cash", "amount": 100}],
         }))
         .expect("deserialize");
         assert!(!minimal.additive);
@@ -635,7 +639,7 @@ mod tests {
     /// `additive: false` would *replace* the invoice's credit entries.
     #[test]
     fn request_types_refuse_unknown_fields() {
-        let entry = json!({"date": "2026-07-10", "method": "cash", "amount": 100});
+        let entry = json!({"date": "2026-07-10", "title": "cash", "amount": 100});
 
         refuses_unknown_field::<QueryRequest>(
             json!({"selector": {"invoice_number": "SZ-1"}, "invoice_number": "SZ-1"}),
@@ -647,20 +651,20 @@ mod tests {
             "tax_numer",
         );
 
-        refuses_unknown_field::<SetPaymentsRequest>(
+        refuses_unknown_field::<SetCreditEntriesRequest>(
             json!({"invoice_number": "SZ-1", "entries": [entry], "aditive": true}),
             "aditive",
         );
-        refuses_unknown_field::<SetPaymentsRequest>(
+        refuses_unknown_field::<SetCreditEntriesRequest>(
             json!({
                 "invoice_number": "SZ-1",
-                "entries": [{"date": "2026-07-10", "method": "cash", "amount": 100, "note": "x"}],
+                "entries": [{"date": "2026-07-10", "title": "cash", "amount": 100, "note": "x"}],
             }),
             "note",
         );
-        refuses_unknown_field::<PaymentEntry>(
-            json!({"date": "2026-07-10", "method": "cash", "amount": 100, "descripton": "x"}),
-            "descripton",
+        refuses_unknown_field::<CreditEntryInput>(
+            json!({"date": "2026-07-10", "title": "cash", "amount": 100, "commnet": "x"}),
+            "commnet",
         );
     }
 
@@ -742,12 +746,12 @@ mod tests {
     }
 
     #[test]
-    fn payment_entry_converts_to_agent() {
-        let entry = PaymentEntry {
+    fn credit_entry_input_converts_to_agent() {
+        let entry = CreditEntryInput {
             date: date(2026, 7, 10),
-            method: PaymentMethod::Card,
+            title: PaymentMethod::Card,
             amount: dec!(25400),
-            description: Some("card".to_owned()),
+            comment: Some("card".to_owned()),
         };
         let credit = CreditEntry::from(&entry);
         assert_eq!(credit.date, date(2026, 7, 10));
@@ -755,9 +759,9 @@ mod tests {
         assert_eq!(credit.amount, dec!(25400));
         assert_eq!(credit.description.as_deref(), Some("card"));
 
-        let bare = PaymentEntry {
-            method: PaymentMethod::Other("Bitcoin".to_owned()),
-            description: None,
+        let bare = CreditEntryInput {
+            title: PaymentMethod::Other("Bitcoin".to_owned()),
+            comment: None,
             ..entry
         };
         let credit = CreditEntry::from(&bare);
@@ -766,11 +770,11 @@ mod tests {
     }
 
     #[test]
-    fn set_payments_response_round_trips() {
-        let mut payments = SetPaymentsResponse::new("SZ-1");
-        payments.outstanding = Some(dec!(0));
-        payments.gross_total = Some(dec!(25400));
-        round_trip(&payments);
+    fn set_credit_entries_response_round_trips() {
+        let mut credit_entries = SetCreditEntriesResponse::new("SZ-1");
+        credit_entries.outstanding = Some(dec!(0));
+        credit_entries.gross_total = Some(dec!(25400));
+        round_trip(&credit_entries);
     }
 
     #[test]
@@ -786,10 +790,10 @@ mod tests {
         response.net_total = Some(dec!(20000));
         response.vat_total = Some(dec!(5400));
         response.gross_total = Some(dec!(25400));
-        let mut payment = PaymentRecord::new(dec!(10000));
-        payment.date = Some(date(2026, 7, 10));
-        payment.title = Some("átutalás".to_owned());
-        response.payments = vec![payment];
+        let mut entry = CreditEntryRecord::new(dec!(10000));
+        entry.date = Some(date(2026, 7, 10));
+        entry.title = Some("átutalás".to_owned());
+        response.credit_entries = vec![entry];
         response.outstanding = Some(dec!(15400));
         response.test = Some(true);
         let json = round_trip(&response);
@@ -799,7 +803,7 @@ mod tests {
             json.get("supplier_id").is_none(),
             "the seller block is not projected: {json}"
         );
-        assert_eq!(json["payments"][0]["amount"], "10000");
+        assert_eq!(json["credit_entries"][0]["amount"], "10000");
 
         let minimal: QueryResponse =
             serde_json::from_value(json!({"invoice_number": "D-1", "document_type": "D"}))
@@ -820,7 +824,7 @@ mod tests {
             net: "20000",
             vat: "5400",
             gross: "25400",
-            payments: &[
+            credit_entries: &[
                 CreditRecord {
                     comment: Some("first"),
                     bank_account: Some("1234-5678"),
@@ -846,26 +850,26 @@ mod tests {
         expected.net_total = Some(dec!(20000));
         expected.vat_total = Some(dec!(5400));
         expected.gross_total = Some(dec!(25400));
-        let mut first = PaymentRecord::new(dec!(10000));
+        let mut first = CreditEntryRecord::new(dec!(10000));
         first.date = Some(date(2026, 7, 10));
         first.title = Some("átutalás".to_owned());
         first.comment = Some("first".to_owned());
         first.bank_account = Some("1234-5678".to_owned());
-        let mut second = PaymentRecord::new(dec!(5000));
+        let mut second = CreditEntryRecord::new(dec!(5000));
         second.date = Some(date(2026, 7, 11));
         second.title = Some("bankkártya".to_owned());
-        expected.payments = vec![first, second];
+        expected.credit_entries = vec![first, second];
         expected.outstanding = Some(dec!(10400));
         expected.test = Some(true);
         assert_eq!(response, expected);
         assert_eq!(
-            PaymentRecord::from(&document.payments[0]),
-            expected.payments[0]
+            CreditEntryRecord::from(&document.credit_entries[0]),
+            expected.credit_entries[0]
         );
     }
 
     #[test]
-    fn query_response_without_payments_owes_the_gross_total() {
+    fn query_response_without_credit_entries_owes_the_gross_total() {
         let document = Doc {
             net: "20000",
             vat: "5400",
@@ -874,7 +878,7 @@ mod tests {
         }
         .parse();
         let response = QueryResponse::from(&document);
-        assert!(response.payments.is_empty());
+        assert!(response.credit_entries.is_empty());
         assert_eq!(response.outstanding, Some(dec!(25400)));
     }
 

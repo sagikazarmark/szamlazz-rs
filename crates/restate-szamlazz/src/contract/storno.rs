@@ -390,7 +390,7 @@ pub struct DocumentStatus {
     pub net: Option<Decimal>,
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.
     #[serde(default)]
-    pub payments: Vec<Decimal>,
+    pub credit_entries: Vec<Decimal>,
     /// The proforma this document converted (`hivdijbekszam`).
     #[serde(default)]
     pub referenced_proforma: Option<String>,
@@ -400,7 +400,7 @@ pub struct DocumentStatus {
 }
 
 impl DocumentStatus {
-    /// A status of `number` in `state` with no totals, payments or
+    /// A status of `number` in `state` with no totals, credit entries or
     /// references.
     pub fn new(number: impl Into<String>, state: DocumentState) -> Self {
         Self {
@@ -408,7 +408,7 @@ impl DocumentStatus {
             state,
             gross: None,
             net: None,
-            payments: Vec::new(),
+            credit_entries: Vec::new(),
             referenced_proforma: None,
             e_invoice: None,
         }
@@ -573,7 +573,7 @@ mod tests {
         let mut invoice = DocumentStatus::new("SZ-2", DocumentState::Live);
         invoice.gross = Some(dec!(25400));
         invoice.net = Some(dec!(20000));
-        invoice.payments = vec![dec!(10000)];
+        invoice.credit_entries = vec![dec!(10000)];
         invoice.referenced_proforma = Some("D-1".to_owned());
         invoice.e_invoice = Some(true);
         status.set(DocumentKind::Invoice, Some(invoice));
@@ -593,7 +593,7 @@ mod tests {
         let json = round_trip(&status);
         assert_eq!(json["invoice"]["number"], "SZ-2");
         assert_eq!(json["invoice"]["state"], "live");
-        assert_eq!(json["invoice"]["payments"], json!(["10000"]));
+        assert_eq!(json["invoice"]["credit_entries"], json!(["10000"]));
         assert_eq!(json["proforma"]["state"], "consumed");
         assert_eq!(json["proforma"]["by"], "SZ-2");
         assert_eq!(json["final"]["state"], "reversed");

@@ -23,7 +23,7 @@ use crate::test_support::open_gateway;
 const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as u64;
 
 /// The `inactivity_timeout` / `abort_timeout` of every handler whose step is
-/// one szamlazz.hu round trip (the four reads and `set_payments`' one send)
+/// one szamlazz.hu round trip (the four reads and `set_credit_entries`' one send)
 /// in the discovery reports (milliseconds): `2m`, the 60 s client timeout
 /// plus the margin a stalling szamlazz.hu needs (#114). The writes whose step
 /// is three trips carry `4m` / `3m`. A literal, like the attributes it
@@ -89,8 +89,8 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
             "{name}"
         );
         if name == "get" {
-            // Read-only: shared, an empty input, the default back-off with
-            // three attempts, no idempotency retention; an explicit journal
+            // Read-only: shared, an empty input, the reads' back-off (10s →
+            // 1m) with three attempts, no idempotency retention; an explicit journal
             // retention so the journal is inspectable. The timeouts are the
             // reads' 2m / 2m (#114): a read step is one szamlazz.hu round trip
             // bounded by the 60 s client timeout, and szamlazz.hu has been
@@ -103,7 +103,9 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
                 "get takes no input"
             );
             assert_eq!(handler.retry_policy_max_attempts, Some(3));
-            assert_eq!(handler.retry_policy_initial_interval, None);
+            assert_eq!(handler.retry_policy_initial_interval, Some(10_000));
+            assert_eq!(handler.retry_policy_exponentiation_factor, Some(2.0));
+            assert_eq!(handler.retry_policy_max_interval, Some(60_000));
             assert_eq!(handler.inactivity_timeout, Some(ONE_TRIP_TIMEOUT_MS));
             assert_eq!(handler.abort_timeout, Some(ONE_TRIP_TIMEOUT_MS));
             assert_eq!(handler.journal_retention, Some(24 * 3_600_000));
@@ -166,7 +168,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             "check_account",
             "query",
             "query_taxpayer",
-            "set_payments",
+            "set_credit_entries",
             "storno"
         ]
     );
@@ -185,7 +187,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             // retention so the journal is inspectable, and, for the probe,
             // so the leak assertion can scan it. The reads' 2m / 2m timeouts
             // (#114): one 60 s round trip plus the margin a stalling
-            // szamlazz.hu needs, the same rule as `set_payments`' one send.
+            // szamlazz.hu needs, the same rule as `set_credit_entries`' one send.
             assert_eq!(
                 handler.retry_policy_initial_interval,
                 Some(10_000),
@@ -232,7 +234,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             // Both writes wait out the 60 s client timeout before the retry
             // after a crash (never the server's ~500 ms default), so that the
             // re-execution cannot run while the first send is still in flight:
-            // `set_payments` because an additive send is at-least-once,
+            // `set_credit_entries` because an additive send is at-least-once,
             // `storno` because its re-execution's leading query would
             // otherwise look before the cut send has landed. The same rule
             // floors the issue policy's `initial_delay`.
@@ -263,7 +265,7 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
                 assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
             } else {
-                assert_eq!(name, "set_payments");
+                assert_eq!(name, "set_credit_entries");
                 // Two attempts: an additive send is at-least-once, so every
                 // invocation attempt is a potential second copy of the entries.
                 assert_eq!(handler.retry_policy_max_attempts, Some(2), "{name}");
@@ -387,7 +389,7 @@ fn a_malformed_body_is_a_structured_invalid_input() {
 
     use super::Body;
     use crate::contract::document::tests::sample_document;
-    use crate::contract::{CreateRequest, DeleteProformaRequest, SetPaymentsRequest};
+    use crate::contract::{CreateRequest, DeleteProformaRequest, SetCreditEntriesRequest};
 
     /// What the SDK hands the handler for `bytes`: the decode never fails.
     fn body<T: for<'de> serde::Deserialize<'de>>(bytes: impl Into<Bytes>) -> Body<T> {
@@ -403,7 +405,7 @@ fn a_malformed_body_is_a_structured_invalid_input() {
         assert_eq!(error.code(), 400);
         let fault: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(fault["code"], "invalid_input");
-        assert_eq!(fault.get("order"), None);
+        assert_eq!(fault["order"], serde_json::Value::Null);
         fault["message"].as_str().expect("message").to_owned()
     }
 
@@ -428,7 +430,7 @@ fn a_malformed_body_is_a_structured_invalid_input() {
     // fault; serde's message says what it can.
     let message = refused::<DeleteProformaRequest>(json!({"force": "yes"}).to_string());
     assert!(message.contains("expected a boolean"), "{message}");
-    let message = refused::<SetPaymentsRequest>(json!({"invoice_number": "SZ-1"}).to_string());
+    let message = refused::<SetCreditEntriesRequest>(json!({"invoice_number": "SZ-1"}).to_string());
     assert!(message.contains("missing field `entries`"), "{message}");
     let message = refused::<CreateRequest>("not json");
     assert!(message.contains("expected"), "{message}");
@@ -447,7 +449,7 @@ fn body_discovers_exactly_as_json() {
     use super::Body;
     use crate::contract::{
         CorrectRequest, CreateRequest, DeleteProformaRequest, QueryRequest, QueryTaxpayerRequest,
-        SetPaymentsRequest, StornoRequest,
+        SetCreditEntriesRequest, StornoRequest,
     };
 
     macro_rules! same_as_json {
@@ -471,7 +473,7 @@ fn body_discovers_exactly_as_json() {
         DeleteProformaRequest,
         QueryRequest,
         QueryTaxpayerRequest,
-        SetPaymentsRequest,
+        SetCreditEntriesRequest,
     );
 
     #[cfg(feature = "schemars")]

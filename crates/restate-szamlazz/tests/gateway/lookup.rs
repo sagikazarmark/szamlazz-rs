@@ -392,7 +392,7 @@ async fn lookup_of_a_corrective_takes_no_hint() {
 }
 
 /// The ownership read (`lookup_ours`): the one "is this document ours?"
-/// query the exclusivity, proforma-link, `get` and delete reads journal. The
+/// query the exclusivity, proforma-link, `get` and delete reads journal (every one a `lookup-{kind}` step). The
 /// same validation as the lookup step's external-id query
 /// (`FoundDocument::is_ours`): a document of this order and kind is `Live` or
 /// `Reversed`, code 7 is `Absent`, another order's or kind's document is a

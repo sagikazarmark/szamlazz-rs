@@ -154,7 +154,7 @@ line of the closure on every execution) is the guard, the key is deduplication.
 Giving up state migrations (above) did not give up every compatibility rule: the *journal* is the one thing an
 in-flight invocation carries across a deploy. Every `ctx.run` result: the `namespace` pin, the `account` step's
 `Resolution` (carrying the `Account`), and the gateway's `LookupOutcome`, `CreateOutcome`, `QueryOutcome`,
-`StornoLookupOutcome`, `StornoOutcome`, `DeleteOutcome`, `SetPaymentsOutcome`, `ProbeOutcome`, `TaxpayerOutcome`,
+`StornoLookupOutcome`, `StornoOutcome`, `DeleteOutcome`, `SetCreditEntriesOutcome`, `ProbeOutcome`, `TaxpayerOutcome`,
 is written as JSON by the deployment that ran the step and read back by whichever deployment replays the
 invocation. An entry
 the new code cannot decode is a retryable SDK error: the invocation replays into the same failure until the

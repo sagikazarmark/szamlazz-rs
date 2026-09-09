@@ -2,7 +2,7 @@
 //! the scoped account: `storno` of an unmanaged document through its path
 //! (verify, the by-number storno lookup, the storno step) with the
 //! original's `telj` repeated and that account's key on the wire, and
-//! `set_payments` through its one step with the flag, the entries and the key
+//! `set_credit_entries` through its one step with the flag, the entries and the key
 //! on the wire and the totals answered. The verdicts (`managed_by_order`, a
 //! `telj`-less original, the storno's `eszamla`), the refusals (a sixth
 //! entry, an empty replace) and the lost-reply advice are unit tests of
@@ -20,14 +20,14 @@ use crate::harness::szamlazz::{
 };
 
 /// `Szamlazz.Agent.storno` under `acme` reverses a document carrying no order
-/// number through `verify-{number}`, `lookup-storno-{number}` and
+/// number through `verify-original-{number}`, `lookup-storno-{number}` and
 /// `storno-{number}`, the storno carrying the original's `telj` and `acme`'s
-/// key and no `keltDatum`; `Szamlazz.Agent.set_payments` under `acme` puts
+/// key and no `keltDatum`; `Szamlazz.Agent.set_credit_entries` under `acme` puts
 /// `<additiv>false</additiv>` (replacing), the entries as sent and `acme`'s
-/// key on the wire in its one `set-payments-{number}` step with no query
+/// key on the wire in its one `set-credit-entries-{number}` step with no query
 /// before it, and answers the invoice's totals as szamlazz.hu reported them,
 /// `outstanding` distinct from `gross_total`.
-pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &Harness) {
+pub(crate) async fn agent_storno_and_set_credit_entries_run_on_the_scoped_account(h: &Harness) {
     h.reset().await;
     holds(&h.mock, &Doc::unmanaged("SZ-23", "SZ")).await;
     external_id_query("acct:by-number:SZ-23:storno")
@@ -62,7 +62,7 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
         [
             "namespace",
             "account",
-            "verify-SZ-23",
+            "verify-original-SZ-23",
             "lookup-storno-SZ-23",
             "storno-SZ-23"
         ]
@@ -77,14 +77,14 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
     let reply = h
         .call_agent_scoped(
             "acme",
-            "set_payments",
+            "set_credit_entries",
             &json!({
                 "invoice_number": "SZ-50",
                 "entries": [{
                     "date": "2026-09-05",
-                    "method": "transfer",
+                    "title": "transfer",
                     "amount": "1000",
-                    "description": "first instalment",
+                    "comment": "first instalment",
                 }],
                 "additive": false,
             }),
@@ -96,7 +96,7 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
     assert_eq!(reply.body["gross_total"], "1270", "{}", reply.body);
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
-        ["namespace", "account", "set-payments-SZ-50"],
+        ["namespace", "account", "set-credit-entries-SZ-50"],
         "one step, no query before it"
     );
     assert_eq!(

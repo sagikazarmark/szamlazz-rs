@@ -13,7 +13,7 @@ ids (`{namespace}:{order}:{kind}`), so any invocation can find what an earlier o
 The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of unmanaged
 documents), the NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account` probe over the same
 gateway module. It is **unkeyed**: its invocations run concurrently, so two by-number writes on one invoice are
-not serialised by the worker the way an order's handlers are. Two replacing `set_payments` (`additive: false`)
+not serialised by the worker the way an order's handlers are. Two replacing `set_credit_entries` (`additive: false`)
 race and the last send to land wins, which under reordered webhook deliveries may be the older snapshot. The
 caller serialises per invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
 
@@ -22,25 +22,67 @@ are computed, domain outcomes are returned as data.
 
 ## Quick Start
 
-Bind both services to a Restate endpoint of your own:
+Bind both services to a Restate endpoint of your own, with the two things Restate's own guidance asks of an
+endpoint: the SDK's replay-aware log filter and the request identity key:
 
 ```rust
+use restate_sdk::filter::ReplayAwareFilter;
 use restate_sdk::prelude::{Endpoint, HttpServer};
 use restate_szamlazz::account::{StaticConfig, StaticResolver};
 use restate_szamlazz::{Accounts, Agent, Order, WorkerConfig};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{EnvFilter, Layer as _};
 
 async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // `RUST_LOG` selects; `ReplayAwareFilter` drops what a replayed handler emits again
+    // (the `execution{…}` span and the prologue's warnings would otherwise repeat on every retry).
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(EnvFilter::from_default_env())
+                .with_filter(ReplayAwareFilter),
+        )
+        .init();
+
     let worker = worker.validate()?;
     let accounts = Accounts::from(StaticResolver::try_from(accounts)?);
     let order = Order::from_parts(accounts.clone(), worker.clone());
     let agent = Agent::from_parts(accounts, worker);
-    let endpoint = Endpoint::builder().bind(order).bind(agent).build();
+    let endpoint = Endpoint::builder()
+        .bind(order)
+        .bind(agent)
+        // Refuse requests the Restate runtime did not sign; required in the multi-account shape
+        // (see *Securing the Worker*). The server logs this public key at start-up.
+        .identity_key("publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f")?
+        .build();
     HttpServer::new(endpoint)
         .listen_and_serve("0.0.0.0:9080".parse()?)
         .await;
     Ok(())
 }
 ```
+
+Register the endpoint and call a handler through the ingress (Restate's URL grammar: `/{service}/{key}/{handler}`
+for a Virtual Object, `/{service}/{handler}` for a service, `/restate/scope/{scope}/call/…` under a scope):
+
+```sh
+restate deployments register http://worker:9080
+
+# Single-account shape, unscoped; the key is the order number, already trimmed.
+curl -X POST http://localhost:8080/Szamlazz.Order/ORD-1/create_invoice \
+  -H 'Idempotency-Key: 4c8f5a1e-…' -H 'content-type: application/json' \
+  -d '{"document": {"buyer": {"name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23."},
+                    "items": [{"name": "Jegy", "quantity": "1", "unit": "db", "unit_price": "1000", "vat_rate": "27"}],
+                    "fulfillment_date": "2026-09-03", "due_date": "2026-09-11", "payment_method": "transfer"}}'
+
+# Multi-account shape: the account's scope on every call.
+curl -X POST http://localhost:8080/restate/scope/acme/call/Szamlazz.Order/ORD-1/create_invoice …
+curl -X POST http://localhost:8080/restate/scope/acme/call/Szamlazz.Agent/check_account
+```
+
+Amounts (`quantity`, `unit_price`, every total) are decimals serialised as JSON **strings**; a number is accepted on
+input. Optional response fields, a fault's included, are present as `null` when absent.
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (a TOML file layered with environment overrides through figment, for instance).
@@ -256,10 +298,10 @@ answer. Not cached by the worker; cache it in the caller with a TTL on the order
 
 `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
 `managed_by_order`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
-`QueryResponse` and `SetPaymentsRequest` / `SetPaymentsResponse` are the remaining handler contracts.
+`QueryResponse` and `SetCreditEntriesRequest` / `SetCreditEntriesResponse` are the remaining handler contracts.
 
 `contract::OrderStatus` / `DocumentStatus` is the live view `get` returns: one optional `DocumentStatus` per kind
-(`number`, `state`, `gross`, `net`, `payments`, `referenced_proforma`, `e_invoice`) with `DocumentState`
+(`number`, `state`, `gross`, `net`, `credit_entries`, `referenced_proforma`, `e_invoice`) with `DocumentState`
 flattened as `{state: live}`, `{state: reversed, storno_number}` or, for a consumed proforma,
 `{state: consumed, by}`. `get` never fills `storno_number` (finding the storno would take the order-number hint,
 which shows only the newest document); the create and storno handlers report it. A `null` slot is *nothing of
@@ -273,7 +315,7 @@ and not one of the external-id tokens (`ExternalId::TOKENS`, in any letter case)
 external id.
 
 `contract::InvoiceNumber` is an invoice number as the by-number requests take it (`StornoRequest`,
-`CorrectRequest`, `SetPaymentsRequest`, `Selector::InvoiceNumber`, `ProformaLink::Number`): 1–40 bytes, no
+`CorrectRequest`, `SetCreditEntriesRequest`, `Selector::InvoiceNumber`, `ProformaLink::Number`): 1–40 bytes, no
 whitespace, no control character, no `:`. Refused by its `Deserialize`, so a bad number is a malformed body
 (`invalid_input` before the prologue). It flows into step names and the storno external ids, hence the bound.
 Distinct from `szamlazz_agent::InvoiceNumber`, the unvalidated wire type; responses echo numbers as plain strings.
@@ -301,6 +343,13 @@ accepted and queryable) because its parts are bounded (namespace 16, order key, 
   runs the create and storno steps, by default `5` executions, `2m` → `10m`, bounded by `1h`; the read policy runs
   every read-only step, by default `5` executions, `5s` → `60s`, bounded by `5m`; the resolve policy runs the
   `account` step, by default with no attempt cap, `1s` → `10s`, bounded by `1m`.
+
+Durations are written the way Restate's own handler attributes write them (jiff's friendly format: `"90s"`, `"2m"`,
+`"1h 30m"`, `"3d"`, `"500ms"`; months and years are refused, having no fixed length) or as a bare integer of seconds,
+so a value copied from a `#[handler(...)]` attribute parses. The field names are the SDK's `RunRetryPolicy`'s
+(`initial_delay`, `max_delay`, `max_attempts`, `max_duration`; `factor` for its `exponentiation_factor`), not the
+handler attribute's `initial_interval` / `max_interval`: those are the *invocation* retry policy, pinned in code; these
+are *run* retry policies.
 
 Each policy's `run_retry_policy()` is the `RunRetryPolicy` its steps run under. `validate()` checks the
 cross-field invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay`, a finite `factor ≥ 1`) and one floor:
@@ -338,7 +387,7 @@ and `Accounts::from` bundles it as resolver and store.
 
 `gateway::Gateway` is the module that speaks to szamlazz.hu on behalf of one account, over
 `szamlazz_agent::Client`: one plain async fn per `ctx.run` (`lookup`, `lookup_ours`, `create`, `verify`, `query`,
-`hint`, `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `query_taxpayer`, `probe`), each returning every
+`hint`, `lookup_storno`, `storno`, `delete_proforma`, `set_credit_entries`, `query_taxpayer`, `probe`), each returning every
 expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may re-execute:
 
 - the read fns (`lookup`, `lookup_ours`, `verify`, `query`, `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return
@@ -417,6 +466,13 @@ Multiple keys stay valid at once, so rotation is a deployment change: register t
 the runtime to the new private key, then drop the old one. Identity keys authenticate the Restate runtime to the
 worker; callers authenticate to Restate ingress separately.
 
+The SDK starts without keys and warns about nothing, so registering one is the host's responsibility, and it is
+**required** in the multi-account shape: the scope that selects the account is protocol data inside the request the
+runtime makes, so an endpoint accepting unsigned requests lets any client that reaches its port invoke either service
+under any scope, on every account the deployment serves; the gateway in front of the ingress (Caller Contract, rule 6)
+does not cover this port. The public key is what the server logs at start-up when it holds the private half
+(`RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE`); it is not a secret.
+
 ## Caller Contract
 
 The request and response bodies are the `contract` types above (their `serde` shape is the wire shape; the
@@ -483,11 +539,11 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `invalid_input` | 400 | The request is malformed: its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent. Or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_payments`, a replacing `set_payments` (`additive: false`) with no entries (the wire contract takes five, and an empty replace would clear the invoice's payments; nothing is sent), or a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
+| `invalid_input` | 400 | The request is malformed: its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent. Or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_credit_entries`, a replacing `set_credit_entries` (`additive: false`) with no entries (the wire contract takes five, and an empty replace would clear the invoice's credit entries; nothing is sent), or a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
-| `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_payments` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
-| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued, or `set_payments` lost the reply to its one send. | Rule 2. For `set_payments` with `additive: true` (**at-least-once**: every send that reached szamlazz.hu appended the entries) query the invoice before re-sending; a replacing call is repeated as is. |
+| `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_credit_entries` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
+| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued, or `set_credit_entries` lost the reply to its one send. | Rule 2. For `set_credit_entries` with `additive: true` (**at-least-once**: every send that reached szamlazz.hu appended the entries) query the invoice before re-sending; a replacing call is repeated as is. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
@@ -504,16 +560,16 @@ Every handler that calls szamlazz.hu pins its own invocation retry policy.
 | Handler | Attempts | Interval | Timeouts (inactivity / abort) | Journal retention |
 |---|---|---|---|---|
 | `Szamlazz.Order` writes (`create_*`, `correct_invoice`, `storno_invoice`, `delete_proforma`) | 5, kill | 2m → 10m, factor 2 | 4m / 3m | 3d (idempotency 30d) |
-| `Szamlazz.Order.get` | 3 | server default | 2m / 2m | 1d |
+| `Szamlazz.Order.get` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
 | `Szamlazz.Agent.storno` | 5, kill | 2m → 10m | 4m / 3m | 3d |
-| `Szamlazz.Agent.set_payments` | 2 | 2m | 2m / 2m | 3d |
-| `Szamlazz.Agent.query`, `query_taxpayer`, `check_account` | 3 | 10s | 2m / 2m | 1d |
+| `Szamlazz.Agent.set_credit_entries` | 2 | 2m | 2m / 2m | 3d |
+| `Szamlazz.Agent.query`, `query_taxpayer`, `check_account` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
 
-`set_payments` gets two attempts because an additive send is at-least-once and every attempt is a potential
+`set_credit_entries` gets two attempts because an additive send is at-least-once and every attempt is a potential
 second copy of the entries. The timeouts follow one rule: a step's szamlazz.hu round trips at the client's 60 s
 `REQUEST_TIMEOUT` each, plus the margin a stalling szamlazz.hu needs. `4m` / `3m` where the step is three trips
 (the create and storno steps' leading query, send and re-query); `2m` / `2m` where it is one, which is
-`set_payments`' send and every read step alike. The reads never run on the server's 1 m defaults, on which a read
+`set_credit_entries`' send and every read step alike. The reads never run on the server's 1 m defaults, on which a read
 stalled for the minute szamlazz.hu has been seen to stall would be suspended and then aborted, an invocation
 attempt spent on a read that would have completed. The 2 m interval is longer than the 60 s client timeout, so
 the retry after a crash cannot run while the first send is still in flight.
@@ -523,7 +579,7 @@ connection, the abort timeout, an undecodable journal), never on a run retry: a 
 `[read]` or `[resolve]` is re-dispatched by the server without advancing the handler's attempt count (verified end
 to end against 1.7.8). So the run policies decide how long a szamlazz.hu outage is tolerated, the invocation
 policy how long a worker outage is (~24 min of back-off on the `Szamlazz.Order` writes and
-`Szamlazz.Agent.storno`, 2 min on `set_payments`), and szamlazz.hu's "max 5 attempts" etiquette is the issue
+`Szamlazz.Agent.storno`, 2 min on `set_credit_entries`), and szamlazz.hu's "max 5 attempts" etiquette is the issue
 policy's business: every re-dispatch is query-first and multiplies no sends.
 
 **Kill, not pause.** A paused invocation holds the order's key and blocks the very handler that would reconcile
@@ -547,7 +603,7 @@ ours is `conflict{foreign}`.
 
 Like every read-only step of both services (the exclusivity and proforma-link lookups before it, the verifies,
 the order-number hint, the storno lookup, `get`'s four queries, `Szamlazz.Agent.query`, `query_taxpayer`'s one
-step `taxpayer-{prefix}`, the `check_account` probe) it runs under the **read policy** (`[read]`: `5` executions
+step `lookup-taxpayer-{prefix}`, the `check_account` probe) it runs under the **read policy** (`[read]`: `5` executions
 `5s` → `60s`, bounded by `5m` by default). Every szamlazz.hu *answer* is journaled data, and a query szamlazz.hu
 did not answer (a transport or parse failure, `szlahu_down`) is the step's retryable error (`Unanswered`),
 re-executed after the policy's delay; a read writes nothing, so re-executing it is safe and its answer is as
@@ -702,7 +758,7 @@ first is held attaching to it: one invocation id, one body, one create); every `
 account its scope selects (`check_account` under each scope with that account's key on the probe, unscoped →
 `unknown_account`; `query` with `test` as reported and no `supplier_id`; `query_taxpayer` under each scope with
 its key, the full number and the stem one step); the `Szamlazz.Agent` writes on the scoped account (`storno`
-with `<teljesitesDatum>` equal to the original's `telj` and no `<keltDatum>`, `set_payments` with the flag, the
+with `<teljesitesDatum>` equal to the original's `telj` and no `<keltDatum>`, `set_credit_entries` with the flag, the
 entries and the key on the wire and the totals answered); an order whose invocations were purged stornoed and
 reissued; a resolver failing twice then answering, the `account` step re-executed under the resolve policy with
 one entry; an invocation held at its fetch after its `account` step, killed, the queued call on the same key

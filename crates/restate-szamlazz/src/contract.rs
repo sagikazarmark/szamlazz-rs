@@ -31,7 +31,22 @@
 //!   ([`OrderStatus`]); the storno contract is shared with
 //!   `Szamlazz.Agent.storno`.
 //! - [`agent`]: the rest of `Szamlazz.Agent`: `query`, `query_taxpayer`,
-//!   `set_payments` and `check_account`.
+//!   `set_credit_entries` and `check_account`.
+//!
+//! **Handler names** are the Rust method names, verbatim, as the Rust SDK
+//! exposes them (`snake_case`; no `#[handler(name = …)]` override anywhere).
+//! `Szamlazz.Order`'s name the document, since the key is the order and a
+//! handler picks one of its documents (`create_invoice`, `storno_invoice`,
+//! `delete_proforma`; `get` alone reads them all); `Szamlazz.Agent`'s name
+//! the operation alone where the document is the input (`query`, `storno`:
+//! the number is in the body) and keep the object where it is not
+//! (`query_taxpayer`, `set_credit_entries`, `check_account`). A handler name is
+//! part of the Restate registration, so a rename is a breaking change
+//! (`set_payments` became `set_credit_entries` in one, 2026-09-09; `CONTEXT.md`,
+//! *Credit entry*). **JSON**: fields `snake_case`; requests closed
+//! (`deny_unknown_fields`), responses open (`#[non_exhaustive]`); decimals
+//! as strings (a number accepted on input), dates as ISO `YYYY-MM-DD`; an
+//! absent optional response field is `null`, a fault's included.
 
 use std::fmt;
 
@@ -44,9 +59,9 @@ pub mod document;
 pub mod storno;
 
 pub use agent::{
-    CheckAccountResponse, CheckedAccount, CredentialsCheck, InvalidTaxNumber, PaymentEntry,
-    PaymentRecord, QueryRequest, QueryResponse, QueryTaxpayerRequest, QueryTaxpayerResponse,
-    Selector, SetPaymentsRequest, SetPaymentsResponse, TaxpayerAddress,
+    CheckAccountResponse, CheckedAccount, CredentialsCheck, CreditEntryInput, CreditEntryRecord,
+    InvalidTaxNumber, QueryRequest, QueryResponse, QueryTaxpayerRequest, QueryTaxpayerResponse,
+    Selector, SetCreditEntriesRequest, SetCreditEntriesResponse, TaxpayerAddress,
 };
 pub use create::{
     ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,
@@ -124,7 +139,7 @@ pub enum TerminalCode {
     /// szamlazz.hu answered the request with an error code of its own that
     /// the handler passes through rather than concludes from: on
     /// `Szamlazz.Agent.query`, `query_taxpayer` (szamlazz.hu's code or NAV's
-    /// relayed one) and `set_payments` (the credit entries refused). The
+    /// relayed one) and `set_credit_entries` (the credit entries refused). The
     /// szamlazz.hu code is in the fault's `szamlazz_code`, the message is
     /// szamlazz.hu's. HTTP 422.
     SzamlazzError,
@@ -247,8 +262,8 @@ impl fmt::Display for TerminalCode {
 /// the SDK carries a terminal error as a code and a message and offers no
 /// other channel), so a caller parses `message` a second time, into this
 /// type. A response type: open (a client tolerates fields added later) and
-/// `#[non_exhaustive]`, built with [`Fault::new`] and the setters; the
-/// optional fields are omitted when absent.
+/// `#[non_exhaustive]`, built with [`Fault::new`] and the setters; like every
+/// response type's, its optional fields are present as `null` when absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -260,16 +275,16 @@ pub struct Fault {
     /// The szamlazz.hu code, when szamlazz.hu's answer is what the fault is
     /// about (`szamlazz_error` always; `credentials_rejected`; `unavailable`
     /// on an inconclusive code).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub szamlazz_code: Option<String>,
     /// The order the fault is about (the `Szamlazz.Order` key), when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub order: Option<String>,
     /// The kind of the document the fault is about, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub kind: Option<IssuedKind>,
     /// The external id of the document the fault is about, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub external_id: Option<String>,
 }
 
@@ -315,12 +330,12 @@ impl Fault {
     }
 }
 
-/// `gross − Σ payments`, when the gross total is known and the arithmetic
+/// `gross − Σ credit entries`, when the gross total is known and the arithmetic
 /// fits a decimal. The one definition of the outstanding amount both
 /// `create_*` and `query` report. Checked: the amounts are szamlazz.hu's, but
 /// a panic would run on the SDK's connection task.
-pub(crate) fn outstanding(gross: Option<Decimal>, payments: &[Decimal]) -> Option<Decimal> {
-    let paid = payments
+pub(crate) fn outstanding(gross: Option<Decimal>, credit_entries: &[Decimal]) -> Option<Decimal> {
+    let paid = credit_entries
         .iter()
         .try_fold(Decimal::ZERO, |sum, amount| sum.checked_add(*amount))?;
     gross?.checked_sub(paid)
@@ -384,8 +399,8 @@ mod tests {
                 "invoice_number": too_long, "correction_id": "c-1", "document": document
             }),
         );
-        refused::<SetPaymentsRequest>(
-            "SetPaymentsRequest",
+        refused::<SetCreditEntriesRequest>(
+            "SetCreditEntriesRequest",
             serde_json::json!({"invoice_number": too_long, "entries": []}),
         );
         refused::<QueryRequest>(
@@ -409,16 +424,23 @@ mod tests {
     }
 
     /// The fault body is the public contract: it round-trips through JSON
-    /// with the optional fields omitted when absent, its status is its
-    /// code's, and a fault written by the services reads back as this type
-    /// (what the e2e harness decodes).
+    /// with the optional fields `null` when absent (the one rule of every
+    /// response type), its status is its code's, and a fault written by the
+    /// services reads back as this type (what the e2e harness decodes).
     #[test]
-    fn fault_round_trips_and_omits_absent_fields() {
+    fn fault_round_trips_with_absent_fields_null() {
         let bare = Fault::new(TerminalCode::InvalidInput, "malformed request body");
         let json = serde_json::to_value(&bare).expect("json");
         assert_eq!(
             json,
-            serde_json::json!({"code": "invalid_input", "message": "malformed request body"})
+            serde_json::json!({
+                "code": "invalid_input",
+                "message": "malformed request body",
+                "szamlazz_code": null,
+                "order": null,
+                "kind": null,
+                "external_id": null,
+            })
         );
         assert_eq!(bare.status(), 400);
         assert_eq!(serde_json::from_value::<Fault>(json).expect("back"), bare);
@@ -533,11 +555,11 @@ mod tests {
             schemars::schema_for!(StornoRequest),
             schemars::schema_for!(DeleteProformaRequest),
             schemars::schema_for!(QueryRequest),
-            schemars::schema_for!(SetPaymentsRequest),
+            schemars::schema_for!(SetCreditEntriesRequest),
             schemars::schema_for!(CreateResponse),
             schemars::schema_for!(StornoResponse),
             schemars::schema_for!(DeleteProformaResponse),
-            schemars::schema_for!(SetPaymentsResponse),
+            schemars::schema_for!(SetCreditEntriesResponse),
             schemars::schema_for!(QueryResponse),
             schemars::schema_for!(OrderStatus),
         ] {
@@ -628,8 +650,8 @@ mod tests {
                 schemars::schema_for!(QueryTaxpayerRequest),
             ),
             (
-                "SetPaymentsRequest",
-                schemars::schema_for!(SetPaymentsRequest),
+                "SetCreditEntriesRequest",
+                schemars::schema_for!(SetCreditEntriesRequest),
             ),
         ];
         let mut nested = std::collections::BTreeSet::new();
@@ -657,7 +679,7 @@ mod tests {
             "LineItemInput",
             "DocumentOverrides",
             "ExchangeRateInput",
-            "PaymentEntry",
+            "CreditEntryInput",
             "ProformaLink/oneOf/2",
             "PaymentMethod/oneOf/7",
             "Selector/oneOf/0",
@@ -733,8 +755,8 @@ mod tests {
                 schemars::schema_for!(QueryTaxpayerRequest),
             ),
             (
-                "SetPaymentsRequest",
-                schemars::schema_for!(SetPaymentsRequest),
+                "SetCreditEntriesRequest",
+                schemars::schema_for!(SetCreditEntriesRequest),
             ),
             ("CreateResponse", schemars::schema_for!(CreateResponse)),
             ("StornoResponse", schemars::schema_for!(StornoResponse)),
@@ -748,8 +770,8 @@ mod tests {
                 schemars::schema_for!(QueryTaxpayerResponse),
             ),
             (
-                "SetPaymentsResponse",
-                schemars::schema_for!(SetPaymentsResponse),
+                "SetCreditEntriesResponse",
+                schemars::schema_for!(SetCreditEntriesResponse),
             ),
             (
                 "CheckAccountResponse",

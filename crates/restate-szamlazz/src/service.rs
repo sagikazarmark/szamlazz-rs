@@ -29,7 +29,7 @@
 //!
 //! - [`Order`]: keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.
-//! - [`Agent`]: by-number operations (`query`, `set_payments`, `storno`), the
+//! - [`Agent`]: by-number operations (`query`, `set_credit_entries`, `storno`), the
 //!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
 //!   probe, registered as `Szamlazz.Agent`.
 
@@ -58,17 +58,19 @@ pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressCli
 use prologue::Execution;
 use support::RunCtx;
 
-/// What both services hold: the accounts bundle and the validated
-/// deployment-level settings. One struct, since the two services are built
-/// from the same parts and differ only in their handlers; what every
-/// handler's execution starts from.
+/// What both services hold, the parts `from_parts` takes: the accounts bundle
+/// and the validated deployment-level settings. One struct, since the two
+/// services are built from the same parts and differ only in their handlers;
+/// what every handler's execution starts from. Not named for Restate's
+/// *deployment* (a registered endpoint revision, ADR 0009), which is a
+/// different thing and keeps the word.
 #[derive(Debug, Clone)]
-pub(crate) struct Deployment {
+pub(crate) struct Parts {
     pub(crate) accounts: Accounts,
     pub(crate) config: ValidatedWorkerConfig,
 }
 
-impl Deployment {
+impl Parts {
     /// Runs a handler's execution on any of the SDK's contexts: the prologue
     /// (pin → resolve → fetch → open), then `body` on the execution it built,
     /// inside the execution span carrying the scope, the key (on an object
@@ -90,7 +92,7 @@ impl Deployment {
 /// The object holds no state.
 #[derive(Debug, Clone)]
 pub struct Order {
-    deployment: Deployment,
+    parts: Parts,
 }
 
 impl Order {
@@ -100,31 +102,31 @@ impl Order {
     #[must_use]
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
-            deployment: Deployment { accounts, config },
+            parts: Parts { accounts, config },
         }
     }
 
     /// The account resolver and credential store.
     #[must_use]
     pub fn accounts(&self) -> &Accounts {
-        &self.deployment.accounts
+        &self.parts.accounts
     }
 
     /// The deployment-level settings.
     #[must_use]
     pub fn config(&self) -> &ValidatedWorkerConfig {
-        &self.deployment.config
+        &self.parts.config
     }
 
     /// Runs a handler's execution, exclusive or shared (`get`):
-    /// [`Deployment::execute`].
+    /// [`Parts::execute`].
     async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
     where
         C: RunCtx<'ctx>,
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        self.deployment.execute(ctx, body).await
+        self.parts.execute(ctx, body).await
     }
 }
 
@@ -133,9 +135,9 @@ impl Order {
 /// probe. No handler compares what it finds with the account.
 ///
 /// **Unkeyed.** A stateless service's invocations run concurrently, so two
-/// by-number writes on one invoice (`set_payments`, `storno`) are not
+/// by-number writes on one invoice (`set_credit_entries`, `storno`) are not
 /// serialised by the worker as [`Order`]'s handlers are by its per-key lock.
-/// Two replacing `set_payments` (`additive: false`) race and the last send to
+/// Two replacing `set_credit_entries` (`additive: false`) race and the last send to
 /// land wins, which under reordered webhook deliveries may be the older
 /// snapshot; two `storno`s both send, and szamlazz.hu's idempotent storno
 /// answers the repeat with the existing storno number (verified for a
@@ -145,7 +147,7 @@ impl Order {
 /// invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
 #[derive(Debug, Clone)]
 pub struct Agent {
-    deployment: Deployment,
+    parts: Parts,
 }
 
 impl Agent {
@@ -155,30 +157,30 @@ impl Agent {
     #[must_use]
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
-            deployment: Deployment { accounts, config },
+            parts: Parts { accounts, config },
         }
     }
 
     /// The account resolver and credential store.
     #[must_use]
     pub fn accounts(&self) -> &Accounts {
-        &self.deployment.accounts
+        &self.parts.accounts
     }
 
     /// The deployment-level settings.
     #[must_use]
     pub fn config(&self) -> &ValidatedWorkerConfig {
-        &self.deployment.config
+        &self.parts.config
     }
 
-    /// Runs a handler's execution: [`Deployment::execute`].
+    /// Runs a handler's execution: [`Parts::execute`].
     async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>
     where
         C: RunCtx<'ctx>,
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        self.deployment.execute(ctx, body).await
+        self.parts.execute(ctx, body).await
     }
 }
 

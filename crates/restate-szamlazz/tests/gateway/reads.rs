@@ -16,7 +16,7 @@ async fn verify_query_and_hint() {
     number_query("SZ-1")
         .respond_with(
             Doc {
-                payments: &[CreditRecord::transfer("500"), CreditRecord::transfer("770")],
+                credit_entries: &[CreditRecord::transfer("500"), CreditRecord::transfer("770")],
                 ..Doc::new("SZ-1", "SZ")
             }
             .response(),
@@ -49,7 +49,7 @@ async fn verify_query_and_hint() {
     match h.gateway.verify("SZ-1").await {
         Ok(QueryOutcome::Found(found)) => {
             assert_eq!(found.number, "SZ-1");
-            assert_eq!(found.payment_amounts(), vec![dec!(500), dec!(770)]);
+            assert_eq!(found.credit_entry_amounts(), vec![dec!(500), dec!(770)]);
             // The `telj` the storno handlers repeat.
             assert_eq!(found.fulfillment_date, Some(ORIGINAL_TELJ));
         }
@@ -85,7 +85,7 @@ async fn verify_query_and_hint() {
     {
         Ok(QueryOutcome::Found(found)) => {
             assert_eq!(found.number, "SZ-1");
-            assert_eq!(found.payments.len(), 2);
+            assert_eq!(found.credit_entries.len(), 2);
         }
         other => panic!("expected Found, got {other:?}"),
     }

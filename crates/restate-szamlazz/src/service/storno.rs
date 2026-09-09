@@ -25,8 +25,8 @@ use szamlazz_agent::Date;
 
 use super::prologue::Execution;
 use super::support::{
-    AnsweredCode, Fault, RunCtx, run_best_effort, run_reading, run_retrying, verified_document,
-    verify,
+    AnsweredCode, Fault, RunCtx, is_cancelled, run_best_effort, run_reading, run_retrying,
+    verified_document, verify,
 };
 use crate::account::Account;
 use crate::contract::{ConflictReason, IssuedKind, StornoOutcome, StornoRequest, StornoResponse};
@@ -236,11 +236,20 @@ fn storno_response(
 
 /// The fault of a storno step whose run ended without a settled outcome: the
 /// issue policy exhausted (500, carrying the last `Unconfirmed`'s display) or
-/// the invocation cancelled (409). `outcome_unknown`; nothing is recorded,
-/// and the next call's verify and lookup find whatever landed. `next` is
-/// what the caller does about it (`retry with a new Idempotency-Key`, `call
-/// storno again`).
+/// the invocation cancelled (409). `outcome_unknown` either way, since a
+/// cancelled write step's send may have landed (the SDK's bare `409
+/// cancelled` would lose that); the message names which. Nothing is
+/// recorded, and the next call's verify and lookup find whatever landed.
+/// `next` is what the caller does about it (`retry with a new
+/// Idempotency-Key`, `call storno again`): the storno is idempotent on the
+/// server, so the same next step serves a cancellation.
 fn storno_outcome_unknown(error: &TerminalError, next: &str) -> Fault {
+    if is_cancelled(error) {
+        return Fault::outcome_unknown(format!(
+            "the storno step was cancelled ({}) before its outcome was confirmed; a send may have landed: {next}",
+            error.code()
+        ));
+    }
     Fault::outcome_unknown(format!(
         "the storno step ended without a confirmed outcome ({}): {}; {next}",
         error.code(),
@@ -418,7 +427,7 @@ async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
 
 impl Execution {
     /// `Szamlazz.Order.storno_invoice`, on the `order` the handler parsed from
-    /// its key: the verify (`verify-storno-{number}`) decided by
+    /// its key: the verify (`verify-original-{number}`) decided by
     /// [`storno_verdict`], the intent, the storno lookup, the storno step, and
     /// the answer from data. Every fault after the verify is about this
     /// storno (`{namespace}:{order}:storno:{number}`).
@@ -497,7 +506,7 @@ impl Execution {
     ) -> Result<ControlFlow<StornoResponse, Box<FoundDocument>>, HandlerError> {
         let namespace = &self.config.namespace;
         let about = |fault: Fault| fault.about(order, None, storno_id);
-        let found = verify(ctx, self, format!("verify-storno-{number}"), number)
+        let found = verify(ctx, self, format!("verify-original-{number}"), number)
             .await
             .map_err(about)?;
         let found = verified_document(found, number, namespace).map_err(about)?;
@@ -534,7 +543,7 @@ impl Execution {
         let namespace = &self.config.namespace;
 
         // Step 1: verify the document.
-        let found = verify(ctx, self, format!("verify-{number}"), &number).await?;
+        let found = verify(ctx, self, format!("verify-original-{number}"), &number).await?;
         let found = verified_document(found, &number, namespace)?;
         match unmanaged_storno_verdict(&found, &number) {
             StornoVerdict::Proceed => {}
@@ -793,7 +802,11 @@ mod tests {
             body["message"].as_str().expect("message").contains("SZ-9"),
             "{body}"
         );
-        assert_eq!(body.get("order"), None, "a by-number fault: {body}");
+        assert_eq!(
+            body["order"],
+            serde_json::Value::Null,
+            "a by-number fault: {body}"
+        );
     }
 
     /// The storno intent both storno handlers build from the verified
@@ -853,7 +866,7 @@ mod tests {
         assert!(message.contains("fulfillment date"), "{message}");
         assert!(message.contains("nothing was sent"), "{message}");
         assert!(message.contains("Idempotency-Key"), "{message}");
-        assert_eq!(body.get("order"), None);
+        assert_eq!(body["order"], serde_json::Value::Null);
 
         let (_, body) = fault_body(fault.about(
             &ord_1(),
@@ -1012,7 +1025,7 @@ mod tests {
         );
         assert_eq!(status, 503);
         assert_eq!(body["code"], "unavailable");
-        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("szlahu_down"), "{message}");
         assert!(message.contains("nothing was sent"), "{message}");
@@ -1038,6 +1051,16 @@ mod tests {
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("500"), "{message}");
         assert!(message.contains("connection reset"), "{message}");
+        assert!(message.ends_with("call storno again"), "{message}");
+
+        let cancelled = TerminalError::new_with_code(409, "cancelled");
+        let (status, body) = fault_body(storno_outcome_unknown(&cancelled, "call storno again"));
+        assert_eq!(status, 500, "{body}");
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("cancelled (409)") && message.contains("a send may have landed"),
+            "names the cancellation and its consequence: {message}"
+        );
         assert!(message.ends_with("call storno again"), "{message}");
     }
 

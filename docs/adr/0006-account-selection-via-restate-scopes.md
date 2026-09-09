@@ -275,7 +275,7 @@ that ADR 0002, ADR 0005, design §3 and both READMEs state, `teszt == account.mo
 document. With the default `live`, a test account configured as live fails loudly on its first found
 document, on any handler that finds one (`account_mismatch` on a verify or a by-number query,
 `conflict{external_id_collision}` on a lookup) instead of issuing on the wrong account. Every handler that
-finds a document runs the check; `Szamlazz.Agent.set_payments` finds none and is the one exemption (#32):
+finds a document runs the check; `Szamlazz.Agent.set_credit_entries` finds none and is the one exemption (#32):
 joined since #49 by `Szamlazz.Agent.query_taxpayer`, which finds none either (a taxpayer record is NAV's, not the
 account's, and carries no pins).
 
@@ -420,7 +420,7 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   applies to any change of mapping (rule 2). Scripted in design §9.
 - Two new terminal codes: `unknown_account` (400), raised by the prologue before anything is issued, and
   `credentials_rejected` (503), whose raising execution issued nothing. `contract::TerminalCode` had six codes
-  at this point: the faults every handler may raise; `Szamlazz.Agent.query`, `set_payments` and `storno` kept
+  at this point: the faults every handler may raise; `Szamlazz.Agent.query`, `set_credit_entries` and `storno` kept
   their by-number 404 `not_found` and 422 pass-through of szamlazz.hu's own code beside them, built outside
   `TerminalCode`. (#67 later folded both into it as `not_found` and `szamlazz_error`, the szamlazz.hu code moving
   to the fault's own `szamlazz_code` field, and rescoped caller-contract rule 2 to the three "outcome unknown"

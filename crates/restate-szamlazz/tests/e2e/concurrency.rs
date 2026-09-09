@@ -106,9 +106,9 @@ async fn assert_second_call_queued_behind_the_first(
         [
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
-            "proforma-link",
+            "lookup-prepayment",
+            "lookup-final",
+            "lookup-proforma",
             "lookup-invoice",
         ],
         "the second call's runs end at the lookup step: no create step"

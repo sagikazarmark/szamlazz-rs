@@ -92,9 +92,9 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         [
             "namespace",
             "account",
-            "exclusivity-invoice",
-            "exclusivity-prepayment",
-            "exclusivity-final",
+            "lookup-invoice",
+            "lookup-prepayment",
+            "lookup-final",
             "lookup-proforma",
             "create-proforma",
         ]
@@ -121,8 +121,8 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         [
             "namespace",
             "account",
-            "exclusivity-prepayment",
-            "exclusivity-final",
+            "lookup-prepayment",
+            "lookup-final",
             "verify-proforma-D-7",
             "lookup-invoice",
             "create-invoice",
@@ -156,10 +156,10 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         [
             "namespace",
             "account",
-            "get-proforma",
-            "get-invoice",
-            "get-prepayment",
-            "get-final",
+            "lookup-proforma",
+            "lookup-invoice",
+            "lookup-prepayment",
+            "lookup-final",
         ]
     );
 }

@@ -22,7 +22,7 @@ use crate::harness::szamlazz::{
 };
 use crate::harness::{Harness, create_body};
 
-/// storno ⇒ `reversed{storno_number}` through `verify-storno-{number}`,
+/// storno ⇒ `reversed{storno_number}` through `verify-original-{number}`,
 /// `lookup-storno-{number}` and `storno-{number}`, the storno carrying the
 /// original's `telj` as `teljesitesDatum`, the original's appearance as
 /// `eszamla` and no `keltDatum` (ADR 0007); then a create with `reissue` ⇒
@@ -95,7 +95,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
         [
             "namespace",
             "account",
-            "verify-storno-SZ-4",
+            "verify-original-SZ-4",
             "lookup-storno-SZ-4",
             "storno-SZ-4",
         ]
@@ -130,7 +130,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
 
 /// The storno handler's other path and its re-execution. An original the
 /// verify already reports `sztornozott` is answered `reversed` with the storno
-/// number from the order-number hint, through `verify-storno-{number}` and
+/// number from the order-number hint, through `verify-original-{number}` and
 /// `hint-storno-{number}` alone, nothing sent. And a storno whose first send
 /// loses its reply (the immediate re-query still missing) is re-executed under
 /// the issue policy with a **byte-identical** body (the `teljesitesDatum` is a
@@ -194,7 +194,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
         [
             "namespace",
             "account",
-            "verify-storno-SZ-4D",
+            "verify-original-SZ-4D",
             "hint-storno-SZ-4D"
         ]
     );

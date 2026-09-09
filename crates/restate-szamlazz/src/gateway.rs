@@ -38,7 +38,7 @@
 //! an entry holds, since the Restate UI shows every entry for the retention
 //! period. So the outcomes here ([`LookupOutcome`], [`CreateOutcome`],
 //! [`QueryOutcome`], [`OwnershipOutcome`], [`StornoLookupOutcome`],
-//! [`StornoOutcome`], [`DeleteOutcome`], [`SetPaymentsOutcome`],
+//! [`StornoOutcome`], [`DeleteOutcome`], [`SetCreditEntriesOutcome`],
 //! [`ProbeOutcome`], [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
 //! response type**: the document outcomes carry the worker's projections
 //! [`FoundDocument`] (of a queried `InvoiceDocument`) and [`IssuedDocument`]
@@ -81,7 +81,9 @@ use szamlazz_agent::{
 use tracing::Instrument as _;
 
 use crate::account::Account;
-use crate::contract::{DeleteReason, IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
+use crate::contract::{
+    CreditEntryInput, DeleteReason, IssuedKind, QueryTaxpayerResponse, Selector,
+};
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
@@ -135,7 +137,7 @@ impl fmt::Display for SzamlazzAnswer {
 /// A refusal of a write: szamlazz.hu's, or the wire contract's before
 /// anything was sent ([`RejectionCode::Request`]). What the `Rejected`
 /// variants of [`CreateOutcome`], [`StornoOutcome`], [`DeleteOutcome`] and
-/// [`SetPaymentsOutcome`] carry; serialises as `code` and `message`, the code
+/// [`SetCreditEntriesOutcome`] carry; serialises as `code` and `message`, the code
 /// as its wire string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -175,9 +177,9 @@ impl From<ApiError> for Rejection {
 /// The code of a [`Rejection`]: szamlazz.hu's, or the pseudo-code of a
 /// rejection that never reached szamlazz.hu because the request violates the
 /// Számla Agent wire contract (a sixth credit entry; a replacing credit-entry
-/// request with no entries, which would clear the invoice's payments; a
+/// request with no entries, which would clear the invoice's credit entries; a
 /// document without line items). On a create or storno the pseudo-code is
-/// the `rejected` outcome like any other code; `Szamlazz.Agent.set_payments`
+/// the `rejected` outcome like any other code; `Szamlazz.Agent.set_credit_entries`
 /// tells it apart and answers the caller's request as `invalid_input`, since
 /// szamlazz.hu answered nothing to pass through.
 ///
@@ -521,8 +523,8 @@ impl Unconfirmed {
 /// re-executed closure's answer is exactly as fresh as a first one; its
 /// exhaustion is the handler's `unavailable` fault.
 ///
-/// The one-shot writes ([`delete_proforma`], [`set_payments`]) carry the same
-/// two shapes as data, [`DeleteOutcome::Lost`] / [`SetPaymentsOutcome::Lost`]
+/// The one-shot writes ([`delete_proforma`], [`set_credit_entries`]) carry the same
+/// two shapes as data, [`DeleteOutcome::Lost`] / [`SetCreditEntriesOutcome::Lost`]
 /// (the *Lost answer*): their step runs once and re-executes nothing, so the
 /// send that drew no answer is journaled and answered as `outcome_unknown`.
 /// Serialisable for that one use; never journaled on its own.
@@ -536,7 +538,7 @@ impl Unconfirmed {
 /// [`query_taxpayer`]: Gateway::query_taxpayer
 /// [`probe`]: Gateway::probe
 /// [`delete_proforma`]: Gateway::delete_proforma
-/// [`set_payments`]: Gateway::set_payments
+/// [`set_credit_entries`]: Gateway::set_credit_entries
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unanswered {
@@ -836,7 +838,7 @@ impl From<ApiError> for DeleteOutcome {
 /// The result of registering credit entries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum SetPaymentsOutcome {
+pub enum SetCreditEntriesOutcome {
     /// The entries are registered.
     Done {
         /// Outstanding amount after the update.
@@ -857,9 +859,9 @@ pub enum SetPaymentsOutcome {
     Lost(Unanswered),
 }
 
-/// A successful registration: [`SetPaymentsOutcome::Done`] with the reported
+/// A successful registration: [`SetCreditEntriesOutcome::Done`] with the reported
 /// totals.
-impl From<InvoiceBalance> for SetPaymentsOutcome {
+impl From<InvoiceBalance> for SetCreditEntriesOutcome {
     fn from(balance: InvoiceBalance) -> Self {
         Self::Done {
             outstanding: balance.outstanding,
@@ -870,7 +872,7 @@ impl From<InvoiceBalance> for SetPaymentsOutcome {
 
 /// A szamlazz.hu error on a registration is a rejection, unless it is a
 /// credential code.
-impl From<ApiError> for SetPaymentsOutcome {
+impl From<ApiError> for SetCreditEntriesOutcome {
     fn from(api: ApiError) -> Self {
         if api.code.is_credential_error() {
             Self::CredentialsRejected(api.into())
@@ -1740,17 +1742,17 @@ impl Gateway {
 
     /// Registers `entries` on invoice `number`, replacing the existing entries
     /// unless `additive`.
-    pub async fn set_payments(
+    pub async fn set_credit_entries(
         &self,
         number: &str,
-        entries: &[PaymentEntry],
+        entries: &[CreditEntryInput],
         additive: bool,
-    ) -> SetPaymentsOutcome {
+    ) -> SetCreditEntriesOutcome {
         let credit_entries = entries.iter().map(CreditEntry::from).collect::<Vec<_>>();
         let credit_entries = match CreditEntries::try_from(credit_entries) {
             Ok(entries) => entries,
             Err(error) => {
-                return SetPaymentsOutcome::Rejected(Rejection::request(error.to_string()));
+                return SetCreditEntriesOutcome::Rejected(Rejection::request(error.to_string()));
             }
         };
         let request = RegisterCreditEntry {
@@ -1763,13 +1765,13 @@ impl Gateway {
         match self.client.send(&request).await {
             Ok(result) => {
                 tracing::info!(number = %number, additive, "credit entries registered");
-                SetPaymentsOutcome::from(result)
+                SetCreditEntriesOutcome::from(result)
             }
-            Err(ClientError::Api(api)) => SetPaymentsOutcome::from(api),
+            Err(ClientError::Api(api)) => SetCreditEntriesOutcome::from(api),
             Err(ClientError::Request(error)) => {
-                SetPaymentsOutcome::Rejected(Rejection::request(error.to_string()))
+                SetCreditEntriesOutcome::Rejected(Rejection::request(error.to_string()))
             }
-            Err(error) => SetPaymentsOutcome::Lost(Unanswered::from_exchange(error)),
+            Err(error) => SetCreditEntriesOutcome::Lost(Unanswered::from_exchange(error)),
         }
     }
 
@@ -1981,13 +1983,13 @@ mod tests {
     }
 
     #[test]
-    fn set_payments_outcome_from_credit_entry_result() {
+    fn set_credit_entries_outcome_from_credit_entry_result() {
         let result = RegisterCreditEntry::new("SZ-1")
             .parse(&response(&created("SZ-1", "1000", "1270", "270")))
             .expect("parse");
         assert_eq!(
-            SetPaymentsOutcome::from(result),
-            SetPaymentsOutcome::Done {
+            SetCreditEntriesOutcome::from(result),
+            SetCreditEntriesOutcome::Done {
                 outstanding: Some(dec!(270)),
                 gross: Some(dec!(1270)),
             }
@@ -1995,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn api_errors_map_to_delete_and_set_payments_outcomes() {
+    fn api_errors_map_to_delete_and_set_credit_entries_outcomes() {
         let gone = ApiError {
             code: ErrorCode::ProformaNotFound,
             message: "Nincs ilyen díjbekérő".to_owned(),
@@ -2011,8 +2013,8 @@ mod tests {
             DeleteOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "xml")))
         );
         assert_eq!(
-            SetPaymentsOutcome::from(malformed),
-            SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "xml")))
+            SetCreditEntriesOutcome::from(malformed),
+            SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "xml")))
         );
 
         // A failure szamlazz.hu reported without a code is answered as
@@ -2026,8 +2028,10 @@ mod tests {
             SzamlazzAnswer::new("absent", "Hiba")
         );
         assert_eq!(
-            SetPaymentsOutcome::from(codeless),
-            SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("absent", "Hiba")))
+            SetCreditEntriesOutcome::from(codeless),
+            SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
+                "absent", "Hiba"
+            )))
         );
 
         for code in [
@@ -2049,8 +2053,8 @@ mod tests {
                 ))
             );
             assert_eq!(
-                SetPaymentsOutcome::from(login),
-                SetPaymentsOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                SetCreditEntriesOutcome::from(login),
+                SetCreditEntriesOutcome::CredentialsRejected(SzamlazzAnswer::new(
                     code.code().to_owned(),
                     "login"
                 ))

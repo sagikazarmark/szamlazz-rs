@@ -101,7 +101,7 @@ pub struct FoundDocument {
     pub gross_total: Decimal,
     /// The credit entries registered against the document (`kifizetesek`),
     /// in the order szamlazz.hu lists them.
-    pub payments: Vec<RecordedCreditEntry>,
+    pub credit_entries: Vec<RecordedCreditEntry>,
 }
 
 /// A credit entry as szamlazz.hu records it against a document (`kifizetes`):
@@ -190,8 +190,11 @@ impl FoundDocument {
     /// The registered credit entry amounts, in the order szamlazz.hu lists
     /// them.
     #[must_use]
-    pub fn payment_amounts(&self) -> Vec<Decimal> {
-        self.payments.iter().map(|payment| payment.amount).collect()
+    pub fn credit_entry_amounts(&self) -> Vec<Decimal> {
+        self.credit_entries
+            .iter()
+            .map(|entry| entry.amount)
+            .collect()
     }
 
     /// Whether the document carries `order` as its
@@ -244,7 +247,7 @@ impl From<InvoiceDocument> for FoundDocument {
             net_total: document.totals.total.net,
             vat_total: document.totals.total.vat,
             gross_total: document.totals.total.gross,
-            payments: document
+            credit_entries: document
                 .credit_entries
                 .into_iter()
                 .map(RecordedCreditEntry::from)
@@ -340,7 +343,7 @@ mod tests {
             net: "20000",
             vat: "5400",
             gross: "25400",
-            payments: &[
+            credit_entries: &[
                 CreditRecord {
                     comment: Some("first"),
                     bank_account: Some("1234-5678"),
@@ -370,8 +373,8 @@ mod tests {
         assert_eq!(found.vat_total, dec!(5400));
         assert_eq!(found.gross_total, dec!(25400));
 
-        let [first, second] = found.payments.as_slice() else {
-            panic!("two credit entries, got {:?}", found.payments);
+        let [first, second] = found.credit_entries.as_slice() else {
+            panic!("two credit entries, got {:?}", found.credit_entries);
         };
         assert_eq!(first.date, date(2026, 7, 10));
         assert_eq!(first.title, "átutalás");
@@ -401,7 +404,7 @@ mod tests {
         assert_eq!(bare.currency, None);
         assert_eq!(bare.referenced_invoice_number, None);
         assert_eq!(bare.referenced_proforma_number, None);
-        assert!(bare.payments.is_empty());
+        assert!(bare.credit_entries.is_empty());
     }
 
     /// The projection serialises flat, under exactly the field names above,
@@ -436,7 +439,7 @@ mod tests {
                 "net_total",
                 "vat_total",
                 "gross_total",
-                "payments",
+                "credit_entries",
             ])
         );
         assert_eq!(json["appearance"], 1, "the code as an integer");
@@ -456,7 +459,7 @@ mod tests {
     fn the_projection_reads_the_checks_off_a_queried_document() {
         let order = OrderKey::parse("ORD-1").expect("order");
         let live = Doc {
-            payments: &[
+            credit_entries: &[
                 CreditRecord::new(date(2026, 7, 4), "transfer", "500"),
                 CreditRecord::new(date(2026, 7, 5), "transfer", "770"),
             ],
@@ -465,7 +468,7 @@ mod tests {
         .parse();
         assert!(live.is_live());
         assert_eq!(live.e_invoice(), Some(false));
-        assert_eq!(live.payment_amounts(), [dec!(500), dec!(770)]);
+        assert_eq!(live.credit_entry_amounts(), [dec!(500), dec!(770)]);
         assert!(live.carries_order(&order));
         assert!(
             !live.carries_order(&OrderKey::parse("ORD-2").expect("order")),

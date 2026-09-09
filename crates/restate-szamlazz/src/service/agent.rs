@@ -1,14 +1,14 @@
 //! The stateless `Szamlazz.Agent` service handlers: `query` and
-//! `set_payments` by document number, `query_taxpayer` by tax number, and
+//! `set_credit_entries` by document number, `query_taxpayer` by tax number, and
 //! the `check_account` probe. The by-number `storno` is the storno
 //! protocol's second shell, in `service::storno`.
 //!
 //! No handler compares the document it finds with the account the invocation
 //! resolved to: the worker holds no account pin; which account a key opens
 //! is the operator's go-live check. Every read (the probe, `query`,
-//! `query_taxpayer`) runs under the read policy; `set_payments` is a write
+//! `query_taxpayer`) runs under the read policy; `set_credit_entries` is a write
 //! without a retry of its own, and with `additive: true` an at-least-once
-//! one (see [`SetPaymentsRequest::additive`]).
+//! one (see [`SetCreditEntriesRequest::additive`]).
 
 use std::sync::Arc;
 
@@ -20,11 +20,11 @@ use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, run_once, run_reading};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
-    QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
+    QueryTaxpayerRequest, QueryTaxpayerResponse, SetCreditEntriesRequest, SetCreditEntriesResponse,
 };
 use crate::gateway::{
-    ProbeOutcome, QueryOutcome, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer, TaxpayerOutcome,
-    Unanswered,
+    ProbeOutcome, QueryOutcome, RejectionCode, SetCreditEntriesOutcome, SzamlazzAnswer,
+    TaxpayerOutcome, Unanswered,
 };
 use crate::identity::{ExternalId, Namespace};
 
@@ -37,11 +37,11 @@ pub(super) fn taxpayer_prefix(request: &QueryTaxpayerRequest) -> Result<Taxpayer
         .map_err(|error| Fault::invalid_input(error.to_string()))
 }
 
-/// The name of `query_taxpayer`'s one durable step: `taxpayer-{prefix}`. The
+/// The name of `query_taxpayer`'s one durable step: `lookup-taxpayer-{prefix}`. The
 /// prefix, not the tax number as sent, so the stem and the full number name
 /// the same entry.
 pub(super) fn taxpayer_step(prefix: &TaxpayerPrefix) -> String {
-    format!("taxpayer-{}", prefix.as_str())
+    format!("lookup-taxpayer-{}", prefix.as_str())
 }
 
 /// What the probe step settled, as `check_account`'s `credentials`. Every
@@ -59,15 +59,15 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
     }
 }
 
-/// The `outcome_unknown` fault of `set_payments` after a lost reply. What the
+/// The `outcome_unknown` fault of `set_credit_entries` after a lost reply. What the
 /// caller does next depends on `additive`: a replacing call is idempotent and
 /// is simply repeated; an additive one is at-least-once (the lost send may
 /// have appended the entries), so the caller queries the invoice first.
-fn set_payments_unknown(additive: bool, lost: &Unanswered) -> Fault {
+fn set_credit_entries_unknown(additive: bool, lost: &Unanswered) -> Fault {
     let next = if additive {
         "the entries are additive and may have landed; query the invoice before re-sending"
     } else {
-        "call set_payments again"
+        "call set_credit_entries again"
     };
     Fault::outcome_unknown(format!(
         "credit entry registration outcome unknown: {lost}; {next}"
@@ -110,28 +110,28 @@ fn taxpayer_response(
     }
 }
 
-/// What `set_payments` answers from what its one step settled: the totals on
+/// What `set_credit_entries` answers from what its one step settled: the totals on
 /// success; a rejection that never reached szamlazz.hu (the wire contract
 /// takes at most five entries, and a replacing request with none would clear
-/// the invoice's payments, [`RejectionCode::Request`]) as `invalid_input`, the
+/// the invoice's credit entries, [`RejectionCode::Request`]) as `invalid_input`, the
 /// caller's request; szamlazz.hu refusing the entries passed through as
 /// `szamlazz_error` (422) naming the invoice; a credential code as
 /// `credentials_rejected`; a lost reply as `outcome_unknown`, conditional on
 /// `additive`.
-fn set_payments_response(
-    outcome: SetPaymentsOutcome,
+fn set_credit_entries_response(
+    outcome: SetCreditEntriesOutcome,
     invoice_number: String,
     additive: bool,
     namespace: &Namespace,
-) -> Result<SetPaymentsResponse, Fault> {
+) -> Result<SetCreditEntriesResponse, Fault> {
     match outcome {
-        SetPaymentsOutcome::Done { outstanding, gross } => {
-            let mut response = SetPaymentsResponse::new(invoice_number);
+        SetCreditEntriesOutcome::Done { outstanding, gross } => {
+            let mut response = SetCreditEntriesResponse::new(invoice_number);
             response.outstanding = outstanding;
             response.gross_total = gross;
             Ok(response)
         }
-        SetPaymentsOutcome::Rejected(rejection) => Err(match rejection.code {
+        SetCreditEntriesOutcome::Rejected(rejection) => Err(match rejection.code {
             RejectionCode::Request => Fault::invalid_input(format!(
                 "the credit entries cannot be sent: {}; nothing was sent",
                 rejection.message
@@ -141,10 +141,10 @@ fn set_payments_response(
                 SzamlazzAnswer::new(code, rejection.message),
             ),
         }),
-        SetPaymentsOutcome::CredentialsRejected(answer) => {
+        SetCreditEntriesOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        SetPaymentsOutcome::Lost(lost) => Err(set_payments_unknown(additive, &lost)),
+        SetCreditEntriesOutcome::Lost(lost) => Err(set_credit_entries_unknown(additive, &lost)),
     }
 }
 
@@ -196,7 +196,7 @@ impl Execution {
         query_response(outcome, &self.config.namespace).map_err(HandlerError::from)
     }
 
-    /// The `query_taxpayer` handler: one durable step (`taxpayer-{prefix}`)
+    /// The `query_taxpayer` handler: one durable step (`lookup-taxpayer-{prefix}`)
     /// under the read policy (NAV's answer as szamlazz.hu relayed it,
     /// projected onto the crate-owned response), then the projection as is.
     /// `valid: false` is the answer, not a fault. Any other `funcCode ≠ OK`
@@ -218,16 +218,16 @@ impl Execution {
         taxpayer_response(outcome, &self.config.namespace).map_err(HandlerError::from)
     }
 
-    /// The `set_payments` handler: one durable step (`set-payments-{number}`)
+    /// The `set_credit_entries` handler: one durable step (`set-credit-entries-{number}`)
     /// that registers the credit entries without a preceding query; a verify
     /// round trip (about a second per credit entry) would establish nothing
     /// the send does not, and a credit entry is not a legal document.
-    pub(super) async fn set_payments_request(
+    pub(super) async fn set_credit_entries_request(
         &self,
         ctx: &Context<'_>,
-        request: SetPaymentsRequest,
-    ) -> Result<SetPaymentsResponse, HandlerError> {
-        let SetPaymentsRequest {
+        request: SetCreditEntriesRequest,
+    ) -> Result<SetCreditEntriesResponse, HandlerError> {
+        let SetCreditEntriesRequest {
             invoice_number,
             entries,
             additive,
@@ -237,11 +237,15 @@ impl Execution {
         let number = invoice_number.clone();
         let outcome = run_once(
             ctx,
-            format!("set-payments-{invoice_number}"),
-            move || async move { gateway.set_payments(&number, &entries, additive).await },
+            format!("set-credit-entries-{invoice_number}"),
+            move || async move {
+                gateway
+                    .set_credit_entries(&number, &entries, additive)
+                    .await
+            },
         )
         .await?;
-        set_payments_response(outcome, invoice_number, additive, &self.config.namespace)
+        set_credit_entries_response(outcome, invoice_number, additive, &self.config.namespace)
             .map_err(HandlerError::from)
     }
 }
@@ -269,15 +273,15 @@ mod tests {
     /// pass-through: szamlazz.hu answered nothing.
     #[test]
     fn a_sixth_credit_entry_is_invalid_input() {
-        let outcome = SetPaymentsOutcome::Rejected(Rejection::request(
+        let outcome = SetCreditEntriesOutcome::Rejected(Rejection::request(
             "a credit-entry request can contain at most five entries",
         ));
-        let fault = set_payments_response(outcome, "SZ-1".to_owned(), false, &namespace())
+        let fault = set_credit_entries_response(outcome, "SZ-1".to_owned(), false, &namespace())
             .expect_err("a fault");
         let (status, body) = fault_body(fault);
         assert_eq!(status, 400, "{body}");
         assert_eq!(body["code"], "invalid_input", "{body}");
-        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("at most five entries"), "{message}");
     }
@@ -287,11 +291,11 @@ mod tests {
     /// (never in `code`, which is the symbolic token), and its message.
     #[test]
     fn a_refused_credit_entry_is_a_szamlazz_error_carrying_the_code() {
-        let outcome = SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
+        let outcome = SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
             "259",
             "A számla nem található.",
         )));
-        let fault = set_payments_response(outcome, "SZ-1".to_owned(), false, &namespace())
+        let fault = set_credit_entries_response(outcome, "SZ-1".to_owned(), false, &namespace())
             .expect_err("a fault");
         let (status, body) = fault_body(fault);
         assert_eq!(status, 422, "{body}");
@@ -312,7 +316,7 @@ mod tests {
             fault_body(query_response(QueryOutcome::NotFound, &namespace()).expect_err("a fault"));
         assert_eq!(status, 404, "{body}");
         assert_eq!(body["code"], "not_found", "{body}");
-        assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
 
         let outcome = QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám."));
         let (status, body) =
@@ -354,13 +358,13 @@ mod tests {
         assert_eq!(body["szamlazz_code"], "NAV_ERROR", "{body}");
     }
 
-    /// `set_payments` with `additive: true` is at-least-once: a lost reply
+    /// `set_credit_entries` with `additive: true` is at-least-once: a lost reply
     /// may have appended the entries, so the fault tells the caller to query
     /// the invoice before re-sending; a replacing call is repeated as is.
     #[test]
-    fn the_set_payments_fault_tells_an_additive_caller_to_query_first() {
+    fn the_set_credit_entries_fault_tells_an_additive_caller_to_query_first() {
         let lost = Unanswered::Transport("connection reset".to_owned());
-        let additive = TerminalError::from(set_payments_unknown(true, &lost));
+        let additive = TerminalError::from(set_credit_entries_unknown(true, &lost));
         assert_eq!(additive.code(), 500);
         assert!(
             additive.message().contains("connection reset"),
@@ -375,15 +379,17 @@ mod tests {
             additive.message()
         );
         assert!(
-            !additive.message().contains("call set_payments again"),
+            !additive.message().contains("call set_credit_entries again"),
             "{}",
             additive.message()
         );
 
-        let replacing = TerminalError::from(set_payments_unknown(false, &lost));
+        let replacing = TerminalError::from(set_credit_entries_unknown(false, &lost));
         assert_eq!(replacing.code(), 500);
         assert!(
-            replacing.message().contains("call set_payments again"),
+            replacing
+                .message()
+                .contains("call set_credit_entries again"),
             "{}",
             replacing.message()
         );
@@ -403,8 +409,8 @@ mod tests {
         let stem = taxpayer_prefix(&QueryTaxpayerRequest::new("12345678")).expect("stem");
         let full = taxpayer_prefix(&QueryTaxpayerRequest::new("12345678-2-42")).expect("full");
         assert_eq!(stem, full);
-        assert_eq!(taxpayer_step(&stem), "taxpayer-12345678");
-        assert_eq!(taxpayer_step(&full), "taxpayer-12345678");
+        assert_eq!(taxpayer_step(&stem), "lookup-taxpayer-12345678");
+        assert_eq!(taxpayer_step(&full), "lookup-taxpayer-12345678");
     }
 
     /// A tax number in neither accepted form is the caller's request:
@@ -446,15 +452,15 @@ mod tests {
                 "{tax_number:?} names both accepted forms: {message}"
             );
             assert_eq!(
-                body.get("order"),
-                None,
+                body["order"],
+                serde_json::Value::Null,
                 "a by-number fault carries no order"
             );
         }
     }
 
     /// An exhausted read of the taxpayer step is the `unavailable` fault
-    /// naming the step by its prefix (`taxpayer-{prefix}`), and the last
+    /// naming the step by its prefix (`lookup-taxpayer-{prefix}`), and the last
     /// failure, never the tax number as the caller sent it.
     #[test]
     fn an_exhausted_taxpayer_read_is_unavailable_naming_the_step() {
@@ -467,7 +473,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json");
         assert_eq!(body["code"], "unavailable", "{body}");
         let message = body["message"].as_str().expect("message");
-        assert!(message.contains("taxpayer-12345678"), "{message}");
+        assert!(message.contains("lookup-taxpayer-12345678"), "{message}");
         assert!(
             message.contains("maintenance"),
             "names the last failure: {message}"
