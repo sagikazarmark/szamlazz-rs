@@ -7,7 +7,7 @@
 //! `telj`-less original, the storno's `eszamla`), the refusals (a sixth
 //! entry, an empty replace) and the lost-reply advice are unit tests of
 //! `service::agent` and the storno intent; the wire shapes of both
-//! operations are `tests/gateway.rs`'s.
+//! operations are `tests/gateway/`'s.
 
 use serde_json::json;
 use wiremock::matchers::body_string_contains;

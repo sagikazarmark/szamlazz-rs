@@ -2035,7 +2035,7 @@ mod tests {
     }
 
     // The pure classifiers behind the async steps, each on its own table.
-    // The wiremock suite (`tests/gateway.rs`) reaches them through HTTP and
+    // The wiremock suite (`tests/gateway/`) reaches them through HTTP and
     // keeps one exchange per operation for the header-vs-body parse path;
     // the branches are asserted here.
 
@@ -2241,6 +2241,35 @@ mod tests {
         let reqwest_error = ClientError::Transport(unbuildable);
         let message = reqwest_error.to_string();
         assert_eq!(classify_failure(reqwest_error), Failure::Transport(message));
+    }
+
+    /// What the run journals as its last failure (`Unconfirmed`'s display) names
+    /// the cause it stands for: `szlahu_down` after a send is unavailability, not
+    /// an "open code", and an open answer without a code is szamlazz.hu's success
+    /// without a document number, never `szlahu_down` (#63).
+    #[test]
+    fn unconfirmed_displays_name_their_cause() {
+        let open = Unconfirmed::Open {
+            code: Some("56".to_owned()),
+            message: "signing".to_owned(),
+        }
+        .to_string();
+        assert_eq!(open, "open code 56: signing");
+
+        let no_number = Unconfirmed::Open {
+            code: None,
+            message: "create succeeded without a document number".to_owned(),
+        }
+        .to_string();
+        assert!(!no_number.contains("szlahu_down"), "{no_number}");
+        assert!(no_number.contains("document number"), "{no_number}");
+
+        let down = Unconfirmed::Unavailable("maintenance".to_owned()).to_string();
+        assert!(down.contains("szlahu_down"), "{down}");
+        assert!(down.contains("maintenance"), "{down}");
+
+        let transport = Unconfirmed::Transport("empty response".to_owned()).to_string();
+        assert_eq!(transport, "transport failure: empty response");
     }
 
     /// The one place a query's failure is split into what szamlazz.hu

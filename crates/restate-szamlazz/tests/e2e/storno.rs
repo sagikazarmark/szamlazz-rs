@@ -7,7 +7,7 @@
 //! verify); and, in phase 2, an order Restate has no memory of. The verdicts
 //! (`not_managed`, `not_stornoable`, a `telj`-less original, the storno's
 //! `eszamla`) are unit tests of `service::storno` and the storno intent;
-//! szamlazz.hu's typed refusals (14, 221) are `tests/gateway.rs`'s.
+//! szamlazz.hu's typed refusals (14, 221) are `tests/gateway/`'s.
 
 use rust_decimal::dec;
 use serde_json::json;

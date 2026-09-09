@@ -5,7 +5,7 @@
 //! the proforma `consumed` by the invoice (the `get` path). The link's
 //! decisions (`auto`, `none`, `{number}` on a proforma of another order or
 //! none at all, on a non-proforma) are unit tests of `service::create`; the
-//! reference on the create body is `tests/gateway.rs`'s.
+//! reference on the create body is `tests/gateway/`'s.
 
 use rust_decimal::dec;
 use serde_json::json;

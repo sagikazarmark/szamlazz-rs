@@ -812,9 +812,14 @@ mod tests {
         account.defaults.e_invoice = false;
         let storno_id = || ExternalId::new("acct:ORD-1:storno:SZ-1");
 
-        // `telj` present: the intent carries it; `eszamla = 2` is an e-invoice.
+        // `telj` present: the intent carries it; `eszamla = 3` is an e-invoice
+        // where the account's default is paper.
         let intent = StornoIntent::from_verified(
-            &Doc::default().parse(),
+            &Doc {
+                eszamla: Some(3),
+                ..Doc::default()
+            }
+            .parse(),
             &account,
             "SZ-1".to_owned(),
             storno_id(),

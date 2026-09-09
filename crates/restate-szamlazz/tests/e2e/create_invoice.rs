@@ -5,7 +5,7 @@
 //! executions. The decisions the sequence takes (`decide_lookup`,
 //! `respond_to`, the duplicate order number, the proforma link) are unit
 //! tests of `service::create`; the wire of the create step is
-//! `tests/gateway.rs`.
+//! `tests/gateway/`.
 
 use restate_e2e_harness::run_result;
 use rust_decimal::dec;

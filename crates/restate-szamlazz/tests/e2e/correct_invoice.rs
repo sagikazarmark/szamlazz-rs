@@ -3,7 +3,7 @@
 //! correctives are exempt) and the create naming the base on the wire; the
 //! same `correction_id` again finding the corrective. The verify's refusals
 //! (7, a reversed base, another order's) are unit tests of `service::create`;
-//! the 71/152 on a corrective is `tests/gateway.rs`'s.
+//! the 71/152 on a corrective is `tests/gateway/`'s.
 
 use rust_decimal::dec;
 use serde_json::json;

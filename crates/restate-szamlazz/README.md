@@ -604,7 +604,7 @@ reversal without the number after a `warn`, while a cancellation of the invocati
   `Order` handlers' key parsing refusing an untrimmed key as `invalid_input` while `OrderKey::parse` still trims;
   and the sentinels that the agent key reaches neither the `credentials_rejected` warning nor the body of a
   `credentials_rejected` fault;
-- the wiremock tests of the gateway against synthetic szamlazz.hu responses (`tests/gateway.rs`), which prove the
+- the wiremock tests of the gateway against synthetic szamlazz.hu responses (`tests/gateway/`), which prove the
   **wire** of each step (which requests it sends and in what order, what it puts in them, and that each answer,
   in headers or in the body alone, is read into the outcome the gateway's classifiers name; the classifiers
   themselves are pure fns table-tested in the module's unit tests): the lookup matrix (`Absent`, `Live`,
@@ -657,7 +657,7 @@ for szamlazz.hu, in two phases on one server. It is two things and nothing else:
   handler journals; a handler with two shapes has two paths), proving the steps run in that order under Restate
   and walking every path in full at least once, which the step-name table check at the end demands. A scenario that is the
   only walker of a path stays however plain its decision; the decision itself (what a handler answers to a given
-  read) is a unit test of `service`, and the wire of each step is `tests/gateway.rs`'s;
+  read) is a unit test of `service`, and the wire of each step is `tests/gateway/`'s;
 - **the durable-execution proof**: what only a server can show. The `Idempotency-Key` replaying a stored
   completion, and a stored fault; a run retry re-executing a read and a write with the delay of the run policy
   (`retry_count` and the failing command on `sys_invocation` while in flight, one journal entry per step) and its

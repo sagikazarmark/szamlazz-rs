@@ -4,7 +4,7 @@
 //! go-live check reads it), `query_taxpayer` under each scope (NAV asked with
 //! that scope's key). The reads' decisions (`credentials: rejected` as data,
 //! 7 as `not_found`, a NAV code passed through, the tax number's two forms)
-//! are unit tests of `service::agent` and `tests/gateway.rs`.
+//! are unit tests of `service::agent` and `tests/gateway/`.
 
 use serde_json::json;
 

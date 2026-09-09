@@ -9,7 +9,7 @@
 //! Shared by the three places a synthetic szamlazz.hu answer is stated: the
 //! crate's unit tests (`src/test_support.rs` includes this file by path and
 //! adds the parse into the worker's projection), the gateway's wiremock tests
-//! (`tests/gateway.rs`) and the e2e suite (`tests/e2e/harness/szamlazz.rs`,
+//! (`tests/gateway/`) and the e2e suite (`tests/e2e/harness/szamlazz.rs`,
 //! which adds the document-centric mount helpers). A `tests/common/` module
 //! is what Cargo compiles into each integration-test binary that declares it
 //! and never as a test of its own; each consumer uses a subset, hence the
@@ -18,9 +18,9 @@
 //!
 //! The fixture's defaults: a live test-account document with the fulfillment
 //! date of [`ORIGINAL_TELJ`], `eszamla` following the kind (`0` on a proforma,
-//! `2` otherwise; szamlazz.hu itself reports `1`, paper, for a default create
-//! and `3` for `eszamla=true` (#73); #156 moves the default to `1`), and the
-//! seller block's `id`, [`SUPPLIER`].
+//! `1`, paper, otherwise: what szamlazz.hu reports for a default create; `3`
+//! is what it reports for `eszamla=true` and `2` was never observed, #73), and
+//! the seller block's `id`, [`SUPPLIER`].
 
 #![allow(
     dead_code,
@@ -97,9 +97,9 @@ pub struct Doc<'a> {
     pub referenced_invoice: Option<&'a str>,
     /// `hivdijbekszam`: the proforma an invoice or prepayment consumed.
     pub referenced_proforma: Option<&'a str>,
-    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `2` (an
-    /// e-invoice code) on anything else. szamlazz.hu reports `1` for a paper
-    /// invoice and `3` for one created with `eszamla=true` (P73).
+    /// `eszamla`; `None` follows `tipus`: `0` on a proforma, `1` (paper) on
+    /// anything else. szamlazz.hu reports `1` for a default create and `3`
+    /// for one created with `eszamla=true`; `2` was never observed (#73).
     pub eszamla: Option<i32>,
     /// `kelt`; `None` renders no element.
     pub issue_date: Option<Date>,
@@ -213,9 +213,11 @@ impl<'a> Doc<'a> {
         let opt = |tag: &str, value: Option<&str>| {
             value.map_or_else(String::new, |value| format!("<{tag}>{value}</{tag}>"))
         };
-        let eszamla = self
-            .eszamla
-            .unwrap_or(if self.tipus == "D" { 0 } else { 2 });
+        // `0` on a proforma (not an invoice), `1` (paper) on anything else.
+        let eszamla = self.eszamla.unwrap_or(match self.tipus {
+            "D" => 0,
+            _ => 1,
+        });
         let kelt = self.issue_date.map(|date| date.to_string());
         let telj = self.fulfillment_date.map(|date| date.to_string());
         let teszt = self.test.map(|test| test.to_string());

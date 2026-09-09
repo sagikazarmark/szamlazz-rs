@@ -8,7 +8,7 @@
 //! namespacing keys, the `account` entry across a re-execution, a rotation,
 //! purge, kill, the flag day, the journal scan and the step-name table check). The
 //! decisions each handler takes are unit tests of `service`; the wire of each
-//! gateway step is `tests/gateway.rs`.
+//! gateway step is `tests/gateway/`.
 //!
 //! The two end-to-end tests are ignored by default:
 //! `cargo test -p restate-szamlazz --test e2e -- --ignored`; `E2E_ONLY=<needle,…>`
@@ -74,7 +74,7 @@
 
 #![cfg(unix)]
 
-/// The fixtures shared with `tests/gateway.rs` and the crate's unit tests.
+/// The fixtures shared with `tests/gateway/` and the crate's unit tests.
 #[path = "../common/mod.rs"]
 mod common;
 mod harness;

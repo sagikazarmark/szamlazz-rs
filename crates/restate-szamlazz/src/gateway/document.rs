@@ -437,7 +437,7 @@ mod tests {
                 "payments",
             ])
         );
-        assert_eq!(json["appearance"], 2, "the code as an integer");
+        assert_eq!(json["appearance"], 1, "the code as an integer");
         assert_eq!(json["document_type"], "SZ", "the tipus as its token");
         assert_eq!(json["net_total"], "1000", "decimals as strings");
         let back: FoundDocument = serde_json::from_value(json).expect("decodes");
@@ -462,7 +462,7 @@ mod tests {
         }
         .parse();
         assert!(live.is_live());
-        assert_eq!(live.e_invoice(), Some(true));
+        assert_eq!(live.e_invoice(), Some(false));
         assert_eq!(live.payment_amounts(), [dec!(500), dec!(770)]);
         assert!(live.carries_order(&order));
         assert!(

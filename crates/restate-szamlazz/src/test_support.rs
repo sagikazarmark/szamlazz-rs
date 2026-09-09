@@ -181,7 +181,11 @@ mod tests {
         assert_eq!(document.info.test, Some(true));
         assert_eq!(document.supplier.id, Some(SUPPLIER));
         assert_eq!(document.info.fulfillment_date, Some(ORIGINAL_TELJ));
-        assert_eq!(document.info.appearance.code(), 2);
+        assert_eq!(
+            document.info.appearance.code(),
+            1,
+            "paper, the default create's code"
+        );
         assert_eq!(document.info.reversed, None);
         assert_eq!(document.info.referenced_invoice_number, None);
         assert_eq!(document.info.referenced_proforma_number, None);
@@ -254,17 +258,18 @@ mod tests {
         );
     }
 
-    /// `eszamla` follows `tipus` (`0` on a proforma, `2` (an e-invoice code)
-    /// on anything else) unless a test sets the code itself.
+    /// `eszamla` follows `tipus` (`0` on a proforma, `1`, paper, on anything
+    /// else: the code szamlazz.hu reports for a default create, #73) unless a
+    /// test sets the code itself.
     #[test]
     fn eszamla_follows_the_kind_unless_set() {
         assert_eq!(Doc::new("D-1", "D").wire().info.appearance.code(), 0);
-        assert_eq!(Doc::new("ES-1", "ES").wire().info.appearance.code(), 2);
-        let paper = Doc {
-            eszamla: Some(1),
+        assert_eq!(Doc::new("ES-1", "ES").wire().info.appearance.code(), 1);
+        let electronic = Doc {
+            eszamla: Some(3),
             ..Doc::default()
         };
-        assert_eq!(paper.wire().info.appearance.code(), 1);
+        assert_eq!(electronic.wire().info.appearance.code(), 3);
     }
 
     /// What `get` and the `Szamlazz.Agent.query` projection read beyond the

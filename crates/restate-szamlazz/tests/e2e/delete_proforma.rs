@@ -3,7 +3,7 @@
 //! deleted (`delete-proforma-{number}`), then a second call finding nothing.
 //! The guard (a paid proforma, `force`, a collision) and the answers (335, a
 //! refusal, a lost reply) are unit tests of `service::storno` and
-//! `tests/gateway.rs`.
+//! `tests/gateway/`.
 
 use serde_json::json;
 
