@@ -4,7 +4,10 @@
 //! the fault envelope, killed and purged, and the server stops on drop.
 //!
 //! Ignored: `cargo test -p restate-e2e-harness -- --ignored` with
-//! `RESTATE_SERVER_BIN` (or `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL`) set.
+//! `RESTATE_SERVER_BIN` set. Never a reused server (`Reuse::Never`): the test
+//! deploys a service of its own and leaves its invocations retained for a
+//! day, which a suite sharing that server (one whose run-name pin scans every
+//! invocation the server holds) would meet as an unpinned handler.
 
 #![cfg(unix)]
 #![allow(
@@ -67,12 +70,15 @@ struct Fault {
 }
 
 #[tokio::test]
-#[ignore = "needs a Restate server: RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
+#[ignore = "needs a Restate server: RESTATE_SERVER_BIN (a server of its own, never a reused one)"]
 async fn e2e_smoke() {
-    let Some(launcher) = launcher_or_skip(Reuse::Allowed) else {
+    let Some(launcher) = launcher_or_skip(Reuse::Never) else {
         return;
     };
-    let spawned = matches!(launcher, Launcher::Binary(_));
+    assert!(
+        matches!(launcher, Launcher::Binary(_)),
+        "Reuse::Never yields a binary"
+    );
     let restate = launcher.launch(&SERVER).await;
     let admin_url = restate.admin_url().to_owned();
 
@@ -163,18 +169,16 @@ async fn e2e_smoke() {
         .await;
     assert_eq!(reply.status, 422, "{}", reply.body);
 
-    // A spawned server stops with the handle.
+    // The spawned server stops with the handle.
     drop(restate);
-    if spawned {
-        let health = plain_http()
-            .build()
-            .expect("client")
-            .get(format!("{admin_url}/health"))
-            .send()
-            .await;
-        assert!(
-            health.is_err(),
-            "the spawned server is gone with the handle"
-        );
-    }
+    let health = plain_http()
+        .build()
+        .expect("client")
+        .get(format!("{admin_url}/health"))
+        .send()
+        .await;
+    assert!(
+        health.is_err(),
+        "the spawned server is gone with the handle"
+    );
 }

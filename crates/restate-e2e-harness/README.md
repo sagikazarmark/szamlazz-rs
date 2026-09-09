@@ -76,8 +76,9 @@ let runs = restate.admin().runs(reply.invocation_id()).await;
 ## Tests
 
 `cargo test -p restate-e2e-harness` runs the pure decisions (the gate, the sampler, the matcher) without a server.
-`cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract against a real server with
-a trivial service of its own: the gate launches a server, the service is deployed (twice), invoked through the
+`RESTATE_SERVER_BIN=… cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract
+against a server of its own (never a reused one: the test deploys a service and leaves its invocations retained,
+which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the
 ingress, its run read from the journal, a fault decoded out of the envelope, an invocation killed and purged, a
 service made private and public, and the server stops on drop.
 

@@ -46,8 +46,10 @@ pub fn sql_literal(text: &str) -> String {
 /// an endpoint to register). The deadline bounds the wait as a whole: a probe
 /// still running at it is cut (the HTTP client's own timeout, 120 s, would
 /// otherwise outlast a 30 s wait on one stalled request) and reported as the
-/// probe that did not answer; a failed probe is not followed by another
-/// after the deadline.
+/// probe that did not answer; a failed probe whose retry sleep would cross
+/// the deadline is the last, reported with `describe` of what it saw, so a
+/// server's own refusal (a rejected registration) is what the panic carries,
+/// never a generic message from a probe started at the deadline.
 pub(crate) async fn poll_until<T, E, Fut>(
     deadline: Duration,
     interval: Duration,
@@ -64,7 +66,7 @@ where
         };
         match answer {
             Ok(answer) => return answer,
-            Err(last) => assert!(Instant::now() < deadline, "{}", describe(&last)),
+            Err(last) => assert!(Instant::now() + interval < deadline, "{}", describe(&last)),
         }
         tokio::time::sleep(interval).await;
     }
@@ -687,6 +689,35 @@ mod tests {
         assert!(
             retries_query(&target.scoped("acme")).ends_with(" AND scope = 'acme'"),
             "a scoped target narrows to its scope"
+        );
+    }
+
+    /// A probe that keeps failing ends with what it saw last, never with the
+    /// in-flight message: the retry sleep that would cross the deadline is
+    /// not taken.
+    #[tokio::test(start_paused = true)]
+    async fn poll_until_reports_the_last_failure_not_a_probe_started_at_the_deadline() {
+        let outcome = tokio::spawn(poll_until::<(), u32, _>(
+            Duration::from_secs(1),
+            Duration::from_millis(300),
+            {
+                let mut attempt = 0;
+                move || {
+                    attempt += 1;
+                    std::future::ready(Err(attempt))
+                }
+            },
+            |attempt| format!("registration refused, attempt {attempt}"),
+        ))
+        .await;
+        let message = outcome
+            .expect_err("the deadline panics")
+            .into_panic()
+            .downcast::<String>()
+            .expect("a message");
+        assert!(
+            message.starts_with("registration refused, attempt "),
+            "{message}"
         );
     }
 

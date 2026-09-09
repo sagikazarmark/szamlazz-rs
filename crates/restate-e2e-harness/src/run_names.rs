@@ -56,7 +56,10 @@ impl RunPatterns {
     /// itself, and the pin would explain anything. Panics likewise on two
     /// different patterns with one prefix (`step-{id}` beside
     /// `step-{number}`): a journaled `step-7` would read as whichever sorted
-    /// first, and the other handler's path would go unexplained.
+    /// first, and the other handler's path would go unexplained. And on a
+    /// fixed name a parametrized prefix shadows (`step-special` beside
+    /// `step-{id}`): [`Self::pattern`] would read the fixed name as the
+    /// parameter, and its path could never be observed.
     #[must_use]
     pub fn of(paths: &[RunPath]) -> Self {
         let mut parametrized: Vec<(&str, &str)> = paths
@@ -76,6 +79,22 @@ impl RunPatterns {
             .collect();
         parametrized.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
         parametrized.dedup();
+        let fixed = paths
+            .iter()
+            .flat_map(|row| row.path.iter())
+            .filter(|name| !name.contains('{'));
+        for name in fixed {
+            if let Some((prefix, pattern)) = parametrized
+                .iter()
+                .find(|(prefix, _)| name.starts_with(prefix) && name.len() > prefix.len())
+            {
+                panic!(
+                    "the fixed run name {name:?} is shadowed by {pattern:?} (prefix {prefix:?}); \
+                     a journaled {name:?} would read as the parameter and its path could never be \
+                     observed"
+                );
+            }
+        }
         for pair in parametrized.windows(2) {
             assert!(
                 pair[0].0 != pair[1].0,
@@ -227,6 +246,40 @@ mod tests {
             .expect("a message");
         assert!(
             message.contains("step-{id}") && message.contains("step-{number}"),
+            "{message}"
+        );
+    }
+
+    /// A fixed name under a parametrized prefix would never be read as
+    /// itself; the table is refused when built, naming both. A fixed name
+    /// that merely shares letters with a prefix (`lookup-proforma` beside
+    /// `lookup-storno-{number}`) is fine.
+    #[test]
+    fn a_fixed_name_shadowed_by_a_parametrized_prefix_is_refused() {
+        let fine = [RunPath::new(
+            "A",
+            "h",
+            &[
+                "lookup-proforma",
+                "lookup-storno-{number}",
+                "storno-{number}",
+            ],
+        )];
+        assert_eq!(
+            RunPatterns::of(&fine).pattern("lookup-proforma"),
+            "lookup-proforma"
+        );
+        let shadowed = [
+            RunPath::new("A", "h", &["step-special"]),
+            RunPath::new("B", "h", &["step-{id}"]),
+        ];
+        let outcome = std::panic::catch_unwind(|| RunPatterns::of(&shadowed));
+        let message = outcome
+            .expect_err("refused")
+            .downcast::<String>()
+            .expect("a message");
+        assert!(
+            message.contains("step-special") && message.contains("step-{id}"),
             "{message}"
         );
     }
