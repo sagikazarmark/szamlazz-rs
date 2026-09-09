@@ -15,12 +15,16 @@
 //! `Szamlazz.Order` calls these inside `ctx.run`; the `Szamlazz.Agent` Restate
 //! service is a thin facade over the same functions. Neither Restate service
 //! calls the other. Everything the services need to know about the account
-//! (its ownership-validation pins, its document defaults) is read through
-//! [`Gateway::account`].
+//! (its document defaults, its seller block) is read through
+//! [`Gateway::account`]; nothing of a found document is compared with the
+//! account (the worker holds no account pin; ADR 0006, account-pin
+//! amendment).
 //!
-//! Every query result is validated before it is called ours:
-//! external ids are not unique server-side and the order-number hint returns
-//! the most recently issued document of any kind.
+//! Every query result is validated before it is called ours, against the
+//! document's own identity (the order number and the `tipus` of the kind,
+//! [`FoundDocument::is_ours`]): external ids are not unique server-side and
+//! the order-number hint returns the most recently issued document of any
+//! kind.
 //!
 //! Tracing events carry external ids, kinds, numbers and codes, never buyer
 //! data.
@@ -33,9 +37,9 @@
 //! types carry no cross-version compatibility contract; what matters is what
 //! an entry holds, since the Restate UI shows every entry for the retention
 //! period. So the outcomes here ([`LookupOutcome`], [`CreateOutcome`],
-//! [`QueryOutcome`], [`StornoLookupOutcome`], [`StornoOutcome`],
-//! [`DeleteOutcome`], [`SetPaymentsOutcome`], [`ProbeOutcome`],
-//! [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
+//! [`QueryOutcome`], [`OwnershipOutcome`], [`StornoLookupOutcome`],
+//! [`StornoOutcome`], [`DeleteOutcome`], [`SetPaymentsOutcome`],
+//! [`ProbeOutcome`], [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
 //! response type**: the document outcomes carry the worker's projections
 //! [`FoundDocument`] (of a queried `InvoiceDocument`) and [`IssuedDocument`]
 //! (of a create or storno reply), [`TaxpayerOutcome`] the crate-owned
@@ -78,13 +82,13 @@ use szamlazz_agent::{
 use tracing::Instrument as _;
 
 use crate::account::Account;
-use crate::contract::{IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
+use crate::contract::{DeleteReason, IssuedKind, PaymentEntry, QueryTaxpayerResponse, Selector};
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
 pub mod document;
 
-pub use build::{DocumentRefs, InputError, gross_total};
+pub use build::{DocumentRefs, InputError};
 pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 
 /// What szamlazz.hu answered with when the answer is a code rather than a
@@ -218,6 +222,16 @@ impl From<RejectionCode> for String {
     }
 }
 
+/// A refused deletion's code as the delete response's reason: szamlazz.hu's
+/// code as itself. (The wire contract refuses nothing on a delete, so
+/// [`RejectionCode::Request`] does not arise there; were it to, it would read
+/// as the `request` pseudo-code, as every other response carries it.)
+impl From<RejectionCode> for DeleteReason {
+    fn from(code: RejectionCode) -> Self {
+        Self::Szamlazz(String::from(code))
+    }
+}
+
 /// Serializes as the wire string.
 impl Serialize for RejectionCode {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -243,8 +257,11 @@ impl<'de> Deserialize<'de> for RejectionCode {
 ///
 /// Opened with [`Gateway::open`] for one handler execution from a resolved
 /// account and freshly fetched credentials, or with
-/// [`Gateway::open_with_http`] over a caller-built HTTP client.
-#[derive(Debug, Clone)]
+/// [`Gateway::open_with_http`] over a caller-built HTTP client. Not `Clone`:
+/// a clone would share the client and its cookie jar, the very thing the
+/// fresh-client-per-open boundary exists to prevent; the services hold one
+/// in an `Arc` for the execution.
+#[derive(Debug)]
 pub struct Gateway {
     client: Client,
     account: Account,
@@ -254,8 +271,9 @@ pub struct Gateway {
 /// external id is queried and, for every kind but correctives, the order
 /// whose hint is taken.
 ///
-/// A found document is validated against the gateway's own [`Account`]; the
-/// request carries only what identifies the document.
+/// A found document is validated against `order` and `kind`
+/// ([`FoundDocument::is_ours`]); the request carries only what identifies
+/// the document.
 #[derive(Debug, Clone)]
 pub struct LookupRequest<'a> {
     /// The external id the document carries and is looked up by.
@@ -318,7 +336,8 @@ pub enum LookupOutcome {
 /// create unless a live document of ours is already there.
 ///
 /// Carries what identifies the document and the create to send. A found
-/// document is validated against the gateway's own [`Account`].
+/// document is validated against `order` and `kind`
+/// ([`FoundDocument::is_ours`]).
 #[derive(Debug, Clone)]
 pub struct CreateStepRequest<'a> {
     /// The external id the document carries and is looked up by.
@@ -491,8 +510,8 @@ impl Unconfirmed {
 
 /// A read-only step got no answer from szamlazz.hu: the read policy
 /// re-executes it. The error of every read fn of the gateway ([`lookup`],
-/// [`verify`], [`query`], [`hint`], [`lookup_storno`], [`query_taxpayer`],
-/// [`probe`]), and never of a write.
+/// [`lookup_ours`], [`verify`], [`query`], [`hint`], [`lookup_storno`],
+/// [`query_taxpayer`], [`probe`]), and never of a write.
 ///
 /// Every szamlazz.hu *answer* (a document, code 7, rejected credentials,
 /// another API code) is the read's data; this is only the exchange that
@@ -501,6 +520,7 @@ impl Unconfirmed {
 /// exhaustion is the handler's `unavailable` fault.
 ///
 /// [`lookup`]: Gateway::lookup
+/// [`lookup_ours`]: Gateway::lookup_ours
 /// [`verify`]: Gateway::verify
 /// [`query`]: Gateway::query
 /// [`hint`]: Gateway::hint
@@ -529,6 +549,40 @@ pub enum QueryOutcome {
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
     /// number or external id, or a deleted / consumed proforma.
     NotFound,
+    /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
+    /// check was not made. See [`ErrorCode::is_credential_error`].
+    CredentialsRejected(SzamlazzAnswer),
+    /// szamlazz.hu answered with another code: an answer the caller cannot
+    /// conclude a document from.
+    Api(SzamlazzAnswer),
+}
+
+/// The answered result of a query by one of **our** external ids, validated
+/// against the document it should hold ([`Gateway::lookup_ours`]): the one
+/// "is this document ours?" read, journaled by every step that decides on
+/// what an external id of the order holds without issuing (the exclusivity
+/// checks, the proforma link, `get`, the delete's read). The lookup and
+/// create steps ask the same question of the same query inside their own
+/// outcomes ([`LookupOutcome`], [`CreateOutcome`]); the validation is one
+/// fn, [`FoundDocument::is_ours`], applied in one place.
+///
+/// A query szamlazz.hu did not answer is [`Unanswered`], never an outcome.
+/// Documents are boxed: a [`FoundDocument`] is large next to the unit
+/// variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum OwnershipOutcome {
+    /// szamlazz.hu holds nothing under the id (code 7).
+    Absent,
+    /// A live document of ours: it carries the order number and the `tipus`
+    /// of the kind.
+    Live(Box<FoundDocument>),
+    /// A reversed document of ours.
+    Reversed(Box<FoundDocument>),
+    /// The newest holder of the id fails validation: another order's or
+    /// kind's document. Never trusted, and never read as "absent": a
+    /// document of ours may be hidden behind it.
+    Collision(Box<FoundDocument>),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
     /// check was not made. See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
@@ -1213,8 +1267,10 @@ impl Gateway {
         settled
     }
 
-    /// The external-id query of both steps, validated against this gateway's
-    /// account.
+    /// The external-id query of the lookup, create and ownership reads,
+    /// validated against the `order` and `kind` the document should have
+    /// ([`FoundDocument::is_ours`]): the one place the question is asked, so
+    /// the collision warning is written once.
     ///
     /// # Errors
     ///
@@ -1267,6 +1323,46 @@ impl Gateway {
     /// re-executes the step.
     pub async fn query(&self, selector: &Selector) -> Result<QueryOutcome, Unanswered> {
         outcome(self.query_raw(invoice_selector(selector)).await)
+    }
+
+    /// Queries one of our external ids and validates what it holds against
+    /// the `order` and `kind` the document should have: the "is this document
+    /// ours?" read of every step that decides on an external id of the order
+    /// without issuing. A holder that is not ours is
+    /// [`OwnershipOutcome::Collision`], logged at `warn`; code 7 is
+    /// [`OwnershipOutcome::Absent`]; a credential code and another code are
+    /// the two answered variants.
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the query got no answer; the caller's read policy
+    /// re-executes the step.
+    pub async fn lookup_ours(
+        &self,
+        external_id: &ExternalId,
+        order: &OrderKey,
+        kind: IssuedKind,
+    ) -> Result<OwnershipOutcome, Unanswered> {
+        let span = tracing::info_span!(
+            "gateway.lookup_ours",
+            external_id = %external_id,
+            kind = %kind,
+        );
+        match self.seen(external_id, order, kind).instrument(span).await {
+            Ok(Seen::Absent) => Ok(OwnershipOutcome::Absent),
+            Ok(Seen::Live(found)) => Ok(OwnershipOutcome::Live(found)),
+            Ok(Seen::Reversed(found)) => Ok(OwnershipOutcome::Reversed(found)),
+            Ok(Seen::Collision(found)) => Ok(OwnershipOutcome::Collision(found)),
+            Err(error) => Ok(match error.answered()? {
+                // `seen` maps code 7 to `Seen::Absent`; the arm keeps the
+                // match exhaustive.
+                Answer::NotFound => OwnershipOutcome::Absent,
+                Answer::CredentialsRejected(answer) => {
+                    OwnershipOutcome::CredentialsRejected(answer)
+                }
+                Answer::Api(answer) => OwnershipOutcome::Api(answer),
+            }),
+        }
     }
 
     /// The order-number hint: the most recently issued document of any kind
@@ -1326,8 +1422,8 @@ impl Gateway {
     /// verdict (the registered taxpayer, or `valid: false`) is
     /// [`TaxpayerOutcome::Found`]; rejected credentials are
     /// [`TaxpayerOutcome::CredentialsRejected`]; any other code, szamlazz.hu's
-    /// or NAV's relayed one, is [`TaxpayerOutcome::Api`]. Finds no document,
-    /// so there are no account pins to check. Issues nothing.
+    /// or NAV's relayed one, is [`TaxpayerOutcome::Api`]. Finds no document.
+    /// Issues nothing.
     ///
     /// # Errors
     ///
@@ -1700,7 +1796,8 @@ pub(crate) fn is_invoice_family(tipus: &str) -> bool {
     matches!(tipus, "SZ" | "ES" | "VS")
 }
 
-/// What the external-id query of the lookup and create steps saw, validated.
+/// What the external-id query of the lookup, create and ownership reads saw,
+/// validated ([`Gateway::seen`]); each read's outcome is projected from it.
 enum Seen {
     /// Code 7.
     Absent,
@@ -1955,7 +2052,7 @@ mod tests {
     // The pure classifiers behind the async steps, each on its own table.
     // The wiremock suite (`tests/gateway.rs`) reaches them through HTTP and
     // keeps one exchange per operation for the header-vs-body parse path;
-    // the branches are pinned here.
+    // the branches are asserted here.
 
     /// Step 2 of the lookup: the order-number hint is foreign when it is a
     /// **live** document of the invoice family (`SZ`, `ES`, `VS`) that is

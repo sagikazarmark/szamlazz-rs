@@ -1,33 +1,29 @@
-//! Plumbing shared by the `Szamlazz.Order` and `Szamlazz.Agent` handlers: the
-//! fault → `TerminalError` mapping, journaled runs, the validation of
-//! documents found under our external ids and the account check of documents
-//! found by number.
+//! Run plumbing shared by the `Szamlazz.Order` and `Szamlazz.Agent`
+//! handlers: the service-side [`Fault`] constructors and the fault →
+//! `TerminalError` mapping, the [`Journaled`] marker with its one list, the
+//! [`RunCtx`] trait over the SDK's three contexts and the `run_*` helpers
+//! (once, retrying, reading, best effort) every durable step goes through,
+//! the two journaled reads the handlers share (a verify by number, an
+//! ownership lookup by one of our external ids) and the order key's parse.
+//! No domain decision lives here:
+//! the create protocol is `create`, the storno protocol `storno`, the
+//! prologue `prologue`.
 
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use restate_sdk::context::{ContextSideEffects, RunFuture as _, RunRetryPolicy};
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
-use szamlazz_agent::Date;
-use tracing::Instrument as _;
 
-use crate::account::{Account, Accounts};
-use crate::config::{ValidatedWorkerConfig, WorkerConfig};
-use crate::contract::{IssuedKind, Selector, StornoOutcome, StornoResponse, TerminalCode};
-use crate::gateway::{
-    FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-    StornoStepRequest, SzamlazzAnswer, Unanswered,
-};
+use crate::account::BoxFuture;
+use crate::contract::{IssuedKind, TerminalCode};
+use crate::gateway::{FoundDocument, OwnershipOutcome, QueryOutcome, SzamlazzAnswer, Unanswered};
 use crate::identity::{ExternalId, Namespace, OrderKey};
-use crate::service::Deployment;
-use crate::service::prologue::{self, Execution};
-
-type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+use crate::service::prologue::Execution;
 
 pub(super) use self::journaled::Journaled;
 #[cfg(test)]
@@ -47,7 +43,7 @@ mod journaled {
     use serde::de::DeserializeOwned;
 
     use crate::gateway::{
-        CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
+        CreateOutcome, DeleteOutcome, LookupOutcome, OwnershipOutcome, ProbeOutcome, QueryOutcome,
         SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
         TaxpayerOutcome,
     };
@@ -84,6 +80,7 @@ mod journaled {
         Namespace,
         Resolution,
         QueryOutcome,
+        OwnershipOutcome,
         LookupOutcome,
         CreateOutcome,
         StornoLookupOutcome,
@@ -186,18 +183,14 @@ impl Fault {
     }
 
     /// szamlazz.hu rejected the account's agent credentials with `code`
-    /// (3, 135, 136 or 164). Logs the warning that pages the operator (tagged
-    /// with the namespace and the code, never the key), and builds the fault.
-    /// The message claims the outcome is not known, nothing more: szamlazz.hu
-    /// answers these codes before acting, so the request it rejected was not
-    /// acted on, but the rejection may be a post-send re-query's after a send
-    /// with an open code, and an earlier execution's send may have landed.
-    pub(super) fn credentials_rejected(namespace: &Namespace, answer: SzamlazzAnswer) -> Self {
-        tracing::warn!(
-            namespace = %namespace,
-            code = %answer.code,
-            "szamlazz.hu rejected the agent credentials; fix the account's agent key"
-        );
+    /// (3, 135, 136 or 164). The message claims the outcome is not known,
+    /// nothing more: szamlazz.hu answers these codes before acting, so the
+    /// request it rejected was not acted on, but the rejection may be a
+    /// post-send re-query's after a send with an open code, and an earlier
+    /// execution's send may have landed. Pure; the warning that pages the
+    /// operator is [`AnsweredCode::into_fault`]'s, the one way a handler
+    /// raises this fault.
+    fn credentials_rejected(answer: SzamlazzAnswer) -> Self {
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
@@ -205,6 +198,54 @@ impl Fault {
             ),
         )
         .with_szamlazz_code(answer.code)
+    }
+}
+
+/// szamlazz.hu answered a step with a code rather than a document, as the
+/// handler reads it: the `CredentialsRejected` and `Api` variants every
+/// gateway outcome carries, lifted out of the outcome at the site that
+/// decides on it, with what the handler makes of another code. The one input
+/// of [`AnsweredCode::into_fault`], so the code → fault mapping (and the
+/// paging warning a credential code carries) is written once. Never
+/// journaled: the outcome is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AnsweredCode {
+    /// A credential code (3, 135, 136, 164): the worker's key is wrong, not
+    /// the request; `credentials_rejected` (503).
+    CredentialsRejected(SzamlazzAnswer),
+    /// Another code the handler cannot conclude a document from (every read
+    /// and write step of `Szamlazz.Order`, the verifies, the storno
+    /// protocol): `unavailable` (503) naming it.
+    Inconclusive(SzamlazzAnswer),
+    /// Another code the handler passes through rather than concludes from
+    /// (`Szamlazz.Agent.query`, `query_taxpayer`): `szamlazz_error` (422)
+    /// with szamlazz.hu's message.
+    PassedThrough(SzamlazzAnswer),
+}
+
+impl AnsweredCode {
+    /// The fault for the code: the one mapping from a szamlazz.hu answer that
+    /// is not a document onto a fault, and the home of the warning that pages
+    /// the operator on a credential code (tagged with the namespace and the
+    /// code, never the key), emitted here and nowhere else. The mapping is
+    /// the side effect: calling it on a credential code pages, whether or not
+    /// the fault is then raised, and nothing else does, so the `Fault`
+    /// constructors stay pure and a handler that reads a credential code
+    /// pages exactly once, at the site that decides on it. The caller attaches
+    /// the document identity it knows ([`Fault::about`]).
+    pub(super) fn into_fault(self, namespace: &Namespace) -> Fault {
+        match self {
+            Self::CredentialsRejected(answer) => {
+                tracing::warn!(
+                    namespace = %namespace,
+                    code = %answer.code,
+                    "szamlazz.hu rejected the agent credentials; fix the account's agent key"
+                );
+                Fault::credentials_rejected(answer)
+            }
+            Self::Inconclusive(answer) => Fault::inconclusive_answer(answer),
+            Self::PassedThrough(answer) => Fault::szamlazz_error(answer),
+        }
     }
 }
 
@@ -293,8 +334,8 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
 
 /// The document a verify by number found, or the fault for anything else:
 /// 404 `not_found` naming the invoice on code 7, `unavailable` on a code the
-/// verify cannot conclude from (`Fault::inconclusive_answer`), a credential
-/// code as `credentials_rejected`. Shared by every verify: `Szamlazz.Order`'s
+/// verify cannot conclude from, a credential code as `credentials_rejected`
+/// ([`AnsweredCode::into_fault`]). Shared by every verify: `Szamlazz.Order`'s
 /// attach the order identity to the fault ([`Fault::about`]),
 /// `Szamlazz.Agent.storno`'s carries none.
 ///
@@ -311,264 +352,17 @@ pub(super) fn verified_document(
         QueryOutcome::NotFound => Err(Fault::not_found(format!(
             "invoice {number} is not known to szamlazz.hu (code 7)"
         ))),
-        QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+        QueryOutcome::Api(answer) => Err(AnsweredCode::Inconclusive(answer).into_fault(namespace)),
         QueryOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
-        }
-    }
-}
-
-/// What the storno step sends, built from what the verify
-/// step found. Shared by `Szamlazz.Order.storno_invoice` and
-/// `Szamlazz.Agent.storno`, whose storno external ids differ.
-#[derive(Debug, Clone)]
-pub(super) struct StornoIntent {
-    /// The invoice to reverse.
-    pub(super) number: String,
-    /// `{namespace}:{order}:storno:{number}` or
-    /// `{namespace}:by-number:{number}:storno`.
-    pub(super) storno_id: ExternalId,
-    pub(super) comment: Option<String>,
-    /// The verified document's `eszamla` when known, else the account
-    /// default: an open code set for which the account's own default is a
-    /// legitimate choice.
-    pub(super) e_invoice: bool,
-    /// The verified document's `telj`, which the storno repeats as its
-    /// `teljesitesDatum`: a fiscal fact of the document for which
-    /// no default can be right, so it is never defaulted.
-    pub(super) fulfillment_date: Date,
-}
-
-impl StornoIntent {
-    /// The intent for reversing the verified `found` (`number`, as the
-    /// caller named it) under `storno_id`: `e_invoice` lifted from the
-    /// document with `account`'s default as fallback, `fulfillment_date` the
-    /// document's own `telj`. A pure function of the journaled verify result,
-    /// so every execution rebuilds the same request.
-    ///
-    /// # Errors
-    ///
-    /// [`Fault::missing_fulfillment_date`] when the document carries no
-    /// `telj`; the callers raise it after every answer that needs no send.
-    pub(super) fn from_verified(
-        found: &FoundDocument,
-        account: &Account,
-        number: String,
-        storno_id: ExternalId,
-        comment: Option<String>,
-    ) -> Result<Self, Fault> {
-        let fulfillment_date = found
-            .fulfillment_date
-            .ok_or_else(|| Fault::missing_fulfillment_date(&number))?;
-        Ok(Self {
-            e_invoice: found.e_invoice().unwrap_or(account.defaults.e_invoice),
-            number,
-            storno_id,
-            comment,
-            fulfillment_date,
-        })
-    }
-}
-
-/// What a storno handler does next with the document its verify found,
-/// decided before anything else is read or sent. Both storno protocols
-/// answer in this shape (`Szamlazz.Order.storno_invoice`'s `storno_verdict`,
-/// `Szamlazz.Agent.storno`'s `unmanaged_storno_verdict`), and the handler
-/// dispatches on it: proceed, read the storno number, or answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum StornoVerdict {
-    /// A live document the handler may reverse: on to the intent and the
-    /// lookup step.
-    Proceed,
-    /// Already reversed, by anyone: the answer is `reversed`, and the storno
-    /// number is what the handler's best-effort read names
-    /// ([`reversed_response`]). The one verdict that needs a further read.
-    AlreadyReversed,
-    /// Answered without a send: `conflict{not_managed}` and
-    /// `rejected{not_stornoable}` at the order's handler,
-    /// `managed_by_order` at the by-number one.
-    Answered(StornoResponse),
-}
-
-/// The `reversed` answer of both storno handlers: `storno_number` as the
-/// read that named it did, absent when a best-effort read could not.
-pub(super) fn reversed_response(number: &str, storno_number: Option<String>) -> StornoResponse {
-    let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
-    response.storno_number = storno_number;
-    response
-}
-
-/// Step 2 of both storno protocols: what the storno lookup step settled,
-/// before the storno step. `Break(response)` when the `SS` reversing `number`
-/// already holds the storno external id (a storno of ours was issued:
-/// `reversed{storno_number}`, nothing sent); `Continue(())` when nothing
-/// does.
-///
-/// # Errors
-///
-/// Rejected credentials (`credentials_rejected`), and another code
-/// (`unavailable`: nothing may be concluded from it, and nothing was sent).
-/// The caller attaches the identity it knows.
-pub(super) fn after_storno_lookup(
-    outcome: StornoLookupOutcome,
-    number: &str,
-    namespace: &Namespace,
-) -> Result<ControlFlow<StornoResponse>, Fault> {
-    match outcome {
-        StornoLookupOutcome::Absent => Ok(ControlFlow::Continue(())),
-        StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(ControlFlow::Break(
-            reversed_response(number, Some(storno_number)),
-        )),
-        StornoLookupOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
-        }
-        StornoLookupOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
-    }
-}
-
-/// The settled storno step as the handlers' `StornoResponse`: reversed (now
-/// or already), not stornoable, or rejected.
-///
-/// # Errors
-///
-/// The faults a settled step can still be: rejected credentials (the
-/// warning tagged with `namespace`), and the leading query answered with
-/// another code or `szlahu_down` (`unavailable` at once; nothing was sent).
-/// The caller attaches the identity it knows.
-pub(super) fn storno_response(
-    outcome: GatewayStornoOutcome,
-    number: String,
-    namespace: &Namespace,
-) -> Result<StornoResponse, Fault> {
-    Ok(match outcome {
-        GatewayStornoOutcome::Reversed(storno) => {
-            StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno.number)
-        }
-        GatewayStornoOutcome::AlreadyReversed { storno_number } => {
-            StornoResponse::new(StornoOutcome::Reversed, number)
-                .with_storno_number(storno_number)
-        }
-        GatewayStornoOutcome::NotStornoable => StornoResponse::new(StornoOutcome::Rejected, number)
-            .with_code("not_stornoable")
-            .with_message(
-                "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
-            ),
-        GatewayStornoOutcome::Rejected(rejection) => {
-            StornoResponse::new(StornoOutcome::Rejected, number)
-                .with_code(rejection.code)
-                .with_message(rejection.message)
-        }
-        GatewayStornoOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
-        }
-        GatewayStornoOutcome::Api(answer) => {
-            return Err(Fault::inconclusive_answer(answer));
-        }
-        GatewayStornoOutcome::Unavailable { message } => {
-            return Err(Fault::szlahu_down_answer(message));
-        }
-    })
-}
-
-/// The storno number a **best-effort** order-number hint names for a document
-/// of the order the verify already saw reversed: the hint when it is the `SS`
-/// referencing `number`, unknown when it is any other document (something
-/// newer was issued under the order), nothing (code 7) or another code
-/// (nothing may be concluded from it, and the handler's answer, `reversed`,
-/// is known). Rejected credentials stay the fault they are on every step.
-///
-/// # Errors
-///
-/// `credentials_rejected`; the caller attaches the storno's identity.
-pub(super) fn storno_number_from_hint(
-    outcome: QueryOutcome,
-    number: &str,
-    namespace: &Namespace,
-) -> Result<Option<String>, Fault> {
-    match outcome {
-        QueryOutcome::Found(found) if found.is_storno_of(number) => Ok(Some(found.number)),
-        QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api(_) => Ok(None),
-        QueryOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
-        }
-    }
-}
-
-/// The storno number a **best-effort** storno lookup names for a document the
-/// verify already saw reversed: the `SS` under the storno external id when the
-/// storno was ours, unknown when nothing is under the id (a reversal from the
-/// UI leaves nothing there) or another code answered (nothing may be concluded
-/// from it, and the handler's answer, `reversed`, is known). Rejected
-/// credentials stay the fault they are on every step.
-///
-/// # Errors
-///
-/// `credentials_rejected`.
-pub(super) fn storno_number_from_lookup(
-    outcome: StornoLookupOutcome,
-    namespace: &Namespace,
-) -> Result<Option<String>, Fault> {
-    match outcome {
-        StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(Some(storno_number)),
-        StornoLookupOutcome::Absent | StornoLookupOutcome::Api(_) => Ok(None),
-        StornoLookupOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
-        }
-    }
-}
-
-/// What a query by one of our external ids found.
-///
-/// Every caller matches all three variants: an issuing handler refuses a
-/// [`Lookup::Collision`] as `conflict{external_id_collision}` (the newest
-/// holder may hide a document of ours), `delete_proforma` answers
-/// `not_deleted{external_id_collision}`, and only `get` (a read that must not
-/// fail) reports the slot as absent.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum Lookup {
-    /// szamlazz.hu holds nothing under the id (code 7).
-    Absent,
-    /// A document that passed validation: ours, live or reversed.
-    Ours(Box<FoundDocument>),
-    /// A document that fails validation: another order or kind. Never
-    /// trusted.
-    Collision(Box<FoundDocument>),
-}
-
-impl Lookup {
-    /// Classifies an answered query: another szamlazz.hu code is
-    /// `unavailable` (nothing may be concluded), rejected credentials are
-    /// `credentials_rejected`. (A query szamlazz.hu did not answer never
-    /// reaches here: it is the read's `Unanswered`, retried by the read
-    /// policy.)
-    pub(super) fn classify(
-        outcome: QueryOutcome,
-        namespace: &Namespace,
-        order: &OrderKey,
-        kind: IssuedKind,
-    ) -> Result<Self, Fault> {
-        match outcome {
-            QueryOutcome::NotFound => Ok(Self::Absent),
-            QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
-            QueryOutcome::CredentialsRejected(answer) => {
-                Err(Fault::credentials_rejected(namespace, answer))
-            }
-            QueryOutcome::Found(found) => {
-                if found.is_ours(order, kind) {
-                    Ok(Self::Ours(found))
-                } else {
-                    tracing::warn!(number = %found.number, kind = %kind, "external id collision");
-                    Ok(Self::Collision(found))
-                }
-            }
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
     }
 }
 
 /// The one thing the helpers below need of a Restate context: its scope, its
-/// invocation id and a journaled run. Implemented for the SDK's three context
-/// types, so the helpers are plain generic fns rather than three stamps of a
-/// macro.
+/// key, its invocation id and a journaled run. Implemented for the SDK's
+/// three context types, so the helpers are plain generic fns rather than
+/// three stamps of a macro.
 ///
 /// Why a trait of our own and not the SDK's `ContextSideEffects`: its `run`
 /// returns an `impl RunFuture` from a trait method, whose `Send`-ness a
@@ -578,6 +372,9 @@ impl Lookup {
 pub(in crate::service) trait RunCtx<'ctx>: Sync {
     /// The scope the request arrived under, `None` when unscoped.
     fn scope(&self) -> Option<&str>;
+    /// The Virtual Object key on an object context; `None` on the stateless
+    /// service's.
+    fn key(&self) -> Option<&str>;
     /// The invocation id, as the ingress returns it in `x-restate-id`.
     fn invocation_id(&self) -> &str;
     /// Journals the result of `f` under `name`, re-executing it under `policy`
@@ -596,10 +393,15 @@ pub(in crate::service) trait RunCtx<'ctx>: Sync {
 }
 
 macro_rules! run_ctx {
-    ($ctx:ident) => {
+    ($ctx:ident, |$this:ident| $key:expr) => {
         impl<'ctx> RunCtx<'ctx> for $ctx<'ctx> {
             fn scope(&self) -> Option<&str> {
                 $ctx::scope(self)
+            }
+
+            fn key(&self) -> Option<&str> {
+                let $this = self;
+                $key
             }
 
             fn invocation_id(&self) -> &str {
@@ -629,94 +431,9 @@ macro_rules! run_ctx {
     };
 }
 
-run_ctx!(ObjectContext);
-run_ctx!(SharedObjectContext);
-run_ctx!(Context);
-
-/// Runs one handler execution: the prologue, then `body` on the execution it
-/// built, the whole inside the execution span (`prologue::execution_span`),
-/// so every log line from the prologue's first step to the handler's answer
-/// carries the scope, the key, the invocation id and, once resolved, the
-/// account id. `key` is the Virtual Object key on the object contexts, `None`
-/// on the stateless service. The body takes the execution by value: nothing
-/// of it outlives the call.
-pub(in crate::service) async fn execute<'ctx, C, T, F, Fut>(
-    ctx: &C,
-    key: Option<&str>,
-    deployment: &Deployment,
-    body: F,
-) -> Result<T, HandlerError>
-where
-    C: RunCtx<'ctx>,
-    F: FnOnce(Execution) -> Fut + Send,
-    Fut: Future<Output = Result<T, HandlerError>> + Send,
-{
-    let span = prologue::execution_span(ctx.scope(), key, ctx.invocation_id());
-    async move {
-        let execution = run_prologue(ctx, &deployment.accounts, &deployment.config).await?;
-        body(execution).await
-    }
-    .instrument(span)
-    .await
-}
-
-/// The prologue of every handler: pin → resolve → fetch → open. Runs inside
-/// the execution span [`execute`] opened, on which it records the account id
-/// once resolved.
-///
-/// 1. **Pin** the namespace in a pure durable step (`namespace`): a redeploy
-///    with a changed namespace cannot make a running invocation issue under a
-///    new id.
-/// 2. **Resolve** the request's scope to its account in a durable step named
-///    `account` under the resolve policy: unscoped and unknown are journaled
-///    as data and become the terminal `unknown_account`; an unavailable
-///    resolver (reporting so, or silent past `prologue::CALL_DEADLINE`) is
-///    retryable and journals nothing; exhaustion is `unavailable`.
-/// 3. **Fetch** the account's credentials outside the journal (on every
-///    execution, including replays) with a short in-process retry, each
-///    attempt bounded by the same deadline, then terminal `unavailable`.
-/// 4. **Open** the gateway for this execution over a fresh client.
-async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    accounts: &Accounts,
-    config: &ValidatedWorkerConfig,
-) -> Result<Execution, HandlerError> {
-    // 1. Pin.
-    let pinned = {
-        let namespace = config.namespace.clone();
-        run_once(ctx, "namespace", move || async move { namespace }).await?
-    };
-    // The pin replaces the namespace alone, which no policy invariant reads:
-    // the execution's settings are the validated ones with the journaled
-    // namespace.
-    let config = WorkerConfig {
-        namespace: pinned,
-        ..WorkerConfig::clone(config)
-    };
-
-    // 2. Resolve.
-    let scope = ctx.scope().map(str::to_owned);
-    let resolution = {
-        let accounts = accounts.clone();
-        run_retrying(
-            ctx,
-            "account",
-            config.resolve.run_retry_policy(),
-            move || async move { prologue::resolve(&accounts, scope.as_deref()).await },
-        )
-        .await
-        .map_err(|error| prologue::resolve_exhausted(&error))?
-    };
-    let account = prologue::account_of(resolution)?;
-    prologue::record_account(&account);
-
-    // 3. Fetch, outside the journal.
-    let credentials = prologue::fetch_credentials(accounts, &account).await?;
-
-    // 4. Open.
-    let gateway = prologue::open(account, credentials)?;
-    Ok(Execution { gateway, config })
-}
+run_ctx!(ObjectContext, |ctx| Some(ctx.key()));
+run_ctx!(SharedObjectContext, |ctx| Some(ctx.key()));
+run_ctx!(Context, |_ctx| None);
 
 /// Journals the result of `f` under `name`, executing it at most once per
 /// journal entry (`RunRetryPolicy::max_attempts(1)`): the pure `namespace`
@@ -842,24 +559,12 @@ pub(in crate::service) async fn verify<'ctx, C: RunCtx<'ctx>>(
     .await
 }
 
-/// Journaled query by external id, under the read policy.
-pub(in crate::service) async fn query_external_id<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    exec: &Execution,
-    name: impl Into<String>,
-    external_id: &ExternalId,
-) -> Result<QueryOutcome, Fault> {
-    let gateway = Arc::clone(&exec.gateway);
-    let selector = Selector::ExternalId(external_id.as_str().to_owned());
-    run_reading(ctx, name, exec, move || async move {
-        gateway.query(&selector).await
-    })
-    .await
-}
-
-/// Journaled query by one of our external ids, under the read policy,
-/// validated against the identity the document should have. A fault carries
-/// that identity.
+/// Journaled query by one of our external ids, validated against the
+/// identity the document should have ([`Gateway::lookup_ours`]), under the
+/// read policy. Every answer is data for the caller to decide on; an
+/// exhausted read is the `unavailable` fault carrying that identity.
+///
+/// [`Gateway::lookup_ours`]: crate::gateway::Gateway::lookup_ours
 pub(in crate::service) async fn lookup<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
@@ -867,127 +572,363 @@ pub(in crate::service) async fn lookup<'ctx, C: RunCtx<'ctx>>(
     external_id: &ExternalId,
     order: &OrderKey,
     kind: IssuedKind,
-) -> Result<Lookup, Fault> {
-    let about = |fault: Fault| fault.about(order, Some(kind), external_id);
-    let outcome = query_external_id(ctx, exec, name, external_id)
-        .await
-        .map_err(about)?;
-    Lookup::classify(outcome, &exec.config.namespace, order, kind).map_err(about)
-}
-
-/// The storno lookup step: one read-only journaled query of the storno
-/// external id, under the read policy.
-pub(in crate::service) async fn lookup_storno<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    exec: &Execution,
-    intent: &StornoIntent,
-) -> Result<StornoLookupOutcome, Fault> {
+) -> Result<OwnershipOutcome, Fault> {
     let gateway = Arc::clone(&exec.gateway);
-    let external_id = intent.storno_id.clone();
-    let number = intent.number.clone();
-    run_reading(
-        ctx,
-        format!("lookup-storno-{number}"),
-        exec,
-        move || async move { gateway.lookup_storno(&external_id, &number).await },
-    )
+    let id = external_id.clone();
+    let looked_up = order.clone();
+    run_reading(ctx, name, exec, move || async move {
+        gateway.lookup_ours(&id, &looked_up, kind).await
+    })
     .await
+    .map_err(|fault| fault.about(order, Some(kind), external_id))
 }
 
-/// The storno step: one durable step under the issue policy's run retry
-/// policy, query-first on every execution (the query is inside the closure: a
-/// separate journaled query would replay its stale "nothing" on the retry and
-/// re-send). The request is rebuilt from the intent on every execution (the
-/// date included), so every send is byte-identical.
-///
-/// # Errors
-///
-/// The `TerminalError` the run ends with: exhaustion (500) or cancellation
-/// (409); the caller maps it to `outcome_unknown` about its document. Nothing
-/// is recorded: the next call's lookup finds whatever landed.
-pub(in crate::service) async fn storno_step<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    exec: &Execution,
-    intent: &StornoIntent,
-) -> Result<GatewayStornoOutcome, TerminalError> {
-    let gateway = Arc::clone(&exec.gateway);
-    let number = intent.number.clone();
-    let external_id = intent.storno_id.clone();
-    let comment = intent.comment.clone();
-    let e_invoice = intent.e_invoice;
-    let fulfillment_date = intent.fulfillment_date;
-    run_retrying(
-        ctx,
-        format!("storno-{}", intent.number),
-        exec.config.issue.run_retry_policy(),
-        move || async move {
-            gateway
-                .storno(StornoStepRequest {
-                    invoice_number: &number,
-                    external_id: &external_id,
-                    comment: comment.as_deref(),
-                    e_invoice,
-                    fulfillment_date,
-                })
-                .await
-        },
-    )
-    .await
-}
+#[cfg(test)]
+mod tests {
+    use restate_sdk::errors::TerminalError;
 
-/// The storno number of a reversed document of `order`, when the
-/// order-number hint is the `SS` referencing it (step `hint-storno-{number}`,
-/// a best-effort read under the read policy, [`run_best_effort`]). Rejected
-/// credentials are a fault about the storno (`storno_id`); everything else
-/// the hint can answer is data ([`storno_number_from_hint`]).
-pub(in crate::service) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    exec: &Execution,
-    order: &OrderKey,
-    number: &str,
-    storno_id: &ExternalId,
-) -> Result<Option<String>, HandlerError> {
-    let gateway = Arc::clone(&exec.gateway);
-    let hinted = order.clone();
-    let Some(outcome) = run_best_effort(
-        ctx,
-        format!("hint-storno-{number}"),
-        exec,
-        move || async move { gateway.hint(&hinted).await },
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    storno_number_from_hint(outcome, number, &exec.config.namespace)
-        .map_err(|fault| fault.about(order, None, storno_id).into())
-}
+    use super::*;
+    use crate::test_support::LogCapture;
 
-/// The storno number of a reversed document no `Order` manages, when a storno
-/// of ours holds `{namespace}:by-number:{number}:storno` (step
-/// `lookup-storno-{number}`, the same entry the storno protocol's lookup step
-/// writes, which this path never reaches; a best-effort read under the read
-/// policy, [`run_best_effort`]). The only read that can name an unmanaged
-/// document's storno: it carries no order number for the hint. Rejected
-/// credentials are a fault; everything else is data
-/// ([`storno_number_from_lookup`]).
-pub(in crate::service) async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    exec: &Execution,
-    number: &str,
-) -> Result<Option<String>, HandlerError> {
-    let gateway = Arc::clone(&exec.gateway);
-    let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
-    let looked_up = number.to_owned();
-    let Some(outcome) = run_best_effort(
-        ctx,
-        format!("lookup-storno-{number}"),
-        exec,
-        move || async move { gateway.lookup_storno(&external_id, &looked_up).await },
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    storno_number_from_lookup(outcome, &exec.config.namespace).map_err(Into::into)
+    fn namespace() -> Namespace {
+        "acct".parse().expect("namespace")
+    }
+
+    #[test]
+    fn faults_serialise_their_code_and_status() {
+        let order = OrderKey::parse("ORD-1").expect("order");
+        let fault = Fault::outcome_unknown("exhausted").about(
+            &order,
+            Some(IssuedKind::Invoice),
+            &ExternalId::new("acct:ORD-1:invoice"),
+        );
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 500);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], TerminalCode::OutcomeUnknown.as_str());
+        assert_eq!(body["order"], "ORD-1");
+        assert_eq!(body["kind"], "invoice");
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+        assert_eq!(body.get("gen"), None);
+        assert_eq!(body.get("request_id"), None);
+
+        let cases = [
+            (Fault::invalid_input("x"), 400, "invalid_input"),
+            (Fault::unavailable("x"), 503, "unavailable"),
+            (Fault::missing_fulfillment_date("SZ-1"), 503, "unavailable"),
+            (
+                AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("3", "x"))
+                    .into_fault(&namespace()),
+                503,
+                "credentials_rejected",
+            ),
+            (Fault::unknown_account("x"), 400, "unknown_account"),
+            (Fault::not_found("x"), 404, "not_found"),
+            (
+                Fault::szamlazz_error(SzamlazzAnswer::new("152", "x")),
+                422,
+                "szamlazz_error",
+            ),
+        ];
+        for (fault, status, code) in cases {
+            let error = TerminalError::from(fault);
+            assert_eq!(error.code(), status);
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+            assert_eq!(body["code"], code);
+            assert_eq!(body.get("order"), None);
+        }
+    }
+
+    /// A szamlazz.hu code never travels in `code` (that field carries a
+    /// `TerminalCode` token), but in `szamlazz_code`, beside it, on every
+    /// fault a szamlazz.hu answer caused; faults that no szamlazz.hu answer
+    /// caused carry no `szamlazz_code` at all.
+    #[test]
+    fn a_szamlazz_code_travels_in_its_own_field() {
+        let error = TerminalError::from(Fault::szamlazz_error(SzamlazzAnswer::new(
+            "152",
+            "Már létezik ilyen rendelésszámú számla.",
+        )));
+        assert_eq!(error.code(), 422);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "szamlazz_error");
+        assert_eq!(body["szamlazz_code"], "152");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("152"), "{message}");
+        assert!(
+            message.contains("Már létezik ilyen rendelésszámú számla."),
+            "{message}"
+        );
+
+        for fault in [
+            Fault::invalid_input("x"),
+            Fault::not_found("x"),
+            Fault::unavailable("x"),
+            Fault::szlahu_down_answer("x"),
+            Fault::outcome_unknown("x"),
+            Fault::unknown_account("x"),
+            Fault::missing_fulfillment_date("SZ-1"),
+        ] {
+            let error = TerminalError::from(fault);
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+            assert_eq!(body.get("szamlazz_code"), None, "{body}");
+        }
+    }
+
+    /// The one mapping from a szamlazz.hu code onto a fault, as a table: a
+    /// credential code is `credentials_rejected` (503), another code the
+    /// handler cannot conclude from is `unavailable` (503), another code the
+    /// handler passes through is `szamlazz_error` (422); each carries the
+    /// szamlazz.hu code in `szamlazz_code` and its message in the text, and
+    /// the credential row's message tells the caller the outcome is not known
+    /// (never that "this attempt issued nothing", which a post-send re-query
+    /// can make false, #63). The warning that pages the operator is emitted
+    /// by exactly the credential row, tagged with the namespace and the code,
+    /// and by nothing else: the mapping pages, the `Fault` constructors do
+    /// not (the warm-up below drops a credential fault and pages all the
+    /// same, which is what it is for). Every site that decides on a gateway
+    /// outcome routes its two answered variants here (the sites' own tests
+    /// assert the routing).
+    #[test]
+    fn an_answered_code_maps_onto_its_fault_and_only_a_credential_code_pages() {
+        let capture = LogCapture::default();
+        let guard = capture.subscribe();
+        drop(
+            AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("0", "warm-up"))
+                .into_fault(&"warmup".parse().expect("namespace")),
+        );
+        LogCapture::rebuild_interest();
+
+        let table = [
+            (
+                AnsweredCode::CredentialsRejected(SzamlazzAnswer::new(
+                    "136",
+                    "Bejelentkezés letiltva",
+                )),
+                503,
+                TerminalCode::CredentialsRejected,
+                "136",
+                "the outcome is not known",
+            ),
+            (
+                AnsweredCode::Inconclusive(SzamlazzAnswer::new("57", "Hibás XML.")),
+                503,
+                TerminalCode::Unavailable,
+                "57",
+                "nothing may be concluded",
+            ),
+            (
+                AnsweredCode::PassedThrough(SzamlazzAnswer::new(
+                    "OPERATION_FAILED",
+                    "A NAV szolgáltatás nem elérhető.",
+                )),
+                422,
+                TerminalCode::SzamlazzError,
+                "OPERATION_FAILED",
+                "szamlazz.hu error",
+            ),
+        ];
+        for (code, status, terminal, szamlazz_code, phrase) in table {
+            let label = format!("{code:?}");
+            let error = TerminalError::from(code.into_fault(&namespace()));
+            assert_eq!(error.code(), status, "{label}");
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+            assert_eq!(body["code"], terminal.as_str(), "{label}: {body}");
+            assert_eq!(body["szamlazz_code"], szamlazz_code, "{label}: {body}");
+            let message = body["message"].as_str().expect("message");
+            assert!(message.contains(szamlazz_code), "{label}: {message}");
+            assert!(message.contains(phrase), "{label}: {message}");
+            assert!(
+                message.contains("Idempotency-Key") || terminal == TerminalCode::SzamlazzError,
+                "{label}: {message}"
+            );
+            assert!(!message.contains("attempt"), "{label}: {message}");
+            assert!(!message.contains("issued nothing"), "{label}: {message}");
+            assert_eq!(body.get("order"), None, "{label}: nothing attached");
+        }
+        drop(guard);
+
+        let logs = capture.logs();
+        let warnings: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("WARN") && !line.contains("warmup"))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the credential row pages: {logs}"
+        );
+        assert!(warnings[0].contains("namespace=acct"), "{}", warnings[0]);
+        assert!(warnings[0].contains("code=136"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("fix the account's agent key"),
+            "{}",
+            warnings[0]
+        );
+    }
+
+    /// The document identity a handler attaches to an answered code's fault
+    /// travels beside the code: order, kind and external id.
+    #[test]
+    fn credentials_rejected_fault_carries_the_document_when_attached() {
+        let order = OrderKey::parse("ORD-1").expect("order");
+        let fault =
+            AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("136", "Bejelentkezés letiltva"))
+                .into_fault(&namespace())
+                .about(
+                    &order,
+                    Some(IssuedKind::Invoice),
+                    &ExternalId::new("acct:ORD-1:invoice"),
+                );
+        let error = TerminalError::from(fault);
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "credentials_rejected");
+        assert_eq!(body["szamlazz_code"], "136");
+        assert_eq!(body["order"], "ORD-1");
+        assert_eq!(body["kind"], "invoice");
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+    }
+
+    /// A read step that ended without an answer (the read policy exhausted
+    /// (500 carrying the last `Unanswered`) or the invocation cancelled (409))
+    /// is the `unavailable` fault naming the step and the last failure, about
+    /// the document when the caller attaches one.
+    #[test]
+    fn an_exhausted_read_is_a_structured_unavailable() {
+        let last = TerminalError::new_with_code(
+            500,
+            "transport failure: error decoding response body: empty response",
+        );
+        let fault = read_exhausted("lookup-invoice", &last);
+        let error = TerminalError::from(fault.clone());
+        assert_eq!(error.code(), 503);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["code"], "unavailable");
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("lookup-invoice"), "{message}");
+        assert!(
+            message.contains("empty response"),
+            "names the last failure: {message}"
+        );
+        assert!(message.contains("500"), "{message}");
+        assert!(message.contains("Idempotency-Key"), "{message}");
+        assert_eq!(body.get("order"), None, "nothing attached yet");
+
+        let order = OrderKey::parse("ORD-1").expect("order");
+        let about = fault.about(
+            &order,
+            Some(IssuedKind::Invoice),
+            &ExternalId::new("acct:ORD-1:invoice"),
+        );
+        let error = TerminalError::from(about);
+        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+        assert_eq!(body["order"], "ORD-1");
+        assert_eq!(body["kind"], "invoice");
+        assert_eq!(body["external_id"], "acct:ORD-1:invoice");
+
+        let cancelled = TerminalError::new_with_code(409, "cancelled");
+        let error = TerminalError::from(read_exhausted("get-proforma", &cancelled));
+        assert_eq!(error.code(), 503, "a cancellation is the same fault");
+        assert!(error.message().contains("409"), "{}", error.message());
+    }
+
+    /// The best-effort reads (the storno-number hint after a verify found the
+    /// document already reversed, and `Szamlazz.Agent.storno`'s storno lookup in
+    /// the same situation) swallow an exhausted read policy: the handler's
+    /// answer (`reversed`) is already known, so the number is reported as unknown
+    /// after a `warn` naming the step. They never swallow a cancellation: the SDK
+    /// ends a cancelled run with 409, and an invocation told to stop must not
+    /// answer `reversed` as if nothing had happened (#65); the error is
+    /// propagated as it came.
+    #[test]
+    fn a_best_effort_read_swallows_exhaustion_but_propagates_a_cancellation() {
+        let capture = LogCapture::default();
+        let guard = capture.subscribe();
+        drop(best_effort(
+            "hint-storno-warmup",
+            TerminalError::new_with_code(500, "warm-up"),
+        ));
+        LogCapture::rebuild_interest();
+
+        let exhausted =
+            TerminalError::new_with_code(500, "szamlazz.hu is unavailable: maintenance");
+        best_effort("hint-storno-SZ-1", exhausted).expect("exhaustion is swallowed");
+
+        let cancelled = TerminalError::new_with_code(409, "cancelled");
+        let error =
+            best_effort("hint-storno-SZ-1", cancelled).expect_err("a cancellation propagates");
+        assert_eq!(error.code(), 409);
+        assert_eq!(error.message(), "cancelled");
+        drop(guard);
+
+        let logs = capture.logs();
+        let warnings: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("WARN") && !line.contains("warmup"))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the swallowed exhaustion warns, the cancellation does not: {logs}"
+        );
+        assert!(warnings[0].contains("hint-storno-SZ-1"), "{}", warnings[0]);
+        assert!(warnings[0].contains("maintenance"), "{}", warnings[0]);
+    }
+
+    /// The Virtual Object key must arrive trimmed: Restate's per-key lock is on
+    /// the *raw* key, so `ORD-1` and ` ORD-1` would be two instances with two
+    /// locks mapping to one szamlazz.hu order and identical external ids; two
+    /// concurrent creates under them would both pass their lookup and both send.
+    /// The handler refuses a key whose trimmed form differs from the raw one as
+    /// `invalid_input` naming the rule; [`OrderKey::parse`] itself stays lenient
+    /// for the places that parse an order number rather than a key.
+    #[test]
+    fn the_order_key_must_arrive_trimmed() {
+        let key = order_key("ORD-1").expect("a trimmed key");
+        assert_eq!(key.as_str(), "ORD-1");
+        let key = order_key("rendelés-42").expect("non-ASCII text in NFC is fine");
+        assert_eq!(key.as_str(), "rendelés-42");
+
+        for raw in [" ORD-1", "ORD-1 ", "\tORD-1", "ORD-1\n", "\u{a0}ORD-1"] {
+            assert_eq!(
+                OrderKey::parse(raw).expect("the type trims").as_str(),
+                "ORD-1",
+                "{raw:?}: OrderKey::parse stays lenient"
+            );
+            let fault = order_key(raw).expect_err("refused");
+            let error = TerminalError::from(fault);
+            assert_eq!(error.code(), 400, "{raw:?}");
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+            assert_eq!(body["code"], "invalid_input", "{raw:?}");
+            let message = body["message"].as_str().expect("message");
+            assert!(
+                message.contains("must not have leading or trailing whitespace"),
+                "{raw:?}: names the rule: {message}"
+            );
+            assert_eq!(body.get("order"), None, "{raw:?}: no order identity yet");
+        }
+
+        // The type's own alphabet still applies to a trimmed key, with its
+        // message naming the rule: no internal whitespace, no `:`, NFC, 40 bytes.
+        let too_long = "x".repeat(OrderKey::MAX_LEN + 1);
+        for (raw, rule) in [
+            ("rendelés #42", "must not contain whitespace"),
+            ("a\u{a0}b", "must not contain whitespace"),
+            ("ORD:1", "must not contain ':'"),
+            ("rendele\u{301}s-42", "must be in Unicode NFC"),
+            (too_long.as_str(), "at most 40 are allowed"),
+        ] {
+            let fault = order_key(raw).expect_err(rule);
+            let error = TerminalError::from(fault);
+            assert_eq!(error.code(), 400, "{raw:?}");
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+            assert_eq!(body["code"], "invalid_input", "{raw:?}");
+            assert!(
+                body["message"].as_str().expect("message").contains(rule),
+                "{raw:?}: names the rule: {body}"
+            );
+            assert_eq!(body.get("order"), None, "{raw:?}: no order identity yet");
+        }
+    }
 }

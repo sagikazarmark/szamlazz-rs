@@ -280,11 +280,12 @@ pub struct InvalidTaxNumber(String);
 /// prefix), not a fault; the optional fields are then absent.
 ///
 /// A crate-owned projection of the Számla Agent crate's `TaxpayerInfo`, not
-/// the agent type as it
-/// is: it is what the handler's read step journals, so its layout is
-/// **additive-only** (a field may be added with a default; nothing is
-/// renamed, removed or retyped), and the agent crate's serde layout never
-/// rides in the journal. Not cached by the worker (szamlazz.hu is the source
+/// the agent type as it is: it is what the handler's read step journals, so
+/// what an entry holds is decided here and the agent crate's serde layout
+/// never rides in the journal (ADR 0009: crate-owned, under no compatibility
+/// rule). Every field but `valid` is optional and defaults, so NAV's
+/// `valid: false` and its simple addresses decode as they come. Not cached by
+/// the worker (szamlazz.hu is the source
 /// of truth); a caller that looks a buyer up repeatedly caches this response
 /// itself, with a TTL on the order of a day.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,7 +325,7 @@ impl From<TaxpayerInfo> for QueryTaxpayerResponse {
 /// structures it. Every field is optional: NAV's detailed addresses fill the
 /// structured fields, its simple addresses only `additional_address_detail`.
 ///
-/// Additive-only, like `QueryTaxpayerResponse`.
+/// Crate-owned and journaled, like `QueryTaxpayerResponse`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default)]
@@ -915,11 +916,11 @@ mod tests {
     }
 
     /// The taxpayer response is a projection of the agent crate's
-    /// `TaxpayerInfo`, field for field, and it is additive-only on the wire:
-    /// a document journaled before a field existed still decodes (every
-    /// optional field and the address list default).
+    /// `TaxpayerInfo`, field for field, and every field but `valid` defaults:
+    /// NAV's `valid: false` (no taxpayer data) and an address NAV gives no
+    /// detail for decode as they come.
     #[test]
-    fn query_taxpayer_response_projects_the_agent_info_and_decodes_additively() {
+    fn query_taxpayer_response_projects_the_agent_info_and_defaults_what_nav_omits() {
         use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
 
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
@@ -965,8 +966,7 @@ mod tests {
             })
         );
 
-        // The minimal shape (what an earlier version of the type, or NAV's
-        // `valid: false`, journals) still decodes.
+        // The minimal shape (NAV's `valid: false`: no taxpayer data) decodes.
         let minimal: QueryTaxpayerResponse =
             serde_json::from_value(json!({"valid": false})).expect("deserialize");
         assert!(!minimal.valid);

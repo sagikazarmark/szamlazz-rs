@@ -1,15 +1,15 @@
-//! The stateless `Szamlazz.Agent` service handlers: `query`, `set_payments`
-//! and `storno` by document number, `query_taxpayer` by tax number, and the
-//! `check_account` probe.
+//! The stateless `Szamlazz.Agent` service handlers: `query` and
+//! `set_payments` by document number, `query_taxpayer` by tax number, and
+//! the `check_account` probe. The by-number `storno` is the storno
+//! protocol's second shell, in `service::storno`.
 //!
 //! No handler compares the document it finds with the account the invocation
 //! resolved to: the worker holds no account pin; which account a key opens
 //! is the operator's go-live check. Every read (the probe, `query`,
-//! `query_taxpayer`, the verify and the storno lookup) runs under the read
-//! policy; `set_payments` is a write without a retry of its own, and with
-//! `additive: true` an at-least-once one (see [`SetPaymentsRequest::additive`]).
+//! `query_taxpayer`) runs under the read policy; `set_payments` is a write
+//! without a retry of its own, and with `additive: true` an at-least-once
+//! one (see [`SetPaymentsRequest::additive`]).
 
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use restate_sdk::errors::HandlerError;
@@ -17,21 +17,13 @@ use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
-use super::support::{
-    Fault, StornoIntent, StornoVerdict, after_storno_lookup, reversed_response, storno_response,
-    verified_document,
-};
-use super::support::{
-    lookup_storno, run_once, run_reading, storno_number_of_unmanaged, storno_step,
-};
+use super::support::{AnsweredCode, Fault, run_once, run_reading};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
-    StornoOutcome, StornoRequest, StornoResponse,
 };
 use crate::gateway::{
-    FoundDocument, ProbeOutcome, QueryOutcome, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer,
-    TaxpayerOutcome,
+    ProbeOutcome, QueryOutcome, RejectionCode, SetPaymentsOutcome, SzamlazzAnswer, TaxpayerOutcome,
 };
 use crate::identity::{ExternalId, Namespace};
 
@@ -92,9 +84,9 @@ fn query_response(outcome: QueryOutcome, namespace: &Namespace) -> Result<QueryR
             "szamlazz.hu does not know the document (code 7)",
         )),
         QueryOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        QueryOutcome::Api(answer) => Err(Fault::szamlazz_error(answer)),
+        QueryOutcome::Api(answer) => Err(AnsweredCode::PassedThrough(answer).into_fault(namespace)),
     }
 }
 
@@ -109,9 +101,11 @@ fn taxpayer_response(
     match outcome {
         TaxpayerOutcome::Found(taxpayer) => Ok(taxpayer),
         TaxpayerOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        TaxpayerOutcome::Api(answer) => Err(Fault::szamlazz_error(answer)),
+        TaxpayerOutcome::Api(answer) => {
+            Err(AnsweredCode::PassedThrough(answer).into_fault(namespace))
+        }
     }
 }
 
@@ -147,30 +141,10 @@ fn set_payments_response(
             ),
         }),
         SetPaymentsOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
         SetPaymentsOutcome::Transport(message) => Err(set_payments_unknown(additive, &message)),
     }
-}
-
-/// `storno`'s decision on the verified document, `number` as the caller named
-/// it: one carrying an order number (`rendelesszam` trimmed; an empty or
-/// whitespace-only element is none) is `Szamlazz.Order`'s, answered as
-/// `managed_by_order` with that number as the `order_key`, and this service
-/// never calls into it; one already reversed, by anyone, is
-/// [`StornoVerdict::AlreadyReversed`] (the storno number is the by-number
-/// lookup's, which the handler reads best effort); a live unmanaged document
-/// proceeds. No document type pre-check: szamlazz.hu's echo tells.
-fn unmanaged_storno_verdict(found: &FoundDocument, number: &str) -> StornoVerdict {
-    if let Some(order) = &found.order_number {
-        return StornoVerdict::Answered(
-            StornoResponse::new(StornoOutcome::ManagedByOrder, number).with_order_key(order),
-        );
-    }
-    if !found.is_live() {
-        return StornoVerdict::AlreadyReversed;
-    }
-    StornoVerdict::Proceed
 }
 
 impl Execution {
@@ -269,76 +243,6 @@ impl Execution {
         set_payments_response(outcome, invoice_number, additive, &self.config.namespace)
             .map_err(HandlerError::from)
     }
-
-    /// The `storno` handler: verify by number, then (for a document carrying
-    /// no order number) the lookup and storno steps under the
-    /// by-number storno external id. A document carrying an order number is
-    /// answered as `managed_by_order`; one already reversed is `reversed`
-    /// with the storno number the by-number storno lookup names, best effort
-    /// (ours when we issued the storno, unknown otherwise).
-    pub(super) async fn storno_request(
-        &self,
-        ctx: &Context<'_>,
-        request: StornoRequest,
-    ) -> Result<StornoResponse, HandlerError> {
-        let StornoRequest {
-            invoice_number: number,
-            comment,
-        } = request;
-        let number = String::from(number);
-
-        // Query first: everything below is about the document as found.
-        let found = {
-            let gateway = Arc::clone(&self.gateway);
-            let number = number.clone();
-            run_reading(ctx, format!("verify-{number}"), self, move || async move {
-                gateway.verify(&number).await
-            })
-            .await?
-        };
-        let found = verified_document(found, &number, &self.config.namespace)?;
-        match unmanaged_storno_verdict(&found, &number) {
-            StornoVerdict::Proceed => {}
-            StornoVerdict::Answered(response) => return Ok(response),
-            StornoVerdict::AlreadyReversed => {
-                // Idempotent: already reversed by anyone. The storno number is
-                // best effort: ours when a storno of ours holds the by-number
-                // storno id, unknown otherwise; a cancelled invocation
-                // propagates as such.
-                let storno_number = storno_number_of_unmanaged(ctx, self, &number).await?;
-                return Ok(reversed_response(&number, storno_number));
-            }
-        }
-        // The intent is a pure function of the verified document: a `telj`
-        // it does not carry is a fault after every answer that needs no send.
-        let intent = StornoIntent::from_verified(
-            &found,
-            self.gateway.account(),
-            number.clone(),
-            ExternalId::for_unmanaged_storno(&self.config.namespace, &number),
-            comment,
-        )?;
-
-        // The lookup step: a storno of ours already under the id.
-        let looked_up = lookup_storno(ctx, self, &intent).await?;
-        if let ControlFlow::Break(response) =
-            after_storno_lookup(looked_up, &number, &self.config.namespace)?
-        {
-            return Ok(response);
-        }
-
-        // The storno step, under the issue policy: query-first on every
-        // execution; any `Err` from the run (exhaustion or cancellation) is
-        // `outcome_unknown`, and the next call's lookup finds whatever landed.
-        let outcome = storno_step(ctx, self, &intent).await.map_err(|error| {
-            Fault::outcome_unknown(format!(
-                "the storno step ended without a confirmed outcome ({}): {}; call storno again",
-                error.code(),
-                error.message()
-            ))
-        })?;
-        storno_response(outcome, number, &self.config.namespace).map_err(Into::into)
-    }
 }
 
 #[cfg(test)]
@@ -347,7 +251,6 @@ mod tests {
 
     use super::*;
     use crate::gateway::Rejection;
-    use crate::test_support::Doc;
 
     fn namespace() -> Namespace {
         "acct".parse().expect("namespace")
@@ -448,99 +351,6 @@ mod tests {
         assert_eq!(status, 422, "{body}");
         assert_eq!(body["code"], "szamlazz_error", "{body}");
         assert_eq!(body["szamlazz_code"], "NAV_ERROR", "{body}");
-    }
-
-    /// `storno`'s verify: code 7 is 404 `not_found` naming the invoice.
-    #[test]
-    fn storno_answers_an_unknown_invoice_as_not_found() {
-        let (status, body) = fault_body(
-            verified_document(QueryOutcome::NotFound, "SZ-9", &namespace()).expect_err("a fault"),
-        );
-        assert_eq!(status, 404, "{body}");
-        assert_eq!(body["code"], "not_found", "{body}");
-        assert!(
-            body["message"].as_str().expect("message").contains("SZ-9"),
-            "{body}"
-        );
-        assert_eq!(body.get("order"), None, "a by-number fault: {body}");
-    }
-
-    /// `storno`'s verdict on the verified document: one carrying an order
-    /// number is `managed_by_order` with that number, trimmed, as the
-    /// `order_key` to call `Szamlazz.Order.storno_invoice` on; an empty or
-    /// whitespace-only `rendelesszam` is no order number (as rendered, and
-    /// as a parsed value the worker reads on its own), and the document is
-    /// this service's to reverse; one already reversed, by anyone, is
-    /// `AlreadyReversed` (the answer is known, the storno number is the
-    /// by-number lookup's); a live unmanaged document proceeds, whatever its
-    /// `tipus`: there is no kind pre-check here, szamlazz.hu's echo tells.
-    #[test]
-    fn the_unmanaged_storno_verdict_redirects_managed_documents_and_proceeds_on_the_rest() {
-        let verdict = |doc: &Doc| unmanaged_storno_verdict(&doc.parse(), doc.number);
-
-        for managed in [Some("ORD-1"), Some("  ORD-1 ")] {
-            let StornoVerdict::Answered(response) = verdict(&Doc {
-                order: managed,
-                reversed: true,
-                ..Doc::default()
-            }) else {
-                panic!("rendelesszam {managed:?} is answered");
-            };
-            assert_eq!(
-                response.outcome,
-                StornoOutcome::ManagedByOrder,
-                "{managed:?}"
-            );
-            assert_eq!(
-                response.order_key.as_deref(),
-                Some("ORD-1"),
-                "{managed:?}: the trimmed order number is the key"
-            );
-            assert_eq!(response.invoice_number, "SZ-1", "{managed:?}");
-            assert_eq!(response.storno_number, None, "{managed:?}");
-            assert_eq!(response.conflict_reason, None, "{managed:?}");
-        }
-
-        for (unmanaged, tipus) in [
-            (None, "SZ"),
-            (Some(""), "SZ"),
-            (Some("  "), "SZ"),
-            (None, "D"),
-        ] {
-            assert_eq!(
-                verdict(&Doc {
-                    order: unmanaged,
-                    ..Doc::new("X-1", tipus)
-                }),
-                StornoVerdict::Proceed,
-                "rendelesszam {unmanaged:?}, {tipus}"
-            );
-        }
-
-        // The projection's own reading of the parsed value, with the parser's
-        // normalisation out of the way.
-        for raw in ["", "   "] {
-            assert_eq!(
-                unmanaged_storno_verdict(&Doc::default().assigned_order(Some(raw)), "SZ-1"),
-                StornoVerdict::Proceed,
-                "order_number {raw:?}: the worker's own reading"
-            );
-        }
-        let StornoVerdict::Answered(response) =
-            unmanaged_storno_verdict(&Doc::default().assigned_order(Some(" ORD-1 ")), "SZ-1")
-        else {
-            panic!("a padded order number is answered");
-        };
-        assert_eq!(response.order_key.as_deref(), Some("ORD-1"));
-
-        assert_eq!(
-            verdict(&Doc {
-                order: None,
-                reversed: true,
-                ..Doc::default()
-            }),
-            StornoVerdict::AlreadyReversed
-        );
     }
 
     /// `set_payments` with `additive: true` is at-least-once: a lost reply

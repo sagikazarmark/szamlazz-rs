@@ -3,7 +3,6 @@
 
 use std::str::FromStr as _;
 
-use rust_decimal::Decimal;
 use szamlazz_agent::ops::invoice::{
     Buyer, CreateInvoice, ExchangeRate, InvoiceHeader, InvoiceKind, InvoiceTemplate,
 };
@@ -189,19 +188,6 @@ impl Gateway {
     }
 }
 
-/// The gross total of a built create request: the sum of its line items'
-/// gross values, or `None` when the sum does not fit a decimal. Checked, like
-/// every arithmetic on caller input: a panic here would run on the SDK's
-/// connection task and take every in-flight invocation on it down with the
-/// request.
-#[must_use]
-pub fn gross_total(create: &CreateInvoice) -> Option<Decimal> {
-    create
-        .items
-        .iter()
-        .try_fold(Decimal::ZERO, |sum, item| sum.checked_add(item.gross_value))
-}
-
 /// Maps a template token, the wire value (`SzlaMost`) or the
 /// [`InvoiceTemplate`] variant in snake case (`most`), to the template;
 /// anything else is passed through verbatim.
@@ -220,7 +206,7 @@ fn template(token: &str) -> InvoiceTemplate {
 #[cfg(test)]
 mod tests {
     use jiff::civil::date;
-    use rust_decimal::dec;
+    use rust_decimal::{Decimal, dec};
     use serde_json::json;
     use szamlazz_agent::wire::AgentRequest as _;
     use szamlazz_agent::{Credentials, PaymentMethod};
@@ -231,6 +217,20 @@ mod tests {
     use crate::contract::document::tests::sample_document;
     use crate::contract::{DocumentKind, ExchangeRateInput, LineItemInput};
     use crate::test_support::open_gateway;
+
+    /// The gross total of a built create request: the sum of its line items'
+    /// gross values, or `None` when the sum does not fit a decimal. Checked,
+    /// like every arithmetic on caller input: a panic here would run on the
+    /// SDK's connection task and take every in-flight invocation on it down
+    /// with the request. A test helper: no handler sums a request (the totals
+    /// a response carries are szamlazz.hu's), so it is not part of the
+    /// interface (#182).
+    fn gross_total(create: &CreateInvoice) -> Option<Decimal> {
+        create
+            .items
+            .iter()
+            .try_fold(Decimal::ZERO, |sum, item| sum.checked_add(item.gross_value))
+    }
 
     /// A gateway for the test account with `defaults` and a fixed seller
     /// block, as the prologue would open it.

@@ -367,7 +367,7 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
 /// with nothing sent. The cancelled invocation's runs are the full create
 /// path (the step's command was journaled before the cancel arrived), so no
 /// `RUN_NAMES` row is added: a cancellation anywhere on the path leaves a
-/// prefix, which the pin admits.
+/// prefix, which the step-name table admits.
 #[allow(
     clippy::too_many_lines,
     reason = "one scenario: the cancelled send, then the released key"

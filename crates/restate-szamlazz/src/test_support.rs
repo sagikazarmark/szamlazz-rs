@@ -166,7 +166,7 @@ mod tests {
 
     use super::*;
 
-    /// The default document is what the worker's pins and derivations read:
+    /// The default document is what the worker's checks and derivations read:
     /// a live test-account `SZ-1` of `ORD-1` from [`SUPPLIER`], an e-invoice
     /// with the fulfillment date of [`ORIGINAL_TELJ`], reversed by nobody,
     /// referencing nothing, with no credit entries.
@@ -211,15 +211,12 @@ mod tests {
         let of_order = Doc::of("SZ-1", "SZ", "E2E-1").wire();
         assert_eq!(of_order.info.order_number.as_deref(), Some("E2E-1"));
 
-        let unknown_mode = Doc {
+        let no_teszt = Doc {
             test: None,
             ..Doc::default()
         };
-        assert!(
-            !unknown_mode.xml().contains("<teszt>"),
-            "renders no element"
-        );
-        assert_eq!(unknown_mode.wire().info.test, None);
+        assert!(!no_teszt.xml().contains("<teszt>"), "renders no element");
+        assert_eq!(no_teszt.wire().info.test, None);
 
         let storno = Doc {
             referenced_invoice: Some("SZ-1"),
@@ -266,7 +263,7 @@ mod tests {
     }
 
     /// What `get` and the `Szamlazz.Agent.query` projection read beyond the
-    /// pins: `kelt`, the totals, the credit entries (`kifizetesek`, each with
+    /// checks: `kelt`, the totals, the credit entries (`kifizetesek`, each with
     /// its date, title, amount and the optional comment and bank account),
     /// and any further `<alap>` child a test needs verbatim.
     #[test]

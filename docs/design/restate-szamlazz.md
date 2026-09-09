@@ -179,7 +179,7 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
 
 The four steps and the handler body run inside one tracing span, **`execution{scope, order, restate.invocation.id,
-account.id}`** (`support::execute`, generic over `support::RunCtx`): `scope` is what the SDK saw (`<unscoped>` when none),
+account.id}`** (`prologue::execute`, generic over `support::RunCtx`): `scope` is what the SDK saw (`<unscoped>` when none),
 `order` the Virtual Object key (absent on `Szamlazz.Agent`), `restate.invocation.id` the value the ingress returns as
 `x-restate-id`, and `account.id` the resolved account's id, recorded once the `account` step has answered. Every log
 line the execution emits, the prologue's warnings, the gateway steps' `gateway.*` spans and events, the paging
@@ -570,8 +570,13 @@ The envelope is Restate's, not ours: the Rust SDK 0.12 carries a terminal error 
 other channel, so the worker serialises the fault into the message and the caller parses `message` a second time
 (`From<Fault> for TerminalError` in `service::support`). The fault body is a public contract type,
 `contract::Fault` (`Serialize + Deserialize`, open like every response type, `#[non_exhaustive]`, built with
-`Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::credentials_rejected`, …, are
-a crate-private inherent impl in `service::support`), so a Rust caller decodes `message` into it rather than
+`Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::unavailable`, …, are a
+crate-private inherent impl in `service::support`, and a szamlazz.hu code that is not a document becomes a fault
+through one mapping, `support::AnsweredCode::into_fault` (a credential code → `credentials_rejected`, another code →
+`unavailable` where the handler cannot conclude from it, `szamlazz_error` where it passes it through), which is also
+where the paging `credentials_rejected` warning is emitted: the mapping pages, once, at the site that decides on the
+code, and the `Fault` constructors are pure (#153)), so a
+Rust caller decodes `message` into it rather than
 re-declaring the shape: the e2e harness (`Reply::fault`) did until #128. A caller reading the envelope's `code` sees
 the HTTP status, never the token. The library README (*Faults*) documents the envelope and its three cases, a
 structured fault, a killed invocation (the same envelope with the last retryable error's text in `message`), an
@@ -699,9 +704,10 @@ Two configuration types, both serde-`Deserialize` only (the host chooses the for
 `ReadConfig`, `ResolveConfig` are its three instantiations; the table names the policy in an error and carries its
 defaults; `max_attempts` is optional on every table, unset by default on `[resolve]`); `WorkerConfig::validate`
 yields the `ValidatedWorkerConfig` the services are built from, the one constructor a deployment has (#128).
-`StaticConfig` is the static resolver's account, read through closed input types (`StaticAccount`, `StaticDefaults`,
-`StaticSeller`, `StaticSellerEmail`) distinct from the journaled value types they are built into
-(`account::{Defaults, SellerConfig, SellerEmailConfig}`, journaled with the `Account`; permissive, though under ADR 0009 no longer for replay, see the note below), and everything account-shaped
+`StaticConfig` is the static resolver's account, read through the closed `StaticAccount` (the `Account` fields plus the
+agent key inline) whose `defaults` and `seller` tables are the value types the account carries
+(`account::{Defaults, SellerConfig, SellerEmailConfig}`, journaled with the `Account`, closed themselves; ADR 0009's
+#175 amendment), and everything account-shaped
 (credentials, endpoint, document defaults, seller block) lives on the `Account` it produces (read by the services
 through `Gateway::account()`). A host reads the two side by side from one file of its own layout, for instance:
 
@@ -750,14 +756,14 @@ one way to the `ValidatedWorkerConfig` that `Order::from_parts` / `Agent::from_p
 `StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint).
 
 **The configuration types are closed.** Every library type a host's loader is made of refuses unknown keys
-(`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount` and
-its `StaticDefaults` / `StaticSeller` / `StaticSellerEmail`), so an unknown key at any level is a parse error the host's
-deserializer reports with the key path; a typo such as `mod = "test"` or `[isue]` fails at start-up instead of silently
-running a test account as live or leaving a policy at its default. The input types are distinct from the journaled
-value types they are built into (`Defaults`, `SellerConfig`, `SellerEmailConfig` in `account`, journaled with the
-`Account`; they stay permissive, but since ADR 0009 nothing replays across deployments, so that is no longer a replay
-requirement and a ticket revisits it), mirror them field for field and convert with `From`; a
-round-trip test holds the two sides to each other (#128). `StaticConfig` is one of two mutually exclusive shapes
+(`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount`
+and the value types its `defaults` and `seller` tables are read as, `Defaults` / `SellerConfig` / `SellerEmailConfig`),
+so an unknown key at any level is a parse error the host's deserializer reports with the key path; a typo such as
+`mod = "test"` or `[isue]` fails at start-up instead of silently running a test account as live or leaving a policy at
+its default. The value types are journaled with the `Account` and closed all the same: under ADR 0009 no journal entry
+is decoded by a later release, so nothing asks them to be permissive, and the `Static*` mirror types that once kept
+them so are gone (#175); an embedder's resolver that deserialises `Defaults` from its own storage is held to the same
+rule. `StaticConfig` is one of two mutually exclusive shapes
 (`[account]` or `[accounts.<scope>]`; both present is refused by `StaticResolver::try_from`, `BothShapes`). A host that
 layers environment overrides over a file should read them as **strings** and let the field's type decide, so an
 all-digit agent key keeps its leading zeros (a provider that parses values as numbers first would drop them).
@@ -868,9 +874,10 @@ order, the newest holder under every external id"), which no stub can express. N
 without Restate (the SDK has no `ObjectContext` harness), so handler decisions are tested in the **decision layer**,
 the decide fns: each handler body is `read → decide → (answer | proceed) → next read`, where every `decide` is a pure
 function of the journaled outcome the read returned and the request, beside its async shell, and the shell is held to
-holding no `match` on a gateway outcome that returns a response. Every shell is in that shape: the storno, delete
-and `get` shells (`service/storno.rs`, #138), `Szamlazz.Agent`'s (`service/agent.rs`), the shared after-lookup
-decision and the responses (`service/support.rs`), the prologue's (`service/prologue.rs`), and the create side's
+holding no `match` on a gateway outcome that returns a response. Every shell is in that shape: the two storno shells
+with the protocol they share (`service/storno.rs`: the verdicts, the intent, the after-lookup decision, the responses,
+#138, #174), the delete (`service/delete.rs`) and `get` (`service/status.rs`) shells, `Szamlazz.Agent`'s
+(`service/agent.rs`), the prologue's (`service/prologue.rs`), and the create side's
 (`service/create.rs`, #137: `decide_lookup`, `decide_exclusivity`, `decide_prepayment_for_final`,
 `decide_proforma_link`, `decide_proforma_by_number`, `decide_base`, `respond_to`, `prepare`). The decision functions are unit-tested branch by branch with `test_support::Doc`; the gateway's own
 classifiers (which answer is settled, which document is foreign, which failure is which class) are the same kind of
@@ -900,7 +907,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `szlahu_down` are data, a credential code never sends, a lost reply is the one `Unconfirmed` before a send;
   #134), and **one credential-code table**, one code per operation in the operation's own shape (both lookup
   queries, the create's send, the three reads, the probe, the storno lookup and send, the delete, the credit
-  entries, the taxpayer query; the codes themselves are the agent crate's `is_credential_error` table); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
+  entries, the taxpayer query; the codes themselves are the agent crate's `is_credential_error` table); every read fn (`lookup`, `lookup_ours`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
   `probe`) answering a 500, an empty body or `szlahu_down` as `Err(Unanswered)` (the step's retryable error, never
   data), and another API code as `Ok(Api)` data (the probe: `Accepted`); the probe as exactly one query of the
   sentinel id and nothing else, with a wrong key as data; the taxpayer query as exactly one `xmltaxpayer` request of
@@ -974,7 +981,8 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   the storno intent built from a verified document (`telj` present → `fulfillment_date` equals it with `e_invoice`
   lifted from `eszamla` or the account default; `<telj></telj>` → the fault naming the invoice, `.about(..)` adding
   the order, kind and external id), the `set_payments` fault's message differing by
-  `additive`, `Lookup::classify` on `Api`, the probe outcome →
+  `additive`, every decision on an `OwnershipOutcome` (the exclusivity, prepayment-for-final, proforma-link, delete
+  and `get` reads) on `Api` and a credential code, the probe outcome →
   `credentials` mapping, the handler's key parsing refusing a key with leading
   or trailing whitespace (`" ORD-1"`, `"ORD-1 "`, `"\tORD-1"`) as `invalid_input` naming the rule while
   `OrderKey::parse` itself still trims, two sentinel tests that the agent key reaches
@@ -1099,7 +1107,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and `Szamlazz.Agent.check_account` set
   `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4). The suite is one
   integration-test binary, `tests/e2e/main.rs`, which holds the two tests and the order the scenarios run in (phase
-  1 as a `JoinSet`, phase 2 in sequence, the pins last); `harness/` is the szamlazz half of the harness, one module
+  1 as a `JoinSet`, phase 2 in sequence, the run-wide checks last); `harness/` is the szamlazz half of the harness, one module
   per concern (`mod.rs`, the `Harness` composing the server, the wiremock and the accounts, and the two server
   specs; `accounts`, the static resolver of phase 1 and the mutable resolver and store of phase 2; `szamlazz`: the
   document-centric stub helpers over the shared fixtures of `tests/common`; `ingress`, a reply with the
@@ -1115,7 +1123,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `e2e_smoke` proves its contract with a trivial service of its own and no consumer. Every other file is one
   handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`, `create_final`,
   `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`, `faults`,
-  `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
+  `prologue`, `multi_account`, `invariants`), each a `pub(crate) async fn` per scenario taking the harness. A new
   scenario of a handler goes into that handler's file and is listed in `main.rs`: in phase 1 when it needs only
   the single-account deployment and order keys of its own, in phase 2 when it needs a scope or scripts the resolver
   or store. The suite runs in about 20 s on four cores (about 50 s before #134: 59 scenarios in sequence with a

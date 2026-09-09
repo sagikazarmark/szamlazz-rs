@@ -160,7 +160,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
 /// second execution's leading query, inside the re-executed closure, finds it
 /// reversed and **does not send again**: `outcome: reversed`, exactly one
 /// create on the wire, one `create-invoice` entry in the journal. What the
-/// gateway's table pins for one execution, here across two executions of one
+/// gateway's table asserts for one execution, here across two executions of one
 /// journaled step.
 pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
     h.absent("E2E-6B", &["prepayment", "final", "proforma"])

@@ -3,7 +3,7 @@
 //! through the harness crate's matcher (`restate_e2e_harness::run_names`: a
 //! journaled name as its pattern, [`run_pattern`], and the prefix rule,
 //! [`is_prefix_of_path`]). The check itself (over every invocation of the
-//! run) is the last scenario (`pins`); the matcher's own tests are the
+//! run) is the last scenario (`invariants`); the matcher's own tests are the
 //! crate's.
 
 use std::sync::LazyLock;

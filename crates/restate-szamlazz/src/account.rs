@@ -15,14 +15,15 @@ use std::sync::Arc;
 use http::Uri;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::Credentials;
-
 use szamlazz_agent::ops::invoice::{Seller, SellerEmail};
+
+use crate::identity::bounded_conversions;
 
 pub mod static_resolver;
 
 pub use static_resolver::{
     AccountTable, InvalidScope, MAX_SCOPE_LEN, Secret, StaticAccount, StaticConfig,
-    StaticConfigError, StaticDefaults, StaticResolver, StaticSeller, StaticSellerEmail,
+    StaticConfigError, StaticResolver,
 };
 
 /// One szamlazz.hu account as the worker knows it, never the agent key.
@@ -102,10 +103,14 @@ impl Account {
 /// account's alone.
 ///
 /// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
-/// [`Default::default`]
-/// and set fields.
+/// [`Default::default`] and set fields. Closed to unknown keys: the static
+/// resolver reads its `[account.defaults]` table as this type, so a misspelt
+/// key is a parse error naming it, and an embedder's resolver that
+/// deserialises it from its own storage is held to the same (ADR 0009: no
+/// journal entry is decoded by a later release, so nothing asks the type to
+/// be permissive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Defaults {
     /// Issue e-invoices (`e-számla`). Default `false`.
@@ -153,19 +158,18 @@ impl Default for Defaults {
 /// The seller (`eladó`) block; the account's own data is used where absent.
 ///
 /// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
-/// [`Default::default`]
-/// and set fields.
+/// [`Default::default`] and set fields. Closed to unknown keys, as
+/// [`Defaults`] is.
 ///
 /// Deliberately not the agent crate's [`Seller`], although the fields mirror
-/// it: the account's journal shape is this crate's contract with every
-/// in-flight invocation, and a crate-owned type keeps a `Seller`
-/// change in `szamlazz-agent` (a field renamed, retyped, or made required)
-/// from altering what an `account` entry replays as. The same reason
+/// it: a journaled type is crate-owned (ADR 0009), so what an `account` entry
+/// holds is decided here and not by a `Seller` change in `szamlazz-agent` (a
+/// field added, renamed or retyped). The same reason
 /// `Szamlazz.Agent.query_taxpayer` journals the crate-owned
 /// `QueryTaxpayerResponse` projection rather than the agent crate's
 /// `TaxpayerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SellerConfig {
     /// Bank name.
@@ -196,9 +200,10 @@ impl SellerConfig {
 ///
 /// Journaled inside the [`Account`] through
 /// [`SellerConfig`]; `#[non_exhaustive]`: start from
-/// [`Default::default`] and set fields.
+/// [`Default::default`] and set fields. Closed to unknown keys, as
+/// [`Defaults`] is.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SellerEmailConfig {
     /// Reply-to address.
@@ -426,17 +431,7 @@ impl TryFrom<String> for Endpoint {
     }
 }
 
-impl fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Endpoint {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+bounded_conversions!(Endpoint, InvalidEndpoint);
 
 /// Serializes as the plain string.
 impl Serialize for Endpoint {
@@ -814,11 +809,11 @@ mod tests {
         assert_eq!(back, account);
     }
 
-    /// Additive-only: a journaled account written before a field existed
-    /// reads back with that field's default. `id` and `credential_ref` are the
-    /// only required fields.
+    /// `id` and `credential_ref` are the only required fields of an account:
+    /// a resolver that sets nothing else gets the production endpoint and
+    /// the default document defaults and seller block.
     #[test]
-    fn account_is_additive_only_with_the_production_endpoint_by_default() {
+    fn an_account_needs_only_its_id_and_credential_ref() {
         let account: Account =
             serde_json::from_value(json!({ "id": "acme", "credential_ref": "acme" }))
                 .expect("deserialize");
@@ -827,6 +822,42 @@ mod tests {
         assert_eq!(account.endpoint.as_str(), "https://www.szamlazz.hu/szamla/");
         assert_eq!(account.defaults, Defaults::default());
         assert_eq!(account.seller, SellerConfig::default());
+    }
+
+    /// `Endpoint` implements the conversion set the crate's bounded newtypes
+    /// share (`identity::tests::the_bounded_newtypes_share_one_conversion_set`):
+    /// `FromStr`, `TryFrom<&str>` and `TryFrom<String>` through one
+    /// validation, `Display`, `AsRef<str>`, `as_str` and `From<_> for String`
+    /// giving the text back as written; `parse` stays as the inherent
+    /// spelling a caller reads best.
+    #[test]
+    fn endpoint_shares_the_bounded_newtypes_conversion_set() {
+        const VALID: &str = "https://www.szamlazz.hu/szamla/";
+        const INVALID: &str = "ftp://example.com/";
+        let parsed = Endpoint::parse(VALID).expect("parse");
+        assert_eq!(VALID.parse::<Endpoint>().expect("FromStr"), parsed);
+        assert_eq!(Endpoint::try_from(VALID).expect("TryFrom<&str>"), parsed);
+        assert_eq!(
+            Endpoint::try_from(VALID.to_owned()).expect("TryFrom<String>"),
+            parsed
+        );
+        assert_eq!(parsed.to_string(), VALID);
+        assert_eq!(parsed.as_ref(), VALID);
+        assert_eq!(parsed.as_str(), VALID);
+        assert_eq!(String::from(parsed), VALID);
+
+        assert!(matches!(
+            INVALID.parse::<Endpoint>(),
+            Err(InvalidEndpoint::Scheme)
+        ));
+        assert!(matches!(
+            Endpoint::try_from(INVALID),
+            Err(InvalidEndpoint::Scheme)
+        ));
+        assert!(matches!(
+            Endpoint::try_from(INVALID.to_owned()),
+            Err(InvalidEndpoint::Scheme)
+        ));
     }
 
     #[test]

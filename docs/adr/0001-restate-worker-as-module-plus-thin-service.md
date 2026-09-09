@@ -6,7 +6,7 @@ that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
 `restate_szamlazz::gateway::Gateway` is a plain Rust module: a struct holding the client
 and the account it speaks for, with async functions `lookup`, `create`, `storno`, `delete_proforma`,
-`set_payments`, `query`, `verify`, `hint`, `lookup_storno`, `query_taxpayer` and `probe`, one per durable step. It has no Restate context, returns every expected
+`set_payments`, `query`, `verify`, `hint`, `lookup_ours`, `lookup_storno`, `query_taxpayer` and `probe`, one per durable step. It has no Restate context, returns every expected
 szamlazz.hu outcome as data (never `Err` for a rejection, a duplicate or a "not found"; the create
 step's `Err(Unconfirmed)` is reserved for an answer that is *not* known and is what the run retry
 policy re-executes), and is unit-testable with wiremock. The `Order` Virtual Object (key = order

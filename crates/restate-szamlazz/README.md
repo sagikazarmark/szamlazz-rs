@@ -312,9 +312,9 @@ and `Agent::from_parts` take, so a deployment cannot run on a policy below the f
 
 Nothing account-shaped is in `WorkerConfig`: document defaults and the seller block belong to the `Account`, and
 their value types (`account::Defaults`, `account::SellerConfig`, `account::SellerEmailConfig`) are journaled with it
-(a *journaled type*'s parts, under no compatibility rule: ADR 0009). The static resolver reads them through closed input types of its own
-(`StaticDefaults`, `StaticSeller`, `StaticSellerEmail`, beside `StaticAccount`'s `Secret` agent key, whose `Debug`
-output is redacted), which mirror them field for field.
+(a *journaled type*'s parts, under no compatibility rule: ADR 0009) and closed to unknown keys themselves, so the
+static resolver reads its `[account.defaults]` and `[account.seller]` tables as them directly (`StaticAccount` adds
+the `Secret` agent key, whose `Debug` output is redacted).
 
 ### Accounts
 
@@ -337,11 +337,11 @@ and `Accounts::from` bundles it as resolver and store.
 ### Gateway and services
 
 `gateway::Gateway` is the module that speaks to szamlazz.hu on behalf of one account, over
-`szamlazz_agent::Client`: one plain async fn per `ctx.run` (`lookup`, `create`, `verify`, `query`, `hint`,
-`lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `query_taxpayer`, `probe`), each returning every
+`szamlazz_agent::Client`: one plain async fn per `ctx.run` (`lookup`, `lookup_ours`, `create`, `verify`, `query`,
+`hint`, `lookup_storno`, `storno`, `delete_proforma`, `set_payments`, `query_taxpayer`, `probe`), each returning every
 expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may re-execute:
 
-- the read fns (`lookup`, `verify`, `query`, `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return
+- the read fns (`lookup`, `lookup_ours`, `verify`, `query`, `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return
   `Err(Unanswered)` when szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`);
 - `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known. An answer to their leading
   query (another code, `szlahu_down`) is data: nothing was sent.

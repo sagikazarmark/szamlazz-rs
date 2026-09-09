@@ -41,7 +41,8 @@
 //! under one scope ([`concurrency`]), the `Szamlazz.Agent` reads and writes
 //! under a scope ([`agent_reads`], [`agent_writes`]), the wire faults
 //! ([`faults`]), the prologue's account step ([`prologue`]), the flag day and
-//! scope isolation ([`multi_account`]) and the run-wide pins ([`pins`]). A
+//! scope isolation ([`multi_account`]) and the run-wide checks
+//! ([`invariants`]). A
 //! scenario is a `pub(crate) async fn` taking the harness; a family file is
 //! where a new scenario of that handler goes.
 //!
@@ -86,8 +87,8 @@ mod create_proforma;
 mod delete_proforma;
 mod faults;
 mod get;
+mod invariants;
 mod multi_account;
-mod pins;
 mod policies;
 mod prologue;
 mod storno;
@@ -216,7 +217,7 @@ async fn e2e_order_protocol() {
         policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,
         get::run_retries_do_not_spend_invocation_attempts,
         faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
-        pins::plant_the_leak_positive_control,
+        invariants::plant_the_leak_positive_control,
     )
     .join_all(&h)
     .await;
@@ -244,11 +245,11 @@ async fn e2e_order_protocol() {
         multi_account::credential_rotation_between_executions_is_picked_up,
     );
 
-    // The run-wide pins, last.
+    // The run-wide checks, last.
     sequentially!(h;
-        pins::the_order_keeps_no_state,
-        pins::no_agent_key_in_any_journal_of_the_run,
-        pins::every_handler_journals_its_tabled_steps,
+        invariants::the_order_keeps_no_state,
+        invariants::no_agent_key_in_any_journal_of_the_run,
+        invariants::every_handler_journals_its_tabled_steps,
     );
 }
 

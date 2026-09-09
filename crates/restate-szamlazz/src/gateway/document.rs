@@ -103,7 +103,7 @@ pub struct FoundDocument {
 
 /// A credit entry as szamlazz.hu records it against a document (`kifizetes`):
 /// the projection of the agent crate's [`RecordedPayment`] with what
-/// `Szamlazz.Agent.query` shows of each entry. Additive-only, like
+/// `Szamlazz.Agent.query` shows of each entry. Crate-owned and journaled, like
 /// [`FoundDocument`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -242,7 +242,8 @@ impl From<RecordedPayment> for RecordedCreditEntry {
 /// the worker never asks for) is not an issued document
 /// ([`TryFrom<InvoiceCreationResult>`](Self::try_from) refuses it with
 /// [`Unnumbered`], and the create step re-queries instead). The PDF the
-/// reply may carry is not here. Additive-only, like [`FoundDocument`].
+/// reply may carry is not here. Crate-owned and journaled, like
+/// [`FoundDocument`] (ADR 0009: no compatibility rule).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct IssuedDocument {
@@ -396,7 +397,7 @@ mod tests {
     /// The projection serialises flat, under exactly the field names above,
     /// and nothing of the buyer, the seller, the line items or the PDF is in
     /// it: what the journal holds for the retention period. (The field order
-    /// is the journal fixtures' to pin.)
+    /// is serde's and asserted by nothing.)
     #[test]
     fn a_found_document_serialises_without_buyer_seller_items_or_pdf() {
         let json = serde_json::to_value(Doc::default().parse()).expect("serialises");

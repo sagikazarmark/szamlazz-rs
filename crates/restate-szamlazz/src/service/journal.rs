@@ -54,8 +54,8 @@ use crate::contract::{
     PaymentEntry, PaymentMethod as ContractPaymentMethod, QueryTaxpayerResponse,
 };
 use crate::gateway::{
-    CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, ProbeOutcome,
-    QueryOutcome, Rejection, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome,
+    CreateOutcome, DeleteOutcome, FoundDocument, IssuedDocument, LookupOutcome, OwnershipOutcome,
+    ProbeOutcome, QueryOutcome, Rejection, SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome,
     SzamlazzAnswer, TaxpayerOutcome,
 };
 use crate::identity::Namespace;
@@ -169,6 +169,14 @@ fn entries() -> Vec<Entry> {
         ],
         &variants!(QueryOutcome { Found(_), NotFound, CredentialsRejected(_), Api(_) }),
     ));
+    all.extend(entries_of(vec![
+            OwnershipOutcome::Absent,
+            OwnershipOutcome::Live(document("SZ-1", false)),
+            OwnershipOutcome::Reversed(document("SZ-1", true)),
+            OwnershipOutcome::Collision(document("SZ-2", false)),
+            OwnershipOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            OwnershipOutcome::Api(API.answer()),
+        ], &variants!(OwnershipOutcome { Absent, Live(_), Reversed(_), Collision(_), CredentialsRejected(_), Api(_) })));
     all.extend(entries_of(vec![
             LookupOutcome::Absent,
             LookupOutcome::Live(document("SZ-1", false)),
