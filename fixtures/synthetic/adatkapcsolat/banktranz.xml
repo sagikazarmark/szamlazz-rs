@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<banktranz xmlns="http://www.szamlazz.hu/banktranz">
+  <id>987</id>
+  <bankszamla>11111111-22222222-33333333</bankszamla>
+  <erteknap>2026-07-03</erteknap>
+  <irany>BE</irany>
+  <technikai>false</technikai>
+  <osszeg>12700.0</osszeg>
+  <devizanem>HUF</devizanem>
+  <partner><nev>Kovács Bt.</nev><bankszamla>44444444-55555555</bankszamla></partner>
+  <kozlemeny>E-2026-123</kozlemeny>
+</banktranz>

@@ -22,20 +22,24 @@ use http::{StatusCode, Uri, header};
 use tower::util::ServiceExt as _;
 
 use crate::KEY_HEADER;
-use crate::ack::{Ack, InvoiceAck, InvoiceDirection};
+use crate::ack::{ControlCode, InvoiceAck, InvoiceDirection};
 use crate::document::{Document, RootKind};
 use crate::handler::{Handler, MaybeSend, MaybeSync};
+use crate::key::keys_match;
 
 #[cfg(not(target_arch = "wasm32"))]
 type AppState<R> = Arc<Receiver<R>>;
 #[cfg(target_arch = "wasm32")]
 type AppState<R> = send_wrapper::SendWrapper<Arc<Receiver<R>>>;
 
-/// Resolves a presented Adatkapcsolat key to tenant-specific business logic.
+/// Resolves a presented Adatkapcsolat key to the [`Handler`] of the
+/// *connection* it identifies: one registered Adatkapcsolat connection (one
+/// szamlazz.hu account pushing to this URL under one key) when several share
+/// the receiver.
 ///
-/// The returned [`Handler`] is the authenticated tenant context, so its fields
-/// are directly available while handling the document. The three answers are
-/// protocol decisions, not just lookup results:
+/// The returned handler is the authenticated connection's context, so its
+/// fields are directly available while handling the document. The three
+/// answers are protocol decisions, not just lookup results:
 ///
 /// - `Ok(Some(handler))`: the key is known; the push is handled.
 /// - `Ok(None)`: the key is **definitely** unknown; the router answers the
@@ -45,27 +49,82 @@ type AppState<R> = send_wrapper::SendWrapper<Arc<Receiver<R>>>;
 /// - `Err(_)`: the key **could not be checked** (a database or secrets
 ///   service timed out, …); the router answers `503` with no Ack, so the
 ///   record stays in szamlazz.hu's 72-hour retry window. The error is not
-///   echoed to szamlazz.hu; log it yourself.
+///   echoed to szamlazz.hu; with the `tracing` feature the router logs it at
+///   `warn`, without it the error is dropped, so log it yourself.
 ///
 /// Resolution is async so a resolver that does I/O need not block.
 /// Implementations can be written as `async fn`; the `MaybeSend` bound keeps
 /// the trait implementable on Cloudflare Workers, where futures are `!Send`.
-/// On native targets the future borrows the returned handler, so the handler
-/// type must be `Sync`, which the router requires of it anyway. Use
-/// constant-time key comparison when keys are secrets rather than opaque IDs.
+/// Compare keys that are secrets with [`keys_match`], in constant time; a key
+/// that is an opaque id you look up needs no more than the lookup.
+///
+/// The matched handler is **owned** (`Arc`), so a resolver may hand out a
+/// handler it holds (an `Arc::clone`, what the fixed-key router does) or
+/// build one per request from what the lookup found, a connection context a
+/// borrow could not express:
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use szamlazz_adatkapcsolat::axum::KeyResolver;
+/// # use szamlazz_adatkapcsolat::{Ack, BankTransaction, Handler, InvoiceAck, InvoiceDocument, ReceiptBatch};
+///
+/// /// The connection a key resolved to, built per request.
+/// struct Connection {
+///     name: String,
+///     // a database handle, a queue producer, …
+/// }
+/// # impl Handler for Connection {
+/// #     type Error = std::convert::Infallible;
+/// #     async fn outgoing_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, Self::Error> {
+/// #         Ok(InvoiceAck::accept(invoice.info.id))
+/// #     }
+/// #     async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, Self::Error> {
+/// #         Ok(InvoiceAck::accept(invoice.info.id))
+/// #     }
+/// #     async fn bank_transaction(&self, _: BankTransaction) -> Result<Ack, Self::Error> {
+/// #         Ok(Ack::accept())
+/// #     }
+/// #     async fn receipts(&self, _: ReceiptBatch) -> Result<Ack, Self::Error> {
+/// #         Ok(Ack::accept())
+/// #     }
+/// # }
+///
+/// struct Directory { /* a pool */ }
+/// # impl Directory {
+/// #     async fn connection_for(&self, _key: &str) -> Result<Option<String>, std::io::Error> {
+/// #         Ok(Some("acme".to_owned()))
+/// #     }
+/// # }
+///
+/// impl KeyResolver for Directory {
+///     type Handler = Connection;
+///     type Error = std::io::Error;
+///
+///     async fn resolve(&self, key: &str) -> Result<Option<Arc<Connection>>, Self::Error> {
+///         // A lookup that fails is `Err` (503, retried), never `Ok(None)`.
+///         let name = self.connection_for(key).await?;
+///         Ok(name.map(|name| Arc::new(Connection { name })))
+///     }
+/// }
+/// ```
+///
+/// Breaking change in 0.4: `resolve` answered `Option<&Self::Handler>`, a
+/// borrow of the resolver, and `Error` was bound by `Display`.
 pub trait KeyResolver {
-    /// Handler/context selected for an authenticated key.
+    /// The handler, the connection's context, selected for an authenticated
+    /// key.
     type Handler: Handler;
 
     /// Why a lookup could not complete. Not sent to szamlazz.hu (the `503`
     /// alone drives the retry), so it may carry internal detail.
-    type Error: std::fmt::Display;
+    type Error: std::error::Error;
 
-    /// Authenticates `presented_key` and returns its tenant handler/context.
+    /// Authenticates `presented_key` and returns its connection's handler.
     fn resolve(
         &self,
         presented_key: &str,
-    ) -> impl Future<Output = Result<Option<&Self::Handler>, Self::Error>> + MaybeSend;
+    ) -> impl Future<Output = Result<Option<Arc<Self::Handler>>, Self::Error>> + MaybeSend;
 }
 
 /// The request-body cap a receiver router applies.
@@ -194,16 +253,16 @@ where
     router_with_resolver_and_body_limit(
         FixedKey {
             key: key.into(),
-            handler,
+            handler: Arc::new(handler),
         },
         body_limit,
     )
 }
 
-/// Multi-customer router: the [`KeyResolver`] maps each presented key to its
-/// tenant's [`Handler`], and says when it could not ([`Err`] → `503`, never
-/// `KEY_ERR`). Applies [`BodyLimit::DEFAULT`]; see [`router`] for the protocol
-/// it answers.
+/// Multi-connection router: the [`KeyResolver`] maps each presented key to its
+/// connection's [`Handler`], and says when it could not ([`Err`] → `503`,
+/// never `KEY_ERR`). Applies [`BodyLimit::DEFAULT`]; see [`router`] for the
+/// protocol it answers.
 ///
 /// [`Err`]: KeyResolver::resolve
 pub fn router_with_resolver<R>(resolver: R) -> Router
@@ -215,7 +274,7 @@ where
     router_with_resolver_and_body_limit(resolver, BodyLimit::DEFAULT)
 }
 
-/// Multi-customer router with a caller-selected request-body limit; see
+/// Multi-connection router with a caller-selected request-body limit; see
 /// [`router_with_resolver`] and [`BodyLimit`].
 pub fn router_with_resolver_and_body_limit<R>(resolver: R, body_limit: BodyLimit) -> Router
 where
@@ -273,21 +332,23 @@ pub fn nest_at(app: Router, path: &str, receiver: Router) -> Router {
         .route(&format!("{path}/"), trailing_route)
 }
 
+/// The one-connection resolver behind [`router`]: one key, one handler, held
+/// once and handed out by `Arc::clone` (no allocation per request).
 struct FixedKey<H> {
     key: String,
-    handler: H,
+    handler: Arc<H>,
 }
 
-impl<H: Handler + MaybeSync> KeyResolver for FixedKey<H> {
+impl<H: Handler + MaybeSend + MaybeSync> KeyResolver for FixedKey<H> {
     type Handler = H;
     type Error = Infallible;
 
     fn resolve(
         &self,
         presented_key: &str,
-    ) -> impl Future<Output = Result<Option<&H>, Infallible>> + MaybeSend {
+    ) -> impl Future<Output = Result<Option<Arc<H>>, Infallible>> + MaybeSend {
         ready(Ok(
-            keys_match(presented_key, &self.key).then_some(&self.handler)
+            keys_match(presented_key, &self.key).then(|| Arc::clone(&self.handler))
         ))
     }
 }
@@ -361,14 +422,15 @@ where
             // Per protocol: answer 200 with a KEY_ERR Ack matching the pushed
             // document type, so szamlazz.hu stops sending until the key
             // changes. Reserved for a lookup that completed and found no
-            // tenant; bank transactions and receipts answered this way are
-            // never resent.
-            return key_error_response(root);
+            // connection; bank transactions and receipts answered this way
+            // are never resent.
+            return xml_response(ControlCode::KeyUnknown.to_xml(root));
         }
         // The resolver could not check the key. KEY_ERR would permanently
         // drop the record; a non-200 keeps the 72-hour retry window alive.
-        // 503 needs no root kind: it carries no Ack.
-        Err(_) => return resolver_unavailable(),
+        // The 503 carries no Ack; the root kind only names the push in the
+        // log.
+        Err(error) => return resolver_unavailable(root, &error),
     };
 
     // Authenticated: the per-element namespace pass and the typed parse.
@@ -386,7 +448,7 @@ where
 
             match handler.outgoing_invoice(invoice).await {
                 Ok(ack) => invoice_xml_response(&ack.for_document(id), InvoiceDirection::Outgoing),
-                Err(_) => handler_error(),
+                Err(error) => handler_error(root, &error),
             }
         }
         Document::IncomingInvoice(invoice) => {
@@ -394,18 +456,18 @@ where
 
             match handler.incoming_invoice(invoice).await {
                 Ok(ack) => invoice_xml_response(&ack.for_document(id), InvoiceDirection::Incoming),
-                Err(_) => handler_error(),
+                Err(error) => handler_error(root, &error),
             }
         }
         Document::BankTransaction(transaction) => {
             match handler.bank_transaction(transaction).await {
                 Ok(ack) => xml_response(ack.to_bank_transaction_xml()),
-                Err(_) => handler_error(),
+                Err(error) => handler_error(root, &error),
             }
         }
         Document::Receipts(batch) => match handler.receipts(batch).await {
             Ok(ack) => xml_response(ack.to_receipts_xml()),
-            Err(_) => handler_error(),
+            Err(error) => handler_error(root, &error),
         },
     }
 }
@@ -413,28 +475,22 @@ where
 fn invoice_xml_response(ack: &InvoiceAck, direction: InvoiceDirection) -> Response {
     match ack.to_xml(direction) {
         Ok(body) => xml_response(body),
-        Err(_) => handler_error(),
-    }
-}
-
-/// The `KEY_ERR` Ack in the shape of the pushed document's kind.
-fn key_error_response(root: RootKind) -> Response {
-    match root {
-        RootKind::OutgoingInvoice => {
-            invoice_xml_response(&InvoiceAck::key_error(), InvoiceDirection::Outgoing)
-        }
-        RootKind::IncomingInvoice => {
-            invoice_xml_response(&InvoiceAck::key_error(), InvoiceDirection::Incoming)
-        }
-        RootKind::BankTransaction => xml_response(Ack::key_error().to_bank_transaction_xml()),
-        RootKind::Receipts => xml_response(Ack::key_error().to_receipts_xml()),
+        // The handler produced an Ack the protocol cannot carry: its
+        // failure, answered like one.
+        Err(error) => handler_error(direction.into(), &error),
     }
 }
 
 /// Answers a resolver that could not check the key with a bare 503. Like a
 /// handler failure, the error is not echoed (it may carry internal detail),
-/// and the status alone keeps szamlazz.hu retrying.
-fn resolver_unavailable() -> Response {
+/// and the status alone keeps szamlazz.hu retrying; under the `tracing`
+/// feature it is logged at `warn`.
+fn resolver_unavailable(root: RootKind, error: &dyn std::error::Error) -> Response {
+    log_warn(
+        root,
+        error,
+        "key resolver could not check the key; answering 503 so szamlazz.hu retries",
+    );
     (StatusCode::SERVICE_UNAVAILABLE, "key resolver unavailable").into_response()
 }
 
@@ -447,29 +503,43 @@ fn xml_response(body: Vec<u8>) -> Response {
         .into_response()
 }
 
-/// Compares the presented key against the configured one without an
-/// early-exit on the first differing byte: the header is the connection's
-/// only authentication, so leaking its content through timing must be avoided.
-/// (The length comparison is not itself secret-dependent.)
-fn keys_match(presented: &str, expected: &str) -> bool {
-    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
-
-    if presented.len() != expected.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-
-    for (a, b) in presented.iter().zip(expected) {
-        diff |= a ^ b;
-    }
-
-    diff == 0
-}
-
 /// Answers a handler failure with a bare 500. The handler's error is
 /// deliberately not echoed to szamlazz.hu: it may carry internal detail, and
-/// the status alone drives the 72-hour retry. Handlers should log their own
-/// errors for diagnostics.
-fn handler_error() -> Response {
+/// the status alone drives the 72-hour retry. Under the `tracing` feature it
+/// is logged at `warn`; without it, it is dropped here, and the handler logs
+/// its own.
+fn handler_error(root: RootKind, error: &dyn std::error::Error) -> Response {
+    log_warn(
+        root,
+        error,
+        "handler failed; answering 500 so szamlazz.hu retries",
+    );
     (StatusCode::INTERNAL_SERVER_ERROR, "handler error").into_response()
+}
+
+/// The one place the router speaks about an error: a `warn` event under the
+/// `tracing` feature, nothing without it. The response never carries it.
+/// The `error` field is the error with its [`source`](std::error::Error::source)
+/// chain (`outer: cause: root cause`), so a wrapped cause is not lost.
+#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+fn log_warn(root: RootKind, error: &dyn std::error::Error, message: &'static str) {
+    #[cfg(feature = "tracing")]
+    tracing::warn!(kind = %root, error = %ErrorChain(error), "{message}");
+}
+
+/// An error and its `source()` chain, colon-separated, for the log.
+#[cfg(feature = "tracing")]
+struct ErrorChain<'a>(&'a dyn std::error::Error);
+
+#[cfg(feature = "tracing")]
+impl std::fmt::Display for ErrorChain<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(cause) = source {
+            write!(f, ": {cause}")?;
+            source = cause.source();
+        }
+        Ok(())
+    }
 }

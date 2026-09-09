@@ -24,8 +24,14 @@ use crate::ack::InvoiceDirection;
 use crate::error::{ParseError, ValidationError};
 
 /// One pushed document, identified by the XML root element.
+///
+/// Exhaustive on purpose: the four variants are the four streams an
+/// Adatkapcsolat connection can push, and [`Handler`](crate::Handler) makes a
+/// fifth a breaking change by design (every method is required, so a new
+/// stream cannot be acknowledged and discarded by an implementation that does
+/// not know it). A wildcard arm would buy nothing and hide that. Breaking
+/// change in 0.4: the enum was `#[non_exhaustive]`.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum Document {
     /// An outgoing invoice (`<szamla>`), pushed within ~15 minutes of issue.
     #[doc(alias = "kimenő számla")]
@@ -49,19 +55,32 @@ impl Document {
     /// delivery: szamlazz.hu retries a non-200 answer, identically, for up
     /// to 72 hours and then drops the record; for a bank transaction or a
     /// receipt that is the last time it offers it. A body this parse cannot
-    /// read is therefore lost, so it refuses only what the receiver cannot
-    /// Ack: a body that is not UTF-8 or not well-formed XML, an unknown root
-    /// or an element outside the document's namespace, an `alap/id` (or a
-    /// bank transaction `id`) that is missing or not an integer, an invoice
-    /// without its `szamlaszam`, and a number or boolean that is not one (an
-    /// `<osszeg>` that is not a number, a `<teszt>` that is not a boolean).
-    /// Everything else is content and reads as the wire delivers it: a
-    /// missing element is `None`, an unknown `<irany>` is
+    /// read is therefore lost, so it refuses only a body that is not the
+    /// pushed record: one that is not UTF-8 or not well-formed XML, an
+    /// unknown root or an element outside the document's namespace, a
+    /// record without its **identity** (an invoice's `alap/id` and
+    /// `szamlaszam`, a bank transaction's `id`, a receipt's `alap/id`;
+    /// missing or not an integer), and a number or boolean that is not one
+    /// (an `<osszeg>` that is not a number, a `<teszt>` that is not a
+    /// boolean). Everything else is content and reads as the wire delivers
+    /// it: a missing element is `None`, an unknown `<irany>` is
     /// [`TransactionDirection::Other`], a `<pdf>` that does not decode is
     /// [`None`](InvoiceDocument::pdf) with the encoded text still in
     /// [`raw_xml`](InvoiceDocument::raw_xml), a date that is not a date (a
     /// `<kelt>` of `2015-12-01junk`) is `None` with its text likewise in the
     /// raw XML, an empty receipt batch has no receipts.
+    ///
+    /// The identity is shape because it is what the receiver keys the
+    /// record by, not because every Ack echoes it: an invoice Ack echoes
+    /// `alap/id` and nothing echoes `szamlaszam`, a bank transaction's or a
+    /// receipt batch's Ack carries no id at all, yet redelivery is the
+    /// protocol's normal case (a lost Ack, a fan-out member that failed) and
+    /// a receiver tolerates it by the id (the archiver names its objects by
+    /// it). szamlazz.hu assigns the id itself and its schemas type it an
+    /// integer, so a push without one is not a record it holds, the same
+    /// class of body as a truncated one. The cost is stated: a receipt
+    /// batch with one id-less `<nyugta>` is refused whole, and szamlazz.hu
+    /// drops it after 72 hours.
     ///
     /// The line between an unknown enumeration token (content) and a
     /// malformed lexical value (shape) is the one the crate has always drawn
@@ -126,11 +145,35 @@ impl Document {
         }
     }
 
-    /// Validates UTF-8 and identifies the root element, verifying its own
-    /// namespace. The XML is read only up to the first start tag (the UTF-8
-    /// check covers the whole body), so the receiver can shape a `KEY_ERR`
-    /// Ack for a push it has not yet authenticated without parsing it.
-    pub(crate) fn identify(body: &[u8]) -> Result<RootKind, ParseError> {
+    /// Which kind of document this is.
+    #[must_use]
+    pub fn kind(&self) -> RootKind {
+        match self {
+            Self::OutgoingInvoice(_) => RootKind::OutgoingInvoice,
+            Self::IncomingInvoice(_) => RootKind::IncomingInvoice,
+            Self::BankTransaction(_) => RootKind::BankTransaction,
+            Self::Receipts(_) => RootKind::Receipts,
+        }
+    }
+
+    /// Validates UTF-8 and identifies the pushed kind by the root element,
+    /// verifying the root's own namespace. The XML is read only up to the
+    /// first start tag (the UTF-8 check covers the whole body), so a
+    /// receiver can follow the protocol's order without a framework:
+    /// identify the root, authenticate the key, and only then
+    /// [`parse`](Self::parse) the body, or answer a `KEY_ERR` Ack in the
+    /// shape of the pushed kind ([`ControlCode::to_xml`](crate::ControlCode::to_xml))
+    /// for a push it has not authenticated, having parsed nothing of it.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::Utf8`] for a body that is not UTF-8,
+    /// [`ParseError::Empty`] for one without a root element,
+    /// [`ParseError::UnknownRoot`] for a root this crate does not know,
+    /// [`ParseError::WrongNamespace`] for a known root outside its official
+    /// namespace, and [`ParseError::Xml`] for XML that is not well-formed up
+    /// to the root.
+    pub fn identify(body: &[u8]) -> Result<RootKind, ParseError> {
         let text = std::str::from_utf8(body)?;
 
         root_kind(text)
@@ -201,16 +244,30 @@ fn validate_element_namespaces(text: &str, kind: RootKind) -> Result<(), ParseEr
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum RootKind {
+/// Which kind of document a push carries, named by its XML root element:
+/// the one enumeration of the four Adatkapcsolat streams, shared by the
+/// parse ([`Document::identify`], [`Document::kind`]), the Acks
+/// ([`ControlCode::to_xml`](crate::ControlCode::to_xml)) and the archiver's
+/// layout.
+///
+/// Exhaustive for the same reason [`Document`] is: a fifth stream is a new
+/// [`Handler`](crate::Handler) method, a breaking change by design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RootKind {
+    /// `<szamla>`: an outgoing invoice.
     OutgoingInvoice,
+    /// `<szamlabe>`: an incoming invoice.
     IncomingInvoice,
+    /// `<banktranz>`: a bank transaction.
     BankTransaction,
+    /// `<xmlnyugtaarchiv>`: a receipt batch.
     Receipts,
 }
 
 impl RootKind {
-    fn name(self) -> &'static str {
+    /// The local name of the pushed root element.
+    #[must_use]
+    pub fn root_element(self) -> &'static str {
         match self {
             Self::OutgoingInvoice => "szamla",
             Self::IncomingInvoice => "szamlabe",
@@ -219,7 +276,10 @@ impl RootKind {
         }
     }
 
-    fn namespace(self) -> &'static str {
+    /// The official namespace of the pushed document, which every element
+    /// of it is in.
+    #[must_use]
+    pub fn namespace(self) -> &'static str {
         match self {
             Self::OutgoingInvoice => "http://www.szamlazz.hu/szamla",
             Self::IncomingInvoice => "http://www.szamlazz.hu/szamlabe",
@@ -227,10 +287,48 @@ impl RootKind {
             Self::Receipts => "http://www.szamlazz.hu/xmlnyugtaarchiv",
         }
     }
+
+    /// The local name of the Ack's root element for this kind.
+    #[must_use]
+    pub fn ack_root_element(self) -> &'static str {
+        match self {
+            Self::OutgoingInvoice => "szamlavalasz",
+            Self::IncomingInvoice => "szamlabevalasz",
+            Self::BankTransaction => "banktranzvalasz",
+            Self::Receipts => "nyugtavalasz",
+        }
+    }
+
+    /// The invoice direction, for the two invoice kinds; `None` for a bank
+    /// transaction or a receipt batch.
+    #[must_use]
+    pub fn direction(self) -> Option<InvoiceDirection> {
+        match self {
+            Self::OutgoingInvoice => Some(InvoiceDirection::Outgoing),
+            Self::IncomingInvoice => Some(InvoiceDirection::Incoming),
+            Self::BankTransaction | Self::Receipts => None,
+        }
+    }
+}
+
+impl From<InvoiceDirection> for RootKind {
+    fn from(direction: InvoiceDirection) -> Self {
+        match direction {
+            InvoiceDirection::Outgoing => Self::OutgoingInvoice,
+            InvoiceDirection::Incoming => Self::IncomingInvoice,
+        }
+    }
+}
+
+impl fmt::Display for RootKind {
+    /// The root element's local name.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.root_element())
+    }
 }
 
 /// Identifies a known root and verifies its exact official namespace.
-pub(crate) fn root_kind(text: &str) -> Result<RootKind, ParseError> {
+fn root_kind(text: &str) -> Result<RootKind, ParseError> {
     let mut reader = Reader::from_str(text);
 
     loop {
@@ -264,7 +362,7 @@ pub(crate) fn root_kind(text: &str) -> Result<RootKind, ParseError> {
 
                 if namespace.as_deref() != Some(kind.namespace()) {
                     return Err(ParseError::WrongNamespace {
-                        root: kind.name().to_owned(),
+                        root: kind.root_element().to_owned(),
                         expected: kind.namespace(),
                         actual: namespace.unwrap_or_default(),
                     });
@@ -1138,7 +1236,7 @@ impl InvoiceDocument {
         }
 
         if self.items.is_empty() {
-            return validation("invoice tetelek must contain at least one tetel");
+            return Err(ValidationError::empty("invoice tetelek", "tetel"));
         }
         for item in &self.items {
             required_text(item.name.as_deref(), "invoice tetel/nev")?;
@@ -1174,8 +1272,9 @@ impl InvoiceDocument {
 
 fn validate_totals(totals: &Totals, document: &str) -> Result<(), ValidationError> {
     if totals.per_vat_rate.is_empty() {
-        return validation(format!(
-            "{document} osszegek must contain at least one afakulcsossz"
+        return Err(ValidationError::empty(
+            format!("{document} osszegek"),
+            "afakulcsossz",
         ));
     }
     for total in &totals.per_vat_rate {
@@ -1193,12 +1292,12 @@ fn validate_totals(totals: &Totals, document: &str) -> Result<(), ValidationErro
     Ok(())
 }
 
-fn required<'a, T>(value: Option<&'a T>, field: &str) -> Result<&'a T, ValidationError> {
-    value.ok_or_else(|| ValidationError::new(format!("missing required {field}")))
+fn required<'a, T>(value: Option<&'a T>, path: &str) -> Result<&'a T, ValidationError> {
+    value.ok_or_else(|| ValidationError::missing(path))
 }
 
-fn required_text<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, ValidationError> {
-    value.ok_or_else(|| ValidationError::new(format!("missing required {field}")))
+fn required_text<'a>(value: Option<&'a str>, path: &str) -> Result<&'a str, ValidationError> {
+    value.ok_or_else(|| ValidationError::missing(path))
 }
 
 fn validate_address(address: &Address, field: &str) -> Result<(), ValidationError> {
@@ -1209,15 +1308,11 @@ fn validate_address(address: &Address, field: &str) -> Result<(), ValidationErro
     Ok(())
 }
 
-fn non_negative(value: Option<Decimal>, field: &str) -> Result<(), ValidationError> {
+fn non_negative(value: Option<Decimal>, path: &str) -> Result<(), ValidationError> {
     if value.is_some_and(|value| value.is_sign_negative()) {
-        return validation(format!("{field} must not be negative"));
+        return Err(ValidationError::negative(path));
     }
     Ok(())
-}
-
-fn validation<T>(message: impl Into<String>) -> Result<T, ValidationError> {
-    Err(ValidationError::new(message))
 }
 
 /// Direction of a bank transaction (`irany`).
@@ -1371,7 +1466,10 @@ impl BankTransaction {
         match required(self.direction.as_ref(), "bank transaction irany")? {
             TransactionDirection::Incoming | TransactionDirection::Outgoing => {}
             TransactionDirection::Other(code) => {
-                return validation(format!("bank transaction irany has unknown value {code}"));
+                return Err(ValidationError::unknown_token(
+                    "bank transaction irany",
+                    code,
+                ));
             }
         }
         required(self.technical.as_ref(), "bank transaction technikai")?;
@@ -1618,7 +1716,7 @@ impl ReceiptBatch {
     /// The first requirement the batch misses.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.receipts.is_empty() {
-            return validation("receipt archive must contain at least one nyugta");
+            return Err(ValidationError::empty("receipt archive", "nyugta"));
         }
         for receipt in &self.receipts {
             required_text(
@@ -1635,7 +1733,7 @@ impl ReceiptBatch {
             required_text(receipt.info.currency.as_deref(), "receipt alap/penznem")?;
             required(receipt.info.test.as_ref(), "receipt alap/teszt")?;
             if receipt.items.is_empty() {
-                return validation("receipt tetelek must contain at least one tetel");
+                return Err(ValidationError::empty("receipt tetelek", "tetel"));
             }
             for item in &receipt.items {
                 required_text(item.name.as_deref(), "receipt tetel/megnevezes")?;
@@ -1863,17 +1961,161 @@ mod tests {
     use super::*;
 
     const OUTGOING_INVOICE: &str = include_str!("../tests/synthetic/szamla.xml");
+    const BANK_TRANSACTION: &str = include_str!("../tests/synthetic/banktranz.xml");
+    const RECEIPT_BATCH: &str = include_str!("../tests/synthetic/xmlnyugtaarchiv.xml");
+
+    fn outgoing(body: &str) -> InvoiceDocument {
+        match Document::parse(body.as_bytes()).expect("parses") {
+            Document::OutgoingInvoice(invoice) => invoice,
+            other => panic!("expected outgoing invoice, got {other:?}"),
+        }
+    }
+
+    fn bank_transaction(body: &str) -> BankTransaction {
+        match Document::parse(body.as_bytes()).expect("parses") {
+            Document::BankTransaction(transaction) => transaction,
+            other => panic!("expected bank transaction, got {other:?}"),
+        }
+    }
+
+    /// The fixture with `element` replaced by `replacement`, asserting the
+    /// fixture still carries the element.
+    fn with(fixture: &str, element: &str, replacement: &str) -> String {
+        assert!(fixture.contains(element), "fixture drifted: {element}");
+        fixture.replacen(element, replacement, 1)
+    }
+
+    #[test]
+    fn identify_reads_the_root_and_its_namespace_only() {
+        // Every fixture identifies as its root; nothing past the start tag is
+        // read, so a body that would not parse still identifies.
+        for (body, kind) in [
+            (OUTGOING_INVOICE, RootKind::OutgoingInvoice),
+            (BANK_TRANSACTION, RootKind::BankTransaction),
+            (RECEIPT_BATCH, RootKind::Receipts),
+        ] {
+            assert_eq!(
+                Document::identify(body.as_bytes()).expect("identifies"),
+                kind
+            );
+            assert_eq!(
+                Document::parse(body.as_bytes()).expect("parses").kind(),
+                kind
+            );
+        }
+        let incoming = OUTGOING_INVOICE
+            .replace(
+                "http://www.szamlazz.hu/szamla",
+                "http://www.szamlazz.hu/szamlabe",
+            )
+            .replace("<szamla xmlns=", "<szamlabe xmlns=")
+            .replace("</szamla>", "</szamlabe>");
+        assert_eq!(
+            Document::identify(incoming.as_bytes()).expect("identifies"),
+            RootKind::IncomingInvoice
+        );
+
+        let truncated = &OUTGOING_INVOICE.as_bytes()[..OUTGOING_INVOICE.len() - 20];
+        assert_eq!(
+            Document::identify(truncated).expect("the start tag is enough"),
+            RootKind::OutgoingInvoice
+        );
+        let without_id = with(OUTGOING_INVOICE, "<id>123456</id>", "");
+        assert_eq!(
+            Document::identify(without_id.as_bytes()).expect("identity is the parse's concern"),
+            RootKind::OutgoingInvoice
+        );
+        // A prefixed root binds its namespace through the prefix.
+        let prefixed = br#"<s:szamla xmlns:s="http://www.szamlazz.hu/szamla"/>"#;
+        assert_eq!(
+            Document::identify(prefixed).expect("identifies"),
+            RootKind::OutgoingInvoice
+        );
+    }
+
+    #[test]
+    fn identify_refuses_a_body_without_a_known_namespaced_root() {
+        assert!(matches!(
+            Document::identify(b"\xff<szamla/>"),
+            Err(ParseError::Utf8(_))
+        ));
+        assert!(matches!(Document::identify(b""), Err(ParseError::Empty)));
+        assert!(matches!(
+            Document::identify(b"<?xml version=\"1.0\"?>"),
+            Err(ParseError::Empty)
+        ));
+        assert!(matches!(
+            Document::identify(b"<whatever/>"),
+            Err(ParseError::UnknownRoot(root)) if root == "whatever"
+        ));
+        for kind in [
+            RootKind::OutgoingInvoice,
+            RootKind::IncomingInvoice,
+            RootKind::BankTransaction,
+            RootKind::Receipts,
+        ] {
+            let unqualified = format!("<{kind}/>");
+            assert!(matches!(
+                Document::identify(unqualified.as_bytes()),
+                Err(ParseError::WrongNamespace { root, expected, actual })
+                    if root == kind.root_element() && expected == kind.namespace() && actual.is_empty()
+            ));
+            let wrong = format!(r#"<{kind} xmlns="https://wrong.example"/>"#);
+            assert!(matches!(
+                Document::identify(wrong.as_bytes()),
+                Err(ParseError::WrongNamespace { actual, .. }) if actual == "https://wrong.example"
+            ));
+        }
+        assert!(matches!(
+            Document::identify(b"not xml at all"),
+            Err(ParseError::Empty)
+        ));
+        assert!(matches!(
+            Document::identify(b"<szamla xmlns=\"http://www.szamlazz.hu/szamla\" <"),
+            Err(ParseError::Xml(_))
+        ));
+    }
+
+    #[test]
+    fn root_kind_names_both_roots_and_the_direction() {
+        for (kind, root, ack_root, direction) in [
+            (
+                RootKind::OutgoingInvoice,
+                "szamla",
+                "szamlavalasz",
+                Some(InvoiceDirection::Outgoing),
+            ),
+            (
+                RootKind::IncomingInvoice,
+                "szamlabe",
+                "szamlabevalasz",
+                Some(InvoiceDirection::Incoming),
+            ),
+            (
+                RootKind::BankTransaction,
+                "banktranz",
+                "banktranzvalasz",
+                None,
+            ),
+            (RootKind::Receipts, "xmlnyugtaarchiv", "nyugtavalasz", None),
+        ] {
+            assert_eq!(kind.root_element(), root);
+            assert_eq!(kind.to_string(), root);
+            assert_eq!(kind.namespace(), format!("http://www.szamlazz.hu/{root}"));
+            assert_eq!(kind.ack_root_element(), ack_root);
+            assert_eq!(kind.direction(), direction);
+            if let Some(direction) = direction {
+                assert_eq!(RootKind::from(direction), kind);
+            }
+        }
+    }
 
     #[test]
     fn empty_optional_numeric_elements_read_as_absent() {
         let body = OUTGOING_INVOICE
             .replace("<forras>34</forras>", "<forras></forras>")
             .replace("<id>1234567</id>", "<id></id>");
-        let Document::OutgoingInvoice(invoice) =
-            Document::parse(body.as_bytes()).expect("empty optional elements must not fail")
-        else {
-            panic!("expected outgoing invoice");
-        };
+        let invoice = outgoing(&body);
         assert_eq!(invoice.info.source, None);
         assert_eq!(invoice.buyer.id, None);
         // The fixture's <rendelesszam> is empty on the wire.
@@ -1882,18 +2124,9 @@ mod tests {
 
     #[test]
     fn unknown_receipt_type_is_preserved() {
-        let body = b"<xmlnyugtaarchiv xmlns=\"http://www.szamlazz.hu/xmlnyugtaarchiv\"><nyugta>\
-            <alap><id>1</id><nyugtaszam>NYGTA-1</nyugtaszam><tipus>XX</tipus>\
-            <stornozott>false</stornozott><kelt>2026-07-03</kelt><fizmod>k\xc3\xa9szp\xc3\xa9nz</fizmod>\
-            <penznem>HUF</penznem><teszt>false</teszt></alap>\
-            <tetelek><tetel><megnevezes>Service</megnevezes><nettoEgysegar>100</nettoEgysegar>\
-            <mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>100</netto>\
-            <afakulcs>27</afakulcs><afa>27</afa><brutto>127</brutto></tetel></tetelek>\
-            <osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>100</netto><afa>27</afa>\
-            <brutto>127</brutto></afakulcsossz><totalossz><netto>100</netto><afa>27</afa>\
-            <brutto>127</brutto></totalossz></osszegek></nyugta></xmlnyugtaarchiv>";
+        let body = with(RECEIPT_BATCH, "<tipus>NY</tipus>", "<tipus>XX</tipus>");
         let Document::Receipts(batch) =
-            Document::parse(body).expect("unknown receipt tipus must not fail")
+            Document::parse(body.as_bytes()).expect("unknown receipt tipus must not fail")
         else {
             panic!("expected receipt batch");
         };
@@ -1903,43 +2136,38 @@ mod tests {
     #[test]
     fn technical_flag_reads_leniently_but_must_be_a_boolean() {
         for (value, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
-            let body = format!(
-                "<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
-                 <id>1</id><bankszamla>111</bankszamla><erteknap>2026-07-04</erteknap>\
-                 <irany>BE</irany><technikai>{value}</technikai>\
-                 <osszeg>1000</osszeg><devizanem>HUF</devizanem></banktranz>"
+            let body = with(
+                BANK_TRANSACTION,
+                "<technikai>false</technikai>",
+                &format!("<technikai>{value}</technikai>"),
             );
-            let Document::BankTransaction(transaction) =
-                Document::parse(body.as_bytes()).expect("valid boolean")
-            else {
-                panic!("expected bank transaction");
-            };
-            assert_eq!(transaction.technical, Some(expected));
+            assert_eq!(bank_transaction(&body).technical, Some(expected));
         }
 
         // Absent or empty is content: the flag reads as absent, and only the
         // strict parse minds.
-        let body = b"<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
-            <id>1</id><bankszamla>111</bankszamla><erteknap>2026-07-04</erteknap>\
-            <irany>BE</irany><technikai/><osszeg>1000</osszeg><devizanem>HUF</devizanem>\
-            </banktranz>";
-        let Document::BankTransaction(transaction) = Document::parse(body).expect("parses") else {
-            panic!("expected bank transaction");
-        };
+        let body = with(
+            BANK_TRANSACTION,
+            "<technikai>false</technikai>",
+            "<technikai/>",
+        );
+        let transaction = bank_transaction(&body);
         assert_eq!(transaction.technical, None);
         assert_eq!(
-            transaction
-                .validate()
-                .expect_err("the XSD requires it")
-                .to_string(),
-            "missing required bank transaction technikai"
+            transaction.validate().expect_err("the XSD requires it"),
+            ValidationError::MissingRequired {
+                path: "bank transaction technikai".to_owned()
+            }
         );
 
         // A token that is not a boolean is shape: the element is not what
         // the document says it is.
-        let body = b"<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
-            <id>1</id><technikai>maybe</technikai></banktranz>";
-        assert!(Document::parse(body).is_err());
+        let body = with(
+            BANK_TRANSACTION,
+            "<technikai>false</technikai>",
+            "<technikai>maybe</technikai>",
+        );
+        assert!(Document::parse(body.as_bytes()).is_err());
     }
 
     #[test]
@@ -1947,46 +2175,41 @@ mod tests {
         // xs:date permits an optional timezone suffix; the offset is
         // discarded, the civil date kept.
         for value in [
-            "2026-07-04",
-            "2026-07-04Z",
-            "2026-07-04+02:00",
-            "2026-07-04-05:00",
+            "2026-07-03",
+            "2026-07-03Z",
+            "2026-07-03+02:00",
+            "2026-07-03-05:00",
         ] {
-            let body = format!(
-                "<banktranz xmlns=\"http://www.szamlazz.hu/banktranz\">\
-                 <id>1</id><bankszamla>111</bankszamla><erteknap>{value}</erteknap>\
-                 <irany>BE</irany><technikai>false</technikai>\
-                 <osszeg>1000</osszeg><devizanem>HUF</devizanem></banktranz>"
+            let body = with(
+                BANK_TRANSACTION,
+                "<erteknap>2026-07-03</erteknap>",
+                &format!("<erteknap>{value}</erteknap>"),
             );
-            let Document::BankTransaction(transaction) =
-                Document::parse(body.as_bytes()).expect("schema-valid xs:date")
-            else {
-                panic!("expected bank transaction");
-            };
-            assert_eq!(transaction.value_date, Some(jiff::civil::date(2026, 7, 4)));
+            assert_eq!(
+                bank_transaction(&body).value_date,
+                Some(jiff::civil::date(2026, 7, 3)),
+                "{value}"
+            );
         }
 
-        let body =
-            OUTGOING_INVOICE.replace("<kelt>2015-12-01</kelt>", "<kelt>2015-12-01+01:00</kelt>");
-        let Document::OutgoingInvoice(invoice) =
-            Document::parse(body.as_bytes()).expect("schema-valid xs:date on optional field")
-        else {
-            panic!("expected outgoing invoice");
-        };
+        let body = with(
+            OUTGOING_INVOICE,
+            "<kelt>2015-12-01</kelt>",
+            "<kelt>2015-12-01+01:00</kelt>",
+        );
         assert_eq!(
-            invoice.info.issue_date,
+            outgoing(&body).info.issue_date,
             Some(jiff::civil::date(2015, 12, 1))
         );
 
         // Garbage after the date is content: the date reads as absent, the
         // text stays in the raw XML, and only the strict parse minds.
-        let body =
-            OUTGOING_INVOICE.replace("<kelt>2015-12-01</kelt>", "<kelt>2015-12-01junk</kelt>");
-        let Document::OutgoingInvoice(invoice) =
-            Document::parse(body.as_bytes()).expect("a date that is not a date is content")
-        else {
-            panic!("expected outgoing invoice");
-        };
+        let body = with(
+            OUTGOING_INVOICE,
+            "<kelt>2015-12-01</kelt>",
+            "<kelt>2015-12-01junk</kelt>",
+        );
+        let invoice = outgoing(&body);
         assert_eq!(invoice.info.issue_date, None);
         assert!(
             invoice

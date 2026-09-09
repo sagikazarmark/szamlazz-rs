@@ -8,10 +8,15 @@ use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 
 use crate::AckError;
+use crate::document::RootKind;
 
 const WRITE_EXPECT: &str = "writing XML to an in-memory buffer cannot fail";
 
-/// A control code sent instead of a normal acknowledgement.
+/// A control code sent instead of a normal acknowledgement: deliberate
+/// protocol speech, not an error (an error is a non-200, which szamlazz.hu
+/// retries).
+///
+/// Breaking change in 0.4: `KeyError` is [`KeyUnknown`](Self::KeyUnknown).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ControlCode {
@@ -20,27 +25,40 @@ pub enum ControlCode {
     /// is **never resent** if it is a bank transaction or a receipt, and an
     /// invoice only when it next changes, so send it for a definite verdict,
     /// never for a check that could not complete (answer a non-200 instead).
-    KeyError,
+    KeyUnknown,
     /// `KEY_DEL`: sever the connection; the account owner is notified by
     /// email. A few in-flight documents may still arrive afterwards.
     Disconnect,
 }
 
 impl ControlCode {
-    fn as_wire(self) -> &'static str {
+    /// The wire token: `KEY_ERR` or `KEY_DEL`.
+    #[must_use]
+    pub fn as_wire(self) -> &'static str {
         match self {
-            Self::KeyError => "KEY_ERR",
+            Self::KeyUnknown => "KEY_ERR",
             Self::Disconnect => "KEY_DEL",
         }
     }
+
+    /// Renders this control code as the Ack of the pushed `kind`: the one
+    /// Ack shape every kind shares, so a receiver that has identified a push
+    /// ([`Document::identify`](crate::Document::identify)) can answer
+    /// `KEY_ERR` or `KEY_DEL` without parsing (or authenticating) the body.
+    /// Infallible: a control Ack carries no caller text.
+    #[must_use]
+    pub fn to_xml(self, kind: RootKind) -> Vec<u8> {
+        render(kind, |writer| write_leaf(writer, "hibakod", self.as_wire()))
+    }
 }
 
-/// Which invoice stream a pushed invoice arrived on: selects the response root
-/// element an [`InvoiceAck`] renders and the XSD
+/// Which invoice stream a pushed invoice arrived on: selects the Ack root an
+/// [`InvoiceAck`] renders and the XSD
 /// [`InvoiceDocument::validate`](crate::InvoiceDocument::validate) checks
-/// against (`szamla.xsd` or `szamlabe.xsd`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
+/// against (`szamla.xsd` or `szamlabe.xsd`). The invoice half of
+/// [`RootKind`] ([`RootKind::direction`]); exhaustive for the same reason.
+/// Breaking change in 0.4: the enum was `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InvoiceDirection {
     /// Outgoing invoices (`<szamla>` → `<szamlavalasz>`).
     Outgoing,
@@ -60,6 +78,11 @@ pub struct InvoiceAck {
 
 impl InvoiceAck {
     /// Accepts the document, echoing its `alap`/`id`.
+    ///
+    /// `id` matters when you render the Ack yourself: pass the pushed
+    /// invoice's [`info.id`](crate::InvoiceInfo::id). Under the `axum` router
+    /// it is overridden, because a successful Ack must echo the pushed id
+    /// whatever a handler supplied ([`for_document`](Self::for_document)).
     pub fn accept(id: i32) -> Self {
         Self {
             id: Some(id),
@@ -77,11 +100,11 @@ impl InvoiceAck {
     }
 
     /// Answers `KEY_ERR`: the key is unknown, stop sending until it changes.
-    pub fn key_error() -> Self {
+    pub fn key_unknown() -> Self {
         Self {
             id: None,
             registration_number: None,
-            control: Some(ControlCode::KeyError),
+            control: Some(ControlCode::KeyUnknown),
         }
     }
 
@@ -99,11 +122,13 @@ impl InvoiceAck {
         (self.id, self.registration_number.as_deref(), self.control)
     }
 
-    /// Binds a handler-produced ack to the document being answered. Control
-    /// acks contain no invoice metadata; successful acks always echo the
-    /// pushed id, regardless of what a handler supplied.
-    #[cfg(feature = "axum")]
-    pub(crate) fn for_document(mut self, id: i32) -> Self {
+    /// Binds the Ack to the document it answers: a successful Ack echoes the
+    /// pushed `id` whatever [`accept`](Self::accept) was given, and a control
+    /// Ack carries no invoice metadata. The `axum` router calls this on every
+    /// handler-produced Ack; call it yourself when dispatching without it.
+    /// Breaking change in 0.4: public, and no longer behind the `axum`
+    /// feature.
+    pub fn for_document(mut self, id: i32) -> Self {
         if self.control.is_some() {
             self.id = None;
             self.registration_number = None;
@@ -113,7 +138,7 @@ impl InvoiceAck {
         self
     }
 
-    /// Renders the response XML for the given invoice stream.
+    /// Renders the Ack for the given invoice stream.
     ///
     /// # Errors
     ///
@@ -123,12 +148,8 @@ impl InvoiceAck {
         if let Some(number) = &self.registration_number {
             validate_xml_10(number)?;
         }
-        let root = match direction {
-            InvoiceDirection::Outgoing => "szamlavalasz",
-            InvoiceDirection::Incoming => "szamlabevalasz",
-        };
 
-        Ok(render(root, |writer| {
+        Ok(render(direction.into(), |writer| {
             if self.id.is_some() || self.registration_number.is_some() {
                 write_start(writer, "alap");
                 if let Some(id) = self.id {
@@ -161,9 +182,9 @@ impl Ack {
     }
 
     /// Answers `KEY_ERR`: the key is unknown; the record is not resent.
-    pub fn key_error() -> Self {
+    pub fn key_unknown() -> Self {
         Self {
-            control: Some(ControlCode::KeyError),
+            control: Some(ControlCode::KeyUnknown),
         }
     }
 
@@ -179,20 +200,20 @@ impl Ack {
         self.control
     }
 
-    /// Renders the `<banktranzvalasz>` response XML.
+    /// Renders the `<banktranzvalasz>` Ack.
     #[must_use]
     pub fn to_bank_transaction_xml(&self) -> Vec<u8> {
-        self.to_xml("banktranzvalasz")
+        self.to_xml(RootKind::BankTransaction)
     }
 
-    /// Renders the `<nyugtavalasz>` response XML.
+    /// Renders the `<nyugtavalasz>` Ack.
     #[must_use]
     pub fn to_receipts_xml(&self) -> Vec<u8> {
-        self.to_xml("nyugtavalasz")
+        self.to_xml(RootKind::Receipts)
     }
 
-    fn to_xml(&self, root: &str) -> Vec<u8> {
-        render(root, |writer| {
+    fn to_xml(&self, kind: RootKind) -> Vec<u8> {
+        render(kind, |writer| {
             if let Some(control) = self.control {
                 write_leaf(writer, "hibakod", control.as_wire());
             }
@@ -200,7 +221,10 @@ impl Ack {
     }
 }
 
-fn render(root: &str, build: impl FnOnce(&mut Writer<Vec<u8>>)) -> Vec<u8> {
+/// Writes the Ack envelope of `kind` (declaration, namespaced root) around
+/// whatever `build` writes.
+fn render(kind: RootKind, build: impl FnOnce(&mut Writer<Vec<u8>>)) -> Vec<u8> {
+    let root = kind.ack_root_element();
     let mut writer = Writer::new(Vec::new());
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -260,6 +284,10 @@ fn is_xml_10_character(character: char) -> bool {
 mod tests {
     use super::*;
 
+    fn text(xml: Vec<u8>) -> String {
+        String::from_utf8(xml).expect("utf-8")
+    }
+
     #[test]
     fn invoice_ack_echoes_id_and_registration_number() {
         let xml = InvoiceAck::accept(1001)
@@ -267,7 +295,7 @@ mod tests {
             .to_xml(InvoiceDirection::Outgoing)
             .expect("valid Ack");
         assert_eq!(
-            String::from_utf8(xml).expect("utf-8"),
+            text(xml),
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <szamlavalasz xmlns=\"http://www.szamlazz.hu/szamlavalasz\">\
              <alap><id>1001</id><iktatoszam>IKT-20260704</iktatoszam></alap>\
@@ -277,36 +305,84 @@ mod tests {
 
     #[test]
     fn incoming_direction_switches_root() {
-        let xml = String::from_utf8(
+        let xml = text(
             InvoiceAck::accept(7)
                 .to_xml(InvoiceDirection::Incoming)
                 .expect("valid Ack"),
-        )
-        .expect("utf-8");
+        );
         assert!(xml.contains("<szamlabevalasz xmlns=\"http://www.szamlazz.hu/szamlabevalasz\">"));
         assert!(!xml.contains("iktatoszam"));
     }
 
     #[test]
-    fn key_error_renders_control_code_only() {
-        let xml = String::from_utf8(
-            InvoiceAck::key_error()
+    fn key_unknown_renders_control_code_only() {
+        let xml = text(
+            InvoiceAck::key_unknown()
                 .to_xml(InvoiceDirection::Outgoing)
                 .expect("valid Ack"),
-        )
-        .expect("utf-8");
+        );
         assert!(xml.contains("<hibakod>KEY_ERR</hibakod>"));
         assert!(!xml.contains("<alap>"));
     }
 
     #[test]
+    fn for_document_binds_the_pushed_id_and_strips_control_acks() {
+        let bound = InvoiceAck::accept(-1)
+            .with_registration_number("IKT-1")
+            .for_document(42);
+        assert_eq!(bound.parts(), (Some(42), Some("IKT-1"), None));
+
+        let control = InvoiceAck::key_unknown().for_document(42);
+        assert_eq!(control.parts(), (None, None, Some(ControlCode::KeyUnknown)));
+        let control = InvoiceAck::disconnect()
+            .with_registration_number("dropped")
+            .for_document(42);
+        assert_eq!(control.parts(), (None, None, Some(ControlCode::Disconnect)));
+    }
+
+    #[test]
     fn bare_acks() {
-        let xml = String::from_utf8(Ack::accept().to_bank_transaction_xml()).expect("utf-8");
+        let xml = text(Ack::accept().to_bank_transaction_xml());
         assert!(xml.contains("<banktranzvalasz xmlns=\"http://www.szamlazz.hu/banktranzvalasz\">"));
         assert!(!xml.contains("hibakod"));
-        let xml = String::from_utf8(Ack::disconnect().to_receipts_xml()).expect("utf-8");
+        let xml = text(Ack::disconnect().to_receipts_xml());
         assert!(xml.contains("<nyugtavalasz"));
         assert!(xml.contains("<hibakod>KEY_DEL</hibakod>"));
+    }
+
+    #[test]
+    fn control_code_renders_the_ack_of_every_kind() {
+        for (kind, root) in [
+            (RootKind::OutgoingInvoice, "szamlavalasz"),
+            (RootKind::IncomingInvoice, "szamlabevalasz"),
+            (RootKind::BankTransaction, "banktranzvalasz"),
+            (RootKind::Receipts, "nyugtavalasz"),
+        ] {
+            let xml = text(ControlCode::KeyUnknown.to_xml(kind));
+            assert_eq!(
+                xml,
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                     <{root} xmlns=\"http://www.szamlazz.hu/{root}\">\
+                     <hibakod>KEY_ERR</hibakod></{root}>"
+                )
+            );
+            assert!(
+                text(ControlCode::Disconnect.to_xml(kind)).contains("<hibakod>KEY_DEL</hibakod>")
+            );
+        }
+
+        // The same bytes as the typed Acks render for the same code.
+        assert_eq!(
+            ControlCode::KeyUnknown.to_xml(RootKind::OutgoingInvoice),
+            InvoiceAck::key_unknown()
+                .to_xml(InvoiceDirection::Outgoing)
+                .expect("valid Ack")
+        );
+        assert_eq!(
+            ControlCode::Disconnect.to_xml(RootKind::Receipts),
+            Ack::disconnect().to_receipts_xml()
+        );
     }
 
     #[test]

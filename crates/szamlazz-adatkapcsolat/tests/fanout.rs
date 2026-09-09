@@ -1,30 +1,48 @@
 //! Fan-out handler tests: delivery to all members, failure aggregation, ack
 //! merging.
 
+mod common;
+
 use std::future::ready;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use common::{OUTGOING_INVOICE, RECEIPT_BATCH};
 use szamlazz_adatkapcsolat::{
-    Ack, Document, Fanout, Handler as _, InvoiceAck, InvoiceDirection, InvoiceDocument, MaybeSend,
+    Ack, Fanout, Handler as _, InvoiceAck, InvoiceDirection, InvoiceDocument, MaybeSend,
     ReceiptBatch,
 };
 
-const OUTGOING_INVOICE: &[u8] = include_bytes!("synthetic/szamla.xml");
-
 fn invoice() -> InvoiceDocument {
-    match Document::parse(OUTGOING_INVOICE).expect("parse") {
-        Document::OutgoingInvoice(invoice) => invoice,
-        other => panic!("expected outgoing invoice, got {other:?}"),
+    common::outgoing(OUTGOING_INVOICE).expect("parse")
+}
+
+fn receipt_batch() -> ReceiptBatch {
+    common::receipts(RECEIPT_BATCH).expect("parse")
+}
+
+/// A member's failure with a cause, so the fan-out's report can be checked
+/// for the `source()` chain.
+#[derive(Debug)]
+struct ProbeError {
+    cause: std::io::Error,
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("probe failed")
     }
 }
 
-/// A minimal valid receipt batch, built the same way a receiver gets one.
-fn receipt_batch() -> ReceiptBatch {
-    let body = br#"<xmlnyugtaarchiv xmlns="http://www.szamlazz.hu/xmlnyugtaarchiv"><nyugta><alap><id>1</id><nyugtaszam>N-1</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-01-01</kelt><fizmod>cash</fizmod><penznem>HUF</penznem><teszt>false</teszt><adoszam>12345678-1-42</adoszam></alap><tetelek><tetel><megnevezes>Item</megnevezes><nettoEgysegar>1</nettoEgysegar><mennyiseg>1</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><netto>1</netto><afakulcs>27</afakulcs><afa>0.27</afa><brutto>1.27</brutto></tetel></tetelek><osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>1</netto><afa>0.27</afa><brutto>1.27</brutto></afakulcsossz><totalossz><netto>1</netto><afa>0.27</afa><brutto>1.27</brutto></totalossz></osszegek></nyugta></xmlnyugtaarchiv>"#;
-    match Document::parse(body).expect("parse") {
-        Document::Receipts(batch) => batch,
-        other => panic!("expected receipt batch, got {other:?}"),
+impl std::error::Error for ProbeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+fn probe_error() -> ProbeError {
+    ProbeError {
+        cause: std::io::Error::new(std::io::ErrorKind::TimedOut, "database down"),
     }
 }
 
@@ -39,15 +57,15 @@ struct Probe {
 }
 
 impl szamlazz_adatkapcsolat::Handler for Probe {
-    type Error = String;
+    type Error = ProbeError;
 
     fn outgoing_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> impl Future<Output = Result<InvoiceAck, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<InvoiceAck, ProbeError>> + MaybeSend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail {
-            return ready(Err("probe failed".to_owned()));
+            return ready(Err(probe_error()));
         }
         if self.disconnect {
             return ready(Ok(InvoiceAck::disconnect()));
@@ -59,14 +77,14 @@ impl szamlazz_adatkapcsolat::Handler for Probe {
         }))
     }
 
-    async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, String> {
+    async fn incoming_invoice(&self, invoice: InvoiceDocument) -> Result<InvoiceAck, ProbeError> {
         self.outgoing_invoice(invoice).await
     }
 
     fn bank_transaction(
         &self,
         _tx: szamlazz_adatkapcsolat::BankTransaction,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<Ack, ProbeError>> + MaybeSend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         ready(Ok(Ack::accept()))
     }
@@ -74,7 +92,7 @@ impl szamlazz_adatkapcsolat::Handler for Probe {
     fn receipts(
         &self,
         _batch: ReceiptBatch,
-    ) -> impl Future<Output = Result<Ack, String>> + MaybeSend {
+    ) -> impl Future<Output = Result<Ack, ProbeError>> + MaybeSend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         ready(Ok(Ack::accept()))
     }
@@ -108,10 +126,15 @@ async fn failure_does_not_stop_other_handlers() {
     let error = fanout.outgoing_invoice(invoice()).await.expect_err("error");
     // The healthy handler still ran…
     assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
-    // …and the report names the failing one.
+    // …and the report names the failing one, with its error kept whole:
+    // the member's own type, and its cause behind it.
     assert_eq!(error.failures.len(), 1);
     assert!(error.failures[0].handler.contains("Probe"));
     assert!(error.to_string().contains("probe failed"));
+    let failure = &error.failures[0].error;
+    assert!(failure.is::<ProbeError>());
+    let cause = std::error::Error::source(failure.as_ref()).expect("the cause is kept");
+    assert_eq!(cause.to_string(), "database down");
 }
 
 #[tokio::test]

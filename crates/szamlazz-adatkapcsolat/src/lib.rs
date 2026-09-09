@@ -17,16 +17,19 @@
 //!
 //! A push is at-most-N-times delivery, and a non-200 szamlazz.hu retries
 //! identically for 72 hours loses the record. So [`Document::parse`] refuses
-//! only what the receiver cannot Ack (shape, never content): an element the
-//! XSD requires but the push omits is `None`, an unknown enumeration token is
-//! kept, a date that is not a date and a PDF that does not decode are `None`
-//! beside the raw XML. The XSD's verdict is a signal a receiver can ask for
-//! ([`Document::validate`]) or make a gate of ([`Document::parse_strict`]).
+//! only a body that is not the pushed record (shape, never content): an
+//! element the XSD requires but the push omits is `None`, an unknown
+//! enumeration token is kept, a date that is not a date and a PDF that does
+//! not decode are `None` beside the raw XML. The XSD's verdict is a signal a
+//! receiver can ask for ([`Document::validate`]) or make a gate of
+//! ([`Document::parse_strict`]).
 //!
-//! The core is framework-free and `wasm32`-clean: [`Document::parse`] takes
-//! raw body bytes, ack types render response bodies. Implement [`Handler`]
-//! for your business logic; with the `axum` feature, `axum::router` wires
-//! everything (key check included) into a ready `Router`.
+//! The core is framework-free and `wasm32`-clean: [`Document::identify`]
+//! names the pushed kind from the root element alone, [`Document::parse`]
+//! takes raw body bytes, ack types render response bodies, [`keys_match`]
+//! compares keys in constant time. Implement [`Handler`] for your business
+//! logic; with the `axum` feature, `axum::router` wires everything (key check
+//! included) into a ready `Router`.
 //!
 //! # Quick start
 //!
@@ -50,6 +53,30 @@
 //! # }
 //! ```
 //!
+//! Without the router, follow the protocol's own order: identify the root,
+//! authenticate, and only then parse; an unknown key is answered in the Ack
+//! shape of the pushed kind with nothing of the body parsed:
+//!
+//! ```
+//! use szamlazz_adatkapcsolat::{ControlCode, Document, keys_match};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let (configured_key, presented_key) = ("k-1", "k-2");
+//! # let body = br#"<banktranz xmlns="http://www.szamlazz.hu/banktranz"><id>987</id></banktranz>"#;
+//! let kind = Document::identify(body)?;
+//! let response = if keys_match(presented_key, configured_key) {
+//!     let document = Document::parse(body)?;
+//!     // … hand `document` to your handler and render its Ack.
+//! #   drop(document);
+//! #   Vec::new()
+//! } else {
+//!     ControlCode::KeyUnknown.to_xml(kind)
+//! };
+//! # assert!(String::from_utf8(response)?.contains("<banktranzvalasz"));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Features
 //!
 //! Default features are empty and provide document parsing, Acks, handlers,
@@ -59,6 +86,9 @@
 //!   rendering, with a 64 MiB request-body cap by default. It supports native
 //!   servers and single-threaded wasm runtimes; wasm handler futures are
 //!   protected by `send_wrapper` thread checks.
+//! - `tracing` makes the router log a handler's or a key resolver's error at
+//!   `warn`; without it the error is dropped (the response is a bare status
+//!   either way).
 //! - `opendal` adds the archival handler and JSON persistence. Applications
 //!   enable the required storage services on their own `opendal` dependency.
 //!   The selected service determines platform support; timestamped archive
@@ -72,6 +102,7 @@ mod document;
 mod error;
 mod fanout;
 mod handler;
+mod key;
 
 #[cfg(feature = "opendal")]
 pub mod archive;
@@ -83,11 +114,18 @@ pub use document::{
     Address, Bank, BankTransaction, BuyerLedger, Document, FinancialItem, InvoiceAppearance,
     InvoiceDocument, InvoiceInfo, InvoiceItem, InvoiceItemLedger, Party, Pdf, ReceiptBatch,
     ReceiptDocument, ReceiptInfo, ReceiptItem, ReceiptItemLedger, ReceiptPayment, RecordedPayment,
-    Totals, TransactionDirection, TransactionPartner, VatRate, VatTotal,
+    RootKind, Totals, TransactionDirection, TransactionPartner, VatRate, VatTotal,
 };
 pub use error::{AckError, ParseError, ValidationError, XmlError};
-pub use fanout::{Fanout, FanoutError, HandlerFailure};
+pub use fanout::{BoxError, Fanout, FanoutError, HandlerFailure};
 pub use handler::{Handler, MaybeSend, MaybeSync};
+pub use key::keys_match;
+
+/// The README's examples, compiled as doctests: the quick start needs the
+/// core crate only.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 /// The header carrying the connection's identifier key.
 pub const KEY_HEADER: &str = "X-Szamlazzhu-Key";

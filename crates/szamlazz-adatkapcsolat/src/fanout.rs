@@ -11,7 +11,9 @@
 //! # fn combine<A, B>(archive: A, business_logic: B) -> Fanout
 //! # where
 //! #     A: Handler + MaybeSend + MaybeSync + 'static,
+//! #     A::Error: MaybeSend + MaybeSync + 'static,
 //! #     B: Handler + MaybeSend + MaybeSync + 'static,
+//! #     B::Error: MaybeSend + MaybeSync + 'static,
 //! # {
 //! let handler = Fanout::new()
 //!     .with(archive)
@@ -24,10 +26,12 @@
 //! - Handlers run **sequentially, in registration order**, and all of them
 //!   run even when an earlier one fails: each delivery makes as much
 //!   progress as possible.
-//! - If any handler failed, the fan-out fails with a per-handler report →
-//!   HTTP 500 → szamlazz.hu re-delivers **to every handler**. Members must
-//!   therefore tolerate re-delivery, which the push protocol demands of any
-//!   receiver anyway (a lost acknowledgement causes re-delivery too).
+//! - If any handler failed, the fan-out fails with a per-handler report
+//!   (each member's error kept whole, [`source`](std::error::Error::source)
+//!   chain included) → HTTP 500 → szamlazz.hu re-delivers **to every
+//!   handler**. Members must therefore tolerate re-delivery, which the push
+//!   protocol demands of any receiver anyway (a lost acknowledgement causes
+//!   re-delivery too).
 //! - Acks are merged: the strongest control code wins (`KEY_DEL` over
 //!   `KEY_ERR` over accept); otherwise the document is accepted with the
 //!   first registration number any handler supplied.
@@ -49,71 +53,88 @@ type BoxedHandler = Box<dyn ErasedHandler + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
 type BoxedHandler = Box<dyn ErasedHandler>;
 
-/// Dyn-compatible mirror of [`Handler`] with the error stringified.
+/// A member's error, type-erased: `Send + Sync` on native targets, where the
+/// fan-out itself is, and without them on `wasm32`, where a handler's error
+/// may hold JavaScript values.
+#[cfg(not(target_arch = "wasm32"))]
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+/// A member's error, type-erased: `Send + Sync` on native targets, where the
+/// fan-out itself is, and without them on `wasm32`, where a handler's error
+/// may hold JavaScript values.
+#[cfg(target_arch = "wasm32")]
+pub type BoxError = Box<dyn std::error::Error + 'static>;
+
+/// Dyn-compatible mirror of [`Handler`] with the error boxed.
 trait ErasedHandler {
     fn outgoing_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> BoxFuture<'_, Result<InvoiceAck, String>>;
+    ) -> BoxFuture<'_, Result<InvoiceAck, BoxError>>;
     fn incoming_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> BoxFuture<'_, Result<InvoiceAck, String>>;
-    fn bank_transaction(&self, transaction: BankTransaction) -> BoxFuture<'_, Result<Ack, String>>;
-    fn receipts(&self, batch: ReceiptBatch) -> BoxFuture<'_, Result<Ack, String>>;
+    ) -> BoxFuture<'_, Result<InvoiceAck, BoxError>>;
+    fn bank_transaction(
+        &self,
+        transaction: BankTransaction,
+    ) -> BoxFuture<'_, Result<Ack, BoxError>>;
+    fn receipts(&self, batch: ReceiptBatch) -> BoxFuture<'_, Result<Ack, BoxError>>;
 }
 
 impl<H> ErasedHandler for H
 where
     H: Handler + MaybeSend + MaybeSync,
+    H::Error: MaybeSend + MaybeSync + 'static,
 {
     fn outgoing_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> BoxFuture<'_, Result<InvoiceAck, String>> {
+    ) -> BoxFuture<'_, Result<InvoiceAck, BoxError>> {
         Box::pin(async move {
             Handler::outgoing_invoice(self, invoice)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(BoxError::from)
         })
     }
 
     fn incoming_invoice(
         &self,
         invoice: InvoiceDocument,
-    ) -> BoxFuture<'_, Result<InvoiceAck, String>> {
+    ) -> BoxFuture<'_, Result<InvoiceAck, BoxError>> {
         Box::pin(async move {
             Handler::incoming_invoice(self, invoice)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(BoxError::from)
         })
     }
 
-    fn bank_transaction(&self, transaction: BankTransaction) -> BoxFuture<'_, Result<Ack, String>> {
+    fn bank_transaction(
+        &self,
+        transaction: BankTransaction,
+    ) -> BoxFuture<'_, Result<Ack, BoxError>> {
         Box::pin(async move {
             Handler::bank_transaction(self, transaction)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(BoxError::from)
         })
     }
 
-    fn receipts(&self, batch: ReceiptBatch) -> BoxFuture<'_, Result<Ack, String>> {
-        Box::pin(async move {
-            Handler::receipts(self, batch)
-                .await
-                .map_err(|error| error.to_string())
-        })
+    fn receipts(&self, batch: ReceiptBatch) -> BoxFuture<'_, Result<Ack, BoxError>> {
+        Box::pin(async move { Handler::receipts(self, batch).await.map_err(BoxError::from) })
     }
 }
 
 /// One member's failure inside a fan-out delivery.
+///
+/// Breaking change in 0.4: `error` was the member's error stringified; it is
+/// the error itself now, type-erased, with its `source()` chain.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct HandlerFailure {
     /// The failing handler's type name.
     pub handler: &'static str,
-    /// Its error, stringified.
-    pub error: String,
+    /// Its error.
+    pub error: BoxError,
 }
 
 /// One or more fan-out members failed; the delivery will be retried for all.
@@ -167,6 +188,7 @@ impl Fanout {
     pub fn with<H>(mut self, handler: H) -> Self
     where
         H: Handler + MaybeSend + MaybeSync + 'static,
+        H::Error: MaybeSend + MaybeSync + 'static,
     {
         self.handlers
             .push((std::any::type_name::<H>(), Box::new(handler)));
@@ -178,7 +200,7 @@ impl Fanout {
             Err(FanoutError {
                 failures: vec![HandlerFailure {
                     handler: "Fanout",
-                    error: "no handlers configured".to_owned(),
+                    error: "no handlers configured".into(),
                 }],
             })
         } else {
@@ -232,8 +254,8 @@ fn escalate(current: Option<ControlCode>, next: Option<ControlCode>) -> Option<C
         (Some(ControlCode::Disconnect), _) | (_, Some(ControlCode::Disconnect)) => {
             Some(ControlCode::Disconnect)
         }
-        (Some(ControlCode::KeyError), _) | (_, Some(ControlCode::KeyError)) => {
-            Some(ControlCode::KeyError)
+        (Some(ControlCode::KeyUnknown), _) | (_, Some(ControlCode::KeyUnknown)) => {
+            Some(ControlCode::KeyUnknown)
         }
         (None, None) => None,
     }
@@ -253,7 +275,7 @@ fn merge_invoice_acks(document_id: i32, acks: &[InvoiceAck]) -> InvoiceAck {
 
     match control {
         Some(ControlCode::Disconnect) => InvoiceAck::disconnect(),
-        Some(ControlCode::KeyError) => InvoiceAck::key_error(),
+        Some(ControlCode::KeyUnknown) => InvoiceAck::key_unknown(),
         None => {
             let ack = InvoiceAck::accept(document_id);
 
@@ -272,7 +294,7 @@ fn merge_acks(acks: &[Ack]) -> Ack {
 
     match control {
         Some(ControlCode::Disconnect) => Ack::disconnect(),
-        Some(ControlCode::KeyError) => Ack::key_error(),
+        Some(ControlCode::KeyUnknown) => Ack::key_unknown(),
         None => Ack::accept(),
     }
 }
