@@ -79,15 +79,16 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 Every failure is a `ClientError` variant, and each says something different about the document you asked for. Invoice creation has no idempotency key, so a failed create settles to one of three outcomes, and only one of them permits sending the same request again: `outcome_class()` says whether a document may already exist, and when it may, a query by the external id says whether one does.
 
 ```rust
-use szamlazz_agent::ops::invoice::CreateInvoice;
+use szamlazz_agent::ops::invoice::{CreateInvoice, CreationOutcome};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
-use szamlazz_agent::{Client, ClientError, InvoiceNumber, InvoiceSelector, OutcomeClass};
+use szamlazz_agent::{Client, ClientError, InvoiceNumber, InvoiceSelector, OutcomeClass, Pdf};
 
 /// What one create settled to.
 enum Outcome {
     /// Issued, now, or by an earlier attempt whose reply was lost.
-    /// `None` only for a PDF preview, which issues nothing.
-    Issued(Option<InvoiceNumber>),
+    Issued(InvoiceNumber),
+    /// A preview was rendered (`header.preview_pdf`); no document exists.
+    Preview(Pdf),
     /// Nothing was issued: szamlazz.hu refused, or confirmed that nothing
     /// carries the external id. The one outcome after which the same
     /// request may be sent again, once its cause is fixed.
@@ -100,9 +101,12 @@ enum Outcome {
 
 async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
     let error = match client.send(request).await {
-        Ok(outcome) => {
-            return Outcome::Issued(outcome.into_issued().map(|created| created.invoice_number));
-        }
+        Ok(CreationOutcome::Issued(created)) => return Outcome::Issued(created.invoice_number),
+        Ok(CreationOutcome::Preview(preview)) => return Outcome::Preview(preview.pdf),
+        // An arm a later release adds is not an issued document either.
+        Ok(_) => return Outcome::NotIssued(ClientError::from(
+            szamlazz_agent::ParseError::Missing("szamlaszam"),
+        )),
         Err(error) => error,
     };
 
@@ -133,7 +137,7 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
             let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId(external_id.clone()));
             match client.send(&query).await {
                 // An earlier attempt issued it; only the reply was lost.
-                Ok(document) => Outcome::Issued(Some(document.info.invoice_number)),
+                Ok(document) => Outcome::Issued(document.info.invoice_number),
                 // Code 7: szamlazz.hu confirms nothing carries the id, the create did not land.
                 Err(answer) if answer.outcome_class() == OutcomeClass::NotFound => {
                     Outcome::NotIssued(error)
