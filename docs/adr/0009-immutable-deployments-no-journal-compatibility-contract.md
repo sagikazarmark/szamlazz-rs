@@ -46,19 +46,26 @@ of the handlers.
    the check, not a clock. (Restate's guidance to keep handlers short so that old deployments drain quickly is
    met as far as the worker can meet it: no handler sleeps or awaits an awakeable.)
 
-2. **The journal has no cross-version compatibility contract.** The additive-only rule, the per-variant
-   fixtures, the compatibility test, the registry, the sealed `Journaled` trait and `journaled!` list, the
-   `DELIBERATE_BREAKS` list and the archive rule are removed. The run helpers' bound is `Serialize +
-   DeserializeOwned`. A journaled type may be reshaped in any release, because no invocation started under the
-   previous release will ever decode it with the new code.
+2. **The journal has no cross-version compatibility contract.** The additive-only rule, the per-variant JSON
+   fixtures under `tests/journal/`, the generator and its `UPDATE_JOURNAL_FIXTURES` mode, the compatibility test
+   (fixture → current type → superset), the `DELIBERATE_BREAKS` list and the archive rule are removed. A journaled
+   type may be reshaped in any release: under normal routing no invocation started under the previous release
+   decodes it with the new code, and the one path that does (an operator's *pause and resume*, item 3) is
+   refused across such a release.
 
 3. **What stays**, because it costs almost nothing or serves a different purpose:
-   - the outcome enums stay `#[non_exhaustive]`, and one plain serde round-trip test per journaled type stays
-     (a value encodes, decodes to itself), as an ordinary unit test of the serde derives, not a contract;
    - the crate-owned projections `FoundDocument` / `IssuedDocument` stay, for the reason #127 also gave that
      has nothing to do with replay: what the handlers never read (the buyer, the seller, the line items, the
      PDF) does not belong in an entry the Restate UI shows for the retention period, and the agent key must
-     never be in one. The leak guard shrinks to that one assertion;
+     never be in one. `service::journal` keeps that as its purpose: a sample of every variant of every journaled
+     type round-trips through serde (a unit test of the derives, not a contract), carries no sentinel agent key
+     and carries no document-body key;
+   - the sealed `Journaled` marker and the `journaled!` list stay as the run helpers' bound, **re-purposed**: not
+     a compatibility marker (nothing about replay) but the registry of the privacy scan, so that "every entry is
+     scanned" is a mechanism and not a convention: only a listed type can be a `ctx.run` result, the scan's
+     samples are held to the list by type name, and each enum's samples to an exhaustive `variants!` match, so a
+     type or variant journaled without a sample fails by name. It is the one part of #125's "completeness by
+     mechanism" whose reason survives the contract;
    - the *Step-name table* (`RUN_NAMES`, checked against `sys_journal` in the e2e) stays. Restate's **pause and
      resume on a new deployment** is the one path on which a journal written by one release is read by another,
      and it needs three things of the new code: the same `ctx.run` sequence, result types that still decode, and
@@ -75,7 +82,9 @@ of the handlers.
   guards a path (`--force` re-registration in production) the deployment procedure now forbids.
 - **Keep the fixtures, drop the mechanism** (the sealed trait, the registry, the archive rule). Considered as
   the middle ground. Rejected because the fixtures' only reader is the compatibility test, and a compatibility
-  test without a compatibility requirement asserts nothing; a round-trip test says what is left to say.
+  test without a compatibility requirement asserts nothing. The opposite cut is what was taken: the fixtures go,
+  the mechanism stays for the privacy scan (item 3), since that scan is the one reason left for wanting "every
+  type, every variant" to be enforced rather than remembered.
 - **In-place updates with the contract, as before.** Rejected: it is the model Restate documents as unsafe, and
   the contract covered only the *shape* of an entry, not the sequence or inputs of the steps, which Restate lists
   as the other three unsafe in-place changes; the *Run-name pin* covered the sequence, and nothing covered the
