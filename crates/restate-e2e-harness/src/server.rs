@@ -24,7 +24,7 @@ use restate_sdk::prelude::{Endpoint, HttpServer};
 use serde_json::Value;
 
 use crate::admin::{Admin, poll_until};
-use crate::gate::{FEATURES, ServerSpec};
+use crate::gate::{Feature, ServerSpec};
 use crate::ingress::{Call, Reply};
 use crate::plain_http;
 
@@ -114,8 +114,9 @@ pub struct Restate {
     admin: Admin,
     ingress: String,
     http: reqwest::Client,
-    /// The flags the server runs with: what `/version` must report.
-    flags: &'static [&'static str],
+    /// The features the server runs with, on or off: what `/version` must
+    /// report.
+    features: &'static [(Feature, bool)],
     /// The host name under which the server reaches this process's endpoint.
     endpoint_host: String,
     process: Option<Process>,
@@ -234,14 +235,14 @@ impl Restate {
             admin: Admin::new(admin, http.clone()),
             ingress,
             http,
-            flags: spec.flags,
+            features: spec.features,
             endpoint_host,
             process,
         }
     }
 
     /// A running server at `admin` / `ingress`, taken as it is: nothing is
-    /// started or stopped; `spec`'s flags are what [`Self::ready`] expects
+    /// started or stopped; `spec`'s features are what [`Self::ready`] expects
     /// `/version` to report.
     pub(crate) fn reuse(
         admin: String,
@@ -252,17 +253,18 @@ impl Restate {
         Self::new(admin, ingress, spec, endpoint_host, None)
     }
 
-    /// A `restate-server` process from `binary` with `spec`'s flags, bound to
-    /// the loopback on three ports chosen free ([`free_ports`]), its data and
-    /// log under a directory of its own in the temp dir
-    /// (`restate-e2e-{pid}-{name}-{admin port}`: the port is unique per
-    /// launch on the host, so two launches of one spec in one test binary
-    /// share nothing), leading a process group of its own so
-    /// that the group is what gets killed. Configured through Restate's
-    /// environment (`RESTATE_<SECTION>__<KEY>`), so no config file is written;
-    /// `spec.flags` are set first and the harness's own values last, so a
-    /// flag cannot move the base dir out of the temp directory or a bind
-    /// address off the loopback (the admin API has no authentication).
+    /// A `restate-server` process from `binary` with `spec`'s features and
+    /// environment, bound to the loopback on three ports chosen free
+    /// ([`free_ports`]), its data and log under a directory of its own in the
+    /// temp dir (`restate-e2e-{pid}-{name}-{admin port}`: the port is unique
+    /// per launch on the host, so two launches of one spec in one test binary
+    /// share nothing), leading a process group of its own so that the group
+    /// is what gets killed. Configured through Restate's environment
+    /// (`RESTATE_<SECTION>__<KEY>`), so no config file is written; `spec.env`
+    /// is set first, the features next and the harness's own values last, so
+    /// a pair cannot move the base dir out of the temp directory, a bind
+    /// address off the loopback (the admin API has no authentication) or a
+    /// feature off what the spec says.
     pub(crate) fn spawn(binary: &Path, spec: &ServerSpec, endpoint_host: String) -> Self {
         let [ingress, admin, node] = free_ports::<3>();
         let ports = Ports {
@@ -279,10 +281,14 @@ impl Restate {
         let log = fs::File::create(base_dir.join("restate-server.log")).expect("the server log");
         let mut command = Command::new(binary);
         command.arg("--no-logo");
-        for flag in spec.flags {
-            let (name, value) = flag
+        for pair in spec.env {
+            let (name, value) = pair
                 .split_once('=')
-                .unwrap_or_else(|| panic!("a server flag is NAME=value: {flag:?}"));
+                .unwrap_or_else(|| panic!("a server environment pair is NAME=value: {pair:?}"));
+            command.env(name, value);
+        }
+        for (feature, on) in spec.features {
+            let (name, value) = feature.env(*on);
             command.env(name, value);
         }
         command
@@ -332,7 +338,7 @@ impl Restate {
     /// for the SQL introspection API to answer (`/health` is up before the
     /// partition store behind `sys_invocation` is provisioned; a suite's first
     /// read would otherwise meet a 500), and checks that `/version` reports
-    /// exactly the [`FEATURES`] the server's flags enable, no other.
+    /// each of the spec's features as the spec has it.
     pub(crate) async fn ready(mut self) -> Self {
         // Not `poll_until`: this wait has a second way out, the spawned
         // process gone, read off `&mut self.process` between probes.
@@ -385,13 +391,15 @@ impl Restate {
             .json()
             .await
             .expect("the /version body is JSON");
-        for (feature, flag) in FEATURES {
-            let expected = self.flags.contains(&flag);
+        for (feature, expected) in self.features {
             assert_eq!(
-                version["features"][feature],
-                Value::Bool(expected),
-                "the Restate server must run with {feature} {}: {version}",
-                if expected { "enabled" } else { "disabled" }
+                version["features"][feature.name],
+                Value::Bool(*expected),
+                "the Restate server must run with {} {} ({}={}): {version}",
+                feature.name,
+                if *expected { "enabled" } else { "disabled" },
+                feature.flag,
+                expected
             );
         }
         self
@@ -424,14 +432,22 @@ impl Restate {
     /// `http://{endpoint_host}:{port}` with `force: true`, retried until the
     /// admin API accepts it. Repeatable: a new URI is a new revision of the
     /// services it binds, and new invocations route to it, so a redeploy is a
-    /// second call.
+    /// second call. Bound to the loopback for a spawned server, which is on
+    /// the loopback itself; on every interface for a reused one, which may be
+    /// a container reaching back to this host (the endpoint has no identity
+    /// key, so it is offered to the network only where the server needs it).
     ///
     /// Served with `serve_with_cancel` over a future that never completes
     /// rather than the SDK's `serve`, whose shutdown future is `ctrl_c()`: the
     /// harness owns SIGINT (it stops the servers it started and exits), and an
     /// endpoint that installed its own handler per deployment would race it.
     pub async fn deploy(&self, endpoint: Endpoint) -> Deployment {
-        let listener = TcpListener::bind("0.0.0.0:0").expect("bind the endpoint");
+        let bind = if self.process.is_some() {
+            "127.0.0.1:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let listener = TcpListener::bind(bind).expect("bind the endpoint");
         let port = listener
             .local_addr()
             .expect("the endpoint's address")
@@ -508,7 +524,7 @@ impl fmt::Debug for Restate {
             .field("admin", &self.admin.base())
             .field("ingress", &self.ingress)
             .field("endpoint_host", &self.endpoint_host)
-            .field("flags", &self.flags)
+            .field("features", &self.features)
             .field(
                 "spawned",
                 &self.process.as_ref().map(|process| process.ports),
@@ -545,6 +561,7 @@ impl Drop for Restate {
 pub struct Deployment {
     /// The URI the server was given (`http://{endpoint_host}:{port}`).
     pub uri: String,
-    /// The port the endpoint listens on, on every interface of this host.
+    /// The port the endpoint listens on: on the loopback for a spawned
+    /// server, on every interface of this host for a reused one.
     pub port: u16,
 }

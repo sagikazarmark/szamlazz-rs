@@ -3,7 +3,7 @@
 //! ([`run_result`]) and a `sys_invocation` row ([`Invocation`]); and a
 //! handler as the admin API lists it ([`Handler`], `GET /services`). What a
 //! watch saw of an invocation's attempts while it ran is
-//! [`Retries`](crate::admin::Retries).
+//! [`Retries`](crate::watch::Retries).
 
 use serde_json::Value;
 
@@ -117,7 +117,7 @@ pub fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a Jou
 
 /// A `sys_invocation` row. `retry_count` and the last failure are attempt
 /// state, gone once the invocation completed; see
-/// [`Watch`](crate::admin::Watch) for them.
+/// [`Watch`](crate::watch::Watch) for them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     /// `status` (`completed`, `running`, `backing-off`, …).

@@ -7,7 +7,9 @@
 //! server, `RESTATE_SERVER_BIN` names a `restate-server` binary the harness
 //! spawns on the loopback ([`Restate`]). With neither the suite
 //! **skips** on a developer machine and **fails** when `CI` is set: a run
-//! that passed by skipping proves nothing.
+//! that passed by skipping proves nothing. [`launcher_or_skip`] is the one
+//! place the environment is read; [`server_gate`] and [`Launcher::launch`]
+//! are functions of what it read.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -19,23 +21,42 @@ use crate::server::Restate;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Launcher {
     /// `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL`: a running server, expected
-    /// to run with the flags of the spec it is launched for; nothing is
+    /// to run with the features of the spec it is launched for; nothing is
     /// started or stopped.
     Reuse {
         /// The admin API's base URL (`http://127.0.0.1:9070`).
         admin: String,
         /// The ingress's base URL (`http://127.0.0.1:8080`).
         ingress: String,
+        /// The host under which the server reaches this process's endpoint:
+        /// `RESTATE_ENDPOINT_HOST`, else `host.docker.internal` (a container
+        /// of the Restate image).
+        endpoint_host: String,
     },
     /// `RESTATE_SERVER_BIN`: a `restate-server` binary the harness spawns on
     /// this host, on ports chosen free at launch.
-    Binary(PathBuf),
+    Binary {
+        /// The binary.
+        binary: PathBuf,
+        /// The host under which the server reaches this process's endpoint:
+        /// `RESTATE_ENDPOINT_HOST`, else `127.0.0.1`.
+        endpoint_host: String,
+    },
 }
+
+/// The endpoint host of a reused server unless overridden: a container of the
+/// Restate image reaches the host this way.
+pub const REUSED_ENDPOINT_HOST: &str = "host.docker.internal";
+
+/// The endpoint host of a spawned server unless overridden: the loopback.
+pub const SPAWNED_ENDPOINT_HOST: &str = "127.0.0.1";
 
 /// The server gate, the decision behind [`launcher_or_skip`]: `reuse` first,
 /// then `binary`; with neither `Ok(None)` (a skip) unless `ci` is set
 /// (non-empty), in which case the suite must not pass by skipping and the
 /// answer is the failure message, naming both ways to provide a server.
+/// `endpoint_host` (`RESTATE_ENDPOINT_HOST`) overrides the host the server
+/// reaches this process's endpoint at, whose default depends on the source.
 ///
 /// # Errors
 ///
@@ -43,20 +64,28 @@ pub enum Launcher {
 pub fn server_gate(
     reuse: Option<(String, String)>,
     binary: Option<PathBuf>,
+    endpoint_host: Option<String>,
     ci: Option<&OsStr>,
 ) -> Result<Option<Launcher>, String> {
     if let Some((admin, ingress)) = reuse {
-        return Ok(Some(Launcher::Reuse { admin, ingress }));
+        return Ok(Some(Launcher::Reuse {
+            admin,
+            ingress,
+            endpoint_host: endpoint_host.unwrap_or_else(|| REUSED_ENDPOINT_HOST.to_owned()),
+        }));
     }
     if let Some(binary) = binary {
-        return Ok(Some(Launcher::Binary(binary)));
+        return Ok(Some(Launcher::Binary {
+            binary,
+            endpoint_host: endpoint_host.unwrap_or_else(|| SPAWNED_ENDPOINT_HOST.to_owned()),
+        }));
     }
     if ci.is_some_and(|value| !value.is_empty()) {
         return Err(
             "no Restate server to run the end-to-end suite against, and CI is set: a skipped run \
              proves nothing. Provide one by setting RESTATE_SERVER_BIN to a restate-server binary \
              (spawned on this host), or by setting RESTATE_ADMIN_URL and RESTATE_INGRESS_URL to a \
-             running server with the flags the suite expects."
+             running server with the features the suite expects."
                 .to_owned(),
         );
     }
@@ -77,8 +106,9 @@ pub enum Reuse {
 /// The launcher the environment provides, or `None` after printing why the
 /// suite skips; panics with the gate's message under `CI`.
 ///
-/// Reads `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` (when `reuse` allows),
-/// `RESTATE_SERVER_BIN` and `CI`; an empty variable is unset (a
+/// The one place the gate reads the environment: `RESTATE_ADMIN_URL` /
+/// `RESTATE_INGRESS_URL` (when `reuse` allows), `RESTATE_SERVER_BIN`,
+/// `RESTATE_ENDPOINT_HOST` and `CI`; an empty variable is unset (a
 /// `RESTATE_ADMIN_URL=` in a CI matrix is not a server to wait 90 s on).
 pub fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
     let non_empty = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -89,7 +119,13 @@ pub fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
     let binary = std::env::var_os("RESTATE_SERVER_BIN")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    match server_gate(reusable, binary, std::env::var_os("CI").as_deref()) {
+    let gate = server_gate(
+        reusable,
+        binary,
+        non_empty("RESTATE_ENDPOINT_HOST"),
+        std::env::var_os("CI").as_deref(),
+    );
+    match gate {
         Ok(Some(launcher)) => Some(launcher),
         Ok(None) => {
             eprintln!(
@@ -102,32 +138,52 @@ pub fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
     }
 }
 
-/// The experimental server features `/version` reports, each with the
-/// environment flag that enables it: vqueues, protocol v7 (below it the SDK
-/// sees no scope) and scoped Virtual Objects. A server is checked at launch
-/// to report each of the three on **iff** its flag is in the
-/// [`ServerSpec`]; a caller whose suite needs them puts the flags in its spec
-/// ([`FLAG_VQUEUES`], [`FLAG_PROTOCOL_V7`], [`FLAG_SCOPED_VIRTUAL_OBJECTS`]).
-pub const FEATURES: [(&str, &str); 3] = [
-    ("vqueues", FLAG_VQUEUES),
-    ("protocol_v7", FLAG_PROTOCOL_V7),
-    ("scoped_virtual_objects", FLAG_SCOPED_VIRTUAL_OBJECTS),
-];
+/// An experimental server feature: what `/version` reports it as and the
+/// environment variable that enables it. A [`ServerSpec`] lists the features
+/// it needs on or off; the spawned server is started with each one's
+/// variable set to its value, and `/version` is checked at launch to report
+/// exactly that, for a spawned and a reused server alike. A feature a spec
+/// does not list is neither set nor checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Feature {
+    /// The key under `features` in `/version`.
+    pub name: &'static str,
+    /// The environment variable that enables it (`true` / `false`).
+    pub flag: &'static str,
+}
 
-/// The flag enabling vqueues, as a `NAME=value` environment pair.
-pub const FLAG_VQUEUES: &str = "RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true";
-/// The flag enabling protocol v7, as a `NAME=value` environment pair.
-pub const FLAG_PROTOCOL_V7: &str = "RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true";
-/// The flag enabling scoped Virtual Objects, as a `NAME=value` environment
-/// pair.
-pub const FLAG_SCOPED_VIRTUAL_OBJECTS: &str =
-    "RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS=true";
+impl Feature {
+    /// The `NAME=value` environment pair setting this feature to `on`.
+    #[must_use]
+    pub fn env(&self, on: bool) -> (&'static str, &'static str) {
+        (self.flag, if on { "true" } else { "false" })
+    }
+}
+
+/// Virtual queues, which scoped Virtual Objects need.
+pub const VQUEUES: Feature = Feature {
+    name: "vqueues",
+    flag: "RESTATE_EXPERIMENTAL_ENABLE_VQUEUES",
+};
+
+/// Service protocol v7; below it the SDK sees no scope.
+pub const PROTOCOL_V7: Feature = Feature {
+    name: "protocol_v7",
+    flag: "RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7",
+};
+
+/// Scoped Virtual Objects (`/restate/scope/{scope}/…`).
+pub const SCOPED_VIRTUAL_OBJECTS: Feature = Feature {
+    name: "scoped_virtual_objects",
+    flag: "RESTATE_EXPERIMENTAL_ENABLE_SCOPED_VIRTUAL_OBJECTS",
+};
 
 /// The shape of a server the harness starts: its name (in the node name and
-/// the base dir) and its flags, `NAME=value` environment pairs set on the
-/// spawned process and expected of a reused server. Its ports are chosen free
-/// at launch, so two suites in one test binary, and two runs on one host,
-/// each have their own.
+/// the base dir), the features it needs on or off (set on the spawned process
+/// and checked against `/version` of a spawned and a reused server alike) and
+/// any other environment the spawned process runs with. Its ports are chosen
+/// free at launch, so two suites in one test binary, and two runs on one
+/// host, each have their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServerSpec {
     /// A short name for the shape (`main`, `canary`), in the node name and
@@ -136,9 +192,15 @@ pub struct ServerSpec {
     /// on drop and a name with a `/` or a `..` in it would name a directory
     /// that is not the harness's.
     pub name: &'static str,
-    /// The environment the server runs with, `NAME=value` pairs; the three
-    /// experimental flags among them are what `/version` is checked against.
-    pub flags: &'static [&'static str],
+    /// The experimental features and whether each is on: what the spawned
+    /// server is started with and what `/version` must report. A feature not
+    /// listed is not the suite's concern: neither set nor checked, so a
+    /// Restate release turning one on by default breaks nothing here.
+    pub features: &'static [(Feature, bool)],
+    /// Other environment the spawned server runs with, `NAME=value` pairs;
+    /// set before the features and the harness's own values, so a pair
+    /// cannot override either.
+    pub env: &'static [&'static str],
 }
 
 impl ServerSpec {
@@ -173,24 +235,22 @@ impl ServerSpec {
 
 impl Launcher {
     /// The server of `spec`'s shape, ready: started from the binary or the
-    /// running one taken as it is, its admin API answering and `/version`
-    /// reporting exactly the features `spec`'s flags enable. Panics when the
-    /// server does not come up (a spawned server's own log tail in the
-    /// message) or reports other features.
-    ///
-    /// `RESTATE_ENDPOINT_HOST` overrides the host the server reaches this
-    /// process's endpoint at: `127.0.0.1` for a spawned server,
-    /// `host.docker.internal` for a reused one (a container of `compose.yaml`).
+    /// running one taken as it is, its admin API and SQL introspection
+    /// answering and `/version` reporting each of `spec`'s features as the
+    /// spec has it. Panics when the server does not come up (a spawned
+    /// server's own log tail in the message) or reports a feature otherwise.
     pub async fn launch(self, spec: &ServerSpec) -> Restate {
         spec.validate();
-        let endpoint_host = |default: &str| {
-            std::env::var("RESTATE_ENDPOINT_HOST").unwrap_or_else(|_| default.to_owned())
-        };
         let restate = match self {
-            Self::Reuse { admin, ingress } => {
-                Restate::reuse(admin, ingress, spec, endpoint_host("host.docker.internal"))
-            }
-            Self::Binary(binary) => Restate::spawn(&binary, spec, endpoint_host("127.0.0.1")),
+            Self::Reuse {
+                admin,
+                ingress,
+                endpoint_host,
+            } => Restate::reuse(admin, ingress, spec, endpoint_host),
+            Self::Binary {
+                binary,
+                endpoint_host,
+            } => Restate::spawn(&binary, spec, endpoint_host),
         };
         restate.ready().await
     }
@@ -211,20 +271,49 @@ mod tests {
         let reuse = Some(("http://a:9070".to_owned(), "http://a:8080".to_owned()));
         let binary = Some(PathBuf::from("/opt/restate-server"));
         assert_eq!(
-            server_gate(reuse.clone(), binary.clone(), None),
+            server_gate(reuse.clone(), binary.clone(), None, None),
             Ok(Some(Launcher::Reuse {
                 admin: "http://a:9070".to_owned(),
                 ingress: "http://a:8080".to_owned(),
+                endpoint_host: REUSED_ENDPOINT_HOST.to_owned(),
             }))
         );
         assert_eq!(
-            server_gate(None, binary.clone(), None),
-            Ok(Some(Launcher::Binary(PathBuf::from("/opt/restate-server"))))
+            server_gate(None, binary.clone(), None, None),
+            Ok(Some(Launcher::Binary {
+                binary: PathBuf::from("/opt/restate-server"),
+                endpoint_host: SPAWNED_ENDPOINT_HOST.to_owned(),
+            }))
         );
         assert_eq!(
-            server_gate(None, binary, Some(OsStr::new("true"))),
-            Ok(Some(Launcher::Binary(PathBuf::from("/opt/restate-server")))),
+            server_gate(None, binary.clone(), None, Some(OsStr::new("true"))),
+            Ok(Some(Launcher::Binary {
+                binary: PathBuf::from("/opt/restate-server"),
+                endpoint_host: SPAWNED_ENDPOINT_HOST.to_owned(),
+            })),
             "the binary suffices under CI too"
+        );
+        assert_eq!(
+            server_gate(reuse, binary, Some("172.17.0.1".to_owned()), None),
+            Ok(Some(Launcher::Reuse {
+                admin: "http://a:9070".to_owned(),
+                ingress: "http://a:8080".to_owned(),
+                endpoint_host: "172.17.0.1".to_owned(),
+            })),
+            "RESTATE_ENDPOINT_HOST overrides the source's default"
+        );
+    }
+
+    /// A feature's environment pair is its flag with `true` or `false`.
+    #[test]
+    fn a_feature_renders_its_environment_pair() {
+        assert_eq!(
+            PROTOCOL_V7.env(true),
+            ("RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7", "true")
+        );
+        assert_eq!(
+            PROTOCOL_V7.env(false),
+            ("RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7", "false")
         );
     }
 
@@ -240,7 +329,8 @@ mod tests {
         }
         let bad = ServerSpec {
             name: "../escape",
-            flags: &[],
+            features: &[],
+            env: &[],
         };
         let outcome = std::panic::catch_unwind(|| bad.validate());
         assert!(
@@ -251,14 +341,14 @@ mod tests {
 
     #[test]
     fn the_server_gate_skips_without_a_server_and_fails_under_ci() {
-        assert_eq!(server_gate(None, None, None), Ok(None), "no CI: skip");
+        assert_eq!(server_gate(None, None, None, None), Ok(None), "no CI: skip");
         assert_eq!(
-            server_gate(None, None, Some(OsStr::new(""))),
+            server_gate(None, None, None, Some(OsStr::new(""))),
             Ok(None),
             "an empty CI is unset"
         );
         for ci in ["true", "1", "yes"] {
-            let message = server_gate(None, None, Some(OsStr::new(ci)))
+            let message = server_gate(None, None, None, Some(OsStr::new(ci)))
                 .expect_err("CI is set and there is no server: a failure, never a skip");
             for named in ["CI", "RESTATE_SERVER_BIN", "RESTATE_ADMIN_URL"] {
                 assert!(message.contains(named), "CI={ci}: {message}");

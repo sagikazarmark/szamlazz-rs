@@ -6,8 +6,9 @@
 //!   `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL`, or a `restate-server`
 //!   binary named by `RESTATE_SERVER_BIN` and spawned on the loopback; with
 //!   neither the suite skips, and fails under `CI`), the [`Launcher`] and the
-//!   shape of a server ([`ServerSpec`]: its name and its `NAME=value` flags,
-//!   checked against `/version` at launch).
+//!   shape of a server ([`ServerSpec`]: its name, the experimental
+//!   [`Feature`]s it needs on or off, checked against `/version` at launch,
+//!   and any other environment).
 //! - [`server`]: the [`Restate`] handle: the spawned process (free ports, a
 //!   process group of its own, log and data under a temp dir kept when the
 //!   test fails, stopped on drop and on SIGINT/SIGTERM), an endpoint served
@@ -18,10 +19,12 @@
 //!   the fault inside Restate's error envelope ([`Reply::fault`], into the
 //!   caller's own type).
 //! - [`admin`]: the admin API ([`Admin`]): SQL introspection, journals and
-//!   `sys_invocation` rows, kill / cancel / purge, and the sampler
-//!   ([`Watch`]) over an invocation's run retries while it is in flight.
+//!   `sys_invocation` rows, the registered handlers, kill / cancel / purge.
+//! - [`watch`]: the sampler ([`Watch`]) over an invocation's run retries
+//!   while it is in flight ([`Retries`]).
 //! - [`introspection`]: `sys_journal` and `sys_invocation` rows
-//!   ([`JournalEntry`], [`Invocation`], [`run_result`]).
+//!   ([`JournalEntry`], [`Invocation`], [`run_result`]) and a handler as
+//!   `GET /services` lists it ([`Handler`]).
 //! - [`run_names`]: the step-name table ([`Table`] over [`RunPath`] rows,
 //!   [`Table::check`] over a whole run) a consumer holds its handlers'
 //!   `ctx.run` names to: the sequence an in-place redeploy replays and a
@@ -41,7 +44,7 @@
 //!
 //! Either reuse a running one (`RESTATE_ADMIN_URL=http://127.0.0.1:9070
 //! RESTATE_INGRESS_URL=http://127.0.0.1:8080`; a container of the Restate
-//! image with the flags the suite expects) or point `RESTATE_SERVER_BIN` at
+//! image with the features the suite expects) or point `RESTATE_SERVER_BIN` at
 //! the binary, which the Restate image carries at
 //! `/usr/local/bin/restate-server`:
 //!
@@ -58,32 +61,34 @@
 //!
 //! # Example
 //!
-//! ```no_run
-//! use restate_e2e_harness::{Call, Launcher, Reuse, ServerSpec, launcher_or_skip};
-//! use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
-//! use restate_sdk::prelude::Endpoint;
+//! The README's example (a spec, the gate, a deployment, a call and its runs)
+//! is compiled as a doctest of this crate; the example is kept there, once.
 //!
-//! const SERVER: ServerSpec = ServerSpec {
-//!     name: "main",
-//!     flags: &[FLAG_VQUEUES, FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS],
-//! };
+//! # Evolvability
 //!
-//! # async fn run() {
-//! let Some(launcher) = launcher_or_skip(Reuse::Allowed) else { return };
-//! let restate = launcher.launch(&SERVER).await;
-//! let endpoint = Endpoint::builder() /* .bind(MyService) */ .build();
-//! restate.deploy(endpoint).await;
-//! let reply = restate.invoke(&Call::service("MyService", "handler"), None, None).await;
-//! assert_eq!(reply.status, 200, "{}", reply.body);
-//! let runs = restate.admin().runs(reply.invocation_id()).await;
-//! # }
-//! ```
+//! **Plain data.** Every row and result type ([`Reply`], [`Invocation`],
+//! [`JournalEntry`], [`Handler`], [`Retries`], [`Deployment`], [`Walked`],
+//! [`Violations`], [`RunPath`], [`ServerSpec`], [`Feature`], [`Target`],
+//! [`Call`], [`Launcher`]) has public fields and none is `#[non_exhaustive]`:
+//! a spec is `const`-constructible in a consumer, a row is destructured and
+//! compared whole in an assertion, and a struct literal in a test reads as
+//! the row it stands for. The cost is stated and accepted: a header added to
+//! `Reply` or a column to `Invocation` is a breaking release of this crate.
+//! It is a test-support crate versioned on its own, its consumers are test
+//! suites whose `Cargo.lock` holds the version, and a breaking minor that a
+//! compiler error names is cheaper for them than constructors and getters on
+//! every row.
 
 // A harness fails a test by panicking: every helper asserts what it observes
 // of the server, and a `# Panics` section on each would say the same thing
 // two hundred times. The panics that carry information (a server that did not
 // come up, a reply without an id) are documented where they are.
 #![allow(clippy::missing_panics_doc)]
+
+/// The README's example, compiled as a doctest: the one copy of it.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 #[cfg(not(unix))]
 compile_error!(
@@ -102,15 +107,17 @@ pub mod introspection;
 pub mod run_names;
 #[cfg(unix)]
 pub mod server;
+pub mod watch;
 
-pub use admin::{Admin, Retries, Target, Watch, sql_literal};
+pub use admin::{Admin, Target, sql_literal};
 #[cfg(unix)]
-pub use gate::{Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
+pub use gate::{Feature, Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::{Call, Mode, Reply};
 pub use introspection::{Handler, Invocation, JournalEntry, run_result};
 pub use run_names::{RunPath, RunPatterns, Table, Violations, Walked, is_prefix_of_path};
 #[cfg(unix)]
 pub use server::{Deployment, Restate};
+pub use watch::{Retries, Watch};
 
 /// A [`reqwest::ClientBuilder`] for the harness's own traffic, all of it
 /// plain `http://` on the loopback (the Restate admin and ingress APIs):

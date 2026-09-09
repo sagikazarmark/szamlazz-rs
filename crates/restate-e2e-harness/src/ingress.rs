@@ -165,6 +165,9 @@ impl Reply {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+    use serde_json::json;
+
     use super::*;
 
     /// The URL grammar, once: a service or an object, unscoped or under a
@@ -201,5 +204,85 @@ mod tests {
             "/restate/scope/acme/send/Inv.Stock/SKU-1/reserve"
         );
         assert_eq!(Mode::default(), Mode::Call);
+    }
+
+    /// A fault reply as the ingress wraps a handler's `TerminalError`.
+    fn fault_reply() -> Reply {
+        Reply {
+            status: 422,
+            body: json!({
+                "code": 422,
+                "message": "{\"code\":\"refused\",\"message\":\"no\"}",
+                "source": "invocation",
+            }),
+            invocation_id: Some("inv_1".to_owned()),
+            error_source: Some("invocation".to_owned()),
+        }
+    }
+
+    /// The consumer-side shape of the fault inside.
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct Fault {
+        code: String,
+        message: String,
+    }
+
+    /// The message `reply.fault::<Fault>()` refuses with.
+    fn refused(reply: &Reply) -> String {
+        *std::panic::catch_unwind(|| reply.fault::<Fault>())
+            .expect_err("refused")
+            .downcast::<String>()
+            .expect("a message")
+    }
+
+    /// The envelope's three marks are asserted, then the string in `message`
+    /// is decoded a second time into the caller's type.
+    #[test]
+    fn a_fault_is_decoded_out_of_the_envelope() {
+        assert_eq!(
+            fault_reply().fault::<Fault>(),
+            Fault {
+                code: "refused".to_owned(),
+                message: "no".to_owned(),
+            }
+        );
+        assert_eq!(fault_reply().invocation_id(), "inv_1");
+    }
+
+    /// Each mark missing is its own refusal, naming what was expected: a
+    /// `code` that is not the status, a `source` that is not the invocation's,
+    /// the header absent, a `message` that is not a string, one that is not
+    /// the caller's type.
+    #[test]
+    fn an_envelope_off_in_any_mark_is_refused() {
+        let mut off = fault_reply();
+        off.body["code"] = json!(500);
+        assert!(refused(&off).contains("the envelope's code is the HTTP status"));
+
+        let mut off = fault_reply();
+        off.body["source"] = json!("ingress");
+        assert!(refused(&off).contains("invocation's terminal error"));
+
+        let mut off = fault_reply();
+        off.error_source = None;
+        assert!(refused(&off).contains("x-restate-error-source"));
+
+        let mut off = fault_reply();
+        off.body["message"] = json!({ "code": "refused" });
+        assert!(refused(&off).contains("an error envelope with a message"));
+
+        let mut off = fault_reply();
+        off.body["message"] = json!("not json");
+        assert!(refused(&off).contains("a structured fault"));
+
+        let no_id = Reply {
+            invocation_id: None,
+            ..fault_reply()
+        };
+        let message = *std::panic::catch_unwind(|| no_id.invocation_id().to_owned())
+            .expect_err("refused")
+            .downcast::<String>()
+            .expect("a message");
+        assert!(message.contains("no x-restate-id"), "{message}");
     }
 }

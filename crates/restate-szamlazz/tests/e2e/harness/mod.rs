@@ -31,7 +31,7 @@ pub(crate) mod szamlazz;
 use std::sync::Arc;
 
 use jiff::civil::date;
-use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
+use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
 pub(crate) use restate_e2e_harness::gate::{Reuse, launcher_or_skip};
 use restate_e2e_harness::{Admin, Call, Restate, ServerSpec, Target, Watch};
 use restate_sdk::prelude::Endpoint;
@@ -47,21 +47,31 @@ use crate::harness::szamlazz::{external_id_query, not_found};
 
 // ----- the servers ---------------------------------------------------------------
 
-/// The main suite's server: the three experimental flags multi-account mode
-/// depends on (vqueues, protocol v7 (below it the SDK sees no scope) and
-/// scoped Virtual Objects). Set on the server the harness starts and expected
-/// of one reused through the environment.
+/// The main suite's server: the three experimental features multi-account
+/// mode depends on (vqueues, protocol v7 (below it the SDK sees no scope) and
+/// scoped Virtual Objects), on. Set on the server the harness starts and
+/// expected of one reused through the environment.
 pub(crate) const MAIN_SERVER: ServerSpec = ServerSpec {
     name: "main",
-    flags: &[FLAG_VQUEUES, FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS],
+    features: &[
+        (VQUEUES, true),
+        (PROTOCOL_V7, true),
+        (SCOPED_VIRTUAL_OBJECTS, true),
+    ],
+    env: &[],
 };
 
 /// The protocol-v7 canary's server: vqueues and scoped Virtual Objects on,
-/// protocol v7 off (a deployment that forgot the one flag the scope needs to
-/// reach the SDK).
+/// protocol v7 **off**, explicitly (a deployment that forgot the one flag the
+/// scope needs to reach the SDK); `/version` is checked to report it off.
 pub(crate) const WITHOUT_PROTOCOL_V7: ServerSpec = ServerSpec {
     name: "canary",
-    flags: &[FLAG_VQUEUES, FLAG_SCOPED_VIRTUAL_OBJECTS],
+    features: &[
+        (VQUEUES, true),
+        (PROTOCOL_V7, false),
+        (SCOPED_VIRTUAL_OBJECTS, true),
+    ],
+    env: &[],
 };
 
 /// The two Restate services of the worker, as the admin API names them.

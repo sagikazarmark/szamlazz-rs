@@ -11,8 +11,9 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   spawns on the loopback, on ports chosen free at launch, with its log and data under a temp directory kept when
   the test fails, in a process group of its own that is killed when the handle drops and on SIGINT/SIGTERM. With
   neither the suite **skips** with a message, and **fails** when `CI` is set: a run that passed by skipping proves
-  nothing. A `ServerSpec` names the shape (`NAME=value` flags, the three experimental features checked against
-  `/version` at launch).
+  nothing. A `ServerSpec` names the shape: the experimental `Feature`s it needs on or off (set on the spawned server,
+  checked against `/version` at launch for a spawned and a reused server alike; a feature not listed is neither set
+  nor checked) and any other `NAME=value` environment.
 - **Deployment**: serve a `restate_sdk` `Endpoint` in-process on a free port and register it (`force: true`,
   retried); repeatable, so a redeploy is a second call. `set_public`, `drain` (nothing in flight on
   `sys_invocation`).
@@ -39,7 +40,7 @@ run names, its scenarios and the harness type that composes them.
 ## Getting a `restate-server`
 
 Either reuse a running one (`RESTATE_ADMIN_URL=http://127.0.0.1:9070 RESTATE_INGRESS_URL=http://127.0.0.1:8080`; a
-container of the Restate image with the flags the suite expects), or point `RESTATE_SERVER_BIN` at the binary,
+container of the Restate image with the features the suite expects), or point `RESTATE_SERVER_BIN` at the binary,
 which the Restate image carries at `/usr/local/bin/restate-server`. In this workspace the Dagger `ci` module
 exports it (`dagger call ci restate-server export --path ./restate-server`); anywhere else, copy it out of the
 image:
@@ -52,18 +53,22 @@ RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness -- --ig
 ```
 
 `RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
-server, `host.docker.internal` for a reused one).
+server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback for a spawned server and to
+every interface for a reused one, which may be a container reaching back to the host.
 
 ## Example
 
+The one copy, compiled as a doctest of the crate:
+
 ```rust,no_run
-use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
+use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
 use restate_e2e_harness::{Call, Reuse, ServerSpec, launcher_or_skip};
 use restate_sdk::prelude::Endpoint;
 
 const SERVER: ServerSpec = ServerSpec {
     name: "main",
-    flags: &[FLAG_VQUEUES, FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS],
+    features: &[(VQUEUES, true), (PROTOCOL_V7, true), (SCOPED_VIRTUAL_OBJECTS, true)],
+    env: &[],
 };
 
 # async fn run() {
@@ -80,7 +85,7 @@ let runs = restate.admin().runs(reply.invocation_id()).await;
 ## Tests
 
 `cargo test -p restate-e2e-harness` runs the pure decisions (the gate, the sampler, the table check, the call
-grammar) without a server.
+grammar, the envelope check) without a server.
 `RESTATE_SERVER_BIN=… cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract
 against a server of its own (never a reused one: the test deploys a service and leaves its invocations retained,
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the

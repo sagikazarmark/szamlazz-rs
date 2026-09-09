@@ -15,7 +15,7 @@
     reason = "the macro-generated `SmokeClient` carries no documentation"
 )]
 
-use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
+use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
 use restate_e2e_harness::{Call, Launcher, Reuse, ServerSpec, launcher_or_skip};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
@@ -23,7 +23,12 @@ use serde_json::json;
 
 const SERVER: ServerSpec = ServerSpec {
     name: "smoke",
-    flags: &[FLAG_VQUEUES, FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS],
+    features: &[
+        (VQUEUES, true),
+        (PROTOCOL_V7, true),
+        (SCOPED_VIRTUAL_OBJECTS, true),
+    ],
+    env: &[],
 };
 
 struct Smoke;
@@ -79,7 +84,7 @@ async fn e2e_smoke() {
         return;
     };
     assert!(
-        matches!(launcher, Launcher::Binary(_)),
+        matches!(launcher, Launcher::Binary { .. }),
         "Reuse::Never yields a binary"
     );
     let restate = launcher.launch(&SERVER).await;
