@@ -312,9 +312,9 @@ and `Agent::from_parts` take, so a deployment cannot run on a policy below the f
 
 Nothing account-shaped is in `WorkerConfig`: document defaults and the seller block belong to the `Account`, and
 their value types (`account::Defaults`, `account::SellerConfig`, `account::SellerEmailConfig`) are journaled with it
-(a *journaled type*'s parts, under no compatibility rule: ADR 0009). The static resolver reads them through closed input types of its own
-(`StaticDefaults`, `StaticSeller`, `StaticSellerEmail`, beside `StaticAccount`'s `Secret` agent key, whose `Debug`
-output is redacted), which mirror them field for field.
+(a *journaled type*'s parts, under no compatibility rule: ADR 0009) and closed to unknown keys themselves, so the
+static resolver reads its `[account.defaults]` and `[account.seller]` tables as them directly (`StaticAccount` adds
+the `Secret` agent key, whose `Debug` output is redacted).
 
 ### Accounts
 

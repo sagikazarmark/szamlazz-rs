@@ -74,6 +74,16 @@ of the handlers.
      release is refused, and the invocation killed for the caller to retry). That path is an operator's
      deliberate act on a named invocation; the table is what makes one of its three questions answerable.
 
+4. **The journaled value types are closed themselves** (*amendment, 2026-09-09, #175*). `Defaults`,
+   `SellerConfig` and `SellerEmailConfig` carry `#[serde(deny_unknown_fields)]` and the static resolver reads its
+   `[account.defaults]` and `[account.seller]` tables as them directly; the `StaticDefaults` / `StaticSeller` /
+   `StaticSellerEmail` mirror types, their two field-by-field `From` impls and the round-trip test that held the
+   copies equal are removed. They existed so that the value types could "stay permissive so that an `account`
+   entry of an earlier deployment replays"; under item 2 no entry is decoded by a later release, so nothing asks
+   them to be permissive, and a closed type refuses a misspelt key at the one point it can be caught. The
+   consequence an embedder sees: a resolver of its own that deserialises `Defaults` from its own storage is
+   held to the same rule (an unknown key is a parse error), which is the intended shape.
+
 ## Considered options
 
 - **Keep the contract as a belt beside the braces.** Rejected. Belt and braces is a fair argument for a rule that

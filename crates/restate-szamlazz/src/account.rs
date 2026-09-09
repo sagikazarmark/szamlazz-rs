@@ -22,7 +22,7 @@ pub mod static_resolver;
 
 pub use static_resolver::{
     AccountTable, InvalidScope, MAX_SCOPE_LEN, Secret, StaticAccount, StaticConfig,
-    StaticConfigError, StaticDefaults, StaticResolver, StaticSeller, StaticSellerEmail,
+    StaticConfigError, StaticResolver,
 };
 
 /// One szamlazz.hu account as the worker knows it, never the agent key.
@@ -102,10 +102,14 @@ impl Account {
 /// account's alone.
 ///
 /// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
-/// [`Default::default`]
-/// and set fields.
+/// [`Default::default`] and set fields. Closed to unknown keys: the static
+/// resolver reads its `[account.defaults]` table as this type, so a misspelt
+/// key is a parse error naming it, and an embedder's resolver that
+/// deserialises it from its own storage is held to the same (ADR 0009: no
+/// journal entry is decoded by a later release, so nothing asks the type to
+/// be permissive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Defaults {
     /// Issue e-invoices (`e-számla`). Default `false`.
@@ -153,19 +157,18 @@ impl Default for Defaults {
 /// The seller (`eladó`) block; the account's own data is used where absent.
 ///
 /// Journaled inside the [`Account`]; `#[non_exhaustive]`: start from
-/// [`Default::default`]
-/// and set fields.
+/// [`Default::default`] and set fields. Closed to unknown keys, as
+/// [`Defaults`] is.
 ///
 /// Deliberately not the agent crate's [`Seller`], although the fields mirror
-/// it: the account's journal shape is this crate's contract with every
-/// in-flight invocation, and a crate-owned type keeps a `Seller`
-/// change in `szamlazz-agent` (a field renamed, retyped, or made required)
-/// from altering what an `account` entry replays as. The same reason
+/// it: a journaled type is crate-owned (ADR 0009), so what an `account` entry
+/// holds is decided here and not by a `Seller` change in `szamlazz-agent` (a
+/// field added, renamed or retyped). The same reason
 /// `Szamlazz.Agent.query_taxpayer` journals the crate-owned
 /// `QueryTaxpayerResponse` projection rather than the agent crate's
 /// `TaxpayerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SellerConfig {
     /// Bank name.
@@ -196,9 +199,10 @@ impl SellerConfig {
 ///
 /// Journaled inside the [`Account`] through
 /// [`SellerConfig`]; `#[non_exhaustive]`: start from
-/// [`Default::default`] and set fields.
+/// [`Default::default`] and set fields. Closed to unknown keys, as
+/// [`Defaults`] is.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SellerEmailConfig {
     /// Reply-to address.

@@ -699,9 +699,10 @@ Two configuration types, both serde-`Deserialize` only (the host chooses the for
 `ReadConfig`, `ResolveConfig` are its three instantiations; the table names the policy in an error and carries its
 defaults; `max_attempts` is optional on every table, unset by default on `[resolve]`); `WorkerConfig::validate`
 yields the `ValidatedWorkerConfig` the services are built from, the one constructor a deployment has (#128).
-`StaticConfig` is the static resolver's account, read through closed input types (`StaticAccount`, `StaticDefaults`,
-`StaticSeller`, `StaticSellerEmail`) distinct from the journaled value types they are built into
-(`account::{Defaults, SellerConfig, SellerEmailConfig}`, journaled with the `Account`; permissive, though under ADR 0009 no longer for replay, see the note below), and everything account-shaped
+`StaticConfig` is the static resolver's account, read through the closed `StaticAccount` (the `Account` fields plus the
+agent key inline) whose `defaults` and `seller` tables are the value types the account carries
+(`account::{Defaults, SellerConfig, SellerEmailConfig}`, journaled with the `Account`, closed themselves; ADR 0009's
+#175 amendment), and everything account-shaped
 (credentials, endpoint, document defaults, seller block) lives on the `Account` it produces (read by the services
 through `Gateway::account()`). A host reads the two side by side from one file of its own layout, for instance:
 
@@ -750,14 +751,14 @@ one way to the `ValidatedWorkerConfig` that `Order::from_parts` / `Agent::from_p
 `StaticResolver::try_from` validates the account (non-blank id and key, an http(s) endpoint).
 
 **The configuration types are closed.** Every library type a host's loader is made of refuses unknown keys
-(`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount` and
-its `StaticDefaults` / `StaticSeller` / `StaticSellerEmail`), so an unknown key at any level is a parse error the host's
-deserializer reports with the key path; a typo such as `mod = "test"` or `[isue]` fails at start-up instead of silently
-running a test account as live or leaving a policy at its default. The input types are distinct from the journaled
-value types they are built into (`Defaults`, `SellerConfig`, `SellerEmailConfig` in `account`, journaled with the
-`Account`; they stay permissive, but since ADR 0009 nothing replays across deployments, so that is no longer a replay
-requirement and a ticket revisits it), mirror them field for field and convert with `From`; a
-round-trip test holds the two sides to each other (#128). `StaticConfig` is one of two mutually exclusive shapes
+(`#[serde(deny_unknown_fields)]`: `WorkerConfig` and its `RetryPolicyConfig` tables, `StaticConfig`, `StaticAccount`
+and the value types its `defaults` and `seller` tables are read as, `Defaults` / `SellerConfig` / `SellerEmailConfig`),
+so an unknown key at any level is a parse error the host's deserializer reports with the key path; a typo such as
+`mod = "test"` or `[isue]` fails at start-up instead of silently running a test account as live or leaving a policy at
+its default. The value types are journaled with the `Account` and closed all the same: under ADR 0009 no journal entry
+is decoded by a later release, so nothing asks them to be permissive, and the `Static*` mirror types that once kept
+them so are gone (#175); an embedder's resolver that deserialises `Defaults` from its own storage is held to the same
+rule. `StaticConfig` is one of two mutually exclusive shapes
 (`[account]` or `[accounts.<scope>]`; both present is refused by `StaticResolver::try_from`, `BothShapes`). A host that
 layers environment overrides over a file should read them as **strings** and let the field's type decide, so an
 all-digit agent key keeps its leading zeros (a provider that parses values as numbers first would drop them).

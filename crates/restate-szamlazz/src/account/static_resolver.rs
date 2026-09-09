@@ -38,13 +38,12 @@
 //!
 //! The configuration types implement `Deserialize` only and are **closed**
 //! at every level (`#[serde(deny_unknown_fields)]`): a misspelt key is a
-//! parse error naming the key, never a setting left at its default. They are
-//! distinct from the journaled value types they are built into
-//! ([`Defaults`], [`SellerConfig`], [`SellerEmailConfig`]), which stay
-//! permissive so that an `account` entry of an earlier deployment replays;
-//! [`StaticDefaults`] and [`StaticSeller`] mirror them field for field and
-//! convert with `From`. The host chooses the file format and
-//! environment merging. [`StaticResolver`] is built from a parsed
+//! parse error naming the key, never a setting left at its default. The
+//! `defaults` and `seller` tables are read as the value types the account
+//! carries ([`Defaults`], [`SellerConfig`], [`super::SellerEmailConfig`]), which are
+//! closed themselves (ADR 0009: a journal entry is never decoded by a later
+//! release, so nothing asks them to be permissive). The host chooses the file
+//! format and environment merging. [`StaticResolver`] is built from a parsed
 //! [`StaticConfig`] with `TryFrom`, which validates what `Deserialize`
 //! cannot, including the checkable half of the resolver's safety contract in
 //! the multi-account shape: unique ids and unique `(endpoint, agent_key)`
@@ -66,7 +65,7 @@ use super::{
     Account, AccountId, AccountResolver, BoxFuture, CredentialRef, CredentialStore, Endpoint,
     FetchError, InvalidEndpoint, NormalizedEndpoint, ResolveError,
 };
-use super::{Defaults, SellerConfig, SellerEmailConfig};
+use super::{Defaults, SellerConfig};
 
 /// The maximum length in bytes of an `[accounts.<scope>]` key: Restate's own
 /// limit on a scope value (a dashed UUID is exactly 36).
@@ -172,150 +171,13 @@ pub struct StaticAccount {
     /// when the resolver is built.
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Document defaults that per-call overrides may change.
+    /// Document defaults that per-call overrides may change; a field absent
+    /// from the table takes [`Defaults`]' own default.
     #[serde(default)]
-    pub defaults: StaticDefaults,
+    pub defaults: Defaults,
     /// The seller block; account data is used where absent.
     #[serde(default)]
-    pub seller: StaticSeller,
-}
-
-/// The `[account.defaults]` table: [`Defaults`] as configured, field for
-/// field and type for type, closed to unknown keys; a field absent from the
-/// table takes `Defaults`' own default.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StaticDefaults {
-    /// Issue e-invoices (`e-számla`). Default `false`.
-    pub e_invoice: bool,
-    /// Document language code. Default `hu`.
-    pub language: String,
-    /// Currency code. Default `HUF`.
-    pub currency: String,
-    /// Quoting bank for non-HUF documents without an explicit rate. Default
-    /// `MNB`.
-    pub exchange_rate_bank: String,
-    /// PDF template token.
-    pub template: Option<String>,
-    /// Whether szamlazz.hu should email documents to buyers.
-    pub send_email: Option<bool>,
-    /// Invoice number prefix (`számlaszám előtag`).
-    pub number_prefix: Option<String>,
-    /// Additional logo token configured on the account.
-    pub extra_logo: Option<String>,
-    /// Aggregator identifier for contracted integrations.
-    pub aggregator: Option<String>,
-    /// Guardian processing flag for contracted integrations.
-    pub guardian: Option<bool>,
-}
-
-impl Default for StaticDefaults {
-    /// [`Defaults::default`], field for field: one source of the default
-    /// values.
-    fn default() -> Self {
-        let Defaults {
-            e_invoice,
-            language,
-            currency,
-            exchange_rate_bank,
-            template,
-            send_email,
-            number_prefix,
-            extra_logo,
-            aggregator,
-            guardian,
-        } = Defaults::default();
-        Self {
-            e_invoice,
-            language,
-            currency,
-            exchange_rate_bank,
-            template,
-            send_email,
-            number_prefix,
-            extra_logo,
-            aggregator,
-            guardian,
-        }
-    }
-}
-
-impl From<StaticDefaults> for Defaults {
-    fn from(input: StaticDefaults) -> Self {
-        let StaticDefaults {
-            e_invoice,
-            language,
-            currency,
-            exchange_rate_bank,
-            template,
-            send_email,
-            number_prefix,
-            extra_logo,
-            aggregator,
-            guardian,
-        } = input;
-        Self {
-            e_invoice,
-            language,
-            currency,
-            exchange_rate_bank,
-            template,
-            send_email,
-            number_prefix,
-            extra_logo,
-            aggregator,
-            guardian,
-        }
-    }
-}
-
-/// The `[account.seller]` table: [`SellerConfig`] as configured, field for
-/// field, closed to unknown keys.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StaticSeller {
-    /// Bank name.
-    pub bank: Option<String>,
-    /// Bank account number.
-    pub bank_account: Option<String>,
-    /// Name of the signer shown on documents.
-    pub signer_name: Option<String>,
-    /// The notification email szamlazz.hu sends to buyers.
-    pub email: StaticSellerEmail,
-}
-
-impl From<StaticSeller> for SellerConfig {
-    fn from(input: StaticSeller) -> Self {
-        Self {
-            bank: input.bank,
-            bank_account: input.bank_account,
-            signer_name: input.signer_name,
-            email: input.email.into(),
-        }
-    }
-}
-
-/// The `[account.seller.email]` table: [`SellerEmailConfig`] as configured,
-/// field for field, closed to unknown keys.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StaticSellerEmail {
-    /// Reply-to address.
-    pub reply_to: Option<String>,
-    /// Subject.
-    pub subject: Option<String>,
-    /// Body; supports `BBCode`.
-    pub body: Option<String>,
-}
-
-impl From<StaticSellerEmail> for SellerEmailConfig {
-    fn from(input: StaticSellerEmail) -> Self {
-        Self {
-            reply_to: input.reply_to,
-            subject: input.subject,
-            body: input.body,
-        }
-    }
+    pub seller: SellerConfig,
 }
 
 /// Where an account sits in the configuration; names the account in a
@@ -491,8 +353,8 @@ impl Entry {
         };
         let mut account = Account::new(id.clone(), CredentialRef::from(id.as_str()));
         account.endpoint = endpoint;
-        account.defaults = defaults.into();
-        account.seller = seller.into();
+        account.defaults = defaults;
+        account.seller = seller;
         Ok(Self {
             account,
             credentials: Credentials::agent_key(agent_key.expose()),
@@ -655,9 +517,8 @@ mod tests {
     /// does not know (the top level, an account table, its `defaults`,
     /// `seller` and `seller.email` sub-tables, in either shape) is a parse
     /// error naming the key and what is expected there, never a setting left
-    /// at its default. The journaled types the accounts are built into stay
-    /// permissive (replay); the closed input types are what a file is read
-    /// through.
+    /// at its default. The sub-tables are the account's own value types,
+    /// closed themselves.
     #[test]
     fn every_level_of_the_configuration_refuses_an_unknown_key() {
         let cases: [(serde_json::Value, &str, &str); 7] = [
@@ -712,52 +573,35 @@ mod tests {
         }
     }
 
-    /// The closed input types mirror the journaled value types field for
-    /// field: every field of `Defaults`, `SellerConfig` and
-    /// `SellerEmailConfig` is configurable, and nothing is configurable that
-    /// the account does not carry. Proven by the round trip: the journaled
-    /// sample, serialised, reads as the input type and converts back
-    /// unchanged; a field added to one side fails here until the other has
-    /// it.
+    /// The `defaults` and `seller` tables are read as the account's value
+    /// types directly: a partial table takes the type's own defaults for what
+    /// it leaves out, and an empty one is exactly `Default::default()`.
     #[test]
-    fn the_input_types_mirror_the_journaled_value_types_field_for_field() {
-        let defaults = Defaults {
-            e_invoice: true,
-            language: "en".to_owned(),
-            currency: "EUR".to_owned(),
-            exchange_rate_bank: "ECB".to_owned(),
-            template: Some("SzlaMost".to_owned()),
-            send_email: Some(false),
-            number_prefix: Some("ACME".to_owned()),
-            extra_logo: Some("logo.png".to_owned()),
-            aggregator: Some("aggregator".to_owned()),
-            guardian: Some(true),
-        };
-        let input: StaticDefaults =
-            serde_json::from_value(serde_json::to_value(&defaults).expect("json"))
-                .expect("every journaled field is an input field");
-        assert_eq!(Defaults::from(input), defaults);
+    fn a_partial_defaults_table_takes_the_types_own_defaults() {
+        let defaults: Defaults =
+            serde_json::from_value(json!({"currency": "EUR", "guardian": true})).expect("defaults");
         assert_eq!(
-            Defaults::from(StaticDefaults::default()),
+            defaults,
+            Defaults {
+                currency: "EUR".to_owned(),
+                guardian: Some(true),
+                ..Defaults::default()
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<Defaults>(json!({})).expect("defaults"),
             Defaults::default()
         );
 
-        let seller = SellerConfig {
-            bank: Some("Bank".to_owned()),
-            bank_account: Some("1234".to_owned()),
-            signer_name: Some("Signer".to_owned()),
-            email: SellerEmailConfig {
-                reply_to: Some("r@e.hu".to_owned()),
-                subject: Some("S".to_owned()),
-                body: Some("B".to_owned()),
-            },
-        };
-        let input: StaticSeller =
-            serde_json::from_value(serde_json::to_value(&seller).expect("json"))
-                .expect("every journaled field is an input field");
-        assert_eq!(SellerConfig::from(input), seller);
+        let seller: SellerConfig =
+            serde_json::from_value(json!({"bank": "Bank", "email": {"subject": "S"}}))
+                .expect("seller");
+        assert_eq!(seller.bank.as_deref(), Some("Bank"));
+        assert_eq!(seller.bank_account, None);
+        assert_eq!(seller.email.subject.as_deref(), Some("S"));
+        assert_eq!(seller.email.reply_to, None);
         assert_eq!(
-            SellerConfig::from(StaticSeller::default()),
+            serde_json::from_value::<SellerConfig>(json!({})).expect("seller"),
             SellerConfig::default()
         );
     }
