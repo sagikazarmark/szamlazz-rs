@@ -13,8 +13,6 @@ use restate_sdk::context::{ContextSideEffects, RunFuture as _, RunRetryPolicy};
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use szamlazz_agent::Date;
 use tracing::Instrument as _;
 
@@ -30,6 +28,72 @@ use crate::service::Deployment;
 use crate::service::prologue::{self, Execution};
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub(super) use self::journaled::Journaled;
+#[cfg(test)]
+pub(super) use self::journaled::journaled_types;
+
+/// The [`Journaled`] marker, its seal and the one list of its implementors.
+///
+/// Not a compatibility contract (ADR 0009: a journal entry is never decoded
+/// by a later release). The list exists for one invariant: every type the
+/// services can journal is one `service::journal` scans for the agent key and
+/// the document body, since an entry is shown in the Restate UI for the
+/// retention period. A type becomes journalable by being added here and in no
+/// other way, and the same list is what the scan's registry is checked
+/// against, so a type journaled without samples fails that test by name.
+mod journaled {
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    use crate::gateway::{
+        CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
+        SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
+        TaxpayerOutcome,
+    };
+    use crate::identity::Namespace;
+    use crate::service::prologue::Resolution;
+
+    /// A type the services journal as the result of a `ctx.run`: the bound
+    /// of the run helpers, so this list is exactly what the journal can hold.
+    pub(in crate::service) trait Journaled:
+        sealed::Sealed + Serialize + DeserializeOwned
+    {
+    }
+
+    mod sealed {
+        pub trait Sealed {}
+    }
+
+    macro_rules! journaled {
+        ($($ty:ty),+ $(,)?) => {
+            $(
+                impl sealed::Sealed for $ty {}
+                impl Journaled for $ty {}
+            )+
+
+            /// The implementors' names, as [`std::any::type_name`] writes them.
+            #[cfg(test)]
+            pub(in crate::service) fn journaled_types() -> Vec<&'static str> {
+                vec![$(::std::any::type_name::<$ty>()),+]
+            }
+        };
+    }
+
+    journaled!(
+        Namespace,
+        Resolution,
+        QueryOutcome,
+        LookupOutcome,
+        CreateOutcome,
+        StornoLookupOutcome,
+        GatewayStornoOutcome,
+        DeleteOutcome,
+        SetPaymentsOutcome,
+        ProbeOutcome,
+        TaxpayerOutcome,
+    );
+}
 
 pub(super) use crate::contract::Fault;
 
@@ -526,7 +590,7 @@ pub(in crate::service) trait RunCtx<'ctx>: Sync {
         f: F,
     ) -> BoxFuture<'ctx, Result<T, TerminalError>>
     where
-        T: Serialize + DeserializeOwned + Send + 'static,
+        T: Journaled + Send + 'static,
         F: FnOnce() -> Fut + Send + 'ctx,
         Fut: Future<Output = Result<T, HandlerError>> + Send + 'ctx;
 }
@@ -549,7 +613,7 @@ macro_rules! run_ctx {
                 f: F,
             ) -> BoxFuture<'ctx, Result<T, TerminalError>>
             where
-                T: Serialize + DeserializeOwned + Send + 'static,
+                T: Journaled + Send + 'static,
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, HandlerError>> + Send + 'ctx,
             {
@@ -668,7 +732,7 @@ where
     C: RunCtx<'ctx>,
     F: FnOnce() -> Fut + Send + 'ctx,
     Fut: Future<Output = T> + Send + 'ctx,
-    T: Serialize + DeserializeOwned + Send + 'static,
+    T: Journaled + Send + 'static,
 {
     let value = ctx
         .run(
@@ -700,7 +764,7 @@ where
     C: RunCtx<'ctx>,
     F: FnOnce() -> Fut + Send + 'ctx,
     Fut: Future<Output = Result<T, E>> + Send + 'ctx,
-    T: Serialize + DeserializeOwned + Send + 'static,
+    T: Journaled + Send + 'static,
     E: StdError + Send + Sync + 'static,
 {
     ctx.run(name.into(), policy, || async move { Ok(f().await?) })
@@ -727,7 +791,7 @@ where
     C: RunCtx<'ctx>,
     F: FnOnce() -> Fut + Send + 'ctx,
     Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-    T: Serialize + DeserializeOwned + Send + 'static,
+    T: Journaled + Send + 'static,
 {
     let name = name.into();
     run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)
@@ -754,7 +818,7 @@ where
     C: RunCtx<'ctx>,
     F: FnOnce() -> Fut + Send + 'ctx,
     Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
-    T: Serialize + DeserializeOwned + Send + 'static,
+    T: Journaled + Send + 'static,
 {
     let name = name.into();
     match run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f).await {

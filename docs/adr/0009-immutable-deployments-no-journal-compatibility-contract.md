@@ -38,11 +38,13 @@ of the handlers.
 ## Decision
 
 1. **A release is a new deployment.** The host registers each release under a URI of its own and keeps the
-   previous release running until Restate reports it drained. Nothing is ever re-registered in place with
-   `--force` outside local development. Draining is bounded by the longest a handler can run: the issue policy's
-   `max_duration` plus the read policy's, on the order of 40 minutes with the defaults, so two releases run side
-   by side for under an hour. (Restate's guidance to keep handlers short so that old deployments drain quickly
-   is already met: no handler sleeps or awaits an awakeable.)
+   previous release running until Restate reports it drained (`restate deployment describe <id> --extra` shows
+   no invocations). Nothing is ever re-registered in place with `--force` outside local development. The drain
+   has no fixed bound: the run policies bound one step's retries (`max_duration` is a threshold checked between
+   attempts), but same-key invocations queue serially behind the one holding the key, a crashed handler is
+   re-dispatched under its invocation retry policy, and a paused invocation waits for an operator; the report is
+   the check, not a clock. (Restate's guidance to keep handlers short so that old deployments drain quickly is
+   met as far as the worker can meet it: no handler sleeps or awaits an awakeable.)
 
 2. **The journal has no cross-version compatibility contract.** The additive-only rule, the per-variant
    fixtures, the compatibility test, the registry, the sealed `Journaled` trait and `journaled!` list, the
@@ -57,11 +59,13 @@ of the handlers.
      has nothing to do with replay: what the handlers never read (the buyer, the seller, the line items, the
      PDF) does not belong in an entry the Restate UI shows for the retention period, and the agent key must
      never be in one. The leak guard shrinks to that one assertion;
-   - the *Run-name pin* (`RUN_NAMES`, checked against `sys_journal` in the e2e) stays. Step names and their
-     order are what Restate's **pause and resume on a new deployment** relies on, the documented way to move a
-     stuck invocation onto fixed code, and the one path on which a journal written by one release is read by
-     another. That path is an operator's deliberate act on a named invocation, and the operator checks the
-     entries are compatible at that moment; the table is what makes the check answerable.
+   - the *Step-name table* (`RUN_NAMES`, checked against `sys_journal` in the e2e) stays. Restate's **pause and
+     resume on a new deployment** is the one path on which a journal written by one release is read by another,
+     and it needs three things of the new code: the same `ctx.run` sequence, result types that still decode, and
+     unchanged step inputs. The table is the **sequence half**, and the only half with a mechanism; the other two
+     are a review of the release's diff (this ADR permits reshaping the result types, so a resume across such a
+     release is refused, and the invocation killed for the caller to retry). That path is an operator's
+     deliberate act on a named invocation; the table is what makes one of its three questions answerable.
 
 ## Considered options
 

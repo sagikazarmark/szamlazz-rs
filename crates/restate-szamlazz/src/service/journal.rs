@@ -23,15 +23,18 @@
 //!
 //! The samples are built through the agent crate's parsers from wire XML
 //! and projected as the gateway projects them, since the agent's types are
-//! `#[non_exhaustive]`; one sample per variant, so a variant that gains a
-//! field is scanned.
+//! `#[non_exhaustive]`. Complete by mechanism, because the scan is a privacy
+//! invariant and not a convention: only a [`Journaled`] type can be a
+//! `ctx.run` result (the sealed marker, implemented through one list in
+//! `support`), [`every_journaled_type_is_sampled`] holds [`entries`] to that
+//! list, and each enum's samples are checked against its [`variants!`] list,
+//! an exhaustive `match`, so a new variant fails to compile until listed and
+//! fails the scan by name until sampled.
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use rust_decimal::dec;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::ops::query_pdf::InvoiceSelector;
@@ -59,32 +62,83 @@ use crate::identity::Namespace;
 use crate::test_support::open_gateway;
 
 use super::prologue::Resolution;
+use super::support::{Journaled, journaled_types};
 
 /// One serialised sample of a journaled type, labelled for messages.
 struct Entry {
+    type_name: &'static str,
     label: String,
     json: String,
 }
 
+/// The variants of a journaled enum: the name of a sample's variant, by an
+/// exhaustive `match`, and every variant's name, so [`entries_of`] can name a
+/// variant that has no sample.
+struct Variants<T> {
+    name_of: fn(&T) -> &'static str,
+    all: &'static [&'static str],
+}
+
+/// The [`Variants`] of an enum, one arm per variant. `name_of` is exhaustive,
+/// so a variant added to the enum fails to compile until it is listed here.
+macro_rules! variants {
+    ($ty:ident { $($variant:ident $( ( $($tuple:tt)* ) )? $( { $($fields:tt)* } )?),+ $(,)? }) => {
+        Variants::<$ty> {
+            name_of: |value| match value {
+                $($ty::$variant $( ( $($tuple)* ) )? $( { $($fields)* } )? => stringify!($variant),)+
+            },
+            all: &[$(stringify!($variant)),+],
+        }
+    };
+}
+
+/// The [`Variants`] of a type with one shape (a newtype, a struct).
+fn single<T>() -> Variants<T> {
+    Variants {
+        name_of: |_| "value",
+        all: &["value"],
+    }
+}
+
 /// Serialises `samples` of one journaled type, asserting each round-trips
-/// (decodes to a value that re-encodes identically).
-fn entries_of<T>(type_label: &str, samples: Vec<T>) -> Vec<Entry>
+/// (decodes to a value that re-encodes identically) and that every variant
+/// `variants` lists has a sample.
+fn entries_of<T>(samples: Vec<T>, variants: &Variants<T>) -> Vec<Entry>
 where
-    T: Serialize + DeserializeOwned + Debug,
+    T: Journaled + Debug,
 {
-    samples
+    let type_name = std::any::type_name::<T>();
+    let entries: Vec<Entry> = samples
         .into_iter()
-        .enumerate()
-        .map(|(index, sample)| {
-            let label = format!("{type_label}[{index}]");
+        .map(|sample| {
+            let label = format!("{type_name}::{}", (variants.name_of)(&sample));
             let json = serde_json::to_string_pretty(&sample).expect("journaled types serialise");
             let replayed: T =
                 serde_json::from_str(&json).unwrap_or_else(|error| panic!("{label}: {error}"));
             let again = serde_json::to_string_pretty(&replayed).expect("serialises again");
             assert_eq!(json, again, "{label}: does not round-trip: {sample:?}");
-            Entry { label, json }
+            Entry {
+                type_name,
+                label,
+                json,
+            }
         })
-        .collect()
+        .collect();
+    let unsampled: Vec<&str> = variants
+        .all
+        .iter()
+        .copied()
+        .filter(|name| {
+            !entries
+                .iter()
+                .any(|entry| entry.label.ends_with(&format!("::{name}")))
+        })
+        .collect();
+    assert!(
+        unsampled.is_empty(),
+        "{type_name}: no sample for variant(s) {unsampled:?}; every variant of a journaled type is scanned"
+    );
+    entries
 }
 
 /// A sample of every variant of every journaled type, serialised, each
@@ -95,9 +149,8 @@ where
 )]
 fn entries() -> Vec<Entry> {
     let mut all = Vec::new();
-    all.extend(entries_of("Namespace", vec![namespace()]));
+    all.extend(entries_of(vec![namespace()], &single()));
     all.extend(entries_of(
-        "Resolution",
         vec![
             Resolution::Account(Box::new(account())),
             Resolution::Unscoped,
@@ -105,19 +158,18 @@ fn entries() -> Vec<Entry> {
                 scope: "acme-events".to_owned(),
             },
         ],
+        &variants!(Resolution { Account(_), Unscoped, Unknown { .. } }),
     ));
     all.extend(entries_of(
-        "QueryOutcome",
         vec![
             QueryOutcome::Found(document("SZ-1", false)),
             QueryOutcome::NotFound,
             QueryOutcome::CredentialsRejected(CREDENTIALS.answer()),
             QueryOutcome::Api(API.answer()),
         ],
+        &variants!(QueryOutcome { Found(_), NotFound, CredentialsRejected(_), Api(_) }),
     ));
-    all.extend(entries_of(
-        "LookupOutcome",
-        vec![
+    all.extend(entries_of(vec![
             LookupOutcome::Absent,
             LookupOutcome::Live(document("SZ-1", false)),
             LookupOutcome::Reversed {
@@ -128,11 +180,8 @@ fn entries() -> Vec<Entry> {
             LookupOutcome::Foreign(document("SZ-2", false)),
             LookupOutcome::CredentialsRejected(CREDENTIALS.answer()),
             LookupOutcome::Api(API.answer()),
-        ],
-    ));
-    all.extend(entries_of(
-        "CreateOutcome",
-        vec![
+        ], &variants!(LookupOutcome { Absent, Live(_), Reversed { .. }, Collision(_), Foreign(_), CredentialsRejected(_), Api(_) })));
+    all.extend(entries_of(vec![
             CreateOutcome::Issued(issued_document()),
             CreateOutcome::Found(document("SZ-1", false)),
             CreateOutcome::Reversed(document("SZ-1", true)),
@@ -149,22 +198,16 @@ fn entries() -> Vec<Entry> {
             CreateOutcome::Unavailable {
                 message: DOWN.to_owned(),
             },
-        ],
-    ));
-    all.extend(entries_of(
-        "StornoLookupOutcome",
-        vec![
+        ], &variants!(CreateOutcome { Issued(_), Found(_), Reversed(_), LiveAgain(_), Reconciled(_), Collision(_), DuplicateOrderNumber { .. }, Rejected(_), CredentialsRejected(_), Api(_), Unavailable { .. } })));
+    all.extend(entries_of(vec![
             StornoLookupOutcome::Absent,
             StornoLookupOutcome::AlreadyReversed {
                 storno_number: "SS-1".to_owned(),
             },
             StornoLookupOutcome::CredentialsRejected(CREDENTIALS.answer()),
             StornoLookupOutcome::Api(API.answer()),
-        ],
-    ));
-    all.extend(entries_of(
-        "StornoOutcome",
-        vec![
+        ], &variants!(StornoLookupOutcome { Absent, AlreadyReversed { .. }, CredentialsRejected(_), Api(_) })));
+    all.extend(entries_of(vec![
             StornoOutcome::Reversed(storno_document()),
             StornoOutcome::AlreadyReversed {
                 storno_number: "SS-1".to_owned(),
@@ -179,21 +222,15 @@ fn entries() -> Vec<Entry> {
             StornoOutcome::Unavailable {
                 message: DOWN.to_owned(),
             },
-        ],
-    ));
-    all.extend(entries_of(
-        "DeleteOutcome",
-        vec![
+        ], &variants!(StornoOutcome { Reversed(_), AlreadyReversed { .. }, NotStornoable, Rejected(_), CredentialsRejected(_), Api(_), Unavailable { .. } })));
+    all.extend(entries_of(vec![
             DeleteOutcome::Deleted,
             DeleteOutcome::AlreadyGone,
             DeleteOutcome::Rejected(Rejection::from(REJECTED.answer())),
             DeleteOutcome::CredentialsRejected(CREDENTIALS.answer()),
             DeleteOutcome::Transport(TRANSPORT.to_owned()),
-        ],
-    ));
-    all.extend(entries_of(
-        "SetPaymentsOutcome",
-        vec![
+        ], &variants!(DeleteOutcome { Deleted, AlreadyGone, Rejected(_), CredentialsRejected(_), Transport(_) })));
+    all.extend(entries_of(vec![
             SetPaymentsOutcome::Done {
                 outstanding: Some(dec!(0)),
                 gross: Some(dec!(12700)),
@@ -204,22 +241,21 @@ fn entries() -> Vec<Entry> {
             ))),
             SetPaymentsOutcome::CredentialsRejected(CREDENTIALS.answer()),
             SetPaymentsOutcome::Transport(TRANSPORT.to_owned()),
-        ],
-    ));
+        ], &variants!(SetPaymentsOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Transport(_) })));
     all.extend(entries_of(
-        "ProbeOutcome",
         vec![
             ProbeOutcome::Accepted,
             ProbeOutcome::CredentialsRejected(CREDENTIALS.answer()),
         ],
+        &variants!(ProbeOutcome { Accepted, CredentialsRejected(_) }),
     ));
     all.extend(entries_of(
-        "TaxpayerOutcome",
         vec![
             TaxpayerOutcome::Found(taxpayer()),
             TaxpayerOutcome::CredentialsRejected(CREDENTIALS.answer()),
             TaxpayerOutcome::Api(NAV.answer()),
         ],
+        &variants!(TaxpayerOutcome { Found(_), CredentialsRejected(_), Api(_) }),
     ));
     all
 }
@@ -439,12 +475,26 @@ fn account() -> Account {
     account
 }
 
-/// Every sample of every journaled type decodes to a value that re-encodes
-/// identically ([`entries_of`] asserts it per sample).
+/// Every [`Journaled`] type (the `journaled!` list in `support`, the only way
+/// a type becomes a `ctx.run` result) has samples in [`entries`], and nothing
+/// else does; and every sample round-trips ([`entries_of`] asserts it per
+/// sample). With the per-enum [`variants!`] check inside `entries_of`, this
+/// is what makes "every entry is scanned" a mechanism and not a convention.
 #[test]
-fn every_journaled_type_round_trips() {
+fn every_journaled_type_is_sampled() {
     let entries = entries();
-    assert!(entries.len() > 40, "{} samples scanned", entries.len());
+    let sampled: BTreeSet<&str> = entries.iter().map(|entry| entry.type_name).collect();
+    let journaled: BTreeSet<&str> = journaled_types().into_iter().collect();
+    let unsampled: Vec<&&str> = journaled.difference(&sampled).collect();
+    assert!(
+        unsampled.is_empty(),
+        "journaled types with no samples in `entries()`: {unsampled:?}"
+    );
+    let stray: Vec<&&str> = sampled.difference(&journaled).collect();
+    assert!(
+        stray.is_empty(),
+        "sampled types that are not journaled: {stray:?}"
+    );
 }
 
 /// No journal entry carries the agent key. The key never leaves the

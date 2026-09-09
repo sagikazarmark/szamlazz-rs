@@ -234,8 +234,9 @@ Every `ctx.run` of both services, per handler path, in the order the handler jou
 step-name table**: `RUN_NAMES` in the e2e harness (`tests/e2e/harness/run_names.rs`), verified against a live
 `sys_journal` whenever the suite runs (§11; CI, on every pull request), and this table follows it: a step added,
 renamed or reordered in the code fails the check first, and the table is then brought to match, never the other way
-round. Under immutable deployments (ADR 0009) the table's diff between two releases is what says whether a stuck
-invocation can be *paused and resumed* on the newer one. The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
+round. Under immutable deployments (ADR 0009) the table is the sequence half of what a *pause and resume* of a
+stuck invocation onto a newer deployment needs; the result types decoding and the step inputs are the other two,
+reviewed by hand (§10, *Releases*). The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
 what an `unavailable` fault's message means by "the step". `{kind}` is the document kind the handler issues or reads:
 `proforma | invoice | prepayment | final`, and `corrective` on `correct_invoice`'s lookup and create; `{number}` is an
 invoice number, the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
@@ -828,8 +829,12 @@ own). What a host is responsible for, and what the library cannot do for it:
 - **Releases.** A release is a new Restate deployment (ADR 0009): registered under a URI of its own, with the
   previous release kept running until `restate deployment describe <id> --extra` reports it drained, then removed.
   Restate routes new invocations to the latest deployment and pins in-flight ones to theirs, so the worker carries no
-  journal compatibility logic. The drain is bounded by the issue policy's `max_duration` plus the read policy's
-  (about 40 minutes with the defaults). `restate deployments register --force` is for local development only.
+  journal compatibility logic. The drain has no fixed bound (same-key invocations queue, a crashed handler is
+  re-dispatched under its invocation retry policy, a paused one waits for an operator): the `describe` report is the
+  check. `restate deployments register --force` is for local development only. A stuck invocation may be paused and
+  resumed on a newer deployment when the release kept the `ctx.run` sequence (the step-name table), the journaled
+  result types and the step inputs; the first has a mechanism, the other two are a review of the release's diff, and
+  a release that reshaped a result type refuses the resume: kill, and the caller retries with a new key.
 - **Go-live.** After a deploy, `Szamlazz.Agent.check_account` under each configured scope (§4), then
   `Szamlazz.Agent.query` a document known to be the account's and read its `test` and seller block: the worker holds no
   account pin (ADR 0006, account-pin amendment), so the right key under the right scope is verified here and nowhere
@@ -1079,8 +1084,9 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   (the durable steps of every handler of both services, parametrized names, `verify-storno-{number}`,
   `taxpayer-{prefix}`, matched by their prefix), every handler seen is in the table, and every path in the table
   was walked in full by at least one invocation. The table is which entries a handler writes and in what order:
-  what Restate's pause-and-resume onto a new deployment replays (ADR 0009). A renamed, inserted, reordered or
-  dropped step fails here, and shows in the table's diff, rather than surprising that resume.
+  the sequence half of what Restate's pause-and-resume onto a new deployment replays (ADR 0009; the result types
+  and the inputs are the other half, reviewed). A renamed, inserted, reordered or dropped step fails here, and
+  shows in the table's diff, rather than surprising that resume.
   The harness (`tests/e2e/harness/`) calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, submits
   without waiting through `/restate/scope/{scope}/send/…`, returns the `x-restate-id` and a parsed fault body,
   reads `sys_journal` (`raw` hex-decoded to bytes, run results are bytes and render as integer arrays in

@@ -15,8 +15,9 @@ use restate_e2e_harness::{RunPath, RunPatterns};
 /// `ctx.run` names they journal. Deployments are immutable (ADR 0009), so an
 /// in-flight invocation never replays against a later release's code by
 /// itself; what does replay a journal on other code is Restate's *pause and
-/// resume on a new deployment*, by name and position, and this table's diff
-/// between two releases is what says whether that resume can work. A
+/// resume on a new deployment*, which needs the same run sequence, result
+/// types that decode and unchanged inputs: this table is the sequence part,
+/// and its diff between two releases is that part's answer. A
 /// `{number}` / `{prefix}` segment is a parameter ([`run_pattern`]); a
 /// handler with two rows has two paths. The check holds when every observed
 /// sequence of a handler is a prefix of one of its paths (a handler that

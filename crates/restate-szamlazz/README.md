@@ -710,9 +710,10 @@ key of the run appears in the hex-decoded `raw` of any journal entry nor in any 
 same scan finds the positive control's sentinel; and the **step-name table check**: `RUN_NAMES` in the harness
 lists, per handler of both services, the ordered `ctx.run` names of every path it journals, and the scenario
 asserts that every invocation's run sequence is a prefix of one of its handler's paths, that every handler seen is
-in the table and that every path was walked in full. The table is what makes Restate's *pause and resume on a new
-deployment* (moving a stuck invocation onto fixed code) answerable: a step renamed, inserted, reordered or dropped
-since the invocation's journal was written is what makes that resume fail, and the table's diff is where it shows.
+in the table and that every path was walked in full. Under immutable deployments the table serves one path,
+Restate's *pause and resume on a new deployment*: it is the **sequence half** of what that resume needs (the other
+two, the result types decoding and the inputs unchanged, are a review; *Deploying*), and a step renamed, inserted,
+reordered or dropped since the invocation's journal was written shows in its diff.
 
 The harness calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses
 fault bodies out of the ingress envelope (asserting on every fault that the body is
@@ -808,10 +809,19 @@ register http://worker-v2/`, a new Lambda version, a new `RestateDeployment` und
 re-register the same URI in place. Restate routes new invocations to the latest deployment and keeps every in-flight
 invocation, retries included, on the deployment it started on; the worker therefore has no journal compatibility
 logic and needs none. Keep the previous release running until `restate deployment describe <id> --extra` reports no
-invocations on it, then remove it. The drain is bounded by the longest a handler can run, the issue policy's
-`max_duration` plus the read policy's (about 40 minutes with the defaults), so two releases run side by side for
-under an hour. `restate deployments register --force` is for local development: it replaces the code an in-flight
-invocation will replay against, which is the one way to strand it.
+invocations on it, then remove it; that report, not a clock, is the drain. The run policies bound one step's retries
+(and `max_duration` is a threshold checked between attempts, not a hard cut), but same-key invocations queue behind
+the one holding the key, a crashed handler is re-dispatched under its invocation retry policy, and a paused invocation
+waits for an operator, so a deployment with a backlog can hold invocations for hours. `restate deployments register
+--force` is for local development: it replaces the code an in-flight invocation will replay against, which is the
+one way to strand it.
+
+A stuck invocation can be moved onto a newer deployment (`restate invocations pause` / `resume --deployment`); the
+newer code then replays the old journal, which needs **three** things to hold, none of which this crate checks
+mechanically: the `ctx.run` sequence (the *step-name table* below is the diff to read), the journaled result types
+still decoding (a release may reshape them; review the diff of `gateway`'s outcome enums and `Resolution`), and the
+steps' inputs unchanged. Review all three before a resume, or kill and let the caller retry with a new
+`Idempotency-Key`.
 
 ## License
 

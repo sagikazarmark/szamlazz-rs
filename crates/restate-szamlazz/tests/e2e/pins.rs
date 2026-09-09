@@ -168,8 +168,9 @@ pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
 /// are a prefix of one of its handler's paths, every handler seen is in the
 /// table, and every path was walked in full by at least one invocation, so a
 /// renamed, inserted, reordered or dropped step, on any handler of either
-/// service, fails here and shows in the table's diff (what a pause-and-resume
-/// onto a new deployment depends on; ADR 0009). The floor of the suite: a
+/// service, fails here and shows in the table's diff (the sequence half of
+/// what a pause-and-resume onto a new deployment depends on; ADR 0009). The
+/// floor of the suite: a
 /// scenario that is the only walker of a path stays, however plain its
 /// decision.
 pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {
@@ -222,9 +223,10 @@ pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {
     assert!(
         unexplained.is_empty(),
         "run sequences no path of their handler explains:\n  {}\n\n\
-         The table is the record of which steps a handler journals and in what order, what a \
-         pause-and-resume of a stuck invocation onto a new deployment replays (ADR 0009). Bring \
-         RUN_NAMES to match the code, and read the diff as the release's replay compatibility.",
+         The table is the record of which steps a handler journals and in what order: the sequence \
+         half of what a pause-and-resume of a stuck invocation onto a new deployment replays (ADR \
+         0009; the result types and the inputs are the other half, reviewed by hand). Bring \
+         RUN_NAMES to match the code; a changed row means such a resume across this release fails.",
         unexplained.join("\n  ")
     );
     let not_walked: Vec<String> = RUN_NAMES
