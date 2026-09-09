@@ -22,7 +22,7 @@ fn discovered_max_attempts<S: Discoverable>(handler: &str) -> u64 {
         .find(|h| h.name.as_str() == handler)
         .unwrap_or_else(|| panic!("no handler {handler}"))
         .retry_policy_max_attempts
-        .unwrap_or_else(|| panic!("{handler} pins no max_attempts"))
+        .unwrap_or_else(|| panic!("{handler} sets no max_attempts"))
 }
 
 /// **Run retries do not spend invocation attempts** (#87): a re-execution

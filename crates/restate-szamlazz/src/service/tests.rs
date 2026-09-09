@@ -26,8 +26,8 @@ const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as 
 /// one szamlazz.hu round trip (the four reads and `set_payments`' one send)
 /// in the discovery reports (milliseconds): `2m`, the 60 s client timeout
 /// plus the margin a stalling szamlazz.hu needs (#114). The writes whose step
-/// is three trips carry `4m` / `3m`. A literal, like the attributes it pins
-/// (the handler macro takes no constant).
+/// is three trips carry `4m` / `3m`. A literal, like the attributes it
+/// asserts (the handler macro takes no constant).
 const ONE_TRIP_TIMEOUT_MS: u64 = 120_000;
 
 /// The `Accounts` bundle of a test account at `endpoint` with `agent_key`,

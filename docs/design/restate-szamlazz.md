@@ -1102,7 +1102,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `Szamlazz.Agent.query`, `Szamlazz.Agent.query_taxpayer` and `Szamlazz.Agent.check_account` set
   `journal_retention = 1d` so their journals are inspectable. Kafka ingress is not exercised (§4). The suite is one
   integration-test binary, `tests/e2e/main.rs`, which holds the two tests and the order the scenarios run in (phase
-  1 as a `JoinSet`, phase 2 in sequence, the pins last); `harness/` is the szamlazz half of the harness, one module
+  1 as a `JoinSet`, phase 2 in sequence, the run-wide checks last); `harness/` is the szamlazz half of the harness, one module
   per concern (`mod.rs`, the `Harness` composing the server, the wiremock and the accounts, and the two server
   specs; `accounts`, the static resolver of phase 1 and the mutable resolver and store of phase 2; `szamlazz`: the
   document-centric stub helpers over the shared fixtures of `tests/common`; `ingress`, a reply with the
@@ -1118,7 +1118,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `e2e_smoke` proves its contract with a trivial service of its own and no consumer. Every other file is one
   handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`, `create_final`,
   `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`, `faults`,
-  `prologue`, `multi_account`, `pins`), each a `pub(crate) async fn` per scenario taking the harness. A new
+  `prologue`, `multi_account`, `invariants`), each a `pub(crate) async fn` per scenario taking the harness. A new
   scenario of a handler goes into that handler's file and is listed in `main.rs`: in phase 1 when it needs only
   the single-account deployment and order keys of its own, in phase 2 when it needs a scope or scripts the resolver
   or store. The suite runs in about 20 s on four cores (about 50 s before #134: 59 scenarios in sequence with a

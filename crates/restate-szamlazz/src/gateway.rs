@@ -15,12 +15,16 @@
 //! `Szamlazz.Order` calls these inside `ctx.run`; the `Szamlazz.Agent` Restate
 //! service is a thin facade over the same functions. Neither Restate service
 //! calls the other. Everything the services need to know about the account
-//! (its ownership-validation pins, its document defaults) is read through
-//! [`Gateway::account`].
+//! (its document defaults, its seller block) is read through
+//! [`Gateway::account`]; nothing of a found document is compared with the
+//! account (the worker holds no account pin; ADR 0006, account-pin
+//! amendment).
 //!
-//! Every query result is validated before it is called ours:
-//! external ids are not unique server-side and the order-number hint returns
-//! the most recently issued document of any kind.
+//! Every query result is validated before it is called ours, against the
+//! document's own identity (the order number and the `tipus` of the kind,
+//! [`FoundDocument::is_ours`]): external ids are not unique server-side and
+//! the order-number hint returns the most recently issued document of any
+//! kind.
 //!
 //! Tracing events carry external ids, kinds, numbers and codes, never buyer
 //! data.
@@ -257,8 +261,9 @@ pub struct Gateway {
 /// external id is queried and, for every kind but correctives, the order
 /// whose hint is taken.
 ///
-/// A found document is validated against the gateway's own [`Account`]; the
-/// request carries only what identifies the document.
+/// A found document is validated against `order` and `kind`
+/// ([`FoundDocument::is_ours`]); the request carries only what identifies
+/// the document.
 #[derive(Debug, Clone)]
 pub struct LookupRequest<'a> {
     /// The external id the document carries and is looked up by.
@@ -321,7 +326,8 @@ pub enum LookupOutcome {
 /// create unless a live document of ours is already there.
 ///
 /// Carries what identifies the document and the create to send. A found
-/// document is validated against the gateway's own [`Account`].
+/// document is validated against `order` and `kind`
+/// ([`FoundDocument::is_ours`]).
 #[derive(Debug, Clone)]
 pub struct CreateStepRequest<'a> {
     /// The external id the document carries and is looked up by.
@@ -1406,8 +1412,8 @@ impl Gateway {
     /// verdict (the registered taxpayer, or `valid: false`) is
     /// [`TaxpayerOutcome::Found`]; rejected credentials are
     /// [`TaxpayerOutcome::CredentialsRejected`]; any other code, szamlazz.hu's
-    /// or NAV's relayed one, is [`TaxpayerOutcome::Api`]. Finds no document,
-    /// so there are no account pins to check. Issues nothing.
+    /// or NAV's relayed one, is [`TaxpayerOutcome::Api`]. Finds no document.
+    /// Issues nothing.
     ///
     /// # Errors
     ///

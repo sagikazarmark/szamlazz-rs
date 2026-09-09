@@ -882,7 +882,7 @@ async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_
 /// the external id can give, against the number the lookup step saw reversed
 /// (`reversed`), and whether a create is sent (the create mock's `expect`).
 /// The decision is `settle_create`'s, table-tested in the gateway's unit
-/// tests; this pins that the step consults it before the send, and that each
+/// tests; this asserts that the step consults it before the send, and that each
 /// answer is read off the wire (code 7 and the credential code in the body
 /// alone, the document, a bare 500, `szlahu_down`) into the outcome it names.
 /// An *answer* that is neither 7 nor a credential code is settled data,

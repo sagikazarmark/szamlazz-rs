@@ -818,11 +818,11 @@ mod tests {
         assert_eq!(back, account);
     }
 
-    /// Additive-only: a journaled account written before a field existed
-    /// reads back with that field's default. `id` and `credential_ref` are the
-    /// only required fields.
+    /// `id` and `credential_ref` are the only required fields of an account:
+    /// a resolver that sets nothing else gets the production endpoint and
+    /// the default document defaults and seller block.
     #[test]
-    fn account_is_additive_only_with_the_production_endpoint_by_default() {
+    fn an_account_needs_only_its_id_and_credential_ref() {
         let account: Account =
             serde_json::from_value(json!({ "id": "acme", "credential_ref": "acme" }))
                 .expect("deserialize");
