@@ -315,7 +315,8 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
 /// glossary's *Idempotency-Key* entry asks the caller to do after **no
 /// answer**: keep the key, since a new one would queue a second invocation
 /// behind the lock, as the first race shows. The completed case (the stored
-/// completion replayed) is (ii); that this is not it is the hold's doing: the
+/// completion replayed) is `create_invoice`'s first scenario; that this is not
+/// it is the hold's doing: the
 /// first invocation is parked at its credential fetch while the retry is
 /// sent, the retry stays **unanswered** for as long as the hold is held (a
 /// replayed completion would answer at once) and adds **no row** to

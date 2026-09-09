@@ -113,6 +113,9 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
     );
 }
 
+/// The issue policy's half of the scenario above, on `E2E-11`: the
+/// exhaustion, the stored fault the same key replays, the next key's
+/// `already_issued`.
 #[allow(
     clippy::too_many_lines,
     reason = "the exhaustion, the stored fault, the next key"
@@ -230,6 +233,8 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     );
 }
 
+/// The read policy's re-execution, on `E2E-27`: one lost reply, `issued` in
+/// one invocation.
 async fn flaky_read_is_re_executed(h: &Harness) {
     let started = Instant::now();
     let watch = h.watch("E2E-27");
@@ -286,6 +291,8 @@ async fn flaky_read_is_re_executed(h: &Harness) {
     );
 }
 
+/// The read policy's exhaustion, on `E2E-28`: three unanswered executions,
+/// the structured `unavailable`, nothing sent.
 async fn exhausted_read_is_unavailable(h: &Harness) {
     let started = Instant::now();
     let watch = h.watch("E2E-28");

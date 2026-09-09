@@ -7,7 +7,16 @@
 //! shared by path with the integration harnesses (`tests/common/mod.rs`: the
 //! renderer, the response templates and the wiremock selector matchers; the
 //! gateway's wiremock tests and the e2e suite declare the same module), so a
-//! fact learned about szamlazz.hu's XML is edited in one place. What this
+//! fact learned about szamlazz.hu's XML is edited in one place. Until #134
+//! there were three renderers of one XML shape, and this module's docs argued
+//! for it: a `#[cfg(test)]` module is invisible to a `tests/` crate, and the
+//! alternative then considered (a `test-support` cargo feature enabled by a
+//! `[dev-dependencies]` self-reference) would have made a test fixture part
+//! of the crate's public feature set (docs.rs builds with `all-features`, and
+//! a public feature is semver surface). The `#[path]` include below sidesteps
+//! both: the file lives under `tests/`, where the integration binaries
+//! declare it as an ordinary module, and this `cfg(test)` module compiles the
+//! same source into the library's tests without any feature. What this
 //! module adds is the unit tests' seam: the rendered XML is parsed into the
 //! Számla Agent crate's [`InvoiceDocument`] ([`Doc::wire`]) and projected
 //! onto the worker's [`FoundDocument`] ([`Doc::parse`]) the way the gateway

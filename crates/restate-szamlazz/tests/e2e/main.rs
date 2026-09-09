@@ -93,6 +93,7 @@ mod prologue;
 mod storno;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use restate_szamlazz::contract::TerminalCode;
@@ -120,6 +121,16 @@ impl Concurrently {
         }
     }
 
+    /// Spawns `scenario` under `name`: the name is what a failure is reported
+    /// under, since a panicked task's `JoinError` carries only its id.
+    fn spawn(&mut self, name: &'static str, scenario: impl Future<Output = ()> + Send + 'static) {
+        let handle = self.set.spawn(async move {
+            scenario.await;
+            name
+        });
+        self.names.insert(handle.id(), name);
+    }
+
     /// Joins every scenario; panics naming each one that failed, with its
     /// panic message.
     async fn join_all(mut self) {
@@ -128,7 +139,11 @@ impl Concurrently {
             match joined {
                 Ok((_, name)) => eprintln!("[phase 1] {name}: pass"),
                 Err(error) => {
-                    let name = self.names.get(&error.id()).copied().unwrap_or("?");
+                    let name = self
+                        .names
+                        .get(&error.id())
+                        .copied()
+                        .unwrap_or("<a task this run did not spawn>");
                     eprintln!("[phase 1] {name}: FAIL");
                     failures.push(format!("{name}: {error}"));
                 }
@@ -143,17 +158,13 @@ impl Concurrently {
     }
 }
 
-/// Spawns each scenario of the list on the harness.
+/// Spawns each scenario of the list on the harness, under its own name.
 macro_rules! concurrently {
     ($h:expr; $($scenario:path),+ $(,)?) => {{
         let mut run = Concurrently::new();
         $(
             let h = Arc::clone(&$h);
-            let handle = run.set.spawn(async move {
-                $scenario(&h).await;
-                stringify!($scenario)
-            });
-            run.names.insert(handle.id(), stringify!($scenario));
+            run.spawn(stringify!($scenario), async move { $scenario(&h).await });
         )+
         run
     }};

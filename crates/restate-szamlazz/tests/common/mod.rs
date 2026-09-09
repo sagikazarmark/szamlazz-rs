@@ -20,7 +20,7 @@
 //! date of [`ORIGINAL_TELJ`], `eszamla` following the kind (`0` on a proforma,
 //! `2` otherwise; szamlazz.hu itself reports `1`, paper, for a default create
 //! and `3` for `eszamla=true` (#73); #156 moves the default to `1`), and the
-//! seller record [`SUPPLIER`].
+//! seller block's `id`, [`SUPPLIER`].
 
 #![allow(
     dead_code,
@@ -51,7 +51,7 @@ pub fn http_client() -> reqwest::Client {
 }
 
 /// The `szallito/id` the rendered documents carry unless a test says
-/// otherwise: the seller record's id as szamlazz.hu prints it in a query body
+/// otherwise: the `id` of the seller block as szamlazz.hu prints it in a query body
 /// (972720 on the test account). Wire realism only: the worker holds no
 /// account pin, and a test that renders another value asserts exactly that.
 pub const SUPPLIER: u64 = 972_720;
@@ -86,7 +86,7 @@ pub struct Doc<'a> {
     /// szamlazz.hu breaking its schema, a document that does not say (the
     /// agent crate reports it as `None`).
     pub test: Option<bool>,
-    /// `szallito/id`: the seller record's id in the `<szallito>` block.
+    /// `szallito/id`: the `id` of the seller block (`<szallito>`).
     /// Parsed, compared with nothing.
     pub supplier_id: u64,
     /// `<sztornozott>true</sztornozott>`: the document is reversed (as

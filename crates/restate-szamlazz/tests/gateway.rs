@@ -891,7 +891,9 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
 }
 
 /// A create step's outcome in one line, for the table above: the variant and
-/// what it names.
+/// what it names. The document-carrying variants are `#[non_exhaustive]`
+/// projections a test cannot build to compare with, so the tables compare
+/// this line.
 fn describe_create(outcome: &Result<CreateOutcome, Unconfirmed>) -> String {
     match outcome {
         Ok(CreateOutcome::Issued(issued)) => format!("Issued {}", issued.number),
@@ -2140,6 +2142,23 @@ async fn storno_rejections_are_typed() {
     }
 }
 
+/// A storno step's outcome in one line, for the table below: the twin of
+/// [`describe_create`].
+fn describe_storno(outcome: &Result<StornoOutcome, Unconfirmed>) -> String {
+    match outcome {
+        Ok(StornoOutcome::Reversed(storno)) => format!("Reversed {}", storno.number),
+        Ok(StornoOutcome::AlreadyReversed { storno_number }) => {
+            format!("AlreadyReversed {storno_number}")
+        }
+        Ok(StornoOutcome::Api(answer)) => format!("Api {}", answer.code),
+        Ok(StornoOutcome::Unavailable { message }) => format!("Unavailable {message}"),
+        Ok(StornoOutcome::CredentialsRejected(answer)) => {
+            format!("CredentialsRejected {}", answer.code)
+        }
+        other => format!("{other:?}"),
+    }
+}
+
 /// The storno step's twin of the create table: what its **leading query** of
 /// the storno external id decides, and whether a storno is sent. The decision
 /// is `settle_storno`'s, unit-tested; an answer that is neither 7 nor a
@@ -2203,19 +2222,7 @@ async fn the_storno_steps_leading_query_settles_or_proceeds() {
             .await;
 
         let outcome = h.gateway.storno(storno_request(&storno_id)).await;
-        let described = match &outcome {
-            Ok(StornoOutcome::Reversed(storno)) => format!("Reversed {}", storno.number),
-            Ok(StornoOutcome::AlreadyReversed { storno_number }) => {
-                format!("AlreadyReversed {storno_number}")
-            }
-            Ok(StornoOutcome::Api(answer)) => format!("Api {}", answer.code),
-            Ok(StornoOutcome::Unavailable { message }) => format!("Unavailable {message}"),
-            Ok(StornoOutcome::CredentialsRejected(answer)) => {
-                format!("CredentialsRejected {}", answer.code)
-            }
-            other => format!("{other:?}"),
-        };
-        assert_eq!(described, expected, "{label}: {outcome:?}");
+        assert_eq!(describe_storno(&outcome), expected, "{label}: {outcome:?}");
         assert_eq!(
             h.bodies().await.len(),
             1 + usize::try_from(sends).expect("0 or 1"),
