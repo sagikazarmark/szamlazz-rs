@@ -13,7 +13,9 @@ use serde_json::Value;
 use wiremock::ResponseTemplate;
 
 use crate::harness::accounts::AGENT_KEY;
-use crate::harness::szamlazz::{Doc, create_for, created, not_found, order_query};
+use crate::harness::szamlazz::{
+    Doc, create_for, created, holds_after_misses, not_found, order_query,
+};
 use crate::harness::{Harness, create_body};
 
 /// The first create of an order is `issued` through the full create path
@@ -37,7 +39,8 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         .await;
     // The lookup step and the create step's own leading query both miss;
     // the second call's lookup finds the document.
-    h.holds_after_misses(
+    holds_after_misses(
+        &h.mock,
         2,
         &Doc {
             external_id: Some("acct:E2E-1:invoice"),
@@ -71,7 +74,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
     // The prologue: the namespace pin and exactly one `account` entry, both
     // before the operation's first step; the journaled account carries its
     // id and never the agent key.
-    let journal = h.journal(reply.invocation_id()).await;
+    let journal = h.admin().journal(reply.invocation_id()).await;
     let runs: Vec<_> = journal
         .iter()
         .filter(|entry| entry.is_run())
@@ -116,7 +119,8 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
     assert_eq!(again.body["gross_total"], "1270");
     assert_eq!(again.body["outstanding"], "1270");
     assert_eq!(
-        h.runs(again.invocation_id())
+        h.admin()
+            .runs(again.invocation_id())
             .await
             .last()
             .map(String::as_str),
@@ -172,7 +176,8 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
     // The lookup step, the first execution's leading query and its re-query
     // miss; the second execution's leading query finds the document
     // reversed.
-    h.holds_after_misses(
+    holds_after_misses(
+        &h.mock,
         3,
         &Doc {
             external_id: Some("acct:E2E-6B:invoice"),
@@ -202,7 +207,7 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
     assert_eq!(response["storno_number"], Value::Null);
 
     // The create step was re-executed (one run retry) and journaled once.
-    let runs = h.runs(reply.invocation_id()).await;
+    let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "create-invoice").count(),
         1,

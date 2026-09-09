@@ -16,7 +16,7 @@ use wiremock::matchers::body_string_contains;
 
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{
-    Doc, agent_key_tag, create_for, create_with_key, created, external_id_query, not_found,
+    Doc, agent_key_tag, create_for, create_with_key, created, external_id_query, holds, not_found,
     number_query, order_query, original_telj_tag, storno_never_sent, storno_of,
     storno_of_number_repeating_telj,
 };
@@ -83,7 +83,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
     assert_eq!(reversed["storno_number"], "SS-4");
     assert_eq!(reversed["invoice_number"], "SZ-4");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -182,7 +182,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
     assert_eq!(reply.body["storno_number"], "SS-4D", "{}", reply.body);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -210,7 +210,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
     );
     assert!(stornos[0].contains(&original_telj_tag()));
     assert!(!stornos[0].contains("<keltDatum>"));
-    let runs = h.runs(reply.invocation_id()).await;
+    let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "storno-SZ-4E").count(),
         1,
@@ -252,14 +252,17 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
         .await;
     assert_eq!(issued.status, 200, "{}", issued.body);
     assert_eq!(issued.body["outcome"], "issued", "{}", issued.body);
-    h.purge(issued.invocation_id()).await;
+    h.admin().purge(issued.invocation_id()).await;
 
     // Storno: the invoice is verified by number and reversed.
     h.reset().await;
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-18:invoice"),
-        ..Doc::of("SZ-18", "SZ", "E2E-18")
-    })
+    holds(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-18:invoice"),
+            ..Doc::of("SZ-18", "SZ", "E2E-18")
+        },
+    )
     .await;
     external_id_query("acct:E2E-18:storno:SZ-18")
         .respond_with(not_found())
@@ -283,10 +286,10 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     assert_eq!(reversed.status, 200, "{}", reversed.body);
     assert_eq!(reversed.body["outcome"], "reversed", "{}", reversed.body);
     assert_eq!(reversed.body["storno_number"], "SS-18");
-    h.purge(reversed.invocation_id()).await;
+    h.admin().purge(reversed.invocation_id()).await;
     assert!(
-        h.journal(issued.invocation_id()).await.is_empty()
-            && h.journal(reversed.invocation_id()).await.is_empty(),
+        h.admin().journal(issued.invocation_id()).await.is_empty()
+            && h.admin().journal(reversed.invocation_id()).await.is_empty(),
         "Restate holds nothing of the order"
     );
 
@@ -338,10 +341,13 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     h.reset().await;
     h.absent("E2E-18", &["proforma", "prepayment", "final"])
         .await;
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-18:invoice"),
-        ..Doc::of("SZ-18B", "SZ", "E2E-18")
-    })
+    holds(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-18:invoice"),
+            ..Doc::of("SZ-18B", "SZ", "E2E-18")
+        },
+    )
     .await;
     let status = h.get_scoped("acme", "E2E-18").await;
     assert_eq!(status["invoice"]["number"], "SZ-18B", "{status}");

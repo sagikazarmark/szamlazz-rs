@@ -9,7 +9,9 @@ use rust_decimal::dec;
 use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
-use crate::harness::szamlazz::{Doc, create_for, created, number_query, order_query};
+use crate::harness::szamlazz::{
+    Doc, create_for, created, holds_after_misses, number_query, order_query,
+};
 use crate::harness::{Harness, document};
 
 /// The base is verified by number (it must carry this order's number); then
@@ -35,7 +37,8 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
         .await;
     // The corrective's id: absent for the lookup step and the create step's
     // leading query, then the issued corrective.
-    h.holds_after_misses(
+    holds_after_misses(
+        &h.mock,
         2,
         &Doc {
             external_id: Some("acct:E2E-C1:corrective:fix-1"),
@@ -73,7 +76,7 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
     assert_eq!(reply.body["kind"], "corrective");
     assert_eq!(reply.body["external_id"], "acct:E2E-C1:corrective:fix-1");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",

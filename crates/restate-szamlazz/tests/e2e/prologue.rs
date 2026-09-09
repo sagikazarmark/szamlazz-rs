@@ -78,7 +78,7 @@ pub(crate) async fn a_flaky_resolver_is_retried_by_the_resolve_policy(h: &Harnes
         "the resolver's own message is never echoed: {retries:?}"
     );
 
-    let runs = h.runs(reply.invocation_id()).await;
+    let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "account").count(),
         1,
@@ -112,7 +112,7 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
         .submit_scoped(SCOPE, "E2E-K", "delete_proforma", &json!({}))
         .await;
     hold.reached().await;
-    h.await_status(&stuck, &["running"]).await;
+    h.admin().await_status(&stuck, &["running"]).await;
 
     // The queued call: submitted while the lock is held, answered after the
     // kill.
@@ -120,7 +120,7 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
         .submit_scoped(SCOPE, "E2E-K", "delete_proforma", &json!({}))
         .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let waiting = h.invocation(&queued).await;
+    let waiting = h.admin().invocation(&queued).await;
     assert_ne!(
         waiting.status, "completed",
         "the queued call waits behind the lock: {waiting:?}"
@@ -130,9 +130,12 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
         "nothing read while the lock is held"
     );
 
-    h.kill(&stuck).await;
-    let killed = h.await_status(&stuck, &["completed", "killed"]).await;
-    let stuck_row = h.invocation(&stuck).await;
+    h.admin().kill(&stuck).await;
+    let killed = h
+        .admin()
+        .await_status(&stuck, &["completed", "killed"])
+        .await;
+    let stuck_row = h.admin().invocation(&stuck).await;
     assert!(
         stuck_row
             .completion_failure
@@ -141,7 +144,7 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
         "the kill is the completion ({killed}): {stuck_row:?}"
     );
     assert_eq!(
-        h.runs(&stuck).await,
+        h.admin().runs(&stuck).await,
         ["namespace", "account"],
         "the killed invocation journaled the prologue's two commands"
     );
@@ -150,16 +153,16 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     hold.release();
 
     let started = Instant::now();
-    h.await_status(&queued, &["completed"]).await;
+    h.admin().await_status(&queued, &["completed"]).await;
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(30),
         "the key was released by the kill, not by a timeout: {elapsed:?}"
     );
-    let done = h.invocation(&queued).await;
+    let done = h.admin().invocation(&queued).await;
     assert_eq!(done.completion_failure, None, "{done:?}");
     assert_eq!(
-        h.runs(&queued).await,
+        h.admin().runs(&queued).await,
         ["namespace", "account", "proforma-for-delete"],
         "the queued delete ran to its answer (absent)"
     );

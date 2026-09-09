@@ -7,7 +7,7 @@
 use rust_decimal::dec;
 use wiremock::matchers::body_string_contains;
 
-use crate::harness::szamlazz::{Doc, create_for, created};
+use crate::harness::szamlazz::{Doc, create_for, created, holds};
 use crate::harness::{Harness, create_body};
 
 /// A live prepayment invoice under `…:prepayment` is recorded by
@@ -16,10 +16,13 @@ use crate::harness::{Harness, create_body};
 /// foreign to the lookup step's hint although it is the newest live
 /// invoice-kind document under the order.
 pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) {
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-43:prepayment"),
-        ..Doc::of("ES-43", "ES", "E2E-43")
-    })
+    holds(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-43:prepayment"),
+            ..Doc::of("ES-43", "ES", "E2E-43")
+        },
+    )
     .await;
     h.absent("E2E-43", &["final"]).await;
     create_for("E2E-43")
@@ -49,7 +52,7 @@ pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) 
     assert_eq!(reply.body["invoice_number"], "VS-43");
     assert_eq!(reply.body["external_id"], "acct:E2E-43:final");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",

@@ -1,6 +1,6 @@
 //! The harness the scenarios drive: the Restate server (through the
 //! `restate-e2e-harness` crate), the wiremock standing in for szamlazz.hu,
-//! and the ingress, SQL and stub helpers ([`Harness`]).
+//! and the ingress under the worker's service names ([`Harness`]).
 //!
 //! What is szamlazz's stays here; what is Restate's is the crate's:
 //!
@@ -13,12 +13,12 @@
 //!   matchers of `tests/common`, and the document-centric mount helpers);
 //! - [`ingress`]: an ingress reply with the worker's [`Fault`] decoded out
 //!   of the crate's envelope check;
-//! - [`run_names`]: the run-name table ([`run_names::RUN_NAMES`]), the
-//!   *step-name table*, over the crate's matcher.
+//! - [`run_names`]: the *step-name table* ([`run_names::RUN_NAMES`], held as
+//!   the crate's [`Table`](restate_e2e_harness::Table)).
 //!
 //! The harness's own tests (the fetch hold and the resolution script, the
 //! stub helpers against wiremock alone) live beside what they test and need
-//! no server; the server gate's, the sampler's and the matcher's are the
+//! no server; the server gate's, the sampler's and the table check's are the
 //! crate's.
 //!
 //! [`Fault`]: restate_szamlazz::contract::Fault
@@ -28,27 +28,22 @@ pub(crate) mod ingress;
 pub(crate) mod run_names;
 pub(crate) mod szamlazz;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use jiff::civil::date;
 use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
 pub(crate) use restate_e2e_harness::gate::{Reuse, launcher_or_skip};
-use restate_e2e_harness::{Invocation, JournalEntry, Restate, ServerSpec, Target, Watch};
+use restate_e2e_harness::{Admin, Call, Restate, ServerSpec, Target, Watch};
 use restate_sdk::prelude::Endpoint;
 use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
-use wiremock::{MockServer, ResponseTemplate};
+use wiremock::MockServer;
 
 use crate::harness::accounts::{MutableAccounts, multi_account_services, services};
 use crate::harness::ingress::Reply;
-use crate::harness::szamlazz::{
-    Doc, Sends, create_lands_on_the_second_send, create_lands_slowly, external_id_query, holds,
-    holds_after_misses, loses_reply_once, not_found,
-};
+use crate::harness::szamlazz::{external_id_query, not_found};
 
 // ----- the servers ---------------------------------------------------------------
 
@@ -105,35 +100,42 @@ pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
 
 // ----- the harness -----------------------------------------------------------
 
-/// The Restate server, the wiremock standing in for szamlazz.hu, and the
-/// ingress, SQL and stub helpers the scenarios drive them through.
+/// The Restate server, the wiremock standing in for szamlazz.hu, and what the
+/// scenarios drive them through: the ingress under the worker's two service
+/// names ([`Harness::call`] and its scoped, agent, `get` and `send` forms), the
+/// admin API as it is ([`Harness::admin`]) plus the order-key naming over it
+/// ([`Harness::in_flight_on`], [`Harness::watch`]), the mock as it is
+/// (`mock`) plus what a scenario counts on it per order or per number.
 ///
 /// A scenario states what szamlazz.hu holds through the document-centric
-/// helpers (one call per document, the same body on every selector the
-/// document is reachable by, so the stubs cannot disagree), and through the
-/// raw selector builders where it is about a specific wire sequence:
+/// helpers of [`szamlazz`] on `h.mock` (one call per document, the same body
+/// on every selector the document is reachable by, so the stubs cannot
+/// disagree), and through the raw selector builders where it is about a
+/// specific wire sequence:
 ///
-/// - [`Harness::absent`]: code 7 on the external ids of `kinds` under `order`.
-/// - [`Harness::holds`]: `doc` on `number_query`, on `order_query` when it
+/// - [`Harness::absent`]: code 7 on the external ids of `kinds` under `order`
+///   (the one document helper on the harness, since it composes the external
+///   ids of the namespace).
+/// - [`szamlazz::holds`]: `doc` on `number_query`, on `order_query` when it
 ///   carries an order, on `external_id_query` when it states an external id.
 ///   When two held documents carry one order, the one held first answers the
 ///   order query (wiremock answers with the first mounted match): a scenario
 ///   whose order's newest document is not the one it holds keeps the raw
 ///   `order_query` builder.
-/// - [`Harness::holds_after_misses`]: the external-id selector alone, code 7
+/// - [`szamlazz::holds_after_misses`]: the external-id selector alone, code 7
 ///   for `misses` queries, then `doc`, the document appearing after a
 ///   hand-counted number of queries (the lookup step's, the create step's
 ///   leading query and re-query).
-/// - [`Harness::create_lands_slowly`]: the order's create is answered
+/// - [`szamlazz::create_lands_slowly`]: the order's create is answered
 ///   `created` after a delay, and `doc` holds its external id from the moment
 ///   the create request is received (code 7 before): the transition is the
 ///   create stub being matched, not a query count, and the delay is the
 ///   window a second caller or a cancellation arrives in while the first
 ///   send's reply is in flight, opened to the scenario by the returned
-///   [`Sends`]. (Its sibling `create_lands_but_reply_lost`, the 500 instead
-///   of the delayed answer, is the helper module's; no scenario needs it,
-///   the gateway's table covers the immediate re-query.)
-/// - [`Harness::create_lands_on_the_second_send`]: the first create answered
+///   [`szamlazz::Sends`]. (Its sibling `create_lands_but_reply_lost`, the 500
+///   instead of the delayed answer, is the helper module's; no scenario needs
+///   it, the gateway's table covers the immediate re-query.)
+/// - [`szamlazz::create_lands_on_the_second_send`]: the first create answered
 ///   without landing (`szlahu_down`, a 500), the second landing: what a
 ///   create step meets when it re-executes after an *Unconfirmed* send.
 /// - The raw builders (`number_query`, `order_query`, `external_id_query`,
@@ -214,6 +216,27 @@ impl Harness {
         }
     }
 
+    /// The Restate admin API of the server: SQL introspection, journals,
+    /// `sys_invocation` rows, kill / cancel / purge, `await_status`, the
+    /// registered handlers. A scenario reads and operates on invocations
+    /// through it directly; what the harness adds on top is the key → object
+    /// naming ([`Self::in_flight_on`], [`Self::await_in_flight_on`],
+    /// [`Self::watch`]).
+    pub(crate) fn admin(&self) -> &Admin {
+        self.restate.admin()
+    }
+
+    /// `Szamlazz.Order.{handler}` on `key`, unscoped, waited for; the
+    /// scenario scopes or sends it ([`Call::scoped`], [`Call::send`]).
+    fn order_call<'a>(key: &'a str, handler: &'a str) -> Call<'a> {
+        Call::object(SERVICES[0], key, handler)
+    }
+
+    /// `Szamlazz.Agent.{handler}`, unscoped, waited for.
+    fn agent_call(handler: &str) -> Call<'_> {
+        Call::service(SERVICES[1], handler)
+    }
+
     /// Calls `Szamlazz.Order.{handler}` on `key` with an `Idempotency-Key`,
     /// unscoped.
     pub(crate) async fn call(
@@ -224,7 +247,7 @@ impl Harness {
         idempotency: &str,
     ) -> Reply {
         self.invoke(
-            &format!("/restate/call/Szamlazz.Order/{key}/{handler}"),
+            &Self::order_call(key, handler),
             Some(body),
             Some(idempotency),
         )
@@ -242,7 +265,7 @@ impl Harness {
         idempotency: &str,
     ) -> Reply {
         self.invoke(
-            &format!("/restate/scope/{scope}/call/Szamlazz.Order/{key}/{handler}"),
+            &Self::order_call(key, handler).scoped(scope),
             Some(body),
             Some(idempotency),
         )
@@ -251,12 +274,8 @@ impl Harness {
 
     /// Calls `Szamlazz.Agent.{handler}` unscoped.
     pub(crate) async fn call_agent(&self, handler: &str, body: &Value) -> Reply {
-        self.invoke(
-            &format!("/restate/call/Szamlazz.Agent/{handler}"),
-            Some(body),
-            None,
-        )
-        .await
+        self.invoke(&Self::agent_call(handler), Some(body), None)
+            .await
     }
 
     /// Calls `Szamlazz.Agent.{handler}` under `scope`.
@@ -266,33 +285,29 @@ impl Harness {
         handler: &str,
         body: &Value,
     ) -> Reply {
-        self.invoke(
-            &format!("/restate/scope/{scope}/call/Szamlazz.Agent/{handler}"),
-            Some(body),
-            None,
-        )
-        .await
+        self.invoke(&Self::agent_call(handler).scoped(scope), Some(body), None)
+            .await
     }
 
     /// `Szamlazz.Agent.check_account`: no input, no idempotency key; unscoped
     /// or under `scope`.
     pub(crate) async fn check_account(&self, scope: Option<&str>) -> Reply {
-        let path = match scope {
-            Some(scope) => format!("/restate/scope/{scope}/call/Szamlazz.Agent/check_account"),
-            None => "/restate/call/Szamlazz.Agent/check_account".to_owned(),
-        };
-        self.invoke(&path, None, None).await
+        let mut call = Self::agent_call("check_account");
+        if let Some(scope) = scope {
+            call = call.scoped(scope);
+        }
+        self.invoke(&call, None, None).await
     }
 
-    /// `POST {ingress}{path}` through the crate's ingress, the reply with the
-    /// worker's fault decodable ([`Reply::fault`]).
+    /// `call` through the crate's ingress, the reply with the worker's fault
+    /// decodable ([`Reply::fault`]).
     pub(crate) async fn invoke(
         &self,
-        path: &str,
+        call: &Call<'_>,
         body: Option<&Value>,
         idempotency: Option<&str>,
     ) -> Reply {
-        Reply(self.restate.invoke(path, body, idempotency).await)
+        Reply(self.restate.invoke(call, body, idempotency).await)
     }
 
     pub(crate) async fn ok(
@@ -309,22 +324,13 @@ impl Harness {
 
     /// `Szamlazz.Order.get`: no input, no idempotency key.
     pub(crate) async fn get_reply(&self, key: &str) -> Reply {
-        self.invoke(
-            &format!("/restate/call/Szamlazz.Order/{key}/get"),
-            None,
-            None,
-        )
-        .await
+        self.invoke(&Self::order_call(key, "get"), None, None).await
     }
 
     /// `Szamlazz.Order.get` under `scope`.
     pub(crate) async fn get_scoped(&self, scope: &str, key: &str) -> Value {
         let reply = self
-            .invoke(
-                &format!("/restate/scope/{scope}/call/Szamlazz.Order/{key}/get"),
-                None,
-                None,
-            )
+            .invoke(&Self::order_call(key, "get").scoped(scope), None, None)
             .await;
         assert_eq!(
             reply.status, 200,
@@ -346,7 +352,7 @@ impl Harness {
     ) -> String {
         let reply = self
             .invoke(
-                &format!("/restate/scope/{scope}/send/Szamlazz.Order/{key}/{handler}"),
+                &Self::order_call(key, handler).scoped(scope).send(),
                 Some(body),
                 None,
             )
@@ -355,29 +361,13 @@ impl Harness {
         reply.invocation_id().to_owned()
     }
 
-    /// Kills an invocation (`PATCH /invocations/{id}/kill`): what an operator
-    /// does to one that will not finish, and what `on_max_attempts = kill`
-    /// does after the handler's attempts are spent.
-    pub(crate) async fn kill(&self, invocation_id: &str) {
-        self.restate.admin().kill(invocation_id).await;
-    }
-
-    /// Cancels an invocation (`PATCH /invocations/{id}/cancel`): the
-    /// cooperative stop. The server signals the running handler, whose next
-    /// awaited step ends with the SDK's 409; the handler answers as it sees
-    /// fit (a write step's 409 is `outcome_unknown`) and the invocation
-    /// completes with that answer. A kill ends it without one.
-    pub(crate) async fn cancel(&self, invocation_id: &str) {
-        self.restate.admin().cancel(invocation_id).await;
-    }
-
     /// The one invocation in flight on Virtual Object `key`: its id, from
     /// `sys_invocation`; panics on none or more than one. How a scenario
     /// names an invocation the ingress has not answered yet (`call` returns
     /// its id only with its answer): to cancel it, or to check that a retry
     /// attached to it.
     pub(crate) async fn in_flight_on(&self, key: &str) -> String {
-        self.restate.admin().in_flight_on(&order(key)).await
+        self.admin().in_flight_on(&order(key)).await
     }
 
     /// Waits until `sys_invocation` holds `count` invocations in flight on
@@ -385,42 +375,7 @@ impl Harness {
     /// server-side moment a call made while the key is held is queued behind
     /// it, which the ingress reports only with the call's answer. The ids.
     pub(crate) async fn await_in_flight_on(&self, key: &str, count: usize) -> Vec<String> {
-        self.restate
-            .admin()
-            .await_in_flight_on(&order(key), count)
-            .await
-    }
-
-    /// Waits until `sys_invocation` reports the invocation in one of
-    /// `statuses`; the status it reached.
-    pub(crate) async fn await_status(&self, invocation_id: &str, statuses: &[&str]) -> String {
-        self.restate
-            .admin()
-            .await_status(invocation_id, statuses)
-            .await
-    }
-
-    /// Runs a SQL query against the introspection API (`POST :9070/query`);
-    /// a scenario's read, so an exchange without rows is a failure of the
-    /// scenario (the sampler, [`Self::watch`], retries instead).
-    pub(crate) async fn sql(&self, query: &str) -> Vec<Value> {
-        self.restate.admin().sql_or_panic(query).await
-    }
-
-    /// The names of the `ctx.run` commands of an invocation, in journal
-    /// order: which durable steps ran.
-    pub(crate) async fn runs(&self, invocation_id: &str) -> Vec<String> {
-        self.restate.admin().runs(invocation_id).await
-    }
-
-    /// The journal of an invocation, in index order.
-    pub(crate) async fn journal(&self, invocation_id: &str) -> Vec<JournalEntry> {
-        self.restate.admin().journal(invocation_id).await
-    }
-
-    /// The `sys_invocation` row of an invocation.
-    pub(crate) async fn invocation(&self, invocation_id: &str) -> Invocation {
-        self.restate.admin().invocation(invocation_id).await
+        self.admin().await_in_flight_on(&order(key), count).await
     }
 
     /// Watches the invocations on Virtual Object `key` and records what
@@ -433,13 +388,7 @@ impl Harness {
     /// it observes the invocation completed, and `finish` ends one whose call
     /// was answered between two samples.
     pub(crate) fn watch(&self, key: &str) -> Watch {
-        Watch::start(self.restate.admin().clone(), &order(key))
-    }
-
-    /// Purges a completed invocation (`PATCH /invocations/{id}/purge`), so a
-    /// later call runs against an order Restate has no memory of.
-    pub(crate) async fn purge(&self, invocation_id: &str) {
-        self.restate.admin().purge(invocation_id).await;
+        Watch::start(self.admin().clone(), &order(key))
     }
 
     /// Verifies every mounted mock's `expect(n)` (wiremock checks them on
@@ -530,17 +479,6 @@ impl Harness {
             .collect()
     }
 
-    /// Every journal entry of every invocation the server still holds, with
-    /// `raw` hex-decoded, keyed by invocation id.
-    pub(crate) async fn all_journals(&self) -> BTreeMap<String, Vec<JournalEntry>> {
-        self.restate.admin().all_journals().await
-    }
-
-    /// Every `sys_invocation` row the server still holds.
-    pub(crate) async fn all_invocations(&self) -> Vec<(String, Invocation)> {
-        self.restate.admin().all_invocations().await
-    }
-
     /// Mounts the code-7 answers for the external ids of `kinds` under
     /// `order`.
     pub(crate) async fn absent(&self, order: &str, kinds: &[&str]) {
@@ -550,40 +488,5 @@ impl Harness {
                 .mount(&self.mock)
                 .await;
         }
-    }
-
-    /// szamlazz.hu holds `doc`: see [`holds`].
-    pub(crate) async fn holds(&self, doc: &Doc<'_>) {
-        holds(&self.mock, doc).await;
-    }
-
-    /// szamlazz.hu holds `doc` under its external id after `misses` code-7
-    /// answers: see [`holds_after_misses`].
-    pub(crate) async fn holds_after_misses(&self, misses: u64, doc: &Doc<'_>) {
-        holds_after_misses(&self.mock, misses, doc).await;
-    }
-
-    /// The next external-id query for `id` loses its reply once: see
-    /// [`loses_reply_once`]. Mount before the steady answers.
-    pub(crate) async fn loses_reply_once(&self, id: &str) {
-        loses_reply_once(&self.mock, id).await;
-    }
-
-    /// The create lands at once but its reply takes `delay`, and `doc` is the
-    /// holder of its external id from the request's receipt: see
-    /// [`create_lands_slowly`]. The [`Sends`] signals the receipt.
-    pub(crate) async fn create_lands_slowly(&self, doc: &Doc<'_>, delay: Duration) -> Sends {
-        create_lands_slowly(&self.mock, doc, delay).await
-    }
-
-    /// The first create is answered `first` without landing, the second lands
-    /// and `doc` is the holder from then on: see
-    /// [`create_lands_on_the_second_send`]. The [`Sends`] counts both.
-    pub(crate) async fn create_lands_on_the_second_send(
-        &self,
-        doc: &Doc<'_>,
-        first: ResponseTemplate,
-    ) -> Sends {
-        create_lands_on_the_second_send(&self.mock, doc, first).await
     }
 }

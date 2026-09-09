@@ -15,7 +15,7 @@ use wiremock::matchers::body_string_contains;
 use crate::harness::Harness;
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{
-    Doc, agent_key_tag, created, credit_of, credited, external_id_query, not_found,
+    Doc, agent_key_tag, created, credit_of, credited, external_id_query, holds, not_found,
     original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
@@ -29,7 +29,7 @@ use crate::harness::szamlazz::{
 /// `outstanding` distinct from `gross_total`.
 pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &Harness) {
     h.reset().await;
-    h.holds(&Doc::unmanaged("SZ-23", "SZ")).await;
+    holds(&h.mock, &Doc::unmanaged("SZ-23", "SZ")).await;
     external_id_query("acct:by-number:SZ-23:storno")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -58,7 +58,7 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
     assert_eq!(reply.body["storno_number"], "SS-23", "{}", reply.body);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -67,7 +67,7 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
             "storno-SZ-23"
         ]
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
     let stornos = h.storno_bodies_of("SZ-23").await;
     assert_eq!(stornos.len(), 1);
@@ -95,7 +95,7 @@ pub(crate) async fn agent_storno_and_set_payments_run_on_the_scoped_account(h: &
     assert_eq!(reply.body["outstanding"], "270", "{}", reply.body);
     assert_eq!(reply.body["gross_total"], "1270", "{}", reply.body);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account", "set-payments-SZ-50"],
         "one step, no query before it"
     );

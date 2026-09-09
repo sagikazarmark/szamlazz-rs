@@ -26,7 +26,7 @@
 //! process. Unix only, as `restate-server` itself is: the server's process
 //! group and the stop signals are.
 //! The Restate half of the harness (the gate, the spawned server, the
-//! deployment, the ingress, the admin API and the run-name matcher) is that
+//! deployment, the ingress, the admin API and the step-name table check) is that
 //! crate, tested there; the szamlazz half under [`harness`] has its own
 //! tests (the fetch hold and the resolution script, the stub helpers) beside
 //! what they test, needing only wiremock and running un-ignored.
@@ -298,10 +298,10 @@ async fn e2e_check_account_without_protocol_v7() {
         "one probe query, nothing else"
     );
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account", "probe"]
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert_eq!(invocation.handler, "check_account");
     // The hazard, in one row: the server keyed the invocation by the scope
@@ -323,7 +323,7 @@ async fn e2e_check_account_without_protocol_v7() {
     assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("unscoped"), "{fault:?}");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account"]
     );
     assert!(

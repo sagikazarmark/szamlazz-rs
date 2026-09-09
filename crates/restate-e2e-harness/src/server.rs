@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use crate::admin::Admin;
 use crate::gate::{FEATURES, ServerSpec};
-use crate::ingress::Reply;
+use crate::ingress::{Call, Reply};
 use crate::plain_http;
 
 /// How long [`Restate::ready`] waits for the admin API.
@@ -449,16 +449,17 @@ impl Restate {
         self.admin.drain().await;
     }
 
-    /// `POST {ingress}{path}`: `body` as JSON when given, `idempotency` as the
-    /// `Idempotency-Key` header when given. The reply, whatever its status:
-    /// the body parsed as JSON when it is, kept as a string otherwise.
+    /// `POST {ingress}{call.path()}`: `body` as JSON when given,
+    /// `idempotency` as the `Idempotency-Key` header when given. The reply,
+    /// whatever its status: the body parsed as JSON when it is, kept as a
+    /// string otherwise.
     pub async fn invoke(
         &self,
-        path: &str,
+        call: &Call<'_>,
         body: Option<&Value>,
         idempotency: Option<&str>,
     ) -> Reply {
-        let mut request = self.http.post(format!("{}{path}", self.ingress));
+        let mut request = self.http.post(format!("{}{}", self.ingress, call.path()));
         if let Some(idempotency) = idempotency {
             request = request.header("idempotency-key", idempotency);
         }

@@ -1,15 +1,14 @@
 //! The *step-name table*: the durable steps of every handler of both
-//! services as the `ctx.run` names they journal ([`RUN_NAMES`]), read
-//! through the harness crate's matcher (`restate_e2e_harness::run_names`: a
-//! journaled name as its pattern, [`run_pattern`], and the prefix rule,
-//! [`is_prefix_of_path`]). The check itself (over every invocation of the
-//! run) is the last scenario (`invariants`); the matcher's own tests are the
-//! crate's.
+//! services as the `ctx.run` names they journal ([`RUN_NAMES`]), held as
+//! the harness crate's [`Table`] ([`TABLE`]: a journaled name read as its
+//! pattern, the check of a whole run). The check itself (over every
+//! invocation the server holds and every handler its deployments offer) is
+//! the last scenario (`invariants`); the check's own tests, on scripted
+//! rows, are the crate's.
 
 use std::sync::LazyLock;
 
-pub(crate) use restate_e2e_harness::is_prefix_of_path;
-use restate_e2e_harness::{RunPath, RunPatterns};
+use restate_e2e_harness::{RunPath, Table};
 
 /// The durable steps of every handler of both services, in order, as the
 /// `ctx.run` names they journal. Deployments are immutable (ADR 0009), so an
@@ -18,11 +17,13 @@ use restate_e2e_harness::{RunPath, RunPatterns};
 /// resume on a new deployment*, which needs the same run sequence, result
 /// types that decode and unchanged inputs: this table is the sequence part,
 /// and its diff between two releases is that part's answer. A
-/// `{number}` / `{prefix}` segment is a parameter ([`run_pattern`]); a
-/// handler with two rows has two paths. The check holds when every observed
-/// sequence of a handler is a prefix of one of its paths (a handler that
-/// answers early journals the first steps only; see [`is_prefix_of_path`])
-/// and every path is observed in full at least once in the run. The
+/// `{number}` / `{prefix}` segment is a parameter ([`Table::pattern`]); a
+/// handler with two rows has two paths. The check ([`Table::check`]) holds
+/// when every observed sequence of a handler is a prefix of one of its paths
+/// (a handler that answers early journals the first steps only), every
+/// handler the deployments offer has a row (so a handler added with neither a
+/// row nor a scenario is not invisible) and every path is observed in full at
+/// least once in the run. The
 /// parameter of a parametrized name is matched by its prefix only: a number
 /// that itself began with a fixed stem (`storno-1`) would read as the longer
 /// pattern; none of the suite's do. The walk requirement sizes the suite:
@@ -192,14 +193,6 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
     ),
 ];
 
-/// The patterns of [`RUN_NAMES`], derived once from the table so the two
-/// cannot disagree.
-static PATTERNS: LazyLock<RunPatterns> = LazyLock::new(|| RunPatterns::of(RUN_NAMES));
-
-/// The [`RUN_NAMES`] pattern of a journaled run name: a parametrized name by
-/// its prefix, the longest first (`verify-storno-…` is
-/// `verify-storno-{number}`, never `verify-{number}`), any other name as it
-/// is.
-pub(crate) fn run_pattern(name: &str) -> String {
-    PATTERNS.pattern(name)
-}
+/// [`RUN_NAMES`] as the crate's [`Table`], built once: its patterns are
+/// derived from the rows, so the two cannot disagree.
+pub(crate) static TABLE: LazyLock<Table> = LazyLock::new(|| Table::new(RUN_NAMES));

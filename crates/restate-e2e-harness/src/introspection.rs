@@ -1,10 +1,52 @@
 //! Rows of the SQL introspection API: a `sys_journal` entry with its `raw`
 //! hex-decoded to bytes ([`JournalEntry`]), the result of a named run
-//! ([`run_result`]) and a `sys_invocation` row ([`Invocation`]). What a watch
-//! saw of an invocation's attempts while it ran is
+//! ([`run_result`]) and a `sys_invocation` row ([`Invocation`]); and a
+//! handler as the admin API lists it ([`Handler`], `GET /services`). What a
+//! watch saw of an invocation's attempts while it ran is
 //! [`Retries`](crate::admin::Retries).
 
 use serde_json::Value;
+
+/// A handler of a registered service, as the admin API lists it
+/// (`GET /services`, [`Admin::handlers`](crate::Admin::handlers)): what a
+/// deployment offers, whether or not the run invoked it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Handler {
+    /// The service (`target_service_name` of its invocations).
+    pub service: String,
+    /// The handler (`target_handler_name` of its invocations).
+    pub name: String,
+}
+
+impl Handler {
+    /// The handlers of one `GET /services` body: every `handlers[].name` of
+    /// every `services[]`.
+    #[must_use]
+    pub fn from_services(body: &Value) -> Vec<Self> {
+        let services = body["services"]
+            .as_array()
+            .unwrap_or_else(|| panic!("GET /services answers a `services` array: {body}"));
+        services
+            .iter()
+            .flat_map(|service| {
+                let name = service["name"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a service has a name: {service}"));
+                service["handlers"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("a service lists its handlers: {service}"))
+                    .iter()
+                    .map(move |handler| Self {
+                        service: name.to_owned(),
+                        name: handler["name"]
+                            .as_str()
+                            .unwrap_or_else(|| panic!("a handler has a name: {handler}"))
+                            .to_owned(),
+                    })
+            })
+            .collect()
+    }
+}
 
 /// A `sys_journal` row with `raw` decoded from hex to bytes: run results are
 /// stored as bytes and render as integer arrays in `entry_json`, so a text
@@ -154,5 +196,39 @@ mod tests {
         assert!(run_result(&journal, "other").is_none());
         assert_eq!(decode_hex("abc"), None, "an odd length is not hex");
         assert_eq!(decode_hex("zz"), None);
+    }
+
+    /// `GET /services` lists every registered service with its handlers; the
+    /// flattened pairs are what a table of run names is compared with.
+    #[test]
+    fn the_handlers_of_a_services_listing_are_flattened() {
+        let body = json!({
+            "services": [
+                {
+                    "name": "Inv.Stock",
+                    "ty": "VirtualObject",
+                    "handlers": [
+                        { "name": "reserve", "ty": "Exclusive" },
+                        { "name": "release", "ty": "Exclusive" },
+                    ],
+                },
+                { "name": "Inv.Api", "ty": "Service", "handlers": [{ "name": "probe" }] },
+                { "name": "Inv.Idle", "ty": "Service", "handlers": [] },
+            ]
+        });
+        let handlers = Handler::from_services(&body);
+        let pairs: Vec<(&str, &str)> = handlers
+            .iter()
+            .map(|handler| (handler.service.as_str(), handler.name.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("Inv.Stock", "reserve"),
+                ("Inv.Stock", "release"),
+                ("Inv.Api", "probe"),
+            ]
+        );
+        assert_eq!(Handler::from_services(&json!({ "services": [] })), []);
     }
 }

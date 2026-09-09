@@ -11,7 +11,9 @@ use rust_decimal::dec;
 use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
-use crate::harness::szamlazz::{Doc, create_for, created, number_query, order_query};
+use crate::harness::szamlazz::{
+    Doc, create_for, created, holds_after_misses, number_query, order_query,
+};
 use crate::harness::{Harness, document};
 
 /// A proforma, then the invoice naming it (`options.proforma: {number}`),
@@ -40,7 +42,8 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     // The invoice id: absent for the proforma create's exclusivity read, the
     // invoice's lookup and its leading query; then the issued invoice,
     // carrying the proforma it consumed, for `get`.
-    h.holds_after_misses(
+    holds_after_misses(
+        &h.mock,
         3,
         &Doc {
             external_id: Some("acct:E2E-7:invoice"),
@@ -85,7 +88,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     assert_eq!(proforma["invoice_number"], "D-7");
     assert_eq!(proforma["external_id"], "acct:E2E-7:proforma");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -114,7 +117,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     assert_eq!(invoice["invoice_number"], "SZ-7");
     assert_eq!(invoice["warnings"], json!([]));
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -146,7 +149,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     assert_eq!(status["prepayment"], serde_json::Value::Null);
     assert_eq!(status["final"], serde_json::Value::Null);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",

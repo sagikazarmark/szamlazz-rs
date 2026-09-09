@@ -18,7 +18,8 @@ use wiremock::ResponseTemplate;
 use restate_szamlazz::contract::{IssuedKind, TerminalCode};
 
 use crate::harness::szamlazz::{
-    Doc, create_for, create_never_sent, created, external_id_query, not_found, order_query,
+    Doc, create_for, create_lands_slowly, create_never_sent, created, external_id_query,
+    holds_after_misses, loses_reply_once, not_found, order_query,
 };
 use crate::harness::{Harness, create_body};
 
@@ -61,7 +62,8 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    h.holds_after_misses(
+    holds_after_misses(
+        &h.mock,
         5,
         &Doc {
             external_id: Some("acct:E2E-11:invoice"),
@@ -82,7 +84,7 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    h.loses_reply_once("acct:E2E-27:invoice").await;
+    loses_reply_once(&h.mock, "acct:E2E-27:invoice").await;
     external_id_query("acct:E2E-27:invoice")
         .respond_with(not_found())
         .mount(&h.mock)
@@ -164,7 +166,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
             .all(|failure| failure.contains("transport failure")),
         "the last failure is the Unconfirmed message: {retries:?}"
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.handler, "create_invoice");
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert!(
@@ -174,7 +176,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
             .is_some_and(|failure| failure.contains("outcome_unknown")),
         "{invocation:?}"
     );
-    let runs = h.runs(reply.invocation_id()).await;
+    let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "create-invoice").count(),
         1,
@@ -219,7 +221,8 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     assert_eq!(reply.body["invoice_number"], "SZ-11");
     assert_eq!(reply.body["external_id"], "acct:E2E-11:invoice");
     assert_eq!(
-        h.runs(reply.invocation_id())
+        h.admin()
+            .runs(reply.invocation_id())
             .await
             .last()
             .map(String::as_str),
@@ -268,11 +271,11 @@ async fn flaky_read_is_re_executed(h: &Harness) {
             .all(|failure| failure.contains("transport failure")),
         "the last failure is the Unanswered message: {retries:?}"
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert_eq!(invocation.completion_failure, None, "{invocation:?}");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -328,7 +331,7 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
         ["lookup-invoice"],
         "the lookup step is the failing command: {retries:?}"
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert!(
         invocation
@@ -338,7 +341,7 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
         "{invocation:?}"
     );
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -379,15 +382,15 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    let mut sends = h
-        .create_lands_slowly(
-            &Doc {
-                external_id: Some("acct:E2E-L4:invoice"),
-                ..Doc::of("SZ-L4", "SZ", "E2E-L4")
-            },
-            Duration::from_secs(4),
-        )
-        .await;
+    let mut sends = create_lands_slowly(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-L4:invoice"),
+            ..Doc::of("SZ-L4", "SZ", "E2E-L4")
+        },
+        Duration::from_secs(4),
+    )
+    .await;
 
     let body = create_body(dec!(1000), false);
     let started = Instant::now();
@@ -398,7 +401,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
             // reply is four seconds away.
             sends.received(1).await;
             let in_flight = h.in_flight_on("E2E-L4").await;
-            h.cancel(&in_flight).await;
+            h.admin().cancel(&in_flight).await;
             in_flight
         },
     );
@@ -426,7 +429,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         elapsed < Duration::from_secs(60),
         "answered when the send's reply came, not after a handler retry: {elapsed:?}"
     );
-    let invocation = h.invocation(&cancelled).await;
+    let invocation = h.admin().invocation(&cancelled).await;
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert!(
         invocation
@@ -436,7 +439,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         "the completion is the fault, not a kill: {invocation:?}"
     );
     assert_eq!(
-        h.runs(&cancelled).await,
+        h.admin().runs(&cancelled).await,
         [
             "namespace",
             "account",
@@ -466,7 +469,8 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     assert_eq!(next.body["outcome"], "already_issued", "{}", next.body);
     assert_eq!(next.body["invoice_number"], "SZ-L4");
     assert_eq!(
-        h.runs(next.invocation_id())
+        h.admin()
+            .runs(next.invocation_id())
             .await
             .last()
             .map(String::as_str),

@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::introspection::{Invocation, JournalEntry};
+use crate::introspection::{Handler, Invocation, JournalEntry};
 
 /// How long the polls ([`Admin::await_status`], [`Admin::purge`],
 /// [`Admin::await_in_flight_on`]) wait.
@@ -467,6 +467,25 @@ impl Admin {
                 )
             })
             .collect()
+    }
+
+    /// Every handler of every registered service (`GET /services`, the latest
+    /// revision of each): what the deployments offer, whether or not the run
+    /// invoked it. What a [`Table`](crate::run_names::Table) is checked
+    /// against, so a handler with neither a row nor an invocation is not
+    /// invisible.
+    pub async fn handlers(&self) -> Vec<Handler> {
+        let response = self
+            .http
+            .get(format!("{}/services", self.base))
+            .header("accept", "application/json")
+            .send()
+            .await
+            .expect("GET /services");
+        let status = response.status().as_u16();
+        let body: Value = response.json().await.expect("the /services body is JSON");
+        assert_eq!(status, 200, "GET /services failed ({status}): {body}");
+        Handler::from_services(&body)
     }
 }
 

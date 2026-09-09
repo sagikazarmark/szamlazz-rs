@@ -709,8 +709,9 @@ entry winning and staying byte-identical.
 key of the run appears in the hex-decoded `raw` of any journal entry nor in any `completion_failure`, while the
 same scan finds the positive control's sentinel; and the **step-name table check**: `RUN_NAMES` in the harness
 lists, per handler of both services, the ordered `ctx.run` names of every path it journals, and the scenario
-asserts that every invocation's run sequence is a prefix of one of its handler's paths, that every handler seen is
-in the table and that every path was walked in full. Under immutable deployments the table serves one path,
+asserts (through the crate's `Table::check`) that every invocation's run sequence is a prefix of one of its
+handler's paths, that every handler the deployments offer (`GET /services`) or an invocation names is in the table
+and that every path was walked in full. Under immutable deployments the table serves one path,
 Restate's *pause and resume on a new deployment*: it is the **sequence half** of what that resume needs (the other
 two, the result types decoding and the inputs unchanged, are a review; *Deploying*), and a step renamed, inserted,
 reordered or dropped since the invocation's journal was written shows in its diff.
@@ -732,19 +733,19 @@ sequence). `tests/e2e/harness/` is the szamlazz half of the harness, one module 
   executions in sequence, or an invocation stands still where a scenario needs it);
 - `szamlazz`: the document-centric stub helpers over the shared fixtures of `tests/common`;
 - `ingress`: a reply with the contract's `Fault` decoded out of the envelope;
-- `run_names`: the `RUN_NAMES` table.
+- `run_names`: the `RUN_NAMES` table, held as the crate's `Table`.
 
 The Restate half (the server gate and the launcher, the spawned server, the in-process deployment, `set_public`
 and `drain`, the ingress reply and the envelope check, the admin API's SQL, journals, `sys_invocation` rows, kill /
-cancel / purge and the in-flight sampler, the run-name matcher) is the workspace's
+cancel / purge and the in-flight sampler, the step-name table check) is the workspace's
 [`restate-e2e-harness`](../restate-e2e-harness) crate, a path dev-dependency that knows nothing of szamlazz and
 never depends on this crate (a dependency back would be a dev-dependency cycle Cargo resolves by compiling this
 crate twice, and every type crossing the boundary would then be two types). The harness's own tests (the fetch
 hold and the resolution script, the stub helpers against wiremock alone) sit beside what they test and run
-un-ignored; the server gate's, the sampler's and the matcher's are the crate's. Every other file is one handler
+un-ignored; the server gate's, the sampler's and the table check's are the crate's. Every other file is one handler
 family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`, `create_final`, `correct_invoice`,
 `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`, `faults`, `prologue`,
-`multi_account`, `pins`), each scenario a `pub(crate) async fn` taking the harness; a new scenario goes into its
+`multi_account`, `invariants`), each scenario a `pub(crate) async fn` taking the harness; a new scenario goes into its
 handler's file and is listed in `main.rs`, in phase 1 when it needs only the single-account deployment and its own
 order keys, in phase 2 when it needs a scope or scripts the resolver or store. The suite runs in about 20 s
 (from about 50 s before the prune and the concurrent phase 1; #134).

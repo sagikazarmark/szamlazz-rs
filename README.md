@@ -32,7 +32,7 @@ This virtual workspace contains six packages intended for publication and indepe
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
 | [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless: szamlazz.hu is the source of truth, reached through deterministic external ids. |
-| [`restate-e2e-harness`](crates/restate-e2e-harness) | End-to-end test harness for `restate_sdk` endpoints against a real `restate-server` (server gate and launcher, in-process deployment, ingress, admin API, journal introspection, run-name matcher); nothing of szamlazz in it, versioned on its own, unix only. |
+| [`restate-e2e-harness`](crates/restate-e2e-harness) | End-to-end test harness for `restate_sdk` endpoints against a real `restate-server` (server gate and launcher, in-process deployment, ingress, admin API, journal introspection, the step-name table check); nothing of szamlazz in it, versioned on its own, unix only. |
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 

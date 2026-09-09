@@ -13,17 +13,19 @@
 //!   test fails, stopped on drop and on SIGINT/SIGTERM), an endpoint served
 //!   in-process and registered ([`Restate::deploy`]), `set_public`, `drain`,
 //!   and the ingress ([`Restate::invoke`]).
-//! - [`ingress`]: a [`Reply`] and the fault inside Restate's error envelope
-//!   ([`Reply::fault`], into the caller's own type).
+//! - [`ingress`]: a [`Call`] (Restate's URL grammar, written once: a
+//!   service or an object, under a scope, called or sent), its [`Reply`] and
+//!   the fault inside Restate's error envelope ([`Reply::fault`], into the
+//!   caller's own type).
 //! - [`admin`]: the admin API ([`Admin`]): SQL introspection, journals and
 //!   `sys_invocation` rows, kill / cancel / purge, and the sampler
 //!   ([`Watch`]) over an invocation's run retries while it is in flight.
 //! - [`introspection`]: `sys_journal` and `sys_invocation` rows
 //!   ([`JournalEntry`], [`Invocation`], [`run_result`]).
-//! - [`run_names`]: the run-name matcher ([`RunPath`], [`RunPatterns`],
-//!   [`is_prefix_of_path`]) a consumer holds its handlers' `ctx.run` names
-//!   to: the sequence an in-place redeploy replays and a pause-and-resume
-//!   onto new code needs.
+//! - [`run_names`]: the step-name table ([`Table`] over [`RunPath`] rows,
+//!   [`Table::check`] over a whole run) a consumer holds its handlers'
+//!   `ctx.run` names to: the sequence an in-place redeploy replays and a
+//!   pause-and-resume onto new code needs.
 //!
 //! The crate knows nothing of any particular endpoint: what it deploys is a
 //! `restate_sdk` [`Endpoint`](restate_sdk::prelude::Endpoint), and what it
@@ -57,7 +59,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use restate_e2e_harness::{Launcher, Reuse, ServerSpec, launcher_or_skip};
+//! use restate_e2e_harness::{Call, Launcher, Reuse, ServerSpec, launcher_or_skip};
 //! use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
 //! use restate_sdk::prelude::Endpoint;
 //!
@@ -71,7 +73,7 @@
 //! let restate = launcher.launch(&SERVER).await;
 //! let endpoint = Endpoint::builder() /* .bind(MyService) */ .build();
 //! restate.deploy(endpoint).await;
-//! let reply = restate.invoke("/restate/call/MyService/handler", None, None).await;
+//! let reply = restate.invoke(&Call::service("MyService", "handler"), None, None).await;
 //! assert_eq!(reply.status, 200, "{}", reply.body);
 //! let runs = restate.admin().runs(reply.invocation_id()).await;
 //! # }
@@ -104,19 +106,20 @@ pub mod server;
 pub use admin::{Admin, Retries, Target, Watch, sql_literal};
 #[cfg(unix)]
 pub use gate::{Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
-pub use ingress::Reply;
-pub use introspection::{Invocation, JournalEntry, run_result};
-pub use run_names::{RunPath, RunPatterns, is_prefix_of_path};
+pub use ingress::{Call, Mode, Reply};
+pub use introspection::{Handler, Invocation, JournalEntry, run_result};
+pub use run_names::{RunPath, RunPatterns, Table, Violations, Walked, is_prefix_of_path};
 #[cfg(unix)]
 pub use server::{Deployment, Restate};
 
-/// A [`reqwest::ClientBuilder`] for a harness's own traffic, all of it plain
-/// `http://` on the loopback (the Restate admin and ingress APIs, a raw post
-/// at a mock): **no root certificates**, so building it never parses the
-/// system CA store (about 28 ms of CPU per client through reqwest's platform
-/// verifier, and a failure on a host without a store). What the harness
-/// speaks to the server through; a consumer's own loopback clients are built
-/// from it too.
-pub fn plain_http() -> reqwest::ClientBuilder {
+/// A [`reqwest::ClientBuilder`] for the harness's own traffic, all of it
+/// plain `http://` on the loopback (the Restate admin and ingress APIs):
+/// **no root certificates**, so building it never parses the system CA store
+/// (about 28 ms of CPU per client through reqwest's platform verifier, and a
+/// failure on a host without a store). Crate-private: a consumer's own
+/// loopback clients (at its mocks, over its own `reqwest`) carry their own
+/// settings, and one adapter for a hypothetical caller was a seam nothing
+/// used.
+pub(crate) fn plain_http() -> reqwest::ClientBuilder {
     reqwest::Client::builder().tls_certs_only(std::iter::empty())
 }

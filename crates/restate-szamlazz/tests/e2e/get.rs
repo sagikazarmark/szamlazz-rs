@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::harness::Harness;
 use crate::harness::szamlazz::Doc;
+use crate::harness::szamlazz::{holds, loses_reply_once};
 
 /// The `max_attempts` of `handler`'s invocation retry policy as the service
 /// discovers it: what the deployment registered with the server, read from
@@ -41,14 +42,17 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
     // Each of the four reads loses its reply once: mounted before the steady
     // answers, which take over from the second query on.
     for kind in ["proforma", "invoice", "prepayment", "final"] {
-        h.loses_reply_once(&format!("acct:E2E-30:{kind}")).await;
+        loses_reply_once(&h.mock, &format!("acct:E2E-30:{kind}")).await;
     }
     h.absent("E2E-30", &["proforma", "prepayment", "final"])
         .await;
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-30:invoice"),
-        ..Doc::of("SZ-30", "SZ", "E2E-30")
-    })
+    holds(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-30:invoice"),
+            ..Doc::of("SZ-30", "SZ", "E2E-30")
+        },
+    )
     .await;
 
     // Four re-executions must be more than the handler would tolerate as
@@ -87,10 +91,10 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
         ["get-proforma", "get-invoice", "get-prepayment", "get-final"],
         "each read failed once, in order: {retries:?}"
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert_eq!(invocation.completion_failure, None, "{invocation:?}");
-    let runs = h.runs(reply.invocation_id()).await;
+    let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs,
         [

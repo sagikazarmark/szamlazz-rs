@@ -10,7 +10,7 @@ use rust_decimal::dec;
 use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
-use crate::harness::szamlazz::{Doc, create_for, created};
+use crate::harness::szamlazz::{Doc, create_for, created, holds};
 use crate::harness::{Harness, document};
 
 /// Under `auto` the order's live proforma is found by the `proforma-link` read
@@ -21,10 +21,13 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
     // `auto`: the proforma under its external id.
     h.absent("E2E-10", &["invoice", "prepayment", "final"])
         .await;
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-10:proforma"),
-        ..Doc::of("D-10", "D", "E2E-10")
-    })
+    holds(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-10:proforma"),
+            ..Doc::of("D-10", "D", "E2E-10")
+        },
+    )
     .await;
     create_for("E2E-10")
         .and(body_string_contains(
@@ -39,7 +42,7 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
     // ours (issued by another channel, linked into this order's chain).
     h.absent("E2E-10P", &["invoice", "prepayment", "final"])
         .await;
-    h.holds(&Doc::of("D-10P", "D", "E2E-10P")).await;
+    holds(&h.mock, &Doc::of("D-10P", "D", "E2E-10P")).await;
     create_for("E2E-10P")
         .and(body_string_contains(
             "<dijbekeroSzamlaszam>D-10P</dijbekeroSzamlaszam>",
@@ -65,7 +68,7 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
     assert_eq!(issued["invoice_number"], "ES-10");
     assert_eq!(issued["external_id"], "acct:E2E-10:prepayment");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -93,7 +96,7 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "ES-10P");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",

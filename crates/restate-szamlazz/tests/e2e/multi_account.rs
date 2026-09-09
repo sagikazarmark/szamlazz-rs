@@ -13,7 +13,7 @@ use restate_szamlazz::contract::TerminalCode;
 use crate::harness::accounts::{AGENT_KEY, BANK_ACCOUNT, BANK_ACCOUNT_CHANGED, KEY_B, KEY_B_V2};
 use crate::harness::szamlazz::{
     Doc, agent_key_tag, create_never_sent, create_with_bank_account, create_with_key, created,
-    not_found, order_query,
+    holds, not_found, order_query,
 };
 use crate::harness::{Harness, create_body};
 
@@ -49,10 +49,13 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     // first scoped create under `acme`: the external id did not change.
     h.absent("E2E-1", &["prepayment", "final", "proforma"])
         .await;
-    h.holds(&Doc {
-        external_id: Some("acct:E2E-1:invoice"),
-        ..Doc::of("SZ-1", "SZ", "E2E-1")
-    })
+    holds(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-1:invoice"),
+            ..Doc::of("SZ-1", "SZ", "E2E-1")
+        },
+    )
     .await;
     create_never_sent(&h.mock, "E2E-1").await;
     let reply = h
@@ -68,9 +71,9 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-1");
     assert_eq!(reply.body["external_id"], "acct:E2E-1:invoice");
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
-    let journal = h.journal(reply.invocation_id()).await;
+    let journal = h.admin().journal(reply.invocation_id()).await;
     let account = run_result(&journal, "account").expect("the account result");
     assert!(
         account.raw_contains("\"id\":\"acme\""),
@@ -98,10 +101,10 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         "the fault tells the caller how to address an account: {fault:?}"
     );
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account"]
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope, None, "{invocation:?}");
     assert!(
         h.requests_of_order("E2E-16").await.is_empty(),
@@ -194,10 +197,10 @@ pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h
         );
     }
     for (reply, scope, id) in [(&acme, "acme", "acme"), (&beta, "beta", "beta")] {
-        let invocation = h.invocation(reply.invocation_id()).await;
+        let invocation = h.admin().invocation(reply.invocation_id()).await;
         assert_eq!(invocation.scope.as_deref(), Some(scope), "{invocation:?}");
         assert_eq!(invocation.status, "completed");
-        let journal = h.journal(reply.invocation_id()).await;
+        let journal = h.admin().journal(reply.invocation_id()).await;
         let account = run_result(&journal, "account").expect("the account result");
         assert!(
             account.raw_contains(&format!("\"id\":\"{id}\"")),
@@ -331,7 +334,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
             .all(|body| body.contains(&format!("<bankszamlaszam>{BANK_ACCOUNT}</bankszamlaszam>"))),
         "both executions carry the journaled seller"
     );
-    let journal = h.journal(reply.invocation_id()).await;
+    let journal = h.admin().journal(reply.invocation_id()).await;
     let account = run_result(&journal, "account").expect("the account result");
     assert!(
         account.raw_contains(BANK_ACCOUNT) && !account.raw_contains(BANK_ACCOUNT_CHANGED),
@@ -417,7 +420,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
             1,
             "the first execution sent before the second reached its fetch"
         );
-        let invocations = h.all_invocations().await;
+        let invocations = h.admin().all_invocations().await;
         let (id, _) = invocations
             .iter()
             .find(|(_, invocation)| {
@@ -426,7 +429,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
                     && invocation.status != "completed"
             })
             .expect("the in-flight invocation under beta");
-        let before = run_result(&h.journal(id).await, "account")
+        let before = run_result(&h.admin().journal(id).await, "account")
             .expect("the account result while in flight")
             .raw
             .clone();
@@ -450,7 +453,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
         creates[1].contains(&agent_key_tag(KEY_B_V2)),
         "execution two carried the rotated key"
     );
-    let journal = h.journal(reply.invocation_id()).await;
+    let journal = h.admin().journal(reply.invocation_id()).await;
     let account = run_result(&journal, "account").expect("the account result");
     assert_eq!(
         account.raw, before,

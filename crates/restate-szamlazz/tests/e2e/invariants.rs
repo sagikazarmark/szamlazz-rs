@@ -1,14 +1,12 @@
 //! The run-wide checks, last: the `Szamlazz.Order` object keeps no state, no
 //! agent key in any journal of the run, and every handler journals its
-//! steps in the table ([`RUN_NAMES`](crate::harness::run_names::RUN_NAMES));
+//! steps in the table ([`TABLE`]);
 //! and, in phase 1, the leak scan's positive control planted.
-
-use std::collections::BTreeSet;
 
 use rust_decimal::dec;
 
 use crate::harness::accounts::AGENT_KEYS;
-use crate::harness::run_names::{RUN_NAMES, is_prefix_of_path, run_pattern};
+use crate::harness::run_names::TABLE;
 use crate::harness::szamlazz::{api_error, create_for, not_found, order_query};
 use crate::harness::{Harness, create_body};
 
@@ -48,7 +46,7 @@ pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
     assert_eq!(reply.body["code"], "259", "{}", reply.body);
     assert_eq!(reply.body["message"], POSITIVE_CONTROL);
 
-    let journal = h.journal(reply.invocation_id()).await;
+    let journal = h.admin().journal(reply.invocation_id()).await;
     let create_result = restate_e2e_harness::run_result(&journal, "create-invoice")
         .unwrap_or_else(|| panic!("the create-invoice run's result entry: {journal:?}"));
     assert!(
@@ -85,6 +83,7 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
     // nothing (a purge or a retention change emptying `sys_invocation`).
     const ENOUGH_ORDER_INVOCATIONS: usize = 30;
     let orders = h
+        .admin()
         .all_invocations()
         .await
         .into_iter()
@@ -94,8 +93,7 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
         orders >= ENOUGH_ORDER_INVOCATIONS,
         "{orders} Szamlazz.Order invocations were run"
     );
-    let state = h
-        .sql("SELECT service_name, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'")
+    let state = h.admin().sql_or_panic("SELECT service_name, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'")
         .await;
     assert!(
         state.is_empty(),
@@ -110,8 +108,8 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
 /// wire, while the scan does find the positive control's sentinel planted in
 /// phase 1, so it reads real bytes.
 pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
-    let journals = h.all_journals().await;
-    let invocations = h.all_invocations().await;
+    let journals = h.admin().all_journals().await;
+    let invocations = h.admin().all_invocations().await;
     assert!(
         journals.len() >= 20 && invocations.len() >= journals.len(),
         "the scan covers the run: {} journals, {} invocations",
@@ -163,87 +161,33 @@ pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
     );
 }
 
-/// The step-name table check over the whole run ([`RUN_NAMES`]): for every
-/// invocation the server still holds, the `ctx.run` names in journal order
-/// are a prefix of one of its handler's paths, every handler seen is in the
-/// table, and every path was walked in full by at least one invocation, so a
-/// renamed, inserted, reordered or dropped step, on any handler of either
-/// service, fails here and shows in the table's diff (the sequence half of
-/// what a pause-and-resume onto a new deployment depends on; ADR 0009). The
-/// floor of the suite: a
-/// scenario that is the only walker of a path stays, however plain its
-/// decision.
+/// The step-name table check over the whole run ([`TABLE`], the crate's
+/// [`Table::check`](restate_e2e_harness::Table::check)): for every invocation
+/// the server still holds, the `ctx.run` names in journal order are a prefix
+/// of one of its handler's paths; every handler the deployments offer
+/// (`GET /services`, both services) or an invocation names is in the table,
+/// so a handler added with neither a row nor a scenario is not invisible; and
+/// every path was walked in full by at least one invocation. A renamed,
+/// inserted, reordered or dropped step, on any handler of either service,
+/// fails here and shows in the table's diff (the sequence half of what a
+/// pause-and-resume onto a new deployment depends on; ADR 0009). The floor
+/// of the suite: a scenario that is the only walker of a path stays, however
+/// plain its decision.
 pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {
-    let journals = h.all_journals().await;
-    let invocations = h.all_invocations().await;
-    let mut unpinned = BTreeSet::new();
-    let mut unexplained = Vec::new();
-    let mut walked = BTreeSet::new();
-    for (id, invocation) in &invocations {
-        let observed: Vec<String> = journals
-            .get(id)
-            .map(|journal| {
-                journal
-                    .iter()
-                    .filter(|entry| entry.is_run())
-                    .filter_map(|entry| entry.name.as_deref())
-                    .map(run_pattern)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let target = format!("{}.{}", invocation.service, invocation.handler);
-        let paths: Vec<(usize, &[&str])> = RUN_NAMES
+    let deployed = h.admin().handlers().await;
+    assert!(
+        deployed
             .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row.service == invocation.service && row.handler == invocation.handler
-            })
-            .map(|(index, row)| (index, row.path))
-            .collect();
-        if paths.is_empty() {
-            unpinned.insert(target);
-            continue;
-        }
-        if !paths
-            .iter()
-            .any(|(_, path)| is_prefix_of_path(&observed, path))
-        {
-            unexplained.push(format!("{id} {target}: {observed:?}"));
-        }
-        for (row, path) in paths {
-            if observed.len() == path.len() && is_prefix_of_path(&observed, path) {
-                walked.insert(row);
-            }
-        }
-    }
-    assert!(
-        unpinned.is_empty(),
-        "handlers not in the table: {unpinned:?}; add their steps to RUN_NAMES"
+            .any(|handler| handler.service == "Szamlazz.Order")
+            && deployed
+                .iter()
+                .any(|handler| handler.service == "Szamlazz.Agent"),
+        "both services are registered: {deployed:?}"
     );
-    assert!(
-        unexplained.is_empty(),
-        "run sequences no path of their handler explains:\n  {}\n\n\
-         The table is the record of which steps a handler journals and in what order: the sequence \
-         half of what a pause-and-resume of a stuck invocation onto a new deployment replays (ADR \
-         0009; the result types and the inputs are the other half, reviewed by hand). Bring \
-         RUN_NAMES to match the code; a changed row means such a resume across this release fails.",
-        unexplained.join("\n  ")
-    );
-    let not_walked: Vec<String> = RUN_NAMES
-        .iter()
-        .enumerate()
-        .filter(|(row, _)| !walked.contains(row))
-        .map(|(_, row)| format!("{}.{}: {:?}", row.service, row.handler, row.path))
-        .collect();
-    assert!(
-        not_walked.is_empty(),
-        "paths no invocation of the run walked in full:\n  {}\n\n\
-         Either a scenario must exercise the path or its last step was dropped from the handler.",
-        not_walked.join("\n  ")
-    );
-    eprintln!(
-        "  (every run sequence of {} invocations is a prefix of one of its handler's paths; all {} paths walked in full)",
-        invocations.len(),
-        RUN_NAMES.len()
-    );
+    let journals = h.admin().all_journals().await;
+    let invocations = h.admin().all_invocations().await;
+    let walked = TABLE
+        .check(&deployed, &invocations, &journals)
+        .unwrap_or_else(|violations| panic!("{violations}"));
+    eprintln!("  ({walked})");
 }

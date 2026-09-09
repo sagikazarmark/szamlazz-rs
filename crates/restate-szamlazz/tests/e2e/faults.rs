@@ -54,10 +54,10 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
     );
     assert_eq!(fault.order, None, "{fault:?}");
     assert!(
-        h.runs(reply.invocation_id()).await.is_empty(),
+        h.admin().runs(reply.invocation_id()).await.is_empty(),
         "refused before the prologue: nothing journaled"
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.handler, "create_invoice");
     assert!(
         invocation
@@ -90,7 +90,7 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
         "names the rule: {fault:?}"
     );
     assert!(
-        h.runs(reply.invocation_id()).await.is_empty(),
+        h.admin().runs(reply.invocation_id()).await.is_empty(),
         "refused before the prologue: nothing journaled"
     );
     assert!(
@@ -112,7 +112,7 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
     assert!(fault.message.contains("Hibás számlaszám."), "{fault:?}");
     assert_eq!(fault.order, None, "{fault:?}");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account", "query"],
         "the answer was journaled as data"
     );

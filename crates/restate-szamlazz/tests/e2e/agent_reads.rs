@@ -84,11 +84,11 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
             "{scope}"
         );
         assert_eq!(
-            h.runs(reply.invocation_id()).await,
+            h.admin().runs(reply.invocation_id()).await,
             ["namespace", "account", "probe"],
             "{scope}"
         );
-        let invocation = h.invocation(reply.invocation_id()).await;
+        let invocation = h.admin().invocation(reply.invocation_id()).await;
         assert_eq!(invocation.scope.as_deref(), Some(scope), "{invocation:?}");
         assert_eq!(invocation.handler, "check_account");
     }
@@ -103,7 +103,7 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
     assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("unscoped"), "{fault:?}");
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account"]
     );
     assert_eq!(
@@ -132,10 +132,10 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
     );
     assert_eq!(reply.body["gross_total"], "1270", "{}", reply.body);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account", "query"]
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
 
     // `query_taxpayer` under each scope: the full number and the stem are
@@ -158,10 +158,10 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
     assert_eq!(reply.body["vat_code"], "2", "{}", reply.body);
     assert_eq!(reply.body["addresses"][0]["kind"], "HQ", "{}", reply.body);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account", "taxpayer-12345678"]
     );
-    let invocation = h.invocation(reply.invocation_id()).await;
+    let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
     assert_eq!(invocation.handler, "query_taxpayer");
 
@@ -179,7 +179,7 @@ pub(crate) async fn the_scope_selects_the_account_for_every_agent_read(h: &Harne
         "valid: false is data"
     );
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         ["namespace", "account", "taxpayer-12345678"]
     );
     assert_eq!(

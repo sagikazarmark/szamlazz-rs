@@ -37,7 +37,7 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     assert_eq!(reply.body["deleted"], true, "{}", reply.body);
     assert!(reply.body["reason"].is_null(), "{}", reply.body);
     assert_eq!(
-        h.runs(reply.invocation_id()).await,
+        h.admin().runs(reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -53,7 +53,7 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     assert_eq!(again.body["deleted"], true, "{}", again.body);
     assert_eq!(again.body["reason"], "absent", "{}", again.body);
     assert_eq!(
-        h.runs(again.invocation_id()).await,
+        h.admin().runs(again.invocation_id()).await,
         ["namespace", "account", "proforma-for-delete"],
         "the lookup answered; no delete step"
     );

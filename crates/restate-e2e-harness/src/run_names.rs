@@ -1,17 +1,24 @@
-//! The *step-name table*'s matching: a table of the `ctx.run` names every
-//! handler journals, per path ([`RunPath`]), a journaled name read as its
-//! pattern ([`RunPatterns::pattern`]) and the prefix rule
-//! ([`is_prefix_of_path`]). The table itself is the consumer's: it names the
+//! The *step-name table*: a table of the `ctx.run` names every handler
+//! journals, per path ([`RunPath`]), held as a [`Table`] that reads a
+//! journaled name as its pattern ([`Table::pattern`]) and checks a whole run
+//! against the table ([`Table::check`]); the prefix rule alone is
+//! [`is_prefix_of_path`]. The table's rows are the consumer's: they name the
 //! consumer's handlers and steps.
 //!
 //! A journal replays by name and position. Under in-place re-registration an
 //! in-flight invocation replays the *previous* deployment's entries, so a
 //! renamed, inserted or reordered step strands it; under immutable deployments
 //! the same sequence is what a pause-and-resume onto new code needs. A
-//! consumer that keeps its table and asserts, over every invocation a run
+//! consumer that keeps its table and checks, over every invocation a run
 //! leaves on the server, that the observed run names are a prefix of one of
-//! its handler's paths and that every path was walked in full, makes either a
-//! failing test instead of a stranded invocation.
+//! its handler's paths, that every handler the deployments offer is tabled
+//! and that every path was walked in full, makes either a failing test
+//! instead of a stranded invocation.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+use crate::introspection::{Handler, Invocation, JournalEntry};
 
 /// One path: a handler of a service and the ordered `ctx.run` names it
 /// journals on that path. A `{…}` segment in a name (`verify-{number}`) is a
@@ -135,11 +142,246 @@ pub fn is_prefix_of_path(observed: &[String], path: &[&str]) -> bool {
             .all(|(seen, expected)| seen == expected)
 }
 
+/// The step-name table: the consumer's rows ([`RunPath`]) with their
+/// patterns derived once ([`RunPatterns::of`], so the two cannot disagree),
+/// and the check of a whole run against them ([`Table::check`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    rows: &'static [RunPath],
+    patterns: RunPatterns,
+}
+
+impl Table {
+    /// The table of `rows`. Panics as [`RunPatterns::of`] does on rows whose
+    /// patterns would read a journaled name ambiguously.
+    #[must_use]
+    pub fn new(rows: &'static [RunPath]) -> Self {
+        Self {
+            rows,
+            patterns: RunPatterns::of(rows),
+        }
+    }
+
+    /// The rows.
+    #[must_use]
+    pub fn rows(&self) -> &'static [RunPath] {
+        self.rows
+    }
+
+    /// The table's pattern of a journaled run name ([`RunPatterns::pattern`]).
+    #[must_use]
+    pub fn pattern(&self, name: &str) -> String {
+        self.patterns.pattern(name)
+    }
+
+    /// The `service.handler` names the rows cover.
+    fn tabled(&self) -> BTreeSet<String> {
+        self.rows
+            .iter()
+            .map(|row| target(row.service, row.handler))
+            .collect()
+    }
+
+    /// The check over a run: for every invocation the server holds, the
+    /// `ctx.run` names of its journal (read as patterns, in journal order)
+    /// are a prefix of one of its handler's paths; every handler `deployed`
+    /// offers or an invocation names has a row, and every row's handler is
+    /// deployed; and every path was walked in full by at least one
+    /// invocation. An invocation without a journal (retention ended between
+    /// the two reads) journaled nothing observable: an empty sequence,
+    /// explained by every path, walking none.
+    ///
+    /// # Errors
+    ///
+    /// Every violation found, by kind ([`Violations`]); its `Display` is the
+    /// report a suite fails with.
+    pub fn check(
+        &self,
+        deployed: &[Handler],
+        invocations: &[(String, Invocation)],
+        journals: &BTreeMap<String, Vec<JournalEntry>>,
+    ) -> Result<Walked, Violations> {
+        let tabled = self.tabled();
+        let deployed: BTreeSet<String> = deployed
+            .iter()
+            .map(|handler| target(&handler.service, &handler.name))
+            .collect();
+        let mut violations = Violations {
+            untabled: deployed.difference(&tabled).cloned().collect(),
+            undeployed: tabled.difference(&deployed).cloned().collect(),
+            unexplained: Vec::new(),
+            unwalked: Vec::new(),
+        };
+        let mut walked = BTreeSet::new();
+        for (id, invocation) in invocations {
+            let observed: Vec<String> = journals
+                .get(id)
+                .map(|journal| {
+                    journal
+                        .iter()
+                        .filter(|entry| entry.is_run())
+                        .filter_map(|entry| entry.name.as_deref())
+                        .map(|name| self.pattern(name))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let target = target(&invocation.service, &invocation.handler);
+            let paths: Vec<(usize, &[&str])> = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    row.service == invocation.service && row.handler == invocation.handler
+                })
+                .map(|(index, row)| (index, row.path))
+                .collect();
+            if paths.is_empty() {
+                violations.untabled.insert(target);
+                continue;
+            }
+            if !paths
+                .iter()
+                .any(|(_, path)| is_prefix_of_path(&observed, path))
+            {
+                violations
+                    .unexplained
+                    .push(format!("{id} {target}: {observed:?}"));
+            }
+            for (row, path) in paths {
+                if observed.len() == path.len() && is_prefix_of_path(&observed, path) {
+                    walked.insert(row);
+                }
+            }
+        }
+        violations.unwalked = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| !walked.contains(row))
+            .map(|(_, row)| format!("{}: {:?}", target(row.service, row.handler), row.path))
+            .collect();
+        if violations.is_empty() {
+            Ok(Walked {
+                invocations: invocations.len(),
+                handlers: tabled.len(),
+                paths: self.rows.len(),
+            })
+        } else {
+            Err(violations)
+        }
+    }
+}
+
+/// `service.handler`, as the check names a handler.
+fn target(service: &str, handler: &str) -> String {
+    format!("{service}.{handler}")
+}
+
+/// What a passed [`Table::check`] covered: the numbers behind "every
+/// invocation's run sequence is a prefix of one of its handler's paths, every
+/// path walked in full".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Walked {
+    /// The invocations checked.
+    pub invocations: usize,
+    /// The handlers the table covers.
+    pub handlers: usize,
+    /// The paths, every one walked in full.
+    pub paths: usize,
+}
+
+impl fmt::Display for Walked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "every run sequence of {} invocations is a prefix of one of its handler's paths; all {} \
+             paths of {} handlers walked in full",
+            self.invocations, self.paths, self.handlers
+        )
+    }
+}
+
+/// What a failed [`Table::check`] found, by kind; empty fields are kinds
+/// with nothing to report. Its `Display` is the report, each kind with what
+/// to do about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Violations {
+    /// Handlers with no row: `service.handler` of every handler a deployment
+    /// offers or an invocation names that the table does not cover. Add
+    /// their steps to the table.
+    pub untabled: BTreeSet<String>,
+    /// Rows for a handler no deployment offers: renamed or removed in the
+    /// code, kept in the table.
+    pub undeployed: BTreeSet<String>,
+    /// Run sequences no path of their handler explains, one per invocation
+    /// (`{id} {service.handler}: {patterns}`): a renamed, inserted,
+    /// reordered or repeated step.
+    pub unexplained: Vec<String>,
+    /// Paths no invocation walked in full (`{service.handler}: {path}`): a
+    /// scenario missing, or the path's last step dropped from the handler.
+    pub unwalked: Vec<String>,
+}
+
+impl Violations {
+    fn is_empty(&self) -> bool {
+        self.untabled.is_empty()
+            && self.undeployed.is_empty()
+            && self.unexplained.is_empty()
+            && self.unwalked.is_empty()
+    }
+}
+
+impl fmt::Display for Violations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "the step-name table check failed:")?;
+        if !self.untabled.is_empty() {
+            writeln!(
+                f,
+                "\nhandlers not in the table (deployed or invoked): {:?}\n  Add their steps to the \
+                 table.",
+                self.untabled
+            )?;
+        }
+        if !self.undeployed.is_empty() {
+            writeln!(
+                f,
+                "\nrows for handlers no deployment offers: {:?}\n  The handler was renamed or \
+                 removed; bring the table to match the code.",
+                self.undeployed
+            )?;
+        }
+        if !self.unexplained.is_empty() {
+            writeln!(
+                f,
+                "\nrun sequences no path of their handler explains:\n  {}\n  The table is the \
+                 record of which steps a handler journals and in what order: the sequence half of \
+                 what a pause-and-resume of a stuck invocation onto a new deployment replays (the \
+                 result types and the inputs are the other half, reviewed by hand). Bring the \
+                 table to match the code; a changed row means such a resume across this release \
+                 fails.",
+                self.unexplained.join("\n  ")
+            )?;
+        }
+        if !self.unwalked.is_empty() {
+            writeln!(
+                f,
+                "\npaths no invocation of the run walked in full:\n  {}\n  Either a scenario must \
+                 exercise the path or its last step was dropped from the handler.",
+                self.unwalked.join("\n  ")
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Violations {}
+
 // ----- the step-name table's matching, without a server ----------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
 
     const PATHS: &[RunPath] = &[
         RunPath::new(
@@ -361,5 +603,271 @@ mod tests {
             ]),
             "a step past the path's end"
         );
+    }
+
+    // ----- the check over a run, on scripted rows --------------------------------
+
+    /// A table of an endpoint with two services: a Virtual Object whose
+    /// `reserve` has two paths (a hold placed, or answered from an existing
+    /// one) and whose `release` has one, and a service with one probe.
+    const TABLE: &[RunPath] = &[
+        RunPath::new(
+            "Inv.Stock",
+            "reserve",
+            &["settings", "lookup-{sku}", "place-hold-{sku}"],
+        ),
+        RunPath::new(
+            "Inv.Stock",
+            "reserve",
+            &["settings", "lookup-{sku}", "existing-hold-{sku}"],
+        ),
+        RunPath::new("Inv.Stock", "release", &["settings", "release-{sku}"]),
+        RunPath::new("Inv.Api", "probe", &["settings", "probe"]),
+    ];
+
+    fn table() -> Table {
+        Table::new(TABLE)
+    }
+
+    fn handler(service: &str, name: &str) -> Handler {
+        Handler {
+            service: service.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    /// Every handler the table names, deployed.
+    fn deployed() -> Vec<Handler> {
+        vec![
+            handler("Inv.Stock", "reserve"),
+            handler("Inv.Stock", "release"),
+            handler("Inv.Api", "probe"),
+        ]
+    }
+
+    /// One completed invocation of `service.handler` with `runs` as its
+    /// journaled `ctx.run` names, in order, plus the rows a journal has around
+    /// them (an input, a notification per run, an output).
+    fn invocation(
+        id: &str,
+        service: &str,
+        handler: &str,
+        runs: &[&str],
+    ) -> ((String, Invocation), (String, Vec<JournalEntry>)) {
+        let mut journal = vec![JournalEntry {
+            index: 0,
+            entry_type: "Command: Input".to_owned(),
+            name: None,
+            raw: Vec::new(),
+        }];
+        for run in runs {
+            let index = u64::try_from(journal.len()).expect("index");
+            journal.push(JournalEntry {
+                index,
+                entry_type: "Command: Run".to_owned(),
+                name: Some((*run).to_owned()),
+                raw: Vec::new(),
+            });
+            journal.push(JournalEntry {
+                index: index + 1,
+                entry_type: "Notification: Run".to_owned(),
+                name: None,
+                raw: b"{}".to_vec(),
+            });
+        }
+        let row = Invocation {
+            status: "completed".to_owned(),
+            completion_failure: None,
+            scope: None,
+            service: service.to_owned(),
+            handler: handler.to_owned(),
+        };
+        ((id.to_owned(), row), (id.to_owned(), journal))
+    }
+
+    /// A run as the check reads it: the `sys_invocation` rows and the
+    /// journals by id.
+    type Run = (
+        Vec<(String, Invocation)>,
+        BTreeMap<String, Vec<JournalEntry>>,
+    );
+
+    /// The invocations of a run that walks every path once, with an early
+    /// answer among them.
+    fn full_walk() -> Run {
+        [
+            invocation(
+                "inv_1",
+                "Inv.Stock",
+                "reserve",
+                &["settings", "lookup-SKU-1", "place-hold-SKU-1"],
+            ),
+            invocation(
+                "inv_2",
+                "Inv.Stock",
+                "reserve",
+                &["settings", "lookup-SKU-1", "existing-hold-SKU-1"],
+            ),
+            invocation("inv_3", "Inv.Stock", "reserve", &["settings"]),
+            invocation(
+                "inv_4",
+                "Inv.Stock",
+                "release",
+                &["settings", "release-SKU-1"],
+            ),
+            invocation("inv_5", "Inv.Api", "probe", &["settings", "probe"]),
+        ]
+        .into_iter()
+        .unzip()
+    }
+
+    /// A run in which every invocation's run sequence is a prefix of one of
+    /// its handler's paths, every deployed handler is tabled and every path
+    /// was walked in full passes, reporting what it covered.
+    #[test]
+    fn a_run_walking_every_path_passes_the_check() {
+        let (invocations, journals) = full_walk();
+        let walked = table()
+            .check(&deployed(), &invocations, &journals)
+            .expect("the check holds");
+        assert_eq!(
+            walked,
+            Walked {
+                invocations: 5,
+                handlers: 3,
+                paths: 4,
+            }
+        );
+        let report = walked.to_string();
+        assert!(report.contains("5 invocations"), "{report}");
+        assert!(report.contains("4 paths"), "{report}");
+    }
+
+    /// A handler with no row is reported whether an invocation of it exists
+    /// or only a deployment offers it: the second is what an invocation-only
+    /// check cannot see (a handler added with neither a row nor a scenario).
+    #[test]
+    fn an_untabled_handler_is_reported_deployed_or_invoked() {
+        let (mut invocations, mut journals) = full_walk();
+        let mut deployed = deployed();
+        deployed.push(handler("Inv.Api", "audit"));
+        let violations = table()
+            .check(&deployed, &invocations, &journals)
+            .expect_err("a deployed handler without a row");
+        assert_eq!(
+            violations.untabled,
+            BTreeSet::from(["Inv.Api.audit".to_owned()])
+        );
+        assert!(violations.undeployed.is_empty());
+        assert!(violations.unexplained.is_empty());
+        assert!(violations.unwalked.is_empty());
+        assert!(violations.to_string().contains("Inv.Api.audit"));
+
+        let (row, journal) = invocation("inv_6", "Inv.Stock", "restock", &["settings"]);
+        invocations.push(row);
+        journals.insert(journal.0, journal.1);
+        let violations = table()
+            .check(&deployed, &invocations, &journals)
+            .expect_err("an invoked handler without a row");
+        assert_eq!(
+            violations.untabled,
+            BTreeSet::from(["Inv.Api.audit".to_owned(), "Inv.Stock.restock".to_owned()])
+        );
+    }
+
+    /// A row for a handler no deployment offers is stale: renamed or removed
+    /// in the code, kept in the table.
+    #[test]
+    fn a_tabled_handler_no_deployment_offers_is_reported() {
+        let (invocations, journals) = full_walk();
+        let deployed: Vec<Handler> = deployed()
+            .into_iter()
+            .filter(|handler| handler.name != "probe")
+            .collect();
+        let violations = table()
+            .check(&deployed, &invocations, &journals)
+            .expect_err("a row without a deployed handler");
+        assert_eq!(
+            violations.undeployed,
+            BTreeSet::from(["Inv.Api.probe".to_owned()])
+        );
+        assert!(violations.untabled.is_empty());
+    }
+
+    /// A run sequence no path of its handler explains (a renamed, inserted,
+    /// reordered or repeated step) is reported with its invocation id and the
+    /// sequence read as patterns; a sequence short of every path is explained
+    /// (an early answer) and walks nothing.
+    #[test]
+    fn an_unexplained_run_sequence_is_reported_by_invocation() {
+        let (mut invocations, mut journals) = full_walk();
+        let (row, journal) = invocation(
+            "inv_6",
+            "Inv.Stock",
+            "reserve",
+            &["settings", "check-SKU-2", "place-hold-SKU-2"],
+        );
+        invocations.push(row);
+        journals.insert(journal.0, journal.1);
+        let violations = table()
+            .check(&deployed(), &invocations, &journals)
+            .expect_err("a renamed step");
+        assert_eq!(
+            violations.unexplained,
+            [
+                "inv_6 Inv.Stock.reserve: [\"settings\", \"check-SKU-2\", \"place-hold-{sku}\"]"
+                    .to_owned()
+            ]
+        );
+        assert!(
+            violations.unwalked.is_empty(),
+            "every path was still walked"
+        );
+        let message = violations.to_string();
+        assert!(message.contains("inv_6"), "{message}");
+        assert!(
+            message.contains("pause-and-resume"),
+            "the message says what the table is for: {message}"
+        );
+    }
+
+    /// A path no invocation walked to its end is reported: a scenario dropped,
+    /// or the path's last step dropped from the handler.
+    #[test]
+    fn a_path_no_invocation_walked_in_full_is_reported() {
+        let (invocations, journals) = full_walk();
+        let (invocations, journals): Run = invocations
+            .into_iter()
+            .filter(|(id, _)| id != "inv_2")
+            .map(|(id, row)| {
+                let journal = journals[&id].clone();
+                ((id.clone(), row), (id, journal))
+            })
+            .unzip();
+        let violations = table()
+            .check(&deployed(), &invocations, &journals)
+            .expect_err("a path not walked");
+        assert_eq!(
+            violations.unwalked,
+            [
+                "Inv.Stock.reserve: [\"settings\", \"lookup-{sku}\", \"existing-hold-{sku}\"]"
+                    .to_owned()
+            ]
+        );
+        assert!(violations.unexplained.is_empty());
+    }
+
+    /// An invocation the server holds a row for but no journal of (retention
+    /// ended, or purged mid-query) journaled nothing observable: explained by
+    /// every path, walking none.
+    #[test]
+    fn an_invocation_without_a_journal_is_an_empty_sequence() {
+        let (mut invocations, journals) = full_walk();
+        let (row, _) = invocation("inv_7", "Inv.Api", "probe", &["settings", "probe"]);
+        invocations.push(row);
+        let walked = table()
+            .check(&deployed(), &invocations, &journals)
+            .expect("an empty sequence is a prefix of every path");
+        assert_eq!(walked.invocations, 6);
     }
 }

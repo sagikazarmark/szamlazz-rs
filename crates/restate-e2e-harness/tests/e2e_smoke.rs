@@ -16,7 +16,7 @@
 )]
 
 use restate_e2e_harness::gate::{FLAG_PROTOCOL_V7, FLAG_SCOPED_VIRTUAL_OBJECTS, FLAG_VQUEUES};
-use restate_e2e_harness::{Launcher, Reuse, ServerSpec, launcher_or_skip, plain_http};
+use restate_e2e_harness::{Call, Launcher, Reuse, ServerSpec, launcher_or_skip};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
@@ -62,6 +62,9 @@ impl Smoke {
     }
 }
 
+/// The refusing handler, called three times below.
+const REFUSE: Call<'static> = Call::service("Smoke", "refuse");
+
 /// The consumer-side shape of the fault above.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct Fault {
@@ -94,7 +97,7 @@ async fn e2e_smoke() {
     // A call through the ingress, its run in the journal.
     let reply = restate
         .invoke(
-            "/restate/call/Smoke/echo",
+            &Call::service("Smoke", "echo"),
             Some(&json!("hello")),
             Some("smoke-1"),
         )
@@ -112,9 +115,7 @@ async fn e2e_smoke() {
     assert!(restate.admin().all_journals().await.contains_key(id));
 
     // A fault, decoded out of the envelope into the caller's type.
-    let reply = restate
-        .invoke("/restate/call/Smoke/refuse", None, None)
-        .await;
+    let reply = restate.invoke(&REFUSE, None, None).await;
     assert_eq!(reply.status, 422, "{}", reply.body);
     assert_eq!(
         reply.fault::<Fault>(),
@@ -125,7 +126,9 @@ async fn e2e_smoke() {
     );
 
     // Kill and purge an invocation that would never finish.
-    let reply = restate.invoke("/restate/send/Smoke/hang", None, None).await;
+    let reply = restate
+        .invoke(&Call::service("Smoke", "hang").send(), None, None)
+        .await;
     assert_eq!(reply.status, 202, "{}", reply.body);
     let id = reply.invocation_id().to_owned();
     restate
@@ -155,30 +158,24 @@ async fn e2e_smoke() {
 
     // A private service is refused at the ingress; public again, it answers.
     restate.set_public("Smoke", false).await;
-    let reply = restate
-        .invoke("/restate/call/Smoke/refuse", None, None)
-        .await;
+    let reply = restate.invoke(&REFUSE, None, None).await;
     assert_ne!(
         reply.status, 422,
         "a private service is not invoked: {}",
         reply.body
     );
     restate.set_public("Smoke", true).await;
-    let reply = restate
-        .invoke("/restate/call/Smoke/refuse", None, None)
-        .await;
+    let reply = restate.invoke(&REFUSE, None, None).await;
     assert_eq!(reply.status, 422, "{}", reply.body);
 
-    // The spawned server stops with the handle.
+    // The spawned server stops with the handle: nothing listens on its admin
+    // port any more.
     drop(restate);
-    let health = plain_http()
-        .build()
-        .expect("client")
-        .get(format!("{admin_url}/health"))
-        .send()
-        .await;
+    let admin_addr = admin_url
+        .strip_prefix("http://")
+        .expect("the admin URL of a spawned server is plain http");
     assert!(
-        health.is_err(),
-        "the spawned server is gone with the handle"
+        std::net::TcpStream::connect(admin_addr).is_err(),
+        "the spawned server is gone with the handle: {admin_addr} still accepts connections"
     );
 }

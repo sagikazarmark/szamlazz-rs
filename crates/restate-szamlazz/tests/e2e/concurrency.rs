@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 use rust_decimal::dec;
 
 use crate::harness::ingress::Reply;
-use crate::harness::szamlazz::{Doc, create_for, created, not_found, order_query, szlahu_down};
+use crate::harness::szamlazz::{
+    Doc, create_for, create_lands_on_the_second_send, create_lands_slowly, created, not_found,
+    order_query, szlahu_down,
+};
 use crate::harness::{Harness, create_body};
 
 /// The scope every call of this family goes under.
@@ -80,7 +83,7 @@ async fn assert_second_call_queued_behind_the_first(
     );
 
     for (which, reply) in [("first", &first.reply), ("second", &second.reply)] {
-        let invocation = h.invocation(reply.invocation_id()).await;
+        let invocation = h.admin().invocation(reply.invocation_id()).await;
         assert_eq!(invocation.status, "completed", "{which}: {invocation:?}");
         assert_eq!(
             invocation.completion_failure, None,
@@ -92,14 +95,14 @@ async fn assert_second_call_queued_behind_the_first(
             "{which}: {invocation:?}"
         );
     }
-    let first_runs = h.runs(first.reply.invocation_id()).await;
+    let first_runs = h.admin().runs(first.reply.invocation_id()).await;
     assert_eq!(
         first_runs.last().map(String::as_str),
         Some("create-invoice"),
         "the first call sent: {first_runs:?}"
     );
     assert_eq!(
-        h.runs(second.reply.invocation_id()).await,
+        h.admin().runs(second.reply.invocation_id()).await,
         [
             "namespace",
             "account",
@@ -137,15 +140,15 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    let mut sends = h
-        .create_lands_slowly(
-            &Doc {
-                external_id: Some("acct:E2E-L1:invoice"),
-                ..Doc::of("SZ-L1", "SZ", "E2E-L1")
-            },
-            Duration::from_secs(3),
-        )
-        .await;
+    let mut sends = create_lands_slowly(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-L1:invoice"),
+            ..Doc::of("SZ-L1", "SZ", "E2E-L1")
+        },
+        Duration::from_secs(3),
+    )
+    .await;
 
     let body = create_body(dec!(1000), false);
     // The first invocation's one and only fetch: held until the second call is
@@ -243,15 +246,15 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    let mut sends = h
-        .create_lands_on_the_second_send(
-            &Doc {
-                external_id: Some("acct:E2E-L2:invoice"),
-                ..Doc::of("SZ-L2", "SZ", "E2E-L2")
-            },
-            szlahu_down(),
-        )
-        .await;
+    let mut sends = create_lands_on_the_second_send(
+        &h.mock,
+        &Doc {
+            external_id: Some("acct:E2E-L2:invoice"),
+            ..Doc::of("SZ-L2", "SZ", "E2E-L2")
+        },
+        szlahu_down(),
+    )
+    .await;
 
     let body = create_body(dec!(1000), false);
     // The second execution's fetch (the first execution's is the first).
@@ -389,18 +392,18 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         1,
         "one create on the wire"
     );
-    let on_the_order = h
-        .sql("SELECT id, target_handler_name, idempotency_key FROM sys_invocation WHERE target_service_key = 'E2E-L3'")
+    let on_the_order = h.admin().sql_or_panic("SELECT id, target_handler_name, idempotency_key FROM sys_invocation WHERE target_service_key = 'E2E-L3'")
         .await;
     assert_eq!(
         on_the_order.len(),
         1,
         "one invocation on the order after both were answered: {on_the_order:?}"
     );
-    let invocation = h.invocation(first.reply.invocation_id()).await;
+    let invocation = h.admin().invocation(first.reply.invocation_id()).await;
     assert_eq!(invocation.status, "completed", "{invocation:?}");
     assert_eq!(
-        h.runs(first.reply.invocation_id())
+        h.admin()
+            .runs(first.reply.invocation_id())
             .await
             .last()
             .map(String::as_str),
