@@ -686,8 +686,11 @@ policies (an exhausted create and the key replaying its fault, a flaky read, an 
 once; the cancellation mid-send; run retries against `get`'s `max_attempts`; the wire faults; the positive
 control.
 
-**Phase 2** performs the documented flag day (private, drain, register the multi-account revision, public) and
-runs, **in sequence** (its scenarios script the shared resolver and store per scope, `acme` or `beta`): the
+**Phase 2** performs the documented flag day (private, drain, register the multi-account revision, public; the one
+step whose failure ends the run, since everything after it runs on that deployment) and runs, **in sequence** (its
+scenarios script the shared resolver and store per scope, `acme` or `beta`), each as a task of its own so that a
+failure is recorded under its name, the mock reset without verifying the failed scenario's expectations, and the
+next scenario runs: the
 first scoped create finding the document issued unscoped under the unchanged external id, unscoped and an unknown
 scope → `unknown_account`; the same order key and the same `Idempotency-Key` under two scopes as two objects and
 two invocations, each account's key on its create; the order-key lock, same key, same scope (#125), with the first
@@ -705,7 +708,9 @@ one entry; an invocation held at its fetch after its `account` step, killed, the
 running at once; an account change and a credential rotation between two executions, the journaled `account`
 entry winning and staying byte-identical.
 
-**Last**, over every invocation the server holds: the `state` table holds no row for `Szamlazz.Order`; no agent
+**Last**, over every invocation the server holds (run whether or not a scenario failed, and reported with the
+scenarios' failures, noting when an earlier failure makes their counts suspect): the `state` table holds no row for
+`Szamlazz.Order`; no agent
 key of the run appears in the hex-decoded `raw` of any journal entry nor in any `completion_failure`, while the
 same scan finds the positive control's sentinel; and the **step-name table check**: `RUN_NAMES` in the harness
 lists, per handler of both services, the ordered `ctx.run` names of every path it journals, and the scenario
@@ -759,7 +764,10 @@ looks for, provoked once.
 **Where the server comes from.** The harness decides once from the environment (the crate's server gate):
 
 - `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` reuse a running server with the three flags (the main suite only;
-  the canary needs a server of its own shape): `docker compose up -d` at the workspace root starts one;
+  the canary needs a server of its own shape): `docker compose up -d` at the workspace root starts one. **One run
+  per server**: the suite's `Idempotency-Key`s and order keys are literals and its checks count over every
+  invocation the server holds, so the harness refuses a server that already holds `Szamlazz.*` invocations, before
+  anything is deployed, naming the fix (`docker compose down -v && docker compose up -d`);
 - `RESTATE_SERVER_BIN` names a `restate-server` binary the harness spawns on the loopback, one process per suite
   (what CI uses). The Dagger `ci` module exports it out of the Restate image:
   `dagger call ci restate-server export --path ./restate-server`, then `RESTATE_SERVER_BIN=$PWD/restate-server`.

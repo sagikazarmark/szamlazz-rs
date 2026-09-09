@@ -167,7 +167,37 @@ impl Harness {
     /// The harness on `restate` (launched and ready: its admin API answering
     /// and `/version` reporting its spec's features): serves and registers
     /// the single-account deployment.
+    ///
+    /// **One run per server.** The suite's `Idempotency-Key`s and order keys
+    /// are literals, the run-wide checks count over every invocation the
+    /// server holds, and a scenario asserts on the invocations of its order
+    /// (`concurrency`: one on `E2E-L3`), so a server that already holds an
+    /// earlier run's `Szamlazz.*` invocations is refused here, before
+    /// anything is deployed, rather than met as a failed `expect(1)` or a
+    /// replayed completion halfway through. A spawned server is fresh by
+    /// construction; a reused one (`RESTATE_ADMIN_URL`) is fresh once per
+    /// `docker compose down -v && docker compose up -d`.
     pub(crate) async fn start(restate: Restate) -> Self {
+        let earlier: Vec<String> = restate
+            .admin()
+            .all_invocations()
+            .await
+            .into_iter()
+            .filter(|(_, invocation)| SERVICES.contains(&invocation.service.as_str()))
+            .map(|(id, invocation)| format!("{id} {}.{}", invocation.service, invocation.handler))
+            .collect();
+        assert!(
+            earlier.is_empty(),
+            "the Restate server at {} already holds {} invocation(s) of {} from an earlier run; the \
+             suite is one run per server (its keys are literals and its checks count over every \
+             invocation the server holds). Reuse a fresh one: `docker compose down -v && docker \
+             compose up -d`, or unset RESTATE_ADMIN_URL / RESTATE_INGRESS_URL and let \
+             RESTATE_SERVER_BIN spawn one. The first few: {:?}",
+            restate.admin_url(),
+            earlier.len(),
+            SERVICES.join(" / "),
+            &earlier[..earlier.len().min(5)]
+        );
         let mock = MockServer::start().await;
         let (order, agent) = services(&mock.uri());
         let harness = Self {

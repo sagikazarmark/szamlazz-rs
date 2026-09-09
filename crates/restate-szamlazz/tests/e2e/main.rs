@@ -54,9 +54,10 @@
 //! scenario's failure is reported (a panic in one does not hide the rest). The
 //! second performs the documented single → multi **flag day** (private,
 //! drain, register the **multi-account** deployment (two accounts, reachable
-//! by scope only, behind a test-local mutable resolver and store), public)
-//! and proves, in sequence, the isolation properties multi-account mode leans
-//! on: the same order key and the same `Idempotency-Key` under two scopes
+//! by scope only, behind a test-local mutable resolver and store), public;
+//! the one step whose failure ends the run, since everything after it runs
+//! on that deployment) and proves, in sequence and likewise every failure
+//! reported, the isolation properties multi-account mode leans on: the same order key and the same `Idempotency-Key` under two scopes
 //! being two objects and two invocations, and, under one scope, the order-key
 //! lock and the in-flight attach (the first invocation held at its credential
 //! fetch, which the mutable store of this phase can do), the scoped reads and
@@ -183,12 +184,81 @@ macro_rules! concurrently {
     }};
 }
 
-/// Runs each scenario of the list in sequence, reporting each.
+/// The scenarios of phase 2 and the run-wide checks, run one after another
+/// on one harness: each as a task of its own, so a panic in one is a
+/// `JoinError` recorded under the scenario's name and the next scenario runs;
+/// the failures are reported together at the end ([`Sequentially::finish`])
+/// rather than the first one ending the run.
+struct Sequentially {
+    h: Arc<Harness>,
+    failures: Vec<String>,
+    /// Whether a scenario (not a run-wide check) has failed: the run-wide
+    /// checks count over the whole run, and after a failed scenario their
+    /// counts are suspect, which their report says.
+    a_scenario_failed: bool,
+}
+
+impl Sequentially {
+    fn new(h: Arc<Harness>) -> Self {
+        Self {
+            h,
+            failures: Vec::new(),
+            a_scenario_failed: false,
+        }
+    }
+
+    /// Runs `scenario` under `name` to its end and records its outcome. After
+    /// a failed scenario the mock is reset **without** verifying its
+    /// expectations (the failed scenario's unmet `expect(n)` would otherwise
+    /// be blamed on the next scenario's `reset`), and said so; a failed
+    /// run-wide check (`phase == "checks"`) mounts nothing and resets nothing.
+    async fn run(
+        &mut self,
+        phase: &str,
+        name: &'static str,
+        scenario: impl Future<Output = ()> + Send + 'static,
+    ) {
+        match tokio::spawn(scenario).await {
+            Ok(()) => eprintln!("[{phase}] {name}: pass"),
+            Err(error) => {
+                eprintln!("[{phase}] {name}: FAIL");
+                let suspect = if phase == "checks" && self.a_scenario_failed {
+                    " (an earlier scenario failed; the run-wide counts are suspect)"
+                } else {
+                    ""
+                };
+                self.failures.push(format!("{name}{suspect}: {error}"));
+                if phase != "checks" {
+                    self.a_scenario_failed = true;
+                    self.h.mock.reset().await;
+                    eprintln!(
+                        "[{phase}] the mock was reset without verifying its expectations, so the \
+                         next scenario starts clean"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Panics naming each scenario and check that failed, with its panic
+    /// message.
+    fn finish(self) {
+        assert!(
+            self.failures.is_empty(),
+            "{} phase-2 scenario(s) or run-wide check(s) failed:\n  {}",
+            self.failures.len(),
+            self.failures.join("\n  ")
+        );
+    }
+}
+
+/// Runs each scenario of the list in sequence on the collector, under its
+/// own name.
 macro_rules! sequentially {
-    ($h:expr; $($scenario:path),+ $(,)?) => {{
+    ($run:expr, $phase:literal; $($scenario:path),+ $(,)?) => {{
         $(
-            $scenario(&$h).await;
-            eprintln!("[phase 2] {}: pass", stringify!($scenario));
+            let h = Arc::clone(&$run.h);
+            $run.run($phase, stringify!($scenario), async move { $scenario(&h).await }).await;
         )+
     }};
 }
@@ -225,13 +295,16 @@ async fn e2e_order_protocol() {
         .ok()
         .expect("every phase-1 scenario has been joined");
 
-    // Phase 2: the flag day, then the multi-account deployment by scope, in
-    // sequence (the scenarios script the shared resolver and store).
+    // Phase 2: the flag day (the prerequisite of everything after it, so its
+    // failure ends the run), then the multi-account deployment by scope, in
+    // sequence (the scenarios script the shared resolver and store), every
+    // failure collected.
     multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
     eprintln!(
         "[phase 2] multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls: pass"
     );
-    sequentially!(h;
+    let mut run = Sequentially::new(Arc::new(h));
+    sequentially!(run, "phase 2";
         multi_account::the_scope_namespaces_the_order_key_and_the_idempotency_key,
         concurrency::same_key_same_scope_concurrent_creates_issue_once,
         concurrency::same_key_same_scope_second_call_between_the_first_calls_executions,
@@ -245,12 +318,14 @@ async fn e2e_order_protocol() {
         multi_account::credential_rotation_between_executions_is_picked_up,
     );
 
-    // The run-wide checks, last.
-    sequentially!(h;
+    // The run-wide checks, last; run whether or not a scenario failed, and
+    // reported with it.
+    sequentially!(run, "checks";
         invariants::the_order_keeps_no_state,
         invariants::no_agent_key_in_any_journal_of_the_run,
         invariants::every_handler_journals_its_tabled_steps,
     );
+    run.finish();
 }
 
 /// The deploy-time canary for protocol v7, provoked: on a server without

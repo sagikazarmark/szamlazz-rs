@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use restate_sdk::prelude::{Endpoint, HttpServer};
 use serde_json::Value;
 
-use crate::admin::Admin;
+use crate::admin::{Admin, poll_until};
 use crate::gate::{FEATURES, ServerSpec};
 use crate::ingress::{Call, Reply};
 use crate::plain_http;
@@ -328,9 +328,11 @@ impl Restate {
     }
 
     /// Waits for the admin API (failing at once, with the server's own account
-    /// of it, when a server the harness started is gone before then) and
-    /// checks that `/version` reports exactly the [`FEATURES`] the server's
-    /// flags enable, no other.
+    /// of it, when a server the harness started is gone before then), then
+    /// for the SQL introspection API to answer (`/health` is up before the
+    /// partition store behind `sys_invocation` is provisioned; a suite's first
+    /// read would otherwise meet a 500), and checks that `/version` reports
+    /// exactly the [`FEATURES`] the server's flags enable, no other.
     pub(crate) async fn ready(mut self) -> Self {
         // Not `poll_until`: this wait has a second way out, the spawned
         // process gone, read off `&mut self.process` between probes.
@@ -361,6 +363,18 @@ impl Restate {
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        poll_until(
+            deadline.saturating_duration_since(Instant::now()),
+            Duration::from_millis(200),
+            || self.admin.sql("SELECT id FROM sys_invocation LIMIT 1"),
+            |error| {
+                format!(
+                    "the SQL introspection API at {} did not come up: {error}",
+                    self.admin.base()
+                )
+            },
+        )
+        .await;
 
         let version: Value = self
             .http
