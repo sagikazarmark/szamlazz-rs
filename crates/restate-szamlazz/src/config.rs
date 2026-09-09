@@ -954,10 +954,7 @@ mod tests {
             );
             assert_eq!(
                 verdict(config(json!({"factor": 0.5}))),
-                Err(WorkerConfigError::InvalidFactor {
-                    table,
-                    factor: 0.5
-                }),
+                Err(WorkerConfigError::InvalidFactor { table, factor: 0.5 }),
                 "{table}"
             );
             assert_eq!(verdict(config(json!({"factor": 1.0}))), Ok(()), "{table}");
@@ -1023,10 +1020,7 @@ mod tests {
         };
         assert!(matches!(
             config.validate(),
-            Err(WorkerConfigError::InvalidFactor {
-                table: "read",
-                ..
-            })
+            Err(WorkerConfigError::InvalidFactor { table: "read", .. })
         ));
     }
 

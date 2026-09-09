@@ -44,8 +44,7 @@ mod journaled {
 
     use crate::gateway::{
         CreateOutcome, DeleteOutcome, LookupOutcome, OwnershipOutcome, ProbeOutcome, QueryOutcome,
-        SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-        TaxpayerOutcome,
+        SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, TaxpayerOutcome,
     };
     use crate::identity::Namespace;
     use crate::service::prologue::Resolution;
@@ -84,7 +83,7 @@ mod journaled {
         LookupOutcome,
         CreateOutcome,
         StornoLookupOutcome,
-        GatewayStornoOutcome,
+        StornoOutcome,
         DeleteOutcome,
         SetPaymentsOutcome,
         ProbeOutcome,

@@ -4,7 +4,7 @@
 //!
 //! Every one of them takes a [`DocumentInput`] (inside a [`CreateRequest`]
 //! or a [`CorrectRequest`]) and answers a [`CreateResponse`], whose
-//! [`Outcome`] is the domain result and whose [`ConflictReason`] says why a
+//! [`CreateOutcome`] is the domain result and whose [`ConflictReason`] says why a
 //! request contradicts what szamlazz.hu holds. [`ConflictReason`] is shared
 //! with the storno handlers (see [`storno`](super::storno)).
 
@@ -117,7 +117,7 @@ impl CorrectRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum Outcome {
+pub enum CreateOutcome {
     /// szamlazz.hu issued the document in this invocation.
     Issued,
     /// A live document of this kind already exists under our external id;
@@ -137,7 +137,7 @@ pub enum Outcome {
     Conflict,
 }
 
-impl Outcome {
+impl CreateOutcome {
     /// Every outcome, in the order the crate README lists them (`issued`
     /// first, then the answers that issue nothing).
     pub const ALL: [Self; 6] = [
@@ -163,7 +163,7 @@ impl Outcome {
     }
 }
 
-impl fmt::Display for Outcome {
+impl fmt::Display for CreateOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -277,7 +277,7 @@ pub enum Warning {
 #[non_exhaustive]
 pub struct CreateResponse {
     /// The domain outcome.
-    pub outcome: Outcome,
+    pub outcome: CreateOutcome,
     /// Present when `outcome` is `conflict`.
     #[serde(default)]
     pub conflict_reason: Option<ConflictReason>,
@@ -327,7 +327,7 @@ impl CreateResponse {
     /// A response with the identity fields set and every optional field
     /// absent.
     #[must_use]
-    pub fn new(outcome: Outcome, kind: IssuedKind, external_id: impl Into<String>) -> Self {
+    pub fn new(outcome: CreateOutcome, kind: IssuedKind, external_id: impl Into<String>) -> Self {
         Self {
             outcome,
             conflict_reason: None,
@@ -346,14 +346,14 @@ impl CreateResponse {
         }
     }
 
-    /// A [`Outcome::Conflict`] response with its reason.
+    /// A [`CreateOutcome::Conflict`] response with its reason.
     #[must_use]
     pub fn conflict(
         reason: ConflictReason,
         kind: IssuedKind,
         external_id: impl Into<String>,
     ) -> Self {
-        let mut response = Self::new(Outcome::Conflict, kind, external_id);
+        let mut response = Self::new(CreateOutcome::Conflict, kind, external_id);
         response.conflict_reason = Some(reason);
         response
     }
@@ -583,14 +583,17 @@ mod tests {
 
     #[test]
     fn create_response_round_trips() {
-        let response =
-            CreateResponse::new(Outcome::Issued, IssuedKind::Invoice, "acct:ORD-1:invoice")
-                .with_invoice_number("SZ-1")
-                .with_net_total(dec!(20000))
-                .with_gross_total(dec!(25400))
-                .with_outstanding(dec!(25400))
-                .with_customer_account_url("https://example.test/acct")
-                .with_warning(Warning::NotificationDeliveryFailed);
+        let response = CreateResponse::new(
+            CreateOutcome::Issued,
+            IssuedKind::Invoice,
+            "acct:ORD-1:invoice",
+        )
+        .with_invoice_number("SZ-1")
+        .with_net_total(dec!(20000))
+        .with_gross_total(dec!(25400))
+        .with_outstanding(dec!(25400))
+        .with_customer_account_url("https://example.test/acct")
+        .with_warning(Warning::NotificationDeliveryFailed);
         let json = round_trip(&response);
         assert_eq!(json["outcome"], "issued");
         assert_eq!(json["conflict_reason"], serde_json::Value::Null);
@@ -614,7 +617,7 @@ mod tests {
         assert_eq!(json["existing_number"], "SZ-1");
 
         let rejected = CreateResponse::new(
-            Outcome::Rejected,
+            CreateOutcome::Rejected,
             IssuedKind::Corrective,
             "acct:ORD-1:corrective:c-2",
         )
@@ -632,7 +635,7 @@ mod tests {
             "external_id": "acct:ORD-1:final",
         }))
         .expect("deserialize");
-        assert_eq!(response.outcome, Outcome::Reversed);
+        assert_eq!(response.outcome, CreateOutcome::Reversed);
         assert!(response.warnings.is_empty());
         assert_eq!(response.invoice_number, None);
     }
@@ -678,16 +681,16 @@ mod tests {
     #[test]
     fn every_outcome_is_snake_case() {
         let outcomes = [
-            (Outcome::Issued, "issued"),
-            (Outcome::AlreadyIssued, "already_issued"),
-            (Outcome::Reconciled, "reconciled"),
-            (Outcome::Reversed, "reversed"),
-            (Outcome::Rejected, "rejected"),
-            (Outcome::Conflict, "conflict"),
+            (CreateOutcome::Issued, "issued"),
+            (CreateOutcome::AlreadyIssued, "already_issued"),
+            (CreateOutcome::Reconciled, "reconciled"),
+            (CreateOutcome::Reversed, "reversed"),
+            (CreateOutcome::Rejected, "rejected"),
+            (CreateOutcome::Conflict, "conflict"),
         ];
-        assert_eq!(Outcome::ALL.len(), outcomes.len());
+        assert_eq!(CreateOutcome::ALL.len(), outcomes.len());
         for (outcome, token) in outcomes {
-            assert!(Outcome::ALL.contains(&outcome), "{token} is in ALL");
+            assert!(CreateOutcome::ALL.contains(&outcome), "{token} is in ALL");
             assert_eq!(outcome.as_str(), token);
             assert_eq!(
                 serde_json::to_value(outcome).expect("serialize"),

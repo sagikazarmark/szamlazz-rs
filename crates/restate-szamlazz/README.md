@@ -195,7 +195,7 @@ activation details.
 
 `contract::CreateRequest` / `CreateResponse` are the input and output of the four `create_*` handlers. The
 request carries the `DocumentInput` (buyer, line items, dates, payment method, per-call overrides) and
-`CreateOptions` (`reissue`, `proforma: auto | none | {number}`); the response carries the `Outcome`, the identity
+`CreateOptions` (`reissue`, `proforma: auto | none | {number}`); the response carries the `CreateOutcome`, the identity
 (`kind`, `external_id`), the numbers and totals, and `warnings`. `customer_account_url` is set only on the
 execution that actually issued (a fresh `issued`), never on `already_issued`, `reconciled` or `get`.
 `CorrectRequest` (`invoice_number`, `correction_id`, `document`) is the input of `correct_invoice` and shares the
@@ -210,7 +210,7 @@ naming the field, never silently dropped. Response types stay open. The `conflic
 malformed body is the structured `invalid_input` fault instead of the SDK's plain-text 400. Same discovery schema
 as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
 
-`contract::Outcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
+`contract::CreateOutcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
 `conflict` with a reason. Both carry `ALL` and `as_str` (the snake-case token, what a caller branches on), and
 both are `#[non_exhaustive]`: a client branches with a default arm. The
 reasons:

@@ -2,7 +2,7 @@
 //! `Szamlazz.Agent` services.
 //!
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
-//! returned as values with HTTP 200 (see [`Outcome`] and [`ConflictReason`]),
+//! returned as values with HTTP 200 (see [`CreateOutcome`] and [`ConflictReason`]),
 //! while the [`TerminalCode`]s are reserved for faults. Three of the seven
 //! codes mean "outcome unknown: retry with a new `Idempotency-Key`, or read
 //! `Szamlazz.Order.get`" (`outcome_unknown`,
@@ -49,7 +49,7 @@ pub use agent::{
     Selector, SetPaymentsRequest, SetPaymentsResponse, TaxpayerAddress,
 };
 pub use create::{
-    ConflictReason, CorrectRequest, CreateOptions, CreateRequest, CreateResponse, Outcome,
+    ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,
     ProformaLink, Warning,
 };
 pub use document::{

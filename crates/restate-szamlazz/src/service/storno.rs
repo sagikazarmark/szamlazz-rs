@@ -30,10 +30,7 @@ use super::support::{
 };
 use crate::account::Account;
 use crate::contract::{ConflictReason, IssuedKind, StornoOutcome, StornoRequest, StornoResponse};
-use crate::gateway::{
-    FoundDocument, QueryOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
-    StornoStepRequest,
-};
+use crate::gateway::{self, FoundDocument, QueryOutcome, StornoLookupOutcome, StornoStepRequest};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
 /// What the storno step sends, built from what the verify step found.
@@ -205,33 +202,33 @@ fn after_storno_lookup(
 /// another code or `szlahu_down` (`unavailable` at once; nothing was sent).
 /// The caller attaches the identity it knows.
 fn storno_response(
-    outcome: GatewayStornoOutcome,
+    outcome: gateway::StornoOutcome,
     number: String,
     namespace: &Namespace,
 ) -> Result<StornoResponse, Fault> {
     Ok(match outcome {
-        GatewayStornoOutcome::Reversed(storno) => {
+        gateway::StornoOutcome::Reversed(storno) => {
             StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno.number)
         }
-        GatewayStornoOutcome::AlreadyReversed { storno_number } => {
+        gateway::StornoOutcome::AlreadyReversed { storno_number } => {
             StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno_number)
         }
-        GatewayStornoOutcome::NotStornoable => StornoResponse::not_stornoable(
+        gateway::StornoOutcome::NotStornoable => StornoResponse::not_stornoable(
             number,
             "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
         ),
-        GatewayStornoOutcome::Rejected(rejection) => {
+        gateway::StornoOutcome::Rejected(rejection) => {
             StornoResponse::new(StornoOutcome::Rejected, number)
                 .with_code(rejection.code)
                 .with_message(rejection.message)
         }
-        GatewayStornoOutcome::CredentialsRejected(answer) => {
+        gateway::StornoOutcome::CredentialsRejected(answer) => {
             return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
-        GatewayStornoOutcome::Api(answer) => {
+        gateway::StornoOutcome::Api(answer) => {
             return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
         }
-        GatewayStornoOutcome::Unavailable { message } => {
+        gateway::StornoOutcome::Unavailable { message } => {
             return Err(Fault::szlahu_down_answer(message));
         }
     })
@@ -334,7 +331,7 @@ async fn storno_step<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
     intent: &StornoIntent,
-) -> Result<GatewayStornoOutcome, TerminalError> {
+) -> Result<gateway::StornoOutcome, TerminalError> {
     let gateway = Arc::clone(&exec.gateway);
     let number = intent.number.clone();
     let external_id = intent.storno_id.clone();
@@ -984,18 +981,18 @@ mod tests {
     /// `szamlazz_code`. Both services share this mapping.
     #[test]
     fn a_settled_storno_step_maps_its_leading_query_answers_onto_faults() {
-        let respond = |outcome: GatewayStornoOutcome| {
+        let respond = |outcome: gateway::StornoOutcome| {
             storno_response(outcome, "SZ-1".to_owned(), &namespace())
         };
 
-        let response = respond(GatewayStornoOutcome::AlreadyReversed {
+        let response = respond(gateway::StornoOutcome::AlreadyReversed {
             storno_number: "SS-1".to_owned(),
         })
         .expect("data");
         assert_eq!(response.storno_number.as_deref(), Some("SS-1"));
 
         let (status, body) = fault_body(
-            respond(GatewayStornoOutcome::Api(SzamlazzAnswer::new(
+            respond(gateway::StornoOutcome::Api(SzamlazzAnswer::new(
                 "57",
                 "Hibás XML.",
             )))
@@ -1008,7 +1005,7 @@ mod tests {
         assert!(message.contains("code 57"), "{message}");
 
         let (status, body) = fault_body(
-            respond(GatewayStornoOutcome::Unavailable {
+            respond(gateway::StornoOutcome::Unavailable {
                 message: "maintenance".to_owned(),
             })
             .expect_err("a fault"),
@@ -1021,7 +1018,7 @@ mod tests {
         assert!(message.contains("nothing was sent"), "{message}");
 
         let (_, body) = fault_body(
-            respond(GatewayStornoOutcome::CredentialsRejected(
+            respond(gateway::StornoOutcome::CredentialsRejected(
                 SzamlazzAnswer::new("3", "login"),
             ))
             .expect_err("a fault"),

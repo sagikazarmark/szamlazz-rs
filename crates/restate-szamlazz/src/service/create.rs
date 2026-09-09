@@ -23,11 +23,11 @@ use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, verified_document};
 use super::support::{lookup, run_reading, run_retrying, verify};
 use crate::contract::{
-    ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
-    IssuedKind, Outcome, ProformaLink, Warning, outstanding,
+    ConflictReason, CorrectRequest, CreateOutcome, CreateRequest, CreateResponse, DocumentInput,
+    DocumentKind, IssuedKind, ProformaLink, Warning, outstanding,
 };
 use crate::gateway::{
-    CreateOutcome, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
+    self, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
     OwnershipOutcome, QueryOutcome,
 };
 use crate::identity::Namespace;
@@ -48,12 +48,13 @@ impl Identity {
         }
     }
 
-    fn respond(&self, outcome: Outcome) -> CreateResponse {
+    fn respond(&self, outcome: CreateOutcome) -> CreateResponse {
         CreateResponse::new(outcome, self.kind, self.external_id.as_str())
     }
 
     fn conflict(&self, reason: ConflictReason) -> CreateResponse {
-        self.respond(Outcome::Conflict).with_conflict_reason(reason)
+        self.respond(CreateOutcome::Conflict)
+            .with_conflict_reason(reason)
     }
 
     fn conflict_about(&self, reason: ConflictReason, number: impl Into<String>) -> CreateResponse {
@@ -61,13 +62,13 @@ impl Identity {
     }
 
     fn rejected(&self, code: impl Into<String>, message: impl Into<String>) -> CreateResponse {
-        self.respond(Outcome::Rejected)
+        self.respond(CreateOutcome::Rejected)
             .with_code(code)
             .with_message(message)
     }
 
     /// A response carrying the found document's number and totals.
-    fn found(&self, outcome: Outcome, found: &FoundDocument) -> CreateResponse {
+    fn found(&self, outcome: CreateOutcome, found: &FoundDocument) -> CreateResponse {
         let gross = Some(found.gross_total);
         let mut response = self.respond(outcome).with_invoice_number(&found.number);
         response.net_total = Some(found.net_total);
@@ -79,7 +80,9 @@ impl Identity {
 
     /// `outcome: reversed` for `number`, reversed by `storno_number`.
     fn reversed(&self, number: &str, storno_number: Option<String>) -> CreateResponse {
-        let mut response = self.respond(Outcome::Reversed).with_invoice_number(number);
+        let mut response = self
+            .respond(CreateOutcome::Reversed)
+            .with_invoice_number(number);
         response.storno_number = storno_number;
         response
     }
@@ -100,13 +103,13 @@ impl Identity {
     /// sent). The caller attaches the document's identity.
     fn respond_to(
         &self,
-        outcome: CreateOutcome,
+        outcome: gateway::CreateOutcome,
         namespace: &Namespace,
     ) -> Result<CreateResponse, Fault> {
         Ok(match outcome {
-            CreateOutcome::Issued(issued) => {
+            gateway::CreateOutcome::Issued(issued) => {
                 let mut response = self
-                    .respond(Outcome::Issued)
+                    .respond(CreateOutcome::Issued)
                     .with_invoice_number(issued.number);
                 response.net_total = issued.net_total;
                 response.gross_total = issued.gross_total;
@@ -119,23 +122,25 @@ impl Identity {
             }
             // An earlier execution of the step created it: the caller asked
             // for this document and has it.
-            CreateOutcome::Found(found) => self.found(Outcome::Issued, &found),
+            gateway::CreateOutcome::Found(found) => self.found(CreateOutcome::Issued, &found),
             // Issued and reversed since the lookup, by an earlier execution
             // of the step and anyone's storno. As if the lookup had seen it:
             // `reversed`, and a new document needs an explicit `reissue`.
             // The storno number is not looked up here; the next call's lookup
             // reports it.
-            CreateOutcome::Reversed(found) => self.reversed(&found.number, None),
+            gateway::CreateOutcome::Reversed(found) => self.reversed(&found.number, None),
             // The document the lookup saw reversed is reported live: what
             // the lookup would have answered under `reissue`.
-            CreateOutcome::LiveAgain(found) => {
+            gateway::CreateOutcome::LiveAgain(found) => {
                 self.conflict_about(ConflictReason::Live, found.number)
             }
-            CreateOutcome::Reconciled(found) => self.found(Outcome::Reconciled, &found),
-            CreateOutcome::Collision(found) => {
+            gateway::CreateOutcome::Reconciled(found) => {
+                self.found(CreateOutcome::Reconciled, &found)
+            }
+            gateway::CreateOutcome::Collision(found) => {
                 self.conflict_about(ConflictReason::ExternalIdCollision, found.number)
             }
-            CreateOutcome::DuplicateOrderNumber {
+            gateway::CreateOutcome::DuplicateOrderNumber {
                 answer,
                 existing_number,
             } => {
@@ -146,17 +151,19 @@ impl Identity {
                 response.existing_number = existing_number;
                 response
             }
-            CreateOutcome::Rejected(rejection) => self.rejected(rejection.code, rejection.message),
-            CreateOutcome::CredentialsRejected(answer) => {
+            gateway::CreateOutcome::Rejected(rejection) => {
+                self.rejected(rejection.code, rejection.message)
+            }
+            gateway::CreateOutcome::CredentialsRejected(answer) => {
                 return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
             }
             // The leading query answered with a code or `szlahu_down`: the
             // fault the lookup step raises for the same answer, at once:
             // nothing was sent (#63).
-            CreateOutcome::Api(answer) => {
+            gateway::CreateOutcome::Api(answer) => {
                 return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
             }
-            CreateOutcome::Unavailable { message } => {
+            gateway::CreateOutcome::Unavailable { message } => {
                 return Err(Fault::szlahu_down_answer(message));
             }
         })
@@ -487,7 +494,7 @@ fn decide_lookup(
             ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number))
         }
         LookupOutcome::Live(found) => {
-            ControlFlow::Break(identity.found(Outcome::AlreadyIssued, &found))
+            ControlFlow::Break(identity.found(CreateOutcome::AlreadyIssued, &found))
         }
         LookupOutcome::Reversed {
             document,
@@ -858,7 +865,7 @@ impl Execution {
         order: &OrderKey,
         intent: &Intent,
         reversed: Option<String>,
-    ) -> Result<CreateOutcome, HandlerError> {
+    ) -> Result<gateway::CreateOutcome, HandlerError> {
         let gateway = Arc::clone(&self.gateway);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
@@ -1095,7 +1102,7 @@ mod tests {
             &identity,
             &namespace(),
         ));
-        assert_eq!(response.outcome, Outcome::AlreadyIssued);
+        assert_eq!(response.outcome, CreateOutcome::AlreadyIssued);
         assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
         assert_eq!(response.net_total, Some(dec!(1000)));
         assert_eq!(response.gross_total, Some(dec!(1270)));
@@ -1109,7 +1116,7 @@ mod tests {
             &identity,
             &namespace(),
         ));
-        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(response.conflict_reason, Some(ConflictReason::Live));
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
         assert_eq!(response.invoice_number, None);
@@ -1137,7 +1144,7 @@ mod tests {
             &identity,
             &namespace(),
         ));
-        assert_eq!(response.outcome, Outcome::Reversed);
+        assert_eq!(response.outcome, CreateOutcome::Reversed);
         assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
         assert_eq!(response.storno_number.as_deref(), Some("SS-1"));
 
@@ -1152,7 +1159,7 @@ mod tests {
             &identity,
             &namespace(),
         ));
-        assert_eq!(response.outcome, Outcome::Reversed);
+        assert_eq!(response.outcome, CreateOutcome::Reversed);
         assert_eq!(response.storno_number, None);
 
         assert_eq!(
@@ -1198,7 +1205,11 @@ mod tests {
                 &identity,
                 &namespace(),
             ));
-            assert_eq!(response.outcome, Outcome::Conflict, "reissue {reissue}");
+            assert_eq!(
+                response.outcome,
+                CreateOutcome::Conflict,
+                "reissue {reissue}"
+            );
             assert_eq!(
                 response.conflict_reason,
                 Some(ConflictReason::ExternalIdCollision),
@@ -1213,7 +1224,11 @@ mod tests {
                 &identity,
                 &namespace(),
             ));
-            assert_eq!(response.outcome, Outcome::Conflict, "reissue {reissue}");
+            assert_eq!(
+                response.outcome,
+                CreateOutcome::Conflict,
+                "reissue {reissue}"
+            );
             assert_eq!(
                 response.conflict_reason,
                 Some(ConflictReason::Foreign),
@@ -1296,7 +1311,7 @@ mod tests {
         )
         .expect("data")
         .expect("refused");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(response.conflict_reason, Some(ConflictReason::PrepaidChain));
         assert_eq!(response.existing_number.as_deref(), Some("ES-1"));
         assert_eq!(
@@ -1402,7 +1417,7 @@ mod tests {
             decide_prepayment_for_final(OwnershipOutcome::Absent, &identity, &namespace, &mut refs)
                 .expect("data")
                 .expect("refused");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::PrepaymentMissing)
@@ -1592,7 +1607,7 @@ mod tests {
         )
         .expect("data")
         .expect("refused");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::ExternalIdCollision)
@@ -1622,7 +1637,7 @@ mod tests {
         )
         .expect("data")
         .expect("refused");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(response.conflict_reason, Some(ConflictReason::ProformaLive));
         assert_eq!(response.existing_number.as_deref(), Some("D-1"));
         assert_eq!(refs.proforma, None, "nothing recorded on a refusal");
@@ -1720,7 +1735,7 @@ mod tests {
         )
         .expect("data")
         .expect("refused");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::ProformaMissing)
@@ -1743,7 +1758,7 @@ mod tests {
             )
             .expect("data")
             .unwrap_or_else(|| panic!("{label}: refused"));
-            assert_eq!(response.outcome, Outcome::Conflict, "{label}");
+            assert_eq!(response.outcome, CreateOutcome::Conflict, "{label}");
             assert_eq!(
                 response.conflict_reason,
                 Some(ConflictReason::NotManaged),
@@ -1879,7 +1894,7 @@ mod tests {
         ] {
             let response = decide_base(&base.parse(), &order, "SZ-1", &identity)
                 .unwrap_or_else(|| panic!("{label}: refused"));
-            assert_eq!(response.outcome, Outcome::Conflict, "{label}");
+            assert_eq!(response.outcome, CreateOutcome::Conflict, "{label}");
             assert_eq!(
                 response.conflict_reason,
                 Some(ConflictReason::NotManaged),
@@ -1984,15 +1999,15 @@ mod tests {
     #[test]
     fn an_issued_document_is_issued_with_the_notification_warning_when_56_said_so() {
         let identity = invoice_identity();
-        let respond = |outcome: CreateOutcome| identity.respond_to(outcome, &namespace());
+        let respond = |outcome: gateway::CreateOutcome| identity.respond_to(outcome, &namespace());
 
         let issued = issued_reply(
             &[("szlahu_id", "924307747")],
             r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>SZ-2</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg><vevoifiokurl>https://www.szamlazz.hu/szamla/fiok/example</vevoifiokurl></xmlszamlavalasz>"#,
         );
         assert!(!issued.notification_delivery_failed);
-        let response = respond(CreateOutcome::Issued(issued)).expect("data");
-        assert_eq!(response.outcome, Outcome::Issued);
+        let response = respond(gateway::CreateOutcome::Issued(issued)).expect("data");
+        assert_eq!(response.outcome, CreateOutcome::Issued);
         assert_eq!(response.invoice_number.as_deref(), Some("SZ-2"));
         assert_eq!(response.net_total, Some(dec!(1000)));
         assert_eq!(response.gross_total, Some(dec!(1270)));
@@ -2017,8 +2032,12 @@ mod tests {
             r#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><hibauzenet>notification failed</hibauzenet><szamlaszam>SZ-3</szamlaszam></xmlszamlavalasz>"#,
         );
         assert!(issued.notification_delivery_failed);
-        let response = respond(CreateOutcome::Issued(issued)).expect("data");
-        assert_eq!(response.outcome, Outcome::Issued, "issued, not rejected");
+        let response = respond(gateway::CreateOutcome::Issued(issued)).expect("data");
+        assert_eq!(
+            response.outcome,
+            CreateOutcome::Issued,
+            "issued, not rejected"
+        );
         assert_eq!(response.invoice_number.as_deref(), Some("SZ-3"));
         assert_eq!(response.gross_total, Some(dec!(1270)));
         assert_eq!(response.warnings, [Warning::NotificationDeliveryFailed]);
@@ -2035,7 +2054,7 @@ mod tests {
         let namespace: Namespace = "acct".parse().expect("namespace");
         let order = OrderKey::parse("ORD-1").expect("order");
         let identity = Identity::of_kind(&namespace, &order, DocumentKind::Invoice);
-        let respond = |outcome: CreateOutcome| identity.respond_to(outcome, &namespace);
+        let respond = |outcome: gateway::CreateOutcome| identity.respond_to(outcome, &namespace);
 
         let live = Doc::default().boxed();
         let reversed = Doc {
@@ -2044,36 +2063,36 @@ mod tests {
         }
         .boxed();
 
-        let response = respond(CreateOutcome::Found(live.clone())).expect("data");
-        assert_eq!(response.outcome, Outcome::Issued);
+        let response = respond(gateway::CreateOutcome::Found(live.clone())).expect("data");
+        assert_eq!(response.outcome, CreateOutcome::Issued);
         assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
         assert_eq!(response.external_id, "acct:ORD-1:invoice");
 
-        let response = respond(CreateOutcome::Reconciled(live.clone())).expect("data");
-        assert_eq!(response.outcome, Outcome::Reconciled);
+        let response = respond(gateway::CreateOutcome::Reconciled(live.clone())).expect("data");
+        assert_eq!(response.outcome, CreateOutcome::Reconciled);
 
-        let response = respond(CreateOutcome::Reversed(reversed)).expect("data");
-        assert_eq!(response.outcome, Outcome::Reversed);
+        let response = respond(gateway::CreateOutcome::Reversed(reversed)).expect("data");
+        assert_eq!(response.outcome, CreateOutcome::Reversed);
         assert_eq!(response.invoice_number.as_deref(), Some("SZ-1"));
         assert_eq!(
             response.storno_number, None,
             "the create step does not look the storno number up"
         );
 
-        let response = respond(CreateOutcome::LiveAgain(live.clone())).expect("data");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        let response = respond(gateway::CreateOutcome::LiveAgain(live.clone())).expect("data");
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(response.conflict_reason, Some(ConflictReason::Live));
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
 
-        let response = respond(CreateOutcome::Collision(live)).expect("data");
-        assert_eq!(response.outcome, Outcome::Conflict);
+        let response = respond(gateway::CreateOutcome::Collision(live)).expect("data");
+        assert_eq!(response.outcome, CreateOutcome::Conflict);
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::ExternalIdCollision)
         );
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
 
-        let response = respond(CreateOutcome::DuplicateOrderNumber {
+        let response = respond(gateway::CreateOutcome::DuplicateOrderNumber {
             answer: SzamlazzAnswer::new("152", "dup"),
             existing_number: Some("SZ-77".to_owned()),
         })
@@ -2085,16 +2104,16 @@ mod tests {
         assert_eq!(response.existing_number.as_deref(), Some("SZ-77"));
         assert_eq!(response.code.as_deref(), Some("152"));
 
-        let response = respond(CreateOutcome::Rejected(Rejection::from(
+        let response = respond(gateway::CreateOutcome::Rejected(Rejection::from(
             SzamlazzAnswer::new("259", "net"),
         )))
         .expect("data");
-        assert_eq!(response.outcome, Outcome::Rejected);
+        assert_eq!(response.outcome, CreateOutcome::Rejected);
         assert_eq!(response.code.as_deref(), Some("259"));
 
-        let fault = respond(CreateOutcome::CredentialsRejected(SzamlazzAnswer::new(
-            "3", "login",
-        )))
+        let fault = respond(gateway::CreateOutcome::CredentialsRejected(
+            SzamlazzAnswer::new("3", "login"),
+        ))
         .expect_err("a fault");
         let (status, body) = fault_body(fault);
         assert_eq!(status, 503, "{body}");
@@ -2103,8 +2122,11 @@ mod tests {
         // The leading query's answers (#63): `unavailable` at once, the shape
         // the lookup step gives the same code, with the szamlazz.hu code beside
         // it, never in `code`; `szlahu_down` has no code to carry.
-        let fault = respond(CreateOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")))
-            .expect_err("a fault");
+        let fault = respond(gateway::CreateOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Hibás XML.",
+        )))
+        .expect_err("a fault");
         let (status, body) = fault_body(fault);
         assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], TerminalCode::Unavailable.as_str());
@@ -2116,7 +2138,7 @@ mod tests {
             "{message}"
         );
 
-        let fault = respond(CreateOutcome::Unavailable {
+        let fault = respond(gateway::CreateOutcome::Unavailable {
             message: "maintenance".to_owned(),
         })
         .expect_err("a fault");
