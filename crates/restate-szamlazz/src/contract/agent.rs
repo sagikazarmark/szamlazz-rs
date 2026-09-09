@@ -190,7 +190,7 @@ impl QueryResponse {
 /// reported, `None` included.
 impl From<&FoundDocument> for QueryResponse {
     fn from(document: &FoundDocument) -> Self {
-        let mut response = Self::new(&document.number, &document.document_type);
+        let mut response = Self::new(&document.number, document.document_type.as_wire());
         response.reversed = document.reversed;
         response
             .referenced_invoice_number
@@ -751,7 +751,7 @@ mod tests {
         };
         let credit = CreditEntry::from(&entry);
         assert_eq!(credit.date, date(2026, 7, 10));
-        assert_eq!(credit.method, szamlazz_agent::PaymentMethod::Card);
+        assert_eq!(credit.title, szamlazz_agent::PaymentMethod::Card);
         assert_eq!(credit.amount, dec!(25400));
         assert_eq!(credit.description.as_deref(), Some("card"));
 
@@ -761,7 +761,7 @@ mod tests {
             ..entry
         };
         let credit = CreditEntry::from(&bare);
-        assert_eq!(credit.method.as_wire(), "Bitcoin");
+        assert_eq!(credit.title.as_wire(), "Bitcoin");
         assert_eq!(credit.description, None);
     }
 

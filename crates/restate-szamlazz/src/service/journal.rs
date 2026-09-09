@@ -37,13 +37,13 @@ use std::fmt::Debug;
 use rust_decimal::dec;
 use serde_json::Value;
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
-use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 use szamlazz_agent::{
-    Credentials, Currency, InvoiceNumber, Language, LineItem, PaymentMethod, VatRate,
+    Credentials, Currency, InvoiceNumber, InvoiceSelector, Language, LineItem, PaymentMethod,
+    VatRate,
 };
 
 use crate::account::{
@@ -328,20 +328,24 @@ fn issued_document() -> IssuedDocument {
             Language::Hungarian,
         ),
         Buyer::new("Kovács Bt.", "2030", "Érd", "Tárnoki út 23."),
-        vec![LineItem::calculated_for_currency(
-            "Eladó izé",
-            dec!(1),
-            "db",
-            dec!(10000),
-            VatRate::percent(27),
-            &Currency::HUF,
-        )],
+        vec![
+            LineItem::try_calculated(
+                "Eladó izé",
+                dec!(1),
+                "db",
+                dec!(10000),
+                VatRate::percent(27),
+                szamlazz_agent::Rounding::minor_unit(&Currency::HUF),
+            )
+            .expect("fits"),
+        ],
     );
     create
         .parse(&reply("SZ-1", "10000", "12700", "12700"))
         .expect("xmlszamlavalasz parses")
-        .try_into()
+        .into_issued()
         .expect("a numbered reply")
+        .into()
 }
 
 /// The reply of a storno of `SZ-1`: the storno invoice `SS-1` with negative

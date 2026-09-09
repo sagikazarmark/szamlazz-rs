@@ -95,3 +95,20 @@ impl fmt::Debug for Credentials {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key never reaches a log through `Debug`, nor does a password.
+    #[test]
+    fn debug_is_redacted() {
+        let debug = format!("{:?}", AgentKey::new("secret"));
+        assert!(!debug.contains("secret"), "{debug}");
+        let debug = format!("{:?}", Credentials::agent_key("secret"));
+        assert!(!debug.contains("secret"), "{debug}");
+        let debug = format!("{:?}", Credentials::user_password("user", "hunter2"));
+        assert!(debug.contains("user"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+    }
+}

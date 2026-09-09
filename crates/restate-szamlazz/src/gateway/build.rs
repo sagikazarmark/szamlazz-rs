@@ -3,10 +3,10 @@
 
 use std::str::FromStr as _;
 
-use szamlazz_agent::ops::invoice::{
-    Buyer, CreateInvoice, ExchangeRate, InvoiceHeader, InvoiceKind, InvoiceTemplate,
+use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
+use szamlazz_agent::{
+    ArithmeticError, Currency, ExchangeRate, InvoiceNumber, InvoiceTemplate, Language,
 };
-use szamlazz_agent::{ArithmeticError, Currency, InvoiceNumber, Language};
 
 use super::Gateway;
 use crate::contract::{DocumentInput, IssuedKind};

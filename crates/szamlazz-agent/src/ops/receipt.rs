@@ -6,20 +6,27 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ParseError, RequestError, ResponseError};
-use crate::item::LineItem;
-use crate::ops::invoice::ExchangeRate;
-use crate::types::{Currency, PaymentMethod, Pdf, ReceiptNumber, VatRate};
+use crate::error::{ParseError, RequestError, ResponseError};
+use crate::item::{LineItem, LineItemLedger};
+use crate::types::{
+    Currency, ExchangeRate, PaymentMethod, Pdf, ReceiptNumber, ReceiptType, Totals, VatRate,
+};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
-use crate::xml::totals::{AfakulcsosszXml, OsszegekXml};
+use crate::xml::totals::OsszegekXml;
+
+/// The `xmlnyugtavalasz` envelope: the reply of the create, storno and query
+/// operations.
+const VALASZ_ROOT: &str = "xmlnyugtavalasz";
+const VALASZ_NAMESPACE: &str = "http://www.szamlazz.hu/xmlnyugtavalasz";
 
 /// The PDF template a receipt is rendered with (`pdfSablon`).
 ///
-/// An empty or unknown value on the wire falls back to the default A4
-/// template.
+/// The set is open like every wire token set: a token the crate does not
+/// know is [`ReceiptTemplate::Other`]. szamlazz.hu renders an empty or
+/// unknown token with the default A4 template.
 #[doc(alias = "pdfSablon")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum ReceiptTemplate {
@@ -31,17 +38,20 @@ pub enum ReceiptTemplate {
     TicketWithLogo,
     /// `N`: 80 mm roll (receipt printer).
     Roll80mm,
+    /// A future or account-specific template token.
+    Other(String),
 }
 
 impl ReceiptTemplate {
     /// The exact wire token.
     #[must_use]
-    pub fn as_wire(self) -> &'static str {
+    pub fn as_wire(&self) -> &str {
         match self {
             Self::A4Default => "A",
             Self::Ticket => "J",
             Self::TicketWithLogo => "L",
             Self::Roll80mm => "N",
+            Self::Other(token) => token,
         }
     }
 }
@@ -81,9 +91,14 @@ impl ReceiptPayment {
 ///
 /// [`CreateReceipt::call_id`] prevents duplicate issuance by making a repeated
 /// identifier fail with error 338. It is not replay-success idempotency: a
-/// retry does not return the original success. The PDF, when
-/// [`CreateReceipt::download_pdf`] is set, arrives decoded in
-/// [`ReceiptResult::pdf`].
+/// retry does not return the original success. The response is the issued
+/// [`Receipt`]; its PDF, when [`CreateReceipt::download_pdf`] is set, arrives
+/// decoded in [`Receipt::pdf`].
+///
+/// A receipt row carries fewer fields than an invoice row: a [`LineItem`]
+/// with a `margin_vat_base`, or a ledger with an economic event or a
+/// settlement period, is refused by [`validate`](AgentRequest::validate)
+/// ([`RequestError::UnsupportedOnReceipt`]) rather than sent without them.
 #[doc(alias = "xmlnyugtacreate")]
 #[doc(alias = "nyugta készítés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -106,7 +121,7 @@ pub struct CreateReceipt {
     /// Free-text comment shown on the receipt (`megjegyzes`).
     pub comment: Option<String>,
     /// PDF template (`pdfSablon`).
-    pub pdf_template: Option<ReceiptTemplate>,
+    pub template: Option<ReceiptTemplate>,
     /// General-ledger identifier of the customer (`fokonyvVevo`).
     #[doc(alias = "fokonyvVevo")]
     pub ledger_customer: Option<String>,
@@ -116,11 +131,12 @@ pub struct CreateReceipt {
     /// Return the PDF in the response (`pdfLetoltes`).
     #[serde(default)]
     pub download_pdf: bool,
-    /// Line items (`tetelek`); at least one is required.
+    /// Line items (`tetelek`); at least one is required, and none may carry
+    /// an invoice-only field (see the type's docs).
     pub items: Vec<LineItem>,
-    /// Payment breakdown (`kifizetesek`); optional, but when present the docs
-    /// require the amounts to sum to the receipt total. This crate does not
-    /// validate that: the server is the authority.
+    /// How the buyer paid (`kifizetesek`), by tender; optional, but when
+    /// present the docs require the amounts to sum to the receipt total. This
+    /// crate does not validate that: the server is the authority.
     #[serde(default)]
     pub payments: Vec<ReceiptPayment>,
 }
@@ -141,7 +157,7 @@ impl CreateReceipt {
             currency,
             exchange_rate: None,
             comment: None,
-            pdf_template: None,
+            template: None,
             ledger_customer: None,
             order_number: None,
             download_pdf: false,
@@ -153,11 +169,14 @@ impl CreateReceipt {
 
 impl AgentRequest for CreateReceipt {
     const ACTION: &'static str = "action-szamla_agent_nyugta_create";
-    type Response = ReceiptResult;
+    type Response = Receipt;
 
     fn validate(&self) -> Result<(), RequestError> {
         if self.items.is_empty() {
             return Err(RequestError::MissingLineItems);
+        }
+        if let Some(field) = self.items.iter().find_map(unsupported_on_receipt) {
+            return Err(RequestError::UnsupportedOnReceipt(field));
         }
         if let Some(count) = self
             .items
@@ -203,7 +222,7 @@ impl AgentRequest for CreateReceipt {
                         }
                     }
                     f.text_opt("megjegyzes", self.comment.as_deref());
-                    if let Some(template) = self.pdf_template {
+                    if let Some(template) = &self.template {
                         f.text("pdfSablon", template.as_wire());
                     }
                     f.text_opt("fokonyvVevo", self.ledger_customer.as_deref());
@@ -258,32 +277,34 @@ impl AgentRequest for CreateReceipt {
 }
 
 /// The receipt storno operation (`xmlnyugtast`,
-/// `action-szamla_agent_nyugta_storno`): cancels an issued receipt.
+/// `action-szamla_agent_nyugta_storno`): reverses an issued receipt.
 ///
-/// The response carries the newly created storno (`SN`) receipt.
+/// The response is the newly issued storno receipt (`SN`,
+/// [`ReceiptType::Storno`]), which names the reversed receipt in
+/// [`Receipt::reversed_receipt_number`].
 #[doc(alias = "xmlnyugtast")]
 #[doc(alias = "nyugta sztornó")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StornoReceipt {
-    /// The receipt to cancel (`nyugtaszam`).
+    /// The receipt to reverse (`nyugtaszam`).
     pub receipt_number: ReceiptNumber,
     /// Return the storno receipt PDF in the response (`pdfLetoltes`).
     #[serde(default)]
     pub download_pdf: bool,
     /// PDF template (`pdfSablon`).
-    pub pdf_template: Option<ReceiptTemplate>,
+    pub template: Option<ReceiptTemplate>,
     /// Unique call identifier for the storno operation (`hivasAzonosito`).
     /// Reusing it returns error 338.
     pub call_id: Option<String>,
 }
 
 impl StornoReceipt {
-    /// A cancellation of the given receipt; no PDF is requested.
+    /// A reversal of the given receipt; no PDF is requested.
     pub fn new(receipt_number: impl Into<ReceiptNumber>) -> Self {
         Self {
             receipt_number: receipt_number.into(),
             download_pdf: false,
-            pdf_template: None,
+            template: None,
             call_id: None,
         }
     }
@@ -291,7 +312,7 @@ impl StornoReceipt {
 
 impl AgentRequest for StornoReceipt {
     const ACTION: &'static str = "action-szamla_agent_nyugta_storno";
-    type Response = ReceiptResult;
+    type Response = Receipt;
 
     fn write_xml(&self, credentials: &Credentials) -> Vec<u8> {
         xml::document(
@@ -304,7 +325,7 @@ impl AgentRequest for StornoReceipt {
                 });
                 root.node("fejlec", |f| {
                     f.text("nyugtaszam", self.receipt_number.as_str());
-                    if let Some(template) = self.pdf_template {
+                    if let Some(template) = &self.template {
                         f.text("pdfSablon", template.as_wire());
                     }
                     f.text_opt("hivasAzonosito", self.call_id.as_deref());
@@ -343,7 +364,7 @@ pub struct QueryReceipt {
     #[serde(default)]
     pub download_pdf: bool,
     /// PDF template for the returned PDF (`pdfSablon`).
-    pub pdf_template: Option<ReceiptTemplate>,
+    pub template: Option<ReceiptTemplate>,
     /// Call identifier (`hivasAzonosito`), as supplied at creation.
     #[doc(alias = "hivasAzonosito")]
     pub call_id: Option<String>,
@@ -356,7 +377,7 @@ impl QueryReceipt {
         Self {
             selector,
             download_pdf: false,
-            pdf_template: None,
+            template: None,
             call_id: None,
         }
     }
@@ -364,7 +385,7 @@ impl QueryReceipt {
 
 impl AgentRequest for QueryReceipt {
     const ACTION: &'static str = "action-szamla_agent_nyugta_get";
-    type Response = ReceiptResult;
+    type Response = Receipt;
 
     fn write_xml(&self, credentials: &Credentials) -> Vec<u8> {
         xml::document(
@@ -383,7 +404,7 @@ impl AgentRequest for QueryReceipt {
                         ReceiptSelector::OrderNumber(number) => f.text("rendelesSzam", number),
                     }
                     f.text_opt("hivasAzonosito", self.call_id.as_deref());
-                    if let Some(template) = self.pdf_template {
+                    if let Some(template) = &self.template {
                         f.text("pdfSablon", template.as_wire());
                     }
                 });
@@ -467,25 +488,19 @@ impl AgentRequest for SendReceipt {
     }
 
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        response.check()?;
-        ReceiptSendResponse::from_body(response.body())?.into_success()
+        xml::verdict(
+            response,
+            "xmlnyugtasendvalasz",
+            "http://www.szamlazz.hu/xmlnyugtasendvalasz",
+        )
     }
 }
 
-/// A successfully created, cancelled, or queried receipt
-/// (`xmlnyugtavalasz`).
-#[doc(alias = "xmlnyugtavalasz")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct ReceiptResult {
-    /// The receipt data.
-    pub receipt: Receipt,
-    /// The receipt PDF (`nyugtaPdf`), when requested.
-    pub pdf: Option<Pdf>,
-}
-
-/// A receipt as returned by szamlazz.hu (`nyugta`).
+/// A receipt as szamlazz.hu returns it (`xmlnyugtavalasz`): the `nyugta`
+/// block, and the PDF beside it when one was requested. The reply of the
+/// create, storno and query operations.
 #[doc(alias = "nyugta")]
+#[doc(alias = "xmlnyugtavalasz")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct Receipt {
@@ -497,17 +512,16 @@ pub struct Receipt {
     /// The receipt number (`nyugtaszam`).
     #[doc(alias = "nyugtaszám")]
     pub receipt_number: ReceiptNumber,
-    /// Receipt type (`tipus`): `NY` for a receipt, `SN` for a storno
-    /// (cancellation) receipt.
+    /// Document type (`tipus`): a receipt (`NY`) or a storno receipt (`SN`).
     #[doc(alias = "típus")]
-    pub kind: String,
-    /// Whether this receipt has been cancelled (`stornozott`); meaningful for
+    pub document_type: ReceiptType,
+    /// Whether this receipt has been reversed (`stornozott`); meaningful for
     /// `NY` receipts.
     #[doc(alias = "stornózott")]
-    pub cancelled: bool,
-    /// For `SN` receipts, the number of the receipt being cancelled
+    pub reversed: bool,
+    /// For `SN` receipts, the number of the receipt being reversed
     /// (`stornozottNyugtaszam`).
-    pub cancelled_receipt_number: Option<ReceiptNumber>,
+    pub reversed_receipt_number: Option<ReceiptNumber>,
     /// Issue date (`kelt`).
     pub issue_date: Date,
     /// Payment method (`fizmod`).
@@ -527,10 +541,6 @@ pub struct Receipt {
     ///
     /// Mirrors the wire: the schema has the element mandatory, so `None`
     /// (absent or empty) is a document that does not say, not a live one.
-    /// A reader that pins the account mode treats `None` as a mismatch.
-    ///
-    /// Breaking change in 0.x: this was a `bool` defaulting to `false` when
-    /// the element was absent.
     pub test: Option<bool>,
     /// Order number (`rendelesSzam`).
     #[doc(alias = "rendelésszám")]
@@ -538,13 +548,16 @@ pub struct Receipt {
     /// Line items (`tetelek`).
     #[doc(alias = "tételek")]
     pub items: Vec<ReceiptItem>,
-    /// Payments (`kifizetesek`).
+    /// How the buyer paid (`kifizetesek`), by tender.
     #[doc(alias = "kifizetések")]
     #[serde(default)]
     pub payments: Vec<ReceiptPayment>,
     /// Totals per VAT rate and overall (`osszegek`).
     #[doc(alias = "összegek")]
-    pub totals: ReceiptTotals,
+    pub totals: Totals,
+    /// The receipt PDF (`nyugtaPdf`), when requested.
+    #[serde(default)]
+    pub pdf: Option<Pdf>,
 }
 
 /// One row of a returned receipt (`tetel`).
@@ -572,7 +585,7 @@ pub struct ReceiptItem {
     pub vat_type: Option<String>,
     /// Raw VAT rate token (`afakulcs`).
     #[doc(alias = "áfakulcs")]
-    pub vat_code: String,
+    pub vat_rate_code: String,
     /// Net value (`netto`).
     pub net_value: Decimal,
     /// VAT value (`afa`).
@@ -595,162 +608,69 @@ pub struct ReceiptItemLedger {
 
 impl ReceiptItem {
     /// The typed VAT rate: [`ReceiptItem::vat_type`] when present, otherwise
-    /// [`ReceiptItem::vat_code`].
+    /// [`ReceiptItem::vat_rate_code`].
     #[must_use]
     pub fn vat_rate(&self) -> VatRate {
-        match self.vat_type.as_deref() {
-            Some(code) => VatRate::from(code),
-            None => VatRate::from(self.vat_code.as_str()),
-        }
+        VatRate::from(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
     }
 }
 
-/// Receipt totals (`osszegek`): per-VAT-rate subtotals and the grand total.
-#[doc(alias = "összegek")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct ReceiptTotals {
-    /// Subtotals per VAT rate (`afakulcsossz`).
-    pub by_rate: Vec<VatRateTotal>,
-    /// Grand totals (`totalossz`).
-    pub total: TotalAmounts,
-}
-
-/// The subtotal for one VAT rate (`afakulcsossz`).
-#[doc(alias = "áfakulcs összesítés")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct VatRateTotal {
-    /// VAT category code (`afatipus`), set when a special code applies.
-    #[doc(alias = "áfatípus")]
-    pub vat_type: Option<String>,
-    /// Raw VAT rate token (`afakulcs`).
-    #[doc(alias = "áfakulcs")]
-    pub vat_code: String,
-    /// Net subtotal (`netto`).
-    pub net: Decimal,
-    /// VAT subtotal (`afa`).
-    pub vat: Decimal,
-    /// Gross subtotal (`brutto`).
-    pub gross: Decimal,
-}
-
-impl VatRateTotal {
-    /// The typed VAT rate: [`VatRateTotal::vat_type`] when present, otherwise
-    /// [`VatRateTotal::vat_code`].
-    #[must_use]
-    pub fn vat_rate(&self) -> VatRate {
-        match self.vat_type.as_deref() {
-            Some(code) => VatRate::from(code),
-            None => VatRate::from(self.vat_code.as_str()),
-        }
+/// The invoice-only [`LineItem`] field a receipt row cannot carry, if any:
+/// the receipt writer has no element for it, and a field that never reaches
+/// the wire is refused rather than dropped.
+fn unsupported_on_receipt(item: &LineItem) -> Option<&'static str> {
+    if item.margin_vat_base.is_some() {
+        return Some("margin_vat_base");
     }
+    let Some(LineItemLedger {
+        economic_event,
+        vat_economic_event,
+        revenue_account: _,
+        vat_account: _,
+        settlement_from,
+        settlement_to,
+    }) = &item.ledger
+    else {
+        return None;
+    };
+    if economic_event.is_some() {
+        return Some("ledger.economic_event");
+    }
+    if vat_economic_event.is_some() {
+        return Some("ledger.vat_economic_event");
+    }
+    if settlement_from.is_some() {
+        return Some("ledger.settlement_from");
+    }
+    if settlement_to.is_some() {
+        return Some("ledger.settlement_to");
+    }
+    None
 }
 
-/// The grand total of a receipt (`totalossz`).
-#[doc(alias = "totál összesítés")]
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct TotalAmounts {
-    /// Net total (`netto`).
-    pub net: Decimal,
-    /// VAT total (`afa`).
-    pub vat: Decimal,
-    /// Gross total (`brutto`).
-    pub gross: Decimal,
-}
-
-/// Parses an `xmlnyugtavalasz` body into a [`ReceiptResult`]. Shared by the
+/// Parses an `xmlnyugtavalasz` body into a [`Receipt`]. Shared by the
 /// create, storno, and query operations.
-fn parse_receipt(response: &RawResponse) -> Result<ReceiptResult, ResponseError> {
-    response.check()?;
-    let valasz = ReceiptResponse::from_body(response.body())?.into_success()?;
-    let nyugta = valasz.nyugta.ok_or(ParseError::Missing("nyugta"))?;
+fn parse_receipt(response: &RawResponse) -> Result<Receipt, ResponseError> {
+    let body: ReceiptBody = xml::valasz(response, VALASZ_ROOT, VALASZ_NAMESPACE)?;
+    let nyugta = body.nyugta.ok_or(ParseError::Missing("nyugta"))?;
+    let pdf = match body.nyugta_pdf.filter(|s| !s.is_empty()) {
+        Some(encoded) => Some(Pdf::from_base64(&encoded)?),
+        None => None,
+    };
 
-    Ok(ReceiptResult {
-        receipt: nyugta.into(),
-        pdf: match valasz.nyugta_pdf.filter(|s| !s.is_empty()) {
-            Some(encoded) => Some(Pdf::from_base64(&encoded)?),
-            None => None,
-        },
+    Ok(Receipt {
+        pdf,
+        ..nyugta.into()
     })
 }
 
-/// Builds the [`ApiError`] reported in a response body.
-fn api_error(hibakod: Option<String>, hibauzenet: Option<String>) -> ResponseError {
-    ApiError {
-        code: hibakod.map_or_else(|| crate::ErrorCode::Unknown("0".to_owned()), Into::into),
-        message: hibauzenet.unwrap_or_default(),
-    }
-    .into()
-}
-
-/// The `xmlnyugtavalasz` response document.
+/// The payload of the `xmlnyugtavalasz` envelope after the verdict.
 #[derive(Debug, serde::Deserialize)]
-struct ReceiptResponse {
-    #[serde(deserialize_with = "xml::de::flexible_bool")]
-    sikeres: bool,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    hibakod: Option<String>,
-    #[serde(default)]
-    hibauzenet: Option<String>,
+struct ReceiptBody {
     #[serde(default, rename(deserialize = "nyugtaPdf"))]
     nyugta_pdf: Option<String>,
     #[serde(default)]
     nyugta: Option<NyugtaXml>,
-}
-
-impl ReceiptResponse {
-    fn from_body(body: &[u8]) -> Result<Self, ParseError> {
-        let text = xml::response_text(
-            body,
-            "xmlnyugtavalasz",
-            "http://www.szamlazz.hu/xmlnyugtavalasz",
-        )?;
-
-        Ok(quick_xml::de::from_str(text)?)
-    }
-
-    /// Converts a `sikeres=false` response into the reported [`ApiError`].
-    fn into_success(self) -> Result<Self, ResponseError> {
-        if self.sikeres {
-            Ok(self)
-        } else {
-            Err(api_error(self.hibakod, self.hibauzenet))
-        }
-    }
-}
-
-/// The `xmlnyugtasendvalasz` response document.
-#[derive(Debug, serde::Deserialize)]
-struct ReceiptSendResponse {
-    #[serde(deserialize_with = "xml::de::flexible_bool")]
-    sikeres: bool,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    hibakod: Option<String>,
-    #[serde(default)]
-    hibauzenet: Option<String>,
-}
-
-impl ReceiptSendResponse {
-    fn from_body(body: &[u8]) -> Result<Self, ParseError> {
-        let text = xml::response_text(
-            body,
-            "xmlnyugtasendvalasz",
-            "http://www.szamlazz.hu/xmlnyugtasendvalasz",
-        )?;
-
-        Ok(quick_xml::de::from_str(text)?)
-    }
-
-    /// Converts a `sikeres=false` response into the reported [`ApiError`].
-    fn into_success(self) -> Result<(), ResponseError> {
-        if self.sikeres {
-            Ok(())
-        } else {
-            Err(api_error(self.hibakod, self.hibauzenet))
-        }
-    }
 }
 
 /// The `nyugta` element of `xmlnyugtavalasz`.
@@ -770,9 +690,9 @@ impl From<NyugtaXml> for Receipt {
             id: alap.id,
             call_id: alap.hivas_azonosito,
             receipt_number: ReceiptNumber::new(alap.nyugtaszam),
-            kind: alap.tipus,
-            cancelled: alap.stornozott,
-            cancelled_receipt_number: alap.stornozott_nyugtaszam.map(ReceiptNumber::new),
+            document_type: alap.tipus,
+            reversed: alap.stornozott,
+            reversed_receipt_number: alap.stornozott_nyugtaszam.map(ReceiptNumber::new),
             issue_date: alap.kelt,
             payment_method: PaymentMethod::from(alap.fizmod),
             currency: Currency::new(alap.penznem),
@@ -788,6 +708,7 @@ impl From<NyugtaXml> for Receipt {
                 .map(|k| k.kifizetes.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
             totals: nyugta.osszegek.into(),
+            pdf: None,
         }
     }
 }
@@ -802,7 +723,7 @@ struct AlapXml {
     )]
     hivas_azonosito: Option<String>,
     nyugtaszam: String,
-    tipus: String,
+    tipus: ReceiptType,
     #[serde(deserialize_with = "xml::de::flexible_bool")]
     stornozott: bool,
     #[serde(
@@ -886,7 +807,7 @@ impl From<TetelXml> for ReceiptItem {
             unit: tetel.mennyisegi_egyseg,
             unit_price: tetel.netto_egysegar,
             vat_type: tetel.afatipus,
-            vat_code: tetel.afakulcs,
+            vat_rate_code: tetel.afakulcs,
             net_value: tetel.netto,
             vat_value: tetel.afa,
             gross_value: tetel.brutto,
@@ -923,31 +844,6 @@ impl From<KifizetesXml> for ReceiptPayment {
     }
 }
 
-impl From<OsszegekXml> for ReceiptTotals {
-    fn from(osszegek: OsszegekXml) -> Self {
-        Self {
-            by_rate: osszegek.afakulcsossz.into_iter().map(Into::into).collect(),
-            total: TotalAmounts {
-                net: osszegek.totalossz.netto,
-                vat: osszegek.totalossz.afa,
-                gross: osszegek.totalossz.brutto,
-            },
-        }
-    }
-}
-
-impl From<AfakulcsosszXml> for VatRateTotal {
-    fn from(ossz: AfakulcsosszXml) -> Self {
-        Self {
-            vat_type: ossz.afatipus,
-            vat_code: ossz.afakulcs,
-            net: ossz.netto,
-            vat: ossz.afa,
-            gross: ossz.brutto,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use jiff::civil::date;
@@ -963,18 +859,21 @@ mod tests {
             currency: Currency::HUF,
             exchange_rate: None,
             comment: None,
-            pdf_template: None,
+            template: None,
             ledger_customer: None,
             order_number: None,
             download_pdf: true,
-            items: vec![LineItem::calculated_for_currency(
-                "Kitten doormat",
-                dec!(2.0),
-                "db",
-                dec!(10000),
-                VatRate::percent(27),
-                &Currency::HUF,
-            )],
+            items: vec![
+                LineItem::try_calculated(
+                    "Kitten doormat",
+                    dec!(2.0),
+                    "db",
+                    dec!(10000),
+                    VatRate::percent(27),
+                    crate::Rounding::minor_unit(&Currency::HUF),
+                )
+                .expect("fits"),
+            ],
             payments: vec![ReceiptPayment {
                 method: "készpénz".into(),
                 amount: dec!(25400),
@@ -1088,12 +987,81 @@ mod tests {
         assert!(xml.contains("<brutto>25400</brutto><fokonyv><arbevetel>911</arbevetel><afa>467</afa></fokonyv><megjegyzes>row</megjegyzes><torloKod>123</torloKod>"));
     }
 
+    /// A receipt row has no element for the invoice-only line item fields;
+    /// a request carrying one is refused before the wire, naming the field,
+    /// rather than sent without it.
+    #[test]
+    fn invoice_only_line_item_fields_are_refused() {
+        let credentials = Credentials::agent_key("key");
+        let refused = |item: LineItem| {
+            let mut receipt = create_sample();
+            receipt.items = vec![item];
+            receipt.to_wire(&credentials).expect_err("refused")
+        };
+        let base = create_sample().items.remove(0);
+
+        assert_eq!(
+            refused(LineItem {
+                margin_vat_base: Some(dec!(100)),
+                ..base.clone()
+            }),
+            RequestError::UnsupportedOnReceipt("margin_vat_base")
+        );
+        for (field, ledger) in [
+            (
+                "ledger.economic_event",
+                LineItemLedger {
+                    economic_event: Some("SALE".into()),
+                    ..LineItemLedger::default()
+                },
+            ),
+            (
+                "ledger.vat_economic_event",
+                LineItemLedger {
+                    vat_economic_event: Some("VAT".into()),
+                    ..LineItemLedger::default()
+                },
+            ),
+            (
+                "ledger.settlement_from",
+                LineItemLedger {
+                    settlement_from: Some(date(2026, 7, 1)),
+                    ..LineItemLedger::default()
+                },
+            ),
+            (
+                "ledger.settlement_to",
+                LineItemLedger {
+                    settlement_to: Some(date(2026, 7, 31)),
+                    ..LineItemLedger::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                refused(LineItem {
+                    ledger: Some(ledger),
+                    ..base.clone()
+                }),
+                RequestError::UnsupportedOnReceipt(field),
+                "{field}"
+            );
+        }
+        // The two ledger fields a receipt row does carry are accepted.
+        let mut receipt = create_sample();
+        receipt.items[0].ledger = Some(LineItemLedger {
+            revenue_account: Some("911".into()),
+            vat_account: Some("467".into()),
+            ..LineItemLedger::default()
+        });
+        assert!(receipt.to_wire(&credentials).is_ok());
+    }
+
     #[test]
     fn writes_canonical_storno_xml() {
         let storno = StornoReceipt {
             receipt_number: ReceiptNumber::new("NYGT-2026-1"),
             download_pdf: true,
-            pdf_template: None,
+            template: None,
             call_id: None,
         };
         let xml = storno.write_xml(&Credentials::agent_key("key"));
@@ -1102,22 +1070,31 @@ mod tests {
     }
 
     #[test]
-    fn storno_writes_pdf_template() {
+    fn storno_writes_template() {
         let storno = StornoReceipt {
             receipt_number: ReceiptNumber::new("NYGT-2026-1"),
             download_pdf: false,
-            pdf_template: Some(ReceiptTemplate::Ticket),
+            template: Some(ReceiptTemplate::Ticket),
             call_id: None,
         };
         let xml =
             String::from_utf8(storno.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
         assert!(xml.contains("<nyugtaszam>NYGT-2026-1</nyugtaszam><pdfSablon>J</pdfSablon>"));
+
+        // An unknown token goes out verbatim: the set is open.
+        let storno = StornoReceipt {
+            template: Some(ReceiptTemplate::Other("Z".into())),
+            ..StornoReceipt::new("NYGT-2026-1")
+        };
+        let xml =
+            String::from_utf8(storno.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
+        assert!(xml.contains("<pdfSablon>Z</pdfSablon>"));
     }
 
     #[test]
     fn storno_writes_call_id_after_template() {
         let mut storno = StornoReceipt::new("NYGT-2026-1");
-        storno.pdf_template = Some(ReceiptTemplate::Ticket);
+        storno.template = Some(ReceiptTemplate::Ticket);
         storno.call_id = Some("STORNO-42".into());
         let xml =
             String::from_utf8(storno.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
@@ -1129,7 +1106,7 @@ mod tests {
         let query = QueryReceipt {
             selector: ReceiptSelector::ReceiptNumber(ReceiptNumber::new("NYGT-2026-1")),
             download_pdf: true,
-            pdf_template: None,
+            template: None,
             call_id: None,
         };
         let xml = query.write_xml(&Credentials::agent_key("key"));
@@ -1142,7 +1119,7 @@ mod tests {
         let query = QueryReceipt {
             selector: ReceiptSelector::OrderNumber("ORDER-123".into()),
             download_pdf: false,
-            pdf_template: None,
+            template: None,
             call_id: None,
         };
         let xml =
@@ -1181,16 +1158,15 @@ mod tests {
     fn parses_receipt_response() {
         let body = include_bytes!("../../tests/synthetic/xmlnyugtavalasz.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
-        let result = query_sample().parse(&response).expect("success");
-        let receipt = result.receipt;
+        let receipt = query_sample().parse(&response).expect("success");
         assert_eq!(receipt.id, 123_456);
         assert_eq!(receipt.call_id, None);
         assert_eq!(receipt.receipt_number.as_str(), "NYGT-TST-2026-123");
-        assert_eq!(receipt.kind, "NY");
-        assert!(!receipt.cancelled);
+        assert_eq!(receipt.document_type, ReceiptType::Receipt);
+        assert!(!receipt.reversed);
         assert_eq!(
             receipt
-                .cancelled_receipt_number
+                .reversed_receipt_number
                 .as_ref()
                 .map(ReceiptNumber::as_str),
             Some("NYGT-TST-2026-100")
@@ -1229,11 +1205,14 @@ mod tests {
             Some("Synthetic voucher")
         );
         assert_eq!(receipt.payments[1].amount, dec!(3000.0));
-        assert_eq!(receipt.totals.by_rate.len(), 1);
-        assert_eq!(receipt.totals.by_rate[0].vat_type.as_deref(), Some("ÁKK"));
-        assert_eq!(receipt.totals.by_rate[0].vat_rate(), VatRate::Akk);
+        assert_eq!(receipt.totals.by_vat_rate.len(), 1);
+        assert_eq!(
+            receipt.totals.by_vat_rate[0].vat_type.as_deref(),
+            Some("ÁKK")
+        );
+        assert_eq!(receipt.totals.by_vat_rate[0].vat_rate(), VatRate::Akk);
         assert_eq!(receipt.totals.total.gross, dec!(254));
-        assert!(result.pdf.is_none());
+        assert!(receipt.pdf.is_none());
     }
 
     /// The totals block's lenient forms: an empty `afatipus` is no VAT type,
@@ -1253,26 +1232,29 @@ mod tests {
                  </nyugta></xmlnyugtavalasz>"
             );
             let response = RawResponse::new::<&str, &str>([], body.into_bytes());
-            query_sample().parse(&response).expect("success").receipt
+            query_sample().parse(&response).expect("success")
         };
 
         let receipt = receipt_with_subtotals(
             "<afakulcsossz><afatipus></afatipus><afakulcs>27</afakulcs>\
              <netto>1000</netto><afa>270</afa><brutto>1270</brutto></afakulcsossz>",
         );
-        assert_eq!(receipt.totals.by_rate.len(), 1);
-        assert_eq!(receipt.totals.by_rate[0].vat_type, None);
-        assert_eq!(receipt.totals.by_rate[0].vat_code, "27");
-        assert_eq!(receipt.totals.by_rate[0].vat_rate(), VatRate::percent(27));
-        assert_eq!(receipt.totals.by_rate[0].net, dec!(1000));
-        assert_eq!(receipt.totals.by_rate[0].vat, dec!(270));
-        assert_eq!(receipt.totals.by_rate[0].gross, dec!(1270));
+        assert_eq!(receipt.totals.by_vat_rate.len(), 1);
+        assert_eq!(receipt.totals.by_vat_rate[0].vat_type, None);
+        assert_eq!(receipt.totals.by_vat_rate[0].vat_rate_code, "27");
+        assert_eq!(
+            receipt.totals.by_vat_rate[0].vat_rate(),
+            VatRate::percent(27)
+        );
+        assert_eq!(receipt.totals.by_vat_rate[0].net, dec!(1000));
+        assert_eq!(receipt.totals.by_vat_rate[0].vat, dec!(270));
+        assert_eq!(receipt.totals.by_vat_rate[0].gross, dec!(1270));
         assert_eq!(receipt.totals.total.net, dec!(1000));
         assert_eq!(receipt.totals.total.vat, dec!(270));
         assert_eq!(receipt.totals.total.gross, dec!(1270));
 
         let receipt = receipt_with_subtotals("");
-        assert!(receipt.totals.by_rate.is_empty());
+        assert!(receipt.totals.by_vat_rate.is_empty());
         assert_eq!(receipt.totals.total.gross, dec!(1270));
     }
 
@@ -1292,7 +1274,7 @@ mod tests {
                  </nyugta></xmlnyugtavalasz>"
             );
             let response = RawResponse::new::<&str, &str>([], body.into_bytes());
-            query_sample().parse(&response).expect("success").receipt
+            query_sample().parse(&response).expect("success")
         };
 
         for (element, expected) in [
@@ -1313,33 +1295,34 @@ mod tests {
     fn decodes_receipt_pdf() {
         let body = r#"<?xml version="1.0" encoding="UTF-8"?><xmlnyugtavalasz xmlns="http://www.szamlazz.hu/xmlnyugtavalasz"><sikeres>true</sikeres><nyugtaPdf>JVBERi0=</nyugtaPdf><nyugta><alap><id>1</id><nyugtaszam>NYGT-2026-1</nyugtaszam><tipus>NY</tipus><stornozott>false</stornozott><kelt>2026-07-04</kelt><fizmod>készpénz</fizmod><penznem>HUF</penznem><teszt>false</teszt></alap><tetelek><tetel><megnevezes>Kitten doormat</megnevezes><mennyiseg>2.0</mennyiseg><mennyisegiEgyseg>db</mennyisegiEgyseg><nettoEgysegar>10000</nettoEgysegar><afakulcs>27</afakulcs><netto>20000.0</netto><afa>5400.0</afa><brutto>25400.0</brutto></tetel></tetelek><osszegek><afakulcsossz><afakulcs>27</afakulcs><netto>20000.0</netto><afa>5400.0</afa><brutto>25400.0</brutto></afakulcsossz><totalossz><netto>20000.0</netto><afa>5400.0</afa><brutto>25400.0</brutto></totalossz></osszegek></nyugta></xmlnyugtavalasz>"#;
         let response = RawResponse::new::<&str, &str>([], body.as_bytes().to_vec());
-        let result = create_sample().parse(&response).expect("success");
-        assert_eq!(result.pdf.expect("pdf").as_bytes(), b"%PDF-");
+        let receipt = create_sample().parse(&response).expect("success");
+        assert_eq!(receipt.pdf.expect("pdf").as_bytes(), b"%PDF-");
     }
 
-    /// The receipt result is journal-safe: it round-trips through JSON with
-    /// the payment method and currency as their wire tokens and the PDF as
+    /// The receipt is journal-safe: it round-trips through JSON with the
+    /// payment method, currency and type as their wire tokens and the PDF as
     /// base64.
     #[test]
-    fn receipt_result_round_trips_through_json() {
+    fn receipt_round_trips_through_json() {
         let body = include_str!("../../tests/synthetic/xmlnyugtavalasz.xml").replace(
             "<sikeres>true</sikeres>",
             "<sikeres>true</sikeres><nyugtaPdf>JVBERi0=</nyugtaPdf>",
         );
         let response = RawResponse::new::<&str, &str>([], body.into_bytes());
-        let result = query_sample().parse(&response).expect("success");
-        assert!(result.pdf.is_some(), "the fixture carries a PDF");
+        let receipt = query_sample().parse(&response).expect("success");
+        assert!(receipt.pdf.is_some(), "the fixture carries a PDF");
 
-        let json = serde_json::to_value(&result).expect("serialize");
-        assert_eq!(json["receipt"]["receipt_number"], "NYGT-TST-2026-123");
-        assert_eq!(json["receipt"]["payment_method"], "cash");
-        assert_eq!(json["receipt"]["currency"], "EUR");
-        assert_eq!(json["receipt"]["items"][0]["vat_code"], "27");
-        assert_eq!(json["receipt"]["totals"]["by_rate"][0]["vat_type"], "ÁKK");
+        let json = serde_json::to_value(&receipt).expect("serialize");
+        assert_eq!(json["receipt_number"], "NYGT-TST-2026-123");
+        assert_eq!(json["document_type"], "NY");
+        assert_eq!(json["payment_method"], "cash");
+        assert_eq!(json["currency"], "EUR");
+        assert_eq!(json["items"][0]["vat_rate_code"], "27");
+        assert_eq!(json["totals"]["by_vat_rate"][0]["vat_type"], "ÁKK");
         assert_eq!(json["pdf"], "JVBERi0=");
 
-        let restored: ReceiptResult = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(restored, result);
+        let restored: Receipt = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, receipt);
     }
 
     #[test]

@@ -1,4 +1,14 @@
-//! Domain value types shared across operations.
+//! Domain value types shared across operations: the identifiers and codes a
+//! document carries, and the request vocabulary more than one operation
+//! sends ([`ExchangeRate`], [`InvoiceTemplate`], [`SellerEmail`],
+//! [`InvoiceSelector`]).
+//!
+//! Open sets follow one rule: a wire *token* the crate does not know is kept
+//! in an `Other(String)` variant ([`VatRate`], [`PaymentMethod`],
+//! [`DocumentType`], [`ReceiptType`], [`InvoiceTemplate`],
+//! [`ReceiptTemplate`](crate::ops::receipt::ReceiptTemplate)); a numeric
+//! *code* the crate does not know is kept in an `Unknown(n)` variant
+//! ([`InvoiceAppearance`](crate::ops::query_xml::InvoiceAppearance)).
 
 use std::borrow::Cow;
 use std::convert::Infallible;
@@ -171,7 +181,7 @@ impl From<Pdf> for Vec<u8> {
 /// unknown codes round-trip through [`VatRate::Other`]. Doc comments give the
 /// NAV meaning of each code; consult a tax advisor for which one applies.
 #[doc(alias = "áfakulcs")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VatRate {
     /// A numeric percentage (27, 18, 5, 0, or fractional foreign rates such as
@@ -353,7 +363,7 @@ impl<'de> serde::Deserialize<'de> for VatRate {
 /// szamlazz.hu accepts 37 ISO-style codes; `HUF` may also be written `Ft`.
 /// The set is open: any code converts via [`Currency::new`] or `From`.
 #[doc(alias = "pénznem")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Currency(Cow<'static, str>);
 
 impl Currency {
@@ -430,6 +440,15 @@ impl From<&str> for Currency {
 impl From<String> for Currency {
     fn from(code: String) -> Self {
         Self::new(code)
+    }
+}
+
+/// Parses a wire code; never fails, since the set is open.
+impl FromStr for Currency {
+    type Err = Infallible;
+
+    fn from_str(code: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(code))
     }
 }
 
@@ -561,7 +580,7 @@ impl<'de> serde::Deserialize<'de> for Language {
 /// recognizes and maps for NAV reporting.
 #[doc(alias = "fizetési mód")]
 #[doc(alias = "fizmod")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PaymentMethod {
     /// `átutalás`: bank transfer.
@@ -725,6 +744,349 @@ impl<'de> serde::Deserialize<'de> for TaxpayerStatus {
     }
 }
 
+/// The type of a queried invoice-family document (`tipus` on a `szamla`).
+///
+/// The code set is szamlazz.hu's and not documented exhaustively, so the enum
+/// is open: a token the crate does not know round-trips through
+/// [`DocumentType::Other`]. Serialises as the two-letter wire token
+/// (`"SZ"`), so a stored value reads the same as the wire.
+#[doc(alias = "tipus")]
+#[doc(alias = "típus")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DocumentType {
+    /// `SZ`: an invoice (`számla`).
+    Invoice,
+    /// `D`: a proforma (`díjbekérő`).
+    Proforma,
+    /// `ES`: a prepayment invoice (`előlegszámla`).
+    Prepayment,
+    /// `VS`: a final invoice (`végszámla`).
+    Final,
+    /// `HS`: a corrective invoice (`helyesbítő számla`).
+    Corrective,
+    /// `SS`: a storno invoice (`sztornó számla`).
+    Storno,
+    /// `SL`: a delivery note (`szállítólevél`).
+    DeliveryNote,
+    /// A code the crate does not know, preserved exactly from the wire.
+    Other(String),
+}
+
+impl DocumentType {
+    /// The exact wire token.
+    #[must_use]
+    pub fn as_wire(&self) -> &str {
+        match self {
+            Self::Invoice => "SZ",
+            Self::Proforma => "D",
+            Self::Prepayment => "ES",
+            Self::Final => "VS",
+            Self::Corrective => "HS",
+            Self::Storno => "SS",
+            Self::DeliveryNote => "SL",
+            Self::Other(code) => code,
+        }
+    }
+}
+
+/// Parses a wire token; an unknown one is [`DocumentType::Other`].
+impl From<&str> for DocumentType {
+    fn from(token: &str) -> Self {
+        match token {
+            "SZ" => Self::Invoice,
+            "D" => Self::Proforma,
+            "ES" => Self::Prepayment,
+            "VS" => Self::Final,
+            "HS" => Self::Corrective,
+            "SS" => Self::Storno,
+            "SL" => Self::DeliveryNote,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+/// Parses a wire token; an unknown one is [`DocumentType::Other`] without
+/// reallocating.
+impl From<String> for DocumentType {
+    fn from(token: String) -> Self {
+        match Self::from(token.as_str()) {
+            Self::Other(_) => Self::Other(token),
+            known => known,
+        }
+    }
+}
+
+/// Parses a wire token; never fails, since the set is open.
+impl FromStr for DocumentType {
+    type Err = Infallible;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from(token))
+    }
+}
+
+impl fmt::Display for DocumentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+/// Serializes as the wire token, e.g. `"SZ"`.
+impl serde::Serialize for DocumentType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire())
+    }
+}
+
+/// Deserializes from the wire token; an unknown one is
+/// [`DocumentType::Other`].
+impl<'de> serde::Deserialize<'de> for DocumentType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+/// The type of a queried receipt (`tipus` on a `nyugta`).
+///
+/// The schema enumerates two codes; the enum stays open like every wire code
+/// set, with an unknown token in [`ReceiptType::Other`]. Serialises as the
+/// wire token (`"NY"`).
+#[doc(alias = "tipus")]
+#[doc(alias = "nyugtatipusTipus")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ReceiptType {
+    /// `NY`: a receipt (`nyugta`).
+    Receipt,
+    /// `SN`: a storno receipt (`nyugta sztornó`), reversing a receipt.
+    Storno,
+    /// A code the crate does not know, preserved exactly from the wire.
+    Other(String),
+}
+
+impl ReceiptType {
+    /// The exact wire token.
+    #[must_use]
+    pub fn as_wire(&self) -> &str {
+        match self {
+            Self::Receipt => "NY",
+            Self::Storno => "SN",
+            Self::Other(code) => code,
+        }
+    }
+}
+
+/// Parses a wire token; an unknown one is [`ReceiptType::Other`].
+impl From<&str> for ReceiptType {
+    fn from(token: &str) -> Self {
+        match token {
+            "NY" => Self::Receipt,
+            "SN" => Self::Storno,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+/// Parses a wire token; an unknown one is [`ReceiptType::Other`] without
+/// reallocating.
+impl From<String> for ReceiptType {
+    fn from(token: String) -> Self {
+        match Self::from(token.as_str()) {
+            Self::Other(_) => Self::Other(token),
+            known => known,
+        }
+    }
+}
+
+/// Parses a wire token; never fails, since the set is open.
+impl FromStr for ReceiptType {
+    type Err = Infallible;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from(token))
+    }
+}
+
+impl fmt::Display for ReceiptType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+/// Serializes as the wire token, e.g. `"NY"`.
+impl serde::Serialize for ReceiptType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire())
+    }
+}
+
+/// Deserializes from the wire token; an unknown one is
+/// [`ReceiptType::Other`].
+impl<'de> serde::Deserialize<'de> for ReceiptType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+/// Exchange rate information, required on non-HUF documents.
+///
+/// The invoice operation writes it as `arfolyamBank` + `arfolyam`, the
+/// receipt operation as `devizabank` + `devizaarf`: one type, two spellings.
+#[doc(alias = "árfolyam")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExchangeRate {
+    /// The quoting bank (`arfolyamBank` / `devizabank`), e.g. `MNB`.
+    pub bank: String,
+    /// The rate (`arfolyam` / `devizaarf`). May be omitted only for automatic
+    /// current-rate MNB lookup.
+    pub rate: Option<Decimal>,
+}
+
+impl ExchangeRate {
+    /// An exchange rate quoted by `bank`.
+    pub fn new(bank: impl Into<String>, rate: Decimal) -> Self {
+        Self {
+            bank: bank.into(),
+            rate: Some(rate),
+        }
+    }
+
+    /// Uses Számlázz.hu's automatic current MNB exchange-rate lookup.
+    #[must_use]
+    pub fn automatic_mnb() -> Self {
+        Self {
+            bank: "MNB".to_owned(),
+            rate: None,
+        }
+    }
+}
+
+/// Invoice PDF template (`szamlaSablon`), on a create and on a storno.
+#[doc(alias = "szamlaSablon")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InvoiceTemplate {
+    /// `SzlaMost`.
+    Most,
+    /// `SzlaAlap`.
+    Default,
+    /// `SzlaNoEnv`.
+    NoEnvelope,
+    /// `Szla8cm`.
+    EightCentimeter,
+    /// `SzlaTomb`.
+    Continuous,
+    /// `SzlaFuvarlevelesAlap`, the delivery-note invoice layout.
+    DeliveryNote,
+    /// A future or account-specific template token.
+    Other(String),
+}
+
+impl InvoiceTemplate {
+    /// The exact `szamlaSablon` wire token.
+    #[must_use]
+    pub fn as_wire(&self) -> &str {
+        match self {
+            Self::Most => "SzlaMost",
+            Self::Default => "SzlaAlap",
+            Self::NoEnvelope => "SzlaNoEnv",
+            Self::EightCentimeter => "Szla8cm",
+            Self::Continuous => "SzlaTomb",
+            Self::DeliveryNote => "SzlaFuvarlevelesAlap",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+/// Settings for the notification email szamlazz.hu sends to the buyer
+/// (the `elado` block of a create and of a storno).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SellerEmail {
+    /// Reply-to address (`emailReplyto`).
+    pub reply_to: Option<String>,
+    /// Subject (`emailTargy`).
+    pub subject: Option<String>,
+    /// Body (`emailSzoveg`); supports `BBCode` (`[b]`, `[i]`, `[h1]`…).
+    pub body: Option<String>,
+}
+
+/// How a query identifies the invoice; shared by the PDF and XML queries.
+///
+/// The wire carries one of `szamlaszam`, `rendelesSzam`, or
+/// `szamlaKulsoAzon`; this enum makes
+/// sending both (or neither) unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InvoiceSelector {
+    /// By invoice number (`szamlaszam`).
+    #[doc(alias = "számlaszám")]
+    InvoiceNumber(InvoiceNumber),
+    /// By order number (`rendelesSzam`); the *last* invoice issued with this
+    /// order number is returned.
+    #[doc(alias = "rendelésszám")]
+    OrderNumber(String),
+    /// By the external identifier supplied when the invoice was created
+    /// (`szamlaKulsoAzon`).
+    ExternalId(String),
+}
+
+/// The totals block (`osszegek`) of a queried invoice and of a receipt: the
+/// per-VAT-rate subtotals and the grand total. One tree for both documents,
+/// since the wire block is the same.
+#[doc(alias = "összegek")]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct Totals {
+    /// Per-VAT-rate subtotals (`afakulcsossz`).
+    pub by_vat_rate: Vec<VatTotal>,
+    /// Grand total (`totalossz`).
+    pub total: GrandTotal,
+}
+
+/// Subtotal for one VAT rate (`afakulcsossz`).
+#[doc(alias = "áfakulcs összesítés")]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct VatTotal {
+    /// VAT category (`afatipus`), when this subtotal uses a special VAT code.
+    #[doc(alias = "áfatípus")]
+    pub vat_type: Option<String>,
+    /// Numeric VAT rate wire token (`afakulcs`); see [`VatTotal::vat_rate`].
+    #[doc(alias = "áfakulcs")]
+    pub vat_rate_code: String,
+    /// Net subtotal (`netto`).
+    pub net: Decimal,
+    /// VAT subtotal (`afa`).
+    pub vat: Decimal,
+    /// Gross subtotal (`brutto`).
+    pub gross: Decimal,
+}
+
+impl VatTotal {
+    /// The VAT type (`afatipus`) when present, otherwise the numeric rate
+    /// (`afakulcs`), parsed into a [`VatRate`].
+    #[must_use]
+    pub fn vat_rate(&self) -> VatRate {
+        VatRate::from(self.vat_type.as_deref().unwrap_or(&self.vat_rate_code))
+    }
+}
+
+/// The grand total (`totalossz`) of a document.
+#[doc(alias = "totál összesítés")]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct GrandTotal {
+    /// Net total (`netto`).
+    pub net: Decimal,
+    /// VAT total (`afa`).
+    pub vat: Decimal,
+    /// Gross total (`brutto`).
+    pub gross: Decimal,
+}
+
 #[cfg(test)]
 mod tests {
     use rust_decimal::dec;
@@ -843,9 +1205,91 @@ mod tests {
         assert_eq!(Currency::new("XYZ").minor_unit_digits(), 2);
     }
 
+    /// Every known `tipus` token round-trips through the enum, its wire
+    /// token, its display and its JSON form, and an unknown one is kept in
+    /// `Other` exactly as sent.
     #[test]
-    fn agent_key_debug_is_redacted() {
-        let debug = format!("{:?}", crate::credentials::AgentKey::new("secret"));
-        assert!(!debug.contains("secret"));
+    fn document_type_round_trips() {
+        let known = [
+            ("SZ", DocumentType::Invoice),
+            ("D", DocumentType::Proforma),
+            ("ES", DocumentType::Prepayment),
+            ("VS", DocumentType::Final),
+            ("HS", DocumentType::Corrective),
+            ("SS", DocumentType::Storno),
+            ("SL", DocumentType::DeliveryNote),
+        ];
+        for (token, expected) in known {
+            assert_eq!(DocumentType::from(token), expected, "{token}");
+            assert_eq!(DocumentType::from(token.to_owned()), expected, "{token}");
+            assert_eq!(
+                token.parse::<DocumentType>(),
+                Ok(expected.clone()),
+                "{token}"
+            );
+            assert_eq!(expected.as_wire(), token);
+            assert_eq!(expected.to_string(), token);
+            let json = serde_json::to_string(&expected).expect("serialize");
+            assert_eq!(json, format!("\"{token}\""));
+            assert_eq!(
+                serde_json::from_str::<DocumentType>(&json).expect("deserialize"),
+                expected
+            );
+        }
+        let other = DocumentType::from("XX");
+        assert_eq!(other, DocumentType::Other("XX".to_owned()));
+        assert_eq!(other.as_wire(), "XX");
+        assert_eq!(
+            serde_json::from_str::<DocumentType>("\"XX\"").expect("deserialize"),
+            other
+        );
+        assert_eq!(
+            DocumentType::from("sz"),
+            DocumentType::Other("sz".to_owned()),
+            "tokens are case-sensitive, as on the wire"
+        );
+    }
+
+    #[test]
+    fn receipt_type_round_trips() {
+        for (token, expected) in [("NY", ReceiptType::Receipt), ("SN", ReceiptType::Storno)] {
+            assert_eq!(ReceiptType::from(token), expected, "{token}");
+            assert_eq!(
+                token.parse::<ReceiptType>(),
+                Ok(expected.clone()),
+                "{token}"
+            );
+            assert_eq!(expected.as_wire(), token);
+            assert_eq!(
+                serde_json::to_string(&expected).expect("serialize"),
+                format!("\"{token}\"")
+            );
+        }
+        assert_eq!(ReceiptType::from("XX"), ReceiptType::Other("XX".to_owned()));
+    }
+
+    /// The three open value types can key a map: grouping rows by VAT rate is
+    /// the natural use of `VatRate`.
+    #[test]
+    fn value_types_hash() {
+        use std::collections::HashSet;
+
+        let rates: HashSet<VatRate> = [VatRate::percent(27), VatRate::from("27.0"), VatRate::Aam]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            rates.len(),
+            2,
+            "27 and 27.0 are one rate, as they compare equal"
+        );
+        let currencies: HashSet<Currency> =
+            [Currency::HUF, Currency::from("HUF")].into_iter().collect();
+        assert_eq!(currencies.len(), 1);
+        assert_eq!("EUR".parse::<Currency>(), Ok(Currency::EUR));
+        let methods: HashSet<PaymentMethod> =
+            [PaymentMethod::Cash, "készpénz".parse().expect("infallible")]
+                .into_iter()
+                .collect();
+        assert_eq!(methods.len(), 1);
     }
 }

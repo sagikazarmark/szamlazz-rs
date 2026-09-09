@@ -6,11 +6,13 @@ use jiff::civil::date;
 use rust_decimal::dec;
 use szamlazz_agent::ops::credit_entry::{CreditEntries, CreditEntry, RegisterCreditEntry};
 use szamlazz_agent::ops::invoice::{
-    Buyer, CreateInvoice, InvoiceHeader, InvoiceKind, PostalAddress, Seller, SellerEmail,
+    Buyer, CreateInvoice, InvoiceHeader, InvoiceKind, PostalAddress, Seller,
 };
 use szamlazz_agent::ops::receipt::{ReceiptEmail, SendReceipt};
 use szamlazz_agent::ops::storno::StornoInvoice;
-use szamlazz_agent::{Currency, Language, LineItem, LineItemLedger, PaymentMethod, VatRate};
+use szamlazz_agent::{
+    Currency, Language, LineItem, LineItemLedger, PaymentMethod, Rounding, SellerEmail, VatRate,
+};
 
 #[test]
 #[expect(
@@ -26,14 +28,15 @@ fn a_create_invoice_extends_its_constructor_with_functional_update() {
         Language::Hungarian,
     );
     let buyer = Buyer::new("Kovács Bt.", "2030", "Érd", "Tárnoki út 23.");
-    let item = LineItem::calculated_for_currency(
+    let item = LineItem::try_calculated(
         "Fejlesztés",
         dec!(1),
         "db",
         dec!(10000),
         VatRate::percent(27),
-        &Currency::HUF,
-    );
+        Rounding::minor_unit(&Currency::HUF),
+    )
+    .expect("fits");
 
     let literal = CreateInvoice {
         external_id: Some("shop:ORD-1:invoice".to_owned()),

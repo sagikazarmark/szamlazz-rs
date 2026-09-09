@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::ObjectContext;
+use szamlazz_agent::DocumentType;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
@@ -403,7 +404,7 @@ fn decide_proforma_by_number(
                     identity.conflict_about(ConflictReason::NotManaged, number),
                 ));
             }
-            if found.document_type != "D" {
+            if found.document_type != DocumentType::Proforma {
                 return Err(Fault::invalid_input(format!(
                     "{number} is not a proforma (tipus {})",
                     found.document_type
@@ -1970,7 +1971,7 @@ mod tests {
                 body.as_bytes().to_vec(),
             ))
             .expect("xmlszamlavalasz parses");
-        IssuedDocument::try_from(result).expect("a numbered reply")
+        IssuedDocument::from(result.into_issued().expect("a numbered reply"))
     }
 
     /// Step 5, the create step's `Issued`: szamlazz.hu issued the document,

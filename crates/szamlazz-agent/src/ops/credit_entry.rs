@@ -1,26 +1,31 @@
-//! Credit entry / payment registration (`xmlszamlakifiz`): records payments
-//! against an existing invoice.
+//! Credit-entry registration (`xmlszamlakifiz`): records credit entries
+//! against an existing invoice and answers its balance.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
+use super::envelope::{self, decimal_body_or_header};
 use crate::credentials::Credentials;
 use crate::error::{ParseError, RequestError, ResponseError};
-use crate::ops::invoice::{InvoiceResponse, decimal_body_or_header};
 use crate::types::{InvoiceNumber, PaymentMethod};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
 
-/// One payment recorded against the invoice (a `kifizetes` block).
+/// One credit entry to register against the invoice (a `kifizetes` block).
+///
+/// What the XML query reads back as a
+/// [`RecordedCreditEntry`](crate::ops::query_xml::RecordedCreditEntry).
 #[doc(alias = "kifizetés")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreditEntry {
-    /// Payment date (`datum`).
+    /// The date of the credit entry (`datum`).
     pub date: Date,
-    /// Payment method / legal title of the payment (`jogcim`).
+    /// The title of the credit entry (`jogcim`): the payment method it was
+    /// settled by. The same element a queried document reports as
+    /// [`RecordedCreditEntry::title`](crate::ops::query_xml::RecordedCreditEntry::title).
     #[doc(alias = "jogcím")]
-    pub method: PaymentMethod,
-    /// Amount paid (`osszeg`).
+    pub title: PaymentMethod,
+    /// Amount credited (`osszeg`).
     #[doc(alias = "összeg")]
     pub amount: Decimal,
     /// Free-text description (`leiras`).
@@ -30,10 +35,10 @@ pub struct CreditEntry {
 impl CreditEntry {
     /// A credit entry without a description.
     #[must_use]
-    pub fn new(date: Date, method: PaymentMethod, amount: Decimal) -> Self {
+    pub fn new(date: Date, title: PaymentMethod, amount: Decimal) -> Self {
         Self {
             date,
-            method,
+            title,
             amount,
             description: None,
         }
@@ -41,6 +46,10 @@ impl CreditEntry {
 }
 
 /// A bounded collection of at most five credit entries.
+///
+/// Dereferences to the slice of entries and iterates over them, so the
+/// collection idioms (`len`, `is_empty`, `iter`, `for`) read as on a `Vec`;
+/// growth goes through [`CreditEntries::push`], which keeps the bound.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(transparent)]
 pub struct CreditEntries(Vec<CreditEntry>);
@@ -69,6 +78,38 @@ impl CreditEntries {
     #[must_use]
     pub fn as_slice(&self) -> &[CreditEntry] {
         &self.0
+    }
+}
+
+impl std::ops::Deref for CreditEntries {
+    type Target = [CreditEntry];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[CreditEntry]> for CreditEntries {
+    fn as_ref(&self) -> &[CreditEntry] {
+        &self.0
+    }
+}
+
+impl IntoIterator for CreditEntries {
+    type Item = CreditEntry;
+    type IntoIter = std::vec::IntoIter<CreditEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a CreditEntries {
+    type Item = &'a CreditEntry;
+    type IntoIter = std::slice::Iter<'a, CreditEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -102,7 +143,7 @@ pub enum CreditEntriesError {
 
 /// The credit-entry operation (`xmlszamlakifiz`, `action-szamla_agent_kifiz`).
 ///
-/// Registers up to five payments against the invoice named by
+/// Registers up to five credit entries against the invoice named by
 /// [`RegisterCreditEntry::invoice_number`]. Unless
 /// [`RegisterCreditEntry::additive`] is set, the entries *replace* the
 /// invoice's existing credit entries, so a replacing request with no
@@ -126,8 +167,8 @@ pub struct RegisterCreditEntry {
     pub additive: bool,
     /// Aggregator identifier (`aggregator`) for contracted integrations.
     pub aggregator: Option<String>,
-    /// The payments to record; at most five per request, and at least one
-    /// unless [`additive`](Self::additive).
+    /// The credit entries to register; at most five per request, and at
+    /// least one unless [`additive`](Self::additive).
     pub entries: CreditEntries,
 }
 
@@ -147,11 +188,12 @@ impl RegisterCreditEntry {
     }
 }
 
-/// The invoice's payment state after the credit entries were registered.
+/// The invoice's balance after the credit entries were registered: the reply
+/// of [`RegisterCreditEntry`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
-pub struct CreditEntryResult {
-    /// The invoice the payments were registered on (`szamlaszam`).
+pub struct InvoiceBalance {
+    /// The invoice the credit entries were registered on (`szamlaszam`).
     pub invoice_number: InvoiceNumber,
     /// Net total of the invoice (`szamlanetto` / `szlahu_nettovegosszeg`).
     pub net_total: Option<Decimal>,
@@ -170,10 +212,10 @@ pub struct CreditEntryResult {
 
 impl AgentRequest for RegisterCreditEntry {
     const ACTION: &'static str = "action-szamla_agent_kifiz";
-    type Response = CreditEntryResult;
+    type Response = InvoiceBalance;
 
     fn validate(&self) -> Result<(), RequestError> {
-        if !self.additive && self.entries.as_slice().is_empty() {
+        if !self.additive && self.entries.is_empty() {
             return Err(RequestError::EmptyCreditEntryReplace);
         }
 
@@ -193,10 +235,10 @@ impl AgentRequest for RegisterCreditEntry {
                     s.text_opt("aggregator", self.aggregator.as_deref());
                     s.text("valaszVerzio", "2");
                 });
-                for entry in self.entries.as_slice() {
+                for entry in &self.entries {
                     root.node("kifizetes", |k| {
                         k.date("datum", entry.date);
-                        k.text("jogcim", entry.method.as_wire());
+                        k.text("jogcim", entry.title.as_wire());
                         k.decimal("osszeg", entry.amount);
                         k.text_opt("leiras", entry.description.as_deref());
                     });
@@ -206,47 +248,34 @@ impl AgentRequest for RegisterCreditEntry {
     }
 
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        response.check()?;
-        let valasz = InvoiceResponse::from_body(response.body())?.into_success()?;
+        let body: envelope::Body = xml::valasz(response, envelope::ROOT, envelope::NAMESPACE)?;
 
-        Ok(CreditEntryResult {
-            invoice_number: valasz
-                .szamlaszam
-                .filter(|s| !s.is_empty())
-                .map(InvoiceNumber::new)
-                .or_else(|| header_invoice_number(response))
+        Ok(InvoiceBalance {
+            invoice_number: body
+                .invoice_number(response)
                 .ok_or(ParseError::Missing("szamlaszam"))?,
             net_total: decimal_body_or_header(
-                valasz.szamlanetto,
+                body.szamlanetto.as_deref(),
+                "szamlanetto",
                 response,
                 "szlahu_nettovegosszeg",
             )?,
             gross_total: decimal_body_or_header(
-                valasz.szamlabrutto,
+                body.szamlabrutto.as_deref(),
+                "szamlabrutto",
                 response,
                 "szlahu_bruttovegosszeg",
             )?,
             outstanding: decimal_body_or_header(
-                valasz.kintlevoseg,
+                body.kintlevoseg.as_deref(),
+                "kintlevoseg",
                 response,
                 "szlahu_kintlevoseg",
             )?,
             payment_method: header_payment_method(response),
-            customer_account_url: valasz.vevoifiokurl.filter(|s| !s.is_empty()).or_else(|| {
-                response
-                    .szlahu("szlahu_vevoifiokurl")
-                    .filter(|s| !s.is_empty())
-            }),
+            customer_account_url: body.customer_account_url(response),
         })
     }
-}
-
-/// The invoice number from the `szlahu_szamlaszam` header, if present.
-fn header_invoice_number(response: &RawResponse) -> Option<InvoiceNumber> {
-    response
-        .szlahu("szlahu_szamlaszam")
-        .filter(|s| !s.is_empty())
-        .map(InvoiceNumber::new)
 }
 
 /// The payment method from the `szlahu_fizetesmod` header, if present.
@@ -312,10 +341,10 @@ mod tests {
         assert_eq!(result.customer_account_url, None);
     }
 
-    /// The payment state is journal-safe: it round-trips through JSON with the
+    /// The balance is journal-safe: it round-trips through JSON with the
     /// payment method as its wire token.
     #[test]
-    fn credit_entry_result_round_trips_through_json() {
+    fn invoice_balance_round_trips_through_json() {
         let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
         let response = RawResponse::new(
             [
@@ -332,7 +361,7 @@ mod tests {
         assert_eq!(json["outstanding"], "8100");
         assert_eq!(json["payment_method"], "átutalás");
 
-        let restored: CreditEntryResult = serde_json::from_value(json).expect("deserialize");
+        let restored: InvoiceBalance = serde_json::from_value(json).expect("deserialize");
         assert_eq!(restored, result);
     }
 
@@ -426,6 +455,21 @@ mod tests {
             CreditEntries::try_from(entries).expect_err("too many"),
             CreditEntriesError::TooMany
         );
+    }
+
+    /// The bounded collection reads like a slice: length, emptiness,
+    /// iteration by reference and by value.
+    #[test]
+    fn credit_entries_have_the_collection_idioms() {
+        let entries = sample().entries;
+        assert_eq!(entries.len(), 2);
+        assert!(!entries.is_empty());
+        assert_eq!(entries.iter().count(), 2);
+        assert_eq!((&entries).into_iter().count(), 2);
+        assert_eq!(entries.as_ref().len(), 2);
+        let amounts: Vec<Decimal> = entries.into_iter().map(|entry| entry.amount).collect();
+        assert_eq!(amounts, [dec!(1000), dec!(2000)]);
+        assert!(CreditEntries::new().is_empty());
     }
 
     /// `RegisterCreditEntry::new(n)` is one forgotten `entries = …` away

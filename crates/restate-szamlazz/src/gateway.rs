@@ -67,17 +67,16 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::client::BuildError;
 use szamlazz_agent::ops::credit_entry::{
-    CreditEntries, CreditEntry, CreditEntryResult, RegisterCreditEntry,
+    CreditEntries, CreditEntry, InvoiceBalance, RegisterCreditEntry,
 };
-use szamlazz_agent::ops::invoice::CreateInvoice;
+use szamlazz_agent::ops::invoice::{CreateInvoice, CreationOutcome};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
-use szamlazz_agent::ops::query_pdf::InvoiceSelector;
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{
-    ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, OutcomeClass,
-    reqwest,
+    ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, InvoiceSelector,
+    OutcomeClass, reqwest,
 };
 use tracing::Instrument as _;
 
@@ -117,10 +116,13 @@ impl SzamlazzAnswer {
     }
 }
 
-/// A szamlazz.hu API error as the answer it is.
+/// A szamlazz.hu API error as the answer it is. The code is the agent
+/// crate's display of it: the wire token, or `absent` for a failure
+/// szamlazz.hu reported without a code, so a fault's `szamlazz_code` and a
+/// journaled answer never carry an empty string.
 impl From<ApiError> for SzamlazzAnswer {
     fn from(api: ApiError) -> Self {
-        Self::new(api.code.code(), api.message)
+        Self::new(api.code.to_string(), api.message)
     }
 }
 
@@ -829,11 +831,11 @@ pub enum SetPaymentsOutcome {
 
 /// A successful registration: [`SetPaymentsOutcome::Done`] with the reported
 /// totals.
-impl From<CreditEntryResult> for SetPaymentsOutcome {
-    fn from(result: CreditEntryResult) -> Self {
+impl From<InvoiceBalance> for SetPaymentsOutcome {
+    fn from(balance: InvoiceBalance) -> Self {
         Self::Done {
-            outstanding: result.outstanding,
-            gross: result.gross_total,
+            outstanding: balance.outstanding,
+            gross: balance.gross_total,
         }
     }
 }
@@ -1091,19 +1093,21 @@ impl Gateway {
 
         // Step 2: create.
         match self.client.send(request.create).await {
-            Ok(result) => match IssuedDocument::try_from(result) {
-                Ok(issued) => {
-                    tracing::info!(number = %issued.number, "document issued");
-                    Ok(CreateOutcome::Issued(issued))
-                }
-                Err(unnumbered) => {
-                    let open = Unconfirmed::Open {
-                        code: None,
-                        message: unnumbered.to_string(),
-                    };
-                    self.settle_or(request, open).await
-                }
-            },
+            Ok(CreationOutcome::Issued(created)) => {
+                let issued = IssuedDocument::from(created);
+                tracing::info!(number = %issued.number, "document issued");
+                Ok(CreateOutcome::Issued(issued))
+            }
+            // A success without a document number (a preview, which the
+            // worker never asks for, or an arm the agent crate adds later):
+            // nothing the step can name, so it re-queries.
+            Ok(_) => {
+                let open = Unconfirmed::Open {
+                    code: None,
+                    message: "the create succeeded without a document number".to_owned(),
+                };
+                self.settle_or(request, open).await
+            }
             Err(error) => match classify_failure(error) {
                 Failure::Rejected(rejection) => {
                     tracing::info!(code = %rejection.code, "document rejected");
@@ -1197,7 +1201,7 @@ impl Gateway {
 
         let existing_number = match self.hint_raw(request.order).await {
             Ok(newest)
-                if newest.is_live() && newest.document_type == document_type_of(request.kind) =>
+                if newest.is_live() && newest.document_type == request.kind.document_type() =>
             {
                 Some(newest.number)
             }
@@ -1762,40 +1766,6 @@ impl Gateway {
     }
 }
 
-/// The `tipus` code the documents of `kind` carry.
-#[must_use]
-pub(crate) const fn document_type_of(kind: IssuedKind) -> &'static str {
-    match kind {
-        IssuedKind::Proforma => "D",
-        IssuedKind::Invoice => "SZ",
-        IssuedKind::Prepayment => "ES",
-        IssuedKind::Final => "VS",
-        IssuedKind::Corrective => "HS",
-    }
-}
-
-/// The kind whose documents carry `tipus`, or `None` for stornos, delivery
-/// notes and unknown codes.
-#[must_use]
-pub(crate) fn issued_kind_of(tipus: &str) -> Option<IssuedKind> {
-    match tipus {
-        "D" => Some(IssuedKind::Proforma),
-        "SZ" => Some(IssuedKind::Invoice),
-        "ES" => Some(IssuedKind::Prepayment),
-        "VS" => Some(IssuedKind::Final),
-        "HS" => Some(IssuedKind::Corrective),
-        _ => None,
-    }
-}
-
-/// Whether `tipus` is a legal invoice of the kinds an order carries: `SZ`,
-/// `ES` or `VS`. Stornos, correctives, proformas and delivery notes are
-/// not.
-#[must_use]
-pub(crate) fn is_invoice_family(tipus: &str) -> bool {
-    matches!(tipus, "SZ" | "ES" | "VS")
-}
-
 /// What the external-id query of the lookup, create and ownership reads saw,
 /// validated ([`Gateway::seen`]); each read's outcome is projected from it.
 enum Seen {
@@ -1858,7 +1828,7 @@ fn classify_failure(error: ClientError) -> Failure {
 /// invoice-kind document that is neither known to be ours nor the document
 /// seen under our external id.
 fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>) -> bool {
-    is_invoice_family(&found.document_type)
+    found.is_invoice_family()
         && found.is_live()
         && Some(found.number.as_str()) != seen
         && !our_numbers.contains(&found.number)
@@ -2011,6 +1981,21 @@ mod tests {
         assert_eq!(
             SetPaymentsOutcome::from(malformed),
             SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("57", "xml")))
+        );
+
+        // A failure szamlazz.hu reported without a code is answered as
+        // `absent`, never as an empty code, in the journal and in a fault.
+        let codeless = ApiError {
+            code: ErrorCode::Absent,
+            message: "Hiba".to_owned(),
+        };
+        assert_eq!(
+            SzamlazzAnswer::from(codeless.clone()),
+            SzamlazzAnswer::new("absent", "Hiba")
+        );
+        assert_eq!(
+            SetPaymentsOutcome::from(codeless),
+            SetPaymentsOutcome::Rejected(Rejection::from(SzamlazzAnswer::new("absent", "Hiba")))
         );
 
         for code in [

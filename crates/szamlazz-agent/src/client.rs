@@ -37,6 +37,16 @@ pub enum ClientError {
     /// Számla Agent reported temporary system unavailability.
     #[error("szamlazz.hu is temporarily unavailable: {0}")]
     ServiceUnavailable(String),
+    /// The endpoint answered with a non-2xx status and no `szlahu_*` header:
+    /// a proxy, a CDN or a misconfigured URL spoke, not szamlazz.hu
+    /// ([`ResponseError::HttpStatus`]).
+    #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
+    HttpStatus {
+        /// The HTTP status.
+        status: u16,
+        /// A bounded excerpt of the body.
+        body: String,
+    },
     /// The HTTP request itself failed.
     ///
     /// Retry with care: invoice creation has no idempotency key, so a timeout
@@ -56,18 +66,19 @@ impl ClientError {
     /// A request refused before it was sent ([`ClientError::Request`]) is
     /// [`OutcomeClass::Rejected`]: nothing reached szamlazz.hu. An API error's
     /// class is its [`ErrorCode::outcome_class`](crate::ErrorCode::outcome_class).
-    /// A transport failure, unavailability (`szlahu_down`) and an unparseable
-    /// response are [`OutcomeClass::Unknown`]: the request may have been
-    /// acted on, and the caller must query by external id before sending it
-    /// again.
+    /// A transport failure, unavailability (`szlahu_down`), an answer from
+    /// the endpoint rather than szamlazz.hu and an unparseable response are
+    /// [`OutcomeClass::Unknown`]: the request may have been acted on, and the
+    /// caller must query by external id before sending it again.
     #[must_use]
     pub fn outcome_class(&self) -> OutcomeClass {
         match self {
             Self::Request(_) => OutcomeClass::Rejected,
             Self::Api(api) => api.code.outcome_class(),
-            Self::Parse(_) | Self::ServiceUnavailable(_) | Self::Transport(_) => {
-                OutcomeClass::Unknown
-            }
+            Self::Parse(_)
+            | Self::ServiceUnavailable(_)
+            | Self::HttpStatus { .. }
+            | Self::Transport(_) => OutcomeClass::Unknown,
         }
     }
 }
@@ -78,6 +89,7 @@ impl From<ResponseError> for ClientError {
             ResponseError::Api(api) => Self::Api(api),
             ResponseError::Parse(parse) => Self::Parse(parse),
             ResponseError::ServiceUnavailable(message) => Self::ServiceUnavailable(message),
+            ResponseError::HttpStatus { status, body } => Self::HttpStatus { status, body },
         }
     }
 }
@@ -100,7 +112,9 @@ impl ClientBuilder {
 
     /// Overrides the endpoint URL, for pointing tests at a mock server.
     /// szamlazz.hu has no separate sandbox host; test mode is an account
-    /// setting.
+    /// setting. Checked at [`build`](Self::build): a string that is not an
+    /// `http` or `https` URL is [`BuildError::InvalidEndpoint`] there, not a
+    /// transport error on every send.
     #[must_use]
     pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());
@@ -122,10 +136,12 @@ impl ClientBuilder {
     ///
     /// # Errors
     ///
-    /// Fails when no credentials were supplied or the underlying HTTP client
-    /// cannot be constructed.
+    /// Fails when no credentials were supplied, the endpoint is not an
+    /// `http` or `https` URL, or the underlying HTTP client cannot be
+    /// constructed.
     pub fn build(self) -> Result<Client, BuildError> {
         let credentials = self.credentials.ok_or(BuildError::MissingCredentials)?;
+        let endpoint = parse_endpoint(self.endpoint.as_deref().unwrap_or(ENDPOINT))?;
         let http = match self.http {
             Some(http) => http,
             None => default_http_client()?,
@@ -134,9 +150,29 @@ impl ClientBuilder {
         Ok(Client {
             http,
             credentials,
-            endpoint: self.endpoint.unwrap_or_else(|| ENDPOINT.to_owned()),
+            endpoint,
         })
     }
+}
+
+/// The endpoint as a URL, or why the string is not one.
+fn parse_endpoint(endpoint: &str) -> Result<reqwest::Url, BuildError> {
+    let invalid = |message: String| BuildError::InvalidEndpoint {
+        endpoint: endpoint.to_owned(),
+        message,
+    };
+    let url = reqwest::Url::parse(endpoint).map_err(|error| invalid(error.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(invalid(format!(
+            "scheme {} is not http or https",
+            url.scheme()
+        )));
+    }
+    if url.host_str().is_none() {
+        return Err(invalid("no host".to_owned()));
+    }
+
+    Ok(url)
 }
 
 /// [`ClientBuilder::build`] failure.
@@ -146,6 +182,14 @@ pub enum BuildError {
     /// No credentials were supplied.
     #[error("credentials are required")]
     MissingCredentials,
+    /// The endpoint is not an `http` or `https` URL with a host.
+    #[error("invalid endpoint {endpoint:?}: {message}")]
+    InvalidEndpoint {
+        /// The endpoint as given.
+        endpoint: String,
+        /// What is wrong with it.
+        message: String,
+    },
     /// The underlying HTTP client could not be constructed.
     #[error("failed to build HTTP client: {0}")]
     Http(#[from] reqwest::Error),
@@ -189,7 +233,7 @@ fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
 pub struct Client {
     http: reqwest::Client,
     credentials: Credentials,
-    endpoint: String,
+    endpoint: reqwest::Url,
 }
 
 impl Client {
@@ -220,7 +264,7 @@ impl Client {
 
         let response = self
             .http
-            .post(&self.endpoint)
+            .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, wire.content_type)
             .body(wire.body)
             .send()
@@ -242,5 +286,45 @@ impl Client {
         let raw = RawResponse::new(headers, body.to_vec()).with_status(status);
 
         Ok(request.parse(&raw)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malformed endpoint is refused when the client is built, naming the
+    /// string, not on every send as a transport error.
+    #[test]
+    fn a_malformed_endpoint_fails_at_build() {
+        assert!(
+            Client::builder()
+                .credentials(Credentials::agent_key("key"))
+                .build()
+                .is_ok(),
+            "the default endpoint"
+        );
+        for endpoint in [
+            "not a url",
+            "ftp://example.test/",
+            "http://",
+            "mailto:x@example.test",
+        ] {
+            let error = Client::builder()
+                .credentials(Credentials::agent_key("key"))
+                .endpoint(endpoint)
+                .build()
+                .expect_err(endpoint);
+            match error {
+                BuildError::InvalidEndpoint {
+                    endpoint: given, ..
+                } => assert_eq!(given, endpoint),
+                other => panic!("{endpoint}: expected InvalidEndpoint, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            Client::builder().endpoint("http://127.0.0.1:1/").build(),
+            Err(BuildError::MissingCredentials)
+        ));
     }
 }

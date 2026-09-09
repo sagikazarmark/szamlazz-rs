@@ -2,7 +2,7 @@
 //! with no HTTP client attached.
 
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ErrorCode, ParseError, RequestError, ResponseError, body_excerpt};
+use crate::error::{ApiError, ErrorCode, RequestError, ResponseError, body_excerpt};
 
 /// The single Számla Agent endpoint. Every operation POSTs here; the
 /// multipart form field name selects the operation.
@@ -195,8 +195,8 @@ impl RawResponse {
     ///
     /// Optional: the parsers read szamlazz.hu's in-band answer first. With
     /// the status known, a non-2xx response that carries no `szlahu_*` header
-    /// is refused as [`ParseError::HttpStatus`] (the endpoint answered, not
-    /// szamlazz.hu) instead of being parsed as an unexpected body. The
+    /// is refused as [`ResponseError::HttpStatus`] (the endpoint answered,
+    /// not szamlazz.hu) instead of being parsed as an unexpected body. The
     /// bundled reqwest client always sets it.
     #[must_use]
     pub fn with_status(mut self, status: u16) -> Self {
@@ -268,7 +268,7 @@ impl RawResponse {
     ///
     /// In order: `szlahu_down`, `szlahu_error_code`, then (only when neither
     /// carried a szamlazz.hu answer) a known non-2xx status
-    /// ([`ParseError::HttpStatus`]).
+    /// ([`ResponseError::HttpStatus`]).
     pub(crate) fn check(&self) -> Result<&Self, ResponseError> {
         match self.header_verdict()? {
             Some(error) => Err(error.into()),
@@ -281,8 +281,8 @@ impl RawResponse {
     /// [`ResponseError::ServiceUnavailable`]; else the `szlahu_error_code`
     /// error, handed back as data for the parser to judge (invoice creation
     /// tolerates 56); else (only when neither carried a szamlazz.hu answer)
-    /// a known non-2xx status is [`ParseError::HttpStatus`], the endpoint's
-    /// answer, not szamlazz.hu's. `Ok(None)` says the body decides.
+    /// a known non-2xx status is [`ResponseError::HttpStatus`], the
+    /// endpoint's answer, not szamlazz.hu's. `Ok(None)` says the body decides.
     pub(crate) fn header_verdict(&self) -> Result<Option<ApiError>, ResponseError> {
         if let Some(message) = self
             .szlahu("szlahu_down")
@@ -296,11 +296,10 @@ impl RawResponse {
         if let Some(status) = self.status
             && !(200..300).contains(&status)
         {
-            return Err(ParseError::HttpStatus {
+            return Err(ResponseError::HttpStatus {
                 status,
                 body: body_excerpt(&self.body),
-            }
-            .into());
+            });
         }
 
         Ok(None)
@@ -534,7 +533,7 @@ mod tests {
             RawResponse::new([("content-type", "text/html")], page.into_bytes()).with_status(502);
 
         match response.check() {
-            Err(ResponseError::Parse(ParseError::HttpStatus { status, body })) => {
+            Err(ResponseError::HttpStatus { status, body }) => {
                 assert_eq!(status, 502);
                 assert!(body.starts_with("<html><body>Bad Gateway"), "{body}");
                 assert!(body.len() < 600, "bounded: {} bytes", body.len());

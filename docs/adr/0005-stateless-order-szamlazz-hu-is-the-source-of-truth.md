@@ -255,7 +255,11 @@ what the handlers read, and nothing else (`restate_szamlazz::gateway::document`)
 - `IssuedDocument`, from a create reply (`InvoiceCreationResult`, `TryFrom` rather than the `From` #127 named:
   the agent type's number is optional, a PDF preview's reply has none, and on `main` the create step already turned
   such a reply into `Unconfirmed::Open` before it could be journaled; the conversion now says so in its type, and the
-  handler's unreachable "issued without a number" arm is gone) and from a storno reply (`CreatedInvoice`, `From`):
+  handler's unreachable "issued without a number" arm is gone. *Since szamlazz-agent 0.4 (#180) the create reply is
+  the agent crate's `CreationOutcome { Issued(CreatedInvoice), Preview }`, so the worker's `TryFrom` and its
+  `Unnumbered` error are gone: `IssuedDocument` is `From<CreatedInvoice>` for the create and the storno alike, and
+  the create step matches on the `Issued` arm and re-queries on anything else.*) and from a storno reply
+  (`CreatedInvoice`, `From`):
   `number`, `document_id`, `net_total`, `gross_total`, `outstanding`, `customer_account_url`,
   `notification_delivery_failed`; never the PDF. `CreateOutcome::Issued` and `StornoOutcome::Reversed` carry it.
 

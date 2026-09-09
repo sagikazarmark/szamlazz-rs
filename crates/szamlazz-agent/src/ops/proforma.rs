@@ -2,7 +2,7 @@
 //! (díjbekérő) from the account.
 
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ParseError, ResponseError};
+use crate::error::ResponseError;
 use crate::types::InvoiceNumber;
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
@@ -68,37 +68,12 @@ impl AgentRequest for DeleteProforma {
     }
 
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        response.check()?;
-        let text = xml::response_text(
-            response.body(),
+        xml::verdict(
+            response,
             "xmlszamladbkdelvalasz",
             "http://www.szamlazz.hu/xmlszamladbkdelvalasz",
-        )?;
-        let valasz: DeleteResponse = quick_xml::de::from_str(text).map_err(ParseError::from)?;
-
-        if valasz.sikeres {
-            Ok(())
-        } else {
-            Err(ApiError {
-                code: valasz
-                    .hibakod
-                    .map_or_else(|| crate::ErrorCode::Unknown("0".to_owned()), Into::into),
-                message: valasz.hibauzenet.unwrap_or_default(),
-            }
-            .into())
-        }
+        )
     }
-}
-
-/// The `xmlszamladbkdelvalasz` response document.
-#[derive(Debug, serde::Deserialize)]
-struct DeleteResponse {
-    #[serde(deserialize_with = "xml::de::flexible_bool")]
-    sikeres: bool,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
-    hibakod: Option<String>,
-    #[serde(default)]
-    hibauzenet: Option<String>,
 }
 
 #[cfg(test)]
@@ -150,6 +125,21 @@ mod tests {
         }
     }
 
+    /// A `sikeres=false` without a `hibakod` is an error with an absent code,
+    /// never a fabricated one.
+    #[test]
+    fn failure_without_a_code_is_absent() {
+        let body = br#"<xmlszamladbkdelvalasz xmlns="http://www.szamlazz.hu/xmlszamladbkdelvalasz"><sikeres>false</sikeres><hibauzenet>Hiba</hibauzenet></xmlszamladbkdelvalasz>"#;
+        let response = RawResponse::new::<&str, &str>([], body.to_vec());
+        match sample().parse(&response).expect_err("error") {
+            ResponseError::Api(api) => {
+                assert_eq!(api.code, crate::ErrorCode::Absent);
+                assert_eq!(api.message, "Hiba");
+            }
+            other => panic!("expected api error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn preserves_critical_text_or_html_error() {
         for body in [
@@ -159,7 +149,7 @@ mod tests {
             let response = RawResponse::new::<&str, &str>([], body.to_vec());
             let error = sample().parse(&response).expect_err("error");
             match error {
-                ResponseError::Parse(ParseError::UnexpectedBody(body)) => {
+                ResponseError::Parse(crate::ParseError::UnexpectedBody(body)) => {
                     assert!(body.contains("critical server error"));
                 }
                 other => panic!("expected preserved response body, got {other:?}"),
@@ -173,7 +163,7 @@ mod tests {
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         assert!(matches!(
             sample().parse(&response),
-            Err(ResponseError::Parse(ParseError::UnexpectedBody(_)))
+            Err(ResponseError::Parse(crate::ParseError::UnexpectedBody(_)))
         ));
     }
 }
