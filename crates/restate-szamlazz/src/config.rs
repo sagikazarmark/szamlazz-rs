@@ -50,7 +50,6 @@
 //! and [`Agent::from_parts`](crate::Agent) take nothing else, so a deployment
 //! cannot run on an issue policy below its floor.
 
-use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::time::Duration;
@@ -200,10 +199,10 @@ impl AsRef<WorkerConfig> for ValidatedWorkerConfig {
 #[non_exhaustive]
 pub enum WorkerConfigError {
     /// A policy's `max_attempts` is zero.
-    #[error("{policy}.max_attempts must be at least 1")]
+    #[error("{table}.max_attempts must be at least 1")]
     ZeroMaxAttempts {
-        /// The policy.
-        policy: Policy,
+        /// The policy's table ([`table::Table::NAME`]).
+        table: &'static str,
     },
     /// The issue policy's `initial_delay` is below
     /// [`IssueConfig::MIN_INITIAL_DELAY`], which documents the rule.
@@ -222,10 +221,10 @@ pub enum WorkerConfigError {
         floor: Duration,
     },
     /// A policy's `initial_delay` exceeds its `max_delay`.
-    #[error("{policy}.initial_delay ({initial:?}) must not exceed {policy}.max_delay ({max:?})")]
+    #[error("{table}.initial_delay ({initial:?}) must not exceed {table}.max_delay ({max:?})")]
     DelayOrder {
-        /// The policy.
-        policy: Policy,
+        /// The policy's table ([`table::Table::NAME`]).
+        table: &'static str,
         /// The configured initial delay.
         initial: Duration,
         /// The configured maximum delay.
@@ -233,52 +232,32 @@ pub enum WorkerConfigError {
     },
     /// A policy's `factor` is below 1 (the delay would shrink), or not a
     /// finite number (`nan`, `inf`; TOML and YAML accept both as floats).
-    #[error("{policy}.factor ({factor}) must be a finite number of at least 1")]
+    #[error("{table}.factor ({factor}) must be a finite number of at least 1")]
     InvalidFactor {
-        /// The policy.
-        policy: Policy,
+        /// The policy's table ([`table::Table::NAME`]).
+        table: &'static str,
         /// The configured factor.
         factor: f32,
     },
 }
 
-/// One of the three run retry policies of a [`WorkerConfig`]; names the
-/// configuration table in a [`WorkerConfigError`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Policy {
-    /// `[issue]`, the [`IssueConfig`].
-    Issue,
-    /// `[read]`, the [`ReadConfig`].
-    Read,
-    /// `[resolve]`, the [`ResolveConfig`].
-    Resolve,
-}
-
-impl fmt::Display for Policy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Issue => "issue",
-            Self::Read => "read",
-            Self::Resolve => "resolve",
-        })
-    }
-}
-
 /// The three tables a [`RetryPolicyConfig`] is read from, as types: each
-/// names its [`Policy`] and carries its defaults, so one struct serves the
-/// three policies with three sets of defaults.
+/// carries its name and its defaults, so one struct serves the three
+/// policies with three sets of defaults, and the table types are the one
+/// enumeration of the policies (#184: a `Policy` enum once doubled them).
 pub mod table {
     use std::fmt;
     use std::time::Duration;
 
-    use super::{Policy, RetryPolicyConfig};
+    use super::RetryPolicyConfig;
 
     /// A policy table of the [`WorkerConfig`](super::WorkerConfig): its name
     /// and its defaults. Sealed: the three tables are the deployment's.
     pub trait Table: sealed::Sealed + Sized + fmt::Debug + Clone + Copy + PartialEq + Eq {
-        /// The table, as a [`WorkerConfigError`](super::WorkerConfigError)
+        /// The table's key in the deployment configuration (`issue`, `read`,
+        /// `resolve`), as a [`WorkerConfigError`](super::WorkerConfigError)
         /// names it.
-        const POLICY: Policy;
+        const NAME: &'static str;
 
         /// The table's defaults.
         fn defaults() -> RetryPolicyConfig<Self>;
@@ -308,7 +287,7 @@ pub mod table {
     impl sealed::Sealed for Resolve {}
 
     impl Table for Issue {
-        const POLICY: Policy = Policy::Issue;
+        const NAME: &'static str = "issue";
 
         fn defaults() -> RetryPolicyConfig<Self> {
             RetryPolicyConfig::new(
@@ -322,7 +301,7 @@ pub mod table {
     }
 
     impl Table for Read {
-        const POLICY: Policy = Policy::Read;
+        const NAME: &'static str = "read";
 
         fn defaults() -> RetryPolicyConfig<Self> {
             RetryPolicyConfig::new(
@@ -336,7 +315,7 @@ pub mod table {
     }
 
     impl Table for Resolve {
-        const POLICY: Policy = Policy::Resolve;
+        const NAME: &'static str = "resolve";
 
         fn defaults() -> RetryPolicyConfig<Self> {
             RetryPolicyConfig::new(
@@ -482,7 +461,7 @@ impl<T: Table> RetryPolicyConfig<T> {
     /// An attempt cap, when set, is at least one execution.
     fn check_attempts(&self) -> Result<(), WorkerConfigError> {
         if self.max_attempts == Some(0) {
-            return Err(WorkerConfigError::ZeroMaxAttempts { policy: T::POLICY });
+            return Err(WorkerConfigError::ZeroMaxAttempts { table: T::NAME });
         }
         Ok(())
     }
@@ -491,7 +470,7 @@ impl<T: Table> RetryPolicyConfig<T> {
     fn check_delays(&self) -> Result<(), WorkerConfigError> {
         if self.initial_delay > self.max_delay {
             return Err(WorkerConfigError::DelayOrder {
-                policy: T::POLICY,
+                table: T::NAME,
                 initial: self.initial_delay,
                 max: self.max_delay,
             });
@@ -500,7 +479,7 @@ impl<T: Table> RetryPolicyConfig<T> {
         // YAML and would otherwise clear the `< 1.0` check.
         if !self.factor.is_finite() || self.factor < 1.0 {
             return Err(WorkerConfigError::InvalidFactor {
-                policy: T::POLICY,
+                table: T::NAME,
                 factor: self.factor,
             });
         }
@@ -929,15 +908,11 @@ mod tests {
     /// table.
     #[test]
     fn validate_reports_the_invariants_of_every_table() {
-        for (table, policy, max_delay) in [
-            ("issue", Policy::Issue, 600),
-            ("read", Policy::Read, 60),
-            ("resolve", Policy::Resolve, 10),
-        ] {
+        for (table, max_delay) in [("issue", 600), ("read", 60), ("resolve", 10)] {
             let config = |policy: serde_json::Value| json!({ "namespace": "acct", table: policy });
             assert_eq!(
                 verdict(config(json!({"max_attempts": 0}))),
-                Err(WorkerConfigError::ZeroMaxAttempts { policy }),
+                Err(WorkerConfigError::ZeroMaxAttempts { table }),
                 "{table}"
             );
             assert_eq!(
@@ -956,7 +931,7 @@ mod tests {
             assert_eq!(
                 verdict(config(json!({"initial_delay": initial}))),
                 Err(WorkerConfigError::DelayOrder {
-                    policy,
+                    table,
                     initial: over,
                     max: Duration::from_secs(max_delay),
                 }),
@@ -980,7 +955,7 @@ mod tests {
             assert_eq!(
                 verdict(config(json!({"factor": 0.5}))),
                 Err(WorkerConfigError::InvalidFactor {
-                    policy,
+                    table,
                     factor: 0.5
                 }),
                 "{table}"
@@ -1024,7 +999,7 @@ mod tests {
                 matches!(
                     error,
                     WorkerConfigError::InvalidFactor {
-                        policy: Policy::Issue,
+                        table: "issue",
                         factor
                     } if factor.is_nan() == non_finite.is_nan()
                 ),
@@ -1049,7 +1024,7 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(WorkerConfigError::InvalidFactor {
-                policy: Policy::Read,
+                table: "read",
                 ..
             })
         ));
