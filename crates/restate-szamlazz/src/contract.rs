@@ -77,7 +77,8 @@ use crate::identity::{ExternalId, OrderKey};
 /// with the HTTP status of [`status`](Self::status). Three of them mean
 /// "outcome unknown: retry with a new `Idempotency-Key`, or read
 /// `Szamlazz.Order.get`": `outcome_unknown`, `unavailable` and
-/// `credentials_rejected`. The rest are settled: the same request never
+/// `credentials_rejected` ([`is_outcome_unknown`](Self::is_outcome_unknown)
+/// names exactly them). The rest are settled: the same request never
 /// succeeds (`invalid_input`, `unknown_account`, `not_found`) or
 /// szamlazz.hu's own answer is passed through
 /// (`szamlazz_error`, whose szamlazz.hu code travels in the fault's separate
@@ -155,6 +156,52 @@ impl TerminalCode {
             Self::UnknownAccount => "unknown_account",
             Self::NotFound => "not_found",
             Self::SzamlazzError => "szamlazz_error",
+        }
+    }
+
+    /// Whether the fault means "outcome unknown": the caller retries with a
+    /// new `Idempotency-Key` or reads `Szamlazz.Order.get`, and pages rather
+    /// than auto-retries. Exactly three codes do: `outcome_unknown` (the
+    /// write step ran out of its policy), `unavailable` (szamlazz.hu, the
+    /// account resolver or the credential store did not answer) and
+    /// `credentials_rejected` (the key is wrong, and an earlier execution may
+    /// have landed). The other four are settled: retrying the same request
+    /// repeats the answer, so the caller fixes the request, the number, the
+    /// scope or the account, or (for `szamlazz_error`) sends again later with
+    /// a new key.
+    ///
+    /// ```
+    /// use restate_szamlazz::contract::TerminalCode;
+    ///
+    /// let outcome_unknown: Vec<TerminalCode> = TerminalCode::ALL
+    ///     .into_iter()
+    ///     .filter(|code| code.is_outcome_unknown())
+    ///     .collect();
+    /// assert_eq!(
+    ///     outcome_unknown,
+    ///     [
+    ///         TerminalCode::OutcomeUnknown,
+    ///         TerminalCode::Unavailable,
+    ///         TerminalCode::CredentialsRejected,
+    ///     ]
+    /// );
+    /// // The settled four: the same request never succeeds as it is.
+    /// for code in [
+    ///     TerminalCode::InvalidInput,
+    ///     TerminalCode::UnknownAccount,
+    ///     TerminalCode::NotFound,
+    ///     TerminalCode::SzamlazzError,
+    /// ] {
+    ///     assert!(!code.is_outcome_unknown());
+    /// }
+    /// ```
+    #[must_use]
+    pub const fn is_outcome_unknown(self) -> bool {
+        match self {
+            Self::OutcomeUnknown | Self::Unavailable | Self::CredentialsRejected => true,
+            Self::InvalidInput | Self::UnknownAccount | Self::NotFound | Self::SzamlazzError => {
+                false
+            }
         }
     }
 

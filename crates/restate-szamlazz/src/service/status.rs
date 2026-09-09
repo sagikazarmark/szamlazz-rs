@@ -6,7 +6,7 @@ use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::SharedObjectContext;
 
 use super::prologue::Execution;
-use super::support::{Fault, lookup};
+use super::support::{AnsweredCode, Fault, lookup};
 use crate::contract::{DocumentKind, DocumentState, DocumentStatus, OrderStatus};
 use crate::gateway::{FoundDocument, OwnershipOutcome};
 use crate::identity::{ExternalId, Namespace, OrderKey};
@@ -64,9 +64,11 @@ fn order_status(
                 status.set(kind, Some(document_status(&found)));
             }
             OwnershipOutcome::Absent | OwnershipOutcome::Collision(_) => {}
-            OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+            OwnershipOutcome::Api(answer) => {
+                return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+            }
             OwnershipOutcome::CredentialsRejected(answer) => {
-                return Err(Fault::credentials_rejected(namespace, answer));
+                return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
             }
         }
     }

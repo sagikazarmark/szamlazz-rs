@@ -183,18 +183,14 @@ impl Fault {
     }
 
     /// szamlazz.hu rejected the account's agent credentials with `code`
-    /// (3, 135, 136 or 164). Logs the warning that pages the operator (tagged
-    /// with the namespace and the code, never the key), and builds the fault.
-    /// The message claims the outcome is not known, nothing more: szamlazz.hu
-    /// answers these codes before acting, so the request it rejected was not
-    /// acted on, but the rejection may be a post-send re-query's after a send
-    /// with an open code, and an earlier execution's send may have landed.
-    pub(super) fn credentials_rejected(namespace: &Namespace, answer: SzamlazzAnswer) -> Self {
-        tracing::warn!(
-            namespace = %namespace,
-            code = %answer.code,
-            "szamlazz.hu rejected the agent credentials; fix the account's agent key"
-        );
+    /// (3, 135, 136 or 164). The message claims the outcome is not known,
+    /// nothing more: szamlazz.hu answers these codes before acting, so the
+    /// request it rejected was not acted on, but the rejection may be a
+    /// post-send re-query's after a send with an open code, and an earlier
+    /// execution's send may have landed. Pure; the warning that pages the
+    /// operator is [`AnsweredCode::into_fault`]'s, the one way a handler
+    /// raises this fault.
+    fn credentials_rejected(answer: SzamlazzAnswer) -> Self {
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
@@ -202,6 +198,51 @@ impl Fault {
             ),
         )
         .with_szamlazz_code(answer.code)
+    }
+}
+
+/// szamlazz.hu answered a step with a code rather than a document, as the
+/// handler reads it: the `CredentialsRejected` and `Api` variants every
+/// gateway outcome carries, lifted out of the outcome at the site that
+/// decides on it, with what the handler makes of another code. The one input
+/// of [`AnsweredCode::into_fault`], so the code → fault mapping (and the
+/// paging warning a credential code carries) is written once. Never
+/// journaled: the outcome is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AnsweredCode {
+    /// A credential code (3, 135, 136, 164): the worker's key is wrong, not
+    /// the request; `credentials_rejected` (503).
+    CredentialsRejected(SzamlazzAnswer),
+    /// Another code the handler cannot conclude a document from (every read
+    /// and write step of `Szamlazz.Order`, the verifies, the storno
+    /// protocol): `unavailable` (503) naming it.
+    Inconclusive(SzamlazzAnswer),
+    /// Another code the handler passes through rather than concludes from
+    /// (`Szamlazz.Agent.query`, `query_taxpayer`): `szamlazz_error` (422)
+    /// with szamlazz.hu's message.
+    PassedThrough(SzamlazzAnswer),
+}
+
+impl AnsweredCode {
+    /// The fault for the code: the one mapping from a szamlazz.hu answer that
+    /// is not a document onto a fault, and the home of the warning that pages
+    /// the operator on a credential code (tagged with the namespace and the
+    /// code, never the key), emitted here and nowhere else, so a fault built
+    /// and discarded never pages and a raised one always does. The caller
+    /// attaches the document identity it knows ([`Fault::about`]).
+    pub(super) fn into_fault(self, namespace: &Namespace) -> Fault {
+        match self {
+            Self::CredentialsRejected(answer) => {
+                tracing::warn!(
+                    namespace = %namespace,
+                    code = %answer.code,
+                    "szamlazz.hu rejected the agent credentials; fix the account's agent key"
+                );
+                Fault::credentials_rejected(answer)
+            }
+            Self::Inconclusive(answer) => Fault::inconclusive_answer(answer),
+            Self::PassedThrough(answer) => Fault::szamlazz_error(answer),
+        }
     }
 }
 
@@ -290,8 +331,8 @@ pub(super) fn order_key(key: &str) -> Result<OrderKey, Fault> {
 
 /// The document a verify by number found, or the fault for anything else:
 /// 404 `not_found` naming the invoice on code 7, `unavailable` on a code the
-/// verify cannot conclude from (`Fault::inconclusive_answer`), a credential
-/// code as `credentials_rejected`. Shared by every verify: `Szamlazz.Order`'s
+/// verify cannot conclude from, a credential code as `credentials_rejected`
+/// ([`AnsweredCode::into_fault`]). Shared by every verify: `Szamlazz.Order`'s
 /// attach the order identity to the fault ([`Fault::about`]),
 /// `Szamlazz.Agent.storno`'s carries none.
 ///
@@ -308,9 +349,9 @@ pub(super) fn verified_document(
         QueryOutcome::NotFound => Err(Fault::not_found(format!(
             "invoice {number} is not known to szamlazz.hu (code 7)"
         ))),
-        QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+        QueryOutcome::Api(answer) => Err(AnsweredCode::Inconclusive(answer).into_fault(namespace)),
         QueryOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
     }
 }
@@ -573,7 +614,8 @@ mod tests {
             (Fault::unavailable("x"), 503, "unavailable"),
             (Fault::missing_fulfillment_date("SZ-1"), 503, "unavailable"),
             (
-                Fault::credentials_rejected(&namespace(), SzamlazzAnswer::new("3", "x")),
+                AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("3", "x"))
+                    .into_fault(&namespace()),
                 503,
                 "credentials_rejected",
             ),
@@ -595,10 +637,9 @@ mod tests {
     }
 
     /// A szamlazz.hu code never travels in `code` (that field carries a
-    /// `TerminalCode` token), but in `szamlazz_code`, beside it: on the 422
-    /// pass-through, whose message is szamlazz.hu's own; on a credential
-    /// rejection; on an inconclusive answer to a read. Faults that no szamlazz.hu
-    /// answer caused carry no `szamlazz_code` at all.
+    /// `TerminalCode` token), but in `szamlazz_code`, beside it, on every
+    /// fault a szamlazz.hu answer caused; faults that no szamlazz.hu answer
+    /// caused carry no `szamlazz_code` at all.
     #[test]
     fn a_szamlazz_code_travels_in_its_own_field() {
         let error = TerminalError::from(Fault::szamlazz_error(SzamlazzAnswer::new(
@@ -616,19 +657,6 @@ mod tests {
             "{message}"
         );
 
-        let error = TerminalError::from(Fault::credentials_rejected(
-            &namespace(),
-            SzamlazzAnswer::new("3", "x"),
-        ));
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-        assert_eq!(body["code"], "credentials_rejected");
-        assert_eq!(body["szamlazz_code"], "3");
-
-        let error = TerminalError::from(Fault::inconclusive_answer(SzamlazzAnswer::new("57", "x")));
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-        assert_eq!(body["code"], "unavailable");
-        assert_eq!(body["szamlazz_code"], "57");
-
         for fault in [
             Fault::invalid_input("x"),
             Fault::not_found("x"),
@@ -644,40 +672,117 @@ mod tests {
         }
     }
 
-    /// The fault a credential rejection raises names the szamlazz.hu code, tells
-    /// the caller the outcome is not known (never that "this attempt issued
-    /// nothing", which a post-send re-query can make false and which uses a word
-    /// the glossary avoids for a handler execution, #63), and carries the
-    /// document identity when one is attached.
+    /// The one mapping from a szamlazz.hu code onto a fault, as a table: a
+    /// credential code is `credentials_rejected` (503), another code the
+    /// handler cannot conclude from is `unavailable` (503), another code the
+    /// handler passes through is `szamlazz_error` (422); each carries the
+    /// szamlazz.hu code in `szamlazz_code` and its message in the text, and
+    /// the credential row's message tells the caller the outcome is not known
+    /// (never that "this attempt issued nothing", which a post-send re-query
+    /// can make false, #63). The warning that pages the operator is emitted
+    /// by exactly the credential row, tagged with the namespace and the code,
+    /// and by nothing else: a fault built and discarded never pages. Every
+    /// site that decides on a gateway outcome routes its two answered
+    /// variants here (the sites' own tests assert the routing).
     #[test]
-    fn credentials_rejected_fault_names_the_code_and_the_document() {
-        let order = OrderKey::parse("ORD-1").expect("order");
-        let fault = Fault::credentials_rejected(
-            &namespace(),
-            SzamlazzAnswer::new("136", "Bejelentkezés letiltva"),
-        )
-        .about(
-            &order,
-            Some(IssuedKind::Invoice),
-            &ExternalId::new("acct:ORD-1:invoice"),
+    fn an_answered_code_maps_onto_its_fault_and_only_a_credential_code_pages() {
+        let capture = LogCapture::default();
+        let guard = capture.subscribe();
+        drop(
+            AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("0", "warm-up"))
+                .into_fault(&"warmup".parse().expect("namespace")),
         );
+        LogCapture::rebuild_interest();
+
+        let table = [
+            (
+                AnsweredCode::CredentialsRejected(SzamlazzAnswer::new(
+                    "136",
+                    "Bejelentkezés letiltva",
+                )),
+                503,
+                TerminalCode::CredentialsRejected,
+                "136",
+                "the outcome is not known",
+            ),
+            (
+                AnsweredCode::Inconclusive(SzamlazzAnswer::new("57", "Hibás XML.")),
+                503,
+                TerminalCode::Unavailable,
+                "57",
+                "nothing may be concluded",
+            ),
+            (
+                AnsweredCode::PassedThrough(SzamlazzAnswer::new(
+                    "OPERATION_FAILED",
+                    "A NAV szolgáltatás nem elérhető.",
+                )),
+                422,
+                TerminalCode::SzamlazzError,
+                "OPERATION_FAILED",
+                "szamlazz.hu error",
+            ),
+        ];
+        for (code, status, terminal, szamlazz_code, phrase) in table {
+            let label = format!("{code:?}");
+            let error = TerminalError::from(code.into_fault(&namespace()));
+            assert_eq!(error.code(), status, "{label}");
+            let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
+            assert_eq!(body["code"], terminal.as_str(), "{label}: {body}");
+            assert_eq!(body["szamlazz_code"], szamlazz_code, "{label}: {body}");
+            let message = body["message"].as_str().expect("message");
+            assert!(message.contains(szamlazz_code), "{label}: {message}");
+            assert!(message.contains(phrase), "{label}: {message}");
+            assert!(
+                message.contains("Idempotency-Key") || terminal == TerminalCode::SzamlazzError,
+                "{label}: {message}"
+            );
+            assert!(!message.contains("attempt"), "{label}: {message}");
+            assert!(!message.contains("issued nothing"), "{label}: {message}");
+            assert_eq!(body.get("order"), None, "{label}: nothing attached");
+        }
+        drop(guard);
+
+        let logs = capture.logs();
+        let warnings: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("WARN") && !line.contains("warmup"))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the credential row pages: {logs}"
+        );
+        assert!(warnings[0].contains("namespace=acct"), "{}", warnings[0]);
+        assert!(warnings[0].contains("code=136"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("fix the account's agent key"),
+            "{}",
+            warnings[0]
+        );
+    }
+
+    /// The document identity a handler attaches to an answered code's fault
+    /// travels beside the code: order, kind and external id.
+    #[test]
+    fn credentials_rejected_fault_carries_the_document_when_attached() {
+        let order = OrderKey::parse("ORD-1").expect("order");
+        let fault =
+            AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("136", "Bejelentkezés letiltva"))
+                .into_fault(&namespace())
+                .about(
+                    &order,
+                    Some(IssuedKind::Invoice),
+                    &ExternalId::new("acct:ORD-1:invoice"),
+                );
         let error = TerminalError::from(fault);
         assert_eq!(error.code(), 503);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], "credentials_rejected");
+        assert_eq!(body["szamlazz_code"], "136");
         assert_eq!(body["order"], "ORD-1");
         assert_eq!(body["kind"], "invoice");
         assert_eq!(body["external_id"], "acct:ORD-1:invoice");
-        let message = body["message"].as_str().expect("message");
-        assert!(message.contains("136"), "{message}");
-        assert!(message.contains("Bejelentkezés letiltva"), "{message}");
-        assert!(message.contains("fix the account's agent key"), "{message}");
-        assert!(
-            message.contains("retry with a new Idempotency-Key"),
-            "{message}"
-        );
-        assert!(!message.contains("attempt"), "{message}");
-        assert!(!message.contains("issued nothing"), "{message}");
     }
 
     /// A read step that ended without an answer (the read policy exhausted

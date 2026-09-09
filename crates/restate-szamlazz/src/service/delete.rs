@@ -9,7 +9,7 @@ use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
-use super::support::{Fault, lookup, run_once};
+use super::support::{AnsweredCode, Fault, lookup, run_once};
 use crate::contract::{DeleteProformaRequest, DeleteProformaResponse, DocumentKind, IssuedKind};
 use crate::gateway::{DeleteOutcome, FoundDocument, OwnershipOutcome};
 use crate::identity::{ExternalId, Namespace, OrderKey};
@@ -85,9 +85,11 @@ fn delete_guard(
             )));
         }
         OwnershipOutcome::Live(found) => found,
-        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::Api(answer) => {
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+        }
         OwnershipOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     };
     if !found.payments.is_empty() && !force {
@@ -119,7 +121,7 @@ fn delete_response(
             Ok(DeleteProformaResponse::not_deleted(rejection.code))
         }
         DeleteOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
         DeleteOutcome::Transport(message) => Err(Fault::outcome_unknown(format!(
             "proforma deletion outcome unknown: {message}; retry with a new Idempotency-Key"

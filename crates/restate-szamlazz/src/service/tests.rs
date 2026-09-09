@@ -510,7 +510,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::support::Fault;
+    use super::support::AnsweredCode;
     use crate::gateway::QueryOutcome;
     use crate::test_support::LogCapture;
 
@@ -531,10 +531,10 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
 
     // Pin the warning's callsite to this thread's subscriber (see
     // `LogCapture`). The warm-up event is told apart by its namespace.
-    drop(Fault::credentials_rejected(
-        &"warmup".parse().expect("namespace"),
-        SzamlazzAnswer::new("0", "warm-up"),
-    ));
+    drop(
+        AnsweredCode::CredentialsRejected(SzamlazzAnswer::new("0", "warm-up"))
+            .into_fault(&"warmup".parse().expect("namespace")),
+    );
     LogCapture::rebuild_interest();
 
     // What the prologue does: resolve, fetch, open; then the gateway
@@ -547,10 +547,9 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
         panic!("expected CredentialsRejected, got {outcome:?}");
     };
     assert_eq!(answer.code, "3");
-    let error = TerminalError::from(Fault::credentials_rejected(
-        &order.config().namespace,
-        answer,
-    ));
+    let error = TerminalError::from(
+        AnsweredCode::CredentialsRejected(answer).into_fault(&order.config().namespace),
+    );
     drop(guard);
 
     let sent = server.received_requests().await.expect("requests");

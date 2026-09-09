@@ -19,7 +19,7 @@ use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
-use super::support::{Fault, verified_document};
+use super::support::{AnsweredCode, Fault, verified_document};
 use super::support::{lookup, run_reading, run_retrying, verify};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
@@ -147,13 +147,13 @@ impl Identity {
             }
             CreateOutcome::Rejected(rejection) => self.rejected(rejection.code, rejection.message),
             CreateOutcome::CredentialsRejected(answer) => {
-                return Err(Fault::credentials_rejected(namespace, answer));
+                return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
             }
             // The leading query answered with a code or `szlahu_down`: the
             // fault the lookup step raises for the same answer, at once:
             // nothing was sent (#63).
             CreateOutcome::Api(answer) => {
-                return Err(Fault::inconclusive_answer(answer));
+                return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
             }
             CreateOutcome::Unavailable { message } => {
                 return Err(Fault::szlahu_down_answer(message));
@@ -261,9 +261,11 @@ fn decide_exclusivity(
         }
         OwnershipOutcome::Live(found) => Some(identity.conflict_about(reason, found.number)),
         OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => None,
-        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::Api(answer) => {
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+        }
         OwnershipOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     })
 }
@@ -299,9 +301,11 @@ fn decide_prepayment_for_final(
             refs.prepayment = Some(found.number);
             None
         }
-        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::Api(answer) => {
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+        }
         OwnershipOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     })
 }
@@ -337,9 +341,11 @@ fn decide_proforma_link(
         }
         OwnershipOutcome::Live(found) => found,
         OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => return Ok(None),
-        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::Api(answer) => {
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+        }
         OwnershipOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     };
     Ok(match link {
@@ -380,10 +386,14 @@ fn decide_proforma_by_number(
     refs: &mut Refs,
 ) -> Result<Option<CreateResponse>, Fault> {
     match outcome {
-        QueryOutcome::Api(answer) => Err(identity.about(order, Fault::inconclusive_answer(answer))),
-        QueryOutcome::CredentialsRejected(answer) => {
-            Err(identity.about(order, Fault::credentials_rejected(namespace, answer)))
-        }
+        QueryOutcome::Api(answer) => Err(identity.about(
+            order,
+            AnsweredCode::Inconclusive(answer).into_fault(namespace),
+        )),
+        QueryOutcome::CredentialsRejected(answer) => Err(identity.about(
+            order,
+            AnsweredCode::CredentialsRejected(answer).into_fault(namespace),
+        )),
         QueryOutcome::NotFound => Ok(Some(
             identity.conflict_about(ConflictReason::ProformaMissing, number),
         )),
@@ -467,10 +477,10 @@ fn decide_lookup(
 ) -> Result<ControlFlow<CreateResponse, Option<String>>, Fault> {
     Ok(match outcome {
         LookupOutcome::Api(answer) => {
-            return Err(Fault::inconclusive_answer(answer));
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
         }
         LookupOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
         LookupOutcome::Live(found) if reissue => {
             ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number))

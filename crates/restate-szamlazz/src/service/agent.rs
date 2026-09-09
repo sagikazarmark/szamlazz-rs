@@ -17,7 +17,7 @@ use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
-use super::support::{Fault, run_once, run_reading};
+use super::support::{AnsweredCode, Fault, run_once, run_reading};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetPaymentsRequest, SetPaymentsResponse,
@@ -84,9 +84,9 @@ fn query_response(outcome: QueryOutcome, namespace: &Namespace) -> Result<QueryR
             "szamlazz.hu does not know the document (code 7)",
         )),
         QueryOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        QueryOutcome::Api(answer) => Err(Fault::szamlazz_error(answer)),
+        QueryOutcome::Api(answer) => Err(AnsweredCode::PassedThrough(answer).into_fault(namespace)),
     }
 }
 
@@ -101,9 +101,11 @@ fn taxpayer_response(
     match outcome {
         TaxpayerOutcome::Found(taxpayer) => Ok(taxpayer),
         TaxpayerOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        TaxpayerOutcome::Api(answer) => Err(Fault::szamlazz_error(answer)),
+        TaxpayerOutcome::Api(answer) => {
+            Err(AnsweredCode::PassedThrough(answer).into_fault(namespace))
+        }
     }
 }
 
@@ -139,7 +141,7 @@ fn set_payments_response(
             ),
         }),
         SetPaymentsOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
         SetPaymentsOutcome::Transport(message) => Err(set_payments_unknown(additive, &message)),
     }

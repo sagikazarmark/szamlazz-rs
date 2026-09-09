@@ -25,7 +25,8 @@ use szamlazz_agent::Date;
 
 use super::prologue::Execution;
 use super::support::{
-    Fault, RunCtx, run_best_effort, run_reading, run_retrying, verified_document, verify,
+    AnsweredCode, Fault, RunCtx, run_best_effort, run_reading, run_retrying, verified_document,
+    verify,
 };
 use crate::account::Account;
 use crate::contract::{ConflictReason, StornoOutcome, StornoRequest, StornoResponse};
@@ -191,9 +192,11 @@ fn after_storno_lookup(
             reversed_response(number, Some(storno_number)),
         )),
         StornoLookupOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        StornoLookupOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
+        StornoLookupOutcome::Api(answer) => {
+            Err(AnsweredCode::Inconclusive(answer).into_fault(namespace))
+        }
     }
 }
 
@@ -230,10 +233,10 @@ fn storno_response(
                 .with_message(rejection.message)
         }
         GatewayStornoOutcome::CredentialsRejected(answer) => {
-            return Err(Fault::credentials_rejected(namespace, answer));
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
         GatewayStornoOutcome::Api(answer) => {
-            return Err(Fault::inconclusive_answer(answer));
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
         }
         GatewayStornoOutcome::Unavailable { message } => {
             return Err(Fault::szlahu_down_answer(message));
@@ -274,7 +277,7 @@ fn storno_number_from_hint(
         QueryOutcome::Found(found) if found.is_storno_of(number) => Ok(Some(found.number)),
         QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api(_) => Ok(None),
         QueryOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
     }
 }
@@ -297,7 +300,7 @@ fn storno_number_from_lookup(
         StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(Some(storno_number)),
         StornoLookupOutcome::Absent | StornoLookupOutcome::Api(_) => Ok(None),
         StornoLookupOutcome::CredentialsRejected(answer) => {
-            Err(Fault::credentials_rejected(namespace, answer))
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
     }
 }

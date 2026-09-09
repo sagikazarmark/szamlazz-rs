@@ -570,8 +570,12 @@ The envelope is Restate's, not ours: the Rust SDK 0.12 carries a terminal error 
 other channel, so the worker serialises the fault into the message and the caller parses `message` a second time
 (`From<Fault> for TerminalError` in `service::support`). The fault body is a public contract type,
 `contract::Fault` (`Serialize + Deserialize`, open like every response type, `#[non_exhaustive]`, built with
-`Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::credentials_rejected`, …, are
-a crate-private inherent impl in `service::support`), so a Rust caller decodes `message` into it rather than
+`Fault::new` and its setters; the service-side constructors, `Fault::not_found`, `Fault::unavailable`, …, are a
+crate-private inherent impl in `service::support`, and a szamlazz.hu code that is not a document becomes a fault
+through one mapping, `support::AnsweredCode::into_fault` (a credential code → `credentials_rejected`, another code →
+`unavailable` where the handler cannot conclude from it, `szamlazz_error` where it passes it through), which is also
+where the paging `credentials_rejected` warning is emitted, so a fault built and discarded never pages (#153)), so a
+Rust caller decodes `message` into it rather than
 re-declaring the shape: the e2e harness (`Reply::fault`) did until #128. A caller reading the envelope's `code` sees
 the HTTP status, never the token. The library README (*Faults*) documents the envelope and its three cases, a
 structured fault, a killed invocation (the same envelope with the last retryable error's text in `message`), an
