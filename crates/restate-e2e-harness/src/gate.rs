@@ -188,7 +188,7 @@ pub const SCOPED_VIRTUAL_OBJECTS: Feature = Feature {
 pub struct ServerSpec {
     /// A short name for the shape (`main`, `canary`), in the node name and
     /// the base dir: one path component of `[a-z0-9-]`, non-empty
-    /// ([`ServerSpec::validate`]), since the base dir is removed recursively
+    /// ([`ServerSpec::assert_valid`]), since the base dir is removed recursively
     /// on drop and a name with a `/` or a `..` in it would name a directory
     /// that is not the harness's.
     pub name: &'static str,
@@ -223,8 +223,10 @@ impl ServerSpec {
 
     /// Panics, naming the rule, unless [`Self::name`] is one safe path
     /// component ([`Self::is_valid_name`]). Run by [`Launcher::launch`]
-    /// before anything touches the filesystem.
-    pub fn validate(&self) {
+    /// before anything touches the filesystem. Named for what it does: a
+    /// `validate` that answers a `Result` is the workspace's other contract
+    /// (#182).
+    pub fn assert_valid(&self) {
         assert!(
             Self::is_valid_name(self.name),
             "a ServerSpec name is one path component of [a-z0-9-], non-empty: {:?}",
@@ -240,7 +242,7 @@ impl Launcher {
     /// spec has it. Panics when the server does not come up (a spawned
     /// server's own log tail in the message) or reports a feature otherwise.
     pub async fn launch(self, spec: &ServerSpec) -> Restate {
-        spec.validate();
+        spec.assert_valid();
         let restate = match self {
             Self::Reuse {
                 admin,
@@ -332,10 +334,10 @@ mod tests {
             features: &[],
             env: &[],
         };
-        let outcome = std::panic::catch_unwind(|| bad.validate());
+        let outcome = std::panic::catch_unwind(|| bad.assert_valid());
         assert!(
             outcome.is_err(),
-            "validate refuses the name before any spawn"
+            "assert_valid refuses the name before any spawn"
         );
     }
 
