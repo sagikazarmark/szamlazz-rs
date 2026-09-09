@@ -178,7 +178,7 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
 
 The four steps and the handler body run inside one tracing span, **`execution{scope, order, restate.invocation.id,
-account.id}`** (`support::{object, shared, service}::execute`): `scope` is what the SDK saw (`<unscoped>` when none),
+account.id}`** (`support::execute`, generic over `support::RunCtx`): `scope` is what the SDK saw (`<unscoped>` when none),
 `order` the Virtual Object key (absent on `Szamlazz.Agent`), `restate.invocation.id` the value the ingress returns as
 `x-restate-id`, and `account.id` the resolved account's id, recorded once the `account` step has answered. Every log
 line the execution emits, the prologue's warnings, the gateway steps' `gateway.*` spans and events, the paging

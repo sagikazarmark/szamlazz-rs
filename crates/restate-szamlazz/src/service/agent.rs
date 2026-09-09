@@ -17,12 +17,12 @@ use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
-use super::support::service::{
-    lookup_storno, run_once, run_reading, storno_number_of_unmanaged, storno_step,
-};
 use super::support::{
     Fault, StornoIntent, StornoVerdict, after_storno_lookup, reversed_response, storno_response,
     verified_document,
+};
+use super::support::{
+    lookup_storno, run_once, run_reading, storno_number_of_unmanaged, storno_step,
 };
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,

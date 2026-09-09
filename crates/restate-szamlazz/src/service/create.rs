@@ -19,8 +19,8 @@ use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
-use super::support::object::{lookup, run_reading, run_retrying, verify};
 use super::support::{Fault, Lookup, verified_document};
+use super::support::{lookup, run_reading, run_retrying, verify};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
     IssuedKind, Outcome, ProformaLink, Warning, outstanding,
