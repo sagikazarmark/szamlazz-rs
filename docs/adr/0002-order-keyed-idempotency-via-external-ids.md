@@ -189,8 +189,8 @@ J-07-12). The decisions:
 - **Arithmetic on caller input is checked, never panicking** (J8). The `LineItem::try_calculated` path of #60
   already answers an overflowing `unit_price × quantity` as `invalid_input`; #64 makes the two remaining
   `Decimal` sums in the worker checked too: `outstanding` (on szamlazz.hu's amounts, on the response path of
-  `create_*` and `query`) and `gross_total` (a public helper with no production caller today; checked so that
-  a future caller cannot reintroduce the panic). The check runs *after* the prologue (it needs the account's
+  `create_*` and `query`) and `gross_total` (then a public helper with no production caller, since #182 a test
+  helper of the build module; checked so that a caller cannot reintroduce the panic). The check runs *after* the prologue (it needs the account's
   currency defaults for the rounding), so `namespace` and `account` are journaled before the 400; a duplicate
   pre-prologue check was rejected as a second site for one rule. The e2e scenario proves the property that
   matters: an overflowing body sent beside a healthy create against the same endpoint issues nothing, exactly

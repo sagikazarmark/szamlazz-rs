@@ -227,9 +227,12 @@ impl AnsweredCode {
     /// The fault for the code: the one mapping from a szamlazz.hu answer that
     /// is not a document onto a fault, and the home of the warning that pages
     /// the operator on a credential code (tagged with the namespace and the
-    /// code, never the key), emitted here and nowhere else, so a fault built
-    /// and discarded never pages and a raised one always does. The caller
-    /// attaches the document identity it knows ([`Fault::about`]).
+    /// code, never the key), emitted here and nowhere else. The mapping is
+    /// the side effect: calling it on a credential code pages, whether or not
+    /// the fault is then raised, and nothing else does, so the `Fault`
+    /// constructors stay pure and a handler that reads a credential code
+    /// pages exactly once, at the site that decides on it. The caller attaches
+    /// the document identity it knows ([`Fault::about`]).
     pub(super) fn into_fault(self, namespace: &Namespace) -> Fault {
         match self {
             Self::CredentialsRejected(answer) => {
@@ -681,9 +684,11 @@ mod tests {
     /// (never that "this attempt issued nothing", which a post-send re-query
     /// can make false, #63). The warning that pages the operator is emitted
     /// by exactly the credential row, tagged with the namespace and the code,
-    /// and by nothing else: a fault built and discarded never pages. Every
-    /// site that decides on a gateway outcome routes its two answered
-    /// variants here (the sites' own tests assert the routing).
+    /// and by nothing else: the mapping pages, the `Fault` constructors do
+    /// not (the warm-up below drops a credential fault and pages all the
+    /// same, which is what it is for). Every site that decides on a gateway
+    /// outcome routes its two answered variants here (the sites' own tests
+    /// assert the routing).
     #[test]
     fn an_answered_code_maps_onto_its_fault_and_only_a_credential_code_pages() {
         let capture = LogCapture::default();

@@ -574,7 +574,8 @@ other channel, so the worker serialises the fault into the message and the calle
 crate-private inherent impl in `service::support`, and a szamlazz.hu code that is not a document becomes a fault
 through one mapping, `support::AnsweredCode::into_fault` (a credential code → `credentials_rejected`, another code →
 `unavailable` where the handler cannot conclude from it, `szamlazz_error` where it passes it through), which is also
-where the paging `credentials_rejected` warning is emitted, so a fault built and discarded never pages (#153)), so a
+where the paging `credentials_rejected` warning is emitted: the mapping pages, once, at the site that decides on the
+code, and the `Fault` constructors are pure (#153)), so a
 Rust caller decodes `message` into it rather than
 re-declaring the shape: the e2e harness (`Reply::fault`) did until #128. A caller reading the envelope's `code` sees
 the HTTP status, never the token. The library README (*Faults*) documents the envelope and its three cases, a
