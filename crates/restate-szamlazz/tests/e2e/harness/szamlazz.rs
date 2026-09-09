@@ -273,7 +273,7 @@ async fn query_by(mock: &MockServer, selector: &str) -> (u16, String) {
 
 /// A create as the Számla Agent client puts it on the wire, reduced to what
 /// the matchers read: the operation's field name and the order number.
-fn create_body(order: &str) -> String {
+fn create_reply_body(order: &str) -> String {
     format!("name=\"action-xmlagentxmlfile\"\n<rendelesSzam>{order}</rendelesSzam>")
 }
 
@@ -414,7 +414,7 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
     // Another order's create matches nothing here and lands nothing.
     let other = http_client()
         .post(mock.uri())
-        .body(create_body("ORD-6"))
+        .body(create_reply_body("ORD-6"))
         .send()
         .await
         .expect("another order's create");
@@ -427,7 +427,7 @@ async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create
 
     let response = http_client()
         .post(mock.uri())
-        .body(create_body("ORD-5"))
+        .body(create_reply_body("ORD-5"))
         .send()
         .await
         .expect("create");
@@ -477,7 +477,7 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
         async move {
             http_client()
                 .post(uri)
-                .body(create_body("ORD-6"))
+                .body(create_reply_body("ORD-6"))
                 .send()
                 .await
                 .expect("create")
@@ -536,7 +536,7 @@ async fn create_lands_on_the_second_send_keeps_the_document_absent_until_the_sec
     let create = || {
         http_client()
             .post(mock.uri())
-            .body(create_body("ORD-7"))
+            .body(create_reply_body("ORD-7"))
             .send()
     };
     let first = create().await.expect("first create");

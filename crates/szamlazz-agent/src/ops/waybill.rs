@@ -85,6 +85,7 @@ impl Mpl {
 }
 
 /// Optional carrier waybill block (`fuvarlevel`).
+#[doc(alias = "fuvarlevel")]
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Waybill {
     /// Legacy destination (`uticel`).

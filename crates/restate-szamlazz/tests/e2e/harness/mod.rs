@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use jiff::civil::date;
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
-pub(crate) use restate_e2e_harness::gate::{Reuse, launcher_or_skip};
+pub(crate) use restate_e2e_harness::gate::{ReusePolicy, launcher_or_skip};
 use restate_e2e_harness::{Admin, Call, Restate, ServerSpec, Target, Watch};
 use restate_sdk::prelude::Endpoint;
 use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};

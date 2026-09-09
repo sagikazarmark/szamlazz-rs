@@ -63,7 +63,7 @@ The one copy, compiled as a doctest of the crate:
 
 ```rust,no_run
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
-use restate_e2e_harness::{Call, Reuse, ServerSpec, launcher_or_skip};
+use restate_e2e_harness::{Call, ReusePolicy, ServerSpec, launcher_or_skip};
 use restate_sdk::prelude::Endpoint;
 
 const SERVER: ServerSpec = ServerSpec {
@@ -73,7 +73,7 @@ const SERVER: ServerSpec = ServerSpec {
 };
 
 # async fn run() {
-let Some(launcher) = launcher_or_skip(Reuse::Allowed) else { return };
+let Some(launcher) = launcher_or_skip(ReusePolicy::Allowed) else { return };
 let restate = launcher.launch(&SERVER).await;
 let endpoint = Endpoint::builder() /* .bind(MyService) */ .build();
 restate.deploy(endpoint).await;

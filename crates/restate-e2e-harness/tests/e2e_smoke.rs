@@ -17,7 +17,7 @@
 )]
 
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
-use restate_e2e_harness::{Call, Launcher, Reuse, ServerSpec, launcher_or_skip};
+use restate_e2e_harness::{Call, Launcher, ReusePolicy, ServerSpec, launcher_or_skip};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
@@ -81,7 +81,7 @@ struct Fault {
 #[tokio::test]
 #[ignore = "needs a Restate server: RESTATE_SERVER_BIN (a server of its own, never a reused one)"]
 async fn e2e_smoke() {
-    let Some(launcher) = launcher_or_skip(Reuse::Never) else {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
         return;
     };
     assert!(

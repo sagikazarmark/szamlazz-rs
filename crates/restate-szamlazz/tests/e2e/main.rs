@@ -107,7 +107,7 @@ use tokio::task::JoinSet;
 
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{not_found, probe_with_key};
-use crate::harness::{Harness, MAIN_SERVER, Reuse, WITHOUT_PROTOCOL_V7, launcher_or_skip};
+use crate::harness::{Harness, MAIN_SERVER, ReusePolicy, WITHOUT_PROTOCOL_V7, launcher_or_skip};
 
 /// The scenarios of phase 1, spawned on one runtime and joined together:
 /// each runs against the shared harness on order keys of its own, and every
@@ -362,7 +362,7 @@ impl Sequentially {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a Restate server: RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
 async fn e2e_order_protocol() {
-    let Some(launcher) = launcher_or_skip(Reuse::Allowed) else {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Allowed) else {
         return;
     };
     let only = Only::from_env();
@@ -495,7 +495,7 @@ fn names_of(scenarios: &[Scenario]) -> Vec<&'static str> {
 #[tokio::test]
 #[ignore = "needs a Restate server: RESTATE_SERVER_BIN"]
 async fn e2e_check_account_without_protocol_v7() {
-    let Some(launcher) = launcher_or_skip(Reuse::Never) else {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
         return;
     };
     let mut h = Harness::start(launcher.launch(&WITHOUT_PROTOCOL_V7).await).await;

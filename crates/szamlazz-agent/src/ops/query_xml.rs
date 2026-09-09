@@ -209,6 +209,7 @@ pub struct InvoiceInfo {
     /// The invoice number (`szamlaszam`).
     pub invoice_number: InvoiceNumber,
     /// Economic-event identifier (`gazdEsemAzon`).
+    #[doc(alias = "gazdEsemAzon")]
     pub economic_event_id: Option<u64>,
     /// Source system code (`forras`) for externally issued invoices.
     pub source: Option<u32>,
@@ -311,6 +312,7 @@ pub struct BuyerPostalAddress {
 }
 
 /// Buyer ledger data returned under `vevo/fokonyv`.
+#[doc(alias = "fokonyv")]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BuyerLedgerInfo {
@@ -426,7 +428,13 @@ impl DocumentItem {
     }
 }
 
-/// A financial item (`qutet`) returned alongside invoice line items.
+/// A financial item (`qutet`): a ledger-side row of the queried document
+/// beside the printed line items, carrying what bookkeeping reads (the VAT
+/// deductibility, the settlement period, the labels) rather than a price and
+/// a quantity. szamlazz.hu documents no English meaning for the element; the
+/// name is most likely a "`QUiCK` tétel", after the `QUiCK` accounting system
+/// its `forras` codes name as an import source.
+#[doc(alias = "qutet")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct FinancialItem {

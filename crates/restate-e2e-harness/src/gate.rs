@@ -94,9 +94,10 @@ pub fn server_gate(
 
 /// Whether the suite may reuse a server from the environment: a suite whose
 /// server shape is the one a reused server is expected to have may, a suite
-/// that needs a server of its own shape (a flag off) may not.
+/// that needs a server of its own shape (a flag off) may not. The policy;
+/// the launcher that results from an allowed reuse is [`Launcher::Reuse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reuse {
+pub enum ReusePolicy {
     /// `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL` are honoured.
     Allowed,
     /// The environment's running server is ignored; only a binary launches.
@@ -110,11 +111,13 @@ pub enum Reuse {
 /// `RESTATE_INGRESS_URL` (when `reuse` allows), `RESTATE_SERVER_BIN`,
 /// `RESTATE_ENDPOINT_HOST` and `CI`; an empty variable is unset (a
 /// `RESTATE_ADMIN_URL=` in a CI matrix is not a server to wait 90 s on).
-pub fn launcher_or_skip(reuse: Reuse) -> Option<Launcher> {
+pub fn launcher_or_skip(reuse: ReusePolicy) -> Option<Launcher> {
     let non_empty = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let reusable = match reuse {
-        Reuse::Allowed => non_empty("RESTATE_ADMIN_URL").zip(non_empty("RESTATE_INGRESS_URL")),
-        Reuse::Never => None,
+        ReusePolicy::Allowed => {
+            non_empty("RESTATE_ADMIN_URL").zip(non_empty("RESTATE_INGRESS_URL"))
+        }
+        ReusePolicy::Never => None,
     };
     let binary = std::env::var_os("RESTATE_SERVER_BIN")
         .filter(|value| !value.is_empty())

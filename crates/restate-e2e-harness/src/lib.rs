@@ -111,7 +111,7 @@ pub mod watch;
 
 pub use admin::{Admin, Target, sql_literal};
 #[cfg(unix)]
-pub use gate::{Feature, Launcher, Reuse, ServerSpec, launcher_or_skip, server_gate};
+pub use gate::{Feature, Launcher, ReusePolicy, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::{Call, Mode, Reply};
 pub use introspection::{Handler, Invocation, JournalEntry, run_result};
 pub use run_names::{RunPath, Table, Violations, Walked};

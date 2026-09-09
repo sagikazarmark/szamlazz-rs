@@ -64,7 +64,7 @@ impl AgentRequest for QueryInvoicePdf {
                     InvoiceSelector::OrderNumber(number) => root.text("rendelesSzam", number),
                     InvoiceSelector::ExternalId(_) => {}
                 }
-                root.text("valaszVerzio", "2");
+                root.text("valaszVerzio", super::RESPONSE_VERSION);
                 if let InvoiceSelector::ExternalId(id) = &self.selector {
                     root.text("szamlaKulsoAzon", id);
                 }

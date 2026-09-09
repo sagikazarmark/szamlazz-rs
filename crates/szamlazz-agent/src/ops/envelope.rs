@@ -44,6 +44,7 @@ pub struct CreatedInvoice {
     #[doc(alias = "kintlévőség")]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account/payment URL (`vevoifiokurl`).
+    #[doc(alias = "vevoifiokurl")]
     pub customer_account_url: Option<String>,
     /// The document PDF, when requested.
     pub pdf: Option<Pdf>,

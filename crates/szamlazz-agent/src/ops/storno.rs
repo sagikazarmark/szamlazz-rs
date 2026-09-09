@@ -177,7 +177,7 @@ impl AgentRequest for StornoInvoice {
                     if let Some(guardian) = self.guardian {
                         s.bool("guardian", guardian);
                     }
-                    s.text("valaszVerzio", "2");
+                    s.text("valaszVerzio", super::RESPONSE_VERSION);
                     s.text_opt("szamlaKulsoAzon", self.external_id.as_deref());
                 });
                 root.node("fejlec", |f| {

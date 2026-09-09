@@ -24,6 +24,12 @@
 //!   sends an explicit `false` (`sendEmail`, `arresAfa`, `eusAfa`, `guardian`,
 //!   `cikkazoninvoice`, `elonezetpdf`, `folyamatosTelj`).
 
+/// The *Response version* (`valaszVerzio`) every operation that has one
+/// requests: `2`, the structured `xmlszamlavalasz` XML with a base64 PDF
+/// (`1` is plain text or raw PDF bytes, which the parsers do not read). One
+/// constant so the pin is greppable; four writers send it.
+pub const RESPONSE_VERSION: &str = "2";
+
 pub mod credit_entry;
 mod envelope;
 pub mod invoice;

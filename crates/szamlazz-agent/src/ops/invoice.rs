@@ -690,7 +690,7 @@ impl AgentRequest for CreateInvoice {
                 if let Some(copies) = self.download_copies {
                     s.text("szamlaLetoltesPld", &copies.to_string());
                 }
-                s.text("valaszVerzio", "2");
+                s.text("valaszVerzio", super::RESPONSE_VERSION);
                 s.text_opt("aggregator", self.aggregator.as_deref());
                 if let Some(guardian) = self.guardian {
                     s.bool("guardian", guardian);

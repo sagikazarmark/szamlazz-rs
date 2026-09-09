@@ -233,7 +233,7 @@ impl AgentRequest for RegisterCreditEntry {
                     s.text_opt("adoszam", self.issuer_tax_number.as_deref());
                     s.bool("additiv", self.additive);
                     s.text_opt("aggregator", self.aggregator.as_deref());
-                    s.text("valaszVerzio", "2");
+                    s.text("valaszVerzio", super::RESPONSE_VERSION);
                 });
                 for entry in &self.entries {
                     root.node("kifizetes", |k| {

@@ -6,8 +6,9 @@
 //! (including `wasm32-unknown-unknown` and Cloudflare Workers) can drive it.
 //! Enable the `client-reqwest` feature for a ready-made async client.
 //!
-//! Identifiers are English; every type documents its Hungarian wire name and
-//! is findable in rustdoc search by that name via doc aliases.
+//! Identifiers are English; a type or field documents its Hungarian wire
+//! name, and the wire-facing ones carry it as a doc alias too, so rustdoc
+//! search finds `szállító`, `qutet` or `vevoifiokurl`.
 //!
 //! # Quick start
 //!
