@@ -31,9 +31,9 @@ use restate_szamlazz::contract::{
 };
 use restate_szamlazz::gateway::{
     CreateOutcome, CreateStepRequest, DeleteOutcome, DocumentRefs, Gateway, LookupOutcome,
-    LookupRequest, ProbeOutcome, QueryOutcome, Rejection, RejectionCode, SetPaymentsOutcome,
-    StornoLookupOutcome, StornoOutcome, StornoStepRequest, SzamlazzAnswer, TaxpayerOutcome,
-    Unanswered, Unconfirmed,
+    LookupRequest, OwnershipOutcome, ProbeOutcome, QueryOutcome, Rejection, RejectionCode,
+    SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome, StornoStepRequest, SzamlazzAnswer,
+    TaxpayerOutcome, Unanswered, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -564,6 +564,118 @@ async fn lookup_of_a_corrective_takes_no_hint() {
         LookupOutcome::Absent
     );
     assert_eq!(h.bodies().await.len(), 1);
+}
+
+/// The ownership read (`lookup_ours`): the one "is this document ours?"
+/// query the exclusivity, proforma-link, `get` and delete reads journal. The
+/// same validation as the lookup step's external-id query
+/// (`FoundDocument::is_ours`): a document of this order and kind is `Live` or
+/// `Reversed`, code 7 is `Absent`, another order's or kind's document is a
+/// `Collision`, a credential code and another code are data; no hint is
+/// taken. An exchange without an answer is `Unanswered`, never an outcome.
+#[tokio::test]
+async fn lookup_ours_validates_the_holder_and_takes_no_hint() {
+    let h = Harness::start().await;
+    let ours = || async {
+        h.gateway
+            .lookup_ours(&external_id(), &order(), IssuedKind::Invoice)
+            .await
+    };
+    order_query("ORD-1")
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(ours().await, Ok(OwnershipOutcome::Absent));
+
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::default().response())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    match ours().await {
+        Ok(OwnershipOutcome::Live(found)) => assert_eq!(found.number, "SZ-1"),
+        other => panic!("expected Live, got {other:?}"),
+    }
+
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::default()
+            }
+            .response(),
+        )
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    match ours().await {
+        Ok(OwnershipOutcome::Reversed(found)) => {
+            assert_eq!(found.number, "SZ-1");
+            assert_eq!(found.reversed, Some(true));
+        }
+        other => panic!("expected Reversed, got {other:?}"),
+    }
+
+    for doc in [
+        Doc {
+            order: Some("ORD-2"),
+            ..Doc::new("SZ-9", "SZ")
+        },
+        Doc::new("D-9", "D"),
+    ] {
+        external_id_query("acct:ORD-1:invoice")
+            .respond_with(doc.response())
+            .up_to_n_times(1)
+            .mount(&h.server)
+            .await;
+        match ours().await {
+            Ok(OwnershipOutcome::Collision(found)) => assert_eq!(found.number, doc.number),
+            other => panic!("{}: expected Collision, got {other:?}", doc.number),
+        }
+    }
+
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(body_error("57", "Ismeretlen hiba"))
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        ours().await,
+        Ok(OwnershipOutcome::Api(SzamlazzAnswer::new(
+            "57",
+            "Ismeretlen hiba"
+        )))
+    );
+
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(api_error("3", "Sikertelen bejelentkezés."))
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        ours().await,
+        Ok(OwnershipOutcome::CredentialsRejected(SzamlazzAnswer::new(
+            "3",
+            "Sikertelen bejelentkezés."
+        )))
+    );
+
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(szlahu_down())
+        .up_to_n_times(1)
+        .mount(&h.server)
+        .await;
+    assert!(
+        matches!(ours().await, Err(Unanswered::Unavailable(_))),
+        "szlahu_down is unanswered"
+    );
 }
 
 #[tokio::test]

@@ -33,9 +33,9 @@
 //! types carry no cross-version compatibility contract; what matters is what
 //! an entry holds, since the Restate UI shows every entry for the retention
 //! period. So the outcomes here ([`LookupOutcome`], [`CreateOutcome`],
-//! [`QueryOutcome`], [`StornoLookupOutcome`], [`StornoOutcome`],
-//! [`DeleteOutcome`], [`SetPaymentsOutcome`], [`ProbeOutcome`],
-//! [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
+//! [`QueryOutcome`], [`OwnershipOutcome`], [`StornoLookupOutcome`],
+//! [`StornoOutcome`], [`DeleteOutcome`], [`SetPaymentsOutcome`],
+//! [`ProbeOutcome`], [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
 //! response type**: the document outcomes carry the worker's projections
 //! [`FoundDocument`] (of a queried `InvoiceDocument`) and [`IssuedDocument`]
 //! (of a create or storno reply), [`TaxpayerOutcome`] the crate-owned
@@ -491,8 +491,8 @@ impl Unconfirmed {
 
 /// A read-only step got no answer from szamlazz.hu: the read policy
 /// re-executes it. The error of every read fn of the gateway ([`lookup`],
-/// [`verify`], [`query`], [`hint`], [`lookup_storno`], [`query_taxpayer`],
-/// [`probe`]), and never of a write.
+/// [`lookup_ours`], [`verify`], [`query`], [`hint`], [`lookup_storno`],
+/// [`query_taxpayer`], [`probe`]), and never of a write.
 ///
 /// Every szamlazz.hu *answer* (a document, code 7, rejected credentials,
 /// another API code) is the read's data; this is only the exchange that
@@ -501,6 +501,7 @@ impl Unconfirmed {
 /// exhaustion is the handler's `unavailable` fault.
 ///
 /// [`lookup`]: Gateway::lookup
+/// [`lookup_ours`]: Gateway::lookup_ours
 /// [`verify`]: Gateway::verify
 /// [`query`]: Gateway::query
 /// [`hint`]: Gateway::hint
@@ -529,6 +530,40 @@ pub enum QueryOutcome {
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
     /// number or external id, or a deleted / consumed proforma.
     NotFound,
+    /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
+    /// check was not made. See [`ErrorCode::is_credential_error`].
+    CredentialsRejected(SzamlazzAnswer),
+    /// szamlazz.hu answered with another code: an answer the caller cannot
+    /// conclude a document from.
+    Api(SzamlazzAnswer),
+}
+
+/// The answered result of a query by one of **our** external ids, validated
+/// against the document it should hold ([`Gateway::lookup_ours`]): the one
+/// "is this document ours?" read, journaled by every step that decides on
+/// what an external id of the order holds without issuing (the exclusivity
+/// checks, the proforma link, `get`, the delete's read). The lookup and
+/// create steps ask the same question of the same query inside their own
+/// outcomes ([`LookupOutcome`], [`CreateOutcome`]); the validation is one
+/// fn, [`FoundDocument::is_ours`], applied in one place.
+///
+/// A query szamlazz.hu did not answer is [`Unanswered`], never an outcome.
+/// Documents are boxed: a [`FoundDocument`] is large next to the unit
+/// variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum OwnershipOutcome {
+    /// szamlazz.hu holds nothing under the id (code 7).
+    Absent,
+    /// A live document of ours: it carries the order number and the `tipus`
+    /// of the kind.
+    Live(Box<FoundDocument>),
+    /// A reversed document of ours.
+    Reversed(Box<FoundDocument>),
+    /// The newest holder of the id fails validation: another order's or
+    /// kind's document. Never trusted, and never read as "absent": a
+    /// document of ours may be hidden behind it.
+    Collision(Box<FoundDocument>),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); the
     /// check was not made. See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
@@ -1213,8 +1248,10 @@ impl Gateway {
         settled
     }
 
-    /// The external-id query of both steps, validated against this gateway's
-    /// account.
+    /// The external-id query of the lookup, create and ownership reads,
+    /// validated against the `order` and `kind` the document should have
+    /// ([`FoundDocument::is_ours`]): the one place the question is asked, so
+    /// the collision warning is written once.
     ///
     /// # Errors
     ///
@@ -1267,6 +1304,46 @@ impl Gateway {
     /// re-executes the step.
     pub async fn query(&self, selector: &Selector) -> Result<QueryOutcome, Unanswered> {
         outcome(self.query_raw(invoice_selector(selector)).await)
+    }
+
+    /// Queries one of our external ids and validates what it holds against
+    /// the `order` and `kind` the document should have: the "is this document
+    /// ours?" read of every step that decides on an external id of the order
+    /// without issuing. A holder that is not ours is
+    /// [`OwnershipOutcome::Collision`], logged at `warn`; code 7 is
+    /// [`OwnershipOutcome::Absent`]; a credential code and another code are
+    /// the two answered variants.
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] when the query got no answer; the caller's read policy
+    /// re-executes the step.
+    pub async fn lookup_ours(
+        &self,
+        external_id: &ExternalId,
+        order: &OrderKey,
+        kind: IssuedKind,
+    ) -> Result<OwnershipOutcome, Unanswered> {
+        let span = tracing::info_span!(
+            "gateway.lookup_ours",
+            external_id = %external_id,
+            kind = %kind,
+        );
+        match self.seen(external_id, order, kind).instrument(span).await {
+            Ok(Seen::Absent) => Ok(OwnershipOutcome::Absent),
+            Ok(Seen::Live(found)) => Ok(OwnershipOutcome::Live(found)),
+            Ok(Seen::Reversed(found)) => Ok(OwnershipOutcome::Reversed(found)),
+            Ok(Seen::Collision(found)) => Ok(OwnershipOutcome::Collision(found)),
+            Err(error) => Ok(match error.answered()? {
+                // `seen` maps code 7 to `Seen::Absent`; the arm keeps the
+                // match exhaustive.
+                Answer::NotFound => OwnershipOutcome::Absent,
+                Answer::CredentialsRejected(answer) => {
+                    OwnershipOutcome::CredentialsRejected(answer)
+                }
+                Answer::Api(answer) => OwnershipOutcome::Api(answer),
+            }),
+        }
     }
 
     /// The order-number hint: the most recently issued document of any kind
@@ -1700,7 +1777,8 @@ pub(crate) fn is_invoice_family(tipus: &str) -> bool {
     matches!(tipus, "SZ" | "ES" | "VS")
 }
 
-/// What the external-id query of the lookup and create steps saw, validated.
+/// What the external-id query of the lookup, create and ownership reads saw,
+/// validated ([`Gateway::seen`]); each read's outcome is projected from it.
 enum Seen {
     /// Code 7.
     Absent,

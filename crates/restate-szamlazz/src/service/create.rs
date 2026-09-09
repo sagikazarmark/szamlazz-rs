@@ -19,7 +19,7 @@ use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
-use super::support::{Fault, Lookup, verified_document};
+use super::support::{Fault, verified_document};
 use super::support::{lookup, run_reading, run_retrying, verify};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateRequest, CreateResponse, DocumentInput, DocumentKind,
@@ -27,7 +27,7 @@ use crate::contract::{
 };
 use crate::gateway::{
     CreateOutcome, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
-    QueryOutcome,
+    OwnershipOutcome, QueryOutcome,
 };
 use crate::identity::Namespace;
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
@@ -243,20 +243,29 @@ const fn links_proforma(kind: DocumentKind) -> bool {
 /// a live document of ours behind it, and refusing to create is the only safe
 /// answer; a reversed document of ours, or nothing, lets the create proceed
 /// (`None`).
+///
+/// # Errors
+///
+/// The faults an answered read can be: another szamlazz.hu code
+/// (`unavailable`, nothing may be concluded) or a credential code
+/// (`credentials_rejected`). The caller attaches the document's identity.
 fn decide_exclusivity(
-    found: Lookup,
+    found: OwnershipOutcome,
     reason: ConflictReason,
     identity: &Identity,
-) -> Option<CreateResponse> {
-    match found {
-        Lookup::Collision(found) => {
+    namespace: &Namespace,
+) -> Result<Option<CreateResponse>, Fault> {
+    Ok(match found {
+        OwnershipOutcome::Collision(found) => {
             Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
         }
-        Lookup::Ours(found) if found.is_live() => {
-            Some(identity.conflict_about(reason, found.number))
+        OwnershipOutcome::Live(found) => Some(identity.conflict_about(reason, found.number)),
+        OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => None,
+        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
         }
-        Lookup::Absent | Lookup::Ours(_) => None,
-    }
+    })
 }
 
 /// Step 1's decision for a final invoice on what `…:prepayment` holds, pure:
@@ -267,25 +276,34 @@ fn decide_exclusivity(
 /// `conflict{prepayment_reversed}`, a document that fails validation
 /// `conflict{external_id_collision}` (see [`decide_exclusivity`] for why a
 /// collision is never treated as absent). Nothing is recorded on a refusal.
+///
+/// # Errors
+///
+/// As [`decide_exclusivity`]'s.
 fn decide_prepayment_for_final(
-    found: Lookup,
+    found: OwnershipOutcome,
     identity: &Identity,
+    namespace: &Namespace,
     refs: &mut Refs,
-) -> Option<CreateResponse> {
-    match found {
-        Lookup::Absent => Some(identity.conflict(ConflictReason::PrepaymentMissing)),
-        Lookup::Collision(found) => {
+) -> Result<Option<CreateResponse>, Fault> {
+    Ok(match found {
+        OwnershipOutcome::Absent => Some(identity.conflict(ConflictReason::PrepaymentMissing)),
+        OwnershipOutcome::Collision(found) => {
             Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
         }
-        Lookup::Ours(found) if !found.is_live() => {
+        OwnershipOutcome::Reversed(found) => {
             Some(identity.conflict_about(ConflictReason::PrepaymentReversed, found.number))
         }
-        Lookup::Ours(found) => {
+        OwnershipOutcome::Live(found) => {
             refs.our_numbers.push(found.number.clone());
             refs.prepayment = Some(found.number);
             None
         }
-    }
+        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
+        }
+    })
 }
 
 /// Step 2's decision under `auto` and `none` on what `…:proforma` holds,
@@ -299,22 +317,32 @@ fn decide_prepayment_for_final(
 /// Nothing is recorded on a refusal. A `{number}` link is
 /// [`decide_proforma_by_number`]'s: the shell never passes it here, and a
 /// live proforma of ours under it would be linked as under `auto`.
+///
+/// # Errors
+///
+/// As [`decide_exclusivity`]'s.
 fn decide_proforma_link(
-    found: Lookup,
+    found: OwnershipOutcome,
     link: &ProformaLink,
     identity: &Identity,
+    namespace: &Namespace,
     refs: &mut Refs,
-) -> Option<CreateResponse> {
+) -> Result<Option<CreateResponse>, Fault> {
     let live = match found {
-        Lookup::Collision(found) => {
-            return Some(
-                identity.conflict_about(ConflictReason::ExternalIdCollision, found.number),
-            );
+        OwnershipOutcome::Collision(found) => {
+            return Ok(Some(identity.conflict_about(
+                ConflictReason::ExternalIdCollision,
+                found.number,
+            )));
         }
-        Lookup::Ours(found) if found.is_live() => found,
-        Lookup::Absent | Lookup::Ours(_) => return None,
+        OwnershipOutcome::Live(found) => found,
+        OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => return Ok(None),
+        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
+        }
     };
-    match link {
+    Ok(match link {
         ProformaLink::None => {
             Some(identity.conflict_about(ConflictReason::ProformaLive, live.number))
         }
@@ -323,7 +351,7 @@ fn decide_proforma_link(
             refs.proforma = Some(live.number);
             None
         }
-    }
+    })
 }
 
 /// Step 2's decision under `{number}` on what the verify of `number` found,
@@ -663,7 +691,8 @@ impl Execution {
             other.into(),
         )
         .await?;
-        Ok(decide_exclusivity(found, reason, identity))
+        decide_exclusivity(found, reason, identity, &self.config.namespace)
+            .map_err(|fault| identity.about(&prepared.order, fault).into())
     }
 
     /// The prepayment a final invoice settles must be live; the decision is
@@ -686,7 +715,8 @@ impl Execution {
             kind.into(),
         )
         .await?;
-        Ok(decide_prepayment_for_final(found, identity, refs))
+        decide_prepayment_for_final(found, identity, &self.config.namespace, refs)
+            .map_err(|fault| identity.about(&prepared.order, fault).into())
     }
 
     // ----- step 2: the proforma link ---------------------------------------
@@ -717,12 +747,14 @@ impl Execution {
                     kind.into(),
                 )
                 .await?;
-                Ok(decide_proforma_link(
+                decide_proforma_link(
                     found,
                     &prepared.proforma,
                     identity,
+                    &self.config.namespace,
                     refs,
-                ))
+                )
+                .map_err(|fault| identity.about(&prepared.order, fault).into())
             }
             ProformaLink::Number(number) => {
                 let number = number.as_str();
@@ -1236,17 +1268,22 @@ mod tests {
     /// `conflict{external_id_collision}`, never "absent", since the newest
     /// holder may hide a live document of ours; a **reversed** document of
     /// ours and nothing at all let the create proceed (the negative case the
-    /// table exists for: a reversed `ES` is what lets a plain `SZ` land).
+    /// table exists for: a reversed `ES` is what lets a plain `SZ` land). An
+    /// answered code is a fault
+    /// ([`an_answered_code_on_an_ownership_read_is_a_fault`]).
     #[test]
     fn exclusivity_refuses_a_live_other_kind_and_a_collision_and_passes_a_reversed_one() {
         let identity = invoice_identity();
+        let namespace = namespace();
 
         let live_prepayment = Doc::new("ES-1", "ES").boxed();
         let response = decide_exclusivity(
-            Lookup::Ours(live_prepayment),
+            OwnershipOutcome::Live(live_prepayment),
             ConflictReason::PrepaidChain,
             &identity,
+            &namespace,
         )
+        .expect("data")
         .expect("refused");
         assert_eq!(response.outcome, Outcome::Conflict);
         assert_eq!(response.conflict_reason, Some(ConflictReason::PrepaidChain));
@@ -1258,12 +1295,14 @@ mod tests {
         );
         assert_eq!(response.external_id, "acct:ORD-1:invoice");
 
-        let proforma_identity = Identity::of_kind(&namespace(), &ord_1(), DocumentKind::Proforma);
+        let proforma_identity = Identity::of_kind(&namespace, &ord_1(), DocumentKind::Proforma);
         let response = decide_exclusivity(
-            Lookup::Ours(Doc::default().boxed()),
+            OwnershipOutcome::Live(Doc::default().boxed()),
             ConflictReason::OrderInvoiced,
             &proforma_identity,
+            &namespace,
         )
+        .expect("data")
         .expect("refused");
         assert_eq!(
             response.conflict_reason,
@@ -1277,10 +1316,12 @@ mod tests {
         }
         .boxed();
         let response = decide_exclusivity(
-            Lookup::Collision(other_order),
+            OwnershipOutcome::Collision(other_order),
             ConflictReason::PrepaidChain,
             &identity,
+            &namespace,
         )
+        .expect("data")
         .expect("refused");
         assert_eq!(
             response.conflict_reason,
@@ -1296,15 +1337,23 @@ mod tests {
         .boxed();
         assert_eq!(
             decide_exclusivity(
-                Lookup::Ours(reversed_prepayment),
+                OwnershipOutcome::Reversed(reversed_prepayment),
                 ConflictReason::PrepaidChain,
-                &identity
-            ),
+                &identity,
+                &namespace,
+            )
+            .expect("data"),
             None,
             "a reversed other-kind document does not refuse"
         );
         assert_eq!(
-            decide_exclusivity(Lookup::Absent, ConflictReason::PrepaidChain, &identity),
+            decide_exclusivity(
+                OwnershipOutcome::Absent,
+                ConflictReason::PrepaidChain,
+                &identity,
+                &namespace,
+            )
+            .expect("data"),
             None
         );
     }
@@ -1319,11 +1368,18 @@ mod tests {
     #[test]
     fn a_final_invoice_settles_a_live_prepayment_and_refuses_everything_else() {
         let identity = Identity::of_kind(&namespace(), &ord_1(), DocumentKind::Final);
+        let namespace = namespace();
 
         let mut refs = Refs::default();
         let live = Doc::new("ES-1", "ES").boxed();
         assert_eq!(
-            decide_prepayment_for_final(Lookup::Ours(live), &identity, &mut refs),
+            decide_prepayment_for_final(
+                OwnershipOutcome::Live(live),
+                &identity,
+                &namespace,
+                &mut refs
+            )
+            .expect("data"),
             None
         );
         assert_eq!(refs.prepayment.as_deref(), Some("ES-1"));
@@ -1332,7 +1388,9 @@ mod tests {
 
         let mut refs = Refs::default();
         let response =
-            decide_prepayment_for_final(Lookup::Absent, &identity, &mut refs).expect("refused");
+            decide_prepayment_for_final(OwnershipOutcome::Absent, &identity, &namespace, &mut refs)
+                .expect("data")
+                .expect("refused");
         assert_eq!(response.outcome, Outcome::Conflict);
         assert_eq!(
             response.conflict_reason,
@@ -1347,8 +1405,14 @@ mod tests {
             ..Doc::new("ES-1", "ES")
         }
         .boxed();
-        let response = decide_prepayment_for_final(Lookup::Ours(reversed), &identity, &mut refs)
-            .expect("refused");
+        let response = decide_prepayment_for_final(
+            OwnershipOutcome::Reversed(reversed),
+            &identity,
+            &namespace,
+            &mut refs,
+        )
+        .expect("data")
+        .expect("refused");
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::PrepaymentReversed)
@@ -1356,9 +1420,14 @@ mod tests {
         assert_eq!(response.existing_number.as_deref(), Some("ES-1"));
 
         let other_kind = Doc::new("SZ-9", "SZ").boxed();
-        let response =
-            decide_prepayment_for_final(Lookup::Collision(other_kind), &identity, &mut refs)
-                .expect("refused");
+        let response = decide_prepayment_for_final(
+            OwnershipOutcome::Collision(other_kind),
+            &identity,
+            &namespace,
+            &mut refs,
+        )
+        .expect("data")
+        .expect("refused");
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::ExternalIdCollision)
@@ -1367,6 +1436,75 @@ mod tests {
 
         assert_eq!(refs.prepayment, None, "nothing recorded on a refusal");
         assert!(refs.our_numbers.is_empty());
+    }
+
+    /// Steps 1 and 2 on an answered code, at every decision that reads an
+    /// external id of the order: another code is `unavailable` (503) carrying
+    /// it in `szamlazz_code`, nothing may be concluded; a credential code is
+    /// `credentials_rejected` (503). Faults, never outcomes, and nothing is
+    /// recorded.
+    #[test]
+    fn an_answered_code_on_an_ownership_read_is_a_fault() {
+        type Decide<'a> = &'a dyn Fn(OwnershipOutcome) -> Result<Option<CreateResponse>, Fault>;
+
+        let identity = invoice_identity();
+        let namespace = namespace();
+        let api = || OwnershipOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML."));
+        let rejected = || {
+            OwnershipOutcome::CredentialsRejected(SzamlazzAnswer::new(
+                "135",
+                "Aktív böngésző session.",
+            ))
+        };
+        let decisions: [(&str, Decide<'_>); 3] = [
+            ("exclusivity", &|found| {
+                decide_exclusivity(found, ConflictReason::PrepaidChain, &identity, &namespace)
+            }),
+            ("prepayment-for-final", &|found| {
+                let mut refs = Refs::default();
+                let decided = decide_prepayment_for_final(found, &identity, &namespace, &mut refs);
+                assert_eq!(refs.prepayment, None, "nothing recorded on a fault");
+                decided
+            }),
+            ("proforma-link", &|found| {
+                let mut refs = Refs::default();
+                let decided = decide_proforma_link(
+                    found,
+                    &ProformaLink::Auto,
+                    &identity,
+                    &namespace,
+                    &mut refs,
+                );
+                assert_eq!(refs.proforma, None, "nothing recorded on a fault");
+                decided
+            }),
+        ];
+        for (label, decide) in decisions {
+            let (status, body) = fault_body(decide(api()).expect_err("a fault"));
+            assert_eq!(status, 503, "{label}: {body}");
+            assert_eq!(
+                body["code"],
+                TerminalCode::Unavailable.as_str(),
+                "{label}: {body}"
+            );
+            assert_eq!(body["szamlazz_code"], "57", "{label}: {body}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .expect("message")
+                    .contains("nothing may be concluded"),
+                "{label}: {body}"
+            );
+
+            let (status, body) = fault_body(decide(rejected()).expect_err("a fault"));
+            assert_eq!(status, 503, "{label}: {body}");
+            assert_eq!(
+                body["code"],
+                TerminalCode::CredentialsRejected.as_str(),
+                "{label}: {body}"
+            );
+            assert_eq!(body["szamlazz_code"], "135", "{label}: {body}");
+        }
     }
 
     // ----- step 2: the proforma link ---------------------------------------
@@ -1379,16 +1517,19 @@ mod tests {
     #[test]
     fn under_auto_a_live_proforma_is_linked_and_anything_else_links_nothing() {
         let identity = invoice_identity();
+        let namespace = namespace();
 
         let mut refs = Refs::default();
         let live = Doc::new("D-1", "D").boxed();
         assert_eq!(
             decide_proforma_link(
-                Lookup::Ours(live),
+                OwnershipOutcome::Live(live),
                 &ProformaLink::Auto,
                 &identity,
+                &namespace,
                 &mut refs
-            ),
+            )
+            .expect("data"),
             None
         );
         assert_eq!(refs.proforma.as_deref(), Some("D-1"));
@@ -1403,15 +1544,24 @@ mod tests {
         .boxed();
         assert_eq!(
             decide_proforma_link(
-                Lookup::Ours(reversed),
+                OwnershipOutcome::Reversed(reversed),
                 &ProformaLink::Auto,
                 &identity,
+                &namespace,
                 &mut refs
-            ),
+            )
+            .expect("data"),
             None
         );
         assert_eq!(
-            decide_proforma_link(Lookup::Absent, &ProformaLink::Auto, &identity, &mut refs),
+            decide_proforma_link(
+                OwnershipOutcome::Absent,
+                &ProformaLink::Auto,
+                &identity,
+                &namespace,
+                &mut refs
+            )
+            .expect("data"),
             None
         );
         assert_eq!(refs.proforma, None, "nothing linked");
@@ -1423,11 +1573,13 @@ mod tests {
         }
         .boxed();
         let response = decide_proforma_link(
-            Lookup::Collision(other_order),
+            OwnershipOutcome::Collision(other_order),
             &ProformaLink::Auto,
             &identity,
+            &namespace,
             &mut refs,
         )
+        .expect("data")
         .expect("refused");
         assert_eq!(response.outcome, Outcome::Conflict);
         assert_eq!(
@@ -1446,15 +1598,18 @@ mod tests {
     #[test]
     fn under_none_a_live_proforma_is_a_conflict_and_anything_else_proceeds() {
         let identity = invoice_identity();
+        let namespace = namespace();
         let mut refs = Refs::default();
 
         let live = Doc::new("D-1", "D").boxed();
         let response = decide_proforma_link(
-            Lookup::Ours(live),
+            OwnershipOutcome::Live(live),
             &ProformaLink::None,
             &identity,
+            &namespace,
             &mut refs,
         )
+        .expect("data")
         .expect("refused");
         assert_eq!(response.outcome, Outcome::Conflict);
         assert_eq!(response.conflict_reason, Some(ConflictReason::ProformaLive));
@@ -1468,15 +1623,24 @@ mod tests {
         .boxed();
         assert_eq!(
             decide_proforma_link(
-                Lookup::Ours(reversed),
+                OwnershipOutcome::Reversed(reversed),
                 &ProformaLink::None,
                 &identity,
+                &namespace,
                 &mut refs
-            ),
+            )
+            .expect("data"),
             None
         );
         assert_eq!(
-            decide_proforma_link(Lookup::Absent, &ProformaLink::None, &identity, &mut refs),
+            decide_proforma_link(
+                OwnershipOutcome::Absent,
+                &ProformaLink::None,
+                &identity,
+                &namespace,
+                &mut refs
+            )
+            .expect("data"),
             None
         );
         assert_eq!(refs.proforma, None);
@@ -1488,16 +1652,19 @@ mod tests {
         }
         .boxed();
         let response = decide_proforma_link(
-            Lookup::Collision(other_order),
+            OwnershipOutcome::Collision(other_order),
             &ProformaLink::None,
             &identity,
+            &namespace,
             &mut refs,
         )
+        .expect("data")
         .expect("refused");
         assert_eq!(
             response.conflict_reason,
             Some(ConflictReason::ExternalIdCollision)
         );
+        assert_eq!(response.existing_number.as_deref(), Some("D-9"));
     }
 
     /// Step 2 under `{number}`, the verify's answer checked like every other

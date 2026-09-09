@@ -901,7 +901,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   `szlahu_down` are data, a credential code never sends, a lost reply is the one `Unconfirmed` before a send;
   #134), and **one credential-code table**, one code per operation in the operation's own shape (both lookup
   queries, the create's send, the three reads, the probe, the storno lookup and send, the delete, the credit
-  entries, the taxpayer query; the codes themselves are the agent crate's `is_credential_error` table); every read fn (`lookup`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
+  entries, the taxpayer query; the codes themselves are the agent crate's `is_credential_error` table); every read fn (`lookup`, `lookup_ours`, `verify`/`query`/`hint`, `lookup_storno`, `query_taxpayer`,
   `probe`) answering a 500, an empty body or `szlahu_down` as `Err(Unanswered)` (the step's retryable error, never
   data), and another API code as `Ok(Api)` data (the probe: `Accepted`); the probe as exactly one query of the
   sentinel id and nothing else, with a wrong key as data; the taxpayer query as exactly one `xmltaxpayer` request of
@@ -975,7 +975,8 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   the storno intent built from a verified document (`telj` present → `fulfillment_date` equals it with `e_invoice`
   lifted from `eszamla` or the account default; `<telj></telj>` → the fault naming the invoice, `.about(..)` adding
   the order, kind and external id), the `set_payments` fault's message differing by
-  `additive`, `Lookup::classify` on `Api`, the probe outcome →
+  `additive`, every decision on an `OwnershipOutcome` (the exclusivity, prepayment-for-final, proforma-link, delete
+  and `get` reads) on `Api` and a credential code, the probe outcome →
   `credentials` mapping, the handler's key parsing refusing a key with leading
   or trailing whitespace (`" ORD-1"`, `"ORD-1 "`, `"\tORD-1"`) as `invalid_input` naming the rule while
   `OrderKey::parse` itself still trims, two sentinel tests that the agent key reaches

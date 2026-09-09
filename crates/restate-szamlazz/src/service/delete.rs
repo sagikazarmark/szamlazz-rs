@@ -9,11 +9,10 @@ use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
-use super::support::{Fault, Lookup, lookup, run_once};
+use super::support::{Fault, lookup, run_once};
 use crate::contract::{DeleteProformaRequest, DeleteProformaResponse, DocumentKind, IssuedKind};
-use crate::gateway::{DeleteOutcome, FoundDocument};
-use crate::identity::OrderKey;
-use crate::identity::{ExternalId, Namespace};
+use crate::gateway::{DeleteOutcome, FoundDocument, OwnershipOutcome};
+use crate::identity::{ExternalId, Namespace, OrderKey};
 
 impl Execution {
     /// `delete_proforma`, on the `order` the handler parsed from its key:
@@ -28,6 +27,8 @@ impl Execution {
     ) -> Result<DeleteProformaResponse, HandlerError> {
         let kind = DocumentKind::Proforma;
         let proforma_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
+        // Every fault is about this proforma.
+        let about = |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), &proforma_id);
         let found = lookup(
             ctx,
             self,
@@ -37,10 +38,11 @@ impl Execution {
             kind.into(),
         )
         .await?;
-        let found = match delete_guard(found, request.force) {
-            ControlFlow::Break(response) => return Ok(response),
-            ControlFlow::Continue(found) => found,
-        };
+        let found =
+            match delete_guard(found, request.force, &self.config.namespace).map_err(about)? {
+                ControlFlow::Break(response) => return Ok(response),
+                ControlFlow::Continue(found) => found,
+            };
 
         let outcome = {
             let gateway = Arc::clone(&self.gateway);
@@ -52,35 +54,48 @@ impl Execution {
             )
             .await?
         };
-        // Every fault of the settled step is about this proforma.
-        let about = |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), &proforma_id);
         delete_response(outcome, &self.config.namespace).map_err(|fault| about(fault).into())
     }
 }
 
 /// The guard before the delete step, on what the lookup of the proforma's
 /// external id found: `Break(response)` for a proforma nothing will be sent
-/// for (nothing under the id: deleted earlier or consumed, `get` tells which;
-/// another document under it, never touched; one with a credit entry
-/// without `force`: szamlazz.hu has no guard against deleting a paid
-/// proforma, so this is it), `Continue(found)` for the one to delete.
+/// for (nothing under the id, or a reversed one: deleted earlier or consumed,
+/// `get` tells which; another document under it, never touched; one with a
+/// credit entry without `force`: szamlazz.hu has no guard against deleting a
+/// paid proforma, so this is it), `Continue(found)` for the one to delete.
+///
+/// # Errors
+///
+/// The faults an answered read can be: another szamlazz.hu code
+/// (`unavailable`, nothing may be concluded) or a credential code
+/// (`credentials_rejected`). The caller attaches the proforma's identity.
 fn delete_guard(
-    found: Lookup,
+    found: OwnershipOutcome,
     force: bool,
-) -> ControlFlow<DeleteProformaResponse, Box<FoundDocument>> {
+    namespace: &Namespace,
+) -> Result<ControlFlow<DeleteProformaResponse, Box<FoundDocument>>, Fault> {
     let found = match found {
-        Lookup::Absent => return ControlFlow::Break(DeleteProformaResponse::absent()),
-        Lookup::Collision(_) => {
-            return ControlFlow::Break(DeleteProformaResponse::not_deleted(
-                "external_id_collision",
-            ));
+        OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => {
+            return Ok(ControlFlow::Break(DeleteProformaResponse::absent()));
         }
-        Lookup::Ours(found) => found,
+        OwnershipOutcome::Collision(_) => {
+            return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
+                "external_id_collision",
+            )));
+        }
+        OwnershipOutcome::Live(found) => found,
+        OwnershipOutcome::Api(answer) => return Err(Fault::inconclusive_answer(answer)),
+        OwnershipOutcome::CredentialsRejected(answer) => {
+            return Err(Fault::credentials_rejected(namespace, answer));
+        }
     };
     if !found.payments.is_empty() && !force {
-        return ControlFlow::Break(DeleteProformaResponse::not_deleted("proforma_paid"));
+        return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
+            "proforma_paid",
+        )));
     }
-    ControlFlow::Continue(found)
+    Ok(ControlFlow::Continue(found))
 }
 
 /// The settled delete step as the response: deleted, and gone since the
@@ -132,19 +147,27 @@ mod tests {
     }
 
     /// The guard before the delete step: nothing under the proforma's
-    /// external id is `deleted{reason: absent}` (deleted earlier or consumed;
-    /// `get` tells which); another document under it is
-    /// `not_deleted{external_id_collision}`, never touched, `force` or not; a
-    /// proforma with a credit entry is `not_deleted{proforma_paid}` without
-    /// `force` (szamlazz.hu has no such guard) and the one to delete with it;
-    /// an unpaid one is the one to delete.
+    /// external id, or a reversed proforma of ours, is `deleted{reason:
+    /// absent}` (deleted earlier or consumed; `get` tells which); another
+    /// document under it is `not_deleted{external_id_collision}`, never
+    /// touched, `force` or not; a proforma with a credit entry is
+    /// `not_deleted{proforma_paid}` without `force` (szamlazz.hu has no such
+    /// guard) and the one to delete with it; an unpaid one is the one to
+    /// delete. An answered code is a fault: another code `unavailable`
+    /// carrying it, a credential code `credentials_rejected`.
     #[test]
     fn the_delete_guard_refuses_a_paid_proforma_unless_forced() {
+        let namespace = namespace();
+        let guard = |found, force| delete_guard(found, force, &namespace);
         let paid = Doc {
             payments: &[CreditRecord::new(date(2026, 9, 4), "átutalás", "1270")],
             ..Doc::new("D-1", "D")
         };
         let unpaid = Doc::new("D-1", "D");
+        let reversed = Doc {
+            reversed: true,
+            ..Doc::new("D-1", "D")
+        };
         let other = Doc {
             order: Some("ORD-2"),
             ..Doc::new("D-OTHER", "D")
@@ -152,29 +175,54 @@ mod tests {
 
         for force in [false, true] {
             assert_eq!(
-                delete_guard(Lookup::Absent, force),
+                guard(OwnershipOutcome::Absent, force).expect("data"),
                 ControlFlow::Break(DeleteProformaResponse::absent()),
                 "force {force}"
             );
             assert_eq!(
-                delete_guard(Lookup::Collision(other.boxed()), force),
+                guard(OwnershipOutcome::Reversed(reversed.boxed()), force).expect("data"),
+                ControlFlow::Break(DeleteProformaResponse::absent()),
+                "force {force}: a reversed proforma is nothing to delete"
+            );
+            assert_eq!(
+                guard(OwnershipOutcome::Collision(other.boxed()), force).expect("data"),
                 ControlFlow::Break(DeleteProformaResponse::not_deleted("external_id_collision")),
                 "force {force}"
             );
             assert_eq!(
-                delete_guard(Lookup::Ours(unpaid.boxed()), force),
+                guard(OwnershipOutcome::Live(unpaid.boxed()), force).expect("data"),
                 ControlFlow::Continue(unpaid.boxed()),
                 "force {force}"
             );
         }
         assert_eq!(
-            delete_guard(Lookup::Ours(paid.boxed()), false),
+            guard(OwnershipOutcome::Live(paid.boxed()), false).expect("data"),
             ControlFlow::Break(DeleteProformaResponse::not_deleted("proforma_paid"))
         );
         assert_eq!(
-            delete_guard(Lookup::Ours(paid.boxed()), true),
+            guard(OwnershipOutcome::Live(paid.boxed()), true).expect("data"),
             ControlFlow::Continue(paid.boxed())
         );
+
+        let (status, body) = fault_body(
+            guard(
+                OwnershipOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")),
+                true,
+            )
+            .expect_err("a fault"),
+        );
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["code"], "unavailable", "{body}");
+        assert_eq!(body["szamlazz_code"], "57", "{body}");
+        let (status, body) = fault_body(
+            guard(
+                OwnershipOutcome::CredentialsRejected(SzamlazzAnswer::new("3", "login")),
+                true,
+            )
+            .expect_err("a fault"),
+        );
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["code"], "credentials_rejected", "{body}");
     }
 
     /// The settled delete step as the response: deleted, and gone since the

@@ -3,8 +3,9 @@
 //! `TerminalError` mapping, the [`Journaled`] marker with its one list, the
 //! [`RunCtx`] trait over the SDK's three contexts and the `run_*` helpers
 //! (once, retrying, reading, best effort) every durable step goes through,
-//! the two journaled reads every handler shares (a verify by number, a query
-//! by external id) and the order key's parse. No domain decision lives here:
+//! the two journaled reads the handlers share (a verify by number, an
+//! ownership lookup by one of our external ids) and the order key's parse.
+//! No domain decision lives here:
 //! the create protocol is `create`, the storno protocol `storno`, the
 //! prologue `prologue`.
 
@@ -19,8 +20,8 @@ use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
 use crate::account::BoxFuture;
-use crate::contract::{IssuedKind, Selector, TerminalCode};
-use crate::gateway::{FoundDocument, QueryOutcome, SzamlazzAnswer, Unanswered};
+use crate::contract::{IssuedKind, TerminalCode};
+use crate::gateway::{FoundDocument, OwnershipOutcome, QueryOutcome, SzamlazzAnswer, Unanswered};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 use crate::service::prologue::Execution;
 
@@ -42,7 +43,7 @@ mod journaled {
     use serde::de::DeserializeOwned;
 
     use crate::gateway::{
-        CreateOutcome, DeleteOutcome, LookupOutcome, ProbeOutcome, QueryOutcome,
+        CreateOutcome, DeleteOutcome, LookupOutcome, OwnershipOutcome, ProbeOutcome, QueryOutcome,
         SetPaymentsOutcome, StornoLookupOutcome, StornoOutcome as GatewayStornoOutcome,
         TaxpayerOutcome,
     };
@@ -79,6 +80,7 @@ mod journaled {
         Namespace,
         Resolution,
         QueryOutcome,
+        OwnershipOutcome,
         LookupOutcome,
         CreateOutcome,
         StornoLookupOutcome,
@@ -313,54 +315,6 @@ pub(super) fn verified_document(
     }
 }
 
-/// What a query by one of our external ids found.
-///
-/// Every caller matches all three variants: an issuing handler refuses a
-/// [`Lookup::Collision`] as `conflict{external_id_collision}` (the newest
-/// holder may hide a document of ours), `delete_proforma` answers
-/// `not_deleted{external_id_collision}`, and only `get` (a read that must not
-/// fail) reports the slot as absent.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum Lookup {
-    /// szamlazz.hu holds nothing under the id (code 7).
-    Absent,
-    /// A document that passed validation: ours, live or reversed.
-    Ours(Box<FoundDocument>),
-    /// A document that fails validation: another order or kind. Never
-    /// trusted.
-    Collision(Box<FoundDocument>),
-}
-
-impl Lookup {
-    /// Classifies an answered query: another szamlazz.hu code is
-    /// `unavailable` (nothing may be concluded), rejected credentials are
-    /// `credentials_rejected`. (A query szamlazz.hu did not answer never
-    /// reaches here: it is the read's `Unanswered`, retried by the read
-    /// policy.)
-    pub(super) fn classify(
-        outcome: QueryOutcome,
-        namespace: &Namespace,
-        order: &OrderKey,
-        kind: IssuedKind,
-    ) -> Result<Self, Fault> {
-        match outcome {
-            QueryOutcome::NotFound => Ok(Self::Absent),
-            QueryOutcome::Api(answer) => Err(Fault::inconclusive_answer(answer)),
-            QueryOutcome::CredentialsRejected(answer) => {
-                Err(Fault::credentials_rejected(namespace, answer))
-            }
-            QueryOutcome::Found(found) => {
-                if found.is_ours(order, kind) {
-                    Ok(Self::Ours(found))
-                } else {
-                    tracing::warn!(number = %found.number, kind = %kind, "external id collision");
-                    Ok(Self::Collision(found))
-                }
-            }
-        }
-    }
-}
-
 /// The one thing the helpers below need of a Restate context: its scope, its
 /// key, its invocation id and a journaled run. Implemented for the SDK's
 /// three context types, so the helpers are plain generic fns rather than
@@ -561,24 +515,12 @@ pub(in crate::service) async fn verify<'ctx, C: RunCtx<'ctx>>(
     .await
 }
 
-/// Journaled query by external id, under the read policy.
-pub(in crate::service) async fn query_external_id<'ctx, C: RunCtx<'ctx>>(
-    ctx: &C,
-    exec: &Execution,
-    name: impl Into<String>,
-    external_id: &ExternalId,
-) -> Result<QueryOutcome, Fault> {
-    let gateway = Arc::clone(&exec.gateway);
-    let selector = Selector::ExternalId(external_id.as_str().to_owned());
-    run_reading(ctx, name, exec, move || async move {
-        gateway.query(&selector).await
-    })
-    .await
-}
-
-/// Journaled query by one of our external ids, under the read policy,
-/// validated against the identity the document should have. A fault carries
-/// that identity.
+/// Journaled query by one of our external ids, validated against the
+/// identity the document should have ([`Gateway::lookup_ours`]), under the
+/// read policy. Every answer is data for the caller to decide on; an
+/// exhausted read is the `unavailable` fault carrying that identity.
+///
+/// [`Gateway::lookup_ours`]: crate::gateway::Gateway::lookup_ours
 pub(in crate::service) async fn lookup<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
@@ -586,12 +528,15 @@ pub(in crate::service) async fn lookup<'ctx, C: RunCtx<'ctx>>(
     external_id: &ExternalId,
     order: &OrderKey,
     kind: IssuedKind,
-) -> Result<Lookup, Fault> {
-    let about = |fault: Fault| fault.about(order, Some(kind), external_id);
-    let outcome = query_external_id(ctx, exec, name, external_id)
-        .await
-        .map_err(about)?;
-    Lookup::classify(outcome, &exec.config.namespace, order, kind).map_err(about)
+) -> Result<OwnershipOutcome, Fault> {
+    let gateway = Arc::clone(&exec.gateway);
+    let id = external_id.clone();
+    let looked_up = order.clone();
+    run_reading(ctx, name, exec, move || async move {
+        gateway.lookup_ours(&id, &looked_up, kind).await
+    })
+    .await
+    .map_err(|fault| fault.about(order, Some(kind), external_id))
 }
 
 #[cfg(test)]
@@ -599,7 +544,7 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::test_support::{Doc, LogCapture};
+    use crate::test_support::LogCapture;
 
     fn namespace() -> Namespace {
         "acct".parse().expect("namespace")
@@ -733,81 +678,6 @@ mod tests {
         );
         assert!(!message.contains("attempt"), "{message}");
         assert!(!message.contains("issued nothing"), "{message}");
-    }
-
-    #[test]
-    fn lookup_classifies_query_outcomes() {
-        let order = OrderKey::parse("ORD-1").expect("order");
-        let namespace = namespace();
-        let classify = |outcome: QueryOutcome| {
-            Lookup::classify(outcome, &namespace, &order, IssuedKind::Invoice)
-        };
-
-        assert_eq!(
-            classify(QueryOutcome::NotFound).expect("classified"),
-            Lookup::Absent
-        );
-        let ours = Doc::default().boxed();
-        let lookup = classify(QueryOutcome::Found(ours.clone())).expect("classified");
-        assert_eq!(lookup, Lookup::Ours(ours));
-
-        let reversed = Doc {
-            reversed: true,
-            ..Doc::default()
-        }
-        .boxed();
-        let lookup = classify(QueryOutcome::Found(reversed.clone())).expect("classified");
-        assert_eq!(lookup, Lookup::Ours(reversed));
-
-        // Each identity of ours off by one: another order or kind.
-        let doc = |edit: fn(&mut Doc<'static>)| {
-            let mut doc = Doc::default();
-            edit(&mut doc);
-            doc.boxed()
-        };
-        for (label, other) in [
-            ("order", doc(|doc| doc.order = Some("ORD-2"))),
-            ("kind", doc(|doc| doc.tipus = "D")),
-        ] {
-            let lookup = classify(QueryOutcome::Found(other.clone())).expect(label);
-            assert_eq!(lookup, Lookup::Collision(other), "{label}");
-        }
-        // No account pin: neither `teszt` nor the seller record's id
-        // (`szallito/id`) is compared with anything; a document of this order and
-        // kind is ours whatever they say, and whether they say anything (an
-        // absent `<teszt>` is `None` since #70).
-        for (label, other) in [
-            ("teszt", doc(|doc| doc.test = Some(false))),
-            ("no teszt", doc(|doc| doc.test = None)),
-            ("szallito/id", doc(|doc| doc.supplier_id = 1)),
-        ] {
-            let lookup = classify(QueryOutcome::Found(other.clone())).expect(label);
-            assert_eq!(lookup, Lookup::Ours(other), "{label}");
-        }
-        // Another szamlazz.hu code is an answer the handler cannot conclude from:
-        // the `unavailable` fault naming the code, as before the read policy.
-        let fault = classify(QueryOutcome::Api(SzamlazzAnswer::new(
-            "57",
-            "Ismeretlen hiba",
-        )))
-        .expect_err("a fault");
-        let error = restate_sdk::errors::TerminalError::from(fault);
-        assert_eq!(error.code(), 503);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-        assert_eq!(body["code"], "unavailable");
-        let message = body["message"].as_str().expect("message");
-        assert!(message.contains("57"), "{message}");
-        assert!(message.contains("Ismeretlen hiba"), "{message}");
-
-        // Rejected credentials are a fault of their own, not `unavailable`.
-        let fault = classify(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
-            "3", "login",
-        )))
-        .expect_err("a fault");
-        let error = restate_sdk::errors::TerminalError::from(fault);
-        assert_eq!(error.code(), 503);
-        let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
-        assert_eq!(body["code"], "credentials_rejected");
     }
 
     /// A read step that ended without an answer (the read policy exhausted
