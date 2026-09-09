@@ -25,8 +25,9 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   columns, gone once the invocation completes) while it runs.
 - **The run-name matcher**: a consumer pins, per handler, the ordered `ctx.run` names of every path it journals
   (`RunPath`), and reads a journaled name as its pattern (`RunPatterns`, `verify-{number}` by its prefix) to assert
-  that every invocation's run sequence is a prefix of one of its handler's paths; a renamed, inserted or reordered
-  step strands every in-flight invocation on the next deploy, and fails the test instead.
+  that every invocation's run sequence is a prefix of one of its handler's paths. Under in-place re-registration a
+  renamed, inserted or reordered step strands every in-flight invocation on the next deploy; under immutable
+  deployments the same sequence is what a pause-and-resume onto new code needs; either way the test fails first.
 
 The crate knows no particular endpoint: it deploys a `restate_sdk::prelude::Endpoint` and decodes a fault into the
 caller's type. What is the consumer's stays with the consumer: its endpoint and mocks, its fault type, its table of

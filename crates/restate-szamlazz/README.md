@@ -250,7 +250,7 @@ szamlazz.hu-verified fact; the rest echoes the configuration.
 `contract::QueryTaxpayerRequest` / `QueryTaxpayerResponse` (`TaxpayerAddress`) is the contract of
 `Szamlazz.Agent.query_taxpayer`. In: `tax_number`, the bare eight-digit stem (`12345678`) or the full
 `NNNNNNNN-N-NN` form (`12345678-2-42`) and nothing else (`QueryTaxpayerRequest::prefix` derives the prefix or
-names what was wrong). Out: `{valid, name?, tax_number?, vat_code?, addresses[]}`, a crate-owned additive-only
+names what was wrong). Out: `{valid, name?, tax_number?, vat_code?, addresses[]}`, a crate-owned
 projection of the agent crate's `TaxpayerInfo` (what the read step journals), with `valid: false` a normal
 answer. Not cached by the worker; cache it in the caller with a TTL on the order of a day.
 
@@ -311,8 +311,8 @@ and `Agent::from_parts` take, so a deployment cannot run on a policy below the f
 `ValidatedWorkerConfig::unchecked` is for test harnesses whose szamlazz.hu is a mock).
 
 Nothing account-shaped is in `WorkerConfig`: document defaults and the seller block belong to the `Account`, and
-their value types (`account::Defaults`, `account::SellerConfig`, `account::SellerEmailConfig`) are journaled with it,
-so they stay permissive and additive-only. The static resolver reads them through closed input types of its own
+their value types (`account::Defaults`, `account::SellerConfig`, `account::SellerEmailConfig`) are journaled with it
+(a *journaled type*'s parts, under no compatibility rule: ADR 0009). The static resolver reads them through closed input types of its own
 (`StaticDefaults`, `StaticSeller`, `StaticSellerEmail`, beside `StaticAccount`'s `Secret` agent key, whose `Debug`
 output is redacted), which mirror them field for field.
 
@@ -358,7 +358,7 @@ service calls another.
 
 `Order` / `Agent` are the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
 registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
-handlers. Both are built `from_parts(Accounts, WorkerConfig)`. Every handler decodes its body (`Body<T>`; a
+handlers. Both are built `from_parts(Accounts, ValidatedWorkerConfig)`. Every handler decodes its body (`Body<T>`; a
 malformed one is `invalid_input` before anything is journaled) and runs the prologue (pin the namespace, resolve
 the account in the `account` step, fetch the credentials, open the gateway) before its operation.
 
@@ -818,7 +818,7 @@ one way to strand it.
 
 A stuck invocation can be moved onto a newer deployment (`restate invocations pause` / `resume --deployment`); the
 newer code then replays the old journal, which needs **three** things to hold, none of which this crate checks
-mechanically: the `ctx.run` sequence (the *step-name table* below is the diff to read), the journaled result types
+mechanically: the `ctx.run` sequence (the *step-name table* above is the diff to read), the journaled result types
 still decoding (a release may reshape them; review the diff of `gateway`'s outcome enums and `Resolution`), and the
 steps' inputs unchanged. Review all three before a resume, or kill and let the caller retry with a new
 `Idempotency-Key`.

@@ -4,12 +4,14 @@
 //! ([`is_prefix_of_path`]). The table itself is the consumer's: it names the
 //! consumer's handlers and steps.
 //!
-//! An in-flight invocation replays the *previous* deployment's entries by
-//! name and position, so a renamed, inserted or reordered step strands it; a
-//! consumer that pins its table and asserts, over every invocation a run
+//! A journal replays by name and position. Under in-place re-registration an
+//! in-flight invocation replays the *previous* deployment's entries, so a
+//! renamed, inserted or reordered step strands it; under immutable deployments
+//! the same sequence is what a pause-and-resume onto new code needs. A
+//! consumer that keeps its table and asserts, over every invocation a run
 //! leaves on the server, that the observed run names are a prefix of one of
-//! its handler's paths and that every path was walked in full, makes that a
-//! failing test instead of a killed invocation.
+//! its handler's paths and that every path was walked in full, makes either a
+//! failing test instead of a stranded invocation.
 
 /// One path: a handler of a service and the ordered `ctx.run` names it
 /// journals on that path. A `{…}` segment in a name (`verify-{number}`) is a

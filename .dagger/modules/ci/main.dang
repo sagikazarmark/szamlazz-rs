@@ -50,7 +50,7 @@ type Ci {
   binary of the Restate image (`RESTATE_SERVER_BIN`; there is no docker here).
   The `tests/e2e` suite of `restate-szamlazz` (the `Szamlazz.Order` and
   `Szamlazz.Agent` handlers, the multi-account flag day and scope isolation,
-  the journal scan for the agent key, the run-name pin and the protocol-v7
+  the journal scan for the agent key, the step-name table check and the protocol-v7
   canary) and the `restate-e2e-harness` crate's own `e2e_smoke` (its contract
   with no consumer). `CI` is set, so a run without a server fails instead of
   skipping.

@@ -2,10 +2,11 @@
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
 amended by #22 (the create step under a run retry policy), #30 (the storno step), #37 (the read policy), #41
-(the `Szamlazz.Agent` writes' timeouts and retry interval), #61 (the ≥ 90 s re-check rule in code) and #87 (what
-an invocation attempt is spent on; `Szamlazz.Agent.storno` on `Order`'s policy; the read policy widened), below.
+(the `Szamlazz.Agent` writes' timeouts and retry interval), #61 (the ≥ 90 s re-check rule in code), #87 (what
+an invocation attempt is spent on; `Szamlazz.Agent.storno` on `Order`'s policy; the read policy widened) and #114
+(every wait has a bound), below.
 Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the verified Restate facts, and
-the operational alerts; the retry policy and timeout values hold as amended (#41, #61, #87, the current values are
+the operational alerts; the retry policy and timeout values hold as amended (#41, #61, #87, #114, the current values are
 in the paragraph below and in the code). Withdrawn by #87: the third "considered option"'s etiquette rationale
 (etiquette bounds sends, which the issue policy governs, not invocation attempts). Kill itself is under review for
 the `Order` writes (#87's follow-up). Superseded: the `pending` slot as what makes

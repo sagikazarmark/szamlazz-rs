@@ -228,8 +228,8 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
   the `SZ`-beside-`ES` and `SZ`-beside-`VS` cases are refused by the service before sending
   (`conflict{prepaid_chain}`; the latter from the final invoice's exclusivity row, #62), whatever the
   server would do. Go-live steps 10 and 11 are the checks.
-- A second `D` after a consumed `D` (152 expected). Low: `create_proforma` looks up `…:invoice` and
-  `…:prepayment` first → `conflict{order_invoiced, existing_number}` when the converting document is ours;
+- A second `D` after a consumed `D` (152 expected). Low: `create_proforma` looks up `…:invoice`,
+  `…:prepayment` and `…:final` first (#62) → `conflict{order_invoiced, existing_number}` when the converting document is ours;
   when it is another channel's the order-number hint in the lookup step sees it → `conflict{foreign}`.
 - An `ES` sent **with** `dijbekeroSzamlaszam` (and a `VS` with it): the XSD lists the element beside
   `elolegszamla` and `vegszamla` as independent optional elements, and the server links an `ES` to the `D`

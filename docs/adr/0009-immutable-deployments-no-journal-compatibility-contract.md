@@ -98,7 +98,7 @@ of the handlers.
 - CONTEXT.md's *Journaled type* entry is replaced by a short one (a `ctx.run` result type; crate-owned; carries
   neither the agent key nor the document body; no compatibility rule), and *Run-name pin* is reworded to name
   pause-and-resume as its reason. The word "pin" is retired from the journal fixtures' vocabulary.
-- The e2e's redeploy scenario, which deploys twice into one harness, keeps proving that a second deployment can
+- The e2e's flag day (`Harness::switch_to_multi_account`, the second `deploy` into one server) keeps proving that a second deployment can
   be registered beside a first; it no longer proves anything about replay across them, and says so.
 - The host's deployment procedure carries the one operational obligation this ADR creates: do not remove, stop or
   `--force`-replace a deployment Restate still reports invocations on. `restate deployment describe <id>

@@ -1,8 +1,8 @@
 # `Szamlazz.Order` keeps no state: szamlazz.hu is the source of truth, reached through deterministic external ids
 
 Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scopes.md); the account whose
-szamlazz.hu is the source of truth is the one the invocation's scope resolved to, and the validation pins are
-read from that journaled `Account` (below); amended by #47, every journaled type is additive-only and pinned
+szamlazz.hu is the source of truth is the one the invocation's scope resolved to, journaled as the `Account`
+(below); amended by #47, every journaled type is additive-only and pinned
 by fixtures (the *Journal compatibility* section); amended by #70; widening a field to `Option<T>` is the one
 retype the rule admits (the *Widening* paragraph); amended by #127; every journaled type is crate-owned, a
 `szamlazz_agent` response type is never journaled directly (the *Crate-owned projections* section), the one

@@ -6,7 +6,7 @@ that `Order` invokes, or as code that `Order` runs itself. We chose the latter.
 
 `restate_szamlazz::gateway::Gateway` is a plain Rust module: a struct holding the client
 and the account it speaks for, with async functions `lookup`, `create`, `storno`, `delete_proforma`,
-`set_payments`, `query`, `query_taxpayer` and `probe`, one per durable step. It has no Restate context, returns every expected
+`set_payments`, `query`, `verify`, `hint`, `lookup_storno`, `query_taxpayer` and `probe`, one per durable step. It has no Restate context, returns every expected
 szamlazz.hu outcome as data (never `Err` for a rejection, a duplicate or a "not found"; the create
 step's `Err(Unconfirmed)` is reserved for an answer that is *not* known and is what the run retry
 policy re-executes), and is unit-testable with wiremock. The `Order` Virtual Object (key = order
@@ -59,7 +59,9 @@ layering below is unchanged by that.
   step runs under the issue policy (a run retry policy, ADR 0004) and is the one closure that may
   return a retryable `Err`, only for an outcome that is not known. A run failure surfaces as a
   terminal error (HTTP 500 to a synchronous caller: verified), which is why the module must never
-  return `Err` for an expected outcome.
+  return `Err` for an expected outcome. *Amended (ADR 0004, #30, #37):* the lookup runs under the read
+  policy and the storno step under the issue policy; only the one-shot writes and the `namespace` step
+  stay at one attempt.
 - A process crash re-executes only the *open* closure; completed runs, sets and sleeps replay from
   the journal. Worst case per episode in a pathological crash loop is (issue policy executions) +
   (invocation attempts − 1) = 9 executions of the create closure, each query-first (ADR 0002),
@@ -76,6 +78,8 @@ layering below is unchanged by that.
   (`QueryOutcome::Found`, the `Live`/`Reversed`/`Collision`/`Foreign` lookup outcomes and the
   `Found`/`Reconciled`/`Collision` create outcomes) is journaled with the buyer block szamlazz.hu
   returned. The journal is still the only place it lands; the handler outputs and tracing are unchanged.
+  *Superseded (#127, ADR 0009):* the outcomes carry crate-owned projections (`FoundDocument`,
+  `IssuedDocument`); no buyer block, seller block, line item or PDF is journaled.
 - Rule, stated so a future `storno_invoice → create_invoice` convenience is not added: no `Order`
   handler ever `.call()`s an exclusive handler on its own key. Under this layering it is structural.
 - The Restate service names are namespaced: `Szamlazz.Order` and `Szamlazz.Agent`. The `Szamlazz.`

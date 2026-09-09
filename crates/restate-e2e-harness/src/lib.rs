@@ -21,8 +21,9 @@
 //! - [`introspection`]: `sys_journal` and `sys_invocation` rows
 //!   ([`JournalEntry`], [`Invocation`], [`run_result`]).
 //! - [`run_names`]: the run-name matcher ([`RunPath`], [`RunPatterns`],
-//!   [`is_prefix_of_path`]) a consumer pins its handlers' `ctx.run` names
-//!   with.
+//!   [`is_prefix_of_path`]) a consumer holds its handlers' `ctx.run` names
+//!   to: the sequence an in-place redeploy replays and a pause-and-resume
+//!   onto new code needs.
 //!
 //! The crate knows nothing of any particular endpoint: what it deploys is a
 //! `restate_sdk` [`Endpoint`](restate_sdk::prelude::Endpoint), and what it

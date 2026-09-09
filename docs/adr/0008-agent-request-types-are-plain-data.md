@@ -56,7 +56,7 @@ We draw the line by who produces the value:
 ## Consequences
 
 - `crates/szamlazz-agent/tests/literals.rs` builds the request types as literals from outside the
-  crate (the compile-time proof of the widening), and `tests/sans_io.rs` drives the core with a
+  crate (the compile-time proof of the widening), and `tests/custom_http_client.rs` drives the core with a
   client the crate knows nothing about (`ureq`, against wiremock), which is also the README's
   sans-IO example; the README is compiled as a doctest.
 - The worker's request builder (`gateway/build.rs`), its seller and buyer projections, the storno
