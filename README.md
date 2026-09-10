@@ -23,7 +23,7 @@ Issuing from Rust directly starts at [`szamlazz-agent`](crates/szamlazz-agent).
 
 ## Workspace
 
-This virtual workspace contains six packages intended for publication and independent use:
+This virtual workspace contains five packages intended for publication and independent use:
 
 | Package | Purpose |
 |---|---|
@@ -32,7 +32,9 @@ This virtual workspace contains six packages intended for publication and indepe
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
 | [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless: szamlazz.hu is the source of truth, reached through deterministic external ids. |
-| [`restate-e2e-harness`](crates/restate-e2e-harness) | End-to-end test harness for `restate_sdk` endpoints against a real `restate-server` (server gate and launcher, in-process deployment, ingress, admin API, journal introspection, the step-name table check); nothing of szamlazz in it, versioned on its own, unix only. |
+
+The worker's end-to-end tests use [`restate-e2e-harness`](https://crates.io/crates/restate-e2e-harness)
+from crates.io.
 
 The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 
@@ -53,7 +55,7 @@ dagger check
 
 It runs the `rust` module's build, test, clippy, doc, audit and fmt checks and the workspace's own `ci` module
 (`.dagger/modules/ci`): `ci:test` (the workspace tests with every feature) and `ci:end-to-end` (the
-`restate-szamlazz` handler layer and the `restate-e2e-harness` smoke test against `restate-server` processes started
+`restate-szamlazz` handler layer against `restate-server` processes started
 inside the container). Run one with `dagger check ci:end-to-end`.
 
 Run the individual host checks with the tracked lockfile:
@@ -68,7 +70,6 @@ cargo doc --workspace --all-features --no-deps --locked
 # RESTATE_ADMIN_URL / RESTATE_INGRESS_URL, e.g. `docker compose up -d`)
 dagger call ci restate-server export --path ./restate-server
 RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-szamlazz --test e2e --all-features --locked -- --ignored
-RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness --locked -- --ignored
 ```
 
 ## License

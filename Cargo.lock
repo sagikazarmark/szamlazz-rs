@@ -2116,9 +2116,9 @@ dependencies = [
 [[package]]
 name = "restate-e2e-harness"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59c8d6812cf3456803c24bb5f0a8b1e5ff5648d8fdd675b8bfa1e415eff0fae1"
 dependencies = [
- "h2",
- "http",
  "hyper",
  "hyper-util",
  "nix",
@@ -2128,7 +2128,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "wiremock",
 ]
 
 [[package]]

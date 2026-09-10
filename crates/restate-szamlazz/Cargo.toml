@@ -40,9 +40,8 @@ unicode-normalization = "0.1.25"
 # dropped on publish.
 restate-szamlazz = { path = ".", features = ["test-util"] }
 # The Restate half of the e2e harness (server gate, deployment, ingress,
-# admin API, journal, the step-name table check); path-only, dropped on publish, and
-# it never depends back on this crate.
-restate-e2e-harness = { path = "../restate-e2e-harness" }
+# admin API, journal, the step-name table check).
+restate-e2e-harness = "0.1.0"
 static_assertions = "1.1.0"
 # `sync` for the e2e harness's fetch hold and send counter (`watch` channels).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util"] }

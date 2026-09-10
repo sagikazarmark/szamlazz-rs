@@ -23,7 +23,7 @@ key, and the worker is the one place that holds one (§4, `Szamlazz.Agent.query_
 | Crate | Kind | Purpose |
 |---|---|---|
 | `restate-szamlazz` | library | Contract types, deployment config, the account model with the resolver and credential-store traits and the static resolver, the `gateway` module, the `Szamlazz.Order` Virtual Object and the `Szamlazz.Agent` service |
-| `restate-e2e-harness` | library (published, versioned on its own) | The Restate half of an end-to-end suite for any `restate_sdk` endpoint: the server gate and launcher, in-process deploy, ingress and admin API, the step-name table's check; a dev-dependency of the worker, knows no szamlazz type (#167) |
+| [`restate-e2e-harness`](https://crates.io/crates/restate-e2e-harness) | external library (crates.io dev-dependency) | The Restate half of an end-to-end suite for any `restate_sdk` endpoint: the server gate and launcher, in-process deploy, ingress and admin API, the step-name table's check; knows no szamlazz type (#167) |
 
 A deployment binds the two services to a Restate endpoint of its own (the library README's *Quick Start*); the
 workspace ships no binary. (A `restate-szamlazz-endpoint` crate, a clap + figment binary with a container image,
@@ -1280,12 +1280,12 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   and the resolution script, the stub helpers against wiremock alone) beside what they test; the Restate half (the
   server gate and launcher, the spawned server, the in-process deployment, `set_public` / `drain`, the ingress
   reply and envelope check, the admin API's SQL, journals, `sys_invocation` rows, kill / cancel / purge and the
-  in-flight sampler, the step-name table check) is the workspace's `restate-e2e-harness` crate
-  (`crates/restate-e2e-harness`, published and versioned on its own, unix only), a path dev-dependency that knows
+  in-flight sampler, the step-name table check) is the published `restate-e2e-harness` crate
+  (versioned on its own, unix only), a crates.io dev-dependency that knows
   no szamlazz type and never depends on `restate-szamlazz` (a dependency back would be a dev-dependency cycle
   Cargo resolves by compiling the crate twice, and every `Order`, `Agent` or `Fault` crossing the boundary would
-  be two types); its pure decisions (the gate, the sampler, the table check) are tested there, and its one ignored
-  `e2e_smoke` proves its contract with a trivial service of its own and no consumer. Every other file is one
+  be two types); its own tests live in the [upstream repository](https://github.com/sagikazarmark/restate-e2e-harness).
+  Every other file in this suite is one
   handler family's scenarios (`create_invoice`, `create_proforma`, `create_prepayment`, `create_final`,
   `correct_invoice`, `storno`, `delete_proforma`, `get`, `policies`, `agent_reads`, `agent_writes`, `faults`,
   `prologue`, `multi_account`, `invariants`), each a `pub(crate) async fn` per scenario taking the harness. A new
@@ -1304,8 +1304,7 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   (default features), `clippy`, `doc`, `audit` and `fmt` checks and, from the workspace's own `ci` module
   (`.dagger/modules/ci`, wired onto `rust:container`), `ci:test` (`cargo test --workspace --all-features --locked`,
   so the `szamlazz-adatkapcsolat` archiver tests behind `opendal` and the `schemars` contract tests run), and
-  `ci:end-to-end`: the ignored `e2e_` tests of the workspace (this suite's two and the `restate-e2e-harness` crate's
-  `e2e_smoke`), on every pull request. The Dagger
+  `ci:end-to-end`: the worker's ignored `e2e_` tests, on every pull request. The Dagger
   container has no docker daemon, and a Dagger service cannot reach back into the container that binds it, so the
   harness starts `restate-server` itself: the check copies the binary out of the Restate image and sets
   `RESTATE_SERVER_BIN`, and the harness spawns one process per suite on the loopback (bind addresses, base

@@ -1047,8 +1047,8 @@ sequence). `tests/e2e/harness/` is the szamlazz half of the harness, one module 
 
 The Restate half (the server gate and the launcher, the spawned server, the in-process deployment, `set_public`
 and `drain`, the ingress reply and the envelope check, the admin API's SQL, journals, `sys_invocation` rows, kill /
-cancel / purge and the in-flight sampler, the step-name table check) is the workspace's
-[`restate-e2e-harness`](../restate-e2e-harness) crate, a path dev-dependency that knows nothing of szamlazz and
+cancel / purge and the in-flight sampler, the step-name table check) is the published
+[`restate-e2e-harness`](https://crates.io/crates/restate-e2e-harness) crate, a crates.io dev-dependency that knows nothing of szamlazz and
 never depends on this crate (a dependency back would be a dev-dependency cycle Cargo resolves by compiling this
 crate twice, and every type crossing the boundary would then be two types). The harness's own tests (the fetch
 hold and the resolution script, the stub helpers against wiremock alone) sit beside what they test and run
@@ -1114,8 +1114,8 @@ and data for inspection; normal teardown removes only that launch's directory.
 tests and the `szamlazz-adatkapcsolat` archiver tests run), `ci:end-to-end` is the ignored suite above with
 `restate-server` copied out of the Restate image and `CI` set, run as
 `cargo test --workspace --all-features --locked --tests -- --ignored e2e_`: the same selection the container
-compiled the tests with, narrowed to the ignored e2e tests by name (this suite's two and the `restate-e2e-harness`
-crate's `e2e_smoke`), so the check compiles nothing (`-p` or `--test e2e` would unify dev-dependency features
+compiled the tests with, narrowed to the worker's ignored e2e tests by name,
+so the check compiles nothing (`-p` or `--test e2e` would unify dev-dependency features
 differently and recompile fifty-odd crates first); when it fails, the kept `restate-server.log` of every server
 follows its output. `dagger check ci:end-to-end` runs it locally the same way.
 

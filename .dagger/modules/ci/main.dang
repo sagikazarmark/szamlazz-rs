@@ -1,8 +1,7 @@
 """
 The checks of this workspace the generic `rust` module cannot express: the
 workspace tests with every feature, and the end-to-end suites against a real
-Restate server (the handler layer of `restate-szamlazz`, and the
-`restate-e2e-harness` crate's own smoke test); and the `restate-server` binary
+Restate server (the handler layer of `restate-szamlazz`); and the `restate-server` binary
 those suites run against, exported for a developer
 (`dagger call ci restate-server export --path ./restate-server`).
 
@@ -51,15 +50,13 @@ type Ci {
   The `tests/e2e` suite of `restate-szamlazz` (the `Szamlazz.Order` and
   `Szamlazz.Agent` handlers, the multi-account flag day and scope isolation,
   the journal scan for the agent key, the step-name table check and the protocol-v7
-  canary) and the `restate-e2e-harness` crate's own e2e tests, including
-  `e2e_quick_start` (the README copied into an isolated consumer crate).
+  canary), using the published `restate-e2e-harness` crate.
   `CI` is set, so a run without a server fails instead of
   skipping.
 
   Runs with the selection `compiled` built (`--workspace --all-features`, every
   test target), narrowed to the ignored e2e tests by name, so workspace targets
-  need no compilation here. The quick-start test separately resolves and builds
-  its documented dev-dependencies outside workspace feature unification.
+  need no compilation here.
   Selecting a package (`-p restate-szamlazz`) or a target
   (`--test e2e`) unifies dev-dependency features differently (only the
   packages with a selected dev target contribute theirs) and recompiles
