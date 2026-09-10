@@ -131,7 +131,7 @@
 //!   with replay; Restate's *attempt* counts the server's re-dispatches of the invocation, which
 //!   the handlers' `invocation_retry_policy` bounds. A *step* is one named `ctx.run`.
 //! - **Prologue**: the first lines of every handler (pin the namespace, resolve the account,
-//!   fetch the credentials, open the gateway), not an interception layer; nothing in the SDK
+//!   with credential fetch and gateway open deferred to an executing operation), not an interception layer; nothing in the SDK
 //!   corresponds to it.
 //! - **Deployment**: Restate's word, a registered endpoint revision (ADR 0009); the crate never
 //!   uses it for anything else. What both services hold in common (the accounts and the

@@ -1,4 +1,4 @@
-//! The fixtures every family shares: the gateway opened as the prologue opens
+//! The fixtures every family shares: the gateway opened as an operation opens
 //! one (over `tests/common`'s HTTP client, against a wiremock server), the
 //! order, external ids and document of `ORD-1`, and the [`Harness`] whose
 //! methods run the lookup and create steps with their request structs filled
@@ -20,7 +20,7 @@ use szamlazz_agent::Credentials;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 use wiremock::MockServer;
 
-/// A gateway for the test account, opened as the prologue would open it.
+/// A gateway for the test account, opened as an executing operation would open it.
 pub fn gateway(server: &MockServer) -> Gateway {
     open(server, "acct", "key")
 }
@@ -163,7 +163,7 @@ impl Harness {
 }
 
 /// An [`Account`] on `server`, and the gateway opened for it with `key` over
-/// a fresh [`http_client`], as the prologue opens one per execution.
+/// a fresh [`http_client`], as an executing operation opens one per execution.
 pub fn open(server: &MockServer, id: &str, key: &str) -> Gateway {
     let mut account = Account::new(id, id);
     account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");

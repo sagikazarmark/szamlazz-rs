@@ -1,5 +1,6 @@
 //! The prologue every handler runs after parsing its key: pin the
-//! namespace, resolve the account, fetch its credentials, open the gateway.
+//! namespace and resolve the account. Credentials and the gateway are acquired
+//! lazily inside an executing external-operation run.
 //!
 //! [`execute`] runs one handler execution: the prologue's durable steps
 //! ([`run_prologue`], generic over [`RunCtx`], so one fn serves the SDK's
@@ -7,10 +8,10 @@
 //! inside the execution span. The steps' decisions are functions of their
 //! inputs whose only effect is a log line, which is what can be unit-tested
 //! (the SDK has no mock context; the durable behaviour is asserted end to
-//! end); the prologue's two calls into an embedder's trait objects run under
-//! the worker's deadline ([`CALL_DEADLINE`]): the resolve that is the body of
-//! the `account` step's closure, and the credential fetch, the one step that
-//! runs outside the journal.
+//! end). Both embedder calls run under the worker's deadline
+//! ([`CALL_DEADLINE`]): resolution inside `account`, and credential fetch
+//! inside the first operation closure that actually executes. Neither the
+//! credentials nor sensitive source messages become a run result.
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -28,15 +29,47 @@ use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
 use crate::config::{ValidatedWorkerConfig, WorkerConfig, format_duration};
 use crate::gateway::Gateway;
 
-/// What one handler execution runs on: the gateway opened for this execution
+/// What one handler execution runs on: the journaled account, the lazy gateway
 /// and the deployment settings with the namespace pinned by the journal.
 ///
 /// Built by the prologue, dropped with the execution: no gateway or client
 /// outlives one handler execution.
 #[derive(Debug)]
 pub(super) struct Execution {
-    pub(super) gateway: Arc<Gateway>,
+    pub(super) account: Account,
+    accounts: Accounts,
+    gateway: Arc<tokio::sync::OnceCell<Arc<Gateway>>>,
     pub(super) config: WorkerConfig,
+}
+
+impl Execution {
+    pub(super) fn new(account: Account, accounts: Accounts, config: WorkerConfig) -> Self {
+        Self {
+            account,
+            accounts,
+            config,
+            gateway: Arc::default(),
+        }
+    }
+
+    /// Called only inside an executing operation run. Replayed results never
+    /// consult the store. A successful client is shared within this execution
+    /// only; the next execution fetches again and owns a fresh cookie jar.
+    pub(super) fn gateway(
+        &self,
+    ) -> impl Future<Output = Result<Arc<Gateway>, Fault>> + Send + 'static {
+        let cell = Arc::clone(&self.gateway);
+        let accounts = self.accounts.clone();
+        let account = self.account.clone();
+        async move {
+            cell.get_or_try_init(|| async move {
+                let credentials = fetch_credentials(&accounts, &account).await?;
+                open(account, credentials)
+            })
+            .await
+            .cloned()
+        }
+    }
 }
 
 /// Runs one handler execution: the prologue ([`run_prologue`]), then `body`
@@ -65,7 +98,7 @@ where
     .await
 }
 
-/// The prologue of every handler: pin → resolve → fetch → open. Runs inside
+/// The prologue of every handler: pin → resolve. Runs inside
 /// the execution span [`execute`] opened, on which it records the account id
 /// once resolved.
 ///
@@ -77,10 +110,9 @@ where
 ///    as data and become the terminal `unknown_account`; an unavailable
 ///    resolver (reporting so, or silent past [`CALL_DEADLINE`]) is
 ///    retryable and journals nothing; exhaustion is `unavailable`.
-/// 3. **Fetch** the account's credentials outside the journal (on every
-///    execution, including replays) with a short in-process retry, each
-///    attempt bounded by the same deadline, then terminal `unavailable`.
-/// 4. **Open** the gateway for this execution over a fresh client.
+///
+/// The account alone suffices for deterministic decisions. Fetch and open
+/// belong to [`Execution::gateway`], awaited only inside an operation run.
 async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     accounts: &Accounts,
@@ -115,12 +147,7 @@ async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
     let account = account_of(resolution)?;
     record_account(&account);
 
-    // 3. Fetch, outside the journal.
-    let credentials = fetch_credentials(accounts, &account).await?;
-
-    // 4. Open.
-    let gateway = open(account, credentials)?;
-    Ok(Execution { gateway, config })
+    Ok(Execution::new(account, accounts.clone(), config))
 }
 
 /// The span every handler execution runs in, from the handler's first line to
@@ -308,9 +335,8 @@ fn resolve_exhausted(error: &TerminalError) -> Fault {
     ))
 }
 
-/// Fetches of the credential store per handler execution, including the
-/// first. Short by design: a prolonged store outage is a terminal
-/// `unavailable`, not a handler retry.
+/// Fetch attempts on the first executing operation of an execution. Short by
+/// design: an outage completes that run with terminal `unavailable`.
 const FETCH_ATTEMPTS: u32 = 3;
 /// The pause before each re-fetch.
 const FETCH_PAUSE: Duration = Duration::from_millis(200);
@@ -339,8 +365,8 @@ impl FetchFailure {
     }
 }
 
-/// Fetches the account's credentials outside the journal, on every
-/// execution, with a short in-process retry of an unavailable store; each
+/// Fetches credentials inside an executing operation, without journaling
+/// them, with a short in-process retry of an unavailable store; each
 /// attempt is one call bounded by [`CALL_DEADLINE`], so the loop ends within
 /// `FETCH_ATTEMPTS × CALL_DEADLINE` plus the pauses.
 ///
@@ -348,12 +374,10 @@ impl FetchFailure {
 ///
 /// The terminal `unavailable` fault: the store is gone for this reference
 /// or stayed unavailable (reporting so, or not answering in time) through
-/// the retries. Terminal by decision: a retryable error would route a
-/// prolonged store outage into the handler's kill-on-five and an unstructured
-/// 500, whereas this is structured and immediate. The cost (an outage during
-/// a replay of an invocation whose create already landed surfaces as
-/// `unavailable` although the document exists) is reconciled by `get` or a
-/// retry with a new `Idempotency-Key`.
+/// the retries. The operation boundary records the terminal failure on its
+/// Run command, bypassing the read/issue policy. An unfinished write may have
+/// sent on an earlier execution: the fault preserves that uncertainty. A
+/// completed run replays without reaching this function at all.
 async fn fetch_credentials(accounts: &Accounts, account: &Account) -> Result<Credentials, Fault> {
     let mut attempt = 1;
     loop {
@@ -400,7 +424,7 @@ fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
         FetchFailure::TimedOut(timed_out) => timed_out.to_string().into(),
     };
     Fault::unavailable(format!(
-        "the account's credentials could not be fetched ({cause}); retry with a new Idempotency-Key"
+        "the account's credentials could not be fetched ({cause}); the outcome is not known"
     ))
 }
 
@@ -409,9 +433,10 @@ fn open(account: Account, credentials: Credentials) -> Result<Arc<Gateway>, Faul
     Gateway::open(account, credentials)
         .map(Arc::new)
         .map_err(|error| {
-            Fault::unavailable(format!(
-                "the szamlazz.hu client could not be built: {error}"
-            ))
+            tracing::warn!(error = %error, "the szamlazz.hu client could not be built");
+            Fault::unavailable(
+                "the szamlazz.hu client could not be built; the outcome is not known",
+            )
         })
 }
 
@@ -665,10 +690,7 @@ mod tests {
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("did not answer within"), "{message}");
         assert!(message.contains("10s"), "{message}");
-        assert!(
-            message.contains("retry with a new Idempotency-Key"),
-            "{message}"
-        );
+        assert!(message.contains("the outcome is not known"), "{message}");
         assert!(!message.contains(ACCOUNT), "{message}");
         assert!(!message.contains(REF), "{message}");
     }
@@ -705,10 +727,7 @@ mod tests {
             message.contains("credential store is unavailable"),
             "{message}"
         );
-        assert!(
-            message.contains("retry with a new Idempotency-Key"),
-            "{message}"
-        );
+        assert!(message.contains("the outcome is not known"), "{message}");
         assert!(!message.contains(STORE_CAUSE), "{message}");
         assert!(!message.contains(ACCOUNT), "{message}");
         assert!(!message.contains(REF), "{message}");
@@ -827,10 +846,7 @@ mod tests {
             message.contains("credential store is unavailable"),
             "{message}"
         );
-        assert!(
-            message.contains("retry with a new Idempotency-Key"),
-            "{message}"
-        );
+        assert!(message.contains("the outcome is not known"), "{message}");
         assert!(!message.contains("abc123"), "{message}");
         assert!(!message.contains(ACCOUNT), "{message}");
         assert!(!message.contains(REF), "{message}");
@@ -870,6 +886,134 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<Resolution>(json).expect("back"),
             resolution
+        );
+    }
+
+    /// A real SDK endpoint with a failure after the worker's completed probe.
+    /// The extra run forces handler replay (an ingress idempotency replay of
+    /// a completed invocation would not execute the handler at all).
+    struct ReplayProbe {
+        parts: Parts,
+        finishes: Arc<AtomicU32>,
+    }
+
+    #[allow(missing_docs, reason = "test-only SDK-generated clients")]
+    #[restate_sdk::service]
+    impl ReplayProbe {
+        #[handler(journal_retention = "1d")]
+        async fn probe(
+            &self,
+            ctx: restate_sdk::prelude::Context<'_>,
+        ) -> Result<restate_sdk::serde::Json<crate::contract::CheckAccountResponse>, HandlerError>
+        {
+            use restate_sdk::context::{ContextSideEffects, RunFuture as _, RunRetryPolicy};
+            let ctx = &ctx;
+            let response = execute(ctx, &self.parts, |exec| async move {
+                exec.check_account_request(ctx).await
+            })
+            .await?;
+            let finishes = Arc::clone(&self.finishes);
+            ContextSideEffects::run(ctx, move || async move {
+                if finishes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(HandlerError::from(std::io::Error::other(
+                        "replay after completed probe",
+                    )));
+                }
+                Ok(())
+            })
+            .name("finish")
+            .retry_policy(
+                RunRetryPolicy::new()
+                    .max_attempts(2)
+                    .initial_delay(Duration::from_secs(1)),
+            )
+            .await?;
+            Ok(restate_sdk::serde::Json(response))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a Restate server: RESTATE_SERVER_BIN"]
+    async fn e2e_completed_operations_replay_without_refetching_credentials() {
+        use crate::account::{StaticConfig, StaticResolver};
+        use restate_e2e_harness::{
+            Call, ServerSpec,
+            gate::{ReusePolicy, launcher_or_skip},
+        };
+        let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+            return;
+        };
+        let server = launcher
+            .launch(&ServerSpec {
+                name: "credential-replay",
+                features: &[],
+                env: &[],
+            })
+            .await;
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("szlahu_error_code", "7")
+                    .insert_header("szlahu_error", "not found"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let config: StaticConfig = serde_json::from_value(json!({"account": {
+            "id": "acct", "agent_key": SCRIPTED_KEY, "endpoint": mock.uri()
+        }}))
+        .expect("config");
+        let store = Arc::new(Scripted::new([
+            Fetch::Credentials,
+            Fetch::Unavailable,
+            Fetch::Unavailable,
+            Fetch::Unavailable,
+        ]));
+        let finishes = Arc::new(AtomicU32::new(0));
+        let probe = ReplayProbe {
+            parts: Parts {
+                accounts: Accounts::new(
+                    Arc::new(StaticResolver::try_from(config).expect("resolver")),
+                    store.clone(),
+                ),
+                config: WorkerConfig::new("acct".parse().expect("namespace"))
+                    .validate()
+                    .expect("config"),
+            },
+            finishes: finishes.clone(),
+        };
+        server
+            .deploy(
+                restate_sdk::prelude::Endpoint::builder()
+                    .bind(probe)
+                    .build(),
+            )
+            .await;
+        let reply = server
+            .invoke(&Call::service("ReplayProbe", "probe"), None, None)
+            .await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.body["credentials"]["state"], "ok");
+        assert_eq!(
+            finishes.load(Ordering::SeqCst),
+            2,
+            "the handler actually replayed"
+        );
+        assert_eq!(
+            store.fetches(),
+            1,
+            "completed external runs need no credentials"
+        );
+        assert_eq!(
+            server.admin().runs(reply.invocation_id()).await,
+            ["namespace", "account", "probe", "finish"]
+        );
+        let journal = server.admin().journal(reply.invocation_id()).await;
+        assert!(
+            journal
+                .iter()
+                .all(|entry| !entry.raw_contains(SCRIPTED_KEY) && !entry.raw_contains(STORE_CAUSE))
         );
     }
 }

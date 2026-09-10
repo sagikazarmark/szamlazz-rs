@@ -37,10 +37,10 @@ Layering (ADR 0001): the `gateway` is a Rust module that speaks to szamlazz.hu o
 `szamlazz_agent::Client` (the transport it wraps; it is not a second client) and the account, and exposes one plain
 async fn per durable step with outcome-as-data. `Szamlazz.Order` calls it inside `ctx.run`; `Szamlazz.Agent` is a thin
 stateless facade over it for by-number operations. Every read of account configuration by the services (the
-document defaults, the seller block) goes through `Gateway::account()`. The services
+document defaults, the seller block) uses the journaled `Account` directly. The services
 hold no gateway: each holds the `Accounts` bundle (account resolver + credential store) and a `WorkerConfig` with the
 deployment-level settings (the namespace of the external ids; the issue, read and resolve policies), and every handler's
-prologue (§4) resolves its account and opens a gateway for its own execution. No Restate service calls another; no
+prologue (§4) resolves its account; its first executing operation opens an execution-local gateway. No Restate service calls another; no
 `Order` handler calls a handler on its own key.
 
 ## 3. Principle: szamlazz.hu is the source of truth (ADR 0005)
@@ -144,8 +144,8 @@ external-id query and hint) or the create step's three (ADR 0004), well inside `
 ### The prologue (every handler of both services)
 
 After decoding its body (`service::Body<T>`: a malformed one is `TerminalError{invalid_input}` here, before anything
-is journaled; §7) and parsing its key, every handler runs the same four steps before its operation; the handler body
-then runs on the resulting *execution* (the gateway opened for this execution plus the deployment settings with the
+is journaled; §7) and parsing its key, every handler pins the namespace and resolves its account before its operation; the handler body
+then runs on the resulting *execution* (the journaled account, lazy gateway and deployment settings with the
 pinned namespace), and nothing of it (gateway, client, credentials) outlives the execution. No Virtual Object state.
 
 1. **Pin**: `ctx.run("namespace", || namespace)`, a pure durable step: an in-place redeploy with a changed namespace
@@ -163,23 +163,30 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    exhaustion or cancellation of the run → `TerminalError{unavailable}`. One `account` entry per invocation: the
    invocation finishes on the account it started on, and the Restate UI shows the journaled `Account` (id,
    endpoint, defaults, seller, credential reference, never the key) for the retention period.
-3. **Fetch**: `store.fetch(account.credential_ref)` **outside the journal**, on every handler execution
-   including replays, with a short in-process retry (three attempts, 200 ms apart, each attempt one call under the
+3. **Fetch lazily inside the first external-operation closure that executes**: `store.fetch(account.credential_ref)`,
+   with a short in-process retry (three attempts, 200 ms apart, each attempt one call under the
    same ten-second deadline; a store silent past it is retried like one that reported itself unavailable, so the
    loop ends within `3 × 10 s` plus the pauses), then
-   `TerminalError{unavailable}`. `gone` is terminal at once. Terminal by decision: a retryable error would route a
-   prolonged store outage into the handler's kill-on-five and an unstructured 500, whereas the terminal fault is
-   structured and immediate. The fault's text tells `gone`, `unavailable` and the deadline apart but names neither
+   `TerminalError{unavailable}` **on that Run command**, not a handler Output replacing it. `gone` is terminal at once.
+   This bypasses the operation's read/issue policy. The fault's text tells `gone`, `unavailable` and the deadline apart but names neither
    the account nor the
    credential reference, no response names the account (§7), and a store's reference may be internal topology (a
-   secret path); the operator's `warn` carries both (#65). Documented cost: an outage during a replay of an
-   invocation whose create already landed surfaces as `unavailable` although the document exists; `get` or a retry
-   with a new `Idempotency-Key` reconciles (`already_issued`). The `Credentials` type has no serde implementation,
-   the compiler rejects any attempt to journal it.
+   secret path); the operator's `warn` carries both (#65). Completed operations replay without fetching.
+   An unfinished write may have sent on an earlier execution: the fault says the outcome is not known, never
+   that nothing was sent; `get` or a new `Idempotency-Key` reconciles it. Best-effort storno-number reads retain
+   their known reversal without a number on initialization failure. Only results/failures are persisted;
+   credentials inside a closure are not journaled. Their type has no serde implementation.
 4. **Open**: `Gateway::open(account, credentials)` over a fresh Számla Agent client (the default `reqwest::Client`
    keeps szamlazz.hu's `JSESSIONID`; a shared client would carry one account's session into another's request).
 
-The four steps and the handler body run inside one tracing span, **`execution{scope, order, restate.invocation.id,
+Open also runs inside that closure; a client is reused only within the execution. Build failure is sanitized
+terminal `unavailable` on the operation run, preserving the same uncertainty. Pure decisions and request
+construction use the journaled Account directly, without a client. A dynamic store's rotation reaches the next
+execution that needs an operation under the same Account/Credential ref. `StaticResolver` retains startup keys:
+registering a new immutable deployment alone does not rotate retained deployments' credentials; update their
+store/configuration operationally or use a dynamic store visible to all retained deployments.
+
+The prologue and the handler body run inside one tracing span, **`execution{scope, order, restate.invocation.id,
 account.id}`** (`prologue::execute`, generic over `support::RunCtx`): `scope` is what the SDK saw (`<unscoped>` when none),
 `order` the Virtual Object key (absent on `Szamlazz.Agent`), `restate.invocation.id` the value the ingress returns as
 `x-restate-id`, and `account.id` the resolved account's id, recorded once the `account` step has answered. Every log
@@ -685,9 +692,9 @@ from (`Api`) is the same fault without a retry, so is the same code, or `szlahu_
 storno original **without a `telj`** (§6 step 1,
 ADR 0007: szamlazz.hu breaking its own schema on a date the storno must repeat; nothing is sent; the message names
 the invoice, and `Szamlazz.Order.storno_invoice` attaches the order, kind and storno external id). It also covers the
-prologue's own faults: the resolve policy
-exhausted, the credential store gone or unavailable, reporting so, or silent past the ten-second deadline on each
-call (#114), through the in-process retry. One of the three "outcome unknown"
+prologue's exhausted resolve policy and operation-local initialization faults: Gateway build failure or the
+credential store gone or unavailable, reporting so, or silent past the ten-second deadline on each
+call (#114), through the in-process retry (#200). One of the three "outcome unknown"
 codes: a read that fails may sit before a create that an earlier execution already landed, so the caller retries with a
 new `Idempotency-Key` or reads `get`, never concludes that no document exists.
 
@@ -755,7 +762,7 @@ agent key inline) whose `defaults` and `seller` tables are the value types the a
 (`account::{Defaults, SellerConfig, SellerEmailConfig}`, journaled with the `Account`, closed themselves; ADR 0009's
 #175 amendment), and everything account-shaped
 (credentials, endpoint, document defaults, seller block) lives on the `Account` it produces (read by the services
-through `Gateway::account()`). A host reads the two side by side from one file of its own layout, for instance:
+directly from the journaled Account). A host reads the two side by side from one file of its own layout, for instance:
 
 ```toml
 namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent

@@ -99,8 +99,8 @@ pub(crate) async fn a_flaky_resolver_is_retried_by_the_resolve_policy(h: &Harnes
 /// `delete_proforma` runs at once, answering from szamlazz.hu. The stuck
 /// invocation stands still at its credential fetch, **held** by the store
 /// (`hold_fetch`): after its `account` step, before its gateway opens, so it
-/// journals `namespace` and `account`, a prefix of every handler's path, and
-/// the moment it stands is the hold's signal, not a clock's. The prologue's
+/// journals `namespace`, `account` and its unfinished `lookup-proforma`, and
+/// the moment it stands is the hold's signal, not a clock's. The operation's
 /// fetch deadline (10 s) would cut a hold that stayed and retry the fetch; the
 /// kill lands well inside it. (`get` would prove nothing here: it is shared
 /// and never waits for the lock.)
@@ -145,8 +145,8 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     );
     assert_eq!(
         h.admin().runs(&stuck).await,
-        ["namespace", "account"],
-        "the killed invocation journaled the prologue's two commands"
+        ["namespace", "account", "lookup-proforma"],
+        "the fetch is inside the unfinished operation command"
     );
     // The hold is on the position, so the queued invocation's fetch would
     // park behind it too: released now that the kill is the completion.

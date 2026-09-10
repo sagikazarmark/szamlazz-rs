@@ -142,6 +142,8 @@ pub(crate) struct MutableAccounts {
     resolutions: Mutex<BTreeMap<String, u32>>,
     /// The fetches a scenario holds ([`Self::hold_fetch`]).
     holds: Mutex<Vec<Arc<Hold>>>,
+    unavailable: Mutex<Vec<String>>,
+    fetches: Mutex<BTreeMap<String, u32>>,
 }
 
 /// Where a held fetch stands.
@@ -231,6 +233,8 @@ impl MutableAccounts {
             resolver_failures: Mutex::new(BTreeMap::new()),
             resolutions: Mutex::new(BTreeMap::new()),
             holds: Mutex::new(Vec::new()),
+            unavailable: Mutex::new(Vec::new()),
+            fetches: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -240,6 +244,23 @@ impl MutableAccounts {
             .lock()
             .expect("keys")
             .insert(credential_ref.to_owned(), Credentials::agent_key(agent_key));
+    }
+
+    pub(crate) fn set_unavailable(&self, credential_ref: &str, unavailable: bool) {
+        let mut refs = self.unavailable.lock().expect("unavailable");
+        refs.retain(|value| value != credential_ref);
+        if unavailable {
+            refs.push(credential_ref.to_owned());
+        }
+    }
+
+    pub(crate) fn fetches(&self, credential_ref: &str) -> u32 {
+        self.fetches
+            .lock()
+            .expect("fetches")
+            .get(credential_ref)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Changes the account reachable under `scope` in place.
@@ -389,7 +410,24 @@ impl CredentialStore for MutableAccounts {
         credential_ref: &'a CredentialRef,
     ) -> BoxFuture<'a, Result<Credentials, FetchError>> {
         Box::pin(async move {
+            *self
+                .fetches
+                .lock()
+                .expect("fetches")
+                .entry(credential_ref.to_string())
+                .or_default() += 1;
             self.park_if_held(credential_ref.as_str()).await;
+            if self
+                .unavailable
+                .lock()
+                .expect("unavailable")
+                .iter()
+                .any(|value| value == credential_ref.as_str())
+            {
+                return Err(FetchError::unavailable(std::io::Error::other(
+                    "secret-store-source-sentinel",
+                )));
+            }
             self.keys
                 .lock()
                 .expect("keys")

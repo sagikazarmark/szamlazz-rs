@@ -13,7 +13,6 @@
 //! a create step that ends without a settled outcome is `outcome_unknown`.
 
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::ObjectContext;
@@ -22,7 +21,9 @@ use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, verified_document};
-use super::support::{is_cancelled, lookup, run_reading, run_retrying, verify};
+use super::support::{
+    initialization_fault, is_cancelled, lookup, run_operating, run_reading, verify,
+};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateOutcome, CreateRequest, CreateResponse, DocumentInput,
     DocumentKind, IssuedKind, ProformaLink, Warning, outstanding,
@@ -457,6 +458,10 @@ fn decide_base(
 /// `Idempotency-Key`, a cancelled one is reconciled by `get` first. Nothing
 /// is recorded, and the next invocation's lookup finds whatever landed.
 fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Identity) -> Fault {
+    if let Some(fault) = initialization_fault(error, "retry with a new Idempotency-Key or read get")
+    {
+        return identity.about(order, fault);
+    }
     let message = if is_cancelled(error) {
         format!(
             "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: read get, then retry with a new Idempotency-Key",
@@ -752,7 +757,7 @@ impl Execution {
         external_id: &ExternalId,
         refs: DocumentRefs<'_>,
     ) -> Result<CreateInvoice, Fault> {
-        self.gateway
+        self.account
             .build_create(kind, document, order, external_id, refs)
             .map_err(|error| Fault::invalid_input(error.to_string()))
     }
@@ -905,21 +910,25 @@ impl Execution {
         order: &OrderKey,
         intent: &Intent,
     ) -> Result<LookupOutcome, Fault> {
-        let gateway = Arc::clone(&self.gateway);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
-        run_reading(ctx, format!("lookup-{kind}"), self, move || async move {
-            gateway
-                .lookup(LookupRequest {
-                    external_id: &external_id,
-                    kind,
-                    order: &order,
-                    our_numbers: &our_numbers,
-                })
-                .await
-        })
+        run_reading(
+            ctx,
+            format!("lookup-{kind}"),
+            self,
+            move |gateway| async move {
+                gateway
+                    .lookup(LookupRequest {
+                        external_id: &external_id,
+                        kind,
+                        order: &order,
+                        our_numbers: &our_numbers,
+                    })
+                    .await
+            },
+        )
         .await
     }
 
@@ -937,16 +946,16 @@ impl Execution {
         intent: &Intent,
         reversed: Option<String>,
     ) -> Result<gateway::CreateOutcome, HandlerError> {
-        let gateway = Arc::clone(&self.gateway);
         let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
         let order_key = order.clone();
         let create = intent.create.clone();
-        run_retrying(
+        run_operating(
             ctx,
             format!("create-{kind}"),
             self.config.issue.run_retry_policy(),
-            move || async move {
+            self,
+            move |gateway| async move {
                 gateway
                     .create(CreateStepRequest {
                         external_id: &external_id,
@@ -967,24 +976,29 @@ impl Execution {
 mod tests {
     use restate_sdk::errors::TerminalError;
     use rust_decimal::dec;
-    use szamlazz_agent::Credentials;
 
     use super::*;
-    use crate::account::{Account, Endpoint};
+    use crate::account::{Account, Accounts, Endpoint, StaticConfig, StaticResolver};
     use crate::config::WorkerConfig;
     use crate::contract::TerminalCode;
     use crate::contract::document::tests::sample_document;
     use crate::gateway::{IssuedDocument, Rejection, SzamlazzAnswer};
-    use crate::test_support::{Doc, open_gateway};
+    use crate::test_support::Doc;
 
     /// An execution as the prologue would build it for the test account.
     fn order() -> Execution {
         let mut account = Account::new("acct", "acct");
         account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
-        Execution {
-            gateway: Arc::new(open_gateway(account, Credentials::agent_key("key"))),
-            config: WorkerConfig::new("acct".parse().expect("namespace")),
-        }
+        let config: StaticConfig = serde_json::from_value(serde_json::json!({
+            "account": { "id": "acct", "agent_key": "key" }
+        }))
+        .expect("config");
+        let store = std::sync::Arc::new(StaticResolver::try_from(config).expect("resolver"));
+        Execution::new(
+            account,
+            Accounts::new(store.clone(), store),
+            WorkerConfig::new("acct".parse().expect("namespace")),
+        )
     }
 
     fn request(proforma: ProformaLink) -> CreateRequest {

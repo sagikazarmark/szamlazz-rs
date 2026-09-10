@@ -22,9 +22,10 @@
 //! built over an issue policy below its floor. Every handler runs the same prologue after parsing
 //! its key: **pin** the namespace in a pure durable step, **resolve** the
 //! request's scope to its account in a durable step named `account` under the
-//! resolve policy, **fetch** the account's credentials outside the journal on
-//! every execution, **open** the gateway for this execution over a fresh
-//! client. The handler body then runs on that execution (`prologue::Execution`);
+//! resolve policy. The first external-operation closure that executes
+//! **fetches** credentials and **opens** a fresh gateway, reused only within
+//! that execution; completed runs replay without either. The handler body
+//! runs on that execution (`prologue::Execution`);
 //! nothing of it (gateway, client, credentials) outlives the execution.
 //!
 //! - [`Order`]: keyed by the order number; its per-key lock serialises
@@ -79,7 +80,7 @@ pub(crate) struct Parts {
 
 impl Parts {
     /// Runs a handler's execution on any of the SDK's contexts: the prologue
-    /// (pin → resolve → fetch → open), then `body` on the execution it built,
+    /// (pin → resolve), then `body` on the execution it built,
     /// inside the execution span carrying the scope, the key (on an object
     /// context), the invocation id and the account id.
     async fn execute<'ctx, C, T, F, Fut>(&self, ctx: &C, body: F) -> Result<T, HandlerError>

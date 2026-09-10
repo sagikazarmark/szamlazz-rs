@@ -374,6 +374,12 @@ enum Shape {
 
 /// Accounts from deployment configuration; the resolver and the credential
 /// store of a static deployment, one struct.
+///
+/// Credentials are captured at construction. Fetching again clones those
+/// startup values: a new immutable deployment does not rotate the keys used
+/// by invocations pinned to an older deployment. Update retained deployments'
+/// store/configuration operationally, or use a dynamic credential store whose
+/// rotations are visible to every retained deployment.
 #[derive(Debug, Clone)]
 pub struct StaticResolver {
     shape: Shape,
@@ -490,7 +496,7 @@ impl AccountResolver for StaticResolver {
 }
 
 impl CredentialStore for StaticResolver {
-    /// The inline key under the account's id; anything else is gone.
+    /// The startup inline key under the account's id; anything else is gone.
     fn fetch<'a>(
         &'a self,
         credential_ref: &'a CredentialRef,

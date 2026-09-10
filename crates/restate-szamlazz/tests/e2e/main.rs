@@ -360,6 +360,10 @@ impl Sequentially {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the suite lists its scenarios and executes its two phases"
+)]
 #[ignore = "needs a Restate server: RESTATE_SERVER_BIN or RESTATE_ADMIN_URL / RESTATE_INGRESS_URL"]
 async fn e2e_order_protocol() {
     let Some(launcher) = launcher_or_skip(ReusePolicy::Allowed) else {
@@ -403,6 +407,8 @@ async fn e2e_order_protocol() {
             prologue::a_killed_invocation_releases_the_order_key,
             multi_account::account_change_between_executions_does_not_reach_the_invocation,
             multi_account::credential_rotation_between_executions_is_picked_up,
+            multi_account::credential_failure_on_replay_preserves_operation_commands,
+            multi_account::initialization_failure_is_journaled_at_the_operation,
         ],
     );
     if let Some(only) = &only {

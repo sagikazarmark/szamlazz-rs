@@ -36,7 +36,7 @@
 //! it says, and that no agent key is in it.
 //!
 //! [`open_gateway`] is how every unit test opens a [`Gateway`]: as the
-//! prologue does, but over the shared [`http_client`], the default client's
+//! executing operation does, but over the shared [`http_client`], the default client's
 //! settings (a cookie jar, the request timeout, no redirects) with **no root
 //! certificates**. Building a default `reqwest::Client` parses the system CA
 //! store (about 28 ms of CPU per client through the platform verifier, and a
@@ -59,7 +59,7 @@ use szamlazz_agent::{Credentials, InvoiceNumber, InvoiceSelector};
 use crate::account::Account;
 use crate::gateway::{FoundDocument, Gateway};
 
-/// A gateway for `account` with `credentials`, opened as the prologue opens
+/// A gateway for `account` with `credentials`, opened as an executing operation opens
 /// one per execution, over a fresh [`http_client`].
 pub(crate) fn open_gateway(account: Account, credentials: Credentials) -> Gateway {
     Gateway::open_with_http(account, credentials, http_client()).expect("gateway")

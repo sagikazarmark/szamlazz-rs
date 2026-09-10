@@ -18,10 +18,10 @@ to hold), and the `check_account` probe, all over the same module. No Restate
 service calls another, and `Order` never invokes a handler on its own key. The dependency direction
 the owner asked for (`Order` depends on the gateway, nothing depends on `Order`) is a compile-time
 fact: `Szamlazz.Order → gateway ← Szamlazz.Agent`. Everything the services know about the account
-they read through `Gateway::account()`. Since #25 neither service holds a gateway: both hold the
+they read from the journaled `Account` directly (#200). Since #25 neither service holds a gateway: both hold the
 `Accounts` bundle (account resolver + credential store) and the deployment-level `WorkerConfig`
-(namespace; the issue, read and resolve policies, the read policy since #37), and every handler's prologue resolves its account and opens a
-gateway for its own execution ([ADR 0006](0006-account-selection-via-restate-scopes.md)).
+(namespace; the issue, read and resolve policies, the read policy since #37). The prologue resolves the account;
+the first executing operation opens a gateway for its execution (#200; [ADR 0006](0006-account-selection-via-restate-scopes.md)).
 
 The crate pair mirrored email-rs: `restate-szamlazz` is the library (contract types, config, the identity
 types, the module, both services, no state, ADR 0005; `restate-sdk` is an unconditional dependency), and

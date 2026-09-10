@@ -14,9 +14,11 @@
 //! second client: the Számla Agent `Client` is the transport it wraps.
 //! `Szamlazz.Order` calls these inside `ctx.run`; the `Szamlazz.Agent` Restate
 //! service is a thin facade over the same functions. Neither Restate service
-//! calls the other. Everything the services need to know about the account
-//! (its document defaults, its seller block) is read through
-//! [`Gateway::account`]; nothing of a found document is compared with the
+//! calls the other. The services read deterministic defaults and seller data
+//! from their journaled [`Account`] (including [`Account::build_create`]),
+//! without requiring a client. The gateway is opened lazily inside an
+//! executing operation run, shared only within that handler execution;
+//! completed runs replay without fetching credentials. Nothing of a found document is compared with the
 //! account (the worker holds no account pin; ADR 0006, account-pin
 //! amendment).
 //!
@@ -930,7 +932,7 @@ impl Gateway {
     /// issue policy's floor
     /// ([`IssueConfig::MIN_INITIAL_DELAY`](crate::config::IssueConfig::MIN_INITIAL_DELAY))
     /// is derived from that constant, and holds because this constructor,
-    /// the one the prologue opens every execution's gateway with, never
+    /// the one an executing operation opens its execution's gateway with, never
     /// supplies a client of its own. [`Gateway::open_with_http`] does, and
     /// the timeout on it is the caller's; a deployment that opened its
     /// gateways that way would have to size the floor itself.

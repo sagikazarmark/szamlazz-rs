@@ -540,7 +540,7 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
     );
     LogCapture::rebuild_interest();
 
-    // What the prologue does: resolve, fetch, open; then the gateway
+    // Resolve the account, then fetch/open as an executing operation does; the gateway
     // observes the code and the fault is built.
     let account = order.accounts().resolve(None).await.expect("account");
     let credentials = order.accounts().fetch(&account).await.expect("credentials");

@@ -21,7 +21,9 @@ use restate_sdk::serde::Json;
 
 use crate::account::BoxFuture;
 use crate::contract::{IssuedKind, TerminalCode};
-use crate::gateway::{FoundDocument, OwnershipOutcome, QueryOutcome, SzamlazzAnswer, Unanswered};
+use crate::gateway::{
+    FoundDocument, Gateway, OwnershipOutcome, QueryOutcome, SzamlazzAnswer, Unanswered,
+};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 use crate::service::prologue::Execution;
 
@@ -303,6 +305,12 @@ impl From<Fault> for HandlerError {
 /// Restate's guidance on a cancellation is that the caller does not retry it.
 /// The caller attaches the document it was reading about when it knows one.
 pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
+    if let Some(fault) = initialization_fault(
+        error,
+        "retry with a new Idempotency-Key, query the document or read get",
+    ) {
+        return fault;
+    }
     if is_cancelled(error) {
         return Fault::unavailable(format!(
             "the {step} read was cancelled ({}) before szamlazz.hu answered; nothing was sent",
@@ -554,6 +562,46 @@ where
         .await
 }
 
+/// The operation boundary: initialization executes only when the SDK runs
+/// the closure. Its sanitized terminal failure completes this Run command,
+/// bypassing the operation's retry policy without replacing a recorded Run
+/// with an Output command. It says nothing about prior executions' sends.
+pub(in crate::service) async fn run_operating<'ctx, C, T, E, F, Fut>(
+    ctx: &C,
+    name: impl Into<String>,
+    policy: RunRetryPolicy,
+    exec: &Execution,
+    f: F,
+) -> Result<T, TerminalError>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce(Arc<Gateway>) -> Fut + Send + 'ctx,
+    Fut: Future<Output = Result<T, E>> + Send + 'ctx,
+    T: Journaled + Send + 'static,
+    E: StdError + Send + Sync + 'static,
+{
+    let gateway = exec.gateway();
+    ctx.run(name.into(), policy, move || async move {
+        let gateway = gateway.await.map_err(HandlerError::from)?;
+        Ok(f(gateway).await?)
+    })
+    .await
+}
+
+/// Only initialization emits a terminal 503 from an operation closure;
+/// exhaustion is 500 and cancellation is 409. Preserve its structured fault
+/// instead of wrapping it as issue-policy exhaustion or a lost answer.
+pub(super) fn initialization_fault(error: &TerminalError, next: &str) -> Option<Fault> {
+    (error.code() == 503)
+        .then(|| serde_json::from_str::<Fault>(error.message()).ok())
+        .flatten()
+        .filter(|fault| fault.code == TerminalCode::Unavailable)
+        .map(|mut fault| {
+            fault.message = format!("{}; {next}", fault.message);
+            fault
+        })
+}
+
 /// A read-only durable step under the read policy: journals the answer of
 /// `f` under `name`, re-executing it while szamlazz.hu does not answer
 /// (`Unanswered`). Every answer is data; a read writes nothing, so a
@@ -564,6 +612,7 @@ where
 /// The `unavailable` fault of a read that ended without an answer (the read
 /// policy exhausted or the invocation cancelled), naming the step and the
 /// last failure. The caller attaches the document when it knows one.
+/// Initialization failure is also `unavailable`, without spending the read policy.
 pub(in crate::service) async fn run_reading<'ctx, C, T, F, Fut>(
     ctx: &C,
     name: impl Into<String>,
@@ -572,19 +621,25 @@ pub(in crate::service) async fn run_reading<'ctx, C, T, F, Fut>(
 ) -> Result<T, Fault>
 where
     C: RunCtx<'ctx>,
-    F: FnOnce() -> Fut + Send + 'ctx,
+    F: FnOnce(Arc<Gateway>) -> Fut + Send + 'ctx,
     Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
     T: Journaled + Send + 'static,
 {
     let name = name.into();
-    run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f)
-        .await
-        .map_err(|error| read_exhausted(&name, &error))
+    run_operating(
+        ctx,
+        name.clone(),
+        exec.config.read.run_retry_policy(),
+        exec,
+        f,
+    )
+    .await
+    .map_err(|error| read_exhausted(&name, &error))
 }
 
 /// A **best-effort** read under the read policy: [`run_reading`] for a step
 /// whose handler already knows its answer and only lacks a detail: the answer
-/// of `f` as `Some`, or `None` when the read policy is exhausted (logged at
+/// of `f` as `Some`, or `None` when initialization fails or the read policy is exhausted (logged at
 /// `warn` naming the step; [`best_effort`]).
 ///
 /// # Errors
@@ -599,12 +654,20 @@ pub(in crate::service) async fn run_best_effort<'ctx, C, T, F, Fut>(
 ) -> Result<Option<T>, TerminalError>
 where
     C: RunCtx<'ctx>,
-    F: FnOnce() -> Fut + Send + 'ctx,
+    F: FnOnce(Arc<Gateway>) -> Fut + Send + 'ctx,
     Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
     T: Journaled + Send + 'static,
 {
     let name = name.into();
-    match run_retrying(ctx, name.clone(), exec.config.read.run_retry_policy(), f).await {
+    match run_operating(
+        ctx,
+        name.clone(),
+        exec.config.read.run_retry_policy(),
+        exec,
+        f,
+    )
+    .await
+    {
         Ok(value) => Ok(Some(value)),
         Err(error) => best_effort(&name, error).map(|()| None),
     }
@@ -617,9 +680,8 @@ pub(in crate::service) async fn verify<'ctx, C: RunCtx<'ctx>>(
     name: impl Into<String>,
     number: &str,
 ) -> Result<QueryOutcome, Fault> {
-    let gateway = Arc::clone(&exec.gateway);
     let number = number.to_owned();
-    run_reading(ctx, name, exec, move || async move {
+    run_reading(ctx, name, exec, move |gateway| async move {
         gateway.verify(&number).await
     })
     .await
@@ -639,10 +701,9 @@ pub(in crate::service) async fn lookup<'ctx, C: RunCtx<'ctx>>(
     order: &OrderKey,
     kind: IssuedKind,
 ) -> Result<OwnershipOutcome, Fault> {
-    let gateway = Arc::clone(&exec.gateway);
     let id = external_id.clone();
     let looked_up = order.clone();
-    run_reading(ctx, name, exec, move || async move {
+    run_reading(ctx, name, exec, move |gateway| async move {
         gateway.lookup_ours(&id, &looked_up, kind).await
     })
     .await

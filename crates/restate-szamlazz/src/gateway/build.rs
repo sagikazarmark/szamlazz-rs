@@ -9,6 +9,7 @@ use szamlazz_agent::{
 };
 
 use super::Gateway;
+use crate::account::Account;
 use crate::contract::{DocumentInput, IssuedKind};
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
@@ -87,7 +88,25 @@ impl Gateway {
         external_id: &ExternalId,
         refs: DocumentRefs<'_>,
     ) -> Result<CreateInvoice, InputError> {
-        let defaults = &self.account.defaults;
+        self.account
+            .build_create(kind, document, order, external_id, refs)
+    }
+}
+
+impl Account {
+    /// Builds a request from journaled defaults without opening a client.
+    ///
+    /// # Errors
+    /// See [`InputError`].
+    pub fn build_create(
+        &self,
+        kind: IssuedKind,
+        document: &DocumentInput,
+        order: &OrderKey,
+        external_id: &ExternalId,
+        refs: DocumentRefs<'_>,
+    ) -> Result<CreateInvoice, InputError> {
+        let defaults = &self.defaults;
         let overrides = &document.overrides;
 
         if document.items.is_empty() {
@@ -182,7 +201,7 @@ impl Gateway {
             aggregator: defaults.aggregator.clone(),
             guardian: defaults.guardian,
             external_id: Some(external_id.as_str().to_owned()),
-            seller: self.account.seller.to_seller(),
+            seller: self.seller.to_seller(),
             ..CreateInvoice::new(invoice_kind, header, buyer, items)
         })
     }
@@ -233,7 +252,7 @@ mod tests {
     }
 
     /// A gateway for the test account with `defaults` and a fixed seller
-    /// block, as the prologue would open it.
+    /// block, as an executing operation would open it.
     fn gateway(defaults: &serde_json::Value) -> Gateway {
         let mut account = Account::new("acct", "acct");
         account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");

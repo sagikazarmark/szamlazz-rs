@@ -88,6 +88,19 @@ of the handlers.
    consequence an embedder sees: a resolver of its own that deserialises `Defaults` from its own storage is
    held to the same rule (an unknown key is a parse error), which is the intended shape.
 
+## Replay-safe initialization (#200, 2026-09-10)
+
+Credential acquisition and Gateway initialization now occur inside an executing operation Run. Completed
+operations replay without either. The step-name sequences, success-result types and operation inputs are
+unchanged; initialization failure is now a terminal failure of the operation Run rather than an early
+handler Output. The old early Output could diverge from recorded operation commands (RT0016, reproduced
+on server 1.7.8 / SDK 0.12.0 / shared core 7.0.3).
+
+Normal immutable-deployment routing still applies. Exceptional resume onto this release requires reviewing
+all intervening changes, including the target-first sequence change above. Matching step names alone does
+not authorize a cross-deployment resume. Retained deployments using `StaticResolver` retain startup keys;
+a new deployment does not update their credential store.
+
 ## Considered options
 
 - **Keep the contract as a belt beside the braces.** Rejected. Belt and braces is a fair argument for a rule that

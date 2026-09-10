@@ -179,14 +179,24 @@ accepted its key. Multi-account mode depends on three experimental Restate flags
 `scoped_virtual_objects`), verified on server 1.7.8 with SDK 0.12.0. Kafka ingress is untested and unsupported in
 multi-account mode.
 
-**Credentials are fetched on every handler execution, outside the journal**, and held only for that execution.
-A rotation is picked up on the next execution of every in-flight invocation, and no agent key is ever written
-into Restate (the `Credentials` type has no serde implementation; the e2e suite scans every journal entry for the
-run's keys). A failed fetch is a **terminal** `unavailable` after a short in-process retry, by decision: a
-retryable error would route a prolonged store outage into the handler's kill-on-five and an unstructured 500,
-whereas the terminal fault is structured and immediate. The cost: a store outage during a **replay** of an
-invocation whose create already landed surfaces as `unavailable` even though the document exists; `get` or a
-retry with a new `Idempotency-Key` reconciles it (`already_issued`).
+**Credentials are fetched lazily inside the first external-operation run that executes**, and the fresh
+Gateway/client is reused only within that handler execution. Completed runs replay without consulting the store.
+The journaled `Account` supplies defaults for deterministic decisions even when no client is opened. Using
+credentials inside a run does not persist them: only its result or failure is journaled, and both stay secret-free
+(the e2e suite scans every journal entry).
+
+A failed fetch is **terminal** `unavailable` after three bounded attempts, 200 ms apart (`gone` fails immediately).
+A Gateway-open failure is the same structured fault. The failure is recorded on the executing operation's run,
+so it cannot replace a recorded run command with a terminal output. It bypasses the operation's read/issue policy;
+best-effort storno-number reads still report the known reversal without its number. An unfinished write may have
+sent during an earlier execution: `unavailable` preserves that uncertainty and advises reconciliation via `get`
+or a new `Idempotency-Key`. Credit-entry callers query the invoice first, then send only missing additive entries
+or the current intended replacement snapshot. Neither credentials nor sensitive initialization source messages reach the journal or caller.
+
+**Rotation depends on the store.** A dynamic store's rotated value is picked up when the next handler execution
+needs an external operation, under the same journaled Account and Credential ref. `StaticResolver` clones startup
+credentials: retained immutable deployments keep their original keys unless their store/configuration is updated
+operationally. Registering a new deployment alone does not rotate credentials for invocations pinned to an older one.
 
 ### The safety contract
 
@@ -413,8 +423,8 @@ expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may
   query (another code, `szlahu_down`) is data: nothing was sent.
 
 It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
-configuration by the services goes through `Gateway::account()`; a gateway is opened per handler execution by the
-prologue (`Gateway::open`) and never outlives it. `Gateway::open_with_http` opens one over a caller-built
+configuration by the services uses the journaled `Account` directly; a gateway is opened lazily inside the first
+executing operation run (`Gateway::open`) and never outlives that execution. `Gateway::open_with_http` opens one over a caller-built
 `reqwest::Client` (re-exported as `szamlazz_agent::reqwest`): the embedder's hook for a proxy or a custom TLS
 setup, and what this crate's unit and wiremock tests open their gateways with, over a client that loads no root
 certificates, so that none of them parses the system CA store for a plain-`http://` mock; a fresh client per
@@ -426,7 +436,7 @@ service calls another.
 registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
 handlers. Both are built `from_parts(Accounts, ValidatedWorkerConfig)`. Every handler decodes its body (`Body<T>`; a
 malformed one is `invalid_input` before anything is journaled) and runs the prologue (pin the namespace, resolve
-the account in the `account` step, fetch the credentials, open the gateway) before its operation.
+the account in the `account` step) before its operation; credential fetch and gateway open occur inside the first executing operation run.
 
 ## Identity Model
 

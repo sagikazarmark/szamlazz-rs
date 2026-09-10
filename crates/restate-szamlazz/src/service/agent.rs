@@ -10,15 +10,13 @@
 //! without a retry of its own, and with `additive: true` an at-least-once
 //! one (see [`SetCreditEntriesRequest::additive`]).
 
-use std::sync::Arc;
-
 use restate_sdk::context::RunRetryPolicy;
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
-use super::support::{AnsweredCode, Fault, run_reading, run_retrying};
+use super::support::{AnsweredCode, Fault, initialization_fault, run_operating, run_reading};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetCreditEntriesRequest, SetCreditEntriesResponse,
@@ -65,14 +63,18 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
 /// intended snapshot (an older one could overwrite newer entries); an
 /// additive one may already have appended the entries, so query first.
 fn set_credit_entries_unknown(additive: bool, lost: &impl std::fmt::Display) -> Fault {
-    let next = if additive {
-        "the entries are additive and may have landed; query the invoice before re-sending; if entries are still missing, send only those entries with a new Idempotency-Key"
-    } else {
-        "query the invoice; if replacement is still intended, call set_credit_entries again with the current intended snapshot and a new Idempotency-Key"
-    };
+    let next = credit_entries_recovery(additive);
     Fault::outcome_unknown(format!(
         "credit entry registration outcome unknown: {lost}; {next}"
     ))
+}
+
+fn credit_entries_recovery(additive: bool) -> &'static str {
+    if additive {
+        "the entries are additive and may have landed; query the invoice before re-sending; if entries are still missing, send only those entries with a new Idempotency-Key"
+    } else {
+        "query the invoice; if replacement is still intended, call set_credit_entries again with the current intended snapshot and a new Idempotency-Key"
+    }
 }
 
 /// What `query` answers from what its one step settled: the projection of
@@ -163,16 +165,15 @@ impl Execution {
         ctx: &Context<'_>,
     ) -> Result<CheckAccountResponse, HandlerError> {
         let outcome = {
-            let gateway = Arc::clone(&self.gateway);
             let external_id = ExternalId::for_probe(&self.config.namespace);
-            run_reading(ctx, "probe", self, move || async move {
+            run_reading(ctx, "probe", self, move |gateway| async move {
                 gateway.probe(&external_id).await
             })
             .await?
         };
         Ok(CheckAccountResponse::new(
             ctx.scope().map(str::to_owned),
-            CheckedAccount::from(self.gateway.account()),
+            CheckedAccount::from(&self.account),
             self.config.namespace.as_str(),
             credentials_check(outcome),
         ))
@@ -188,9 +189,8 @@ impl Execution {
         ctx: &Context<'_>,
         request: QueryRequest,
     ) -> Result<QueryResponse, HandlerError> {
-        let gateway = Arc::clone(&self.gateway);
         let selector = request.selector;
-        let outcome = run_reading(ctx, "query", self, move || async move {
+        let outcome = run_reading(ctx, "query", self, move |gateway| async move {
             gateway.query(&selector).await
         })
         .await?;
@@ -210,9 +210,8 @@ impl Execution {
         ctx: &Context<'_>,
         prefix: TaxpayerPrefix,
     ) -> Result<QueryTaxpayerResponse, HandlerError> {
-        let gateway = Arc::clone(&self.gateway);
         let step = taxpayer_step(&prefix);
-        let outcome = run_reading(ctx, step, self, move || async move {
+        let outcome = run_reading(ctx, step, self, move |gateway| async move {
             gateway.query_taxpayer(&prefix).await
         })
         .await?;
@@ -234,13 +233,13 @@ impl Execution {
             additive,
         } = request;
         let invoice_number = String::from(invoice_number);
-        let gateway = Arc::clone(&self.gateway);
         let number = invoice_number.clone();
-        let outcome = run_retrying(
+        let outcome = run_operating(
             ctx,
             format!("set-credit-entries-{invoice_number}"),
             RunRetryPolicy::new().max_attempts(1),
-            move || async move {
+            self,
+            move |gateway| async move {
                 Ok::<_, std::convert::Infallible>(
                     gateway
                         .set_credit_entries(&number, &entries, additive)
@@ -249,7 +248,10 @@ impl Execution {
             },
         )
         .await
-        .map_err(|error| set_credit_entries_unknown(additive, &error))?;
+        .map_err(|error| {
+            initialization_fault(&error, credit_entries_recovery(additive))
+                .unwrap_or_else(|| set_credit_entries_unknown(additive, &error))
+        })?;
         set_credit_entries_response(outcome, invoice_number, additive, &self.config.namespace)
             .map_err(HandlerError::from)
     }

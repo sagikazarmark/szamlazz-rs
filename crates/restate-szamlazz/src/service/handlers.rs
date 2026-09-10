@@ -34,8 +34,9 @@ use crate::contract::{
 /// its execution inside one span (`execution{scope, order,
 /// restate.invocation.id, account.id}`, so every log line it emits is
 /// attributable): the prologue (pin the namespace, resolve the request's
-/// scope to its account, journaled once per invocation, fetch the
-/// credentials for this execution, open the gateway) and then its operation.
+/// scope to its account, journaled once per invocation) and then its operation.
+/// Credentials and a fresh gateway are acquired inside the first operation
+/// run that executes; completed runs replay without consulting the store.
 /// After validation, a target ownership lookup (`lookup-{kind}`) settles a
 /// live target, a collision or a reversal without reissue before prerequisites.
 /// Reversed non-correctives take a best-effort `hint-storno-{number}`; an

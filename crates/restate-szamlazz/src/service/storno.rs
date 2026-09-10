@@ -17,7 +17,6 @@
 //! methods at the end are its shells.
 
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::prelude::{Context, ObjectContext};
@@ -25,8 +24,8 @@ use szamlazz_agent::Date;
 
 use super::prologue::Execution;
 use super::support::{
-    AnsweredCode, Fault, RunCtx, is_cancelled, run_best_effort, run_reading, run_retrying,
-    verified_document, verify,
+    AnsweredCode, Fault, RunCtx, initialization_fault, is_cancelled, run_best_effort,
+    run_operating, run_reading, verified_document, verify,
 };
 use crate::account::Account;
 use crate::contract::{ConflictReason, IssuedKind, StornoOutcome, StornoRequest, StornoResponse};
@@ -256,6 +255,12 @@ fn storno_response(
 /// Idempotency-Key`, `call storno again`): the storno is idempotent on the
 /// server, so the same next step serves a cancellation.
 fn storno_outcome_unknown(error: &TerminalError, next: &str) -> Fault {
+    if let Some(fault) = initialization_fault(
+        error,
+        "query the original invoice, then retry with a new Idempotency-Key if still intended",
+    ) {
+        return fault;
+    }
     if is_cancelled(error) {
         return Fault::outcome_unknown(format!(
             "the storno step was cancelled ({}) before its outcome was confirmed; a send may have landed: {next}",
@@ -325,14 +330,13 @@ async fn lookup_storno<'ctx, C: RunCtx<'ctx>>(
     exec: &Execution,
     intent: &StornoIntent,
 ) -> Result<StornoLookupOutcome, Fault> {
-    let gateway = Arc::clone(&exec.gateway);
     let external_id = intent.storno_id.clone();
     let number = intent.number.clone();
     run_reading(
         ctx,
         format!("lookup-storno-{number}"),
         exec,
-        move || async move { gateway.lookup_storno(&external_id, &number).await },
+        move |gateway| async move { gateway.lookup_storno(&external_id, &number).await },
     )
     .await
 }
@@ -353,17 +357,17 @@ async fn storno_step<'ctx, C: RunCtx<'ctx>>(
     exec: &Execution,
     intent: &StornoIntent,
 ) -> Result<gateway::StornoOutcome, TerminalError> {
-    let gateway = Arc::clone(&exec.gateway);
     let number = intent.number.clone();
     let external_id = intent.storno_id.clone();
     let comment = intent.comment.clone();
     let e_invoice = intent.e_invoice;
     let fulfillment_date = intent.fulfillment_date;
-    run_retrying(
+    run_operating(
         ctx,
         format!("storno-{}", intent.number),
         exec.config.issue.run_retry_policy(),
-        move || async move {
+        exec,
+        move |gateway| async move {
             gateway
                 .storno(StornoStepRequest {
                     invoice_number: &number,
@@ -390,13 +394,12 @@ pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
     number: &str,
     storno_id: &ExternalId,
 ) -> Result<Option<String>, HandlerError> {
-    let gateway = Arc::clone(&exec.gateway);
     let hinted = order.clone();
     let Some(outcome) = run_best_effort(
         ctx,
         format!("hint-storno-{number}"),
         exec,
-        move || async move { gateway.hint(&hinted).await },
+        move |gateway| async move { gateway.hint(&hinted).await },
     )
     .await?
     else {
@@ -419,14 +422,13 @@ async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
     exec: &Execution,
     number: &str,
 ) -> Result<Option<String>, HandlerError> {
-    let gateway = Arc::clone(&exec.gateway);
     let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
     let looked_up = number.to_owned();
     let Some(outcome) = run_best_effort(
         ctx,
         format!("lookup-storno-{number}"),
         exec,
-        move || async move { gateway.lookup_storno(&external_id, &looked_up).await },
+        move |gateway| async move { gateway.lookup_storno(&external_id, &looked_up).await },
     )
     .await?
     else {
@@ -473,7 +475,7 @@ impl Execution {
         // send.
         let intent = StornoIntent::from_verified(
             &found,
-            self.gateway.account(),
+            &self.account,
             number.clone(),
             storno_id.clone(),
             comment,
@@ -573,7 +575,7 @@ impl Execution {
         // it does not carry is a fault after every answer that needs no send.
         let intent = StornoIntent::from_verified(
             &found,
-            self.gateway.account(),
+            &self.account,
             number.clone(),
             ExternalId::for_unmanaged_storno(namespace, &number),
             comment,

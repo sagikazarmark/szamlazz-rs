@@ -3,14 +3,13 @@
 //! without a retry of its own), and the answer from data.
 
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 use restate_sdk::context::RunRetryPolicy;
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
-use super::support::{AnsweredCode, Fault, lookup, run_retrying};
+use super::support::{AnsweredCode, Fault, initialization_fault, lookup, run_operating};
 use crate::contract::{
     DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentKind, IssuedKind,
 };
@@ -48,18 +47,20 @@ impl Execution {
             };
 
         let outcome = {
-            let gateway = Arc::clone(&self.gateway);
             let number = found.number;
-            run_retrying(
+            run_operating(
                 ctx,
                 format!("delete-proforma-{number}"),
                 RunRetryPolicy::new().max_attempts(1),
-                move || async move {
+                self,
+                move |gateway| async move {
                     Ok::<_, std::convert::Infallible>(gateway.delete_proforma(&number).await)
                 },
             )
             .await
-            .map_err(|error| about(delete_unknown(&error)))?
+            .map_err(|error| {
+                about(initialization_fault(&error, "read get, then retry with a new Idempotency-Key if deletion is still intended").unwrap_or_else(|| delete_unknown(&error)))
+            })?
         };
         delete_response(outcome, &self.config.namespace).map_err(|fault| about(fault).into())
     }

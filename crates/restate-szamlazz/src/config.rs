@@ -39,8 +39,7 @@
 //! ([`StaticConfig`](crate::account::StaticConfig)) beside these keys.
 //! Everything account-shaped (credentials, endpoint, document defaults,
 //! seller block) is the [`Account`](crate::account::Account) a resolver
-//! produces, read by the services through
-//! [`Gateway::account`](crate::gateway::Gateway::account); its value types
+//! produces, read directly by the services without a client; its value types
 //! live in [`account`](crate::account), where they are journaled.
 //!
 //! The policies are `#[non_exhaustive]` (deployment-level, journaled nowhere,

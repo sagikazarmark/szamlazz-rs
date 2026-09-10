@@ -32,7 +32,7 @@ pub use static_resolver::{
 /// invocation finishes on the account it started on. Everything account-shaped
 /// the service layer reads is here: the endpoint, the document defaults and
 /// the seller block. The credentials are fetched separately, by
-/// [`Account::credential_ref`], on every handler execution.
+/// [`Account::credential_ref`], when a handler execution first needs an external operation.
 ///
 /// # Journaled
 ///
@@ -555,24 +555,28 @@ pub trait AccountResolver: Send + Sync {
 ///
 /// # Safety contract
 ///
-/// - **Fetched on every handler execution, never journaled.** The worker
-///   calls [`fetch`](Self::fetch) outside the journal every time a handler
-///   executes, including replays, and holds the result only for that
-///   execution, so a rotation is picked up on the next execution of every
-///   in-flight invocation, and no agent key is written into Restate.
+/// - **Fetched inside an executing operation, never journaled.** The worker
+///   calls [`fetch`](Self::fetch) when an execution first needs a gateway,
+///   inside that operation's run closure, and reuses the client only for that
+///   execution. Completed runs replay without a fetch. A dynamic store's
+///   rotation is picked up by the next execution that needs an operation;
+///   no agent key is written into Restate. A [`StaticResolver`] instead keeps
+///   startup credentials; retained immutable deployments need an operational
+///   store/configuration update to see a rotation.
 ///   [`Credentials`] has no serde implementation: the compiler rejects any
 ///   attempt to journal it.
 /// - **A stable reference across rotations.** The [`CredentialRef`] is the
 ///   resolver's, journaled with the [`Account`]; a store rotates the value
 ///   behind it, never the reference, so an in-flight invocation's next
-///   execution fetches the new key by the reference it journaled.
+///   executing operation fetches the new key by the reference it journaled.
 /// - A `Gone` reference is an answer (the account's credentials were
 ///   removed); `Unavailable` is a fault of the store. Neither display text
 ///   echoes the store's own message.
 /// - **Answer within seconds.** The worker bounds every `fetch` call at ten
 ///   seconds and drops the future at the deadline; a slow answer is
 ///   `unavailable`, retried in process like a reported `Unavailable`, then
-///   the terminal fault. A store over a secrets service or a network sets its
+///   terminal `unavailable` on the operation run, bypassing its retry policy
+///   and preserving uncertainty from earlier executions. A store over a secrets service or a network sets its
 ///   own, shorter timeouts and answers `Unavailable` itself rather than
 ///   letting a call hang into the worker's bound.
 ///

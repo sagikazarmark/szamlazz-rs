@@ -23,8 +23,8 @@ One deployment serves any number of szamlazz.hu accounts. The caller selects the
 the **Restate scope** (`/restate/scope/{scope}/call/Szamlazz.Order/{order}/…`, likewise for
 `Szamlazz.Agent`). Every handler of both services runs the same **prologue** before its operation: pin the
 namespace in a pure durable step (`namespace`); resolve the scope to its **Account** through the pluggable
-`AccountResolver` in a durable step named `account` under the **resolve policy**; fetch the account's
-credentials through the pluggable `CredentialStore` *outside the journal*, on every handler execution;
+`AccountResolver` in a durable step named `account` under the **resolve policy**. Then fetch the account's
+credentials through the pluggable `CredentialStore` inside the first executing operation run, without persisting them (#200);
 open the **Gateway** (the module that speaks to szamlazz.hu for one account) over a fresh Számla Agent
 client. The `Account` is journaled once per invocation and carries everything about the account but its
 agent key; the credentials are held only for the execution. The Virtual Object key stays the bare, trimmed
@@ -81,10 +81,12 @@ Resolution is split so that the *decision* is durable and the *secret* is not.
    `unscoped` and `unknown` are journaled and never retried; only the
    resolver's *unavailability* is a retryable error, whose display text never echoes the resolver's own
    message (it becomes `last_failure` on `sys_invocation`).
-2. The credentials are fetched **on every handler execution, including replays**, outside the journal,
+2. The credentials are fetched **inside the first external-operation run that executes** (#200), never persisted,
    with three in-process attempts 200 ms apart, and are dropped with the execution. A rotation is picked up
-   by the next execution of every in-flight invocation while its `account` entry stays byte-identical
-   (verified: `credential_rotation_between_executions_is_picked_up`).
+   by the next execution that needs an external operation while its `account` entry stays byte-identical
+   (verified: `credential_rotation_between_executions_is_picked_up`). Completed operations replay without a fetch.
+   This rotation guarantee requires a dynamic store. `StaticResolver` retains startup keys on each immutable
+   deployment; a new deployment does not rotate retained deployments' credentials.
 
 The **compile-time guard** is that `szamlazz_agent::Credentials` and `AgentKey` implement neither
 `Serialize` nor `Deserialize` (`assert_not_impl_any!` in `account.rs`), so a `ctx.run` closure cannot
@@ -290,14 +292,14 @@ account's, and carries no pins).
 
 ### A credential-store outage is a terminal `unavailable`
 
-The fetch is not a Restate retry. Three in-process attempts, then `TerminalError{unavailable}` (503),
-`gone` at once. Terminal by decision: a retryable error would route a prolonged store outage into the
-handler's `invocation_retry_policy` (five attempts, kill), and end as an unstructured 500 that looks like a
-transport failure; the terminal fault is structured and immediate. **Documented cost:** an outage during a
-*replay* of an invocation whose create already landed surfaces as `unavailable` although the document
-exists, which is exactly what the caller contract already says an error means ("outcome unknown"); `get` or
-a retry with a new `Idempotency-Key` answers `already_issued` (verified:
-`failing_credential_store_is_a_terminal_unavailable`, the same order issuing once the store is back).
+The fetch is not a Restate retry. Three bounded in-process attempts, then `TerminalError{unavailable}` (503),
+`gone` at once. Since #200 the terminal failure is recorded on the executing operation's Run command,
+not an early handler Output. It bypasses the operation retry policy. Completed operations replay without
+a fetch; an unfinished operation can fail initialization after earlier executions may have sent, so its
+fault preserves uncertainty. Create callers reconcile via `get` or a new `Idempotency-Key`; credit-entry
+callers query the invoice, then send only missing additive entries or the current intended replacement
+snapshot. The live replay regression reproduced the old RT0016 journal mismatch on Restate 1.7.8 and
+passes with operation-local initialization.
 
 ### `credentials_rejected` is 503
 
@@ -460,7 +462,7 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
 ## Superseded and amended sections of ADRs 0001–0005
 
 - **ADR 0001.** Amended: neither service holds a gateway or a client; both hold the `Accounts` bundle and
-  the `WorkerConfig`, and every handler's prologue opens a `Gateway` for its own execution. The module is
+  the `WorkerConfig`, and the first executing operation opens a `Gateway` for its execution (#200). The module is
   `gateway` (first `steps`). `Szamlazz.Agent` gains `check_account`. The rest holds.
 - **ADR 0002.** Superseded: "one szamlazz.hu account per deployment means the key carries no account
   namespace; the account slug lives in the external id" → the key carries no account namespace *because the

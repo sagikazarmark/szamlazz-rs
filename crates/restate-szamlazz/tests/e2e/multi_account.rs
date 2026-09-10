@@ -17,6 +17,170 @@ use crate::harness::szamlazz::{
 };
 use crate::harness::{Harness, create_body};
 
+/// A completed lookup must replay before an unfinished create fetches again.
+/// Failing that fetch must complete the run, not emit Output where Run is
+/// recorded. A prior send may have landed, so the fault cannot claim absence.
+pub(crate) async fn credential_failure_on_replay_preserves_operation_commands(h: &Harness) {
+    use std::time::Duration;
+
+    h.reset().await;
+    h.multi().rotate("beta", KEY_B);
+    let fetches = h.multi().fetches("beta");
+    h.absent("E2E-INIT", &["invoice", "prepayment", "final", "proforma"])
+        .await;
+    order_query("E2E-INIT")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_with_key(KEY_B)
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let hold = h.multi().hold_fetch("beta", 2);
+    let body = create_body(dec!(1000), false);
+    let call = h.call_scoped("beta", "E2E-INIT", "create_invoice", &body, "e2e-init");
+    let failure = async {
+        hold.reached().await;
+        let id = h.in_flight_on("E2E-INIT").await;
+        let journal = h.admin().journal(&id).await;
+        assert!(run_result(&journal, "lookup-invoice").is_some());
+        assert_eq!(h.create_bodies_of("E2E-INIT").await.len(), 1);
+        h.multi().set_unavailable("beta", true);
+        hold.release();
+        id
+    };
+    let (reply, id) = tokio::join!(tokio::time::timeout(Duration::from_secs(8), call), failure);
+    let state = h.admin().invocation(&id).await;
+    h.multi().set_unavailable("beta", false);
+    let reply = reply.unwrap_or_else(|_| {
+        panic!("expected a structured fault, not divergent journal commands: {state:?}")
+    });
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, TerminalCode::Unavailable);
+    assert!(fault.message.contains("outcome is not known"), "{fault:?}");
+    assert!(!fault.message.contains("nothing was sent"), "{fault:?}");
+    assert!(
+        !fault.message.contains("secret-store-source-sentinel"),
+        "{fault:?}"
+    );
+    assert_eq!(h.create_bodies_of("E2E-INIT").await.len(), 1);
+    assert_eq!(
+        h.multi().fetches("beta") - fetches,
+        4,
+        "one initial fetch and three at the unfinished operation; completed reads need none"
+    );
+    let journal = h.admin().journal(&id).await;
+    assert!(run_result(&journal, "create-invoice").is_some());
+    assert!(
+        journal
+            .iter()
+            .all(|entry| !entry.raw_contains("secret-store-source-sentinel"))
+    );
+}
+
+/// Initialization is a failure of the operation Run even on its first
+/// execution. Reads and one-shot writes preserve the same structured fault.
+pub(crate) async fn initialization_failure_is_journaled_at_the_operation(h: &Harness) {
+    use serde_json::json;
+    h.reset().await;
+    h.multi().set_unavailable("beta", true);
+    for (handler, body, step) in [
+        (
+            "query",
+            json!({"selector": {"invoice_number": "SZ-INIT"}}),
+            "query",
+        ),
+        (
+            "set_credit_entries",
+            json!({"invoice_number": "SZ-INIT", "entries": [], "additive": true}),
+            "set-credit-entries-SZ-INIT",
+        ),
+    ] {
+        let before = h.multi().fetches("beta");
+        let reply = h.call_agent_scoped("beta", handler, &body).await;
+        assert_eq!(reply.status, 503, "{handler}: {}", reply.body);
+        assert_eq!(reply.fault().code, TerminalCode::Unavailable);
+        assert_eq!(
+            h.multi().fetches("beta") - before,
+            3,
+            "no operation policy retries initialization"
+        );
+        assert_eq!(
+            h.admin().runs(reply.invocation_id()).await,
+            ["namespace", "account", step]
+        );
+        let journal = h.admin().journal(reply.invocation_id()).await;
+        assert!(run_result(&journal, step).is_some());
+        assert!(
+            journal
+                .iter()
+                .all(|entry| !entry.raw_contains("secret-store-source-sentinel"))
+        );
+    }
+    h.multi().set_unavailable("beta", false);
+    assert!(
+        h.mock
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+
+    // An initialization failure cannot establish whether an earlier execution
+    // sent: its one-shot recovery advice must be safe for either case.
+    h.multi().set_unavailable("beta", true);
+    for (additive, advice) in [
+        (true, "send only those entries"),
+        (false, "current intended snapshot"),
+    ] {
+        let reply = h
+            .call_agent_scoped(
+                "beta",
+                "set_credit_entries",
+                &json!({
+                    "invoice_number": "SZ-INIT", "additive": additive,
+                        "entries": [{"date": "2026-09-10", "title": "transfer", "amount": "1270"}]
+                }),
+            )
+            .await;
+        assert_eq!(reply.status, 503, "{}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, TerminalCode::Unavailable);
+        assert!(fault.message.contains("query the invoice"), "{fault:?}");
+        assert!(fault.message.contains(advice), "{fault:?}");
+        assert!(!fault.message.contains("read get"), "{fault:?}");
+    }
+    h.multi().set_unavailable("beta", false);
+
+    // http::Uri accepts this port; the Számla Agent URL builder refuses it.
+    // This reaches Gateway::open after a successful credential fetch.
+    h.multi().update("beta", |account| {
+        account.endpoint = "http://127.0.0.1:99999/".parse().expect("endpoint");
+    });
+    let reply = h.check_account(Some("beta")).await;
+    h.multi().update("beta", |account| {
+        account.endpoint = h.mock.uri().parse().expect("endpoint");
+    });
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, TerminalCode::Unavailable);
+    assert!(
+        fault.message.contains("client could not be built"),
+        "{fault:?}"
+    );
+    assert!(
+        !fault.message.contains("99999"),
+        "source is private: {fault:?}"
+    );
+    assert_eq!(
+        h.admin().runs(reply.invocation_id()).await,
+        ["namespace", "account", "probe"]
+    );
+    assert!(run_result(&h.admin().journal(reply.invocation_id()).await, "probe").is_some());
+}
+
 /// The single → multi flag day. While the services are private the
 /// ingress refuses a call without creating an invocation; after the drain
 /// and the switch (same namespace, the same szamlazz.hu account now under
@@ -131,7 +295,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
 /// The scope namespaces both identities Restate keys an invocation by. The
 /// same order key under scopes `acme` and `beta`, concurrently, is two
 /// Virtual Objects: two `issued`, each account's own agent key on the create
-/// wire exactly once (the prologue opens each execution's gateway on its own
+/// wire exactly once (the executing operation opens its gateway on its own
 /// account; the lookup queries carry the key as well, the create bodies are
 /// what identify *which account issued*), the same external id on two
 /// szamlazz.hu accounts. And the **same** `Idempotency-Key` under two scopes
