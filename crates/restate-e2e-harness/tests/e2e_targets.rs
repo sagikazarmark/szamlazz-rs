@@ -4,12 +4,11 @@
 #![cfg(unix)]
 #![allow(missing_docs, reason = "test-only generated clients")]
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
-use restate_e2e_harness::{
-    Admin, Call, Retries, ReusePolicy, ServerSpec, Target, Watch, launcher_or_skip,
-};
+use restate_e2e_harness::{Admin, Call, ReusePolicy, ServerSpec, Target, Watch, launcher_or_skip};
 use restate_sdk::prelude::*;
 use serde_json::json;
 
@@ -37,9 +36,11 @@ impl ScopedObject {
         Ok(ctx.key().to_owned())
     }
 
+    // Keep every retry delay below the observed 2 s scheduler-yield threshold
+    // on Restate 1.7.8 with vqueues; this improves visibility, not guarantees it.
     #[handler(
         journal_retention = "1d",
-        invocation_retry_policy(initial_interval = "1s")
+        invocation_retry_policy(initial_interval = "1s", max_interval = "1s")
     )]
     async fn retry(&self, ctx: ObjectContext<'_>, label: String) -> HandlerResult<()> {
         ctx.run(|| async { Err::<(), _>(std::io::Error::other(label.clone()).into()) })
@@ -60,25 +61,47 @@ impl OtherObject {
     }
 }
 
-/// The invocations remain in flight throughout sampling. A busy runner may
-/// not process a sample before `finish` cancels it; try a new watch if so,
-/// within one deadline. Once a sample answers, its selection must be correct.
-async fn sample(admin: &Admin, target: &Target<'_>) -> Retries {
-    tokio::time::timeout(Duration::from_secs(30), async {
+/// The invocations remain in flight throughout sampling, but their failing
+/// commands need not be visible in every successful sample. Accumulate evidence
+/// across watches within one deadline, rejecting any label outside the selection.
+async fn sample(admin: &Admin, target: &Target<'_>, expected: &[&str]) {
+    let mut observed = BTreeSet::new();
+    let mut samples = 0;
+    let mut query_errors = 0;
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
         let mut window = Duration::from_millis(200);
         loop {
             let watch = Watch::start(admin.clone(), target);
             tokio::time::sleep(window).await;
             let retries = watch.finish().await;
-            assert_eq!(retries.query_errors, 0, "{retries:?}");
-            if retries.samples > 0 {
-                return retries;
+            samples += retries.samples;
+            query_errors += retries.query_errors;
+            assert_eq!(query_errors, 0, "{target:?}: {retries:?}");
+            assert!(
+                !retries.observed_completion,
+                "{target:?} is still in flight: {retries:?}"
+            );
+            for label in &retries.failing_commands {
+                assert!(
+                    expected.contains(&label.as_str()),
+                    "{target:?}: unexpected label {label:?}, expected {expected:?}: {retries:?}"
+                );
             }
-            window *= 2;
+            observed.extend(retries.failing_commands);
+            if expected.iter().all(|label| observed.contains(*label)) {
+                return;
+            }
+            // Give slow queries time to answer without an unbounded window
+            // delaying the next check for unexpected labels.
+            window = (window * 2).min(Duration::from_secs(2));
         }
     })
-    .await
-    .expect("a processed watch sample")
+    .await;
+    assert!(
+        result.is_ok(),
+        "{target:?}: timed out waiting for {expected:?}; observed {observed:?}, \
+         samples: {samples}, query_errors: {query_errors}"
+    );
 }
 
 #[tokio::test]
@@ -158,16 +181,9 @@ async fn e2e_targets_isolate_the_same_service_and_key_in_each_scope() {
     );
 
     for (target, _, label) in &cases {
-        let retries = sample(restate.admin(), target).await;
-        assert_eq!(retries.failing_commands, [*label]);
+        sample(restate.admin(), target, &[*label]).await;
     }
-    let mut retries = sample(restate.admin(), &all).await;
-    retries.failing_commands.sort();
-    assert_eq!(retries.failing_commands, ["alpha", "beta", "unscoped"]);
-    assert!(
-        !retries.observed_completion,
-        "named scopes are still in flight"
-    );
+    sample(restate.admin(), &all, &["alpha", "beta", "unscoped"]).await;
 
     for id in ids.iter().chain(&decoys) {
         restate.admin().kill(id).await;
