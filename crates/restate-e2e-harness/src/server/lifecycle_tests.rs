@@ -100,7 +100,11 @@ impl Suite {
             .env("TMPDIR", &root)
             .env("RESTATE_LIFECYCLE_PAUSES", pauses)
             .stdout(Stdio::from(log.try_clone().expect("suite log")))
-            .stderr(Stdio::from(log))
+            .stderr(if scenario == "stderr-failure" {
+                Stdio::piped()
+            } else {
+                Stdio::from(log)
+            })
             .spawn()
             .expect("isolated suite process");
         Self { child, root }
@@ -246,6 +250,14 @@ fn suite_process() {
                     )
                 });
                 if result.is_err() {
+                    if std::env::var("RESTATE_LIFECYCLE_SCENARIO")
+                        .is_ok_and(|scenario| scenario == "stderr-failure")
+                    {
+                        assert!(
+                            super::started().groups.is_empty(),
+                            "failed launch unregistered"
+                        );
+                    }
                     fs::write(root.join(format!("refused-{name}.ready")), "")
                         .expect("launch refused");
                 }
@@ -259,6 +271,39 @@ fn suite_process() {
     );
     launch("second");
     std::thread::park();
+}
+
+#[test]
+fn failing_stderr_after_spawn_stops_and_reaps_the_process_group() {
+    let mut suite = Suite::start("stderr-failure", Signal::SIGTERM, "spawned-first");
+    suite.await_point("spawned-first");
+    let processes = suite.await_server("first");
+    // The first diagnostic succeeded. Break the sink before the post-spawn
+    // diagnostic, while both the server and its descendant are alive.
+    drop(suite.child.stderr.take().expect("piped stderr"));
+    suite.release("spawned-first");
+    suite.await_point("refused-first");
+    wait_for(
+        || processes.iter().all(|&pid| !alive(pid)),
+        "failed launch leaves no server or descendant alive",
+    );
+    assert_eq!(
+        kill(processes[0], None),
+        Err(nix::errno::Errno::ESRCH),
+        "the server leader is reaped, not merely killed"
+    );
+    assert!(
+        fs::read_dir(&suite.root)
+            .expect("suite directory")
+            .any(|entry| {
+                entry
+                    .expect("entry")
+                    .path()
+                    .join("restate-server.log")
+                    .exists()
+            }),
+        "failed startup retains its diagnostic directory"
+    );
 }
 
 #[test]

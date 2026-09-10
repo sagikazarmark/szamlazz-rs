@@ -132,13 +132,25 @@ pub fn launcher_or_skip(reuse: ReusePolicy) -> Option<Launcher> {
     match gate {
         Ok(Some(launcher)) => Some(launcher),
         Ok(None) => {
-            eprintln!(
-                "skipping: no Restate server (no RESTATE_SERVER_BIN, no RESTATE_ADMIN_URL / \
-                 RESTATE_INGRESS_URL)"
-            );
+            match reuse {
+                ReusePolicy::Allowed => eprintln!(
+                    "skipping: no Restate server (no RESTATE_SERVER_BIN, no RESTATE_ADMIN_URL / \
+                     RESTATE_INGRESS_URL)"
+                ),
+                ReusePolicy::Never => eprintln!(
+                    "skipping: no RESTATE_SERVER_BIN; ReusePolicy::Never ignores server reuse URLs"
+                ),
+            }
             None
         }
-        Err(message) => panic!("{message}"),
+        Err(message) => match reuse {
+            ReusePolicy::Allowed => panic!("{message}"),
+            ReusePolicy::Never => panic!(
+                "no Restate server to run the end-to-end suite against, and CI is set: a skipped run \
+                 proves nothing. Set RESTATE_SERVER_BIN to a restate-server binary (spawned on this \
+                 host). ReusePolicy::Never ignores RESTATE_ADMIN_URL and RESTATE_INGRESS_URL."
+            ),
+        },
     }
 }
 

@@ -11,8 +11,8 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   spawns on the loopback, on ports chosen free at launch, with its log and data under an exclusively allocated
   temp directory (`restate-e2e-{pid}-{name}-{sequence}`). Existing candidates are skipped, so port reuse cannot
   reuse storage or overwrite earlier failure evidence. Failed launches and panic teardown retain their own
-   directory, including when startup is cancelled by a timeout or task abortion; normal teardown removes only that launch's directory. Its process group is killed when the handle
-  drops and on SIGINT/SIGTERM. With
+  directory, including when startup is cancelled by a timeout or task abortion; normal teardown removes only
+  that launch's directory. Its process group is killed when the handle drops and on SIGINT/SIGTERM. With
   neither the suite **skips** with a message, and **fails** when `CI` is set: a run that passed by skipping proves
   nothing. A `ServerSpec` names the shape: the experimental `Feature`s it needs on or off (set on the spawned server,
   checked against `/version` at launch for a spawned and a reused server alike; a feature not listed is neither set
@@ -26,8 +26,9 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   called or sent; logical segments percent-encoded by the harness) and `invoke(&call, body, idempotency)` → a `Reply` (status, parsed body, `x-restate-id`,
   `x-restate-error-source`); `Reply::fault::<F>()` asserts Restate's error envelope (`code` = the HTTP status,
   `source` = `invocation`, the header) and decodes the JSON string in `message` into the caller's own fault type.
-  `Restate::ingress_url()` exposes the base URL for consumer-owned HTTP clients sending raw bodies or custom
-  headers, or using a different timeout.
+  `invoke` has a 120-second HTTP timeout; timing out panics without cancelling the invocation or establishing
+  that it completed. `Restate::ingress_url()` exposes the base URL for consumer-owned HTTP clients sending
+  raw bodies or custom headers, or using a different timeout.
 - **The admin API**: SQL introspection, journals (`raw` hex-decoded to bytes), `ctx.run` names, `sys_invocation`
   rows, the registered handlers (`GET /services`), kill / cancel / purge (waiting for the row to go),
   `await_status`, the in-flight invocations selected by service/key/scope, and a `Watch` that samples their run retries
@@ -61,71 +62,6 @@ The image's binary is Linux-only. On macOS, use a native `restate-server` from t
 The quick start below is tested with **Rust SDK 0.12.0 and Restate server 1.7.8**,
 with vqueues, protocol v7 and scoped Virtual Objects enabled. This crate requires
 **Unix** and **Rust 1.92 or later**.
-
-Admin and ingress base URLs accept trailing slashes; the harness removes those
-separators while preserving any path prefix, including in the exported base URLs.
-With reuse allowed, setting only one of `RESTATE_ADMIN_URL` and `RESTATE_INGRESS_URL`
-fails immediately and names the missing variable. An incomplete pair never falls
-back to a spawned server or a skip. `ReusePolicy::Never` ignores both reuse URLs.
-Spawned servers use TCP for the node, admin and ingress listeners, overriding
-listener modes inherited from the environment or supplied through `ServerSpec.env`.
-
-`RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
-server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback when the server reaches it
-there (a spawned server, no override) and to every interface otherwise (a reused server may be a container reaching
-back to the host).
-
-### Process lifecycle
-
-Before any child can be spawned, the launcher waits for both SIGINT and SIGTERM
-to be registered on a dedicated thread/runtime. Initialization failure panics
-and prevents this and later launches. Spawning and registering a process group
-share a lock with shutdown: a launch already inside that boundary is included
-in cleanup; once shutdown closes admission, further launches are refused.
-
-A stop signal kills every registered server's process group (including descendants
-that remain in it), then exits the test process with status **130** for SIGINT or
-**143** for SIGTERM. This covers signals during first startup and concurrent
-launches. Normal handle drop kills the group and reaps the child. Signal exit does
-not unwind or remove the server's temporary directory; normal drop removes it
-unless the test is panicking. SIGKILL cannot run cleanup.
-
-Exit inspection leaves the child unreaped, reserving its process ID until group
-signaling, reaping and registry removal happen under the lifecycle lock. On Unix
-targets without `waitid` (OpenBSD, Redox, Cygwin, Horizon), early exit inspection is
-unavailable; readiness still fails at its deadline.
-
-Readiness uses one 90-second deadline for health, SQL introspection and version
-checks, including response bodies. The owned child is inspected throughout those
-stages and after successful responses; another server answering on a selected
-admin port cannot hide an observed child exit.
-
-Dropping the handle also requests shutdown of every local endpoint it deployed.
-Keep the Tokio runtime running to execute that shutdown; Drop does not wait for
-completion. Connections have up to ten seconds to drain; remaining connection and
-SDK handler tasks are then cancelled and joined. The private HTTP/2 server owns
-both kinds of tasks over the SDK's `HyperEndpoint` adapter, since SDK 0.12's
-`HttpServer` detaches them and its timeout only stops waiting. This terminates
-handler futures, not external effects or independently spawned application tasks.
-Earlier endpoints stay available while the handle lives, and a reused Restate
-server is itself left running.
-
-**End successful tests with `restate.finish().await`.** This requests shutdown of
-all local endpoints together, waits for their connection and SDK handler tasks,
-and fails the test if any endpoint task panicked—even when Restate retried that
-execution successfully. Failures identify the endpoint URI and task, including
-earlier deployments. Forced cancellation at the drain deadline is expected;
-panics are not. An owned server is stopped and its logs retained on endpoint failure.
-Drop alone is best-effort cleanup and cannot propagate task failures to the test.
-Keep handler dependencies alive through `finish`. It does not wait for durable
-invocations to complete (`drain` does), or join independently spawned application tasks.
-
-For a test deliberately exercising handler panics, use
-`let failures = restate.finish_with_failures().await` and assert the expected
-`EndpointFailure { uri, message }` values. This is the explicit acknowledgement
-path; normal tests should use `finish`, which requires no failures. Cancelling
-either finish future requests cleanup but forfeits its completion and failure
-assertion; an owned server's diagnostic directory is retained.
 
 ## Quick start
 
@@ -211,6 +147,75 @@ patches only the harness dependency to the local source, and runs this exact tes
 against a real server. Its fresh dependency resolution checks these features
 without workspace dev-dependency unification.
 
+## Server configuration and lifecycle
+
+Admin and ingress base URLs accept trailing slashes; the harness removes those
+separators while preserving any path prefix, including in the exported base URLs.
+With reuse allowed, setting only one of `RESTATE_ADMIN_URL` and `RESTATE_INGRESS_URL`
+fails immediately and names the missing variable. An incomplete pair never falls
+back to a spawned server or a skip. `ReusePolicy::Never` ignores both reuse URLs.
+Spawned servers use TCP for the node, admin and ingress listeners, overriding
+listener modes inherited from the environment or supplied through `ServerSpec.env`.
+
+`RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
+server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback when the server reaches it
+there (a spawned server, no override) and to every interface otherwise (a reused server may be a container reaching
+back to the host).
+
+### Process lifecycle
+
+Before any child can be spawned, the launcher waits for both SIGINT and SIGTERM
+to be registered on a dedicated thread/runtime. Initialization failure panics
+and prevents this and later launches. Spawning and registering a process group
+share a lock with shutdown: a launch already inside that boundary is included
+in cleanup; once shutdown closes admission, further launches are refused.
+The child is owned for cleanup immediately after spawning, so a startup panic,
+including a failed diagnostic write, kills and reaps it and retains its directory.
+
+A stop signal kills every registered server's process group (including descendants
+that remain in it), then exits the test process with status **130** for SIGINT or
+**143** for SIGTERM. This covers signals during first startup and concurrent
+launches. Normal handle drop kills the group and reaps the child. Signal exit does
+not unwind or remove the server's temporary directory; normal drop removes it
+unless the test is panicking. SIGKILL cannot run cleanup.
+
+Exit inspection leaves the child unreaped, reserving its process ID until group
+signaling, reaping and registry removal happen under the lifecycle lock. On Unix
+targets without `waitid` (OpenBSD, Redox, Cygwin, Horizon), early exit inspection is
+unavailable; readiness still fails at its deadline.
+
+Readiness uses one 90-second deadline for health, SQL introspection and version
+checks, including response bodies. The owned child is inspected throughout those
+stages and after successful responses; another server answering on a selected
+admin port cannot hide an observed child exit.
+
+Dropping the handle also requests shutdown of every local endpoint it deployed.
+Keep the Tokio runtime running to execute that shutdown; Drop does not wait for
+completion. Connections have up to ten seconds to drain; remaining connection and
+SDK handler tasks are then cancelled and joined. The private HTTP/2 server owns
+both kinds of tasks over the SDK's `HyperEndpoint` adapter, since SDK 0.12's
+`HttpServer` detaches them and its timeout only stops waiting. This terminates
+handler futures, not external effects or independently spawned application tasks.
+Earlier endpoints stay available while the handle lives, and a reused Restate
+server is itself left running.
+
+**End successful tests with `restate.finish().await`.** This requests shutdown of
+all local endpoints together, waits for their connection and SDK handler tasks,
+and fails the test if any endpoint task panicked—even when Restate retried that
+execution successfully. Failures identify the endpoint URI and task, including
+earlier deployments. Forced cancellation at the drain deadline is expected;
+panics are not. An owned server is stopped and its logs retained on endpoint failure.
+Drop alone is best-effort cleanup and cannot propagate task failures to the test.
+Keep handler dependencies alive through `finish`. It does not wait for durable
+invocations to complete (`drain` does), or join independently spawned application tasks.
+
+For a test deliberately exercising handler panics, use
+`let failures = restate.finish_with_failures().await` and assert the expected
+`EndpointFailure { uri, message }` values. This is the explicit acknowledgement
+path; normal tests should use `finish`, which requires no failures. Cancelling
+either finish future requests cleanup but forfeits its completion and failure
+assertion; an owned server's diagnostic directory is retained.
+
 ## Selecting objects to observe
 
 ### Observation timeouts
@@ -239,8 +244,7 @@ use `restate.admin().drain_with_timeout(...)` for a longer wait.
 `Call::object` and `Target::object` take the **same logical key**. Pass `invoice/2026` to both: `Call::path()`
 renders the key as `invoice%2F2026`, while the SQL selector matches `invoice/2026`. A literal `%2F` is encoded
 as `%252F`; callers must not pre-encode keys, services, handlers or scopes. Standalone `.` and `..` segments
-are refused because HTTP URL parsers normalize them even when encoded. This is a breaking change from the
-previous caller-encoded `Call` convention; remove caller-side percent encoding when migrating.
+are refused because HTTP URL parsers normalize them even when encoded.
 
 `Target` always includes a service and key. Its public `scope: ScopeSelection` distinguishes three selections:
 
@@ -259,10 +263,6 @@ assert_eq!(all.scope, ScopeSelection::All);
 ```
 
 `ScopeSelection::default()` is `Unscoped`. Selectors remain plain data and const-constructible.
-**Migration:** `Target::object` previously included all scopes and `Target.scope` was an `Option<&str>`.
-Use `.all_scopes()` to retain that aggregation; replace literal `None` with `ScopeSelection::All` for the old
-behavior (or `Unscoped` for an exact unscoped selection), and `Some(name)` with `ScopeSelection::Named(name)`.
-This is a breaking interface change of the independently versioned harness crate.
 
 `Admin::in_flight_ids_on`, `in_flight_on`, `await_in_flight_on` and `Watch::start` all apply this selection.
 `Watch` is **object-wide**: all matching invocations contribute retry counts and failures, and it stops when
@@ -338,12 +338,10 @@ let full = run_result_at(journal, "lookup-invoice", 1).expect("full lookup");
 # }
 ```
 
-**Migration:** name-only selection previously silently chose the first occurrence.
-Use `run_result_at` where names repeat. Custom SQL must select `version` and
+Custom SQL must select `version` and
 `entry_json` along with `index`, `entry_type`, `name`, and `raw` when using
-`JournalEntry::from_row`; literals must supply the new `version` and
-`run_completion_id` fields. This is a breaking interface change of the
-independently versioned harness crate. `raw` remains the hex-decoded entry bytes
+`JournalEntry::from_row`; literals must supply `version` and
+`run_completion_id`. `raw` holds the hex-decoded entry bytes
 for content and leak assertions; it is not the correlation source.
 
 `JournalEntry::from_row` requires a non-empty string `entry_type` and a valid hex string `raw`, even for
@@ -398,9 +396,7 @@ the first `{`, without validating the remainder or comparing parameter values or
 `Table::new` rejects empty parameter prefixes, different patterns sharing a prefix, and fixed names shadowed
 by a parameter prefix within the same handler.
 
-**Migration:** pass service and handler to `Table::pattern`. A missing map entry
-is now missing evidence, not an empty sequence; retain and collect every supplied
-invocation's journal. Do not fill missing entries with empty vectors unless the
+Retain and collect every supplied invocation's journal. Do not fill missing entries with empty vectors unless the
 test has independently established an empty journal. `Admin::all_journals` only
 returns invocations with retained entries.
 
@@ -432,7 +428,7 @@ exercise successful handler completion during draining and forced cancellation
 of a pending handler, including termination of its existing HTTP/2 connection.
 They also assert that `finish` propagates handler panics and that deliberate
 failure collection returns their endpoint URI and message. Startup regressions
-cover timeout and task-abortion cleanup with retained evidence.
+cover timeout, task-abortion and failed-stderr cleanup with retained evidence.
 `RESTATE_SERVER_BIN=… cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract
 against a server of its own (never a reused one: the test deploys a service and leaves its invocations retained,
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the

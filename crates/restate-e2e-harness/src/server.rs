@@ -15,6 +15,7 @@
 
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -310,13 +311,7 @@ fn stop_on_signal() {
 }
 
 impl Restate {
-    fn new(
-        admin: String,
-        mut ingress: String,
-        spec: &ServerSpec,
-        endpoint_host: String,
-        process: Option<Process>,
-    ) -> Self {
+    fn new(admin: String, mut ingress: String, spec: &ServerSpec, endpoint_host: String) -> Self {
         let http = plain_http()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -328,7 +323,7 @@ impl Restate {
             http,
             features: spec.features,
             endpoint_host,
-            process,
+            process: None,
             endpoints: Mutex::new(Vec::new()),
         }
     }
@@ -342,7 +337,7 @@ impl Restate {
         spec: &ServerSpec,
         endpoint_host: String,
     ) -> Self {
-        Self::new(admin, ingress, spec, endpoint_host, None)
+        Self::new(admin, ingress, spec, endpoint_host)
     }
 
     /// A `restate-server` process from `binary` with `spec`'s features and
@@ -409,6 +404,15 @@ impl Restate {
         #[cfg(test)]
         lifecycle_tests::pause("install");
         stop_on_signal();
+        // Build fallible client state before spawning. Declare the cleanup
+        // owner before the registry guard so unwinding releases the lifecycle
+        // lock before Restate::drop acquires it to stop and reap the child.
+        let mut restate = Self::new(
+            format!("http://127.0.0.1:{admin}"),
+            format!("http://127.0.0.1:{ingress}"),
+            spec,
+            endpoint_host,
+        );
         // A signal cannot miss a child between spawn and registration.
         let mut registry = started();
         assert!(
@@ -418,30 +422,29 @@ impl Restate {
         let child = command
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {}: {error}", binary.display()));
-        #[cfg(test)]
-        lifecycle_tests::spawned(child.id());
-        eprintln!(
-            "restate-server (pid {}) on {ports}, base dir {}",
-            child.id(),
-            base_dir.display()
-        );
-        let process = Process {
+        let group = child.id();
+        restate.process = Some(Process {
             ports,
             child,
             base_dir,
             keep_evidence: true,
-        };
-        registry.groups.push(process.group());
+        });
+        #[cfg(test)]
+        lifecycle_tests::spawned(group);
+        registry.groups.push(group);
         drop(registry);
+        eprintln!(
+            "restate-server (pid {group}) on {ports}, base dir {}",
+            restate
+                .process
+                .as_ref()
+                .expect("spawned process")
+                .base_dir
+                .display()
+        );
         #[cfg(test)]
         lifecycle_tests::pause("registered");
-        Self::new(
-            format!("http://127.0.0.1:{admin}"),
-            format!("http://127.0.0.1:{ingress}"),
-            spec,
-            endpoint_host,
-            Some(process),
-        )
+        restate
     }
 
     /// Waits for the admin API (failing at once, with the server's own account
@@ -741,6 +744,11 @@ impl Restate {
     /// `idempotency` as the `Idempotency-Key` header when given. The reply,
     /// whatever its status: the body parsed as JSON when it is, kept as a
     /// string otherwise.
+    ///
+    /// The HTTP request, including its response body, has a 120-second timeout;
+    /// a timeout panics rather than returning a [`Reply`]. It does not cancel
+    /// the invocation or establish that it completed. For a different timeout,
+    /// use [`Self::ingress_url`] and [`Call::path`] with a consumer-owned HTTP client.
     pub async fn invoke(
         &self,
         call: &Call<'_>,
@@ -811,7 +819,10 @@ impl Drop for Restate {
         registry.groups.retain(|started| *started != group);
         drop(registry);
         if process.keep_evidence || std::thread::panicking() {
-            eprintln!(
+            // A failed stderr write may be why startup is unwinding. Cleanup
+            // must not panic again while reporting retained evidence.
+            let _ = writeln!(
+                std::io::stderr(),
                 "restate-server's base dir is kept for inspection: {}",
                 process.base_dir.display()
             );
