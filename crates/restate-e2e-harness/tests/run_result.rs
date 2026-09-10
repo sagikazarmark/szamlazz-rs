@@ -36,6 +36,35 @@ fn notification(index: u64, completion: u32) -> JournalEntry {
 }
 
 #[test]
+fn unnamed_runs_keep_their_result_identity() {
+    let journal = [
+        command(1, "", 0),
+        notification(2, 0),
+        command(3, "named", 1),
+        notification(4, 1),
+        command(5, "", 2),
+        notification(6, 2),
+    ];
+    assert!(journal[0].is_run());
+    assert_eq!(
+        run_result(&journal[..2], "")
+            .expect("unique unnamed run")
+            .index,
+        2
+    );
+    for (occurrence, index) in [(0, 2), (1, 6)] {
+        assert_eq!(
+            restate_e2e_harness::run_result_at(&journal, "", occurrence)
+                .expect("unnamed occurrence")
+                .index,
+            index
+        );
+    }
+    assert!(std::panic::catch_unwind(|| run_result(&journal, "")).is_err());
+    assert_eq!(run_result(&journal, "named").expect("named run").index, 4);
+}
+
+#[test]
 fn interleaved_runs_find_their_own_notifications_in_either_completion_order() {
     for (first, second) in [(41, 7), (7, 41)] {
         let journal = [

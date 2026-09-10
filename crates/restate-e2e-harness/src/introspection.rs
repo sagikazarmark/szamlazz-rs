@@ -223,7 +223,7 @@ impl JournalEntry {
         }
     }
 
-    /// Whether the entry is a `ctx.run` command (named).
+    /// Whether the entry is a `ctx.run` command, named or unnamed.
     /// Panics on a missing or unsupported journal version or classification,
     /// or a run without name evidence: only the journal-v2 representation in
     /// Restate 1.7.8 is understood; another spelling cannot establish absence.
@@ -238,6 +238,15 @@ impl JournalEntry {
             self.index
         );
         is_run
+    }
+
+    /// A named run's non-empty name, after validating the entry's evidence.
+    pub(crate) fn named_run_name(&self) -> Option<&str> {
+        if self.is_run() {
+            self.name.as_deref().filter(|name| !name.is_empty())
+        } else {
+            None
+        }
     }
 
     fn assert_supported_version(&self) {
@@ -272,6 +281,9 @@ impl JournalEntry {
 /// order, with unrelated entries between them. Rust SDK 0.12 requires immediately
 /// awaiting each run; interleaved runs are supported here for journal inspection,
 /// not as an endorsement of interleaving SDK context operations.
+///
+/// An unnamed run can be selected with `name = ""`; repeated unnamed runs
+/// require [`run_result_at`] just like repeated non-empty names.
 ///
 /// # Panics
 ///

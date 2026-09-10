@@ -216,8 +216,9 @@ impl Table {
     ///   possible branches.
     ///
     /// Supply journals in journal order. Entries other than named runs are
-    /// ignored. A missing journal (for example, retention ended between the
-    /// two reads) is missing evidence, reported in [`Violations::missing_journals`].
+    /// ignored, including run commands with an empty name. A missing journal
+    /// (for example, retention ended between the two reads) is missing evidence,
+    /// reported in [`Violations::missing_journals`].
     /// It establishes neither conformance nor coverage. An explicitly supplied
     /// empty journal is an empty observed sequence, walking only an empty row.
     /// Supplied entries must be journal v2; missing or unsupported versions
@@ -273,8 +274,7 @@ impl Table {
             let Some(journal) = journal else { continue };
             let observed: Vec<String> = journal
                 .iter()
-                .filter(|entry| entry.is_run())
-                .filter_map(|entry| entry.name.as_deref())
+                .filter_map(JournalEntry::named_run_name)
                 .map(|name| self.pattern(&invocation.service, &invocation.handler, name))
                 .collect();
             if !paths
@@ -738,6 +738,28 @@ mod tests {
         let report = walked.to_string();
         assert!(report.contains("6 invocations"), "{report}");
         assert!(report.contains("5 paths"), "{report}");
+    }
+
+    #[test]
+    fn unnamed_runs_do_not_change_named_path_coverage() {
+        const ROWS: &[RunPath] = &[
+            RunPath::new("Svc", "mixed", &["first", "second"]),
+            RunPath::new("Svc", "unnamed", &[]),
+        ];
+        let (invocations, journals): Run = [
+            invocation("mixed", "Svc", "mixed", &["", "first", "", "second", ""]),
+            invocation("unnamed", "Svc", "unnamed", &["", ""]),
+        ]
+        .into_iter()
+        .unzip();
+        let walked = Table::new(ROWS)
+            .check(
+                &[handler("Svc", "mixed"), handler("Svc", "unnamed")],
+                &invocations,
+                &journals,
+            )
+            .expect("unnamed runs are ignored by named-path checks");
+        assert_eq!(walked.paths, 2);
     }
 
     #[test]

@@ -47,9 +47,13 @@
 //!
 //! The poll interval is nominally **100 ms**. Slow admin queries and task
 //! scheduling can leave larger gaps; no one- or two-second delay guarantees
-//! ten samples. [`Retries::samples`] counts successful queries (even empty
-//! results), while [`Retries::query_errors`] and [`Retries::last_query_error`]
-//! expose failed queries. These help diagnose sparse or failing observation,
+//! ten samples. [`Retries::samples`] counts successfully decoded queries (even
+//! empty results), while [`Retries::query_errors`] and [`Retries::last_query_error`]
+//! expose failed queries and malformed rows. A malformed row rejects the whole
+//! sample without changing retry observations or establishing completion. The
+//! error names its zero-based row index and column. Status must be a string;
+//! nullable retry columns accept omission or null, but reject other wrong types.
+//! These help diagnose sparse or failing observation,
 //! but neither many successful samples nor zero query errors proves complete
 //! coverage. A query cancelled by `finish` contributes to neither count.
 //!
@@ -69,6 +73,7 @@
 
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -107,7 +112,7 @@ pub struct Retries {
     /// Every distinct `last_failure_related_command_name` seen, in order of
     /// first sight.
     pub failing_commands: Vec<String>,
-    /// Successful queries, including empty results, not rows or retries.
+    /// Successfully decoded queries, including empty results, not rows or retries.
     /// Helps diagnose sampling density, but does not prove complete coverage.
     pub samples: u64,
     /// Whether the watch observed no selected invocation in flight after
@@ -115,8 +120,9 @@ pub struct Retries {
     /// describes the selection falling idle, not a particular invocation's
     /// completion; an invocation can also finish between samples unseen.
     pub observed_completion: bool,
-    /// How many samples the admin API failed to answer (retried, never
-    /// fatal). Zero errors does not rule out gaps between successful samples.
+    /// How many queries failed or contained malformed rows (retried, never
+    /// fatal). A malformed sample contributes no observations. Zero errors
+    /// does not rule out gaps between successful samples.
     pub query_errors: u64,
     /// The last such failure.
     pub last_query_error: Option<String>,
@@ -132,6 +138,34 @@ enum Progress {
     Done,
 }
 
+/// One decoded observation. Nullable columns may be omitted by Restate's
+/// JSON writer; other type mismatches are observation errors, not absence.
+struct SampleRow<'a> {
+    status: &'a str,
+    retry_count: Option<u64>,
+    last_failure: Option<&'a str>,
+    failing_command: Option<&'a str>,
+}
+
+impl<'a> SampleRow<'a> {
+    fn from_row(row: &'a Value, index: usize) -> Result<Self, String> {
+        fn column<'a, T: Deserialize<'a>>(
+            row: &'a Value,
+            index: usize,
+            name: &str,
+        ) -> Result<T, String> {
+            T::deserialize(&row[name])
+                .map_err(|error| format!("retry sample row {index}, column {name}: {error}"))
+        }
+        Ok(Self {
+            status: column(row, index, "status")?,
+            retry_count: column(row, index, "retry_count")?,
+            last_failure: column(row, index, "last_failure")?,
+            failing_command: column(row, index, "last_failure_related_command_name")?,
+        })
+    }
+}
+
 /// The sampling decision over `sys_invocation` rows, pure: records the
 /// in-flight columns of every row and decides when the selection falls idle.
 /// An object may carry older, completed invocations from earlier
@@ -145,21 +179,35 @@ struct Sampler {
 impl Sampler {
     /// Records one sample's rows.
     fn observe(&mut self, rows: &[Value]) -> Progress {
+        // Decode the entire sample before changing observations: a malformed
+        // later row must not leave partial counts or establish completion.
+        let rows: Result<Vec<_>, _> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| SampleRow::from_row(row, index))
+            .collect();
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.query_failed(error);
+                return Progress::Sampling;
+            }
+        };
         self.retries.samples += 1;
         let mut in_flight = false;
         for row in rows {
-            if row["status"].as_str() != Some("completed") {
+            if row.status != "completed" {
                 in_flight = true;
             }
-            if let Some(count) = row["retry_count"].as_u64() {
+            if let Some(count) = row.retry_count {
                 self.retries.max_retry_count = self.retries.max_retry_count.max(count);
             }
-            if let Some(failure) = row["last_failure"].as_str()
+            if let Some(failure) = row.last_failure
                 && !self.retries.failures.iter().any(|seen| seen == failure)
             {
                 self.retries.failures.push(failure.to_owned());
             }
-            if let Some(command) = row["last_failure_related_command_name"].as_str()
+            if let Some(command) = row.failing_command
                 && !self
                     .retries
                     .failing_commands
@@ -180,7 +228,7 @@ impl Sampler {
         }
     }
 
-    /// Records a sample the admin API did not answer.
+    /// Records a sample the admin API did not answer or whose rows cannot be decoded.
     fn query_failed(&mut self, error: String) {
         self.retries.query_errors += 1;
         self.retries.last_query_error = Some(error);
@@ -392,6 +440,95 @@ mod tests {
             Some("sql failed (503): {}")
         );
         assert_eq!(retries.max_retry_count, 1);
+    }
+
+    #[test]
+    fn malformed_samples_are_errors_and_change_no_observations() {
+        let mut cases = vec![
+            (Value::Null, "status"),
+            (json!(42), "status"),
+            (json!([]), "status"),
+            (json!({}), "status"),
+        ];
+        for value in [Value::Null, json!(false), json!(1), json!([]), json!({})] {
+            cases.push((json!({"status": value}), "status"));
+        }
+        for value in [
+            json!("3"),
+            json!(-1),
+            json!(1.5),
+            json!(false),
+            json!([]),
+            json!({}),
+        ] {
+            cases.push((
+                json!({"status": "completed", "retry_count": value}),
+                "retry_count",
+            ));
+        }
+        for field in ["last_failure", "last_failure_related_command_name"] {
+            for value in [json!(3), json!(false), json!([]), json!({})] {
+                let mut malformed = json!({"status": "completed"});
+                malformed[field] = value;
+                cases.push((malformed, field));
+            }
+        }
+        for (malformed, field) in cases {
+            let mut sampler = Sampler::default();
+            let before = row("running", Some(99), Some("discard"), Some("discard"));
+            assert_eq!(
+                sampler.observe(&[before, malformed.clone()]),
+                Progress::Sampling
+            );
+            let retries = &sampler.retries;
+            assert_eq!(retries.samples, 0, "{malformed}");
+            assert_eq!(retries.query_errors, 1, "{malformed}");
+            let error = retries.last_query_error.as_deref().expect("decoding error");
+            assert!(error.contains("row 1"), "{error}");
+            assert!(error.contains(field), "{error}");
+            assert_eq!(retries.max_retry_count, 0);
+            assert!(retries.failures.is_empty());
+            assert!(retries.failing_commands.is_empty());
+            assert!(!retries.observed_completion);
+            assert_eq!(
+                sampler.observe(&[]),
+                Progress::Sampling,
+                "a rejected sample cannot establish in-flight work"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn malformed_samples_do_not_complete_the_watch_and_valid_samples_recover() {
+        let mut script = vec![
+            // Omitted nullable columns and unknown status strings are valid.
+            Ok(vec![json!({"status": "new-server-status"})]),
+            Ok(vec![json!({"status": "completed", "retry_count": "3"})]),
+            Ok(vec![row(
+                "backing-off",
+                Some(3),
+                Some("failure"),
+                Some("step"),
+            )]),
+            // Explicit nulls are valid too.
+            Ok(vec![row("completed", None, None, None)]),
+        ]
+        .into_iter();
+        let mut watch = Watch::over(move || std::future::ready(script.next().expect("script")));
+        let retries = (&mut watch.task).await.expect("watch recovers");
+        assert_eq!(retries.samples, 3);
+        assert_eq!(retries.query_errors, 1);
+        assert!(
+            retries
+                .last_query_error
+                .as_deref()
+                .expect("decoding error")
+                .contains("retry_count")
+        );
+        assert_eq!(retries.max_retry_count, 3);
+        assert_eq!(retries.failures, ["failure"]);
+        assert_eq!(retries.failing_commands, ["step"]);
+        assert!(retries.observed_completion);
     }
 
     /// The watch ends by itself when a sample shows the key idle after it was

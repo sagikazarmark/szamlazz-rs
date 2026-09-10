@@ -100,10 +100,13 @@ impl Smoke {
     /// between repeated names. Distinct results prove the selected occurrence.
     #[handler(journal_retention = "1d")]
     async fn correlation(&self, ctx: Context<'_>) -> HandlerResult<()> {
+        ctx.run(|| async { Ok("unnamed-first".to_owned()) }).await?;
         ctx.run(|| async { Ok("first-result".to_owned()) })
             .name("repeated")
             .await?;
         ctx.sleep(std::time::Duration::from_millis(1)).await?;
+        ctx.run(|| async { Ok("unnamed-second".to_owned()) })
+            .await?;
         ctx.run(|| async { Ok("second-result".to_owned()) })
             .name("repeated")
             .await?;
@@ -312,6 +315,17 @@ async fn check_run_correlation(restate: &restate_e2e_harness::Restate) {
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let journal = restate.admin().journal(reply.invocation_id()).await;
+    assert_eq!(
+        restate.admin().runs(reply.invocation_id()).await,
+        ["repeated", "repeated", "unique"]
+    );
+    for (occurrence, expected) in [(0, "unnamed-first"), (1, "unnamed-second")] {
+        assert!(
+            run_result_at(&journal, "", occurrence)
+                .expect("completed unnamed run")
+                .raw_contains(expected)
+        );
+    }
     assert!(
         journal
             .iter()

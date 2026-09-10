@@ -242,6 +242,11 @@ yield threshold and how sample/query-error counts help diagnose incomplete
 observation. Neither that delay nor the nominal 100 ms poll interval guarantees
 visibility; a two-second delay can yield instead of widening the window.
 
+Malformed retry rows count as `query_errors`, with the row index and column in
+`last_query_error`. The whole sample is discarded and sampling continues: it adds
+no successful sample, retry evidence or completion observation. Nullable columns
+accept omission or null; status must be a string, including unknown status tokens.
+
 ## Reading run results
 
 `run_result(&journal, name)` returns the matching `Notification: Run` row, or
@@ -333,9 +338,13 @@ The status, service and handler must be present strings; unknown status strings 
   entire row. This is coverage of the declared named-run paths, not all possible branches or proof that
   those invocations completed. An explicitly supplied empty journal walks only an empty row, if one is declared.
 
-Named-run inspection (`JournalEntry::is_run`, `Admin::runs` and `Table::check`)
+Run inspection (`JournalEntry::is_run`, `Admin::runs` and `Table::check`)
 requires journal v2. Missing or unsupported versions panic rather than establishing
 that no runs occurred or accepting an empty sequence.
+
+`JournalEntry::is_run` recognizes both named and unnamed run commands. `Admin::runs`
+and `Table::check` omit unnamed runs (whose name is the empty string). They remain
+in the journal, and `run_result_at(&journal, "", occurrence)` selects their results.
 
 Patterns are scoped to `(service, handler)`: adding another handler cannot change
 how an existing handler's names are read. `Table::pattern(service, handler, name)`

@@ -436,15 +436,16 @@ impl Admin {
         rows.iter().map(JournalEntry::from_row).collect()
     }
 
-    /// The names of the `ctx.run` commands of an invocation, in journal
-    /// order: which durable steps ran.
+    /// The non-empty names of the `ctx.run` commands of an invocation, in
+    /// journal order. Unnamed runs are omitted, as in [`crate::Table::check`];
+    /// use [`Self::journal`] to inspect all run commands.
     /// Panics on missing or unsupported journal versions, as [`JournalEntry::is_run`] does.
     pub async fn runs(&self, invocation_id: &str) -> Vec<String> {
         self.journal(invocation_id)
             .await
-            .into_iter()
-            .filter(JournalEntry::is_run)
-            .filter_map(|entry| entry.name)
+            .iter()
+            .filter_map(JournalEntry::named_run_name)
+            .map(str::to_owned)
             .collect()
     }
 
