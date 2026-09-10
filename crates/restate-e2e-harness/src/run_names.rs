@@ -6,13 +6,24 @@
 //! ([`RunPatterns`]) and the prefix rule ([`is_prefix_of_path`]) are the
 //! table's parts, reachable for a consumer that composes its own check.
 //!
-//! Run names and positions participate in replay checks. A renamed, inserted
-//! or reordered step can strand an invocation replayed on changed code. This
-//! table detects changed sequences as a regression signal for exceptional
-//! resume or retained-prefix restart. It does not prove replay compatibility:
-//! review the actual invocation prefix, branch logic, exact commands,
-//! serialization and inputs. Allowed patterns do not prove that old results
-//! take the same branch, and parametrized names do not compare exact inputs.
+//! The check establishes named-run sequence conformance and observed path
+//! coverage against the **current rows**. A renamed, inserted or reordered
+//! step can fail against an unchanged table; changing the implementation and
+//! table together can pass. It does not compare historical deployments, the
+//! full journal command sequence, result serialization/decoding, inputs or
+//! historical branch decisions.
+//!
+//! **Immutable deployments are the normal execution model:** register each
+//! release separately and keep the original code available for invocations
+//! pinned to it. Exceptional cross-deployment resume or restart from a retained
+//! journal prefix requires reviewing the actual retained prefix against the
+//! candidate code: exact command sequence (including names and parameters),
+//! result serialization and decoding, operation inputs, and branch behavior.
+//! The table and its diff are supporting evidence, not proof of replay
+//! compatibility or a general cross-release journal-compatibility contract.
+//! Allowed paths do not establish that an old result takes the same branch.
+//! For restart, also reconcile external effects of operations outside the
+//! copied prefix before allowing them to execute again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -116,11 +127,12 @@ impl RunPatterns {
         Self { parametrized }
     }
 
-    /// The table's pattern of a journaled run name: a parametrized name by
-    /// its prefix, any other name as it is. The parameter is matched by its
-    /// prefix only: a name that itself began with a tabled stem (`release-1`
-    /// under a `release-{sku}` and a `release-1-{x}`) would read as the
-    /// longer pattern.
+    /// The table's pattern of a journaled run name: the longest matching
+    /// prefix before the first `{`, requiring a non-empty remainder; any
+    /// unmatched name is returned as it is. The remainder is not validated
+    /// against the pattern, and parameter values and operation inputs are not
+    /// compared. For example, `release-1-A` under `release-{sku}` and
+    /// `release-1-{x}` reads as the longer pattern, `release-1-{x}`.
     #[must_use]
     pub fn pattern(&self, name: &str) -> String {
         self.parametrized
@@ -175,14 +187,29 @@ impl Table {
             .collect()
     }
 
-    /// The check over a run: for every invocation the server holds, the
-    /// `ctx.run` names of its journal (read as patterns, in journal order)
-    /// are a prefix of one of its handler's paths; every handler `deployed`
-    /// offers or an invocation names has a row, and every row's handler is
-    /// deployed; and every path was walked in full by at least one
-    /// invocation. An invocation without a journal (retention ended between
-    /// the two reads) journaled nothing observable: an empty sequence,
-    /// explained by every path, walking none.
+    /// Check the supplied observations against the current table:
+    ///
+    /// - Each supplied invocation's named `ctx.run` entries, in supplied
+    ///   journal order and read through [`Self::pattern`], form a prefix of
+    ///   at least one path for its service and handler. Fixed names match
+    ///   exactly; parameter patterns use [`RunPatterns::pattern`]'s longest
+    ///   prefix rule.
+    /// - Every handler `deployed` offers or an invocation names has a row,
+    ///   and every row's handler is deployed.
+    /// - Every row is walked in full: at least one invocation's observed
+    ///   pattern sequence equals the entire row. Invocation completion is
+    ///   not checked; coverage is of declared named-run paths, not all
+    ///   possible branches.
+    ///
+    /// Supply journals in journal order. Entries other than named runs are
+    /// ignored. A missing journal (for example, retention ended between the
+    /// two reads) is an empty observed sequence: a prefix of every path,
+    /// walking only an empty row, if declared.
+    ///
+    /// This checks current observations against current rows, not historical
+    /// replay compatibility: changing the implementation and table together
+    /// can pass. See the [module guidance](self) for the review required for
+    /// exceptional cross-deployment resume or retained-prefix restart.
     ///
     /// # Errors
     ///

@@ -27,9 +27,11 @@
 //!   ([`JournalEntry`], [`Invocation`], [`run_result`]) and a handler as
 //!   `GET /services` lists it ([`Handler`]).
 //! - [`run_names`]: the step-name table ([`Table`] over [`RunPath`] rows,
-//!   [`Table::check`] over a whole run) a consumer holds its handlers'
-//!   `ctx.run` names to: a regression signal when reviewing exceptional resume
-//!   or retained-prefix restart, not proof of replay compatibility.
+//!   [`Table::check`] over supplied observations): named-run sequence
+//!   conformance and observed path coverage against the current rows. The
+//!   module describes its matching rules and limits as supporting evidence
+//!   for deployment review, not proof of replay compatibility. Immutable
+//!   deployments remain the normal execution model.
 //!
 //! The crate knows nothing of any particular endpoint: what it deploys is a
 //! `restate_sdk` [`Endpoint`](restate_sdk::prelude::Endpoint), and what it

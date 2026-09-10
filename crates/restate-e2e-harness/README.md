@@ -30,12 +30,9 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   (`retry_count`, `last_failure`, the failing command: in-flight columns, gone once the invocation completes) while
   they run.
 - **The step-name table**: a consumer tables, per handler, the ordered `ctx.run` names of every path it journals
-  (`RunPath`), and `Table::check` verifies a whole run against it: every invocation's run sequence is a prefix of
-  one of its handler's paths (a journaled name read as its pattern, `lookup-{sku}` by its prefix), every handler
-  the deployments offer is tabled, and every path was walked in full. A renamed, inserted or reordered step can
-  strand an invocation replayed on changed code. The table is a regression signal for exceptional resume or
-  retained-prefix restart, not a compatibility proof: review the actual invocation prefix, branch logic, exact
-  commands, serialization and inputs. Allowed patterns do not establish that old data takes the same branch.
+  (`RunPath`), and `Table::check` checks observed named-run sequences and path coverage against the current
+  table. See [Checking step-name sequences](#checking-step-name-sequences) for the matching rules and what
+  the result contributes to deployment review.
 
 The crate knows no particular endpoint: it deploys a `restate_sdk::prelude::Endpoint` and decodes a fault into the
 caller's type. What is the consumer's stays with the consumer: its endpoint and mocks, its fault type, its table of
@@ -264,6 +261,38 @@ Use `run_result_at` where names repeat. Custom SQL must select `version` and
 `run_completion_id` fields. This is a breaking interface change of the
 independently versioned harness crate. `raw` remains the hex-decoded entry bytes
 for content and leak assertions; it is not the correlation source.
+
+## Checking step-name sequences
+
+`Table::check` takes the deployed handlers, invocations and journals supplied by the suite. It checks that:
+
+- Each invocation's **named-run sequence**, read as patterns in journal order, is a prefix of at least one
+  tabled path for its service and handler. Shorter sequences are allowed, including early answers and
+  unfinished invocations. A missing journal is an empty observed sequence.
+- Every supplied deployed or invoked handler has a row, and every tabled handler is deployed.
+- Every tabled path is **walked in full**: at least one invocation's observed pattern sequence equals the
+  entire row. This is coverage of the declared named-run paths, not all possible branches or proof that
+  those invocations completed. An empty sequence walks only an empty row, if one is declared.
+
+Fixed names match exactly. A parameter pattern such as `lookup-{sku}` matches any name starting with
+`lookup-` and a non-empty remainder; the longest matching prefix wins. Matching uses only the text before
+the first `{`, without validating the remainder or comparing parameter values or operation inputs.
+`Table::new` rejects empty parameter prefixes, different patterns sharing a prefix, and fixed names shadowed
+by a parameter prefix.
+
+The check compares **current observations with current rows**. A renamed, inserted or reordered step can fail
+against an unchanged table, but changing the implementation and table together can pass. It does not compare
+historical deployments, the full journal command sequence, result serialization/decoding, inputs or historical
+branch decisions. A passing check and the table's diff are supporting evidence for deployment review, not
+proof of replay compatibility.
+
+**Immutable deployments are the normal execution model:** register each release separately and keep the
+original code available for invocations pinned to it. Exceptional cross-deployment resume or restart from a
+retained journal prefix requires reviewing that invocation's **actual retained prefix, exact command sequence
+(including names and parameters), result serialization and decoding, operation inputs, and branch behavior**
+against the candidate code. Allowed paths do not establish that an old result takes the same branch. For a
+restart, also reconcile external effects of operations outside the copied prefix before allowing them to
+execute again. The table imposes no general cross-release journal-compatibility contract.
 
 ## Tests
 
