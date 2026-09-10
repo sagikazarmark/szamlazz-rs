@@ -159,24 +159,38 @@ pub fn is_prefix_of_path(observed: &[String], path: &[&str]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     rows: &'static [RunPath],
-    patterns: RunPatterns,
+    patterns: BTreeMap<(&'static str, &'static str), RunPatterns>,
 }
 
 impl Table {
     /// The table of `rows`. Panics as [`RunPatterns::of`] does on rows whose
-    /// patterns would read a journaled name ambiguously.
+    /// patterns within one handler would read a journaled name ambiguously.
     #[must_use]
     pub fn new(rows: &'static [RunPath]) -> Self {
+        let mut handlers = BTreeMap::<_, Vec<RunPath>>::new();
+        for row in rows {
+            handlers
+                .entry((row.service, row.handler))
+                .or_default()
+                .push(*row);
+        }
         Self {
             rows,
-            patterns: RunPatterns::of(rows),
+            patterns: handlers
+                .into_iter()
+                .map(|(handler, rows)| (handler, RunPatterns::of(&rows)))
+                .collect(),
         }
     }
 
-    /// The table's pattern of a journaled run name ([`RunPatterns::pattern`]).
+    /// The handler's pattern of a journaled run name ([`RunPatterns::pattern`]).
+    /// Patterns from other handlers have no effect. An untabled handler's
+    /// name is returned unchanged; [`Self::check`] reports that handler.
     #[must_use]
-    pub fn pattern(&self, name: &str) -> String {
-        self.patterns.pattern(name)
+    pub fn pattern(&self, service: &str, handler: &str, name: &str) -> String {
+        self.patterns
+            .get(&(service, handler))
+            .map_or_else(|| name.to_owned(), |patterns| patterns.pattern(name))
     }
 
     /// The `service.handler` names the rows cover.
@@ -203,8 +217,9 @@ impl Table {
     ///
     /// Supply journals in journal order. Entries other than named runs are
     /// ignored. A missing journal (for example, retention ended between the
-    /// two reads) is an empty observed sequence: a prefix of every path,
-    /// walking only an empty row, if declared.
+    /// two reads) is missing evidence, reported in [`Violations::missing_journals`].
+    /// It establishes neither conformance nor coverage. An explicitly supplied
+    /// empty journal is an empty observed sequence, walking only an empty row.
     /// Supplied entries must be journal v2; missing or unsupported versions
     /// panic rather than being interpreted as empty sequences.
     ///
@@ -233,20 +248,14 @@ impl Table {
             undeployed: tabled.difference(&deployed).cloned().collect(),
             unexplained: Vec::new(),
             unwalked: Vec::new(),
+            missing_journals: BTreeSet::new(),
         };
         let mut walked = BTreeSet::new();
         for (id, invocation) in invocations {
-            let observed: Vec<String> = journals
-                .get(id)
-                .map(|journal| {
-                    journal
-                        .iter()
-                        .filter(|entry| entry.is_run())
-                        .filter_map(|entry| entry.name.as_deref())
-                        .map(|name| self.pattern(name))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let journal = journals.get(id);
+            if journal.is_none() {
+                violations.missing_journals.insert(id.clone());
+            }
             let target = target(&invocation.service, &invocation.handler);
             let paths: Vec<(usize, &[&str])> = self
                 .rows
@@ -261,6 +270,13 @@ impl Table {
                 violations.untabled.insert(target);
                 continue;
             }
+            let Some(journal) = journal else { continue };
+            let observed: Vec<String> = journal
+                .iter()
+                .filter(|entry| entry.is_run())
+                .filter_map(|entry| entry.name.as_deref())
+                .map(|name| self.pattern(&invocation.service, &invocation.handler, name))
+                .collect();
             if !paths
                 .iter()
                 .any(|(_, path)| is_prefix_of_path(&observed, path))
@@ -328,6 +344,9 @@ impl fmt::Display for Walked {
 /// to do about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violations {
+    /// Invocation ids absent from the supplied journals. Retain and collect
+    /// their evidence; missing journals earn no conformance or path coverage.
+    pub missing_journals: BTreeSet<String>,
     /// Handlers with no row: `service.handler` of every handler a deployment
     /// offers or an invocation names that the table does not cover. Add
     /// their steps to the table.
@@ -346,7 +365,8 @@ pub struct Violations {
 
 impl Violations {
     fn is_empty(&self) -> bool {
-        self.untabled.is_empty()
+        self.missing_journals.is_empty()
+            && self.untabled.is_empty()
             && self.undeployed.is_empty()
             && self.unexplained.is_empty()
             && self.unwalked.is_empty()
@@ -356,6 +376,13 @@ impl Violations {
 impl fmt::Display for Violations {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "the step-name table check failed:")?;
+        if !self.missing_journals.is_empty() {
+            writeln!(
+                f,
+                "\nmissing journals for invocations: {:?}\n  Retain journals and collect them before checking; missing evidence cannot establish conformance or coverage.",
+                self.missing_journals
+            )?;
+        }
         if !self.untabled.is_empty() {
             writeln!(
                 f,
@@ -713,6 +740,52 @@ mod tests {
         assert!(report.contains("5 paths"), "{report}");
     }
 
+    #[test]
+    fn unrelated_handlers_do_not_change_run_patterns() {
+        const ROWS: &[RunPath] = &[
+            RunPath::new("Svc", "release", &["release-{sku}"]),
+            RunPath::new("Svc", "hold", &["release-hold-{sku}"]),
+        ];
+        let (invocations, journals): Run = [
+            invocation("a", "Svc", "release", &["release-hold-7"]),
+            invocation("b", "Svc", "hold", &["release-hold-8"]),
+        ]
+        .into_iter()
+        .unzip();
+        let deployed = [handler("Svc", "release"), handler("Svc", "hold")];
+        assert_eq!(
+            Table::new(ROWS)
+                .check(&deployed, &invocations, &journals)
+                .expect("both paths walked")
+                .paths,
+            2
+        );
+        assert_eq!(
+            Table::new(ROWS).pattern("Svc", "release", "release-hold-7"),
+            "release-{sku}"
+        );
+    }
+
+    #[test]
+    fn pattern_ambiguity_is_validated_within_each_handler_only() {
+        const ROWS: &[RunPath] = &[
+            RunPath::new("A", "h", &["step-{id}"]),
+            RunPath::new("B", "h", &["step-{sku}"]),
+            RunPath::new("B", "fixed", &["step-special"]),
+        ];
+        const AMBIGUOUS: &[&[RunPath]] = &[
+            &[RunPath::new("A", "h", &["step-{id}", "step-{sku}"])],
+            &[RunPath::new("A", "h", &["step-{id}", "step-special"])],
+        ];
+        let table = Table::new(ROWS);
+        assert_eq!(table.pattern("A", "h", "step-7"), "step-{id}");
+        assert_eq!(table.pattern("B", "h", "step-7"), "step-{sku}");
+        assert_eq!(table.pattern("B", "fixed", "step-special"), "step-special");
+        for rows in AMBIGUOUS {
+            assert!(std::panic::catch_unwind(|| Table::new(rows)).is_err());
+        }
+    }
+
     /// A handler with no row is reported whether an invocation of it exists
     /// or only a deployment offers it: the second is what an invocation-only
     /// check cannot see (a handler added with neither a row nor a scenario).
@@ -823,17 +896,48 @@ mod tests {
         assert!(violations.unexplained.is_empty());
     }
 
-    /// An invocation the server holds a row for but no journal of (retention
-    /// ended, or purged mid-query) journaled nothing observable: explained by
-    /// every path, walking none.
+    /// Retention expiry or incomplete collection cannot establish conformance,
+    /// even if other invocations cover all paths.
     #[test]
-    fn an_invocation_without_a_journal_is_an_empty_sequence() {
+    fn an_invocation_without_a_journal_is_missing_evidence() {
         let (mut invocations, journals) = full_walk();
         let (row, _) = invocation("inv_8", "Inv.Api", "probe", &["settings", "probe"]);
         invocations.push(row);
-        let walked = table()
+        let violations = table()
             .check(&deployed(), &invocations, &journals)
-            .expect("an empty sequence is a prefix of every path");
-        assert_eq!(walked.invocations, 7);
+            .expect_err("a missing journal cannot be checked");
+        assert_eq!(
+            violations.missing_journals,
+            BTreeSet::from(["inv_8".into()])
+        );
+        assert!(
+            violations.unwalked.is_empty(),
+            "other invocations still cover every path"
+        );
+        assert!(violations.to_string().contains("inv_8"));
+    }
+
+    #[test]
+    fn only_explicit_empty_evidence_walks_an_empty_path() {
+        const EMPTY: &[RunPath] = &[RunPath::new("Svc", "h", &[])];
+        let table = Table::new(EMPTY);
+        let (row, _) = invocation("empty", "Svc", "h", &[]);
+        let deployed = [handler("Svc", "h")];
+        let violations = table
+            .check(&deployed, std::slice::from_ref(&row), &BTreeMap::new())
+            .expect_err("missing evidence");
+        assert_eq!(
+            violations.missing_journals,
+            BTreeSet::from(["empty".into()])
+        );
+        assert_eq!(violations.unwalked, ["Svc.h: []"]);
+        let journals = BTreeMap::from([("empty".into(), Vec::new())]);
+        assert_eq!(
+            table
+                .check(&deployed, &[row], &journals)
+                .expect("explicit empty journal")
+                .paths,
+            1
+        );
     }
 }

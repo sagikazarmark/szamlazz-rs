@@ -13,6 +13,9 @@ keywords = ["restate", "testing", "e2e"]
 categories = ["development-tools::testing"]
 
 [dependencies]
+# Managed HTTP/2 serving: own connection and stream tasks through forced shutdown.
+hyper = { version = "1", features = ["server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 restate-sdk = { workspace = true }
 serde = { workspace = true }
@@ -30,6 +33,8 @@ nix = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+h2 = "0.4"
+http = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
 

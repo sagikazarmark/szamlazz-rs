@@ -25,9 +25,10 @@ use restate_e2e_harness::{RunPath, Table};
 /// handler the deployments offer has a row (so a handler added with neither a
 /// row nor a scenario is not invisible) and every path is observed in full at
 /// least once in the run. The
-/// parameter of a parametrized name is matched by its prefix only: a number
-/// that itself began with a fixed stem (`storno-1`) would read as the longer
-/// pattern; none of the suite's do. The walk requirement sizes the suite:
+/// parameter of a parametrized name is matched by its prefix only, within
+/// that handler's patterns (longest prefix first). Other handlers' names
+/// cannot change its interpretation. Missing journals fail the check rather
+/// than counting as empty sequences. The walk requirement sizes the suite:
 /// every row is walked by at least one phase-1 or phase-2 scenario, and a row
 /// whose only walker were removed fails the check (#134).
 pub(crate) const RUN_NAMES: &[RunPath] = &[

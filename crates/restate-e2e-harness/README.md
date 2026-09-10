@@ -95,9 +95,18 @@ signaling, reaping and registry removal happen under the lifecycle lock. On Unix
 targets without `waitid` (OpenBSD, Redox, Cygwin, Horizon), early exit inspection is
 unavailable; readiness still fails at its deadline.
 
+Readiness uses one 90-second deadline for health, SQL introspection and version
+checks, including response bodies. The owned child is inspected throughout those
+stages and after successful responses; another server answering on a selected
+admin port cannot hide an observed child exit.
+
 Dropping the handle also requests shutdown of every local endpoint it deployed.
 Keep the Tokio runtime running to execute that shutdown; Drop does not wait for
-completion. The SDK allows up to ten seconds for active connections to drain.
+completion. Connections have up to ten seconds to drain; remaining connection and
+SDK handler tasks are then cancelled and joined. The private HTTP/2 server owns
+both kinds of tasks over the SDK's `HyperEndpoint` adapter, since SDK 0.12's
+`HttpServer` detaches them and its timeout only stops waiting. This terminates
+handler futures, not external effects or independently spawned application tasks.
 Earlier endpoints stay available while the handle lives, and a reused Restate
 server is itself left running.
 
@@ -317,21 +326,33 @@ The status, service and handler must be present strings; unknown status strings 
 
 - Each invocation's **named-run sequence**, read as patterns in journal order, is a prefix of at least one
   tabled path for its service and handler. Shorter sequences are allowed, including early answers and
-  unfinished invocations. A missing journal is an empty observed sequence.
+  unfinished invocations. A missing journal fails with its invocation id in
+  `Violations::missing_journals`; it cannot establish conformance or coverage.
 - Every supplied deployed or invoked handler has a row, and every tabled handler is deployed.
 - Every tabled path is **walked in full**: at least one invocation's observed pattern sequence equals the
   entire row. This is coverage of the declared named-run paths, not all possible branches or proof that
-  those invocations completed. An empty sequence walks only an empty row, if one is declared.
+  those invocations completed. An explicitly supplied empty journal walks only an empty row, if one is declared.
 
 Named-run inspection (`JournalEntry::is_run`, `Admin::runs` and `Table::check`)
 requires journal v2. Missing or unsupported versions panic rather than establishing
 that no runs occurred or accepting an empty sequence.
 
+Patterns are scoped to `(service, handler)`: adding another handler cannot change
+how an existing handler's names are read. `Table::pattern(service, handler, name)`
+uses the same matching as the check. Standalone `RunPatterns` matches the set of
+rows the caller deliberately supplies.
+
 Fixed names match exactly. A parameter pattern such as `lookup-{sku}` matches any name starting with
 `lookup-` and a non-empty remainder; the longest matching prefix wins. Matching uses only the text before
 the first `{`, without validating the remainder or comparing parameter values or operation inputs.
 `Table::new` rejects empty parameter prefixes, different patterns sharing a prefix, and fixed names shadowed
-by a parameter prefix.
+by a parameter prefix within the same handler.
+
+**Migration:** pass service and handler to `Table::pattern`. A missing map entry
+is now missing evidence, not an empty sequence; retain and collect every supplied
+invocation's journal. Do not fill missing entries with empty vectors unless the
+test has independently established an empty journal. `Admin::all_journals` only
+returns invocations with retained entries.
 
 The check compares **current observations with current rows**. A renamed, inserted or reordered step can fail
 against an unchanged table, but changing the implementation and table together can pass. It does not compare
@@ -355,6 +376,10 @@ server. The lifecycle tests use a fake executable with a descendant, real SIGINT
 and SIGTERM, and test-only barriers around registration, spawn and shutdown; they
 check signal exit statuses and that no child or descendant remains alive, plus
 refusal to launch when signal initialization fails.
+Readiness regressions cover child exit during health, SQL and version probes and
+a version probe inheriting time spent in earlier stages. Endpoint regressions
+exercise successful handler completion during draining and forced cancellation
+of a pending handler, including termination of its existing HTTP/2 connection.
 `RESTATE_SERVER_BIN=… cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract
 against a server of its own (never a reused one: the test deploys a service and leaves its invocations retained,
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the

@@ -2117,6 +2117,10 @@ dependencies = [
 name = "restate-e2e-harness"
 version = "0.1.0"
 dependencies = [
+ "h2",
+ "http",
+ "hyper",
+ "hyper-util",
  "nix",
  "reqwest",
  "restate-sdk",

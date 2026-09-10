@@ -16,7 +16,8 @@
 //!   and the ingress ([`Restate::invoke`]).
 //!   The handle owns its local endpoints too: Drop requests their shutdown;
 //!   a [`Deployment`] is only the URI/port descriptor. The current runtime
-//!   executes shutdown, with the SDK draining active connections.
+//!   executes shutdown: connections drain for ten seconds, then remaining
+//!   connection and SDK handler tasks are cancelled and joined.
 //! - [`ingress`]: a [`Call`] (Restate's URL grammar, written once: a
 //!   service or an object, under a scope, called or sent), its [`Reply`] and
 //!   the fault inside Restate's error envelope ([`Reply::fault`], into the

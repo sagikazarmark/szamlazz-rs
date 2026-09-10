@@ -21,15 +21,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use restate_sdk::prelude::{Endpoint, HttpServer};
+use restate_sdk::prelude::Endpoint;
 use serde_json::Value;
 
 use crate::admin::{Admin, poll_until};
 use crate::gate::{Feature, SPAWNED_ENDPOINT_HOST, ServerSpec};
 use crate::ingress::{Call, Reply};
 use crate::plain_http;
+
+mod endpoint;
 
 /// How long [`Restate::ready`] waits for the admin API.
 const READY_DEADLINE: Duration = Duration::from_secs(90);
@@ -427,59 +429,62 @@ impl Restate {
     /// for the SQL introspection API to answer (`/health` is up before the
     /// partition store behind `sys_invocation` is provisioned; a suite's first
     /// read would otherwise meet a 500), and checks that `/version` reports
-    /// each of the spec's features as the spec has it.
+    /// each of the spec's features as the spec has it. One deadline covers all
+    /// stages; the owned child is inspected during requests and retry sleeps
+    /// and after successful responses, including the final version response.
     pub(crate) async fn ready(mut self) -> Self {
-        // Not `poll_until`: this wait has a second way out, the spawned
-        // process gone, read off `&mut self.process` between probes.
-        let deadline = Instant::now() + READY_DEADLINE;
-        loop {
-            // Bounded by the deadline, not the client's 120 s timeout: a
-            // server that accepts the connection and stalls does not defer
-            // the liveness check below.
-            let health = tokio::time::timeout_at(
-                deadline.into(),
-                self.http
-                    .get(format!("{}/health", self.admin.base()))
-                    .send(),
+        let deadline = tokio::time::Instant::now() + READY_DEADLINE;
+        let http = self.http.clone();
+        let admin = self.admin.clone();
+        self.while_alive(deadline, "health", async {
+            poll_until(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                Duration::from_millis(500),
+                || async {
+                    http.get(format!("{}/health", admin.base()))
+                        .send()
+                        .await
+                        .and_then(reqwest::Response::error_for_status)
+                        .map(|_| ())
+                },
+                |error| {
+                    format!(
+                        "the Restate admin API at {} did not come up: {error}",
+                        admin.base()
+                    )
+                },
             )
             .await;
-            if let Ok(Ok(response)) = health
-                && response.status().is_success()
-            {
-                break;
-            }
-            if let Some(reason) = self.exited() {
-                panic!("{reason}");
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the Restate admin API at {} did not come up",
-                self.admin.base()
-            );
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        poll_until(
-            deadline.saturating_duration_since(Instant::now()),
-            Duration::from_millis(200),
-            || self.admin.sql("SELECT id FROM sys_invocation LIMIT 1"),
-            |error| {
-                format!(
-                    "the SQL introspection API at {} did not come up: {error}",
-                    self.admin.base()
-                )
-            },
-        )
+        })
         .await;
-
+        self.while_alive(deadline, "SQL introspection", async {
+            poll_until(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                Duration::from_millis(200),
+                || admin.sql("SELECT id FROM sys_invocation LIMIT 1"),
+                |error| {
+                    format!(
+                        "the SQL introspection API at {} did not come up: {error}",
+                        admin.base()
+                    )
+                },
+            )
+            .await;
+        })
+        .await;
         let version: Value = self
-            .http
-            .get(format!("{}/version", self.admin.base()))
-            .send()
-            .await
-            .expect("GET /version")
-            .json()
-            .await
-            .expect("the /version body is JSON");
+            .while_alive(deadline, "version", async {
+                http.get(format!("{}/version", admin.base()))
+                    .send()
+                    .await
+                    .expect("GET /version")
+                    .error_for_status()
+                    .expect("GET /version succeeds")
+                    .json()
+                    .await
+                    .expect("the /version body is JSON")
+            })
+            .await;
         for (feature, expected) in self.features {
             assert_eq!(
                 version["features"][feature.name],
@@ -492,6 +497,37 @@ impl Restate {
             );
         }
         self
+    }
+
+    /// Supervise an entire stage, including response bodies and retry sleeps.
+    /// A successful response from an independently bound admin port cannot
+    /// hide the owned child's exit. All stages share the same absolute deadline.
+    async fn while_alive<T>(
+        &mut self,
+        deadline: tokio::time::Instant,
+        stage: &str,
+        probe: impl Future<Output = T>,
+    ) -> T {
+        tokio::pin!(probe);
+        let mut inspect = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            if let Some(reason) = self.exited() {
+                panic!("{reason}");
+            }
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => {
+                    panic!("Restate readiness deadline passed during {stage} at {}", self.admin.base());
+                }
+                _ = inspect.tick() => {}
+                answer = &mut probe => {
+                    if let Some(reason) = self.exited() {
+                        panic!("{reason}");
+                    }
+                    return answer;
+                }
+            }
+        }
     }
 
     /// Why the server the harness started is gone, if it is: the spawned
@@ -543,14 +579,15 @@ impl Restate {
     ///
     /// Dropping `Restate` requests shutdown of every endpoint it deployed,
     /// including on a reused server. The runtime must keep running to execute
-    /// shutdown; the SDK allows up to ten seconds for active connections to drain.
+    /// shutdown. Connections drain for up to ten seconds, then remaining
+    /// connection and SDK handler tasks are cancelled and joined.
     /// Dropping the returned [`Deployment`] only discards its URI/port descriptor.
     /// Earlier endpoints remain available while this handle lives.
     ///
-    /// Served with `serve_with_cancel` over this handle's shutdown signal
-    /// rather than the SDK's `serve`, whose shutdown future is `ctrl_c()`: the
-    /// harness owns SIGINT (it stops the servers it started and exits), and an
-    /// endpoint that installed its own handler per deployment would race it.
+    /// Served through the SDK's `HyperEndpoint` adapter with owned HTTP/2
+    /// connection and stream tasks. SDK 0.12's `HttpServer` detaches those
+    /// tasks, so its graceful-shutdown timeout cannot release active handlers.
+    /// The shutdown signal belongs to this handle, not a per-endpoint SIGINT handler.
     pub async fn deploy(&self, endpoint: Endpoint) -> Deployment {
         let bind = if self.endpoint_host == SPAWNED_ENDPOINT_HOST {
             "127.0.0.1:0"
@@ -571,11 +608,7 @@ impl Restate {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(stop);
-        tokio::spawn(async move {
-            HttpServer::new(endpoint)
-                .serve_with_cancel(listener, stopped)
-                .await;
-        });
+        tokio::spawn(endpoint::serve(endpoint, listener, stopped));
 
         let uri = format!("http://{}:{port}", self.endpoint_host);
         self.admin.register(&uri).await;
