@@ -148,7 +148,61 @@ where
     reason = "one table of samples; a variant per line is what makes it reviewable"
 )]
 fn entries() -> Vec<Entry> {
+    use crate::contract::recovery::{
+        MarkerVersion, NonExecutionAttestation, RecoveryEvidence, RecoveryResponse,
+        UnresolvedWrite, WriteOperation,
+    };
+    use crate::gateway::recovery::WriteResult;
     let mut all = Vec::new();
+    let marker = UnresolvedWrite {
+        version: MarkerVersion,
+        token: "inv-owner".into(),
+        owner_invocation: "inv-owner".into(),
+        created_at: "2026-09-10T12:00:00Z".into(),
+        scope: Some("acme".into()),
+        order: OrderKey::parse("ORD-1").expect("order"),
+        namespace: namespace(),
+        external_id: "acct:ORD-1:invoice".into(),
+        account_id: "acct".into(),
+        endpoint: "https://www.szamlazz.hu/szamla/".into(),
+        credential_ref: "acct".into(),
+        operation: WriteOperation::Create {
+            kind: crate::identity::IssuedKind::Invoice,
+            expected_number: None,
+            corrected_number: None,
+        },
+    };
+    all.extend(entries_of(vec![()], &single()));
+    all.extend(entries_of(
+        vec![Some("operator-id".to_owned()), None::<String>],
+        &single(),
+    ));
+    all.extend(entries_of(vec![marker], &single()));
+    all.extend(entries_of(
+        vec![RecoveryResponse {
+            token: "inv-owner".into(),
+            operator: "operator-id".into(),
+            evidence: serde_json::to_value(RecoveryEvidence::NotExecuted {
+                audit_reference: "INC-216".into(),
+                did_not_execute_and_cannot_execute_later: NonExecutionAttestation,
+            })
+            .expect("evidence"),
+        }],
+        &single(),
+    ));
+    all.extend(entries_of(
+        vec![
+            WriteResult::Unresolved,
+            WriteResult::Answered {
+                credentials: true,
+                answer: CREDENTIALS.answer(),
+            },
+            WriteResult::Create(CreateOutcome::Issued(issued_document())),
+            WriteResult::Storno(StornoOutcome::Reversed(storno_document())),
+            WriteResult::Delete(DeleteOutcome::Deleted),
+        ],
+        &variants!(WriteResult { Create(_), Storno(_), Delete(_), Answered { .. }, Unresolved }),
+    ));
     all.extend(entries_of(vec![namespace()], &single()));
     all.extend(entries_of(
         vec![

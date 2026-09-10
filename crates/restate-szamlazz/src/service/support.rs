@@ -78,6 +78,11 @@ mod journaled {
     }
 
     journaled!(
+        (),
+        Option<String>,
+        crate::contract::recovery::UnresolvedWrite,
+        crate::contract::recovery::RecoveryResponse,
+        crate::gateway::recovery::WriteResult,
         Namespace,
         Resolution,
         QueryOutcome,
@@ -162,7 +167,7 @@ impl Fault {
     /// nothing may be concluded from it.
     pub(super) fn inconclusive_answer(answer: SzamlazzAnswer) -> Self {
         Self::unavailable(format!(
-            "szamlazz.hu answered the query with code {answer}; nothing may be concluded; retry with a new Idempotency-Key or read get"
+            "szamlazz.hu answered the query with code {answer}; nothing may be concluded; reconcile any earlier write before deliberately renewing the operation"
         ))
         .with_szamlazz_code(answer.code)
     }
@@ -174,7 +179,7 @@ impl Fault {
     /// it. No `szamlazz_code`: `szlahu_down` is a header, not a code.
     pub(super) fn szlahu_down_answer(message: impl Into<String>) -> Self {
         Self::unavailable(format!(
-            "szamlazz.hu reported unavailability (szlahu_down) to the query: {}; nothing was sent; retry with a new Idempotency-Key or read get",
+            "szamlazz.hu reported unavailability (szlahu_down) to the query: {}; this query sent no mutation; reconcile any earlier write before deliberately renewing the operation",
             message.into()
         ))
     }
@@ -213,7 +218,7 @@ impl Fault {
         Self::new(
             TerminalCode::CredentialsRejected,
             format!(
-                "szamlazz.hu rejected the agent credentials (code {answer}); the outcome is not known; fix the account's agent key, then retry with a new Idempotency-Key or read get"
+                "szamlazz.hu rejected the agent credentials (code {answer}); the outcome is not known; fix the account's agent key and reconcile any earlier write before deliberately renewing the operation"
             ),
         )
         .with_szamlazz_code(answer.code)
@@ -322,7 +327,7 @@ impl From<Fault> for HandlerError {
 pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
     if let Some(fault) = initialization_fault(
         error,
-        "retry with a new Idempotency-Key, query the document or read get",
+        "reconcile any earlier write before deliberately renewing; use a fresh invocation for a new read",
     ) {
         return fault;
     }
@@ -333,7 +338,7 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
         ));
     }
     Fault::unavailable(format!(
-        "the {step} read ended without an answer from szamlazz.hu ({}): {}; retry with a new Idempotency-Key or read get",
+        "the {step} read ended without an answer from szamlazz.hu ({}): {}; reconcile any earlier write before deliberately renewing; use a fresh invocation for a new read",
         error.code(),
         error.message()
     ))
@@ -937,7 +942,7 @@ mod tests {
             assert!(message.contains(szamlazz_code), "{label}: {message}");
             assert!(message.contains(phrase), "{label}: {message}");
             assert!(
-                message.contains("Idempotency-Key") || terminal == TerminalCode::SzamlazzError,
+                message.contains("reconcile") || terminal == TerminalCode::SzamlazzError,
                 "{label}: {message}"
             );
             assert!(!message.contains("attempt"), "{label}: {message}");
@@ -1014,7 +1019,7 @@ mod tests {
             "names the last failure: {message}"
         );
         assert!(message.contains("500"), "{message}");
-        assert!(message.contains("Idempotency-Key"), "{message}");
+        assert!(message.contains("reconcile any earlier write"), "{message}");
         assert_eq!(
             body["order"],
             serde_json::Value::Null,

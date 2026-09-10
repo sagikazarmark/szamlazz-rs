@@ -315,6 +315,11 @@ configuration above remains the current behavior, not proof that absence authori
 
 ## Unresolved Order writes (#205, 2026-09-10)
 
+Implementation amendment (#216): Order mutations now use a pre-send unresolved marker, acknowledged
+arming with execution-local one-use permission, and retained read-only reconciliation. Invocation exhaustion
+pauses; cancellation/kill cannot clear the marker. The exact command/recovery/state contract and migration
+boundary are [specified here](../design/order-write-protocol.md). Unkeyed Agent writes retain their own policy.
+
 **Decision: retain the original invocation for read-only reconciliation, with pause on unresolved recovery or
 invocation-policy exhaustion, plus a minimal durable unresolved-write marker armed before sending.** The owner
 explicitly selected “Retain plus marker” after reviewing the reproduction and alternatives. This is the approved

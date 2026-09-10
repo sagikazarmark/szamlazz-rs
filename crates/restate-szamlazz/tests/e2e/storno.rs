@@ -45,6 +45,18 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
             }
             .response(),
         )
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    number_query("SZ-4")
+        .respond_with(
+            Doc {
+                reversed: true,
+                eszamla: Some(3),
+                ..Doc::of("SZ-4", "SZ", "E2E-4")
+            }
+            .response(),
+        )
         .mount(&h.mock)
         .await;
     external_id_query("acct:E2E-4:storno:SZ-4")
@@ -114,6 +126,8 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
             "account",
             "verify-original-SZ-4",
             "lookup-storno-SZ-4",
+            "prepare-write",
+            "arm-write",
             "storno-SZ-4",
         ]
     );
@@ -153,6 +167,10 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
 /// the issue policy with a **byte-identical** body (the `teljesitesDatum` is a
 /// pure function of the journaled verify, which the re-execution replays)
 /// under one `storno-{number}` entry.
+#[allow(
+    clippy::too_many_lines,
+    reason = "hint and retained storno reconciliation paths"
+)]
 pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &Harness) {
     // The hint path.
     number_query("SZ-4D")
@@ -182,10 +200,32 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
     // misses; the second execution's send lands.
     number_query("SZ-4E")
         .respond_with(Doc::of("SZ-4E", "SZ", "E2E-4E").response())
+        .up_to_n_times(1)
+        .mount(&h.mock)
+        .await;
+    number_query("SZ-4E")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::of("SZ-4E", "SZ", "E2E-4E")
+            }
+            .response(),
+        )
         .mount(&h.mock)
         .await;
     external_id_query("acct:E2E-4E:storno:SZ-4E")
         .respond_with(not_found())
+        .up_to_n_times(4)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-4E:storno:SZ-4E")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-4E"),
+                ..Doc::of("SS-4E", "SS", "E2E-4E")
+            }
+            .response(),
+        )
         .mount(&h.mock)
         .await;
     storno_of_number_repeating_telj("SZ-4E")
@@ -196,7 +236,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
         .await;
     storno_of_number_repeating_telj("SZ-4E")
         .respond_with(created("SS-4E", "-1000", "-1270"))
-        .expect(1)
+        .expect(0)
         .mount(&h.mock)
         .await;
 
@@ -228,11 +268,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
     assert_eq!(reply.body["storno_number"], "SS-4E", "{}", reply.body);
     let stornos = h.storno_bodies_of("SZ-4E").await;
-    assert_eq!(stornos.len(), 2, "two executions of the storno step");
-    assert_eq!(
-        stornos[0], stornos[1],
-        "the re-executed storno is byte-identical"
-    );
+    assert_eq!(stornos.len(), 1, "reconciliation never resends");
     assert!(stornos[0].contains(&original_telj_tag()));
     assert!(!stornos[0].contains("<keltDatum>"));
     let runs = h.admin().runs(reply.invocation_id()).await;
@@ -277,9 +313,23 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
         };
         number_query(number)
             .respond_with(original.response())
+            .up_to_n_times(1)
             .expect(1)
             .mount(&h.mock)
             .await;
+        if managed && recovered {
+            number_query(number)
+                .respond_with(
+                    Doc {
+                        reversed: true,
+                        ..original
+                    }
+                    .response(),
+                )
+                .expect(1)
+                .mount(&h.mock)
+                .await;
+        }
         // Lookup, first execution's leading query and immediate reconciliation
         // all miss. Only the next execution's leading query sees what landed.
         if recovered {
@@ -293,7 +343,11 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
                 .respond_with(
                     Doc {
                         referenced_invoice: Some(number),
-                        ..Doc::new(returned, "SS")
+                        ..if managed {
+                            Doc::of(returned, "SS", order)
+                        } else {
+                            Doc::unmanaged(returned, "SS")
+                        }
                     }
                     .response(),
                 )
@@ -303,11 +357,11 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
         } else {
             external_id_query(&external_id)
                 .respond_with(not_found())
-                .expect(5)
+                .expect(if managed { 4..=20 } else { 5..=5 })
                 .mount(&h.mock)
                 .await;
         }
-        let sends = if recovered { 1 } else { 2 };
+        let sends = if recovered || managed { 1 } else { 2 };
         storno_of_number_repeating_telj(number)
             .respond_with(created_without_totals(returned))
             .expect(sends)
@@ -320,6 +374,17 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
             .await;
 
         let body = storno_of(number);
+        if managed && !recovered {
+            let submitted = h.invoke(&call.send(), Some(&body), Some(order)).await;
+            h.admin()
+                .await_status(submitted.invocation_id(), &["paused"])
+                .await;
+            assert_eq!(h.storno_bodies_of(number).await.len(), 1);
+            h.admin().cancel(submitted.invocation_id()).await;
+            let cancelled = h.invoke(&call, Some(&body), Some(order)).await;
+            assert_eq!(cancelled.fault().is_cancelled(), Some(true));
+            continue;
+        }
         let reply = h.invoke(&call, Some(&body), Some(order)).await;
         if recovered {
             assert_eq!(reply.status, 200, "{}", reply.body);
@@ -338,15 +403,22 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
                 "{fault:?}"
             );
         }
+        let mut expected = vec![
+            "namespace".to_owned(),
+            "account".to_owned(),
+            format!("verify-original-{number}"),
+            format!("lookup-storno-{number}"),
+        ];
+        if managed {
+            expected.extend(["prepare-write".into(), "arm-write".into()]);
+        }
+        expected.push(format!("storno-{number}"));
+        if managed {
+            expected.push("reconcile-write".into());
+        }
         assert_eq!(
             h.admin().runs(reply.invocation_id()).await,
-            [
-                "namespace".to_owned(),
-                "account".to_owned(),
-                format!("verify-original-{number}"),
-                format!("lookup-storno-{number}"),
-                format!("storno-{number}"),
-            ],
+            expected,
             "verification/retry belong to the one storno entry"
         );
         let stored = h.invoke(&call, Some(&body), Some(order)).await;

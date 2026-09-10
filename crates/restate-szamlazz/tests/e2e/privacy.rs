@@ -49,23 +49,16 @@ pub(crate) async fn diagnostics_are_safe_in_run_failures_journals_and_ingress(h:
                     .set_body_string(format!("<{PRIVATE}>{AGENT_KEY}</{PRIVATE}>"))
             }
         })
-        .expect(6)
+        .expect(6..)
         .mount(&h.mock)
         .await;
     create_for(order)
         .respond_with(ResponseTemplate::new(502).set_body_string(format!("{AGENT_KEY} {PRIVATE}")))
-        .expect(2)
+        .expect(1)
         .mount(&h.mock)
         .await;
     let watch = h.watch(order);
-    let reply = h
-        .call(
-            order,
-            "create_invoice",
-            &create_body(dec!(1000)),
-            "privacy-215-create",
-        )
-        .await;
+    let reply = cancel_retained(h, order, "privacy-215-create").await;
     let observed = watch.finish().await;
     assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
@@ -76,8 +69,7 @@ pub(crate) async fn diagnostics_are_safe_in_run_failures_journals_and_ingress(h:
         fault.external_id.as_deref(),
         Some("acct:E2E-PRIVACY-215:invoice")
     );
-    assert!(fault.message.contains("create: HTTP 502"), "{fault:?}");
-    assert!(fault.message.contains("query: parse:"), "{fault:?}");
+    assert_eq!(fault.is_cancelled(), Some(true));
     safe(&reply.body.to_string());
     assert!(
         !observed.failures.is_empty(),
@@ -87,16 +79,13 @@ pub(crate) async fn diagnostics_are_safe_in_run_failures_journals_and_ingress(h:
         observed
             .failing_commands
             .iter()
-            .any(|name| name == "create-invoice")
+            .any(|name| name == "reconcile-write")
     );
     for failure in &observed.failures {
         safe(failure);
-        assert!(
-            failure.contains("HTTP 502") && failure.contains("query: parse:"),
-            "{failure}"
-        );
+        assert!(failure.contains("unresolved"), "{failure}");
     }
-    inspect(h, reply.invocation_id(), "create-invoice", "HTTP 502").await;
+    inspect(h, reply.invocation_id(), "create-invoice", "Unresolved").await;
 
     // A failed read is still unavailable; no write was attempted.
     number_query("SZ-PRIVACY-READ")
@@ -184,7 +173,7 @@ async fn credential_requery_keeps_the_send(h: &Harness) {
         .await;
     external_id_query("acct:E2E-PRIVACY-CREDENTIAL:invoice")
         .respond_with(api_error("135", &format!("{AGENT_KEY} {PRIVATE}")))
-        .expect(1)
+        .expect(1..)
         .mount(&h.mock)
         .await;
     create_for(order)
@@ -192,32 +181,13 @@ async fn credential_requery_keeps_the_send(h: &Harness) {
         .expect(1)
         .mount(&h.mock)
         .await;
-    let reply = h
-        .call(
-            order,
-            "create_invoice",
-            &create_body(dec!(1000)),
-            "privacy-215-credential",
-        )
-        .await;
-    assert_eq!(reply.status, 503, "{}", reply.body);
+    let reply = cancel_retained(h, order, "privacy-215-credential").await;
+    assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::CredentialsRejected);
-    assert_eq!(fault.szamlazz_code.as_deref(), Some("135"));
-    assert!(fault.message.contains("create: HTTP 502"));
-    assert!(
-        fault
-            .message
-            .contains("credentials rejected: browser session active")
-    );
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+    assert_eq!(fault.is_cancelled(), Some(true));
     safe(&reply.body.to_string());
-    inspect(
-        h,
-        reply.invocation_id(),
-        "create-invoice",
-        "create: HTTP 502",
-    )
-    .await;
+    inspect(h, reply.invocation_id(), "create-invoice", "Unresolved").await;
 }
 
 async fn inspect(h: &Harness, id: &str, step: &str, category: &str) {
@@ -239,5 +209,17 @@ async fn inspect(h: &Harness, id: &str, step: &str, category: &str) {
     let invocation = h.admin().invocation(id).await;
     let failure = invocation.completion_failure.expect("retained fault");
     safe(&failure);
-    assert!(failure.contains(category));
+    assert!(failure.to_lowercase().contains(&category.to_lowercase()));
+}
+
+async fn cancel_retained(h: &Harness, order: &str, key: &str) -> crate::harness::ingress::Reply {
+    let call = restate_e2e_harness::Call::object("Szamlazz.Order", order, "create_invoice");
+    let body = create_body(dec!(1000));
+    let submitted = h.invoke(&call.send(), Some(&body), Some(key)).await;
+    h.admin()
+        .await_status(submitted.invocation_id(), &["paused"])
+        .await;
+    assert_eq!(h.create_bodies_of(order).await.len(), 1);
+    h.admin().cancel(submitted.invocation_id()).await;
+    h.invoke(&call, Some(&body), Some(key)).await
 }

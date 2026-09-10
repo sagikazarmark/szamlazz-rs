@@ -108,6 +108,8 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
             "lookup-final",
             "lookup-proforma",
             "lookup-prepayment",
+            "prepare-write",
+            "arm-write",
             "create-prepayment",
         ]
     );
@@ -137,6 +139,8 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
             "lookup-final",
             "verify-proforma-D-10P",
             "lookup-prepayment",
+            "prepare-write",
+            "arm-write",
             "create-prepayment",
         ]
     );

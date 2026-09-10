@@ -84,6 +84,8 @@ pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) 
             "lookup-final",
             "lookup-prepayment",
             "lookup-final",
+            "prepare-write",
+            "arm-write",
             "create-final",
         ]
     );

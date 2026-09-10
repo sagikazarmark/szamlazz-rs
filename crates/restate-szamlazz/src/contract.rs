@@ -4,8 +4,8 @@
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
 //! returned as values with HTTP 200 (see [`CreateOutcome`] and [`ConflictReason`]),
 //! while the [`TerminalCode`]s are reserved for faults. Three of the eight
-//! known codes mean "outcome unknown: reconcile using a new `Idempotency-Key`, or read
-//! `Szamlazz.Order.get`" (`outcome_unknown`,
+//! known codes mean "outcome unknown: reconcile before deliberately renewing"
+//! (`outcome_unknown`,
 //! `unavailable`, `credentials_rejected`); the other known codes are settled: the same
 //! request never succeeds, or szamlazz.hu's own answer is passed through
 //! ([`TerminalCode`] says which). Cancellation is independent: a read reports
@@ -63,6 +63,7 @@ use serde::{Deserialize, Serialize};
 pub mod agent;
 pub mod create;
 pub mod document;
+pub mod recovery;
 pub mod storno;
 
 pub use agent::{
@@ -97,8 +98,8 @@ use crate::identity::{ExternalId, OrderKey};
 ///
 /// Every fault either service raises carries one of these tokens in `code`,
 /// with the HTTP status of [`status`](Self::status). Three of them mean
-/// "outcome unknown: retry with a new `Idempotency-Key`, or read
-/// `Szamlazz.Order.get`": `outcome_unknown`, `unavailable` and
+/// "outcome unknown: reconcile before deliberately renewing":
+/// `outcome_unknown`, `unavailable` and
 /// `credentials_rejected` ([`is_outcome_unknown`](Self::is_outcome_unknown)
 /// names exactly them). The other known codes are settled: the same request
 /// never succeeds (`invalid_input`, `unknown_account`, `not_found`) or
@@ -109,6 +110,8 @@ use crate::identity::{ExternalId, OrderKey};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TerminalCode {
+    /// The host denied operator recovery access. HTTP 403.
+    Forbidden,
     /// Intentional cancellation during a read or account resolution. HTTP 409.
     /// No write was sent; cancellation does not authorize automatic retry.
     Cancelled,
@@ -132,7 +135,7 @@ pub enum TerminalCode {
     /// these codes before acting), but the code may have come to a post-send
     /// re-query, and an earlier execution may have landed with a lost reply,
     /// which is why this is a fault and not a `rejected` outcome. Fix the
-    /// key, then retry with a new `Idempotency-Key`. HTTP 503.
+    /// key, then reconcile any earlier write before renewal. HTTP 503.
     CredentialsRejected,
     /// The request names no account of this deployment: it arrived unscoped
     /// where accounts are reachable by scope only, or under a scope no account
@@ -158,7 +161,8 @@ pub enum TerminalCode {
 
 impl TerminalCode {
     /// Known codes, including intentional read cancellation.
-    pub const KNOWN: [Self; 8] = [
+    pub const KNOWN: [Self; 9] = [
+        Self::Forbidden,
         Self::Cancelled,
         Self::InvalidInput,
         Self::UnknownAccount,
@@ -173,6 +177,7 @@ impl TerminalCode {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Forbidden => "forbidden",
             Self::Cancelled => "cancelled",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Unavailable => "unavailable",
@@ -185,8 +190,8 @@ impl TerminalCode {
         }
     }
 
-    /// Whether the fault means "outcome unknown": the caller reconciles with a
-    /// new `Idempotency-Key` or reads `Szamlazz.Order.get`, and pages rather
+    /// Whether the fault means "outcome unknown": the caller reconciles before
+    /// renewing the operation, and pages rather
     /// than auto-retries. Exactly three codes do: `outcome_unknown` (the
     /// write step ran out of its policy), `unavailable` (szamlazz.hu, the
     /// account resolver or the credential store did not answer) and
@@ -229,7 +234,8 @@ impl TerminalCode {
     pub const fn is_outcome_unknown(&self) -> Option<bool> {
         match self {
             Self::OutcomeUnknown | Self::Unavailable | Self::CredentialsRejected => Some(true),
-            Self::Cancelled
+            Self::Forbidden
+            | Self::Cancelled
             | Self::InvalidInput
             | Self::UnknownAccount
             | Self::NotFound
@@ -243,6 +249,7 @@ impl TerminalCode {
     #[must_use]
     pub const fn status(&self) -> Option<u16> {
         match self {
+            Self::Forbidden => Some(403),
             // The caller's request: the same request never succeeds.
             Self::InvalidInput | Self::UnknownAccount => Some(400),
             Self::NotFound => Some(404),
@@ -269,6 +276,7 @@ impl fmt::Display for TerminalCode {
 impl From<String> for TerminalCode {
     fn from(token: String) -> Self {
         match token.as_str() {
+            "forbidden" => Self::Forbidden,
             "cancelled" => Self::Cancelled,
             "outcome_unknown" => Self::OutcomeUnknown,
             "unavailable" => Self::Unavailable,
@@ -316,7 +324,7 @@ impl schemars::JsonSchema for TerminalCode {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "The worker fault code. Known values: cancelled (409), invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Cancellation does not authorize automatic retry. Other strings are preserved without an inferred HTTP status or outcome classification.",
+            "description": "The worker fault code. Known values: forbidden (403), cancelled (409), invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Cancellation does not authorize automatic retry. Other strings are preserved without an inferred HTTP status or outcome classification.",
         })
     }
 }
@@ -639,6 +647,7 @@ mod tests {
     #[test]
     fn terminal_code_tokens() {
         let expected = [
+            (TerminalCode::Forbidden, "forbidden", 403, false),
             (TerminalCode::Cancelled, "cancelled", 409, false),
             (TerminalCode::OutcomeUnknown, "outcome_unknown", 500, true),
             (TerminalCode::Unavailable, "unavailable", 503, true),

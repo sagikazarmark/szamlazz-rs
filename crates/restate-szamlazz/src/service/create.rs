@@ -14,16 +14,18 @@
 
 use std::ops::ControlFlow;
 
-use restate_sdk::errors::{HandlerError, TerminalError};
+use restate_sdk::errors::HandlerError;
+#[cfg(test)]
+use restate_sdk::errors::TerminalError;
 use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::DocumentType;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, verified_document};
-use super::support::{
-    initialization_fault, is_cancelled, lookup, run_operating, run_reading, verify,
-};
+#[cfg(test)]
+use super::support::{initialization_fault, is_cancelled};
+use super::support::{lookup, run_reading, verify};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateOutcome, CreateRequest, CreateResponse, DocumentInput,
     DocumentKind, IssuedKind, ProformaLink, Reissue, Warning, outstanding,
@@ -462,19 +464,19 @@ fn decide_base(
 /// message tells the two apart: an exhausted step is retried with a new
 /// `Idempotency-Key`, a cancelled one is reconciled by `get` first. Nothing
 /// is recorded, and the next invocation's lookup finds whatever landed.
+#[cfg(test)]
 fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Identity) -> Fault {
-    if let Some(fault) = initialization_fault(error, "retry with a new Idempotency-Key or read get")
-    {
+    if let Some(fault) = initialization_fault(error, "reconcile before deliberately renewing") {
         return identity.about(order, fault);
     }
     let message = if is_cancelled(error) {
         format!(
-            "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: read get, then retry with a new Idempotency-Key only if issuance is still intended",
+            "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: reconcile before deliberately renewing",
             error.code()
         )
     } else {
         format!(
-            "the create step ended without a confirmed outcome ({}): {}; retry with a new Idempotency-Key",
+            "the create step ended without a confirmed outcome ({}): {}; reconcile before deliberately renewing",
             error.code(),
             error.message()
         )
@@ -999,25 +1001,46 @@ impl Execution {
         let kind = intent.identity.kind;
         let order_key = order.clone();
         let create = intent.create.clone();
-        run_operating(
-            ctx,
-            format!("create-{kind}"),
-            self.config.issue.run_retry_policy(),
-            self,
-            move |gateway| async move {
-                gateway
-                    .create(CreateStepRequest {
-                        external_id: &external_id,
-                        kind,
-                        order: &order_key,
-                        create: &create,
-                        reversed: reversed.as_deref(),
-                    })
-                    .await
+        let operation = crate::contract::recovery::WriteOperation::Create {
+            kind,
+            expected_number: reversed.clone(),
+            corrected_number: match &create.kind {
+                szamlazz_agent::ops::invoice::InvoiceKind::Corrective { corrected_number } => {
+                    Some(corrected_number.to_string())
+                }
+                _ => None,
             },
-        )
-        .await
-        .map_err(|error| create_outcome_unknown(&error, order, &intent.identity).into())
+        };
+        let result = self
+            .protected_write(
+                ctx,
+                order,
+                &intent.identity.external_id,
+                operation,
+                format!("create-{kind}"),
+                move |gateway, marker| async move {
+                    gateway
+                        .protected_create(
+                            CreateStepRequest {
+                                external_id: &external_id,
+                                kind,
+                                order: &order_key,
+                                create: &create,
+                                reversed: reversed.as_deref(),
+                            },
+                            &marker,
+                        )
+                        .await
+                },
+            )
+            .await?;
+        match result {
+            crate::gateway::recovery::WriteResult::Create(outcome) => Ok(outcome),
+            _ => Err(Fault::outcome_unknown(
+                "unexpected recovery operation; operator inspection required",
+            )
+            .into()),
+        }
     }
 }
 
@@ -2152,7 +2175,7 @@ mod tests {
         );
         assert!(message.contains("HTTP 500"), "{message}");
         assert!(
-            message.contains("retry with a new Idempotency-Key"),
+            message.contains("reconcile before deliberately renewing"),
             "{message}"
         );
         assert_eq!(body["order"], "ORD-1", "{body}");
@@ -2167,7 +2190,7 @@ mod tests {
         assert!(message.contains("(409)"), "{message}");
         assert!(message.contains("cancelled"), "{message}");
         assert!(
-            message.contains("a send may have landed: read get"),
+            message.contains("a send may have landed: reconcile"),
             "a cancelled write reconciles before it retries: {message}"
         );
         assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
@@ -2342,10 +2365,7 @@ mod tests {
         assert_eq!(body["szamlazz_code"], "57");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("code 57"), "{message}");
-        assert!(
-            message.contains("retry with a new Idempotency-Key"),
-            "{message}"
-        );
+        assert!(message.contains("reconcile any earlier write"), "{message}");
 
         let fault = respond(gateway::CreateOutcome::Unavailable {
             message: "maintenance".to_owned(),
@@ -2358,6 +2378,6 @@ mod tests {
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("szlahu_down"), "{message}");
         assert!(message.contains("maintenance"), "{message}");
-        assert!(message.contains("nothing was sent"), "{message}");
+        assert!(message.contains("this query sent no mutation"), "{message}");
     }
 }

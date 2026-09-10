@@ -25,7 +25,7 @@ use crate::contract::{
 /// The `Szamlazz.Order` Virtual Object, keyed by the order number
 /// (`rendelésszám`).
 ///
-/// Keeps no state: every handler answers from szamlazz.hu through the order's
+/// Keeps only unresolved-write uncertainty: document status comes from szamlazz.hu through the order's
 /// deterministic external ids. The retry identity of a request is Restate's
 /// ingress `Idempotency-Key`. Every handler with an input takes it as a
 /// [`Body`] and decodes it first (a malformed body is the `invalid_input`
@@ -42,8 +42,8 @@ use crate::contract::{
 /// Reversed non-correctives take a best-effort `hint-storno-{number}`; an
 /// absent target or explicit reissue proceeds through prerequisites, then
 /// the full lookup (also `lookup-{kind}`) and query-first create under the
-/// issue policy. Write handlers kill after five invocation attempts; `get`
-/// after three. The query inside every create execution guards a repeated send.
+/// protected write protocol. Write handlers pause after five invocation attempts;
+/// `get` kills after three. A completed arm never grants permission on replay.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -53,7 +53,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -67,6 +67,7 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         // Reborrowed so that the `async move` body captures the reference,
         // not the context; every handler below does the same.
         let ctx = &ctx;
@@ -85,7 +86,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -99,6 +100,7 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             Box::pin(execution.issue_kind(ctx, order, DocumentKind::Invoice, request)).await
@@ -123,7 +125,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -137,6 +139,7 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             Box::pin(execution.issue_kind(ctx, order, DocumentKind::Prepayment, request)).await
@@ -161,7 +164,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -175,6 +178,7 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             Box::pin(execution.issue_kind(ctx, order, DocumentKind::Final, request)).await
@@ -191,7 +195,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -205,6 +209,7 @@ impl Order {
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             Box::pin(execution.correct(ctx, order, request)).await
@@ -220,7 +225,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -234,6 +239,7 @@ impl Order {
     ) -> HandlerResult<Json<StornoResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             Box::pin(execution.storno(ctx, order, request)).await
@@ -253,7 +259,7 @@ impl Order {
             factor = 2.0,
             max_interval = "10m",
             max_attempts = 5,
-            on_max_attempts = "kill"
+            on_max_attempts = "pause"
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
@@ -267,6 +273,7 @@ impl Order {
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
+        super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             Box::pin(execution.delete(ctx, order, request)).await
@@ -309,6 +316,38 @@ impl Order {
         })
         .await
         .map(Json)
+    }
+
+    /// Operator-only shared observation of unresolved Order uncertainty.
+    #[handler]
+    async fn observe_unresolved(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> HandlerResult<Json<crate::contract::recovery::UnresolvedObservation>> {
+        self.observe_marker(&ctx).await.map(Json)
+    }
+
+    /// Operator-only exclusive evidence-carrying settlement of the exact marker.
+    #[handler(
+        invocation_retry_policy(
+            initial_interval = "10s",
+            factor = 2.0,
+            max_interval = "1m",
+            max_attempts = 3,
+            on_max_attempts = "pause"
+        ),
+        inactivity_timeout = "4m",
+        abort_timeout = "3m",
+        journal_retention = "30d"
+    )]
+    async fn recover(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Body<crate::contract::recovery::RecoveryRequest>,
+    ) -> HandlerResult<Json<crate::contract::recovery::RecoveryResponse>> {
+        self.recover_marker(&ctx, request.into_request()?)
+            .await
+            .map(Json)
     }
 }
 

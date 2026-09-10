@@ -31,7 +31,7 @@ use crate::gateway::Gateway;
 
 tokio::task_local! {
     /// SDK 0.12.0 replay-filter mitigation; see `mark_fresh_work`.
-    static SDK_SPAN: tracing::Span;
+    pub(super) static SDK_SPAN: tracing::Span;
 }
 
 /// SDK 0.12.0 records replay transitions on the current child span, while
@@ -54,12 +54,13 @@ pub(super) fn mark_fresh_work() {
 ///
 /// Built by the prologue, dropped with the execution: no gateway or client
 /// outlives one handler execution.
-#[derive(Debug)]
 pub(super) struct Execution {
     pub(super) account: Account,
     accounts: Accounts,
     gateway: Arc<tokio::sync::OnceCell<Arc<Gateway>>>,
     pub(super) config: WorkerConfig,
+    #[cfg(feature = "test-util")]
+    pub(super) write_observer: Option<Arc<dyn super::recovery::WriteObserver>>,
 }
 
 impl Execution {
@@ -69,6 +70,8 @@ impl Execution {
             accounts,
             config,
             gateway: Arc::default(),
+            #[cfg(feature = "test-util")]
+            write_observer: None,
         }
     }
 
@@ -190,7 +193,11 @@ async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
 /// ingress returns as `x-restate-id`, the caller's handle on the invocation.
 /// Never the key: the account id is journaled and shown in the Restate UI
 /// already, so logging it leaks nothing.
-fn execution_span(scope: Option<&str>, order: Option<&str>, invocation_id: &str) -> tracing::Span {
+pub(super) fn execution_span(
+    scope: Option<&str>,
+    order: Option<&str>,
+    invocation_id: &str,
+) -> tracing::Span {
     tracing::info_span!(
         "execution",
         scope = %scope.unwrap_or("<unscoped>"),
@@ -353,7 +360,7 @@ fn resolve_exhausted(error: &TerminalError) -> Fault {
         ));
     }
     Fault::unavailable(format!(
-        "the account could not be resolved ({}): {}; retry with a new Idempotency-Key",
+        "the account could not be resolved ({}): {}; reconcile any earlier write before deliberately renewing the operation",
         error.code(),
         error.message()
     ))
@@ -822,7 +829,7 @@ mod tests {
             body["message"]
                 .as_str()
                 .expect("message")
-                .contains("retry with a new Idempotency-Key"),
+                .contains("reconcile any earlier write"),
             "{body}"
         );
 

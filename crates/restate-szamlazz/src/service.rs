@@ -3,10 +3,10 @@
 //!
 //! Both are thin adapters: every szamlazz.hu call runs inside `ctx.run` through
 //! the [`Gateway`](crate::gateway::Gateway) and domain outcomes are returned as
-//! data. Neither keeps state: szamlazz.hu is the source of truth, reached
-//! through the order's deterministic external ids. `TerminalError`s carry a
+//! data. Order keeps only unresolved-write uncertainty; szamlazz.hu is the document source of truth,
+//! reached through deterministic external ids. `TerminalError`s carry a
 //! [`TerminalCode`](crate::contract::TerminalCode): three of the codes mean
-//! "outcome unknown: retry with a new `Idempotency-Key`, or read `get`"
+//! "outcome unknown: reconcile before deliberately renewing"
 //! (`outcome_unknown`, `unavailable`, `credentials_rejected`), the rest are
 //! settled: the same request never succeeds, or szamlazz.hu's own answer is
 //! passed through, or a read was intentionally `cancelled` (409). A cancelled
@@ -58,6 +58,7 @@ mod ingress;
 #[cfg(test)]
 mod journal;
 mod prologue;
+mod recovery;
 mod status;
 mod storno;
 mod support;
@@ -65,6 +66,9 @@ mod support;
 pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
 pub use ingress::decode_fault;
+pub use recovery::RecoveryAuthorizer;
+#[cfg(feature = "test-util")]
+pub use recovery::{WriteCheckpoint, WriteObserver};
 pub use support::FaultConversionError;
 
 use prologue::Execution;
@@ -101,10 +105,21 @@ impl Parts {
 /// `Szamlazz.Order`.
 ///
 /// Same-key handlers run one at a time, which serialises issuing per order.
-/// The object holds no state.
-#[derive(Debug, Clone)]
+/// The object's only state is the unresolved-write marker.
+#[derive(Clone)]
 pub struct Order {
     parts: Parts,
+    recovery_authorizer: Option<std::sync::Arc<dyn RecoveryAuthorizer>>,
+    #[cfg(feature = "test-util")]
+    write_observer: Option<std::sync::Arc<dyn WriteObserver>>,
+}
+
+impl std::fmt::Debug for Order {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Order")
+            .field("parts", &self.parts)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Order {
@@ -115,6 +130,9 @@ impl Order {
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
             parts: Parts { accounts, config },
+            recovery_authorizer: None,
+            #[cfg(feature = "test-util")]
+            write_observer: None,
         }
     }
 
@@ -138,7 +156,17 @@ impl Order {
         F: FnOnce(Execution) -> Fut + Send,
         Fut: Future<Output = Result<T, HandlerError>> + Send,
     {
-        self.parts.execute(ctx, body).await
+        self.parts
+            .execute(ctx, |execution| {
+                #[cfg(feature = "test-util")]
+                let execution = {
+                    let mut execution = execution;
+                    execution.write_observer.clone_from(&self.write_observer);
+                    execution
+                };
+                body(execution)
+            })
+            .await
     }
 }
 

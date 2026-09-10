@@ -93,6 +93,8 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
             "lookup-final",
             "lookup-proforma",
             "lookup-invoice",
+            "prepare-write",
+            "arm-write",
             "create-invoice",
         ],
         "{runs:?}"

@@ -483,6 +483,11 @@ corrective by contract.
 
 ### Unresolved Order writes (#205)
 
+#216 implements the [protected Order command protocol](order-write-protocol.md): the marker is the
+Order's sole cross-invocation state, arming replay grants no send permission, and uncertainty is retained
+for read-only reconciliation and pause. Operator recovery uses the pinned account and exact marker.
+This supersedes older no-state, repeated-create and terminal-exhaustion descriptions below.
+
 The protocol above describes current production behavior. A real-server scripted investigation demonstrated
 that terminal exhaustion releases the lock and a queued invocation can send while the earlier write remains
 invisible, including same-correction-ID and invoice→prepayment cases. The delay floor is not a cross-invocation

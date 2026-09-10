@@ -22,6 +22,7 @@ const POSITIVE_CONTROL: &str = "SENTINEL-8f3a2c-LEAK-CONTROL";
 /// journal v2 the `Command: Run` row carries the name and completion id; the
 /// result is in the notification with that id, which `run_result` reads.
 pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
+    recovery_paths(h).await;
     h.absent("E2E-12", &["prepayment", "final", "proforma", "invoice"])
         .await;
     order_query("E2E-12")
@@ -77,6 +78,69 @@ pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
     );
 }
 
+async fn recovery_paths(h: &Harness) {
+    use crate::harness::szamlazz::{Doc, external_id_query};
+    use restate_e2e_harness::Call;
+    use serde_json::json;
+    let key = "E2E-RECOVERY";
+    h.absent(key, &["invoice", "prepayment", "final", "proforma"])
+        .await;
+    order_query(key)
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_for(key)
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .expect(2)
+        .mount(&h.mock)
+        .await;
+    let create = Call::object("Szamlazz.Order", key, "create_invoice");
+    let observe = Call::object("Szamlazz.Order", key, "observe_unresolved");
+    let recover = Call::object("Szamlazz.Order", key, "recover");
+    let denied = h
+        .invoke(
+            &Call::object("Szamlazz.Order", "UNAUTHORIZED", "observe_unresolved"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(denied.status, 403);
+    assert_eq!(
+        denied.fault().code,
+        restate_szamlazz::contract::TerminalCode::Forbidden
+    );
+    for (id, positive) in [("recovery-attested", false), ("recovery-positive", true)] {
+        let body = create_body(dec!(1000));
+        let submitted = h.invoke(&create.send(), Some(&body), Some(id)).await;
+        h.admin()
+            .await_status(submitted.invocation_id(), &["paused"])
+            .await;
+        let observed = h.invoke(&observe, None, None).await;
+        assert_eq!(observed.body["state"], "unresolved");
+        h.admin().kill(submitted.invocation_id()).await;
+        let evidence = if positive {
+            external_id_query("acct:E2E-RECOVERY:invoice")
+                .respond_with(Doc::of("RECOVERED", "SZ", key).response())
+                .with_priority(1)
+                .mount(&h.mock)
+                .await;
+            json!({"type":"document", "number":"RECOVERED"})
+        } else {
+            json!({"type":"not_executed", "audit_reference":"INC-216", "did_not_execute_and_cannot_execute_later":true})
+        };
+        let response = h
+            .invoke(
+                &recover,
+                Some(&json!({"marker":observed.body["marker"],"evidence":evidence})),
+                None,
+            )
+            .await;
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(response.body["evidence"], evidence);
+        assert_eq!(h.invoke(&observe, None, None).await.body["state"], "absent");
+    }
+}
+
 /// The `Szamlazz.Order` object keeps no state: after every create, storno,
 /// delete and read of the run, on both deployments, the `state` table holds
 /// no row for the service; szamlazz.hu is the only record, and there is
@@ -99,11 +163,15 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
     );
     let state = h.admin().sql_or_panic("SELECT service_name, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'")
         .await;
+    assert!(!state.is_empty(), "cancelled writes retain markers");
     assert!(
-        state.is_empty(),
-        "Szamlazz.Order keeps no state, yet the state table holds: {state:?}"
+        state.iter().all(|row| row["key"] == "unresolved-write"),
+        "only uncertainty state: {state:?}"
     );
-    eprintln!("  (the state table holds nothing for Szamlazz.Order after {orders} invocations)");
+    eprintln!(
+        "  ({} unresolved markers after {orders} invocations)",
+        state.len()
+    );
 }
 
 /// The leak check over the whole run: the hex-decoded `raw` of every journal

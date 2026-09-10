@@ -2,8 +2,8 @@
 //! execution.
 //!
 //! The `Order` Virtual Object (keyed by the order number) serialises issuing per key so that a
-//! caller can say "issue the invoice for order X" and get exactly one legal document under
-//! retries, crashes, concurrent callers and reversals. It keeps **no state**: szamlazz.hu is the
+//! caller can say "issue the invoice for order X". A durable unresolved-write marker and
+//! one-use execution-local send permission protect retries and later mutations. szamlazz.hu is the
 //! source of truth, reached through deterministic external ids (`{namespace}:{order}:{kind}`), so
 //! any invocation can find what an earlier one issued. The stateless `Szamlazz.Agent` service
 //! exposes by-number operations (query, credit entries, storno of unmanaged documents), the NAV

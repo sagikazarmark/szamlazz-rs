@@ -494,12 +494,35 @@ impl Execution {
         // run (exhaustion (500) or cancellation (409)) is `outcome_unknown`
         // about this storno: nothing is recorded, the next invocation's
         // verify and lookup find whatever landed.
-        let outcome = storno_step(ctx, self, &intent).await.map_err(|error| {
-            about(storno_outcome_unknown(
-                &error,
-                "retry with a new Idempotency-Key",
-            ))
-        })?;
+        let operation = crate::contract::recovery::WriteOperation::Storno {
+            number: number.clone(),
+        };
+        let result = self
+            .protected_write(
+                ctx,
+                &order,
+                &storno_id,
+                operation,
+                format!("storno-{number}"),
+                move |gateway, marker| async move {
+                    gateway
+                        .protected_storno(
+                            StornoStepRequest {
+                                invoice_number: &intent.number,
+                                external_id: &intent.storno_id,
+                                comment: intent.comment.as_deref(),
+                                e_invoice: intent.e_invoice,
+                                fulfillment_date: intent.fulfillment_date,
+                            },
+                            &marker,
+                        )
+                        .await
+                },
+            )
+            .await?;
+        let crate::gateway::recovery::WriteResult::Storno(outcome) = result else {
+            return Err(Fault::outcome_unknown("unexpected recovery operation").into());
+        };
 
         // Step 4: branch on data.
         storno_response(outcome, number, namespace).map_err(|fault| about(fault).into())
@@ -1085,7 +1108,7 @@ mod tests {
         assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("szlahu_down"), "{message}");
-        assert!(message.contains("nothing was sent"), "{message}");
+        assert!(message.contains("this query sent no mutation"), "{message}");
 
         let (_, body) = fault_body(
             respond(gateway::StornoOutcome::CredentialsRejected(

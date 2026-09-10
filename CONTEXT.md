@@ -230,9 +230,11 @@ _Avoid_: retryable (a different question), error class (it classifies the outcom
 **Unresolved write**:
 A write whose external effect may still occur or may have occurred without a conclusive answer. An empty query,
 elapsed time, cancellation or invocation kill does not settle it. An **unresolved-write marker** records that
-uncertainty across invocations; it is not a ledger of documents. The approved recovery direction retains the
-original invocation for reconciliation and uses the marker to guard later mutations after its lock is released
-(ADR 0004, #205; implementation pending: the current Order still keeps no state).
+uncertainty across invocations; it is not a ledger of documents. The original invocation is retained for
+read-only reconciliation and pause; the marker guards later mutations after its lock is released. Recovery
+requires matching positive evidence or an audited operator assertion that the exact request did not execute
+and cannot execute later. A marker can conservatively describe a request that never sent. Operator attestation
+is never represented as vendor proof (ADR 0004, #205, #216).
 _Avoid_: pending invoice (existence is not known), timeout as negative settlement, kill as permission to issue
 
 **Issue policy**:

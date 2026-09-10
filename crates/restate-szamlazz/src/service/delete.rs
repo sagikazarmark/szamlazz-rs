@@ -5,12 +5,11 @@
 
 use std::ops::ControlFlow;
 
-use restate_sdk::context::RunRetryPolicy;
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
-use super::support::{AnsweredCode, Fault, initialization_fault, lookup, run_operating};
+use super::support::{AnsweredCode, Fault, lookup};
 use crate::contract::{
     DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentKind, IssuedKind,
 };
@@ -61,26 +60,28 @@ impl Execution {
         };
         let outcome = {
             let target_order = order.clone();
-            run_operating(
-                ctx,
-                format!("delete-proforma-{number}"),
-                RunRetryPolicy::new().max_attempts(1),
-                self,
-                move |gateway| async move {
-                    Ok::<_, std::convert::Infallible>(
-                        gateway
-                            .delete_proforma(&found, &target_order, request.force)
-                            .await,
-                    )
-                },
-            )
-            .await
-            .map_err(|error| {
-                target_fault(
-                    initialization_fault(&error, DELETE_RECOVERY)
-                        .unwrap_or_else(|| delete_unknown(&error).with_run_cause(&error)),
+            let result = self
+                .protected_write(
+                    ctx,
+                    &order,
+                    &proforma_id,
+                    crate::contract::recovery::WriteOperation::Delete {
+                        number: number.clone(),
+                    },
+                    format!("delete-proforma-{number}"),
+                    move |gateway, _marker| async move {
+                        crate::gateway::recovery::WriteResult::delete(
+                            gateway
+                                .delete_proforma(&found, &target_order, request.force)
+                                .await,
+                        )
+                    },
                 )
-            })?
+                .await?;
+            let crate::gateway::recovery::WriteResult::Delete(outcome) = result else {
+                return Err(Fault::outcome_unknown("unexpected recovery operation").into());
+            };
+            outcome
         };
         delete_response(outcome, &self.config.namespace).map_err(|fault| target_fault(fault).into())
     }

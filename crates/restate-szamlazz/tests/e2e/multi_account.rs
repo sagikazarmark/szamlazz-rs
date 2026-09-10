@@ -4,9 +4,11 @@
 //! are two objects, two invocations), an account change and a credential
 //! rotation between two executions of one step.
 
+use crate::harness::szamlazz::external_id_query;
 use restate_e2e_harness::{run_result, run_result_at};
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::body_string_contains;
 
 use restate_szamlazz::contract::TerminalCode;
 
@@ -56,24 +58,23 @@ pub(crate) async fn credential_failure_on_replay_preserves_operation_commands(h:
     let (reply, id) = tokio::join!(tokio::time::timeout(Duration::from_secs(8), call), failure);
     let state = h.admin().invocation(&id).await;
     h.multi().set_unavailable("beta", false);
-    let reply = reply.unwrap_or_else(|_| {
-        panic!("expected a structured fault, not divergent journal commands: {state:?}")
-    });
-    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(reply.is_err(), "unresolved owner remains unfinished");
+    assert_eq!(state.status, "paused");
+    h.admin().cancel(&id).await;
+    let reply = h
+        .call_scoped("beta", "E2E-INIT", "create_invoice", &body, "e2e-init")
+        .await;
+    assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::Unavailable);
-    assert!(fault.message.contains("outcome is not known"), "{fault:?}");
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+    assert_eq!(fault.is_cancelled(), Some(true));
     assert!(!fault.message.contains("nothing was sent"), "{fault:?}");
     assert!(
         !fault.message.contains("secret-store-source-sentinel"),
         "{fault:?}"
     );
     assert_eq!(h.create_bodies_of("E2E-INIT").await.len(), 1);
-    assert_eq!(
-        h.multi().fetches("beta") - fetches,
-        4,
-        "one initial fetch and three at the unfinished operation; completed reads need none"
-    );
+    assert!(h.multi().fetches("beta") - fetches >= 4);
     let journal = h.admin().journal(&id).await;
     assert!(run_result(&journal, "create-invoice").is_some());
     assert!(
@@ -442,7 +443,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
         .await;
     create_with_bank_account(BANK_ACCOUNT)
         .respond_with(created("SZ-19", "1000", "1270"))
-        .expect(1)
+        .expect(0)
         .mount(&h.mock)
         .await;
     create_with_bank_account(BANK_ACCOUNT_CHANGED)
@@ -465,14 +466,19 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
         h.multi().update("acme", |account| {
             account.seller.bank_account = Some(BANK_ACCOUNT_CHANGED.to_owned());
         });
+        external_id_query("acct:E2E-19:invoice")
+            .respond_with(Doc::of("SZ-19", "SZ", "E2E-19").response())
+            .with_priority(1)
+            .mount(&h.mock)
+            .await;
         hold.release();
     };
     let (reply, ()) = tokio::join!(call, change);
     assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reconciled", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-19");
     let creates = h.create_bodies_of("E2E-19").await;
-    assert_eq!(creates.len(), 2, "two executions of the create step");
+    assert_eq!(creates.len(), 1, "reconciliation does not resend");
     assert!(
         creates
             .iter()
@@ -543,7 +549,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
         .await;
     create_with_key(KEY_B_V2)
         .respond_with(created("SZ-20", "1000", "1270"))
-        .expect(1)
+        .expect(0)
         .mount(&h.mock)
         .await;
 
@@ -579,24 +585,33 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
             .raw
             .clone();
         h.multi().rotate("beta", KEY_B_V2);
+        external_id_query("acct:E2E-20:invoice")
+            .and(body_string_contains(agent_key_tag(KEY_B_V2)))
+            .respond_with(Doc::of("SZ-20", "SZ", "E2E-20").response())
+            .with_priority(1)
+            .mount(&h.mock)
+            .await;
         hold.release();
         (id.clone(), before)
     };
     let (reply, (id, before)) = tokio::join!(call, rotate);
     assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "reconciled", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-20");
     assert_eq!(reply.invocation_id(), id);
 
     let creates = h.create_bodies_of("E2E-20").await;
-    assert_eq!(creates.len(), 2, "two executions of the create step");
+    assert_eq!(creates.len(), 1, "reconciliation does not resend");
     assert!(
         creates[0].contains(&agent_key_tag(KEY_B)),
         "execution one carried the old key"
     );
     assert!(
-        creates[1].contains(&agent_key_tag(KEY_B_V2)),
-        "execution two carried the rotated key"
+        h.requests_of_order("E2E-20")
+            .await
+            .iter()
+            .any(|body| body.contains(&agent_key_tag(KEY_B_V2))),
+        "reconciliation carried the rotated key"
     );
     let journal = h.admin().journal(reply.invocation_id()).await;
     let account = run_result(&journal, "account").expect("the account result");

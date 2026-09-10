@@ -104,6 +104,8 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
             "lookup-prepayment",
             "lookup-final",
             "lookup-proforma",
+            "prepare-write",
+            "arm-write",
             "create-proforma",
         ]
     );
@@ -134,6 +136,8 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
             "lookup-final",
             "verify-proforma-D-7",
             "lookup-invoice",
+            "prepare-write",
+            "arm-write",
             "create-invoice",
         ],
         "the named proforma is verified in place of the link read"

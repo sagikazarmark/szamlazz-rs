@@ -98,6 +98,8 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
             "lookup-corrective",
             "verify-base-SZ-C1",
             "lookup-corrective",
+            "prepare-write",
+            "arm-write",
             "create-corrective"
         ]
     );

@@ -20,8 +20,7 @@ use rust_decimal::dec;
 
 use crate::harness::ingress::Reply;
 use crate::harness::szamlazz::{
-    Doc, create_for, create_lands_on_the_second_send, create_lands_slowly, created, not_found,
-    order_query, szlahu_down,
+    Doc, create_for, create_lands_slowly, created, not_found, order_query, szlahu_down,
 };
 use crate::harness::{Harness, create_body};
 
@@ -57,8 +56,11 @@ async fn assert_second_call_queued_behind_the_first(
 ) {
     assert_eq!(first.reply.status, 200, "{}", first.reply.body);
     assert_eq!(second.reply.status, 200, "{}", second.reply.body);
-    assert_eq!(
-        first.reply.body["outcome"], "issued",
+    assert!(
+        matches!(
+            first.reply.body["outcome"].as_str(),
+            Some("issued" | "reconciled")
+        ),
         "{}",
         first.reply.body
     );
@@ -98,7 +100,11 @@ async fn assert_second_call_queued_behind_the_first(
     let first_runs = h.admin().runs(first.reply.invocation_id()).await;
     assert_eq!(
         first_runs.last().map(String::as_str),
-        Some("create-invoice"),
+        Some(if first.reply.body["outcome"] == "reconciled" {
+            "reconcile-write"
+        } else {
+            "create-invoice"
+        }),
         "the first call sent: {first_runs:?}"
     );
     assert_eq!(
@@ -239,15 +245,15 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    let mut sends = create_lands_on_the_second_send(
-        &h.mock,
-        &Doc {
-            external_id: Some("acct:E2E-L2:invoice"),
-            ..Doc::of("SZ-L2", "SZ", "E2E-L2")
-        },
-        szlahu_down(),
-    )
-    .await;
+    crate::harness::szamlazz::external_id_query("acct:E2E-L2:invoice")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_for("E2E-L2")
+        .respond_with(szlahu_down())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
 
     let body = create_body(dec!(1000));
     // The second execution's fetch (the first execution's is the first).
@@ -277,8 +283,12 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
                 "the second call was queued before the second send: {in_flight:?}"
             );
             let released = Instant::now();
+            crate::harness::szamlazz::external_id_query("acct:E2E-L2:invoice")
+                .respond_with(Doc::of("SZ-L2", "SZ", "E2E-L2").response())
+                .with_priority(1)
+                .mount(&h.mock)
+                .await;
             hold.release();
-            sends.received(2).await;
             (in_flight, released, Instant::now())
         },
     );
@@ -294,14 +304,14 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
     );
     assert_eq!(
         retries.failing_commands,
-        ["create-invoice"],
+        ["reconcile-write"],
         "the first call's create step is what re-executed: {retries:?}"
     );
     assert_second_call_queued_behind_the_first(h, "SZ-L2", first, second).await;
     assert_eq!(
         h.create_bodies_of("E2E-L2").await.len(),
-        2,
-        "two sends, both the first call's: the one szamlazz.hu did not act on and the one that landed"
+        1,
+        "one send while the original invocation reconciles"
     );
 }
 

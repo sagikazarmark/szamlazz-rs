@@ -101,6 +101,7 @@ use crate::identity::{ExternalId, OrderKey};
 pub mod build;
 mod diagnostic;
 pub mod document;
+pub(crate) mod recovery;
 
 pub use build::{DocumentRefs, InputError};
 pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
@@ -993,9 +994,16 @@ impl Gateway {
     ///
     /// Returns an error when the HTTP client cannot be constructed.
     pub fn open(account: Account, credentials: Credentials) -> Result<Self, BuildError> {
+        let http = reqwest::Client::builder()
+            .cookie_store(true)
+            .timeout(szamlazz_agent::client::REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?;
         let client = Client::builder()
             .credentials(credentials)
             .endpoint(account.endpoint.as_str())
+            .http_client(http)
             .build()?;
         Ok(Self { client, account })
     }
@@ -1211,6 +1219,14 @@ impl Gateway {
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
+        self.create_send(request, false).await
+    }
+
+    async fn create_send(
+        &self,
+        request: &CreateStepRequest<'_>,
+        protected: bool,
+    ) -> Result<CreateOutcome, Unconfirmed> {
         // Step 2: create.
         match self.client.send(request.create).await {
             Ok(CreationOutcome::Issued(created)) => {
@@ -1226,7 +1242,11 @@ impl Gateway {
                     code: None,
                     message: "the create succeeded without a document number".to_owned(),
                 };
-                self.settle_or(request, open).await
+                if protected {
+                    Err(open)
+                } else {
+                    self.settle_or(request, open).await
+                }
             }
             Err(error) => match classify_failure("create", error) {
                 Failure::Rejected(rejection) => {
@@ -1242,14 +1262,24 @@ impl Gateway {
                         code: Some(answer.code),
                         message: answer.message,
                     };
-                    self.settle_or(request, open).await
+                    if protected {
+                        Err(open)
+                    } else {
+                        self.settle_or(request, open).await
+                    }
                 }
                 Failure::Unavailable(message) => {
+                    if protected {
+                        return Err(Unconfirmed::Unavailable(message));
+                    }
                     tracing::warn!("szlahu_down on the create; re-querying");
                     self.settle_or(request, Unconfirmed::Unavailable(message))
                         .await
                 }
                 Failure::Transport(message) => {
+                    if protected {
+                        return Err(Unconfirmed::Transport(message));
+                    }
                     tracing::warn!("transport failure; re-querying");
                     self.settle_or(request, Unconfirmed::Transport(message))
                         .await
@@ -1699,6 +1729,14 @@ impl Gateway {
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
+        self.storno_send(request, false).await
+    }
+
+    async fn storno_send(
+        &self,
+        request: StornoStepRequest<'_>,
+        protected: bool,
+    ) -> Result<StornoOutcome, Unconfirmed> {
         // Step 2: send.
         let storno = StornoInvoice {
             e_invoice: request.e_invoice,
@@ -1722,6 +1760,26 @@ impl Gateway {
                     Ok(StornoOutcome::NotStornoable)
                 }
                 StornoReplyEvidence::NeedsVerification => {
+                    if protected {
+                        if let Ok(document) = self
+                            .query_raw(InvoiceSelector::InvoiceNumber(
+                                created.invoice_number.clone(),
+                            ))
+                            .await
+                            && document.number == created.invoice_number.as_str()
+                            && document.is_storno_of(request.invoice_number)
+                            && let Ok(original) = self
+                                .query_raw(InvoiceSelector::InvoiceNumber(
+                                    request.invoice_number.into(),
+                                ))
+                                .await
+                            && original.number == request.invoice_number
+                            && original.reversed == Some(true)
+                        {
+                            return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+                        }
+                        return Err(Unconfirmed::StornoVerification { number: created.invoice_number.to_string(), message: "numbered reply needs positive identity and original reversal evidence".to_owned() });
+                    }
                     self.verify_storno_reply(&request, created).await
                 }
             },
@@ -1743,14 +1801,24 @@ impl Gateway {
                         code: Some(answer.code),
                         message: answer.message,
                     };
-                    self.storno_settle_or(&request, open).await
+                    if protected {
+                        Err(open)
+                    } else {
+                        self.storno_settle_or(&request, open).await
+                    }
                 }
                 Failure::Unavailable(message) => {
+                    if protected {
+                        return Err(Unconfirmed::Unavailable(message));
+                    }
                     tracing::warn!("szlahu_down on the storno; re-querying");
                     self.storno_settle_or(&request, Unconfirmed::Unavailable(message))
                         .await
                 }
                 Failure::Transport(message) => {
+                    if protected {
+                        return Err(Unconfirmed::Transport(message));
+                    }
                     tracing::warn!("transport failure; re-querying");
                     self.storno_settle_or(&request, Unconfirmed::Transport(message))
                         .await

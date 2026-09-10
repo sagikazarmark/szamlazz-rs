@@ -150,10 +150,16 @@ pub(crate) async fn cancelled_storno_is_uncertain(h: &Harness) {
         )
         .await;
         let fault = reply.fault();
-        assert!(
-            fault.message.contains("query the original invoice"),
-            "{fault:?}"
-        );
-        assert!(fault.message.contains("if still intended"), "{fault:?}");
+        if call.service == "Szamlazz.Agent" {
+            assert!(
+                fault.message.contains("query the original invoice"),
+                "{fault:?}"
+            );
+        } else {
+            assert!(
+                fault.message.contains("unresolved marker is retained"),
+                "{fault:?}"
+            );
+        }
     }
 }

@@ -2,8 +2,8 @@
 
 Decision approved by the owner on 2026-09-10: **retain the invocation for reconciliation, plus a durable
 unresolved-write marker**. [ADR 0004](../adr/0004-kill-not-pause-on-exhausted-retries.md#unresolved-order-writes-205-2026-09-10)
-records the trade-off. This file specifies the bounded follow-up. The production worker still uses query-first
-re-execution, terminal run exhaustion and invocation-policy kill. The probes here do not implement the redesign.
+records the trade-off. This file specifies the bounded follow-up. #216 implements the protected protocol in
+[the command specification](order-write-protocol.md); the baseline reproduction below is historical evidence.
 
 ## Verified reproduction
 

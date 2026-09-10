@@ -7,8 +7,9 @@
 
 Three protocol libraries (the Számla Agent client, the IPN receiver, the Adatkapcsolat receiver) and a **durable
 invoicing worker** on [Restate](https://restate.dev/): the `Szamlazz.Order` service issues, corrects and reverses
-szamlazz.hu documents **exactly once per order** under retries, crashes and concurrent callers, keeping no state of its
-own (szamlazz.hu is the source of truth). You call it over HTTP with a JSON body from any language (no Rust, no
+szamlazz.hu documents with **one unresolved write per order** under retries, crashes and concurrent callers.
+It retains uncertainty for read-only reconciliation and guards later mutations with a durable marker;
+szamlazz.hu remains the document source of truth. You call it over HTTP with a JSON body from any language (no Rust, no
 Restate SDK), and branch on the outcome it returns as data; the request and response contract, the fault envelope
 and the guidance for calling from a webhook handler are in the [`restate-szamlazz` README](crates/restate-szamlazz/README.md).
 Issuing from Rust directly starts at [`szamlazz-agent`](crates/szamlazz-agent).
@@ -19,7 +20,7 @@ Issuing from Rust directly starts at [`szamlazz-agent`](crates/szamlazz-agent).
 - **Portable library cores.** The three protocol libraries (`szamlazz-agent`, `szamlazz-ipn`, `szamlazz-adatkapcsolat`) target native Rust and `wasm32-unknown-unknown`, including Cloudflare Workers; the Restate crates are native-only.
 - **Bring your own HTTP client.** The Számla Agent core performs no I/O: build complete wire requests and parse raw responses with any HTTP client, or enable the reqwest client.
 - **Protocol-native models.** Typed operations, documents, Acks, errors, and Hungarian Rustdoc aliases preserve szamlazz.hu semantics.
-- **Durable workers.** Issue and reverse documents exactly once per order through stateless Restate services you bind to an endpoint of your own; szamlazz.hu stays the source of truth.
+- **Durable workers.** Serialize Order mutations and retain unresolved writes for evidence-based recovery; szamlazz.hu stays the document source of truth.
 
 ## Workspace
 
@@ -31,7 +32,7 @@ This virtual workspace contains five packages intended for publication and indep
 | [`szamlazz-ipn`](crates/szamlazz-ipn) | IPN receiver types for current payment-status snapshots, with an optional axum extractor. |
 | [`szamlazz-adatkapcsolat`](crates/szamlazz-adatkapcsolat) | Adatkapcsolat receiver for outgoing and incoming invoices, bank transactions, and receipts. |
 | [`szamlazz-cli`](crates/szamlazz-cli) | `szamlazz` command-line client and local development receiver for IPN and Adatkapcsolat. |
-| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` Virtual Object and `Szamlazz.Agent` service issuing szamlazz.hu documents exactly once per order, stateless: szamlazz.hu is the source of truth, reached through deterministic external ids. |
+| [`restate-szamlazz`](crates/restate-szamlazz) | Restate `Szamlazz.Order` with unresolved-write protection and the stateless `Szamlazz.Agent` service; document status comes from szamlazz.hu. |
 
 The worker's end-to-end tests use [`restate-e2e-harness`](https://crates.io/crates/restate-e2e-harness)
 from crates.io.

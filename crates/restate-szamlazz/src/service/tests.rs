@@ -54,7 +54,7 @@ fn worker_config() -> ValidatedWorkerConfig {
 }
 
 #[test]
-fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
+fn order_discovers_mutations_reads_and_operator_recovery() {
     let discovery = <Order as Discoverable>::discover();
     assert_eq!(discovery.name.as_str(), "Szamlazz.Order");
     assert_eq!(discovery.ty, ServiceType::VirtualObject);
@@ -75,6 +75,8 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
             "create_proforma",
             "delete_proforma",
             "get",
+            "observe_unresolved",
+            "recover",
             "storno_invoice",
         ]
     );
@@ -83,9 +85,24 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
         let name = handler.name.as_str();
         assert_eq!(handler.ingress_private, None, "{name} is public");
         assert!(handler.output.is_some(), "{name} returns an output");
+        if matches!(name, "observe_unresolved" | "recover") {
+            assert_eq!(
+                handler.ty,
+                if name == "observe_unresolved" {
+                    Some(HandlerType::Shared)
+                } else {
+                    None
+                }
+            );
+            continue;
+        }
         assert_eq!(
             handler.retry_policy_on_max_attempts,
-            Some(RetryPolicyOnMaxAttempts::Kill),
+            Some(if name == "get" {
+                RetryPolicyOnMaxAttempts::Kill
+            } else {
+                RetryPolicyOnMaxAttempts::Pause
+            }),
             "{name}"
         );
         if name == "get" {

@@ -28,6 +28,7 @@ pub(crate) mod ingress;
 pub(crate) mod run_names;
 pub(crate) mod szamlazz;
 
+use restate_sdk::service::IntoServiceDefinition as _;
 use std::sync::Arc;
 
 use jiff::civil::date;
@@ -179,6 +180,18 @@ pub(crate) struct Harness {
     multi: Option<Arc<MutableAccounts>>,
 }
 
+struct TestOperator;
+impl restate_szamlazz::service::RecoveryAuthorizer for TestOperator {
+    fn authorize(
+        &self,
+        _scope: Option<&str>,
+        order: &str,
+        _headers: &restate_sdk::context::HeaderMap,
+    ) -> Option<String> {
+        (order == "E2E-RECOVERY").then(|| "test-operator".to_owned())
+    }
+}
+
 impl Harness {
     /// Join endpoint tasks before releasing their mock and assert no handler
     /// panic was hidden by a successful Restate retry.
@@ -236,8 +249,33 @@ impl Harness {
     /// the deployment with the server: a new URI is a new revision of both
     /// services, and new invocations route to it.
     async fn deploy(&self, order: Order, agent: Agent) {
+        let order = order.with_recovery_authorizer(Arc::new(TestOperator));
+        let mut options = restate_sdk::endpoint::ServiceOptions::default();
+        for handler in [
+            "create_invoice",
+            "create_proforma",
+            "create_prepayment",
+            "create_final",
+            "correct_invoice",
+            "storno_invoice",
+            "delete_proforma",
+        ] {
+            options = options.handler(
+                handler,
+                restate_sdk::endpoint::HandlerOptions::default()
+                    .retry_policy_initial_interval(std::time::Duration::from_secs(1))
+                    .retry_policy_max_interval(std::time::Duration::from_secs(1))
+                    .retry_policy_max_attempts(3)
+                    .retry_policy_pause_on_max_attempts(),
+            );
+        }
         self.restate
-            .deploy(Endpoint::builder().bind(order).bind(agent).build())
+            .deploy(
+                Endpoint::builder()
+                    .bind(order.into_service_definition().options(options))
+                    .bind(agent)
+                    .build(),
+            )
             .await;
     }
 

@@ -65,7 +65,7 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .await;
     holds_after_misses(
         &h.mock,
-        6,
+        4,
         &Doc {
             external_id: Some("acct:E2E-11:invoice"),
             ..Doc::of("SZ-11", "SZ", "E2E-11")
@@ -74,7 +74,7 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
     .await;
     create_for("E2E-11")
         .respond_with(ResponseTemplate::new(500))
-        .expect(2)
+        .expect(1)
         .mount(&h.mock)
         .await;
     // The flaky target lookup: the first execution loses its reply; the
@@ -136,20 +136,12 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
         .await;
     let elapsed = started.elapsed();
     let retries = watch.finish().await;
-    assert_eq!(reply.status, 500, "{}", reply.body);
+    assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
         "the run policy's delay (1 s initial) was honoured, not the handler's: {elapsed:?}"
     );
-    let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
-    assert_eq!(fault.order.as_deref(), Some("E2E-11"));
-    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
-    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-11:invoice"));
-    assert!(
-        fault.message.contains("retry with a new Idempotency-Key"),
-        "{fault:?}"
-    );
+    assert_eq!(reply.body["outcome"], "reconciled");
     // The run's re-execution is visible while the invocation is in flight:
     // `retry_count` (the invoker's count of starts) counts it, with the
     // create step named as the failing command, and the completed invocation
@@ -157,26 +149,20 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
         retries.failing_commands,
-        ["create-invoice"],
+        ["reconcile-write"],
         "the run, not the handler, is what retried: {retries:?}"
     );
     assert!(
         retries
             .failures
             .iter()
-            .all(|failure| failure.contains("transport failure")),
+            .all(|failure| failure.contains("unresolved")),
         "the last failure is the Unconfirmed message: {retries:?}"
     );
     let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.handler, "create_invoice");
     assert_eq!(invocation.status, "completed", "{invocation:?}");
-    assert!(
-        invocation
-            .completion_failure
-            .as_deref()
-            .is_some_and(|failure| failure.contains("outcome_unknown")),
-        "{invocation:?}"
-    );
+    assert!(invocation.completion_failure.is_none(), "{invocation:?}");
     let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "create-invoice").count(),
@@ -185,8 +171,8 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     );
     assert_eq!(
         h.create_bodies_of("E2E-11").await.len(),
-        2,
-        "one send per execution"
+        1,
+        "one send across every execution"
     );
 
     // The same key: the stored fault, nothing read.
@@ -199,8 +185,8 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
             "e2e-11-k1",
         )
         .await;
-    assert_eq!(replayed.status, 500, "{}", replayed.body);
-    assert_eq!(replayed.fault().code, TerminalCode::OutcomeUnknown);
+    assert_eq!(replayed.status, 200, "{}", replayed.body);
+    assert_eq!(replayed.body, reply.body);
     assert_eq!(replayed.invocation_id(), reply.invocation_id());
     assert_eq!(
         h.requests_of_order("E2E-11").await.len(),
@@ -228,7 +214,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     );
     assert_eq!(
         h.create_bodies_of("E2E-11").await.len(),
-        2,
+        1,
         "nothing more was sent"
     );
 }
@@ -281,6 +267,8 @@ async fn flaky_read_is_re_executed(h: &Harness) {
             "lookup-final",
             "lookup-proforma",
             "lookup-invoice",
+            "prepare-write",
+            "arm-write",
             "create-invoice",
         ],
         "one journal entry per step; the retried read is one entry"
@@ -320,7 +308,7 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
     assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
     assert!(fault.message.contains("transport failure"), "{fault:?}");
     assert!(
-        fault.message.contains("retry with a new Idempotency-Key"),
+        fault.message.contains("reconcile any earlier write"),
         "{fault:?}"
     );
     assert!(retries.max_retry_count >= 1, "{retries:?}");
@@ -414,13 +402,11 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     assert_eq!(fault.kind, Some(IssuedKind::Invoice));
     assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-L4:invoice"));
     assert!(
-        fault.message.contains("(409)") && fault.message.contains("cancelled"),
+        fault.message.contains("409") && fault.message.contains("cancelled"),
         "the fault names how the run ended: {fault:?}"
     );
     assert!(
-        fault
-            .message
-            .contains("a send may have landed: read get, then retry with a new Idempotency-Key only if issuance is still intended"),
+        fault.message.contains("unresolved marker is retained"),
         "a cancelled write reconciles before it retries: {fault:?}"
     );
     assert!(
@@ -446,6 +432,8 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
             "lookup-final",
             "lookup-proforma",
             "lookup-invoice",
+            "prepare-write",
+            "arm-write",
             "create-invoice",
         ],
         "the create step's command was journaled; the cancel ended its await"
@@ -464,14 +452,9 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         started.elapsed() < Duration::from_secs(30),
         "the key was released by the cancelled invocation's completion"
     );
-    assert_eq!(next.status, 200, "{}", next.body);
-    assert_eq!(next.body["outcome"], "already_issued", "{}", next.body);
-    assert_eq!(next.body["invoice_number"], "SZ-L4");
-    assert_eq!(
-        h.admin().runs(next.invocation_id()).await,
-        ["namespace", "account", "lookup-invoice"],
-        "the next call answered from its target lookup before prerequisites"
-    );
+    assert_eq!(next.status, 500, "{}", next.body);
+    assert_eq!(next.fault().code, TerminalCode::OutcomeUnknown);
+    assert!(h.admin().runs(next.invocation_id()).await.is_empty());
     assert_eq!(
         h.create_bodies_of("E2E-L4").await.len(),
         1,
@@ -567,21 +550,13 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
     .await;
     let fault = reply.fault();
     assert_eq!(fault.order.as_deref(), Some("E2E-CANCEL-DELETE"));
-    assert!(fault.message.contains("D-CANCEL"), "{fault:?}");
     assert!(
-        fault.message.contains("query the expected number"),
+        fault.message.contains("unresolved marker is retained"),
         "{fault:?}"
     );
-    assert!(fault.message.contains("same expected_number"), "{fault:?}");
-    assert_eq!(fault.kind, Some(IssuedKind::Proforma));
     assert_eq!(
         fault.external_id.as_deref(),
         Some("acct:E2E-CANCEL-DELETE:proforma")
-    );
-    assert!(fault.message.contains("read get"), "{fault:?}");
-    assert!(
-        fault.message.contains("if deletion is still intended"),
-        "{fault:?}"
     );
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
@@ -589,6 +564,8 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
             "namespace",
             "account",
             "lookup-proforma",
+            "prepare-write",
+            "arm-write",
             "delete-proforma-D-CANCEL"
         ]
     );
@@ -603,10 +580,6 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
             Some("cancel-delete-k2"),
         )
         .await;
-    assert_eq!(again.status, 200, "{}", again.body);
-    assert_eq!(again.body["reason"], "absent", "{}", again.body);
-    assert_eq!(
-        h.admin().runs(again.invocation_id()).await,
-        ["namespace", "account", "lookup-proforma"]
-    );
+    assert_eq!(again.status, 500, "{}", again.body);
+    assert!(h.admin().runs(again.invocation_id()).await.is_empty());
 }

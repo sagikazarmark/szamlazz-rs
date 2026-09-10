@@ -1,0 +1,222 @@
+//! Operator recovery and the versioned, fail-closed unresolved-write state.
+
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::identity::{IssuedKind, Namespace, OrderKey};
+
+/// Recovery intent without buyer data, line items, XML or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum WriteOperation {
+    /// Issuance, including its expected old holder and corrective base.
+    Create {
+        /// The kind being issued.
+        kind: IssuedKind,
+        /// The old reversed holder, for explicit reissue.
+        expected_number: Option<String>,
+        /// The original of a corrective.
+        corrected_number: Option<String>,
+    },
+    /// Reversal of the exact original.
+    Storno {
+        /// Original invoice number.
+        number: String,
+    },
+    /// Deletion of the pinned proforma.
+    Delete {
+        /// Pinned proforma number.
+        number: String,
+    },
+}
+
+/// Schema version accepted by this deployment. Unknown versions fail closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "u8")]
+pub struct MarkerVersion;
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for MarkerVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MarkerVersion".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":"integer", "const":1})
+    }
+}
+
+impl From<MarkerVersion> for u8 {
+    fn from(_: MarkerVersion) -> Self {
+        1
+    }
+}
+
+impl<'de> Deserialize<'de> for MarkerVersion {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        match u8::deserialize(de)? {
+            1 => Ok(Self),
+            _ => Err(serde::de::Error::custom(
+                "unsupported unresolved-write version",
+            )),
+        }
+    }
+}
+
+/// The sole Order state: a possibly effective write awaiting conclusive evidence.
+/// Its schema crosses deployments and is deliberately closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UnresolvedWrite {
+    /// Explicit state schema version.
+    pub version: MarkerVersion,
+    /// Unique marker token, the original invocation id.
+    pub token: String,
+    /// Invocation retaining or formerly holding the lock.
+    pub owner_invocation: String,
+    /// Arming time, for operator observation only; never an expiry.
+    pub created_at: String,
+    /// Restate scope, including unscoped as a distinct value.
+    pub scope: Option<String>,
+    /// Exact Order key.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub order: OrderKey,
+    /// Pinned deployment namespace.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub namespace: Namespace,
+    /// External identity of the write.
+    pub external_id: String,
+    /// Pinned resolver-owned account id.
+    pub account_id: String,
+    /// Pinned Számla Agent endpoint.
+    pub endpoint: String,
+    /// Stable non-secret credential reference.
+    pub credential_ref: String,
+    /// Minimal operation-specific recovery intent.
+    pub operation: WriteOperation,
+}
+
+/// Explicit affirmative operator assertion, never vendor proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "bool")]
+pub struct NonExecutionAttestation;
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for NonExecutionAttestation {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NonExecutionAttestation".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":"boolean", "const":true})
+    }
+}
+
+impl From<NonExecutionAttestation> for bool {
+    fn from(_: NonExecutionAttestation) -> Self {
+        true
+    }
+}
+
+impl<'de> Deserialize<'de> for NonExecutionAttestation {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        if bool::deserialize(de)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(
+                "must attest that the exact request did not execute and cannot execute later",
+            ))
+        }
+    }
+}
+
+/// Evidence an authorized operator submits; no generic clearance exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum RecoveryEvidence {
+    /// Independently query and validate the document on the pinned account.
+    Document {
+        /// Candidate issued document or storno number.
+        number: crate::identity::InvoiceNumber,
+    },
+    /// Audited operator assertion that the exact request cannot have an effect.
+    NotExecuted {
+        /// Reference to the operator's durable incident/evidence record.
+        audit_reference: String,
+        /// Must be explicitly true. Time elapsed is not evidence.
+        did_not_execute_and_cannot_execute_later: NonExecutionAttestation,
+    },
+}
+
+/// Exclusive operator recovery; the complete marker must match exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct RecoveryRequest {
+    /// Exact marker observed under the same scope and Order key.
+    pub marker: UnresolvedWrite,
+    /// Evidence permitting settlement, never permission to send.
+    pub evidence: RecoveryEvidence,
+}
+
+/// Shared observation available even while the owner is paused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum UnresolvedObservation {
+    /// No unresolved marker.
+    Absent,
+    /// A known marker awaiting recovery.
+    Unresolved {
+        /// Minimal recovery record.
+        marker: Box<UnresolvedWrite>,
+    },
+    /// State is present but cannot safely be decoded by this deployment.
+    Unreadable,
+    /// A newer observation or marker schema, preserved without authorizing recovery.
+    #[serde(untagged)]
+    Other {
+        /// Unclassified state token.
+        state: String,
+        /// Fields returned by the newer deployment.
+        #[serde(flatten)]
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl<'de> Deserialize<'de> for UnresolvedObservation {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(de)?;
+        let state = fields
+            .remove("state")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| serde::de::Error::custom("observation requires a string state"))?;
+        match state.as_str() {
+            "absent" => Ok(Self::Absent),
+            "unreadable" => Ok(Self::Unreadable),
+            "unresolved" => {
+                let marker = fields.get("marker").cloned().ok_or_else(|| {
+                    serde::de::Error::custom("unresolved observation requires marker")
+                })?;
+                match serde_json::from_value(marker) {
+                    Ok(marker) => Ok(Self::Unresolved { marker }),
+                    Err(_) => Ok(Self::Other { state, fields }),
+                }
+            }
+            _ => Ok(Self::Other { state, fields }),
+        }
+    }
+}
+
+/// Journaled evidence of operator settlement, returned before any new mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct RecoveryResponse {
+    /// Marker settled by this recovery invocation.
+    pub token: String,
+    /// Operator identity supplied by the host authorizer.
+    pub operator: String,
+    /// Evidence that settled uncertainty. An attestation stays an attestation.
+    pub evidence: serde_json::Value,
+}

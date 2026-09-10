@@ -354,7 +354,7 @@ pub(crate) async fn missing_target_after_a_lost_reissue_preserves_uncertainty(h:
         .await;
     external_id_query("acct:E2E-INTENT-LOST:invoice")
         .respond_with(not_found())
-        .expect(2)
+        .expect(2..)
         .mount(&h.mock)
         .await;
     h.absent(order, &["prepayment", "final", "proforma"]).await;
@@ -367,19 +367,22 @@ pub(crate) async fn missing_target_after_a_lost_reissue_preserves_uncertainty(h:
         .expect(1)
         .mount(&h.mock)
         .await;
-    let reply = h
-        .call(
-            order,
-            "create_invoice",
-            &reissue_body(dec!(1000), "SZ-LOST-A"),
-            "intent-lost",
-        )
+    let call = restate_e2e_harness::Call::object("Szamlazz.Order", order, "create_invoice");
+    let body = reissue_body(dec!(1000), "SZ-LOST-A");
+    let submitted = h
+        .invoke(&call.send(), Some(&body), Some("intent-lost"))
         .await;
+    h.admin()
+        .await_status(submitted.invocation_id(), &["paused"])
+        .await;
+    assert_eq!(h.create_bodies_of(order).await.len(), 1);
+    h.admin().cancel(submitted.invocation_id()).await;
+    let reply = h.invoke(&call, Some(&body), Some("intent-lost")).await;
     assert_eq!(reply.status, 500, "{}", reply.body);
     assert_eq!(
         reply.fault().code,
         restate_szamlazz::contract::TerminalCode::OutcomeUnknown
     );
-    assert!(reply.fault().message.contains("earlier send"));
+    assert_eq!(reply.fault().is_cancelled(), Some(true));
     assert_eq!(h.create_bodies_of(order).await.len(), 1);
 }

@@ -34,11 +34,23 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
         let number = format!("D-{suffix}");
         let doc = Doc::of(&number, "D", &order);
         let reaches_send = fresh.is_none();
-        external_id_query(&format!("acct:{order}:proforma")).respond_with(doc.response()).expect(1).mount(&h.mock).await;
+        external_id_query(&format!("acct:{order}:proforma")).respond_with(doc.response()).expect(1..).mount(&h.mock).await;
         number_query(&number).respond_with(fresh.unwrap_or_else(|| doc.response())).expect(1).mount(&h.mock).await;
         delete_of(&number).respond_with(send).expect(u64::from(reaches_send)).mount(&h.mock).await;
         let key = format!("delete-{suffix}");
         let body = json!({"expected_number": number, "force": true});
+        if status == 500 {
+            let call = restate_e2e_harness::Call::object("Szamlazz.Order", &order, "delete_proforma");
+            let submitted = h.invoke(&call.send(), Some(&body), Some(&key)).await;
+            h.admin().await_status(submitted.invocation_id(), &["paused"]).await;
+            assert_eq!(h.delete_bodies_of(&number).await.len(), 1);
+            h.admin().cancel(submitted.invocation_id()).await;
+            let cancelled = h.invoke(&call, Some(&body), Some(&key)).await;
+            assert_eq!(cancelled.fault().is_cancelled(), Some(true));
+            let blocked = h.call(&order, "delete_proforma", &body, &format!("{key}-next")).await;
+            assert_eq!(blocked.status, 500);
+            continue;
+        }
         let reply = h.call(&order, "delete_proforma", &body, &key).await;
         assert_eq!(reply.status, status, "{suffix}: {}", reply.body);
         if status == 200 {
@@ -79,7 +91,7 @@ pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Har
         .await;
     external_id_query("acct:E2E-D-REPLAY:proforma")
         .respond_with(Doc::of("D-REPLACEMENT", "D", "E2E-D-REPLAY").response())
-        .expect(0)
+        .expect(1..)
         .mount(&h.mock)
         .await;
     let signal = Arc::clone(&reached);
@@ -123,23 +135,16 @@ pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Har
                 }
                 .response(),
             )
-            .expect(1)
+            .expect(0)
             .mount(&h.mock)
             .await;
         h.admin().resume(&id).await;
+        h.admin().await_status(&id, &["paused"]).await;
+        h.admin().cancel(&id).await;
     };
     let (reply, ()) = tokio::join!(call, interrupt);
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(
-        reply.body,
-        json!({"deleted": false, "reason": "proforma_paid"})
-    );
-    assert_eq!(
-        h.requests_mentioning("acct:E2E-D-REPLAY:proforma")
-            .await
-            .len(),
-        1
-    );
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    assert_eq!(reply.fault().is_cancelled(), Some(true));
     assert!(h.delete_bodies_of("D-PINNED").await.is_empty());
     assert!(h.delete_bodies_of("D-REPLACEMENT").await.is_empty());
 }
@@ -185,6 +190,8 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
             "namespace",
             "account",
             "lookup-proforma",
+            "prepare-write",
+            "arm-write",
             "delete-proforma-D-D1"
         ]
     );

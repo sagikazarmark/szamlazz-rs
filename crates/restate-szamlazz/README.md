@@ -7,8 +7,8 @@
 
 The `Szamlazz.Order` Virtual Object, keyed by the order number, serializes issuing per key: a caller says "issue
 the invoice for order X" and reconciles retries through deterministic external ids. An unanswered send that
-remains invisible can outlive invocation completion; the current worker does not guard later mutations against
-that uncertainty (see **Unresolved writes** below). It keeps **no state**. szamlazz.hu is the source of truth, reached through deterministic external
+remains invisible is retained for read-only reconciliation and pause. A durable **unresolved-write marker**
+guards every later mutation after cancellation or kill (see **Unresolved writes** below). szamlazz.hu is the source of truth, reached through deterministic external
 ids (`{namespace}:{order}:{kind}`), so any invocation can find what an earlier one issued.
 
 The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of unmanaged
@@ -495,7 +495,7 @@ the account in the `account` step) before its operation; credential fetch and ga
 Three identities work together.
 
 **The order key** decides which `Order` instance runs; same-key handlers run one at a time, which is what
-serializes issuing per order. The object holds no state. The key is the order number **trimmed by the caller**:
+serializes issuing per order. Its only state is unresolved-write uncertainty. The key is the order number **trimmed by the caller**:
 Restate's per-key lock is on the raw key, so `ORD-1` and ` ORD-1` would be two instances with two locks mapping
 to one szamlazz.hu order and identical external ids, and two concurrent creates under them would both pass their
 lookup and both send. A key with leading or trailing whitespace is therefore refused as `invalid_input` before
@@ -683,6 +683,7 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
 | `cancelled` | 409 | Intentional cancellation during an ordinary read, account resolution or best-effort read. No write was sent. | Respect the stop; do not automatically retry. |
+| `forbidden` | 403 | The host denied operator recovery access. | Use the authenticated operator recovery boundary. |
 | `invalid_input` | 400 | The request is malformed: its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent. Or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_credit_entries`, a replacing `set_credit_entries` (`additive: false`) with no entries (the wire contract takes five, and an empty replace would clear the invoice's credit entries; nothing is sent), or a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
@@ -694,8 +695,8 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 A 5xx whose `x-restate-error-source` is `invocation` is an invocation failure, including native kill errors,
 not the Restate ingress being down. Restate's HTTP invocation docs say to treat `invocation` errors as non-retryable and to auto-retry a 5xx
 only when its source is `ingress` (or absent); do that here: page on an `invocation` 503 instead of retrying into
-it (`credentials_rejected` in particular repeats identically until the deployment is fixed) and only then retry
-with a new `Idempotency-Key` or read `get`.
+it (`credentials_rejected` in particular repeats identically until the deployment is fixed). Reconcile any
+earlier write before deliberately renewing; a fresh `get` remains an observation, not negative settlement.
 
 ### Retry policy
 
@@ -703,8 +704,9 @@ Every handler that calls szamlazz.hu pins its own invocation retry policy.
 
 | Handler | Attempts | Interval | Timeouts (inactivity / abort) | Journal retention |
 |---|---|---|---|---|
-| `Szamlazz.Order` writes (`create_*`, `correct_invoice`, `storno_invoice`, `delete_proforma`) | 5, kill | 2m → 10m, factor 2 | 4m / 3m | 3d (idempotency 30d) |
+| `Szamlazz.Order` writes (`create_*`, `correct_invoice`, `storno_invoice`, `delete_proforma`) | 5, pause | 2m → 10m, factor 2 | 4m / 3m | 3d (idempotency 30d) |
 | `Szamlazz.Order.get` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
+| `Szamlazz.Order.recover` | 3, pause | 10s → 1m, factor 2 | 4m / 3m | 30d |
 | `Szamlazz.Agent.storno` | 5, kill | 2m → 10m | 4m / 3m | 3d |
 | `Szamlazz.Agent.set_credit_entries` | 2 | 2m | 2m / 2m | 3d |
 | `Szamlazz.Agent.query`, `query_taxpayer`, `check_account` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
@@ -721,30 +723,49 @@ could request suspension during a slow read; abort follows only if the SDK does 
 abort interval. The 2 m retry interval is longer than the client timeout and allows the observed server stall
 to settle; a client deadline does not prove that szamlazz.hu has stopped processing a request.
 
-**An invocation attempt is spent only on a worker-side failure** (the worker unreachable, a rollout cutting the
-connection, the abort timeout, an undecodable journal), never on a run retry: a step re-executed under `[issue]`,
+**An invocation attempt is spent on retained read-only reconciliation or a worker-side failure** (the worker unreachable, a rollout cutting the
+connection, the abort timeout, an undecodable journal), not on an explicitly delayed run retry: a step re-executed under `[issue]`,
 `[read]` or `[resolve]` is re-dispatched by the server without advancing the handler's attempt count (verified end
 to end against 1.7.8). So the run policies decide how long a szamlazz.hu outage is tolerated, the invocation
 policy how long a worker outage is (~24 min of back-off on the `Szamlazz.Order` writes and
 `Szamlazz.Agent.storno`, 2 min on `set_credit_entries`), and szamlazz.hu's "max 5 attempts" etiquette is the issue
 policy's business. Create/storno re-executions are query-first, but the run thresholds are not hard send limits.
 
-**Unresolved writes.** Current handlers complete on run exhaustion and kill on invocation-policy exhaustion.
-Either can release the Order lock while an external send is still processing. A valid one-execution issue policy
-can admit a queued second send immediately; the delay floor does not apply across invocations. This is reproduced
-with a scripted vendor in [#205's investigation and implementation brief](../../docs/design/unresolved-order-writes.md),
-including correctives and invoice/prepayment competition. It is not evidence of a live vendor duplicate.
+**Unresolved writes.** Every Order mutation checks the durable marker before resolving the account or reading
+prerequisites. Before a write it records minimal recovery identity, sets the marker, awaits durable arming,
+and consumes an execution-local one-use permission. Completed arming replay grants no permission. An open write
+replay therefore reconciles without sending. Uncertainty becomes a read-only run whose failures spend the
+invocation policy and eventually pause with the lock retained; `[issue]` never authorizes another Order send.
+Cancellation returns structured uncertainty and retains the marker. Kill releases the lock but not the marker.
 
-The approved follow-up retains the original invocation for read-only reconciliation/pause and writes a minimal
-durable unresolved-write marker before sending, guarding later mutations after cancellation/kill. **That
-protection is not implemented yet.** Until then, quiesce producers and account for queued mutations when recovering
-an unresolved order. A timeout, kill, delay or empty `get` is not permission to send again. Positive evidence must
-identify the intended document; negative settlement must establish that the earlier send did not act and cannot
-act later. Without that evidence, keep the operation blocked. Correctives require their own external-id/number
-query because `get` reads only the four ordinary kinds. Keep the original Idempotency-Key while an invocation is
-unfinished, including paused; a new key cannot settle uncertainty. The brief covers operator recovery and limits.
-Current fault messages may still say “retry with a new Idempotency-Key”; this evidence-before-renewal rule
-qualifies that wording. Aligning those runtime messages and their assertions is part of the recovery follow-up.
+Keep the original Idempotency-Key while unfinished, paused included. Empty queries, elapsed time, cancellation,
+kill and a new key do not settle uncertainty. Positive evidence must match the order/kind and corrective or
+reissue intent; storno recovery verifies the original reference and reversal. Deletion absence is ambiguous.
+
+`observe_unresolved` is an operator-only shared observation, usable beside a paused owner. `recover` is an
+operator-only exclusive action carrying the **exact observed marker** and either document evidence
+(`{"type":"document","number":"SZ-1"}`) or audited non-execution attestation
+(`{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}`).
+An attestation is the operator's assertion, never vendor proof. Recovery records evidence before clearing;
+it sends nothing. Stale markers, changed identity and unknown evidence refuse.
+
+Access defaults to `forbidden` (403). A host enables it with `Order::with_recovery_authorizer` and its
+`service::RecoveryAuthorizer`, using authenticated operator metadata from its ingress boundary. Strip caller
+identity assertions, enforce the same policy on internal SDK callers, and authenticate runtime requests to
+the endpoint. A request-body flag is not authorization. Never enable an allow-all authorizer on public ingress.
+
+Prefer resuming a paused owner on its pinned deployment. Exclusive recovery cannot run behind that owner's
+lock: quiesce producers, inspect/cancel queued mutations, deliberately stop the owner, then submit evidence.
+Recovery uses the pinned account/endpoint and credential reference; changed scope configuration cannot redirect
+it. Keep rotated credentials available behind that stable reference.
+
+**Migration:** quiesce every producer, including delayed sends and internal SDK callers; settle old unmarked
+uncertainty and external work before switching. Draining Restate alone is not vendor completion. Old code that
+ignores markers must not overlap protected code on the same scope/key. Unknown marker versions or malformed
+state fail closed; retain compatible code and review actual prefixes for exceptional replay. Monitor unresolved
+age, paused owners, orphaned markers and queued mutations (#45). Unkeyed Agent writes, vendor UI writes and
+administrative state deletion are outside the Order protection boundary. See the
+[exact command protocol](../../docs/design/order-write-protocol.md).
 
 **The prologue's own waits are bounded too.** One `AccountResolver::resolve` or `CredentialStore::fetch` call
 gets ten seconds (a worker constant, not a setting: a resolver that has not answered by then is not going to),
@@ -887,7 +908,7 @@ matching live reissue target is still `conflict{live}`; ownership collisions ret
 **Separate guarantees:** external ids recover documents after journal expiry; Restate request deduplication
 lasts only for its retention period; expected-document intent prevents an old command authorizing a mutation
 of a replacement. Longer retention is not indefinite idempotency, and a conflict/empty observation does not
-settle an unresolved earlier send (#205). The Order remains stateless. Query/send races with other writers
+settle an unresolved earlier send (#205). The Order retains only uncertainty state. Query/send races with other writers
 remain possible; the mock lifecycle tests establish worker decisions, not vendor atomic compare-and-set.
 
 Drain legacy commands on their original immutable deployment before changing callers. Register this release
@@ -909,10 +930,10 @@ The evidence is the vendor's [error-handling documentation](https://docs.szamlaz
 [behaviour notes D1/D3/D8](../../docs/szamlazz-hu-behaviour.md). No live post-action error for
 deletion or credit-entry registration was demonstrated; the uncertainty policy is conservative.
 
-Both runs keep `max_attempts(1)`: no automatic write retry or post-send re-query. A crash or
-interruption before journaling can still re-execute the unfinished closure; this is distinct
-from a policy retry. Replaying a completed run does neither. Recover using the fault guidance
-above, with a new `Idempotency-Key` after a completed fault.
+Both runs keep `max_attempts(1)`. Order deletion additionally requires execution-local send permission:
+replay of an open closure cannot repeat it. Agent credit entries remain unkeyed and can repeat after a crash;
+use their operation-specific query/reconciliation guidance. A completed uncertain fault never alone
+authorizes another write.
 
 Release/journal review under ADR 0009: register a new immutable deployment. Step names and
 ordered paths stay the same, but deletion now consumes the pinned document and order for its
