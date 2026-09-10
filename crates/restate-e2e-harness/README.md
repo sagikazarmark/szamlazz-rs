@@ -239,6 +239,11 @@ not cancel an invocation or undo an admin operation. A custom HTTP timeout
 does not replace the observation timeout. `Restate::drain` uses the default;
 use `restate.admin().drain_with_timeout(...)` for a longer wait.
 
+Timeout diagnostics identify the operation, its target and the configured wait.
+Status observations retry an absent invocation row, but reject a present row with
+a missing, null or non-string status. Requested status selections and their tokens
+must be non-empty; unknown string tokens remain observable.
+
 ### Object selectors
 
 `Call::object` and `Target::object` take the **same logical key**. Pass `invoice/2026` to both: `Call::path()`

@@ -30,10 +30,10 @@ async fn every_explicit_timeout_bounds_its_observation() {
             .build()
             .expect("loopback client"),
     );
-    let mut waits = tokio::task::JoinSet::new();
+    let mut waits = Vec::new();
     for operation in ["status", "in-flight", "drain", "pause", "purge", "register"] {
         let admin = admin.clone();
-        waits.spawn(async move {
+        let wait = tokio::spawn(async move {
             let timeout = Duration::from_millis(50);
             match operation {
                 "status" => {
@@ -57,20 +57,115 @@ async fn every_explicit_timeout_bounds_its_observation() {
                 _ => unreachable!(),
             }
         });
+        waits.push((operation, wait));
     }
     tokio::time::timeout(Duration::from_secs(5), async {
-        for _ in 0..6 {
-            let error = waits
-                .join_next()
-                .await
-                .expect("wait task")
-                .expect_err("observation times out");
-            assert!(error.to_string().contains("deadline passed"), "{error}");
+        for (operation, wait) in waits {
+            let error = wait.await.expect_err("observation times out");
+            let message = error.to_string();
+            assert!(message.contains("deadline passed after 50ms"), "{message}");
+            let context: &[&str] = match operation {
+                "status" => &["await invocation inv", "completed"],
+                "in-flight" => &["at least 1 invocation(s)", "Svc", "key", "Unscoped"],
+                "drain" => &["drain invocations", admin.base()],
+                "pause" => &["await invocation inv", "paused"],
+                "purge" => &["purge invocation inv"],
+                "register" => &["register endpoint http://127.0.0.1:1234"],
+                _ => unreachable!(),
+            };
+            for part in context {
+                assert!(message.contains(part), "{operation}: {message}");
+            }
         }
     })
     .await
     .expect("custom deadlines replace the 30/60-second defaults");
     server.verify().await;
+}
+
+#[tokio::test]
+async fn status_observation_distinguishes_absent_and_malformed_rows() {
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    let server = MockServer::start().await;
+    let admin = Admin::new(
+        server.uri(),
+        reqwest::Client::builder()
+            .tls_certs_only(std::iter::empty())
+            .build()
+            .expect("loopback client"),
+    );
+    for row in [json!({}), json!({"status": null}), json!({"status": 42})] {
+        Mock::given(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rows": [row]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let admin = admin.clone();
+        let error =
+            tokio::spawn(async move { admin.await_status("inv-malformed", &["completed"]).await })
+                .await
+                .expect_err("malformed status fails at decoding, not at the deadline");
+        let message = error.to_string();
+        assert!(message.contains("inv-malformed"), "{message}");
+        assert!(message.contains("missing or malformed status"), "{message}");
+        server.verify().await;
+        server.reset().await;
+    }
+
+    Mock::given(path("/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rows": []})))
+        .expect(1)
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows": [{"status": "future-status"}]
+        })))
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        admin.await_status("inv-later", &["future-status"]).await,
+        "future-status",
+        "an absent row is retried, and unknown string statuses stay observable"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn empty_status_selections_are_refused_before_querying() {
+    let server = wiremock::MockServer::start().await;
+    let admin = Admin::new(
+        server.uri(),
+        reqwest::Client::builder()
+            .tls_certs_only(std::iter::empty())
+            .build()
+            .expect("loopback client"),
+    );
+    for statuses in [vec![], vec![""], vec!["completed", ""]] {
+        let admin = admin.clone();
+        let error = tokio::spawn(async move { admin.await_status("inv-empty", &statuses).await })
+            .await
+            .expect_err("empty requested statuses cannot match absent evidence");
+        let message = error.to_string();
+        assert!(message.contains("inv-empty"), "{message}");
+        assert!(
+            message.contains("expected statuses must be non-empty"),
+            "{message}"
+        );
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

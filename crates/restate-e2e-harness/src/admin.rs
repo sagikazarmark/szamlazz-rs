@@ -42,8 +42,11 @@ pub fn sql_literal(text: &str) -> String {
 /// the deadline is the last, reported with `describe` of what it saw, so a
 /// server's own refusal (a rejected registration) is what the panic carries,
 /// never a generic message from a probe started at the deadline.
+/// Both failures include `operation` and the configured timeout; an in-flight
+/// timeout has that context even when no probe has answered yet.
 pub(crate) async fn poll_until<T, E, Fut>(
-    deadline: Duration,
+    timeout: Duration,
+    operation: &str,
     interval: Duration,
     mut probe: impl FnMut() -> Fut,
     describe: impl Fn(&E) -> String,
@@ -51,14 +54,18 @@ pub(crate) async fn poll_until<T, E, Fut>(
 where
     Fut: Future<Output = Result<T, E>>,
 {
-    let deadline = Instant::now() + deadline;
+    let deadline = Instant::now() + timeout;
     loop {
         let Ok(answer) = tokio::time::timeout_at(deadline, probe()).await else {
-            panic!("the wait's deadline passed while a probe was in flight: {deadline:?}")
+            panic!("{operation}: deadline passed after {timeout:?} while a probe was in flight")
         };
         match answer {
             Ok(answer) => return answer,
-            Err(last) => assert!(Instant::now() + interval < deadline, "{}", describe(&last)),
+            Err(last) => assert!(
+                Instant::now() + interval < deadline,
+                "{operation}: observation did not succeed within {timeout:?}: {}",
+                describe(&last)
+            ),
         }
         tokio::time::sleep(interval).await;
     }
@@ -254,6 +261,7 @@ impl Admin {
         let registration = json!({ "uri": uri, "force": true });
         poll_until(
             timeout,
+            &format!("register endpoint {uri}"),
             Duration::from_millis(500),
             || async {
                 let response = self
@@ -289,6 +297,7 @@ impl Admin {
     pub async fn drain_with_timeout(&self, timeout: Duration) {
         poll_until(
             timeout,
+            &format!("drain invocations at {}", self.base),
             Duration::from_millis(200),
             || async {
                 let in_flight = self
@@ -362,6 +371,7 @@ impl Admin {
         self.patch_invocation(invocation_id, "purge").await;
         poll_until(
             timeout,
+            &format!("purge invocation {invocation_id}"),
             Duration::from_millis(200),
             || async {
                 let rows = self
@@ -379,6 +389,8 @@ impl Admin {
 
     /// Waits until `sys_invocation` reports the invocation in one of
     /// `statuses`; the status it reached.
+    /// The selection and each requested status must be non-empty. Missing rows
+    /// are observed again; malformed status values panic.
     /// Waits up to 30 seconds; use [`Self::await_status_with_timeout`] to override.
     pub async fn await_status(&self, invocation_id: &str, statuses: &[&str]) -> String {
         self.await_status_with_timeout(invocation_id, statuses, POLL_DEADLINE)
@@ -388,14 +400,21 @@ impl Admin {
     /// Observes a status as [`Self::await_status`] with an explicit timeout
     /// covering all probes and sleeps, independent of the HTTP client's own
     /// timeout. Timing out does not cancel the invocation.
+    /// An absent row is observed again; a present row must carry a string status.
+    /// Panics on an empty status selection or an empty requested status.
     pub async fn await_status_with_timeout(
         &self,
         invocation_id: &str,
         statuses: &[&str],
         timeout: Duration,
     ) -> String {
+        assert!(
+            !statuses.is_empty() && statuses.iter().all(|status| !status.is_empty()),
+            "invocation {invocation_id}: expected statuses must be non-empty strings in a non-empty selection"
+        );
         poll_until(
             timeout,
+            &format!("await invocation {invocation_id} status in {statuses:?}"),
             Duration::from_millis(100),
             || async {
                 let rows = self
@@ -404,18 +423,24 @@ impl Admin {
                         sql_literal(invocation_id)
                     ))
                     .await;
-                let status = rows
-                    .first()
-                    .and_then(|row| row["status"].as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if statuses.contains(&status.as_str()) {
-                    Ok(status)
+                let Some(row) = rows.first() else {
+                    return Err(None);
+                };
+                let status = row["status"].as_str().unwrap_or_else(|| {
+                    panic!("invocation {invocation_id}: missing or malformed status in row: {row}")
+                });
+                if statuses.contains(&status) {
+                    Ok(status.to_owned())
                 } else {
-                    Err(status)
+                    Err(Some(status.to_owned()))
                 }
             },
-            |status| format!("invocation {invocation_id} is {status:?}, not one of {statuses:?}"),
+            |status| match status {
+                Some(status) => {
+                    format!("invocation {invocation_id} is {status:?}, not one of {statuses:?}")
+                }
+                None => format!("no sys_invocation row for {invocation_id}"),
+            },
         )
         .await
     }
@@ -469,6 +494,7 @@ impl Admin {
     ) -> Vec<String> {
         poll_until(
             timeout,
+            &format!("await at least {count} invocation(s) in flight on {target:?}"),
             Duration::from_millis(25),
             || async {
                 let in_flight = self.in_flight_ids_on(target).await;
@@ -621,6 +647,7 @@ mod tests {
     async fn poll_until_reports_the_last_failure_not_a_probe_started_at_the_deadline() {
         let outcome = tokio::spawn(poll_until::<(), u32, _>(
             Duration::from_secs(1),
+            "register endpoint",
             Duration::from_millis(300),
             {
                 let mut attempt = 0;
@@ -638,7 +665,7 @@ mod tests {
             .downcast::<String>()
             .expect("a message");
         assert!(
-            message.starts_with("registration refused, attempt "),
+            message.contains("registration refused, attempt "),
             "{message}"
         );
     }
@@ -650,6 +677,7 @@ mod tests {
     async fn poll_until_cuts_a_probe_still_in_flight_at_the_deadline() {
         let outcome = tokio::spawn(poll_until::<(), (), _>(
             Duration::from_secs(1),
+            "await invocation inv status in [completed]",
             Duration::from_millis(10),
             std::future::pending,
             |()| String::new(),
@@ -658,7 +686,7 @@ mod tests {
         let panic = outcome.expect_err("the deadline panics");
         let message = panic.into_panic().downcast::<String>().expect("a message");
         assert!(
-            message.contains("deadline passed while a probe was in flight"),
+            message.contains("await invocation inv status in [completed]: deadline passed after 1s while a probe was in flight"),
             "{message}"
         );
     }

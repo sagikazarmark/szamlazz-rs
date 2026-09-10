@@ -462,6 +462,7 @@ impl Restate {
         self.while_alive(deadline, "health", async {
             poll_until(
                 deadline.saturating_duration_since(tokio::time::Instant::now()),
+                &format!("wait for Restate health at {}", admin.base()),
                 Duration::from_millis(500),
                 || async {
                     http.get(format!("{}/health", admin.base()))
@@ -483,6 +484,7 @@ impl Restate {
         self.while_alive(deadline, "SQL introspection", async {
             poll_until(
                 deadline.saturating_duration_since(tokio::time::Instant::now()),
+                &format!("wait for Restate SQL introspection at {}", admin.base()),
                 Duration::from_millis(200),
                 || admin.sql("SELECT id FROM sys_invocation LIMIT 1"),
                 |error| {
