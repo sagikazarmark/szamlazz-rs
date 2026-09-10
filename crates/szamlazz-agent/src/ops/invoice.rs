@@ -196,6 +196,33 @@ pub struct InvoiceHeader {
     pub template: Option<InvoiceTemplate>,
     /// Return a preview PDF without issuing the document (`elonezetpdf`).
     pub preview_pdf: Option<bool>,
+    /// Per-document simplified invoice image for tour operators (`simpleItems`).
+    /// `None` omits the element; explicit false/true is sent as supplied.
+    /// This changes the image, not the document kind or electronic/paper
+    /// appearance. Full monetary line-item data is still sent to NAV.
+    ///
+    /// The [vendor's rules](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/travel-agency)
+    /// allow independent selection on regular invoices (including those from
+    /// proformas), proformas and prepayment invoices. Final invoices inherit
+    /// the prepayment's setting; stornos inherit the original's. Corrective
+    /// invoices and delivery notes cannot use it, and simplified originals
+    /// cannot be corrected even when the corrective omits this field.
+    ///
+    /// The seller must have OSS off and a Hungarian tax number. At most two
+    /// items are allowed, except a final may have four (two negative and two
+    /// new). Allowed VAT codes: `0`, `5`, `18`, `27`, `TAM`, `AAM`, `K.AFA`,
+    /// `F.AFA`; a final's rates must match the prepayment's, though order,
+    /// names and prices may differ. The server overrides the requested
+    /// template with the simplified view. For `K.AFA`, the caller must put
+    /// the margin-scheme information in the invoice comment.
+    /// These content rules are answered by szamlazz.hu, not validated locally.
+    ///
+    /// The writer's tail is template → preview → simple items, following the
+    /// download XSD and official PHP 2.12.4. Current EN/HU inline XSDs reverse
+    /// the last two: combined-preview server acceptance remains unverified.
+    #[doc(alias = "simpleItems")]
+    #[serde(default)]
+    pub simple_items: Option<bool>,
 }
 
 impl InvoiceHeader {
@@ -227,6 +254,7 @@ impl InvoiceHeader {
             eu_vat: None,
             template: None,
             preview_pdf: None,
+            simple_items: None,
         }
     }
 }
@@ -790,6 +818,11 @@ impl AgentRequest for CreateInvoice {
                 }
                 if let Some(preview) = h.preview_pdf {
                     f.bool("elonezetpdf", preview);
+                }
+                // Deliberate policy: PHP 2.12.4/download order; the current
+                // inline XSDs disagree when both optional fields are present.
+                if let Some(simple) = h.simple_items {
+                    f.bool("simpleItems", simple);
                 }
             });
             root.node("elado", |e| {

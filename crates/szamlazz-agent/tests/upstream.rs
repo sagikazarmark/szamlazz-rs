@@ -104,6 +104,50 @@ fn delivered(body: &[u8]) -> RawResponse {
     RawResponse::new::<&str, &str>([], body.to_vec()).with_status(200)
 }
 
+/// Original schema excerpts disagree. This comparison establishes the conflict,
+/// not combined-preview server acceptance or whole-schema conformance.
+#[test]
+fn simple_items_source_orders_conflict() {
+    fn tail(body: &[u8]) -> Vec<String> {
+        let text = std::str::from_utf8(body).expect("UTF-8 source");
+        let wrapped = format!("<sequence>{text}</sequence>");
+        let mut reader = quick_xml::Reader::from_str(&wrapped);
+        let mut names = Vec::new();
+        loop {
+            match reader.read_event().expect("schema excerpt") {
+                quick_xml::events::Event::Start(start) if start.name().as_ref() == "element" => {
+                    let name = start
+                        .try_get_attribute("name")
+                        .expect("attribute")
+                        .expect("name");
+                    names.push(
+                        name.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                            .expect("name text")
+                            .into_owned(),
+                    );
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
+        names
+    }
+    corpus::run(
+        "simple-items-2026-09-10",
+        &[
+            ("download-header-tail.txt", |body| {
+                assert_eq!(tail(body), ["szamlaSablon", "elonezetpdf", "simpleItems"]);
+            }),
+            ("en-inline-header-tail.txt", |body| {
+                assert_eq!(tail(body), ["szamlaSablon", "simpleItems", "elonezetpdf"]);
+            }),
+            ("hu-inline-header-tail.txt", |body| {
+                assert_eq!(tail(body), ["szamlaSablon", "simpleItems", "elonezetpdf"]);
+            }),
+        ],
+    );
+}
+
 /// The one email address the examples carry. The docs site masks addresses
 /// as `[email protected]`, with a no-break space (U+00A0) between the words,
 /// and the corpus keeps the page's text verbatim, so that is the value a
@@ -930,6 +974,10 @@ mod responses {
             Some("KBOSS.HU KERESKEDELMI ÉS SZOLGÁLTATÓ KORLÁTOLT FELELŐSSÉGŰ TÁRSASÁG")
         );
         assert_eq!(taxpayer.tax_number.as_deref(), Some("13421739"));
+        assert_eq!(
+            taxpayer.info_date.as_deref(),
+            Some("2004-12-26T23:00:00.000Z")
+        );
         assert_eq!(taxpayer.vat_code.as_deref(), Some("2"));
         assert_eq!(taxpayer.addresses.len(), 1);
         let address = &taxpayer.addresses[0];

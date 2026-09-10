@@ -110,6 +110,79 @@ impl From<TaxpayerPrefix> for QueryTaxpayer {
     }
 }
 
+/// NAV's incorporation category, serialized as its open wire token.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Incorporation {
+    /// `ORGANIZATION`: an organization.
+    Organization,
+    /// `SELF_EMPLOYED`: a self-employed individual.
+    SelfEmployed,
+    /// `TAXABLE_PERSON`: a private person with a tax number.
+    TaxablePerson,
+    /// A token this crate does not know, preserved verbatim.
+    Other(String),
+}
+
+impl Incorporation {
+    /// The exact wire token.
+    #[must_use]
+    pub fn as_wire(&self) -> &str {
+        match self {
+            Self::Organization => "ORGANIZATION",
+            Self::SelfEmployed => "SELF_EMPLOYED",
+            Self::TaxablePerson => "TAXABLE_PERSON",
+            Self::Other(token) => token,
+        }
+    }
+}
+
+impl From<&str> for Incorporation {
+    fn from(token: &str) -> Self {
+        match token {
+            "ORGANIZATION" => Self::Organization,
+            "SELF_EMPLOYED" => Self::SelfEmployed,
+            "TAXABLE_PERSON" => Self::TaxablePerson,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl From<String> for Incorporation {
+    fn from(token: String) -> Self {
+        match Self::from(token.as_str()) {
+            Self::Other(_) => Self::Other(token),
+            known => known,
+        }
+    }
+}
+
+impl FromStr for Incorporation {
+    type Err = std::convert::Infallible;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from(token))
+    }
+}
+
+impl std::fmt::Display for Incorporation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+impl serde::Serialize for Incorporation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Incorporation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
 /// A taxpayer as registered in the NAV Online Invoice system.
 #[doc(alias = "adóalany")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -119,6 +192,30 @@ pub struct TaxpayerInfo {
     pub valid: bool,
     /// Registered name (`taxpayerName`), when valid.
     pub name: Option<String>,
+    /// Registered short name (`taxpayerData/taxpayerShortName`).
+    #[doc(alias = "taxpayerShortName")]
+    #[serde(default)]
+    pub short_name: Option<String>,
+    /// County code (`taxpayerData/taxNumberDetail/countyCode`), including leading zeroes.
+    #[doc(alias = "countyCode")]
+    #[serde(default)]
+    pub county_code: Option<String>,
+    /// VAT group identifier (`taxpayerData/vatGroupMembership`), not a boolean
+    /// or an assembled full tax number.
+    #[doc(alias = "vatGroupMembership")]
+    #[serde(default)]
+    pub vat_group_membership: Option<String>,
+    /// NAV incorporation category (`taxpayerData/incorporation`).
+    #[serde(default)]
+    pub incorporation: Option<Incorporation>,
+    /// Last data change, as the root-child `infoDate`'s decoded source text.
+    /// This is **not a validated datetime** or the lookup time/cache expiry.
+    /// Nonblank text is retained with its offset, precision or lack of zone;
+    /// malformed advisory text is retained too. Absent, empty or XML-blank
+    /// text is `None`. No timezone, temporal validation or TTL is inferred.
+    #[doc(alias = "infoDate")]
+    #[serde(default)]
+    pub info_date: Option<String>,
     /// The 8-digit `taxpayerId`, when provided.
     #[doc(alias = "törzsszám")]
     pub tax_number: Option<String>,
@@ -196,6 +293,11 @@ struct TaxpayerResponse {
     message: Option<String>,
     validity: Option<bool>,
     name: Option<String>,
+    short_name: Option<String>,
+    county_code: Option<String>,
+    vat_group_membership: Option<String>,
+    incorporation: Option<Incorporation>,
+    info_date: Option<String>,
     taxpayer_id: Option<String>,
     vat_code: Option<String>,
     addresses: Vec<TaxpayerAddress>,
@@ -243,14 +345,27 @@ impl Layout {
     ) -> (&'static str, bool) {
         let (ns, containers, leaves): (&str, &[&'static str], &[&'static str]) = match parent {
             "QueryTaxpayerResponse" if name == "result" => (self.result, &["result"], &[]),
-            "QueryTaxpayerResponse" => (self.api, &["taxpayerData"], &["taxpayerValidity"]),
+            "QueryTaxpayerResponse" => (
+                self.api,
+                &["taxpayerData"],
+                &["taxpayerValidity", "infoDate"],
+            ),
             "result" => (self.result, &[], &["funcCode", "errorCode", "message"]),
             "taxpayerData" => (
                 self.api,
                 &["taxNumberDetail", "taxpayerAddressList"],
-                &["taxpayerName"],
+                &[
+                    "taxpayerName",
+                    "taxpayerShortName",
+                    "vatGroupMembership",
+                    "incorporation",
+                ],
             ),
-            "taxNumberDetail" => (self.component, &[], &["taxpayerId", "vatCode"]),
+            "taxNumberDetail" => (
+                self.component,
+                &[],
+                &["taxpayerId", "vatCode", "countyCode"],
+            ),
             "taxpayerAddressList" => (self.api, &["taxpayerAddressItem"], &[]),
             "taxpayerAddressItem" => (self.api, &["taxpayerAddress"], &["taxpayerAddressType"]),
             "taxpayerAddress" => (
@@ -465,6 +580,11 @@ impl TaxpayerResponse {
                 });
             }
             "taxpayerName" => self.name = Some(value.to_owned()),
+            "taxpayerShortName" => self.short_name = Some(value.to_owned()),
+            "countyCode" => self.county_code = Some(value.to_owned()),
+            "vatGroupMembership" => self.vat_group_membership = Some(value.to_owned()),
+            "incorporation" => self.incorporation = Some(Incorporation::from(value)),
+            "infoDate" => self.info_date = Some(value.to_owned()),
             "taxpayerId" => self.taxpayer_id = Some(value.to_owned()),
             "vatCode" => self.vat_code = Some(value.to_owned()),
             _ => {}
@@ -482,6 +602,11 @@ impl TaxpayerResponse {
                     .validity
                     .ok_or(ParseError::Missing("taxpayerValidity"))?,
                 name: self.name,
+                short_name: self.short_name,
+                county_code: self.county_code,
+                vat_group_membership: self.vat_group_membership,
+                incorporation: self.incorporation,
+                info_date: self.info_date,
                 tax_number: self.taxpayer_id,
                 vat_code: self.vat_code,
                 addresses: self.addresses,

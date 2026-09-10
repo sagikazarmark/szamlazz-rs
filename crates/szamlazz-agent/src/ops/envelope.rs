@@ -11,7 +11,7 @@
 use rust_decimal::Decimal;
 
 use crate::error::{ErrorCode, ParseError, ResponseError};
-use crate::types::{InvoiceNumber, Pdf};
+use crate::types::{InvoiceNumber, PaymentMethod, Pdf};
 use crate::wire::RawResponse;
 use crate::xml;
 
@@ -46,6 +46,11 @@ pub struct CreatedInvoice {
     /// Buyer-facing account/payment URL (`vevoifiokurl`).
     #[doc(alias = "vevoifiokurl")]
     pub customer_account_url: Option<String>,
+    /// Invoice payment method from the encoded `szlahu_fizetesmod` header.
+    /// Unknown tokens are preserved; no XML payment-method element is read.
+    #[doc(alias = "szlahu_fizetesmod")]
+    #[serde(default)]
+    pub payment_method: Option<PaymentMethod>,
     /// The document PDF, when requested.
     pub pdf: Option<Pdf>,
     /// Whether the invoice was issued but Számlázz.hu could not deliver its
@@ -231,6 +236,7 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
             "szlahu_kintlevoseg",
         ))?,
         customer_account_url: body.customer_account_url(response),
+        payment_method: header_payment_method(response),
         pdf: lenient(notification_delivery_failed, body.pdf())?,
         notification_delivery_failed,
     }))
@@ -269,6 +275,14 @@ fn parse_envelope(body: &[u8]) -> Result<(xml::Verdict, Body), ParseError> {
     let payload = quick_xml::de::from_str(text)?;
 
     Ok((verdict, payload))
+}
+
+/// The encoded textual payment-method header shared by the document operations.
+pub(crate) fn header_payment_method(response: &RawResponse) -> Option<PaymentMethod> {
+    response
+        .szlahu("szlahu_fizetesmod")
+        .filter(|s| !s.is_empty())
+        .map(PaymentMethod::from)
 }
 
 fn nonblank_invoice_number(value: &str) -> Option<InvoiceNumber> {
@@ -684,6 +698,7 @@ mod tests {
             gross_total: gross,
             outstanding: None,
             customer_account_url: None,
+            payment_method: None,
             pdf: None,
             notification_delivery_failed: false,
         }

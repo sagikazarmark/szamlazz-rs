@@ -272,18 +272,10 @@ impl AgentRequest for RegisterCreditEntry {
                 response,
                 "szlahu_kintlevoseg",
             )?,
-            payment_method: header_payment_method(response),
+            payment_method: envelope::header_payment_method(response),
             customer_account_url: body.customer_account_url(response),
         })
     }
-}
-
-/// The payment method from the `szlahu_fizetesmod` header, if present.
-fn header_payment_method(response: &RawResponse) -> Option<PaymentMethod> {
-    response
-        .szlahu("szlahu_fizetesmod")
-        .filter(|s| !s.is_empty())
-        .map(PaymentMethod::from)
 }
 
 #[cfg(test)]

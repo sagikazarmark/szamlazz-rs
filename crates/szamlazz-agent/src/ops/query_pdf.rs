@@ -43,6 +43,14 @@ pub struct InvoicePdf {
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
     pub gross_total: Option<Decimal>,
+    /// Outstanding amount (`kintlevoseg`), body before header; absent is not zero.
+    #[doc(alias = "kintlevoseg")]
+    #[serde(default)]
+    pub outstanding: Option<Decimal>,
+    /// Opaque buyer-facing URL (`vevoifiokurl`), body before the decoded header.
+    #[doc(alias = "vevoifiokurl")]
+    #[serde(default)]
+    pub customer_account_url: Option<String>,
     /// The invoice PDF.
     pub pdf: Pdf,
 }
@@ -79,6 +87,8 @@ impl AgentRequest for QueryInvoicePdf {
             invoice_number: created.invoice_number,
             net_total: created.net_total,
             gross_total: created.gross_total,
+            outstanding: created.outstanding,
+            customer_account_url: created.customer_account_url,
             pdf: created.pdf.ok_or(ParseError::Missing("pdf"))?,
         })
     }

@@ -7,6 +7,70 @@ use szamlazz_agent::wire::{AgentRequest, RawResponse};
 use szamlazz_agent::{ErrorCode, InvoiceSelector, ResponseError};
 
 #[test]
+fn create_storno_and_credit_entry_share_encoded_payment_method_headers() {
+    use szamlazz_agent::ops::invoice::{
+        Buyer, CreateInvoice, CreatedInvoice, InvoiceHeader, InvoiceKind,
+    };
+    use szamlazz_agent::{Currency, Language, PaymentMethod};
+    let create = CreateInvoice::new(
+        InvoiceKind::invoice(),
+        InvoiceHeader::new(
+            jiff::civil::date(2026, 9, 10),
+            jiff::civil::date(2026, 9, 10),
+            PaymentMethod::Cash,
+            Currency::HUF,
+            Language::Hungarian,
+        ),
+        Buyer::new("Buyer", "1111", "Budapest", "Street 1"),
+        vec![],
+    );
+    for (header, expected) in [
+        (None, None),
+        (Some(""), None),
+        (Some("%C3%A1tutal%C3%A1s"), Some(PaymentMethod::Transfer)),
+        (Some("k%C3%A9szp%C3%A9nz"), Some(PaymentMethod::Cash)),
+        (
+            Some("future%2Bmethod+%252B"),
+            Some(PaymentMethod::Other("future+method %2B".into())),
+        ),
+        (Some("%C3%28"), Some(PaymentMethod::Other("%C3%28".into()))),
+    ] {
+        let headers: Vec<_> = header
+            .map(|h| ("szlahu_fizetesmod", h))
+            .into_iter()
+            .collect();
+        // There is no XML payment-method field in this envelope.
+        let raw = RawResponse::new(headers, br#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>I-1</szamlaszam><fizetesmod>wrong</fizetesmod></xmlszamlavalasz>"#.to_vec());
+        let created = create
+            .parse(&raw)
+            .expect("create")
+            .into_issued()
+            .expect("numbered");
+        let storno = StornoInvoice::new("I-0").parse(&raw).expect("storno");
+        let credit = RegisterCreditEntry::new("I-1")
+            .parse(&raw)
+            .expect("credit entry");
+        assert_eq!(created.payment_method, expected);
+        assert_eq!(storno.payment_method, expected);
+        assert_eq!(credit.payment_method, expected);
+        let mut json = serde_json::to_value(&created).expect("JSON");
+        assert_eq!(
+            serde_json::from_value::<CreatedInvoice>(json.clone()).expect("roundtrip"),
+            created
+        );
+        json.as_object_mut()
+            .expect("object")
+            .remove("payment_method");
+        assert_eq!(
+            serde_json::from_value::<CreatedInvoice>(json)
+                .expect("old JSON")
+                .payment_method,
+            None
+        );
+    }
+}
+
+#[test]
 fn session_cookie_requires_an_exact_case_sensitive_cookie_pair() {
     for (cookies, expected) in [
         (
@@ -233,8 +297,74 @@ fn monetary_headers_are_ungrouped_decimals_across_operations() {
             .parse(&raw)
             .expect("PDF");
         assert_eq!(
-            (pdf.net_total, pdf.gross_total),
-            (Some(expected), Some(expected))
+            (pdf.net_total, pdf.gross_total, pdf.outstanding),
+            (Some(expected), Some(expected), Some(expected))
+        );
+    }
+}
+
+#[test]
+fn pdf_balance_and_opaque_url_prefer_body_then_headers_and_default_to_none() {
+    use szamlazz_agent::ops::query_pdf::InvoicePdf;
+    let query = QueryInvoicePdf::new(InvoiceSelector::OrderNumber("O-1".into()));
+    for (inner, headers, amount, url) in [
+        ("", vec![], None, None),
+        (
+            "",
+            vec![
+                ("szlahu_kintlevoseg", "-1,5"),
+                ("szlahu_vevoifiokurl", "opaque%3Aa%252Bb+c"),
+            ],
+            Some(dec!(-1.5)),
+            Some("opaque:a%2Bb c"),
+        ),
+        (
+            "<kintlevoseg>0</kintlevoseg><vevoifiokurl>opaque:a%2Bb+c&amp;x=1</vevoifiokurl>",
+            vec![
+                ("szlahu_kintlevoseg", "bad"),
+                ("szlahu_vevoifiokurl", "wrong"),
+            ],
+            Some(dec!(0)),
+            Some("opaque:a%2Bb+c&x=1"),
+        ),
+        (
+            "<kintlevoseg>+2.5</kintlevoseg>",
+            vec![("szlahu_kintlevoseg", "99")],
+            Some(dec!(2.5)),
+            None,
+        ),
+    ] {
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>I-1</szamlaszam><pdf>JVBERi0=</pdf>{inner}</xmlszamlavalasz>"#
+        );
+        let pdf = query
+            .parse(&RawResponse::new(headers, body.into_bytes()))
+            .expect("PDF");
+        assert_eq!(pdf.outstanding, amount);
+        assert_eq!(pdf.customer_account_url.as_deref(), url);
+        assert_eq!(pdf.pdf.as_bytes(), b"%PDF-");
+        let json = serde_json::to_value(&pdf).expect("JSON");
+        assert_eq!(
+            serde_json::from_value::<InvoicePdf>(json.clone()).expect("roundtrip"),
+            pdf
+        );
+        assert!(json.get("payment_method").is_none());
+        assert!(json.get("document_id").is_none());
+        assert!(json.get("notification_delivery_failed").is_none());
+    }
+    let old: InvoicePdf = serde_json::from_str(
+        r#"{"invoice_number":"I-1","pdf":"JVBERi0=","net_total":null,"gross_total":null}"#,
+    )
+    .expect("old JSON");
+    assert_eq!((old.outstanding, old.customer_account_url), (None, None));
+    for body in ["<pdf>JVBERi0=</pdf>", "<szamlaszam>I-1</szamlaszam>"] {
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres>{body}</xmlszamlavalasz>"#
+        );
+        assert!(
+            query
+                .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+                .is_err()
         );
     }
 }

@@ -210,6 +210,15 @@ The complete newly fetched schemas are not substituted into `agent/xsd/`.
 Keep original source snapshots separate from the documented local transformation
 of `agent/xsd/xmlszamla.xsd` and from `tests/golden` writer expectations.
 
+`agent/simple-items-2026-09-10/` retains separately acquired **header-tail
+excerpts**, not complete or merged XSDs, from the three URLs in the table above.
+Each starts at `<element name="szamlaSablon"` and ends before the closing
+`sequence`; boundary whitespace is stripped and a final newline added. Inline
+excerpts are the HTML-decoded `pre` text (adjacent HTML spans concatenated).
+Comments and element order are otherwise retained. `tests/upstream.rs` compares
+their actual element sequences; `tests/simple_items.rs` independently asserts
+the chosen writer output and retention of full monetary/group-id/erasure data.
+
 [#199](https://github.com/sagikazarmark/szamlazz-rs/issues/199) owns the
 `simpleItems` writer policy and its independent order/feature regression cases,
 including separately retained source snapshots. Its chosen order follows the

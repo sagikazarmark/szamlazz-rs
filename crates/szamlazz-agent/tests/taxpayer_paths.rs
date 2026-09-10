@@ -3,6 +3,114 @@ use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
 use szamlazz_agent::wire::{AgentRequest, RawResponse};
 use szamlazz_agent::{ErrorCode, ResponseError};
 
+#[test]
+fn info_date_is_advisory_source_text_not_a_datetime() {
+    for (source, expected) in [
+        ("2004-12-26T23:00:00.000Z", Some("2004-12-26T23:00:00.000Z")),
+        (
+            "2026-09-10T01:02:03+02:00",
+            Some("2026-09-10T01:02:03+02:00"),
+        ),
+        (
+            "2026-09-10T01:02:03-05:00",
+            Some("2026-09-10T01:02:03-05:00"),
+        ),
+        ("2026-09-10T01:02:03", Some("2026-09-10T01:02:03")),
+        (
+            "2026-09-10T01:02:03.12345678901234567890",
+            Some("2026-09-10T01:02:03.12345678901234567890"),
+        ),
+        ("2026-09-10T24:00:00", Some("2026-09-10T24:00:00")),
+        (" not-a-date é中 ", Some(" not-a-date é中 ")),
+        (" A&amp;B<![CDATA[<C>]]>&#160; ", Some(" A&B<C>\u{a0} ")),
+        ("&#160;", Some("\u{a0}")),
+        ("", None),
+        (" \t\r\n ", None),
+    ] {
+        let info = parse(&format!("<result><funcCode>OK</funcCode></result><infoDate>{source}</infoDate><taxpayerValidity>true</taxpayerValidity>")).expect("useful lookup");
+        assert!(info.valid);
+        assert_eq!(info.info_date.as_deref(), expected, "{source}");
+    }
+}
+
+#[test]
+fn new_business_fields_use_only_their_versioned_paths() {
+    use szamlazz_agent::ops::taxpayer::TaxpayerInfo;
+    fn absent(info: &TaxpayerInfo) {
+        assert_eq!(info.short_name, None);
+        assert_eq!(info.county_code, None);
+        assert_eq!(info.vat_group_membership, None);
+        assert_eq!(info.incorporation, None);
+        assert_eq!(info.info_date, None);
+    }
+    for data in [
+        "",
+        "<taxpayerShortName>wrong root</taxpayerShortName><d:countyCode>02</d:countyCode><vatGroupMembership>12345678</vatGroupMembership><incorporation>ORGANIZATION</incorporation>",
+        "<f:infoDate>foreign</f:infoDate><foreign><infoDate>hidden</infoDate><taxpayerData><taxpayerShortName>hidden</taxpayerShortName><incorporation>ORGANIZATION</incorporation><vatGroupMembership>12345678</vatGroupMembership><taxNumberDetail><d:countyCode>02</d:countyCode></taxNumberDetail></taxpayerData></foreign>",
+        "<taxpayerData><infoDate>wrong parent</infoDate><f:taxpayerShortName>foreign</f:taxpayerShortName><f:incorporation>ORGANIZATION</f:incorporation><f:vatGroupMembership>12345678</f:vatGroupMembership><taxNumberDetail><countyCode>wrong namespace</countyCode></taxNumberDetail></taxpayerData>",
+        "<infoDate/><taxpayerData><taxpayerShortName> \t </taxpayerShortName><incorporation/><vatGroupMembership/><taxNumberDetail><d:countyCode/></taxNumberDetail></taxpayerData>",
+    ] {
+        absent(&parse(&format!("<result><funcCode>OK</funcCode></result><taxpayerValidity>true</taxpayerValidity>{data}")).expect("sparse data"));
+    }
+    let old: TaxpayerInfo = serde_json::from_str(
+        r#"{"valid":true,"name":"Known","tax_number":"12345678","vat_code":"2","addresses":[]}"#,
+    )
+    .expect("old JSON");
+    absent(&old);
+
+    let body = include_str!("synthetic/taxpayer_v3.xml");
+    let wrong = body
+        .replace("api:taxpayerShortName", "base:taxpayerShortName")
+        .replace("base:countyCode", "api:countyCode")
+        .replace("api:vatGroupMembership", "common:vatGroupMembership")
+        .replace("api:incorporation", "base:incorporation")
+        .replace("api:infoDate", "common:infoDate");
+    absent(
+        &QueryTaxpayer::new("12345678")
+            .expect("prefix")
+            .parse(&RawResponse::new::<&str, &str>([], wrong.into_bytes()))
+            .expect("sparse NAV 3"),
+    );
+}
+
+#[test]
+fn incorporation_tokens_are_open_wire_strings_in_both_nav_versions() {
+    use szamlazz_agent::ops::taxpayer::{Incorporation, TaxpayerInfo};
+    for (token, expected) in [
+        ("ORGANIZATION", Incorporation::Organization),
+        ("SELF_EMPLOYED", Incorporation::SelfEmployed),
+        ("TAXABLE_PERSON", Incorporation::TaxablePerson),
+        ("FUTURE_KIND", Incorporation::Other("FUTURE_KIND".into())),
+    ] {
+        let v2 = format!(
+            "<result><funcCode>OK</funcCode></result><taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerShortName> Short </taxpayerShortName><taxNumberDetail><d:countyCode>02</d:countyCode></taxNumberDetail><vatGroupMembership>87654321</vatGroupMembership><incorporation>{token}</incorporation></taxpayerData>"
+        );
+        let v3 = include_str!("synthetic/taxpayer_v3.xml").replace("ORGANIZATION", token);
+        for info in [
+            parse(&v2).expect("NAV 2"),
+            QueryTaxpayer::new("12345678")
+                .expect("prefix")
+                .parse(&RawResponse::new::<&str, &str>([], v3.into_bytes()))
+                .expect("NAV 3"),
+        ] {
+            assert_eq!(info.incorporation, Some(expected.clone()));
+            assert_eq!(info.county_code.as_deref(), Some("02"));
+            assert_eq!(info.vat_group_membership.as_deref(), Some("87654321"));
+            let json = serde_json::to_value(&info).expect("JSON");
+            assert_eq!(json["incorporation"], token);
+            assert_eq!(
+                serde_json::from_value::<TaxpayerInfo>(json).expect("roundtrip"),
+                info
+            );
+        }
+        assert_eq!(
+            token.parse::<Incorporation>().expect("open token"),
+            expected
+        );
+        assert_eq!(expected.to_string(), token);
+    }
+}
+
 fn parse(inner: &str) -> Result<szamlazz_agent::ops::taxpayer::TaxpayerInfo, ResponseError> {
     QueryTaxpayer::new("12345678").expect("prefix").parse(&RawResponse::new::<&str, &str>([], format!(r#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns:d="http://schemas.nav.gov.hu/OSA/2.0/data" xmlns:f="urn:foreign">{inner}</QueryTaxpayerResponse>"#).into_bytes()))
 }
@@ -122,6 +230,19 @@ fn nav_3_uses_common_result_and_base_components_with_arbitrary_prefixes() {
     assert!(info.valid);
     assert_eq!(info.name.as_deref(), Some("SYNTHETIC SOFTWARE KFT."));
     assert_eq!(info.tax_number.as_deref(), Some("12345678"));
+    assert_eq!(info.short_name.as_deref(), Some("SYNTHETIC KFT."));
+    assert_eq!(info.county_code.as_deref(), Some("02"));
+    assert_eq!(info.vat_group_membership.as_deref(), Some("87654321"));
+    assert_eq!(
+        info.incorporation,
+        Some(szamlazz_agent::ops::taxpayer::Incorporation::Organization)
+    );
+    assert_eq!(
+        info.info_date.as_deref(),
+        Some("2026-09-10T12:34:56.123456789012+02:00")
+    );
+    assert_eq!(info.addresses.len(), 2);
+    assert_eq!(info.addresses[1].city.as_deref(), Some("MASIKVAROS"));
     assert_eq!(info.addresses[0].city.as_deref(), Some("TESTVAROS"));
     for wrong in [
         body.replace("<common:result>", "<api:result>")
