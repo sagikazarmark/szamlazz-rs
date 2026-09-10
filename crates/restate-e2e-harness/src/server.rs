@@ -335,8 +335,8 @@ impl Restate {
     /// (`RESTATE_<SECTION>__<KEY>`), so no config file is written; `spec.env`
     /// is set first, the features next and the harness's own values last, so
     /// a pair cannot move the base dir out of the temp directory, a bind
-    /// address off the loopback (the admin API has no authentication) or a
-    /// feature off what the spec says.
+    /// address off the loopback (the admin API has no authentication), a
+    /// listener away from TCP or a feature off what the spec says.
     pub(crate) fn spawn(binary: &Path, spec: &ServerSpec, endpoint_host: String) -> Self {
         let [ingress, admin, node] = free_ports::<3>();
         let ports = Ports {
@@ -367,6 +367,10 @@ impl Restate {
             .env("RESTATE_BASE_DIR", &base_dir)
             .env("RESTATE_NODE_NAME", format!("e2e-{}", spec.name))
             .env("RESTATE_LISTEN_MODE", "tcp")
+            // Section modes override the global mode in Restate, including
+            // when inherited from the environment or supplied by spec.env.
+            .env("RESTATE_ADMIN__LISTEN_MODE", "tcp")
+            .env("RESTATE_INGRESS__LISTEN_MODE", "tcp")
             .env("RESTATE_BIND_ADDRESS", format!("127.0.0.1:{node}"))
             .env(
                 "RESTATE_ADVERTISED_ADDRESS",

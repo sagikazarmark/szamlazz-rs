@@ -34,6 +34,53 @@ const SERVER: ServerSpec = ServerSpec {
     env: &[],
 };
 
+const LISTENER_MODE_SOURCE: &str = "HARNESS_TEST_LISTENER_MODE_SOURCE";
+
+fn server_spec() -> ServerSpec {
+    ServerSpec {
+        env: if std::env::var(LISTENER_MODE_SOURCE).as_deref() == Ok("spec") {
+            &[
+                "RESTATE_ADMIN__LISTEN_MODE=unix",
+                "RESTATE_INGRESS__LISTEN_MODE=unix",
+            ]
+        } else {
+            SERVER.env
+        },
+        ..SERVER
+    }
+}
+
+/// Run the actual launcher in isolated processes so inherited settings do not
+/// require mutating this test process's environment while Tokio is running.
+#[test]
+#[ignore = "needs RESTATE_SERVER_BIN; verifies listener-mode override precedence"]
+fn e2e_listener_modes() {
+    if launcher_or_skip(ReusePolicy::Never).is_none() {
+        return;
+    }
+    for source in ["inherited", "spec"] {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", "e2e_smoke", "--ignored", "--nocapture"])
+            .env(LISTENER_MODE_SOURCE, source);
+        for name in ["RESTATE_ADMIN__LISTEN_MODE", "RESTATE_INGRESS__LISTEN_MODE"] {
+            if source == "inherited" {
+                command.env(name, "unix");
+            } else {
+                command.env_remove(name);
+            }
+        }
+        let output = command.output().expect("isolated listener-mode smoke test");
+        assert!(
+            output.status.success(),
+            "{source} listener settings must not disable the advertised TCP ports:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
 struct Smoke;
 
 #[restate_sdk::service(name = "Smoke")]
@@ -107,7 +154,7 @@ async fn e2e_smoke() {
         matches!(launcher, Launcher::Binary { .. }),
         "ReusePolicy::Never yields a binary"
     );
-    let restate = launcher.launch(&SERVER).await;
+    let restate = launcher.launch(&server_spec()).await;
     let admin_url = restate.admin_url().to_owned();
 
     // Deploy, twice: a redeploy is a second call.

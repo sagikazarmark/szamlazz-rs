@@ -64,6 +64,8 @@ with vqueues, protocol v7 and scoped Virtual Objects enabled. This crate require
 
 Admin and ingress base URLs accept trailing slashes; the harness removes those
 separators while preserving any path prefix, including in the exported base URLs.
+Spawned servers use TCP for the node, admin and ingress listeners, overriding
+listener modes inherited from the environment or supplied through `ServerSpec.env`.
 
 `RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
 server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback when the server reaches it
@@ -341,6 +343,8 @@ against a server of its own (never a reused one: the test deploys a service and 
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the
 ingress, its run read from the journal, a fault decoded out of the envelope, an invocation killed and purged, a
 service made private and public, and the server stops on drop.
+`e2e_listener_modes` repeats the smoke test in isolated processes with conflicting
+admin and ingress listener modes, supplied by both the environment and `ServerSpec.env`.
 The same command runs `e2e_targets`: the same service/key unscoped and in two named scopes, exact and all-scope
 in-flight/await selection, and isolated versus aggregate `Watch` sampling. Another service and another key are
 excluded from every selection.
