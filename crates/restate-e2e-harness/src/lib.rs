@@ -14,6 +14,9 @@
 //!   test fails, stopped on drop and on SIGINT/SIGTERM), an endpoint served
 //!   in-process and registered ([`Restate::deploy`]), `set_public`, `drain`,
 //!   and the ingress ([`Restate::invoke`]).
+//!   The handle owns its local endpoints too: Drop requests their shutdown;
+//!   a [`Deployment`] is only the URI/port descriptor. The current runtime
+//!   executes shutdown, with the SDK draining active connections.
 //! - [`ingress`]: a [`Call`] (Restate's URL grammar, written once: a
 //!   service or an object, under a scope, called or sent), its [`Reply`] and
 //!   the fault inside Restate's error envelope ([`Reply::fault`], into the

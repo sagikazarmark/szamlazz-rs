@@ -26,6 +26,8 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync",
 # the group with `killpg(2)`.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+# Safe non-reaping waitid on Linux and macOS (nix exposes it only on some Unix targets).
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

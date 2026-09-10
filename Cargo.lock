@@ -2120,6 +2120,7 @@ dependencies = [
  "nix",
  "reqwest",
  "restate-sdk",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",

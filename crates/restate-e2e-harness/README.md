@@ -18,7 +18,9 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   checked against `/version` at launch for a spawned and a reused server alike; a feature not listed is neither set
   nor checked) and any other `NAME=value` environment.
 - **Deployment**: serve a `restate_sdk` `Endpoint` in-process on a free port and register it (`force: true`,
-  retried); repeatable, so a redeploy is a second call. `set_public`, `drain` (nothing in flight on
+  retried); repeatable, so a redeploy is a second call. Local endpoints belong to the `Restate` handle:
+  dropping it requests shutdown of all of them, including on a reused server. Discarding a `Deployment`
+  descriptor leaves its endpoint running. `set_public`, `drain` (nothing in flight on
   `sys_invocation`).
 - **The ingress**: a `Call` (Restate's URL grammar written once: a service or a Virtual Object key, under a scope,
   called or sent; logical segments percent-encoded by the harness) and `invoke(&call, body, idempotency)` → a `Reply` (status, parsed body, `x-restate-id`,
@@ -60,6 +62,9 @@ The quick start below is tested with **Rust SDK 0.12.0 and Restate server 1.7.8*
 with vqueues, protocol v7 and scoped Virtual Objects enabled. This crate requires
 **Unix** and **Rust 1.92 or later**.
 
+Admin and ingress base URLs accept trailing slashes; the harness removes those
+separators while preserving any path prefix, including in the exported base URLs.
+
 `RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
 server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback when the server reaches it
 there (a spawned server, no override) and to every interface otherwise (a reused server may be a container reaching
@@ -79,6 +84,17 @@ that remain in it), then exits the test process with status **130** for SIGINT o
 launches. Normal handle drop kills the group and reaps the child. Signal exit does
 not unwind or remove the server's temporary directory; normal drop removes it
 unless the test is panicking. SIGKILL cannot run cleanup.
+
+Exit inspection leaves the child unreaped, reserving its process ID until group
+signaling, reaping and registry removal happen under the lifecycle lock. On Unix
+targets without `waitid` (OpenBSD, Redox, Cygwin, Horizon), early exit inspection is
+unavailable; readiness still fails at its deadline.
+
+Dropping the handle also requests shutdown of every local endpoint it deployed.
+Keep the Tokio runtime running to execute that shutdown; Drop does not wait for
+completion. The SDK allows up to ten seconds for active connections to drain.
+Earlier endpoints stay available while the handle lives, and a reused Restate
+server is itself left running.
 
 ## Quick start
 
@@ -287,6 +303,10 @@ raw bytes are not usable for content assertions through this decoder.
 - Every tabled path is **walked in full**: at least one invocation's observed pattern sequence equals the
   entire row. This is coverage of the declared named-run paths, not all possible branches or proof that
   those invocations completed. An empty sequence walks only an empty row, if one is declared.
+
+Named-run inspection (`JournalEntry::is_run`, `Admin::runs` and `Table::check`)
+requires journal v2. Missing or unsupported versions panic rather than establishing
+that no runs occurred or accepting an empty sequence.
 
 Fixed names match exactly. A parameter pattern such as `lookup-{sku}` matches any name starting with
 `lookup-` and a non-empty remainder; the longest matching prefix wins. Matching uses only the text before

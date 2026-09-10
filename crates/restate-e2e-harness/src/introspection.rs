@@ -117,9 +117,21 @@ impl JournalEntry {
     }
 
     /// Whether the entry is a `ctx.run` command (named).
+    /// Panics on a missing or unsupported journal version: only journal v2
+    /// is understood, and another spelling cannot establish absence of runs.
     #[must_use]
     pub fn is_run(&self) -> bool {
+        self.assert_supported_version();
         self.entry_type == "Command: Run"
+    }
+
+    fn assert_supported_version(&self) {
+        assert_eq!(
+            self.version,
+            Some(2),
+            "unsupported journal version at entry {}",
+            self.index
+        );
     }
 
     /// Whether the entry's bytes contain `needle`; the empty needle is
@@ -193,12 +205,7 @@ fn validate_run_journal(journal: &[JournalEntry]) {
     let mut notifications = std::collections::BTreeSet::new();
     let mut previous = None;
     for entry in journal {
-        assert_eq!(
-            entry.version,
-            Some(2),
-            "unsupported journal version at entry {}",
-            entry.index
-        );
+        entry.assert_supported_version();
         assert!(
             previous.is_none_or(|index| index < entry.index),
             "unsupported journal order at entry {}; expected strictly increasing indices",
@@ -287,7 +294,7 @@ impl Invocation {
 }
 
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     (0..hex.len())

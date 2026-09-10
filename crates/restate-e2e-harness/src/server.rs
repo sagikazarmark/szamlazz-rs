@@ -120,18 +120,57 @@ impl Process {
     /// Why the process is gone, if it is: its exit status and the tail of
     /// its log, naming the ports it was to bind.
     fn exited(&mut self) -> Option<String> {
-        let status = self.child.try_wait().ok().flatten()?;
+        let status = exit_status(&self.child)?;
         let log = fs::read_to_string(self.base_dir.join("restate-server.log")).unwrap_or_default();
         let tail: Vec<&str> = log.lines().rev().take(30).collect();
         let tail: Vec<&str> = tail.into_iter().rev().collect();
         Some(format!(
-            "restate-server exited with {status} before its admin API came up, on ports {} \
+            "restate-server exited with {status}, on ports {} \
              (chosen free at launch; one may have been taken since). The last lines of its \
              log:\n{}",
             self.ports,
             tail.join("\n")
         ))
     }
+}
+
+/// Observe without reaping: the zombie leader reserves its pid until Drop
+/// signals the group, reaps and unregisters under the lifecycle lock.
+#[cfg(not(any(
+    target_os = "openbsd",
+    target_os = "redox",
+    target_os = "cygwin",
+    target_os = "horizon"
+)))]
+fn exit_status(child: &Child) -> Option<String> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let pid = Pid::from_raw(i32::try_from(child.id()).expect("child pid fits i32"))
+        .expect("child pid is positive");
+    loop {
+        match waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        ) {
+            Ok(status) => return status.map(|status| format!("{status:?}")),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => panic!(
+                "inspect restate-server {} without reaping: {error}",
+                child.id()
+            ),
+        }
+    }
+}
+
+// These targets have no waitid wrapper. Readiness remains bounded by its
+// deadline; never substitute try_wait, which would release the reserved pid.
+#[cfg(any(
+    target_os = "openbsd",
+    target_os = "redox",
+    target_os = "cygwin",
+    target_os = "horizon"
+))]
+fn exit_status(_child: &Child) -> Option<String> {
+    None
 }
 
 /// A Restate server: an existing one (from the environment) or a
@@ -147,6 +186,9 @@ pub struct Restate {
     /// The host name under which the server reaches this process's endpoint.
     endpoint_host: String,
     process: Option<Process>,
+    /// Dropping the senders requests shutdown of every local endpoint,
+    /// including endpoints registered with a reused server.
+    endpoints: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
 }
 
 /// Every server this test process started and has not stopped yet, by the
@@ -249,7 +291,7 @@ fn stop_on_signal() {
 impl Restate {
     fn new(
         admin: String,
-        ingress: String,
+        mut ingress: String,
         spec: &ServerSpec,
         endpoint_host: String,
         process: Option<Process>,
@@ -258,6 +300,7 @@ impl Restate {
             .timeout(HTTP_TIMEOUT)
             .build()
             .expect("the harness's HTTP client");
+        ingress.truncate(ingress.trim_end_matches('/').len());
         Self {
             admin: Admin::new(admin, http.clone()),
             ingress,
@@ -265,6 +308,7 @@ impl Restate {
             features: spec.features,
             endpoint_host,
             process,
+            endpoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -452,6 +496,10 @@ impl Restate {
     /// free and taken since, most likely) is reported at once, naming its
     /// ports, rather than waited on until the deadline. `None` for a reused
     /// server, and for one still running.
+    /// Inspection leaves the child unreaped until group cleanup on Drop.
+    /// On Unix targets without `waitid` (OpenBSD, Redox, Cygwin, Horizon),
+    /// exit inspection is unavailable and this returns `None`; readiness still
+    /// fails at its deadline.
     pub fn exited(&mut self) -> Option<String> {
         self.process.as_mut().and_then(Process::exited)
     }
@@ -478,7 +526,7 @@ impl Restate {
     }
 
     /// Serves `endpoint` on a free port of this host (a task of the current
-    /// runtime, for the runtime's life) and registers it with the server as
+    /// runtime, owned by this handle) and registers it with the server as
     /// `http://{endpoint_host}:{port}` with `force: true`, retried until the
     /// admin API accepts it. Repeatable: a new URI is a new revision of the
     /// services it binds, and new invocations route to it, so a redeploy is a
@@ -489,7 +537,13 @@ impl Restate {
     /// by another address). The endpoint has no identity key, so it is offered
     /// to the network only where the server needs it.
     ///
-    /// Served with `serve_with_cancel` over a future that never completes
+    /// Dropping `Restate` requests shutdown of every endpoint it deployed,
+    /// including on a reused server. The runtime must keep running to execute
+    /// shutdown; the SDK allows up to ten seconds for active connections to drain.
+    /// Dropping the returned [`Deployment`] only discards its URI/port descriptor.
+    /// Earlier endpoints remain available while this handle lives.
+    ///
+    /// Served with `serve_with_cancel` over this handle's shutdown signal
     /// rather than the SDK's `serve`, whose shutdown future is `ctrl_c()`: the
     /// harness owns SIGINT (it stops the servers it started and exits), and an
     /// endpoint that installed its own handler per deployment would race it.
@@ -508,9 +562,14 @@ impl Restate {
             .set_nonblocking(true)
             .expect("a non-blocking listener");
         let listener = tokio::net::TcpListener::from_std(listener).expect("a tokio listener");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        self.endpoints
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stop);
         tokio::spawn(async move {
             HttpServer::new(endpoint)
-                .serve_with_cancel(listener, std::future::pending::<()>())
+                .serve_with_cancel(listener, stopped)
                 .await;
         });
 
@@ -587,6 +646,10 @@ impl fmt::Debug for Restate {
 
 impl Drop for Restate {
     fn drop(&mut self) {
+        self.endpoints
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         let Some(mut process) = self.process.take() else {
             return;
         };

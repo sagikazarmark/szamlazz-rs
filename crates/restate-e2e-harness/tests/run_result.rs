@@ -187,6 +187,9 @@ fn unavailable_raw_cannot_pass_a_negative_content_assertion() {
         Some(Value::Null),
         Some(json!([115, 101, 99, 114, 101, 116])),
         Some(json!("zz")),
+        Some(json!("+1")),
+        Some(json!("+1+2")),
+        Some(json!("é")),
     ] {
         let mut row = json!({
             "index": 2, "version": 2, "entry_type": "Notification: Run",
@@ -206,6 +209,51 @@ fn unavailable_raw_cannot_pass_a_negative_content_assertion() {
     let empty = row(0, "Command: Input", None, &json!({}));
     assert!(empty.raw.is_empty());
     assert!(!empty.raw_contains("secret"));
+}
+
+#[tokio::test]
+async fn unsupported_journals_cannot_establish_no_runs_or_table_conformance() {
+    use restate_e2e_harness::{Admin, Handler, Invocation, RunPath, Table};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    const PATHS: &[RunPath] = &[RunPath::new("Svc", "h", &[])];
+    let server = MockServer::start().await;
+    let http = reqwest::Client::builder()
+        .tls_certs_only(std::iter::empty())
+        .build()
+        .expect("loopback client");
+    let table = Table::new(PATHS);
+    let handlers = [Handler {
+        service: "Svc".into(),
+        name: "h".into(),
+    }];
+    let invocations = [(
+        "inv".into(),
+        Invocation::from_row(&json!({
+            "status": "completed", "target_service_name": "Svc", "target_handler_name": "h"
+        })),
+    )];
+    for version in [Value::Null, json!(1), json!(3)] {
+        server.reset().await;
+        let row = json!({
+            "index": 0, "version": version, "entry_type": "Run", "name": "unexpected", "raw": "00"
+        });
+        Mock::given(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rows": [row.clone()]})))
+            .mount(&server)
+            .await;
+        let admin = Admin::new(server.uri(), http.clone());
+        assert!(
+            tokio::spawn(async move { admin.runs("inv").await })
+                .await
+                .expect_err("unsupported evidence must panic, not answer no runs")
+                .is_panic()
+        );
+        let journals = [("inv".into(), vec![JournalEntry::from_row(&row)])].into();
+        assert!(
+            std::panic::catch_unwind(|| table.check(&handlers, &invocations, &journals)).is_err()
+        );
+    }
 }
 
 #[test]

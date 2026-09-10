@@ -205,6 +205,10 @@ async fn e2e_smoke() {
     // The spawned server stops with the handle: nothing listens on its admin
     // port any more.
     drop(restate);
+    check_teardown(&admin_url, [first, second]).await;
+}
+
+async fn check_teardown(admin_url: &str, deployments: [restate_e2e_harness::Deployment; 2]) {
     let admin_addr = admin_url
         .strip_prefix("http://")
         .expect("the admin URL of a spawned server is plain http");
@@ -212,6 +216,18 @@ async fn e2e_smoke() {
         std::net::TcpStream::connect(admin_addr).is_err(),
         "the spawned server is gone with the handle: {admin_addr} still accepts connections"
     );
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        for deployment in deployments {
+            while tokio::net::TcpStream::connect(("127.0.0.1", deployment.port))
+                .await
+                .is_ok()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .expect("local endpoints stop with their owner after SDK connection draining");
 }
 
 async fn check_raw_ingress(restate: &restate_e2e_harness::Restate) {

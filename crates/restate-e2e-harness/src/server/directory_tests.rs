@@ -94,7 +94,9 @@ fn launches_preserve_existing_failure_evidence() {
         child,
         root: root.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // On targets without non-reaping waitid, a failed launch is reported at
+    // the readiness deadline rather than by early exit inspection.
+    let deadline = Instant::now() + super::READY_DEADLINE + Duration::from_secs(30);
     let status = loop {
         if let Some(status) = suite.child.try_wait().expect("suite exit status") {
             break status;

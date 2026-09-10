@@ -96,6 +96,7 @@ impl Suite {
                 "--nocapture",
             ])
             .env(ROOT, &root)
+            .env("RESTATE_LIFECYCLE_SCENARIO", scenario)
             .env("TMPDIR", &root)
             .env("RESTATE_LIFECYCLE_PAUSES", pauses)
             .stdout(Stdio::from(log.try_clone().expect("suite log")))
@@ -216,6 +217,12 @@ fn suite_process() {
         return;
     };
     let root = PathBuf::from(root);
+    if std::env::var("RESTATE_LIFECYCLE_SCENARIO")
+        .is_ok_and(|scenario| scenario.starts_with("exit-observation"))
+    {
+        observe_exit(&root);
+        return;
+    }
     let launch = |name: &'static str| {
         let root = root.clone();
         std::thread::Builder::new()
@@ -365,4 +372,95 @@ fn failed_signal_initialization_prevents_this_and_later_launches() {
     assert!(!suite.reached("spawned-second"));
     assert!(!suite.root.join("e2e-first.pids").exists());
     assert!(!suite.root.join("e2e-second.pids").exists());
+}
+
+#[cfg(not(any(
+    target_os = "openbsd",
+    target_os = "redox",
+    target_os = "cygwin",
+    target_os = "horizon"
+)))]
+fn observe_exit(root: &Path) {
+    use rustix::process::{WaitId, WaitIdOptions, waitid};
+    let mut restate = super::Restate::spawn(
+        &root.join("server"),
+        &ServerSpec {
+            name: "first",
+            features: &[],
+            env: &[],
+        },
+        "127.0.0.1".into(),
+    );
+    let group = restate.process.as_ref().expect("spawned").group();
+    wait_for(|| restate.exited().is_some(), "leader exits");
+    let child = rustix::process::Pid::from_raw(i32::try_from(group).expect("pid")).expect("pid");
+    for _ in 0..2 {
+        assert!(restate.exited().is_some(), "exit remains observable");
+        assert!(
+            waitid(
+                WaitId::Pid(child),
+                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG
+            )
+            .expect("exit inspection must leave the leader waitable")
+            .is_some()
+        );
+    }
+    fs::write(root.join("exit-observed.ready"), "").expect("observed exit");
+    wait_for(
+        || root.join("drop.release").exists(),
+        "drop requested or signal exits process",
+    );
+    drop(restate);
+    assert!(!super::started().groups.contains(&group));
+    assert_eq!(
+        waitid(
+            WaitId::Pid(child),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+        )
+        .expect_err("Drop reaped the child"),
+        rustix::io::Errno::CHILD
+    );
+}
+
+#[cfg(any(
+    target_os = "openbsd",
+    target_os = "redox",
+    target_os = "cygwin",
+    target_os = "horizon"
+))]
+fn observe_exit(_root: &Path) {
+    panic!("exit observation is unavailable on this platform");
+}
+
+#[test]
+#[cfg(not(any(
+    target_os = "openbsd",
+    target_os = "redox",
+    target_os = "cygwin",
+    target_os = "horizon"
+)))]
+fn exit_inspection_preserves_the_leader_until_drop_or_signal_cleanup() {
+    for signal in [None, Some(Signal::SIGINT), Some(Signal::SIGTERM)] {
+        let scenario = if signal.is_none() {
+            "exit-observation-drop"
+        } else {
+            "exit-observation-signal"
+        };
+        let mut suite = Suite::start(scenario, signal.unwrap_or(Signal::SIGTERM), "");
+        let processes = suite.await_server("first");
+        kill(processes[0], Signal::SIGKILL).expect("exit the leader, keep its descendant");
+        suite.await_point("exit-observed");
+        assert!(
+            alive(processes[1]),
+            "inspection must not kill the descendant"
+        );
+        let status = if let Some(signal) = signal {
+            suite.signal(signal);
+            if signal == Signal::SIGINT { 130 } else { 143 }
+        } else {
+            fs::write(suite.root.join("drop.release"), "").expect("drop handle");
+            0
+        };
+        suite.assert_stopped(status, &processes);
+    }
 }

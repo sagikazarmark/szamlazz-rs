@@ -205,6 +205,8 @@ impl Table {
     /// ignored. A missing journal (for example, retention ended between the
     /// two reads) is an empty observed sequence: a prefix of every path,
     /// walking only an empty row, if declared.
+    /// Supplied entries must be journal v2; missing or unsupported versions
+    /// panic rather than being interpreted as empty sequences.
     ///
     /// This checks current observations against current rows, not historical
     /// replay compatibility: changing the implementation and table together

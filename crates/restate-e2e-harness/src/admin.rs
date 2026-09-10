@@ -145,9 +145,10 @@ pub struct Admin {
 
 impl Admin {
     /// The admin API at `base` (`http://127.0.0.1:9070`), spoken to through
-    /// `http`.
+    /// `http`. Trailing slashes are removed; a path prefix is preserved.
     #[must_use]
-    pub fn new(base: String, http: reqwest::Client) -> Self {
+    pub fn new(mut base: String, http: reqwest::Client) -> Self {
+        base.truncate(base.trim_end_matches('/').len());
         Self { base, http }
     }
 
@@ -435,6 +436,7 @@ impl Admin {
 
     /// The names of the `ctx.run` commands of an invocation, in journal
     /// order: which durable steps ran.
+    /// Panics on missing or unsupported journal versions, as [`JournalEntry::is_run`] does.
     pub async fn runs(&self, invocation_id: &str) -> Vec<String> {
         self.journal(invocation_id)
             .await
