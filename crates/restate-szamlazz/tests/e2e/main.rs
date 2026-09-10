@@ -352,13 +352,18 @@ impl Sequentially {
 
     /// Panics naming each scenario and check of the run that failed, with its
     /// panic message.
-    fn finish(self) {
+    async fn finish(self) {
         assert!(
             self.failures.is_empty(),
             "{} scenario(s) or run-wide check(s) failed:\n  {}",
             self.failures.len(),
             self.failures.join("\n  ")
         );
+        Arc::try_unwrap(self.h)
+            .ok()
+            .expect("every scenario has been joined")
+            .finish()
+            .await;
     }
 }
 
@@ -484,7 +489,9 @@ async fn e2e_order_protocol() {
              (E2E_ONLY selects no phase-2 scenario)"
         );
         report_skipped("checks", &names_of(&checks));
-        Sequentially::after_phase_1(Arc::new(h), phase1_failures).finish();
+        Sequentially::after_phase_1(Arc::new(h), phase1_failures)
+            .finish()
+            .await;
         return;
     }
     multi_account::flag_day_keeps_the_documents_and_refuses_unscoped_calls(&mut h).await;
@@ -498,7 +505,7 @@ async fn e2e_order_protocol() {
     } else {
         run.run_all(Step::Check, checks).await;
     }
-    run.finish();
+    run.finish().await;
 }
 
 /// The names of `scenarios`.
@@ -586,6 +593,7 @@ async fn e2e_check_account_without_protocol_v7() {
     eprintln!(
         "(canary) without protocol v7: scoped check_account → scope: null on the single-account deployment, unknown_account on the multi-account one: pass"
     );
+    h.finish().await;
 }
 
 // ----- the E2E_ONLY filter, without a server ---------------------------------------

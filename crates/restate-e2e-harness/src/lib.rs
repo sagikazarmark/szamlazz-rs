@@ -18,6 +18,9 @@
 //!   a [`Deployment`] is only the URI/port descriptor. The current runtime
 //!   executes shutdown: connections drain for ten seconds, then remaining
 //!   connection and SDK handler tasks are cancelled and joined.
+//!   End successful tests with [`Restate::finish`] to await this boundary and
+//!   fail on endpoint task panics, including ones followed by successful retries.
+//!   [`Restate::finish_with_failures`] explicitly collects expected failures.
 //! - [`ingress`]: a [`Call`] (Restate's URL grammar, written once: a
 //!   service or an object, under a scope, called or sent), its [`Reply`] and
 //!   the fault inside Restate's error envelope ([`Reply::fault`], into the
@@ -80,7 +83,7 @@
 //! **Plain data.** Every row and result type ([`Reply`], [`Invocation`],
 //! [`JournalEntry`], [`Handler`], [`Retries`], [`Deployment`], [`Walked`],
 //! [`Violations`], [`RunPath`], [`ServerSpec`], [`Feature`], [`Target`],
-//! [`Call`], [`Launcher`]) has public fields and none is `#[non_exhaustive]`:
+//! [`Call`], [`Launcher`], [`EndpointFailure`]) has public fields and none is `#[non_exhaustive]`:
 //! a spec is `const`-constructible in a consumer, a row is destructured and
 //! compared whole in an assertion, and a struct literal in a test reads as
 //! the row it stands for. The cost is stated and accepted: a header added to
@@ -127,7 +130,7 @@ pub use ingress::{Call, Mode, Reply};
 pub use introspection::{Handler, Invocation, JournalEntry, run_result, run_result_at};
 pub use run_names::{RunPath, Table, Violations, Walked};
 #[cfg(unix)]
-pub use server::{Deployment, Restate};
+pub use server::{Deployment, EndpointFailure, Restate};
 pub use watch::{Retries, Watch};
 
 /// A [`reqwest::ClientBuilder`] for the harness's own traffic, all of it

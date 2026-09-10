@@ -193,6 +193,9 @@ async fn suite_process() {
         right_data
     );
 
+    cancelled_startup(&root).await;
+    finish_evidence(&root).await;
+
     // An executable that exits before readiness also retains its own evidence.
     fs::write(root.join("fail-launch"), "").expect("fail next server startup");
     assert!(
@@ -234,6 +237,94 @@ async fn suite_process() {
     );
 }
 
+// An externally bounded startup is dropped without thread unwinding.
+// Both timeout and task abortion must stop the child and preserve evidence.
+async fn cancelled_startup(root: &Path) {
+    for abort in [false, true] {
+        fs::write(root.join("hold-launch"), "").expect("hold next startup");
+        let mut launching = Box::pin(launch(root));
+        let held = tokio::select! {
+            _ = &mut launching => panic!("startup must remain pending"),
+            held = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(base) = fs::read_to_string(root.join("held-base")) {
+                        break PathBuf::from(base);
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => held.expect("controlled server is waiting before readiness"),
+        };
+        let group = fs::read_to_string(held.join("group")).expect("held process group");
+        let group = Pid::from_raw(group.parse().expect("group pid"));
+        if abort {
+            let launching = tokio::spawn(launching);
+            launching.abort();
+            assert!(launching.await.expect_err("aborted startup").is_cancelled());
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), launching)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            held.join("restate-server.log").exists(),
+            "cancelled launch retains log"
+        );
+        assert!(held.join("data").exists(), "cancelled launch retains data");
+        assert_eq!(
+            nix::sys::signal::kill(group, None),
+            Err(nix::errno::Errno::ESRCH),
+            "child killed and reaped"
+        );
+        fs::remove_file(root.join("hold-launch")).expect("allow startup");
+        fs::remove_file(root.join("held-base")).expect("remove startup marker");
+    }
+}
+
+async fn finish_evidence(root: &Path) {
+    for collect in [false, true] {
+        let restate = launch(root).await;
+        let base = base_dir(root, &restate);
+        let group = restate.process.as_ref().expect("owned process").group();
+        // Cancelling before the first poll must retain evidence too.
+        if collect {
+            drop(restate.finish_with_failures());
+        } else {
+            drop(restate.finish());
+        }
+        assert!(
+            base.join("restate-server.log").exists(),
+            "cancelled finish retains log"
+        );
+        assert_eq!(
+            nix::sys::signal::kill(Pid::from_raw(i32::try_from(group).expect("pid")), None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+    }
+
+    let restate = launch(root).await;
+    let base = base_dir(root, &restate);
+    let failures = super::endpoint::Failures::default();
+    restate
+        .endpoints
+        .lock()
+        .expect("endpoints")
+        .push(super::LocalEndpoint {
+            uri: "http://test-endpoint".into(),
+            stop: None,
+            task: tokio::spawn(async { panic!("deliberate serving failure") }),
+            failures,
+        });
+    let failures = restate.finish_with_failures().await;
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("deliberate serving failure"));
+    assert!(
+        base.join("restate-server.log").exists(),
+        "collected endpoint failures retain logs"
+    );
+}
+
 /// The executable the launcher starts, implementing just its readiness protocol.
 #[tokio::test]
 async fn server_process() {
@@ -250,11 +341,17 @@ async fn server_process() {
         "every server starts with fresh storage"
     );
     fs::write(base.join("data"), &address).expect("server persisted state");
+    fs::write(base.join("group"), &group).expect("server pid");
     fs::write(
         root.join(format!("base-{address}")),
         base.as_os_str().as_encoded_bytes(),
     )
     .expect("report base");
+    if root.join("hold-launch").exists() {
+        eprintln!("controlled startup held before readiness");
+        fs::write(root.join("held-base"), base.as_os_str().as_encoded_bytes()).expect("held base");
+        std::future::pending::<()>().await;
+    }
     if root.join("fail-launch").exists() {
         fs::write(
             root.join("failed-base"),

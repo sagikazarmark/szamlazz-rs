@@ -206,4 +206,5 @@ async fn e2e_targets_isolate_the_same_service_and_key_in_each_scope() {
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body, json!(key));
     }
+    restate.finish().await;
 }

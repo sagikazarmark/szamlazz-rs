@@ -104,12 +104,14 @@ fn launch_directory(name: &str) -> PathBuf {
 
 /// A `restate-server` process the harness spawned: its ports, the child (kept
 /// to be reaped after its group is killed) and its base directory, removed on
-/// drop unless the test is failing; then it stays, with `restate-server.log`
+/// drop unless startup is incomplete or the test is failing; then it stays, with `restate-server.log`
 /// in it.
 struct Process {
     ports: Ports,
     child: Child,
     base_dir: PathBuf,
+    /// Incomplete startup and endpoint failures retain diagnostic evidence.
+    keep_evidence: bool,
 }
 
 impl Process {
@@ -188,9 +190,26 @@ pub struct Restate {
     /// The host name under which the server reaches this process's endpoint.
     endpoint_host: String,
     process: Option<Process>,
-    /// Dropping the senders requests shutdown of every local endpoint,
-    /// including endpoints registered with a reused server.
-    endpoints: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+    endpoints: Mutex<Vec<LocalEndpoint>>,
+}
+
+struct LocalEndpoint {
+    uri: String,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+    failures: endpoint::Failures,
+}
+
+/// An unexpected failure of a local endpoint's serving, connection or stream
+/// task, including a panic in an SDK handler. Returned by
+/// [`Restate::finish_with_failures`] for tests deliberately exercising panics.
+/// Normal tests use [`Restate::finish`], which asserts there were none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointFailure {
+    /// The endpoint's registered URI, distinguishing earlier deployments too.
+    pub uri: String,
+    /// The task and its join error, including the panic message when it is text.
+    pub message: String,
 }
 
 /// Every server this test process started and has not stopped yet, by the
@@ -410,6 +429,7 @@ impl Restate {
             ports,
             child,
             base_dir,
+            keep_evidence: true,
         };
         registry.groups.push(process.group());
         drop(registry);
@@ -495,6 +515,9 @@ impl Restate {
                 feature.flag,
                 expected
             );
+        }
+        if let Some(process) = &mut self.process {
+            process.keep_evidence = false;
         }
         self
     }
@@ -588,6 +611,8 @@ impl Restate {
     /// connection and stream tasks. SDK 0.12's `HttpServer` detaches those
     /// tasks, so its graceful-shutdown timeout cannot release active handlers.
     /// The shutdown signal belongs to this handle, not a per-endpoint SIGINT handler.
+    /// End successful tests with [`Self::finish`] to await shutdown and assert
+    /// no endpoint task panicked; Drop alone cannot fail the test for a panic.
     pub async fn deploy(&self, endpoint: Endpoint) -> Deployment {
         let bind = if self.endpoint_host == SPAWNED_ENDPOINT_HOST {
             "127.0.0.1:0"
@@ -604,15 +629,100 @@ impl Restate {
             .expect("a non-blocking listener");
         let listener = tokio::net::TcpListener::from_std(listener).expect("a tokio listener");
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let uri = format!("http://{}:{port}", self.endpoint_host);
+        let failures = endpoint::Failures::default();
+        let task = tokio::spawn(endpoint::serve(
+            endpoint,
+            listener,
+            stopped,
+            failures.clone(),
+        ));
         self.endpoints
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(stop);
-        tokio::spawn(endpoint::serve(endpoint, listener, stopped));
+            .push(LocalEndpoint {
+                uri: uri.clone(),
+                stop: Some(stop),
+                task,
+                failures,
+            });
 
-        let uri = format!("http://{}:{port}", self.endpoint_host);
         self.admin.register(&uri).await;
         Deployment { uri, port }
+    }
+
+    /// Finishes the test: requests shutdown of all local endpoints, waits for
+    /// their connections and SDK handler tasks to drain (up to ten seconds per
+    /// endpoint, concurrently), then cancels and joins unfinished work. Asserts
+    /// no endpoint task failed, including panics from earlier executions that
+    /// Restate subsequently retried successfully. Stops an owned server; a
+    /// reused server remains running. Failure retains an owned server's logs.
+    ///
+    /// Call this at the end of a successful test while its Tokio runtime and
+    /// handler dependencies are still alive. Drop alone only requests cleanup
+    /// and cannot propagate task failures to the test. This does not wait for
+    /// durable invocations to complete; use [`Self::drain`] first if needed.
+    /// External effects and independently spawned application tasks are outside
+    /// this boundary. Use [`Self::finish_with_failures`] only when the test
+    /// deliberately expects endpoint task failures and asserts on them itself.
+    pub fn finish(mut self) -> impl Future<Output = ()> {
+        self.retain_evidence();
+        async move {
+            let failures = self.finish_endpoints().await;
+            assert!(
+                failures.is_empty(),
+                "local endpoint tasks failed: {failures:#?}"
+            );
+        }
+    }
+
+    /// The same shutdown/join boundary as [`Self::finish`], returning every
+    /// unexpected task failure instead of asserting. For tests intentionally
+    /// exercising panics: assert the expected failures explicitly. Cancellation
+    /// of unfinished work at the drain deadline is deliberate and not a failure.
+    /// An owned server's logs are retained when failures were recorded.
+    pub fn finish_with_failures(mut self) -> impl Future<Output = Vec<EndpointFailure>> {
+        self.retain_evidence();
+        async move { self.finish_endpoints().await }
+    }
+
+    fn retain_evidence(&mut self) {
+        // Set before constructing the future: cancellation before its first
+        // poll is incomplete cleanup too.
+        if let Some(process) = &mut self.process {
+            process.keep_evidence = true;
+        }
+    }
+
+    async fn finish_endpoints(&mut self) -> Vec<EndpointFailure> {
+        let endpoints = self
+            .endpoints
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        for endpoint in endpoints.iter_mut() {
+            endpoint.stop.take();
+        }
+        let mut failures = Vec::new();
+        for endpoint in endpoints.iter_mut() {
+            endpoint
+                .failures
+                .record("serving task", (&mut endpoint.task).await, false);
+            failures.extend(
+                endpoint
+                    .failures
+                    .take()
+                    .into_iter()
+                    .map(|message| EndpointFailure {
+                        uri: endpoint.uri.clone(),
+                        message,
+                    }),
+            );
+        }
+        endpoints.clear();
+        if let Some(process) = &mut self.process {
+            process.keep_evidence = !failures.is_empty();
+        }
+        failures
     }
 
     /// `PATCH /services/{service}` with `public`, asserting success
@@ -700,7 +810,7 @@ impl Drop for Restate {
         let _ = process.child.wait();
         registry.groups.retain(|started| *started != group);
         drop(registry);
-        if std::thread::panicking() {
+        if process.keep_evidence || std::thread::panicking() {
             eprintln!(
                 "restate-server's base dir is kept for inspection: {}",
                 process.base_dir.display()

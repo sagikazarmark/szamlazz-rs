@@ -186,6 +186,7 @@ async fn e2e_unresolved_exhaustion_admits_a_second_send() {
             "{key}: first outcome_unknown, queued {next_handler} issued; two sends before visibility (scripted)"
         );
     }
+    restate.finish().await;
 }
 
 /// Test-only retention + marker design. The marker guards later invocations;
@@ -443,6 +444,7 @@ async fn e2e_unresolved_retention_probe() {
         "one send on each order; none after kill"
     );
     eprintln!("marker: manual kill released the lock; queued mutation refused; no additional send");
+    restate.finish().await;
 }
 
 async fn send_count(mock: &MockServer) -> usize {

@@ -11,7 +11,7 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   spawns on the loopback, on ports chosen free at launch, with its log and data under an exclusively allocated
   temp directory (`restate-e2e-{pid}-{name}-{sequence}`). Existing candidates are skipped, so port reuse cannot
   reuse storage or overwrite earlier failure evidence. Failed launches and panic teardown retain their own
-  directory; normal teardown removes only that launch's directory. Its process group is killed when the handle
+   directory, including when startup is cancelled by a timeout or task abortion; normal teardown removes only that launch's directory. Its process group is killed when the handle
   drops and on SIGINT/SIGTERM. With
   neither the suite **skips** with a message, and **fails** when `CI` is set: a run that passed by skipping proves
   nothing. A `ServerSpec` names the shape: the experimental `Feature`s it needs on or off (set on the spawned server,
@@ -110,6 +110,23 @@ handler futures, not external effects or independently spawned application tasks
 Earlier endpoints stay available while the handle lives, and a reused Restate
 server is itself left running.
 
+**End successful tests with `restate.finish().await`.** This requests shutdown of
+all local endpoints together, waits for their connection and SDK handler tasks,
+and fails the test if any endpoint task panicked—even when Restate retried that
+execution successfully. Failures identify the endpoint URI and task, including
+earlier deployments. Forced cancellation at the drain deadline is expected;
+panics are not. An owned server is stopped and its logs retained on endpoint failure.
+Drop alone is best-effort cleanup and cannot propagate task failures to the test.
+Keep handler dependencies alive through `finish`. It does not wait for durable
+invocations to complete (`drain` does), or join independently spawned application tasks.
+
+For a test deliberately exercising handler panics, use
+`let failures = restate.finish_with_failures().await` and assert the expected
+`EndpointFailure { uri, message }` values. This is the explicit acknowledgement
+path; normal tests should use `finish`, which requires no failures. Cancelling
+either finish future requests cleanup but forfeits its completion and failure
+assertion; an owned server's diagnostic directory is retained.
+
 ## Quick start
 
 In a Rust crate using edition `2024`, add these to `Cargo.toml`:
@@ -170,6 +187,7 @@ async fn e2e_greeting() {
     assert!(run_result(&journal, "greet-person")
         .expect("retained greet-person result")
         .raw_contains("Hello, Ada!"));
+    restate.finish().await;
 }
 ```
 
@@ -194,6 +212,29 @@ against a real server. Its fresh dependency resolution checks these features
 without workspace dev-dependency unification.
 
 ## Selecting objects to observe
+
+### Observation timeouts
+
+`Admin::await_status`, `await_in_flight_on`, `pause` and `purge` observe for up
+to **30 seconds** by default; `drain` and `register` wait up to **60 seconds**.
+Each has a matching `_with_timeout` variant taking a `Duration` as its last
+argument, for example:
+
+```rust,no_run
+use std::time::Duration;
+# async fn observe(admin: &restate_e2e_harness::Admin, id: &str) {
+admin.await_status_with_timeout(id, &["completed"], Duration::from_secs(90)).await;
+# }
+```
+
+The timeout covers all observation probes, their response bodies and sleeps.
+For `pause` and `purge`, it starts after the initiating PATCH succeeds; that
+request has the HTTP client's own timeout. A timeout fails the test and does
+not cancel an invocation or undo an admin operation. A custom HTTP timeout
+does not replace the observation timeout. `Restate::drain` uses the default;
+use `restate.admin().drain_with_timeout(...)` for a longer wait.
+
+### Object selectors
 
 `Call::object` and `Target::object` take the **same logical key**. Pass `invoice/2026` to both: `Call::path()`
 renders the key as `invoice%2F2026`, while the SQL selector matches `invoice/2026`. A literal `%2F` is encoded
@@ -389,6 +430,9 @@ Readiness regressions cover child exit during health, SQL and version probes and
 a version probe inheriting time spent in earlier stages. Endpoint regressions
 exercise successful handler completion during draining and forced cancellation
 of a pending handler, including termination of its existing HTTP/2 connection.
+They also assert that `finish` propagates handler panics and that deliberate
+failure collection returns their endpoint URI and message. Startup regressions
+cover timeout and task-abortion cleanup with retained evidence.
 `RESTATE_SERVER_BIN=… cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract
 against a server of its own (never a reused one: the test deploys a service and leaves its invocations retained,
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the
@@ -402,6 +446,8 @@ excluded from every selection.
 It also runs `e2e_quick_start`, compiling and executing the README in a separate
 temporary crate. That check needs access to the Cargo registry (or a populated
 cache), retains the crate on failure, and removes it on success.
+`e2e_endpoint_failure` proves that an assertion panic followed by a successful
+Restate retry and a clean redeployment still fails `finish`.
 
 ## License
 

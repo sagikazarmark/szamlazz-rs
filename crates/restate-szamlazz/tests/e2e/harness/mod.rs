@@ -180,6 +180,13 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    /// Join endpoint tasks before releasing their mock and assert no handler
+    /// panic was hidden by a successful Restate retry.
+    pub(crate) async fn finish(self) {
+        self.restate.finish().await;
+        self.mock.verify().await;
+    }
+
     /// The harness on `restate` (launched and ready: its admin API answering
     /// and `/version` reporting its spec's features): serves and registers
     /// the single-account deployment.

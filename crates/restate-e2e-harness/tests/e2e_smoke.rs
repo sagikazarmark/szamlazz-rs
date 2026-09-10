@@ -254,7 +254,7 @@ async fn e2e_smoke() {
 
     // The spawned server stops with the handle: nothing listens on its admin
     // port any more.
-    drop(restate);
+    restate.finish().await;
     check_teardown(&admin_url, [first, second]).await;
 }
 

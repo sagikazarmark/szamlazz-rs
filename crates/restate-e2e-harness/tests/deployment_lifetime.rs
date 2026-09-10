@@ -142,7 +142,7 @@ async fn cancelling_registration_keeps_the_endpoint_owned_for_teardown() {
             }) => port.expect("registration reached admin"),
         }
     };
-    drop(restate);
+    restate.finish().await;
     await_closed(&[port]).await;
 }
 
@@ -178,6 +178,91 @@ async fn shutdown_releases_active_handlers_after_the_drain_deadline() {
 #[tokio::test]
 async fn shutdown_allows_active_handlers_to_finish_during_the_drain_window() {
     draining_handler(true).await;
+}
+
+struct PanickingService;
+
+#[restate_sdk::service(name = "PanickingService")]
+impl PanickingService {
+    #[handler]
+    async fn fail(&self, _ctx: Context<'_>) -> HandlerResult<()> {
+        tokio::task::yield_now().await;
+        panic!("deliberate endpoint assertion");
+    }
+}
+
+#[tokio::test]
+async fn finish_reports_handler_panics_and_explicit_collection_acknowledges_them() {
+    for collect in [false, true] {
+        let server = MockServer::start().await;
+        let restate = reused(&server, "", "").await;
+        Mock::given(path("/deployments"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let deployment = restate
+            .deploy(Endpoint::builder().bind(PanickingService).build())
+            .await;
+        let socket = tokio::net::TcpStream::connect(("127.0.0.1", deployment.port))
+            .await
+            .expect("endpoint socket");
+        let (mut client, connection) = h2::client::handshake(socket)
+            .await
+            .expect("HTTP/2 handshake");
+        let driver = tokio::spawn(connection);
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("{}/invoke/PanickingService/fail", deployment.uri))
+            .header("content-type", "application/vnd.restate.invocation.v6")
+            .body(())
+            .expect("request");
+        let (response, mut send) = client
+            .send_request(request, false)
+            .expect("invocation stream");
+        send.send_data(invocation_frames().into(), true)
+            .expect("invocation input");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // A failed stream can fail either the headers or the response body.
+            if let Ok(mut response) = response.await {
+                loop {
+                    match response.body_mut().data().await {
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) => break,
+                        None => panic!("a panicking handler cannot complete its response"),
+                    }
+                }
+            }
+        })
+        .await
+        .expect("handler stream fails");
+        if collect {
+            let failures = restate.finish_with_failures().await;
+            assert_eq!(failures.len(), 1, "{failures:?}");
+            assert_eq!(failures[0].uri, deployment.uri);
+            assert!(
+                failures[0]
+                    .message
+                    .contains("deliberate endpoint assertion")
+            );
+        } else {
+            let error = tokio::spawn(restate.finish())
+                .await
+                .expect_err("finish fails the test");
+            assert!(
+                error.to_string().contains("deliberate endpoint assertion"),
+                "{error}"
+            );
+        }
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", deployment.port))
+                .await
+                .is_err()
+        );
+        driver
+            .await
+            .expect("client task")
+            .expect("connection closes");
+    }
 }
 
 /// Protocol v6 Start: 16-byte id, debug id, one known entry, random seed.
@@ -250,7 +335,7 @@ async fn draining_handler(complete: bool) {
     })
     .await
     .expect("actual handler entered");
-    drop(restate);
+    let finishing = tokio::spawn(restate.finish());
     await_closed(&[deployment.port]).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
@@ -293,4 +378,7 @@ async fn draining_handler(complete: bool) {
         .expect("client connection task")
         .expect("HTTP/2 connection closes");
     drop((response, send, client));
+    finishing
+        .await
+        .expect("finish joins handlers and accepts deliberate shutdown cancellation");
 }

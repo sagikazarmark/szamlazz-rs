@@ -243,10 +243,17 @@ impl Admin {
     /// Registers the endpoint at `uri` (`POST /deployments` with `force:
     /// true`), retried until the admin API accepts it: a new URI is a new
     /// revision of the services it binds, and new invocations route to it.
+    /// Waits up to 60 seconds; use [`Self::register_with_timeout`] to override.
     pub async fn register(&self, uri: &str) {
+        self.register_with_timeout(uri, REGISTER_DEADLINE).await;
+    }
+
+    /// Registers as [`Self::register`] with an explicit timeout covering all
+    /// registration requests, response bodies and retry sleeps.
+    pub async fn register_with_timeout(&self, uri: &str, timeout: Duration) {
         let registration = json!({ "uri": uri, "force": true });
         poll_until(
-            REGISTER_DEADLINE,
+            timeout,
             Duration::from_millis(500),
             || async {
                 let response = self
@@ -272,9 +279,16 @@ impl Admin {
     }
 
     /// Waits until `sys_invocation` holds no invocation that is not completed.
+    /// Waits up to 60 seconds; use [`Self::drain_with_timeout`] to override.
     pub async fn drain(&self) {
+        self.drain_with_timeout(DRAIN_DEADLINE).await;
+    }
+
+    /// Observes a drained server as [`Self::drain`] with an explicit timeout
+    /// covering all probes and sleeps. A timeout does not stop invocations.
+    pub async fn drain_with_timeout(&self, timeout: Duration) {
         poll_until(
-            DRAIN_DEADLINE,
+            timeout,
             Duration::from_millis(200),
             || async {
                 let in_flight = self
@@ -310,9 +324,19 @@ impl Admin {
     }
 
     /// Pauses an invocation, preserving its journal for a later replay.
+    /// Observes the paused status for up to 30 seconds after the PATCH succeeds;
+    /// use [`Self::pause_with_timeout`] to override the observation timeout.
     pub async fn pause(&self, invocation_id: &str) {
+        self.pause_with_timeout(invocation_id, POLL_DEADLINE).await;
+    }
+
+    /// Pauses as [`Self::pause`] with an explicit status-observation timeout.
+    /// The PATCH uses the HTTP client's timeout separately. Timing out while
+    /// observing does not undo the pause request.
+    pub async fn pause_with_timeout(&self, invocation_id: &str, timeout: Duration) {
         self.patch_invocation(invocation_id, "pause").await;
-        self.await_status(invocation_id, &["paused"]).await;
+        self.await_status_with_timeout(invocation_id, &["paused"], timeout)
+            .await;
     }
 
     /// Resumes an invocation on its pinned deployment.
@@ -325,10 +349,19 @@ impl Admin {
     /// removing its retained completion, journal and deduplication record.
     /// A later call can execute as a fresh invocation. Virtual Object state
     /// remains; purging an invocation does not reset its object.
+    /// Observes removal for up to 30 seconds after the PATCH succeeds;
+    /// use [`Self::purge_with_timeout`] to override the observation timeout.
     pub async fn purge(&self, invocation_id: &str) {
+        self.purge_with_timeout(invocation_id, POLL_DEADLINE).await;
+    }
+
+    /// Purges as [`Self::purge`] with an explicit removal-observation timeout.
+    /// The PATCH uses the HTTP client's timeout separately. Timing out while
+    /// observing does not undo the purge request.
+    pub async fn purge_with_timeout(&self, invocation_id: &str, timeout: Duration) {
         self.patch_invocation(invocation_id, "purge").await;
         poll_until(
-            POLL_DEADLINE,
+            timeout,
             Duration::from_millis(200),
             || async {
                 let rows = self
@@ -346,9 +379,23 @@ impl Admin {
 
     /// Waits until `sys_invocation` reports the invocation in one of
     /// `statuses`; the status it reached.
+    /// Waits up to 30 seconds; use [`Self::await_status_with_timeout`] to override.
     pub async fn await_status(&self, invocation_id: &str, statuses: &[&str]) -> String {
+        self.await_status_with_timeout(invocation_id, statuses, POLL_DEADLINE)
+            .await
+    }
+
+    /// Observes a status as [`Self::await_status`] with an explicit timeout
+    /// covering all probes and sleeps, independent of the HTTP client's own
+    /// timeout. Timing out does not cancel the invocation.
+    pub async fn await_status_with_timeout(
+        &self,
+        invocation_id: &str,
+        statuses: &[&str],
+        timeout: Duration,
+    ) -> String {
         poll_until(
-            POLL_DEADLINE,
+            timeout,
             Duration::from_millis(100),
             || async {
                 let rows = self
@@ -406,9 +453,22 @@ impl Admin {
     /// matching `target` (accepted by the server, not completed): the
     /// server-side moment a call made while the key is held is queued behind
     /// it, which the ingress reports only with the call's answer. The ids.
+    /// Waits up to 30 seconds; use [`Self::await_in_flight_on_with_timeout`] to override.
     pub async fn await_in_flight_on(&self, target: &Target<'_>, count: usize) -> Vec<String> {
+        self.await_in_flight_on_with_timeout(target, count, POLL_DEADLINE)
+            .await
+    }
+
+    /// Observes at least `count` invocations as [`Self::await_in_flight_on`]
+    /// with an explicit timeout covering all probes and sleeps.
+    pub async fn await_in_flight_on_with_timeout(
+        &self,
+        target: &Target<'_>,
+        count: usize,
+        timeout: Duration,
+    ) -> Vec<String> {
         poll_until(
-            POLL_DEADLINE,
+            timeout,
             Duration::from_millis(25),
             || async {
                 let in_flight = self.in_flight_ids_on(target).await;
