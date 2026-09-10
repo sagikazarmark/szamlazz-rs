@@ -76,12 +76,14 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 
 ## When the Call Fails
 
-Every failure is a `ClientError` variant, and each says something different about the document you asked for. Invoice creation has no idempotency key, so a failed create settles to one of three outcomes, and only one of them permits sending the same request again: `outcome_class()` says whether a document may already exist, and when it may, a query by the external id says whether one does.
+Use the [operation recovery table](https://docs.rs/szamlazz-agent/latest/szamlazz_agent/error/index.html#recovery) for invoice creation/storno, receipt creation/storno, reads, credit entries, proforma deletion and receipt email. `outcome_class()` describes this exchange, not an earlier lost send of the logical operation. Invoice creation has no idempotency key; an immediate empty query cannot prove a create failed while it may still be in flight.
+
+This example sends once and examines one reconciliation result. It checks identity before adopting a found invoice and leaves an empty or inconclusive query unresolved. The caller must serialize logical issuance and retain the request's order and external id.
 
 ```rust
 use szamlazz_agent::ops::invoice::{CreateInvoice, CreationOutcome};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
-use szamlazz_agent::{Client, ClientError, InvoiceNumber, InvoiceSelector, OutcomeClass, Pdf};
+use szamlazz_agent::{Client, ClientError, DocumentType, InvoiceNumber, InvoiceSelector, OutcomeClass, Pdf};
 
 /// What one create settled to.
 enum Outcome {
@@ -89,22 +91,18 @@ enum Outcome {
     Issued(InvoiceNumber),
     /// A preview was rendered (`header.preview_pdf`); no document exists.
     Preview(Pdf),
-    /// Nothing was issued: szamlazz.hu refused, or confirmed that nothing
-    /// carries the external id. The one outcome after which the same
-    /// request may be sent again, once its cause is fixed.
-    NotIssued(ClientError),
-    /// A document may exist: neither the create nor the reconciling query
-    /// answered. Never send again from here, query by the external id
-    /// until szamlazz.hu answers.
+    /// This exchange was refused; an earlier lost send remains a separate question.
+    Refused(ClientError),
+    /// Recovery is unresolved, including an immediate empty query or wrong identity.
     Unknown(ClientError),
 }
 
-async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
+async fn issue_once(client: &Client, request: &CreateInvoice, expected_type: DocumentType) -> Outcome {
     let error = match client.send(request).await {
         Ok(CreationOutcome::Issued(created)) => return Outcome::Issued(created.invoice_number),
         Ok(CreationOutcome::Preview(preview)) => return Outcome::Preview(preview.pdf),
         // An arm a later release adds is not an issued document either.
-        Ok(_) => return Outcome::NotIssued(ClientError::from(
+        Ok(_) => return Outcome::Unknown(ClientError::from(
             szamlazz_agent::ParseError::Missing("szamlaszam"),
         )),
         Err(error) => error,
@@ -124,33 +122,97 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
     }
 
     match error.outcome_class() {
-        // Nothing was issued: the request, the account or the order number is the problem.
+        // Refused now; this says nothing about an earlier send.
         OutcomeClass::Rejected | OutcomeClass::NotFound | OutcomeClass::DuplicateOrderNumber => {
-            Outcome::NotIssued(error)
+            Outcome::Refused(error)
         }
         // `Unknown` (and any class a later version adds): a document may exist.
         // Ask szamlazz.hu what carries the external id before anything is sent again.
         _ => {
-            let Some(external_id) = &request.external_id else {
-                return Outcome::Unknown(error); // nothing to reconcile by
+            let (Some(external_id), Some(order)) = (&request.external_id, &request.header.order_number) else {
+                return Outcome::Unknown(error); // missing reconciliation identity
             };
             let query = QueryInvoiceXml::new(InvoiceSelector::ExternalId(external_id.clone()));
             match client.send(&query).await {
-                // An earlier attempt issued it; only the reply was lost.
-                Ok(document) => Outcome::Issued(document.info.invoice_number),
-                // Code 7: szamlazz.hu confirms nothing carries the id, the create did not land.
-                Err(answer) if answer.outcome_class() == OutcomeClass::NotFound => {
-                    Outcome::NotIssued(error)
-                }
-                // The query did not answer either: still open.
-                Err(_) => Outcome::Unknown(error),
+                Ok(document)
+                    if document.info.order_number.as_ref() == Some(order)
+                        && document.info.document_type == expected_type
+                        && document.info.reversed == Some(false) => Outcome::Issued(document.info.invoice_number),
+                // Wrong identity, reversed, absent (7), or unanswered: no automatic resend.
+                _ => Outcome::Unknown(error),
             }
         }
     }
 }
 ```
 
-`Outcome::Unknown` is answered by querying again, never by re-sending: the create may have landed, and a second one would be a second legal document. `ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number; query by `InvoiceSelector::OrderNumber` to find it.
+`Outcome::Unknown` requires reconciliation and time for earlier sends to finish before another create is considered. An external id returns its newest holder and is not unique server-side; a collision must be resolved rather than adopted. `ClientError::Api` carries the typed `ErrorCode` with the verbatim message. For 71/152, `InvoiceSelector::OrderNumber` can find the existing document, which also needs identity checks.
+
+The vendor allows at most **five total sends of the same request, including the initial send**, then operator intervention; never a tight retry loop. This wording does not specify exact combined accounting for a write and its reconciliation queries. Code 55 means signing failed, not proven issuance: timestamp access may recover, certificate expiry requires remediation. It remains `Unknown`. Code 56 is known issuance only **with a number**, corroborated by first-party PHP 2.12.4, not observed in the account probes. Without a number it remains `Unknown`.
+
+The detailed A4d stalled-send observation found no issuance; a broader project assertion of delayed issuance lacks a linked probe. [Recovery evidence](https://docs.rs/szamlazz-agent/latest/szamlazz_agent/error/index.html#retry-limit-and-evidence) qualifies both. A timeout does not cancel server work, and the default remains 60 seconds.
+
+## Receipts
+
+Persist a unique creation call id **before the first send** and keep it for the logical issuance. Error 338 prevents another receipt but does not return the original number or PDF. Query a known number or a deliberately managed order, then verify call id, order, number, document type and reversal data. Unresolved recovery does not justify a fresh call id.
+
+```rust
+use rust_decimal::dec;
+use szamlazz_agent::ops::receipt::{CreateReceipt, QueryReceipt, ReceiptSelector};
+use szamlazz_agent::{Client, Currency, LineItem, PaymentMethod, ReceiptType, VatRate};
+
+// `persisted_call_id` and `order` come from durable caller storage, not a new UUID per retry.
+fn creation(persisted_call_id: &str, order: &str) -> CreateReceipt {
+    CreateReceipt {
+        call_id: Some(persisted_call_id.to_owned()),
+        order_number: Some(order.to_owned()),
+        ..CreateReceipt::new("NYGTA", PaymentMethod::Cash, Currency::HUF, vec![
+            // Documented HUF receipt example: fractional net/VAT, whole gross.
+            LineItem::new("Item", dec!(1), "db", dec!(787.40), VatRate::percent(27),
+                dec!(787.40), dec!(212.60), dec!(1000)),
+        ])
+    }
+}
+
+async fn inspect_order(client: &Client, persisted_call_id: &str, order: &str)
+    -> Result<bool, szamlazz_agent::ClientError>
+{
+    // If the receipt number is known, prefer ReceiptSelector::ReceiptNumber(number).
+    // Order lookup returns the last match; this caller manages the order's uniqueness.
+    let query = QueryReceipt::new(ReceiptSelector::OrderNumber(order.to_owned()));
+    // query.call_id stays None: it is not a supported call-ID-only lookup.
+    let receipt = client.send(&query).await?;
+    println!("inspect returned number: {}", receipt.receipt_number);
+    Ok(receipt.call_id.as_deref() == Some(persisted_call_id)
+        && receipt.order_number.as_deref() == Some(order)
+        && receipt.document_type == ReceiptType::Receipt
+        && !receipt.reversed
+        && receipt.reversed_receipt_number.is_none())
+}
+```
+
+`false` or an error leaves recovery unresolved. A normal number/order query omits `QueryReceipt::call_id`: the XML field is optional and its query behavior unspecified. First-party PHP docs say order queries return the **last matching document**; the exact “last” criterion and `SN` selection remain unresolved. For receipt storno, keep the logical call identity and query the known original's reversal state; that alone does not recover the `SN` number/PDF. Neither storno-specific 338 behavior nor invoice-style successful repeats are promised.
+
+### Receipt email
+
+For a first send supply all details and one recipient:
+
+```rust
+use szamlazz_agent::ops::receipt::{ReceiptEmail, SendReceipt};
+
+let first_send = SendReceipt {
+    email: Some(ReceiptEmail {
+        to: Some("buyer@example.com".into()),
+        reply_to: Some("seller@example.com".into()),
+        subject: Some("Your receipt".into()),
+        body: Some("Thank you for your purchase.".into()),
+    }),
+    ..SendReceipt::new("NYGTA-2026-1")
+};
+let resend = SendReceipt::new("NYGTA-2026-1");
+```
+
+The resend writes a **present empty `emailKuldes` block**, requesting the previous email details. Within `ReceiptEmail`, `None` omits a child while `Some("")` emits an empty child; independent partial-field merging and comma-separated recipients are not established by the source. After a lost acknowledgement, receipt existence does not prove email delivery; another send may duplicate the email.
 
 ## Response parsing
 
@@ -247,14 +309,18 @@ The shared request vocabulary (`ExchangeRate`, `InvoiceTemplate`, `SellerEmail`,
 szamlazz.hu verifies every row's arithmetic server-side (net = unit price × quantity, VAT = net × rate / 100, gross = net + VAT; error codes 259–264), and the crate does not duplicate that check. It offers two ways to fill the values:
 
 - **`LineItem::try_calculated(…, rounding)`** derives them and returns `ArithmeticError` instead of panicking when a value does not fit a `Decimal`. The rounding is an explicit choice:
-  - `Rounding::minor_unit(&currency)`: the currency's minor unit, whole forints for HUF (`Currency::minor_unit_digits` returns 0 for HUF although ISO 4217 says 2: the fillér is out of circulation and szamlazz.hu works in whole forints), cents for EUR, thousandths for KWD, 2 for a code the table does not know. This is what the invoice can state and what NAV reporting takes, so it is the choice for a document that must reconcile to the caller's ledger.
+  - `Rounding::minor_unit(&currency)`: the crate's minor-unit policy, whole forints for HUF (`Currency::minor_unit_digits` returns 0 although ISO 4217 says 2), cents for EUR, thousandths for KWD, 2 for a code the table does not know. This is a local arithmetic choice for ledger reconciliation, not a promise of server precision or acceptance for every currency.
   - `Rounding::Scale(n)`: a fixed number of decimal places.
-  - `Rounding::Exact`: no rounding; a `100.005 EUR` net goes on the wire with a five-decimal VAT. szamlazz.hu then rounds each value to two decimals on its own and does not recompute the gross: `100.004 / 27.00108 / 127.00508` is stored as `100 / 27 / 127.01`, a document whose gross is not net + VAT (observed on the test account). Ask for this only when your business rule requires it and you accept that.
+  - `Rounding::Exact`: no rounding. On the test account, a EUR **invoice** sent with `100.004 / 27.00108 / 127.00508` was stored as `100 / 27 / 127.01`: independent two-decimal rounding without recomputing gross. This is invoice evidence, not receipt evidence or a rule for KWD.
 
-  Rounding is half away from zero and applied at each step (the net is rounded before the VAT is derived from it), so gross = net + VAT holds exactly on the wire, and what is sent is what szamlazz.hu stores. The rounded net can differ from unit price × quantity by up to half a minor unit (`2 × 1234.25 HUF = 2468.5 → 2469`); szamlazz.hu's `net = price × qty` check (259) tolerated discrepancies of 0.5, 1 and 2 HUF on the test account and rejected 5 and 10, so the half unit is safely inside: hand-computed values passed to `LineItem::new` are the ones that can hit it.
+  Rounding is half away from zero and applied at each step (net before VAT), so gross = net + VAT holds exactly on the wire. This calculator invariant does not establish server acceptance or storage precision. HUF **invoice** probes tolerated net discrepancies of 0.5, 1 and 2 HUF and rejected 5 and 10; those observations are not receipt probes.
 - **`LineItem::new(…)`** takes net, VAT and gross as your system computed them and sends them as-is.
 
 `LineItem` is plain data like every request type: set the optional fields with functional update (`LineItem { comment: Some(..), ..item }`). A receipt row carries fewer fields than an invoice row; a `CreateReceipt` whose item sets `margin_vat_base` or the ledger's economic-event or settlement fields is refused before the wire (`RequestError::UnsupportedOnReceipt`) rather than sent without them.
+
+For HUF/Ft **receipts**, [documented item rules](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/item-amounts) require whole gross, net/VAT with at most two decimals, and exact net + VAT = gross. The `787.40 / 212.60 / 1000` example above is valid under those rules. `Scale(2)` alone does not ensure whole gross; minor-unit HUF rounding produces whole net and VAT as a stricter local choice. `LineItem::new` and `Exact` remain available; the caller supplies amounts appropriate to the document. These receipt rules were not live-probed here.
+
+Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted numeric rate). General XML pages ask for bank and rate; the receipt-specific `ReceiptHeader` and custom-data receipt example comments in official PHP **2.12.4** document automatic MNB lookup. The example supplies an explicit rate, so this is documentation evidence, not an omitted-rate execution; local tests prove emission only.
 
 `VatRate::Percent` renders its wire token normalised: `27.00`, `27.0` and `27` all go out as `27`, `5.50` as `5.5`. szamlazz.hu accepts `27.00` and `27.0` as well (test account), so this is hygiene: the integer form is the one every fixture shows, and a queried rate comes back as a double (`27.0`) that round-trips to `27` this way.
 
@@ -262,8 +328,8 @@ szamlazz.hu verifies every row's arithmetic server-side (net = unit price × qua
 
 - Identifiers are English; Rustdoc search also finds types by Hungarian names such as `díjbekérő` and `kintlévőség` through doc aliases.
 - Errors are typed as `ErrorCode` values while preserving the verbatim Hungarian message. A failure szamlazz.hu reports without any code (`sikeres=false` and no `hibakod`) is `ErrorCode::Absent`, never an invented `0`.
-- Two different questions are answered per error. `ErrorCode::is_retryable()` says whether the same *query* can succeed later (codes 1 and 55). `outcome_class()` (on `ErrorCode`, `ResponseError` and `ClientError`) says whether a *document may exist* despite the error: `Rejected` (nothing was created), `Unknown` (1, 55, 56, `szlahu_down`, a transport or parse failure, any code the crate does not know; query by external id before re-sending), `DuplicateOrderNumber` (71/152) or `NotFound` (7). Re-sending a create because `is_retryable()` is true can issue a duplicate legal document; act on `outcome_class()` instead.
-- Agent code 56 means issuance succeeded but notification delivery failed. It sets `notification_delivery_failed = true`; do not retry that issued document.
+- `ErrorCode::is_retryable()` is a potentially transient hint (1 and 55), never permission to repeat a write. `outcome_class()` (also on `ResponseError` and `ClientError`) answers `Rejected` (this exchange refused), `Unknown` (1, 55, unnumbered 56, unanswered exchanges and open codes), `DuplicateOrderNumber` (71/152) or `NotFound` (7, operation-dependent missing data; 339, receipt not found). Use the operation recovery table above.
+- Agent code 56 **with a number** means issuance succeeded but notification failed. It sets `notification_delivery_failed = true`; do not retry that issued document. Without a number it remains unknown.
 - An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused (it is silently ignored), so read the issued document's `hivdijbekszam` to see which link landed.
 - **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice (by `elolegSzamlaszam` or by the shared order number), but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account.
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
@@ -280,6 +346,7 @@ One release, so a consumer pays the migration once. The naming and shape changes
 
 - `InvoiceInfo::id`, `Supplier::id`, `BuyerInfo::id`, `InvoiceInfo::economic_event_id`, `InvoiceInfo::source`, `DocumentItem::ordering`, `FinancialItem::deductible_vat`, `RecordedCreditEntry::bank_transaction_id`, `CreatedInvoice::document_id` and `Receipt`'s `id` are `i64` (they were `u64`, `u32` or `i32`).
 - `InvoiceAppearance` carries and returns an `i64` (`Electronic(i64)`, `Unknown(i64)`, `code() -> i64`, `From<i64>`) and serialises as the integer code (`1`), not the string `"1"`; the CLI's `--json` output of a queried invoice changes with it. A JSON string is no longer read back.
+- #195 intentionally changes thirteen documented codes from `Unknown`: 339 becomes named `ReceiptNotFound` / `NotFound`; 336, 337, 340, 363–365 and 551–556 become named `Rejected` variants. All are non-retryable and not credential errors. Future numeric, NAV text and absent codes remain unknown. These are source-derived classifications, not newly observed account behavior.
 
 ## License
 

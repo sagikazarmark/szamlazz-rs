@@ -1,6 +1,8 @@
 //! Receipt operations (`nyugta`): creation (`xmlnyugtacreate`), storno
 //! (`xmlnyugtast`), query (`xmlnyugtaget`), and email sending
 //! (`xmlnyugtasend`).
+//!
+//! See the [operation recovery table](crate::error#recovery) for lost answers.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -94,6 +96,16 @@ impl ReceiptPayment {
 /// retry does not return the original success. The response is the issued
 /// [`Receipt`]; its PDF, when [`CreateReceipt::download_pdf`] is set, arrives
 /// decoded in [`Receipt::pdf`].
+/// Persist the unique call id before the first send and keep it for the logical
+/// issuance. Recover by known number or a deliberately managed order, checking
+/// identity, type and reversal data; unresolved recovery never justifies a new id.
+/// See [recovery](crate::error#recovery).
+///
+/// HUF/Ft receipt items require whole gross, net/VAT with at most two decimal
+/// places, and exact net + VAT = gross ([documented rules](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/item-amounts)).
+/// `787.40 / 212.60 / 1000` is valid under those rules. `Rounding::Scale(2)`
+/// alone does not ensure whole gross; HUF minor-unit rounding is a stricter
+/// local choice. The calculator's arithmetic is not a server-acceptance check.
 ///
 /// A receipt row carries fewer fields than an invoice row: a [`LineItem`]
 /// with a `margin_vat_base`, or a ledger with an economic event or a
@@ -105,6 +117,7 @@ impl ReceiptPayment {
 pub struct CreateReceipt {
     /// Unique call identifier (`hivasAzonosito`). Reusing it returns error 338,
     /// which prevents duplicate issuance but does not replay the prior result.
+    /// Persist before first send; keep the same id throughout recovery.
     #[doc(alias = "hivasAzonosito")]
     pub call_id: Option<String>,
     /// Receipt number prefix (`elotag`), e.g. `NYGTA` → `NYGTA-2026-111`.
@@ -116,7 +129,8 @@ pub struct CreateReceipt {
     pub currency: Currency,
     /// Exchange rate; required when the currency is not HUF. Written as
     /// `devizabank` + `devizaarf` (the invoice operation spells these
-    /// `arfolyamBank` + `arfolyam`).
+    /// `arfolyamBank` + `arfolyam`). Automatic MNB lookup may omit the numeric
+    /// rate; see [`ExchangeRate::automatic_mnb`] for receipt-specific provenance.
     pub exchange_rate: Option<ExchangeRate>,
     /// Free-text comment shown on the receipt (`megjegyzes`).
     pub comment: Option<String>,
@@ -282,6 +296,10 @@ impl AgentRequest for CreateReceipt {
 /// The response is the newly issued storno receipt (`SN`,
 /// [`ReceiptType::Storno`]), which names the reversed receipt in
 /// [`Receipt::reversed_receipt_number`].
+/// After a lost answer, query the known original's reversal state; this alone
+/// does not recover the `SN` number/PDF. Keep the logical call identity. A
+/// storno-specific 338 guarantee or invoice-style successful repeat has not been
+/// established; see [recovery](crate::error#recovery).
 #[doc(alias = "xmlnyugtast")]
 #[doc(alias = "nyugta sztornó")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -294,7 +312,8 @@ pub struct StornoReceipt {
     /// PDF template (`pdfSablon`).
     pub template: Option<ReceiptTemplate>,
     /// Unique call identifier for the storno operation (`hivasAzonosito`).
-    /// Reusing it returns error 338.
+    /// Keep it stable for the logical call; repeat semantics are not established
+    /// as they are for receipt creation.
     pub call_id: Option<String>,
 }
 
@@ -346,7 +365,10 @@ impl AgentRequest for StornoReceipt {
 pub enum ReceiptSelector {
     /// Look up by receipt number (`nyugtaszam`).
     ReceiptNumber(ReceiptNumber),
-    /// Look up by order number (`rendelesSzam`).
+    /// Look up by order number (`rendelesSzam`): the last matching document,
+    /// according to the [PHP docs](https://docs.szamlazz.hu/php/nyugta-lekerdezes).
+    /// The exact “last” criterion and selection of `SN` remain unresolved;
+    /// verify returned identity, type and reversal data before adopting it.
     #[doc(alias = "rendelésszám")]
     OrderNumber(String),
 }
@@ -354,6 +376,8 @@ pub enum ReceiptSelector {
 /// The receipt query operation (`xmlnyugtaget`,
 /// `action-szamla_agent_nyugta_get`): fetches an issued receipt by receipt
 /// number or order number.
+/// Omit `call_id` on ordinary lookups; no call-ID-only lookup is offered.
+/// See [receipt recovery](crate::error#recovery).
 #[doc(alias = "xmlnyugtaget")]
 #[doc(alias = "nyugta lekérdezés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -365,7 +389,8 @@ pub struct QueryReceipt {
     pub download_pdf: bool,
     /// PDF template for the returned PDF (`pdfSablon`).
     pub template: Option<ReceiptTemplate>,
-    /// Call identifier (`hivasAzonosito`), as supplied at creation.
+    /// Optional wire call identifier (`hivasAzonosito`), whose query behavior
+    /// is unspecified. Omit for normal number/order lookups; it is not a selector.
     #[doc(alias = "hivasAzonosito")]
     pub call_id: Option<String>,
 }
@@ -419,13 +444,14 @@ impl AgentRequest for QueryReceipt {
 
 /// Email settings for [`SendReceipt`] (`emailKuldes`).
 ///
-/// Fields left `None` fall back to the values used the last time the receipt
-/// was emailed.
+/// `None` omits a child, while `Some("")` writes an empty child. The documented
+/// resend uses a present empty `emailKuldes` block (all details absent); independent
+/// merging of partially supplied fields with previous details is not established.
+/// Supply all fields and one recipient for a first send.
 #[doc(alias = "email küldés")]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ReceiptEmail {
-    /// Recipient address (`email`); multiple recipients may be
-    /// comma-separated.
+    /// Recipient address (`email`). Multi-recipient syntax is not established.
     pub to: Option<String>,
     /// Reply-to address (`emailReplyto`).
     pub reply_to: Option<String>,
@@ -440,20 +466,22 @@ pub struct ReceiptEmail {
 ///
 /// The success response is a plain acknowledgement, so the parsed payload is
 /// `()`.
+/// A lost acknowledgement leaves delivery unresolved: querying receipt existence
+/// does not establish that email landed, and another send can duplicate it.
 #[doc(alias = "xmlnyugtasend")]
 #[doc(alias = "nyugta küldés")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SendReceipt {
     /// The receipt to email (`nyugtaszam`).
     pub receipt_number: ReceiptNumber,
-    /// Email overrides; when `None`, an empty `emailKuldes` block requests a
+    /// Email details; when `None`, a present empty `emailKuldes` block requests a
     /// resend using the previous email details.
     pub email: Option<ReceiptEmail>,
 }
 
 impl SendReceipt {
     /// A request to resend the previously used email for the given receipt.
-    /// Set [`SendReceipt::email`] on the returned value to override it.
+    /// Set [`SendReceipt::email`] with all details for a first send.
     pub fn new(receipt_number: impl Into<ReceiptNumber>) -> Self {
         Self {
             receipt_number: receipt_number.into(),
@@ -1006,7 +1034,7 @@ mod tests {
         receipt.exchange_rate = Some(ExchangeRate::automatic_mnb());
         let wire = receipt
             .to_wire(&Credentials::agent_key("key"))
-            .expect("MNB automatic lookup is valid for receipts");
+            .expect("crate supports emitting automatic MNB lookup");
         let body = String::from_utf8_lossy(&wire.body);
         assert!(body.contains("<devizabank>MNB</devizabank>"));
         assert!(!body.contains("devizaarf"));

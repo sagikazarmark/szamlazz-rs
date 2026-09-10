@@ -9,8 +9,8 @@
 //! [`ErrorCode::is_retryable`] (can the same *query* succeed later), and
 //! [`ErrorCode::outcome_class`] (also on [`ResponseError`] and the client's
 //! error): may a *document* have been created despite the error. A
-//! document-issuing integration acts on the second: it re-queries by external
-//! id before it ever re-sends a create.
+//! caller uses the second together with the [operation recovery table](#recovery).
+//! A refusal describes this exchange, not any earlier send of the logical operation.
 //!
 //! Which channel carries the error depends on the operation: invoice creation,
 //! storno, and proforma deletion set `szlahu_error_code`/`szlahu_error`
@@ -18,6 +18,8 @@
 //! 7) and credit-entry registration (code 463) report in the body only. Every
 //! parser in this crate therefore reads the body's `<hibakod>` as well as the
 //! headers; see [`RawResponse::header_error`](crate::wire::RawResponse::header_error).
+
+#![doc = include_str!("recovery.md")]
 
 /// A documented Számla Agent error code.
 ///
@@ -40,8 +42,9 @@ pub enum ErrorCode {
     /// 7: missing data (`Hiányzó adat`): a required field is absent from the
     /// request, or the referenced document was not found (an unknown invoice
     /// number, order number, or external identifier on PDF/XML queries).
-    /// Receipt operations report an unknown receipt number as code 339, which
-    /// parses as [`ErrorCode::Unknown`].
+    /// Receipt operations report an unknown receipt number as
+    /// [`ErrorCode::ReceiptNotFound`] (339). On receipt send, 7 can instead
+    /// mean a missing subject; the class alone does not identify the missing data.
     ///
     /// On queries the code is reported in the body only (no `szlahu_error_code`
     /// header). A proforma that has been converted into an invoice (by an
@@ -61,11 +64,13 @@ pub enum ErrorCode {
     /// certificate.
     EInvoiceNotEnabled,
     /// 55: e-invoice signing failed; certificate expired or the timestamp
-    /// server is unreachable.
+    /// server is unreachable. Signing failure does not prove issuance. Timestamp
+    /// access may recover later; an expired certificate needs operator remediation.
     EInvoiceSigningFailed,
     /// 56: the invoice was issued, but its notification could not be
-    /// delivered. Invoice-issuing operations expose this as a non-fatal flag
-    /// when the response also contains the issued invoice number.
+    /// delivered, when accompanied by its number. Invoice-issuing operations
+    /// expose that as a non-fatal flag; without a number the outcome is unknown.
+    /// Corroborated by first-party PHP 2.12.4 source, not observed on the test account.
     InvoiceNotificationDeliveryFailed,
     /// 57: malformed request XML.
     MalformedXml,
@@ -143,9 +148,17 @@ pub enum ErrorCode {
     GrossValueInvalid,
     /// 335: proforma not found (or already deleted).
     ProformaNotFound,
+    /// 336: the receipt prefix is already used for invoices.
+    ReceiptPrefixUsedForInvoices,
+    /// 337: invalid receipt prefix; only capital letters and numbers are allowed.
+    InvalidReceiptPrefix,
     /// 338: a receipt call identifier has already been used; no duplicate
     /// receipt is issued and the prior success is not replayed.
     DuplicateReceiptCallId,
+    /// 339: the referenced receipt number does not exist.
+    ReceiptNotFound,
+    /// 340: receipt tender amounts do not sum to its gross total.
+    ReceiptPaymentMismatch,
     /// 352 (observed): the issue date (`keltDatum`) may only be today:
     /// `A számla kelte csak a mai nap lehet: ….` Observed on a storno request
     /// carrying an earlier `keltDatum`, reversing a paper invoice with a paper
@@ -153,6 +166,12 @@ pub enum ErrorCode {
     /// [`StornoInvoice::issue_date`](crate::ops::storno::StornoInvoice::issue_date)
     /// to let the server date the storno invoice.
     IssueDateMustBeToday,
+    /// 363: a HUF/Ft receipt item's gross value must be a whole number.
+    ReceiptGrossNotWhole,
+    /// 364: a HUF/Ft receipt item's net value may have at most two decimal places.
+    ReceiptNetPrecision,
+    /// 365: a HUF/Ft receipt item's VAT value may have at most two decimal places.
+    ReceiptVatPrecision,
     /// 463 (observed): a credit entry was registered against a reversed or
     /// reversing invoice: `Sztornózó vagy sztornózott számlához nem tartozhat
     /// kifizetettségi információ.` Reported in the body only (no
@@ -165,6 +184,20 @@ pub enum ErrorCode {
     ErasureCodesUnavailable,
     /// 539: data erasure codes are disabled in the account settings.
     ErasureCodesDisabled,
+    /// 551: simplified invoice image is incompatible with OSS enabled or a
+    /// non-Hungarian seller tax number, including an inherited final invoice.
+    SimplifiedImageAccountIncompatible,
+    /// 552: simplified invoice image permits at most two items (four on a final).
+    SimplifiedImageItemLimit,
+    /// 553: a simplified invoice image item uses a disallowed VAT token.
+    SimplifiedImageVatInvalid,
+    /// 554: a simplified-image original cannot be corrected, even when the
+    /// corrective request omits `simpleItems`.
+    SimplifiedImageCannotCorrect,
+    /// 555: simplified final invoice VAT rates differ from the prepayment's.
+    SimplifiedImagePrepaymentVatMismatch,
+    /// 556: simplified invoice image is forbidden on correctives and delivery notes.
+    SimplifiedImageDocumentForbidden,
     /// Any code without documented meaning, preserved exactly from the wire.
     Unknown(String),
     /// szamlazz.hu reported a failure (`sikeres=false`, or NAV's `funcCode`
@@ -204,12 +237,25 @@ impl ErrorCode {
             Self::VatValueInvalid => "263",
             Self::GrossValueInvalid => "264",
             Self::ProformaNotFound => "335",
+            Self::ReceiptPrefixUsedForInvoices => "336",
+            Self::InvalidReceiptPrefix => "337",
             Self::DuplicateReceiptCallId => "338",
+            Self::ReceiptNotFound => "339",
+            Self::ReceiptPaymentMismatch => "340",
             Self::IssueDateMustBeToday => "352",
+            Self::ReceiptGrossNotWhole => "363",
+            Self::ReceiptNetPrecision => "364",
+            Self::ReceiptVatPrecision => "365",
             Self::PaymentOnReversedInvoice => "463",
             Self::ErasureCodeLimit => "537",
             Self::ErasureCodesUnavailable => "538",
             Self::ErasureCodesDisabled => "539",
+            Self::SimplifiedImageAccountIncompatible => "551",
+            Self::SimplifiedImageItemLimit => "552",
+            Self::SimplifiedImageVatInvalid => "553",
+            Self::SimplifiedImageCannotCorrect => "554",
+            Self::SimplifiedImagePrepaymentVatMismatch => "555",
+            Self::SimplifiedImageDocumentForbidden => "556",
             Self::Unknown(code) => code,
             Self::Absent => "",
         }
@@ -243,31 +289,39 @@ impl ErrorCode {
             263 => Self::VatValueInvalid,
             264 => Self::GrossValueInvalid,
             335 => Self::ProformaNotFound,
+            336 => Self::ReceiptPrefixUsedForInvoices,
+            337 => Self::InvalidReceiptPrefix,
             338 => Self::DuplicateReceiptCallId,
+            339 => Self::ReceiptNotFound,
+            340 => Self::ReceiptPaymentMismatch,
             352 => Self::IssueDateMustBeToday,
+            363 => Self::ReceiptGrossNotWhole,
+            364 => Self::ReceiptNetPrecision,
+            365 => Self::ReceiptVatPrecision,
             463 => Self::PaymentOnReversedInvoice,
             537 => Self::ErasureCodeLimit,
             538 => Self::ErasureCodesUnavailable,
             539 => Self::ErasureCodesDisabled,
+            551 => Self::SimplifiedImageAccountIncompatible,
+            552 => Self::SimplifiedImageItemLimit,
+            553 => Self::SimplifiedImageVatInvalid,
+            554 => Self::SimplifiedImageCannotCorrect,
+            555 => Self::SimplifiedImagePrepaymentVatMismatch,
+            556 => Self::SimplifiedImageDocumentForbidden,
             _ => return None,
         })
     }
 
-    /// Whether the *same request* can succeed later, for a **query**: `true`
-    /// for 1 (maintenance) and 55 (e-invoice signing failed), which szamlazz.hu
-    /// asks integrations to retry at most ~5 times and never in a tight loop.
+    /// Whether the same request is potentially transient: `true` for 1
+    /// (maintenance) and 55 (signing failed). This is a retry hint suitable for
+    /// reads, not permission to repeat a write. Code 55 does not prove issuance:
+    /// timestamp access may recover, but an expired certificate needs remediation.
     ///
-    /// This is **not** permission to re-send a document-creating request.
-    /// Invoice creation has no idempotency key, and 1 and 55 are exactly the
-    /// codes after which a document *may already exist* (55 in particular
-    /// means "issued, signing failed"), so `while error.is_retryable() {
-    /// resend }` on a create can issue a duplicate legal document. Before
-    /// re-sending a create, storno or receipt, query by the external id
-    /// (`szamlaKulsoAzon`) the request carried and act on
-    /// [`outcome_class`](Self::outcome_class): re-send only when nothing is
-    /// there. The reference implementation is the `restate-szamlazz` worker's
-    /// create step, whose every execution queries first and sends only when
-    /// the external id holds nothing.
+    /// The vendor permits at most **five total sends of the same request,
+    /// including the initial send**, then stop for operator intervention; never
+    /// retry in a tight loop. Its same-request wording does not specify an exact
+    /// combined budget for a write and its reconciliation queries.
+    /// See the [operation recovery table](crate::error#recovery) before any repeat.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Maintenance | Self::EInvoiceSigningFailed)
@@ -294,22 +348,24 @@ impl ErrorCode {
 
     /// What this code says about the document the request asked for: may one
     /// exist despite the error? See [`OutcomeClass`] for the caller's action
-    /// per class.
+    /// per class and the [operation recovery table](crate::error#recovery).
     ///
-    /// The table follows what was verified against szamlazz.hu:
+    /// The table combines documented codes, first-party PHP source (56), and
+    /// test-account observations (only the variants explicitly marked observed):
     ///
     /// | Class | Codes |
     /// |---|---|
     /// | [`Unknown`](OutcomeClass::Unknown) | 1, 55, 56, every code this crate does not know ([`ErrorCode::Unknown`]) and a failure without a code ([`ErrorCode::Absent`]) |
     /// | [`DuplicateOrderNumber`](OutcomeClass::DuplicateOrderNumber) | 71, 152 |
-    /// | [`NotFound`](OutcomeClass::NotFound) | 7 |
+    /// | [`NotFound`](OutcomeClass::NotFound) | 7 (operation-dependent missing data), 339 (receipt not found) |
     /// | [`Rejected`](OutcomeClass::Rejected) | everything else, the credential codes 3, 135, 136 and 164 included |
     ///
     /// 56 surfaces as an error only when the response carries no document
     /// number (with one, the parsers report success with
     /// `notification_delivery_failed` set), so as an error it always leaves
     /// the outcome open. An unknown code is classified conservatively: it may
-    /// be a refusal, or a new "issued, but…" code like 55 and 56.
+    /// be a refusal, or a new "issued, but…" code like numbered 56. Neither 55
+    /// nor the thirteen receipt/simplified-image additions were observed on the account.
     #[must_use]
     pub fn outcome_class(&self) -> OutcomeClass {
         match self {
@@ -321,7 +377,7 @@ impl ErrorCode {
             Self::DuplicateOrderNumber | Self::DuplicateOrderNumberNamed => {
                 OutcomeClass::DuplicateOrderNumber
             }
-            Self::MissingData => OutcomeClass::NotFound,
+            Self::MissingData | Self::ReceiptNotFound => OutcomeClass::NotFound,
             Self::InvalidCredentials
             | Self::StornoOfReversalInvoice
             | Self::XmlNotAFile
@@ -340,12 +396,24 @@ impl ErrorCode {
             | Self::VatValueInvalid
             | Self::GrossValueInvalid
             | Self::ProformaNotFound
+            | Self::ReceiptPrefixUsedForInvoices
+            | Self::InvalidReceiptPrefix
             | Self::DuplicateReceiptCallId
+            | Self::ReceiptPaymentMismatch
             | Self::IssueDateMustBeToday
+            | Self::ReceiptGrossNotWhole
+            | Self::ReceiptNetPrecision
+            | Self::ReceiptVatPrecision
             | Self::PaymentOnReversedInvoice
             | Self::ErasureCodeLimit
             | Self::ErasureCodesUnavailable
-            | Self::ErasureCodesDisabled => OutcomeClass::Rejected,
+            | Self::ErasureCodesDisabled
+            | Self::SimplifiedImageAccountIncompatible
+            | Self::SimplifiedImageItemLimit
+            | Self::SimplifiedImageVatInvalid
+            | Self::SimplifiedImageCannotCorrect
+            | Self::SimplifiedImagePrepaymentVatMismatch
+            | Self::SimplifiedImageDocumentForbidden => OutcomeClass::Rejected,
         }
     }
 }
@@ -357,25 +425,27 @@ impl ErrorCode {
 /// retries (*may a document have been created?*), which
 /// [`ErrorCode::is_retryable`] does not: invoice creation has no idempotency
 /// key, so re-sending a create after a code that left the outcome open can
-/// issue a duplicate legal document. Each variant states the caller's action.
+/// issue a duplicate legal document. Use the [operation recovery table](crate::error#recovery):
+/// a document's existence cannot settle a credit-entry mutation or receipt email.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutcomeClass {
-    /// szamlazz.hu refused the request before acting: no document was
-    /// created. Fix the request (or, for the credential codes, the account)
-    /// before sending again.
+    /// szamlazz.hu refused this request before acting. Fix the request (or,
+    /// for credential codes, the account). This does not prove an earlier
+    /// send failed; notably 338 refuses a duplicate without recovering its result.
     Rejected,
     /// A document may or may not have been created. Reconcile before anything
-    /// else: query by the external id (`szamlaKulsoAzon`) the request
-    /// carried and act on what is there; re-send only when nothing is.
+    /// else: use the [operation recovery table](crate::error#recovery). An immediate
+    /// empty query does not rule out an earlier send still in flight.
     Unknown,
     /// Another document already carries the order number (71/152); nothing
     /// new was created. Query by order number to find it: the message names
     /// the order number, never the existing document.
     DuplicateOrderNumber,
-    /// The referenced document is not on the query surface (7): on a query
-    /// the selector matched nothing, on a write a required field or the
-    /// referenced document is missing. Nothing was created either way.
+    /// The referenced receipt is absent (339), or data is missing (7): on an
+    /// invoice query the selector matched nothing; on a write a required field
+    /// or referenced document is missing. Interpret 7 for the operation, and
+    /// do not infer the outcome of an earlier send from this exchange.
     NotFound,
 }
 
@@ -671,7 +741,8 @@ impl ResponseError {
     /// (`szlahu_down`), an answer from the endpoint rather than szamlazz.hu
     /// and an unparseable response are [`OutcomeClass::Unknown`]: szamlazz.hu
     /// produced no answer the caller can conclude from, so a document may
-    /// have been issued.
+    /// have been issued. See the [operation recovery table](crate::error#recovery)
+    /// for the distinct receipt, mutation, deletion and email cases.
     #[must_use]
     pub fn outcome_class(&self) -> OutcomeClass {
         match self {
@@ -687,8 +758,9 @@ impl ResponseError {
 mod tests {
     use super::*;
 
-    /// Every named variant, so the round-trip test cannot silently skip one.
-    const NAMED: [ErrorCode; 30] = [
+    /// The original catalogue; the thirteen #195 additions have a source-derived
+    /// public-parser table in `tests/error_classification.rs`.
+    const ORIGINAL_NAMED: [ErrorCode; 30] = [
         ErrorCode::Maintenance,
         ErrorCode::InvalidCredentials,
         ErrorCode::MissingData,
@@ -723,7 +795,7 @@ mod tests {
 
     #[test]
     fn named_codes_round_trip_through_the_wire_code() {
-        for code in NAMED {
+        for code in ORIGINAL_NAMED {
             assert_eq!(ErrorCode::from(code.code()), code, "{code:?}");
             assert_eq!(ErrorCode::from(code.code().to_owned()), code, "{code:?}");
             assert_eq!(code.to_string(), code.code(), "{code:?}");
@@ -736,7 +808,7 @@ mod tests {
 
     #[test]
     fn numeric_codes_round_trip() {
-        for code in NAMED {
+        for code in ORIGINAL_NAMED {
             let numeric: u16 = code.code().parse().expect("named codes are numeric");
             assert_eq!(ErrorCode::from(numeric), code, "{code:?}");
             assert_eq!(
@@ -773,7 +845,7 @@ mod tests {
         assert_eq!(ErrorCode::Absent.outcome_class(), OutcomeClass::Unknown);
         assert!(!ErrorCode::Absent.is_retryable());
         assert!(!ErrorCode::Absent.is_credential_error());
-        assert!(!NAMED.contains(&ErrorCode::Absent));
+        assert!(!ORIGINAL_NAMED.contains(&ErrorCode::Absent));
         let error = ApiError {
             code: ErrorCode::Absent,
             message: "Hiba".to_owned(),
@@ -841,7 +913,7 @@ mod tests {
 
     #[test]
     fn only_transient_codes_are_retryable() {
-        for code in NAMED {
+        for code in ORIGINAL_NAMED {
             let expected = matches!(
                 code,
                 ErrorCode::Maintenance | ErrorCode::EInvoiceSigningFailed
@@ -851,12 +923,12 @@ mod tests {
         assert!(!ErrorCode::Unknown("999".to_owned()).is_retryable());
     }
 
-    /// The class of every named code, as observed on szamlazz.hu: the codes
+    /// The original catalogue's classes, from documentation and observations:
     /// after which a document may exist are 1, 55 and 56 (the latter surfaces
     /// as an error only without a number); 71/152 name an existing document;
     /// 7 is "not on the query surface"; every other code refuses before acting.
     #[test]
-    fn every_named_code_has_an_outcome_class() {
+    fn original_catalogue_has_an_outcome_class() {
         let table: [(ErrorCode, OutcomeClass); 30] = [
             (ErrorCode::Maintenance, OutcomeClass::Unknown),
             (ErrorCode::InvalidCredentials, OutcomeClass::Rejected),
@@ -903,11 +975,14 @@ mod tests {
         ];
         assert_eq!(
             table.len(),
-            NAMED.len(),
-            "the table covers every named code"
+            ORIGINAL_NAMED.len(),
+            "the table covers the original catalogue"
         );
         for (code, expected) in table {
-            assert!(NAMED.contains(&code), "{code:?} is a named code");
+            assert!(
+                ORIGINAL_NAMED.contains(&code),
+                "{code:?} is in the original catalogue"
+            );
             assert_eq!(code.outcome_class(), expected, "{code:?}");
         }
     }
@@ -924,7 +999,7 @@ mod tests {
             ErrorCode::LoginBlocked,
             ErrorCode::MultipleAccounts,
         ];
-        for code in NAMED {
+        for code in ORIGINAL_NAMED {
             assert_eq!(
                 code.is_credential_error(),
                 credential.contains(&code),

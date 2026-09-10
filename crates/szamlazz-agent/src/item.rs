@@ -12,6 +12,10 @@ use crate::types::{Currency, VatRate};
 /// at each step: the net is rounded before the VAT is computed from it, so
 /// gross = net + VAT holds exactly on the wire. A scale above the value's own
 /// leaves it unchanged, so `Scale(n)` never adds precision.
+/// This is a local arithmetic invariant, not a guarantee of server acceptance
+/// or storage precision. See [`CreateReceipt`](crate::ops::receipt::CreateReceipt)
+/// for the distinct HUF/Ft receipt amount rules; `Scale(2)` alone does not
+/// ensure a whole gross value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Rounding {
@@ -19,17 +23,17 @@ pub enum Rounding {
     Scale(u32),
     /// No rounding: exact decimal arithmetic, which can carry more decimal
     /// places than the currency has (`100.005 EUR` with a five-decimal VAT).
-    /// szamlazz.hu then rounds **each value to two decimals on its own** and
-    /// does not recompute the gross, so `100.004 / 27.00108 / 127.00508` is
-    /// stored as `100 / 27 / 127.01`: a document whose gross is not net + VAT
-    /// (observed on the test account, 2026-09-06). Ask for this only when your
-    /// business rule requires it and you accept that outcome.
+    /// A EUR invoice sent as `100.004 / 27.00108 / 127.00508` was stored as
+    /// `100 / 27 / 127.01`, rounding each value independently (test account,
+    /// 2026-09-06). This is invoice evidence, not receipt evidence or a rule
+    /// for KWD. The caller chooses values appropriate to the document.
     Exact,
 }
 
 impl Rounding {
     /// Round to the currency's minor unit: whole forints for HUF, cents for
     /// EUR, thousandths for KWD; see [`Currency::minor_unit_digits`].
+    /// This local policy does not establish server precision for each currency.
     #[must_use]
     pub fn minor_unit(currency: &Currency) -> Self {
         Self::Scale(currency.minor_unit_digits())
@@ -77,6 +81,10 @@ pub struct LineItemLedger {
 /// already computed them and must match. Plain data like every request
 /// type: the optional fields are set with functional update
 /// (`LineItem { comment: Some(..), ..item }`).
+/// HUF/Ft receipt net and VAT may be fractional with at most two decimals while
+/// gross must be whole and exactly their sum; see
+/// [`CreateReceipt`](crate::ops::receipt::CreateReceipt). The explicit constructor
+/// preserves such values (`787.40 / 212.60 / 1000`) as supplied.
 #[doc(alias = "tétel")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LineItem {
@@ -157,6 +165,8 @@ impl LineItem {
     /// to a ledger), and an overflow of caller-supplied money is an error,
     /// never a panic. Non-percentage VAT codes (AAM, EUT, …) yield a VAT
     /// value of 0.
+    /// A successful calculation proves local arithmetic only, not receipt
+    /// amount compliance or the precision szamlazz.hu will store.
     ///
     /// # Errors
     ///

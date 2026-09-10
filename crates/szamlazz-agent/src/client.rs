@@ -51,10 +51,11 @@ pub enum ClientError {
     ///
     /// Retry with care: invoice creation has no idempotency key, so a timeout
     /// after the server already issued the document means a retry issues a
-    /// duplicate. Receipt call ids prevent duplicate issuance by returning
-    /// error 338 on reuse, but a retry does not replay the original success.
+    /// duplicate. Receipt creation call ids prevent duplicate issuance by
+    /// returning error 338 on reuse, but do not replay the original success.
+    /// Receipt storno repeat semantics are not established.
     /// [`ClientError::outcome_class`] says which failures leave the outcome
-    /// open.
+    /// open; use the [operation recovery table](crate::error#recovery).
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
 }
@@ -69,7 +70,9 @@ impl ClientError {
     /// A transport failure, unavailability (`szlahu_down`), an answer from
     /// the endpoint rather than szamlazz.hu and an unparseable response are
     /// [`OutcomeClass::Unknown`]: the request may have been acted on, and the
-    /// caller must query by external id before sending it again.
+    /// caller follows the [operation recovery table](crate::error#recovery)
+    /// before sending again. An empty immediate query cannot rule out an
+    /// earlier send still in flight.
     #[must_use]
     pub fn outcome_class(&self) -> OutcomeClass {
         match self {
@@ -198,11 +201,13 @@ pub enum BuildError {
 /// How long the default HTTP client waits for one request before giving up
 /// (native targets; on wasm the runtime owns timeouts).
 ///
-/// szamlazz.hu has been observed to stall for about a minute and still issue
-/// the document, so a caller that re-checks or re-sends after a timeout must
-/// wait at least this long after the send: the request may still be in
-/// flight server-side. Exported so that such a floor can be derived from the
-/// timeout rather than copied. A client built with
+/// The detailed account record reports a ≥57-second stalled create with no
+/// issuance found; the broader delayed-issuance assertion has unresolved
+/// provenance (see [recovery evidence](crate::error#retry-limit-and-evidence)).
+/// A timeout does not cancel server work. A caller must allow in-flight work
+/// plus a margin before considering another send, and reconcile identity;
+/// an immediate empty query alone is insufficient. Exported so a delay floor
+/// can be derived rather than copied. A client built with
 /// [`ClientBuilder::http_client`] carries its own timeout instead.
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 

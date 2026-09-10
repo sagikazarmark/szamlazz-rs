@@ -405,7 +405,9 @@ impl Currency {
     /// BHD, 4 for CLF. The code is matched in any letter case.
     ///
     /// HUF (`HUF`/`Ft`) is 0, not ISO 4217's 2: the fillér is out of
-    /// circulation and szamlazz.hu works in whole forints. A code the table
+    /// circulation, so the crate chooses whole-forint arithmetic. HUF receipt
+    /// net/VAT can still be fractional. This is a local rounding policy, not
+    /// a statement of server precision for each currency. A code the table
     /// does not know is treated like the common case, 2.
     #[must_use]
     pub fn minor_unit_digits(&self) -> u32 {
@@ -953,6 +955,13 @@ impl ExchangeRate {
     }
 
     /// Uses Számlázz.hu's automatic current MNB exchange-rate lookup.
+    ///
+    /// For receipts, this is supported by the receipt-specific `ReceiptHeader`
+    /// and custom-data receipt example comments in [official PHP 2.12.4](https://docs.szamlazz.hu/assets/files/PHPApiAgent-2.12.4-33e323cd64c5ba9601bec272b218f2d1.zip),
+    /// despite general XML pages asking for bank and rate. That example supplies
+    /// a rate: its comments are documentation evidence, not an omitted-rate
+    /// execution. Local tests prove emission only; no receipt account probe
+    /// establishes server execution of the omitted-rate request.
     #[must_use]
     pub fn automatic_mnb() -> Self {
         Self {
