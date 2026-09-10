@@ -129,15 +129,18 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// A raw HTTP response as received.
 ///
 /// Build one from any HTTP client's response, then hand it to the request
-/// type's `parse` function. szamlazz.hu signals errors in-band (HTTP 200
-/// with `szlahu_*` headers and a `<hibakod>` body), so the parsers read the
-/// headers and the body first; the HTTP status ([`RawResponse::with_status`])
-/// only matters when neither carries a szamlazz.hu answer, where a non-2xx
-/// says the endpoint (a proxy, a CDN, a misconfigured URL) answered instead.
+/// type's `parse` function. Before reading the body, parsers check in order:
+/// nonblank `szlahu_down`, a nonblank `szlahu_error_code` (judged by the
+/// operation, including numbered-56 treatment), then a known non-2xx HTTP
+/// status ([`RawResponse::with_status`]). Only then does the body decide.
+/// A body-only `<hibakod>` at HTTP 200 is an API error; at HTTP 500 it is
+/// [`ResponseError::HttpStatus`]. Success-number and unrelated `szlahu_*`
+/// headers do not bypass status. A status does not prove who produced it.
 ///
 /// `Debug` names the response's headers but never a cookie's value: the
 /// `Set-Cookie` header carries the `JSESSIONID`, which authenticates as the
-/// account for 90 minutes. The body is printed as its length.
+/// account until the session expires (90 minutes of inactivity, per vendor
+/// documentation). The body is printed as its length.
 #[derive(Clone)]
 pub struct RawResponse {
     status: Option<u16>,
@@ -193,11 +196,11 @@ impl RawResponse {
 
     /// Records the HTTP status the response arrived with.
     ///
-    /// Optional: the parsers read szamlazz.hu's in-band answer first. With
-    /// the status known, a non-2xx response that carries no `szlahu_*` header
-    /// is refused as [`ResponseError::HttpStatus`] (the endpoint answered,
-    /// not szamlazz.hu) instead of being parsed as an unexpected body. The
-    /// bundled reqwest client always sets it.
+    /// Optional: after nonblank `szlahu_down` and error-code headers, a known
+    /// non-2xx status is [`ResponseError::HttpStatus`], before body parsing.
+    /// Success-number and other headers do not bypass it. An omitted status
+    /// leaves the body to the operation's parser after the header checks.
+    /// The bundled reqwest client always supplies the status.
     #[must_use]
     pub fn with_status(mut self, status: u16) -> Self {
         self.status = Some(status);
@@ -217,7 +220,8 @@ impl RawResponse {
         &self.body
     }
 
-    /// The first header with the given name (case-insensitive).
+    /// The first header with the given name (case-insensitive), without value
+    /// decoding. Use this for numeric headers and `szlahu_error_code`.
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         let name = name.to_ascii_lowercase();
@@ -228,16 +232,14 @@ impl RawResponse {
             .map(|(_, v)| v.as_str())
     }
 
-    /// A `szlahu_*` header value, percent-decoded (szamlazz.hu URL-encodes
-    /// them).
+    /// An encoded textual header, decoded once: `+` becomes a space and
+    /// percent escapes become UTF-8 (`%2B` becomes a literal `+`).
     ///
-    /// Document-issuing operations report the issued number as
-    /// `szlahu_szamlaszam`, the totals as `szlahu_nettovegosszeg` /
-    /// `szlahu_bruttovegosszeg` / `szlahu_kintlevoseg`, and szamlazz.hu's
-    /// internal *document* identifier as `szlahu_id`, the same value the XML
-    /// query returns as `alap/id` (a storno or corrective invoice carries its
-    /// original's identifier as `gazdEsemAzon`). `szlahu_id` is not an
-    /// account or supplier identifier; that is `szallito/id` in query bodies.
+    /// Use for `szlahu_szamlaszam`, `szlahu_error`, `szlahu_down` and
+    /// `szlahu_vevoifiokurl`. This utility does not classify header names:
+    /// numeric totals, `szlahu_id` and `szlahu_error_code` use raw
+    /// [`header`](Self::header) instead, preserving signs and code tokens.
+    /// A URL in XML receives XML entity decoding only, never this decoding.
     pub fn szlahu(&self, name: &str) -> Option<String> {
         self.header(name).map(percent_decode)
     }
@@ -249,7 +251,7 @@ impl RawResponse {
     /// 73), storno (14, 221, 352), and proforma deletion (335) report errors
     /// in the headers *and* the body; the XML query (7) and credit-entry
     /// registration (463) report in the body only. `None` here therefore does
-    /// not mean success: every parser in this crate also reads the body's
+    /// not mean success: the parser checks status before reading the body's
     /// `<hibakod>` / `<hibauzenet>`. An empty header is no error either: it
     /// is read as absent, like an empty `<hibakod>` element.
     #[must_use]
@@ -266,8 +268,8 @@ impl RawResponse {
 
     /// Fails on a header-signaled error, otherwise hands back the response.
     ///
-    /// In order: `szlahu_down`, `szlahu_error_code`, then (only when neither
-    /// carried a szamlazz.hu answer) a known non-2xx status
+    /// In order: nonblank `szlahu_down`, nonblank `szlahu_error_code`, then
+    /// a known non-2xx status
     /// ([`ResponseError::HttpStatus`]).
     pub(crate) fn check(&self) -> Result<&Self, ResponseError> {
         match self.header_verdict()? {
@@ -277,12 +279,11 @@ impl RawResponse {
     }
 
     /// What the headers and the status say before the body is read, in the
-    /// one order every parser applies: `szlahu_down` is
+    /// one order every parser applies: nonblank `szlahu_down` is
     /// [`ResponseError::ServiceUnavailable`]; else the `szlahu_error_code`
-    /// error, handed back as data for the parser to judge (invoice creation
-    /// tolerates 56); else (only when neither carried a szamlazz.hu answer)
-    /// a known non-2xx status is [`ResponseError::HttpStatus`], the
-    /// endpoint's answer, not szamlazz.hu's. `Ok(None)` says the body decides.
+    /// error, handed back as data for the parser to judge (issuing parsers
+    /// tolerate numbered 56); else a known non-2xx status is
+    /// [`ResponseError::HttpStatus`]. `Ok(None)` says the body decides.
     pub(crate) fn header_verdict(&self) -> Result<Option<ApiError>, ResponseError> {
         if let Some(message) = self
             .szlahu("szlahu_down")
@@ -305,24 +306,33 @@ impl RawResponse {
         Ok(None)
     }
 
-    /// The `JSESSIONID` session cookie set by this response, as a `Cookie`
-    /// header value for the next request.
+    /// The first exact, case-sensitive `JSESSIONID` cookie pair in repeated
+    /// `Set-Cookie` headers, as a `Cookie` header value. Skips malformed and
+    /// nonmatching entries; trims HTTP SP/HTAB around the name and value,
+    /// preserves later `=` signs and accepts an empty value.
     ///
     /// Optional performance feature for integrations that transmit the
     /// [`WireRequest`] themselves: replaying the cookie skips
     /// re-authentication. Sessions expire after 90 minutes of inactivity. The
-    /// bundled reqwest client reuses the session through reqwest's cookie
-    /// store instead and never calls this.
+    /// native reqwest client reuses the session through reqwest's cookie
+    /// store instead and never calls this. This helper discards attributes:
+    /// lifetime, path, domain and expiry handling belong to the transport jar.
+    /// Reuse only within one account; use distinct jars for independently
+    /// authenticated accounts and a fresh jar on credential/account changes.
+    /// Vendor guidance also advises a fresh session after company-data or
+    /// email edits. Fresh jars are an ownership policy, not proof of vendor
+    /// key-versus-cookie precedence. Browser cookie access is platform-controlled.
+    #[must_use]
     pub fn session_cookie(&self) -> Option<String> {
-        let name = "set-cookie";
-
         self.headers
             .iter()
-            .filter(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
-            .find(|v| v.starts_with("JSESSIONID"))
-            .and_then(|v| v.split(';').next())
-            .map(str::to_owned)
+            .filter(|(name, _)| name == "set-cookie")
+            .find_map(|(_, value)| {
+                let pair = value.split(';').next()?;
+                let (name, value) = pair.split_once('=')?;
+                (name.trim_matches([' ', '\t']) == "JSESSIONID")
+                    .then(|| format!("JSESSIONID={}", value.trim_matches([' ', '\t'])))
+            })
     }
 }
 
@@ -579,7 +589,7 @@ mod tests {
 
     /// A `RawResponse` is the natural thing to log on a parse failure; its
     /// `Set-Cookie` header carries the `JSESSIONID`, which authenticates as
-    /// the account for 90 minutes. `Debug` names the cookie, never its value,
+    /// the account until expiry (90 minutes of inactivity). `Debug` names the cookie, never its value,
     /// and prints the body's length rather than the body.
     #[test]
     fn raw_response_debug_redacts_cookies_and_the_body() {

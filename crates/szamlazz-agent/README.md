@@ -116,7 +116,7 @@ async fn issue_once(client: &Client, request: &CreateInvoice, expected_type: Doc
         // No answer to conclude from: the request may have been acted on.
         ClientError::Transport(cause) => eprintln!("transport: {cause}"),
         ClientError::ServiceUnavailable(message) => eprintln!("szlahu_down: {message}"),
-        ClientError::HttpStatus { status, .. } => eprintln!("the endpoint answered {status}, not szamlazz.hu"),
+        ClientError::HttpStatus { status, .. } => eprintln!("HTTP {status} before body interpretation"),
         ClientError::Parse(cause) => eprintln!("unreadable response: {cause}"),
         _ => eprintln!("{error}"),
     }
@@ -264,7 +264,8 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
     let request = QueryTaxpayer::new("12345678")?;
     let wire = request.to_wire(&Credentials::agent_key("your-agent-key"))?;
 
-    let mut response = ureq::post(ENDPOINT)
+    let http = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
+    let mut response = http.post(ENDPOINT)
         .content_type(&wire.content_type)
         .send(&wire.body[..])?;
     let status = response.status().as_u16();
@@ -280,15 +281,25 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-To skip re-authentication on consecutive calls, replay `RawResponse::session_cookie()` as the `Cookie` header of the next request; the reqwest client does this through its cookie store.
+`RawResponse::session_cookie()` extracts the first exact, case-sensitive `JSESSIONID` pair from repeated `Set-Cookie` headers, skipping malformed/nonmatching entries. It accepts empty values and preserves later `=` signs. HTTP header names are case-insensitive; cookie names are not. This helper discards attributes: the transport jar owns lifetime, path, domain and expiry handling. The native reqwest client uses its jar directly.
 
-The HTTP status is optional but worth passing. Before reading the body, every parser checks, in order: a non-empty `szlahu_down` (`ServiceUnavailable`), a `szlahu_error_code` (the operation judges it; issuance can tolerate 56), then a known non-2xx status (`ResponseError::HttpStatus`, `ClientError::HttpStatus` through the client). Only after that does the body decide: a `<hibakod>` body does not override a non-2xx status without either in-band header. This distinguishes a proxy or CDN's answer from a puzzling `UnexpectedBody`; without the status, such a body is left to the operation's parser. HTTP-status and parse failures both have `OutcomeClass::Unknown`.
+The HTTP status is optional but worth passing. Before reading the body, every parser checks, in order: a nonblank `szlahu_down` (`ServiceUnavailable`), a nonblank `szlahu_error_code` (the operation judges it; invoice issuance/storno can tolerate **numbered** 56), then a known non-2xx status (`ResponseError::HttpStatus`, `ClientError::HttpStatus` through the client). Only after that does the body decide: a body-only `<hibakod>` is an API error at 200 and `HttpStatus` at 500. A success-number or unrelated `szlahu_*` header does not bypass status. The status does not identify whether szamlazz.hu or an intermediary answered. Without it, the body is left to the operation's parser after the header checks. HTTP-status and parse failures both have `OutcomeClass::Unknown`. The example disables ureq's status-as-error behavior to preserve this interpretation.
+
+`RawResponse::szlahu()` is a utility for **encoded textual** headers (`szlahu_szamlaszam`, `szlahu_error`, `szlahu_down`, `szlahu_vevoifiokurl`): it decodes once, turning `+` into space and `%2B` into `+`. Numeric headers (totals, `szlahu_id`) and error codes use raw `header()` instead. URLs in XML receive XML entity decoding only: literal `+` and `%2B` remain intact, and are never decoded again as headers.
+
+### Sessions and refresh
+
+On native targets, reuse a client within one account. Independently authenticated accounts need **distinct cookie jars**. `Client::clone()` and `reqwest::Client::clone()` share the underlying jar; cloning does not refresh a session. Building a new default `Client` creates a fresh in-memory jar. With `ClientBuilder::http_client`, use `.cookie_store(true)` or `.cookie_provider(Arc<Jar>)`; a fresh HTTP client over an existing provider still shares that provider's sessions.
+
+[Vendor guidance](https://docs.szamlazz.hu/agent/basics/session-cookie) advises a fresh session after company-data or email edits. Build a new default client, or inject a fresh client **and fresh jar**. Do the same on credential/account changes as caller ownership policy, not as a proven vendor invalidation mechanism: vendor key-versus-cookie precedence has not been established. Sessions expire after **90 minutes of inactivity**. Without cookie persistence, requests reauthenticate; disk storage and an automatic refresh timer are not required.
 
 ## Feature Flags
 
 No features are enabled by default. The [crate documentation](https://docs.rs/szamlazz-agent/latest/szamlazz_agent/#features) is authoritative for feature semantics and platform constraints.
 
-- **`client-reqwest`** provides the ready-made async `Client` on native Rust and browser wasm, and re-exports `reqwest`, so a caller supplying its own HTTP client (`ClientBuilder::http_client`: a proxy, a custom TLS setup) names the one version this crate is built against.
+- **`client-reqwest`** provides the ready-made async `Client` with native and browser wasm transport compilation, and re-exports `reqwest`, so a caller supplying its own HTTP client (`ClientBuilder::http_client`: a proxy, a custom TLS setup) names the one version this crate is built against.
+
+Browser transport compilation does not prove direct Számla Agent access. Vendor CORS must permit the request and expose the `szlahu_*` response headers; browsers manage cookies and hide `Set-Cookie` from application code. Reqwest Fetch defaults to **same-origin credentials** unless set per request. `Client::send` keeps that default; injecting another client does not enable cross-origin credential inclusion. XML authentication may work without cookies. Direct browser feasibility remains an explicit vendor/platform question; native loopback checks establish neither CORS nor browser cookie access.
 
 ## Operations
 

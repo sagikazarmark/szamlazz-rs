@@ -712,8 +712,10 @@ pub enum ResponseError {
     /// `szlahu_down` response header.
     #[error("szamlazz.hu is temporarily unavailable: {0}")]
     ServiceUnavailable(String),
-    /// The endpoint answered with a non-2xx status and no `szlahu_*` header:
-    /// a proxy, a CDN or a misconfigured URL spoke, not szamlazz.hu.
+    /// A non-2xx status, checked before the body when neither a nonblank
+    /// `szlahu_down` nor an error-code header took precedence. A success-number
+    /// or unrelated `szlahu_*` header does not bypass this check. The status
+    /// does not identify whether szamlazz.hu or an intermediary answered.
     ///
     /// Raised only when the client supplied the status
     /// ([`RawResponse::with_status`](crate::wire::RawResponse::with_status));
@@ -721,7 +723,7 @@ pub enum ResponseError {
     /// is read first whatever the status. Its [outcome
     /// class](Self::outcome_class) is `Unknown`: a gateway timeout may have
     /// cut a request the server went on to act on.
-    #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
+    #[error("HTTP {status} before body interpretation: {body}")]
     HttpStatus {
         /// The HTTP status.
         status: u16,
@@ -738,7 +740,7 @@ impl ResponseError {
     /// one exist despite the error? See [`OutcomeClass`].
     ///
     /// An API error's class is its [`ErrorCode::outcome_class`]. Unavailability
-    /// (`szlahu_down`), an answer from the endpoint rather than szamlazz.hu
+    /// (`szlahu_down`), a non-2xx status reached before body interpretation
     /// and an unparseable response are [`OutcomeClass::Unknown`]: szamlazz.hu
     /// produced no answer the caller can conclude from, so a document may
     /// have been issued. See the [operation recovery table](crate::error#recovery)

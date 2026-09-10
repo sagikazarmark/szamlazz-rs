@@ -137,6 +137,87 @@ async fn maps_system_unavailability() {
     ));
 }
 
+/// Native loopback evidence through the configured transport hook: capture,
+/// clone/reuse, fresh jars and same-origin isolation. This exercises neither
+/// vendor account selection, browser CORS nor production root-store loading.
+#[tokio::test]
+async fn injected_cookie_jars_are_reused_by_clones_and_isolated_when_fresh() {
+    use std::sync::Arc;
+    use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &wiremock::Request| {
+            let body = String::from_utf8_lossy(&request.body);
+            let session = if body.contains("<szamlaagentkulcs>account-a</szamlaagentkulcs>") {
+                "JSESSIONID=session-a; Path=/; HttpOnly"
+            } else {
+                "JSESSIONID=session-b; Path=/; HttpOnly"
+            };
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", session)
+                .set_body_raw(
+                    include_bytes!("synthetic/taxpayer.xml").to_vec(),
+                    "application/xml",
+                )
+        })
+        .expect(6)
+        .mount(&server)
+        .await;
+
+    let open = |key| {
+        let http = reqwest::Client::builder()
+            .tls_certs_only(std::iter::empty())
+            .cookie_provider(Arc::new(reqwest::cookie::Jar::default()))
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("fresh HTTP client and jar");
+        Client::builder()
+            .credentials(Credentials::agent_key(key))
+            .endpoint(server.uri())
+            .http_client(http)
+            .build()
+            .expect("client")
+    };
+    let a = open("account-a");
+    let b = open("account-b");
+    let query = QueryTaxpayer::new("12345678").expect("prefix");
+    a.send(&query).await.expect("capture a");
+    a.clone().send(&query).await.expect("clone reuses a");
+    b.send(&query).await.expect("b starts without a");
+    b.send(&query).await.expect("reuse b");
+    open("account-a")
+        .send(&query)
+        .await
+        .expect("refresh a with a fresh jar");
+    a.send(&query)
+        .await
+        .expect("original still has its session");
+
+    let requests = server.received_requests().await.expect("requests");
+    let cookies: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            request
+                .headers
+                .get("cookie")
+                .map(|value| value.to_str().expect("cookie"))
+        })
+        .collect();
+    assert_eq!(
+        cookies,
+        [
+            None,
+            Some("JSESSIONID=session-a"),
+            None,
+            Some("JSESSIONID=session-b"),
+            None,
+            Some("JSESSIONID=session-a")
+        ]
+    );
+}
+
 /// A URL nothing listens on is a transport error on send; a string that is
 /// not a URL never gets that far (`BuildError::InvalidEndpoint` at build).
 #[tokio::test]

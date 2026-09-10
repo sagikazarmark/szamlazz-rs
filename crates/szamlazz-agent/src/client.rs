@@ -6,6 +6,9 @@
 //! `JSESSIONID` session (through reqwest's cookie store), timeouts, TLS, and
 //! the redirect policy.
 //!
+//! See [`Client`] for native session ownership and refresh, and the
+//! [platform boundary](crate#features) for browser Fetch limitations.
+//!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use szamlazz_agent::client::Client;
@@ -37,10 +40,11 @@ pub enum ClientError {
     /// Számla Agent reported temporary system unavailability.
     #[error("szamlazz.hu is temporarily unavailable: {0}")]
     ServiceUnavailable(String),
-    /// The endpoint answered with a non-2xx status and no `szlahu_*` header:
-    /// a proxy, a CDN or a misconfigured URL spoke, not szamlazz.hu
+    /// A non-2xx status reached before body interpretation, after checking
+    /// nonblank `szlahu_down` and error-code headers. Success-number or other
+    /// headers do not bypass it; the status does not identify who answered
     /// ([`ResponseError::HttpStatus`]).
-    #[error("HTTP {status} from the endpoint with no szamlazz.hu answer: {body}")]
+    #[error("HTTP {status} before body interpretation: {body}")]
     HttpStatus {
         /// The HTTP status.
         status: u16,
@@ -67,8 +71,8 @@ impl ClientError {
     /// A request refused before it was sent ([`ClientError::Request`]) is
     /// [`OutcomeClass::Rejected`]: nothing reached szamlazz.hu. An API error's
     /// class is its [`ErrorCode::outcome_class`](crate::ErrorCode::outcome_class).
-    /// A transport failure, unavailability (`szlahu_down`), an answer from
-    /// the endpoint rather than szamlazz.hu and an unparseable response are
+    /// A transport failure, unavailability (`szlahu_down`), a non-2xx status
+    /// reached before body interpretation and an unparseable response are
     /// [`OutcomeClass::Unknown`]: the request may have been acted on, and the
     /// caller follows the [operation recovery table](crate::error#recovery)
     /// before sending again. An empty immediate query cannot rule out an
@@ -126,9 +130,20 @@ impl ClientBuilder {
 
     /// Supplies a pre-configured [`reqwest::Client`] (proxies, timeouts, …).
     ///
-    /// Enable `.cookie_store(true)` (as the default client does) so the
+    /// On native targets, enable `.cookie_store(true)` (as the default client does)
+    /// or supply `.cookie_provider(Arc<Jar>)` so the
     /// `JSESSIONID` session cookie is reused and consecutive requests skip
     /// re-authentication; without it every request logs in again.
+    /// The supplied client owns all transport settings. Reuse its jar within
+    /// one account, never across independently authenticated accounts. Cloning
+    /// a reqwest client shares its jar; a new client over the same provider
+    /// also shares it. Refresh with a fresh client **and fresh provider** after
+    /// credential/account changes or relevant account edits (see [`Client`]).
+    ///
+    /// Browser wasm uses Fetch and browser-managed cookies, not this native
+    /// jar. Injecting a client does not enable cross-origin credentials:
+    /// reqwest sets that on individual requests, and [`Client::send`] leaves
+    /// Fetch's same-origin credentials default in place. See [Features](crate#features).
     #[must_use]
     pub fn http_client(mut self, http: reqwest::Client) -> Self {
         self.http = Some(http);
@@ -212,8 +227,8 @@ pub enum BuildError {
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// On native targets the client keeps the `JSESSIONID` session cookie via
-/// reqwest's cookie store, skipping re-authentication (sessions live 90
-/// minutes), bounds each request to [`REQUEST_TIMEOUT`] so a stalled server
+/// reqwest's cookie store, skipping re-authentication (sessions expire after
+/// 90 minutes of inactivity), bounds each request to [`REQUEST_TIMEOUT`] so a stalled server
 /// cannot hang the call forever, and does not follow redirects: the endpoint
 /// never redirects, and following one would silently convert the multipart
 /// POST into a body-less GET. On wasm the browser/runtime owns cookies and
@@ -234,6 +249,22 @@ fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
 }
 
 /// An async Számla Agent client.
+///
+/// On native targets, reuse a client within one account to retain its session.
+/// Independently authenticated accounts need distinct cookie jars. [`Clone`]
+/// shares the underlying reqwest client and jar; it does **not** refresh the
+/// session. Each new default client starts with a fresh in-memory jar.
+///
+/// [Vendor guidance](https://docs.szamlazz.hu/agent/basics/session-cookie)
+/// advises a fresh session after company-data or email edits: build a new
+/// default client, or inject a fresh client with a fresh cookie provider.
+/// Use a fresh jar on credential/account changes too. This is caller ownership
+/// policy, not evidence of vendor invalidation or key-versus-cookie precedence.
+/// Sessions expire after 90 minutes of inactivity; without persistence requests
+/// reauthenticate. Disk persistence and automatic refresh are not required.
+///
+/// These native jar guarantees do not describe browser wasm; see
+/// [Features](crate#features) for the Fetch/CORS boundary.
 #[derive(Debug, Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -263,7 +294,9 @@ impl Client {
     ///
     /// Returns an error if the request violates its wire contract, transport
     /// fails, szamlazz.hu reports an error or unavailability, or the response
-    /// cannot be parsed.
+    /// cannot be parsed. Response interpretation follows [`RawResponse`]:
+    /// nonblank down header, error-code header (operation-specific numbered
+    /// 56), non-2xx status, then body.
     pub async fn send<R: AgentRequest>(&self, request: &R) -> Result<R::Response, ClientError> {
         let wire = request.to_wire(&self.credentials)?;
 

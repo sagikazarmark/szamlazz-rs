@@ -49,12 +49,21 @@
 //! helpers such as `Pdf::save_to` are available only on non-wasm targets.
 //!
 //! - `client-reqwest` adds the ready-made async `Client`. It supports native
-//!   and browser wasm targets. On native targets it manages the session cookie,
+//!   and browser wasm transport compilation. On native targets it manages the session cookie,
 //!   timeout (`client::REQUEST_TIMEOUT`), TLS, and redirect policy; on wasm the
 //!   browser controls cookies and redirects. The feature re-exports [`reqwest`]
 //!   so that a caller supplying its own HTTP client
 //!   ([`client::ClientBuilder::http_client`]) names the one version this crate
 //!   is built against.
+//!
+//! Browser transport availability does not establish direct access to the
+//! Számla Agent endpoint: vendor CORS policy must permit the request and expose
+//! the `szlahu_*` response headers. Browsers control cookies and do not expose
+//! `Set-Cookie` to application code. Reqwest's Fetch requests default to
+//! same-origin credentials unless overridden per request; `Client::send` keeps
+//! that default, and injecting another reqwest client does not enable inclusion.
+//! XML authentication may work without cookies, but direct browser feasibility
+//! remains a vendor/platform question, not something native loopback tests prove.
 // docs.rs builds with all features on nightly and sets `--cfg docsrs`;
 // current rustdoc's doc_cfg automatically annotates feature- and target gates.
 #![cfg_attr(docsrs, feature(doc_cfg))]
