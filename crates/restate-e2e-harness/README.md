@@ -8,8 +8,11 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
 
 - **The server gate**: where the server comes from, decided once from the environment. `RESTATE_ADMIN_URL` /
   `RESTATE_INGRESS_URL` reuse a running server; `RESTATE_SERVER_BIN` names a `restate-server` binary the harness
-  spawns on the loopback, on ports chosen free at launch, with its log and data under a temp directory kept when
-  the test fails, in a process group of its own that is killed when the handle drops and on SIGINT/SIGTERM. With
+  spawns on the loopback, on ports chosen free at launch, with its log and data under an exclusively allocated
+  temp directory (`restate-e2e-{pid}-{name}-{sequence}`). Existing candidates are skipped, so port reuse cannot
+  reuse storage or overwrite earlier failure evidence. Failed launches and panic teardown retain their own
+  directory; normal teardown removes only that launch's directory. Its process group is killed when the handle
+  drops and on SIGINT/SIGTERM. With
   neither the suite **skips** with a message, and **fails** when `CI` is set: a run that passed by skipping proves
   nothing. A `ServerSpec` names the shape: the experimental `Feature`s it needs on or off (set on the spawned server,
   checked against `/version` at launch for a spawned and a reused server alike; a feature not listed is neither set

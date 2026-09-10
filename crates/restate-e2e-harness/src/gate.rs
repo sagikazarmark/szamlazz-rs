@@ -247,6 +247,10 @@ impl Launcher {
     /// A binary launch also panics if stop-signal initialization fails or
     /// signal shutdown has begun; both signal registrations are ready before
     /// any child can spawn. See the [`crate::server`] lifecycle guarantee.
+    /// Each binary launch exclusively allocates fresh storage independently of
+    /// port reuse, skipping existing directory candidates. Failed launches and
+    /// panic teardown retain their log and data at the printed path; normal
+    /// teardown removes only the directory owned by that launch.
     pub async fn launch(self, spec: &ServerSpec) -> Restate {
         spec.assert_valid();
         let restate = match self {

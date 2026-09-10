@@ -1104,8 +1104,9 @@ URLs say.
 **Lifecycle.** A server the harness starts is stopped when the run ends, passes or fails, and when the test process
 is told to stop: a SIGINT (Ctrl-C) or SIGTERM runs no `Drop`, so the harness stops every server it started itself
 and exits with the signal's status (130 or 143). The spawned binary leads a process group of its own and the group
-is killed. A failing test keeps the spawned server's base dir (`$TMPDIR/restate-e2e-{pid}-{main|canary}-{admin port}`, its log
-in it) for inspection.
+is killed. Each launch exclusively claims a fresh base dir (`$TMPDIR/restate-e2e-{pid}-{main|canary}-{sequence}`),
+skipping existing candidates independently of port reuse. Failed launches and panic teardown keep their own log
+and data for inspection; normal teardown removes only that launch's directory.
 
 **What CI runs.** `dagger check` (the `Dagger` workflow on every pull request) runs the `rust` module's `build`,
 `test` (default features), `clippy`, `doc`, `audit` and `fmt` checks and the workspace's own `ci` module

@@ -19,6 +19,7 @@ use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -73,6 +74,30 @@ fn free_ports<const N: usize>() -> [u16; N] {
         *port = listener.local_addr().expect("the bound address").port();
     }
     ports
+}
+
+/// Claim a fresh directory, even if a previous process with this pid left
+/// evidence behind. The counter selects candidates; exclusive creation owns
+/// them. Port reuse has no bearing on storage identity.
+fn launch_directory(name: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let candidate = std::env::temp_dir().join(format!(
+            "restate-e2e-{}-{name}-{sequence}",
+            std::process::id(),
+        ));
+        #[cfg(test)]
+        directory_tests::collide(&candidate);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!(
+                "allocate the server's base dir {}: {error}",
+                candidate.display()
+            ),
+        }
+    }
 }
 
 /// A `restate-server` process the harness spawned: its ports, the child (kept
@@ -258,10 +283,11 @@ impl Restate {
     /// A `restate-server` process from `binary` with `spec`'s features and
     /// environment, bound to the loopback on three ports chosen free
     /// ([`free_ports`]), its data and log under a directory of its own in the
-    /// temp dir (`restate-e2e-{pid}-{name}-{admin port}`: the port is unique
-    /// per launch on the host, so two launches of one spec in one test binary
-    /// share nothing), leading a process group of its own so that the group
-    /// is what gets killed. Configured through Restate's environment
+    /// temp dir (`restate-e2e-{pid}-{name}-{sequence}`, claimed by exclusive
+    /// directory creation, skipping existing candidates). Repeated and concurrent
+    /// launches share no storage, even when ports are reused or an earlier
+    /// failure left its directory behind. The process leads a group of its own,
+    /// which is what gets killed. Configured through Restate's environment
     /// (`RESTATE_<SECTION>__<KEY>`), so no config file is written; `spec.env`
     /// is set first, the features next and the harness's own values last, so
     /// a pair cannot move the base dir out of the temp directory, a bind
@@ -274,13 +300,13 @@ impl Restate {
             admin,
             node,
         };
-        let base_dir = std::env::temp_dir().join(format!(
-            "restate-e2e-{}-{}-{admin}",
-            std::process::id(),
-            spec.name
-        ));
-        fs::create_dir_all(&base_dir).expect("the server's base dir");
-        let log = fs::File::create(base_dir.join("restate-server.log")).expect("the server log");
+        let base_dir = launch_directory(spec.name);
+        eprintln!(
+            "restate-server's base dir: {} (kept if launch fails)",
+            base_dir.display()
+        );
+        let log =
+            fs::File::create_new(base_dir.join("restate-server.log")).expect("the server log");
         let mut command = Command::new(binary);
         command.arg("--no-logo");
         for pair in spec.env {
@@ -589,3 +615,6 @@ pub struct Deployment {
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+#[cfg(test)]
+mod directory_tests;
