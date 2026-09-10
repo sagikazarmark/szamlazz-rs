@@ -36,7 +36,7 @@ use tracing_subscriber::{EnvFilter, Layer as _};
 
 async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
     // `RUST_LOG` selects; `ReplayAwareFilter` drops what a replayed handler emits again
-    // (the `execution{…}` span and the prologue's warnings would otherwise repeat on every retry).
+    // (events outside completed durable steps would otherwise repeat on every retry).
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -80,6 +80,16 @@ curl -X POST http://localhost:8080/Szamlazz.Order/ORD-1/create_invoice \
 curl -X POST http://localhost:8080/restate/scope/acme/call/Szamlazz.Order/ORD-1/create_invoice …
 curl -X POST http://localhost:8080/restate/scope/acme/call/Szamlazz.Agent/check_account
 ```
+
+For correlated replay-aware logs, keep the SDK's INFO endpoint span and the worker's
+INFO execution span enabled, for example `RUST_LOG=info,restate_szamlazz=debug`.
+SDK 0.12.0 can leave its ancestor span marked as replaying when fresh work begins
+under an application child span. This crate mitigates that at its actual run-closure
+boundary, preserving duplicate suppression and fresh Gateway/credential-warning
+events with scope, account and invocation correlation. The mitigation covers these
+worker services; another service bound to the same endpoint needs its own handling
+until an SDK fix is released. See the [reproduction, candidate upstream patch and
+removal condition](../../docs/research/2026-09-10-replay-logging.md).
 
 Amounts (`quantity`, `unit_price`, every total) are decimals serialised as JSON **strings**; a number is accepted on
 input. Optional response fields, a fault's included, are present as `null` when absent.

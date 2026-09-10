@@ -63,8 +63,9 @@
 //! // Logs: `RUST_LOG` selects, and the SDK's `ReplayAwareFilter` drops what a
 //! // replayed handler emits again. Every handler execution of this crate runs
 //! // in an `execution{scope, order, restate.invocation.id, account.id}` span
-//! // and the prologue warns outside the durable steps; without the filter a
-//! // retried invocation repeats those lines on every replay.
+//! // so events outside completed durable steps would otherwise repeat.
+//! // Keep the SDK and execution INFO spans enabled, e.g.
+//! // RUST_LOG=info,restate_szamlazz=debug.
 //! tracing_subscriber::registry()
 //!     .with(
 //!         tracing_subscriber::fmt::layer()
@@ -96,6 +97,14 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! SDK 0.12.0 can suppress fresh events when replay finishes under a child span.
+//! These services retain the SDK endpoint span and clear its replay flag only
+//! when a run closure actually executes; the execution span still supplies scope,
+//! account and invocation correlation. The usual subscriber above is sufficient.
+//! This mitigation is local to these services. Remove it after the minimum SDK
+//! version retains its own span and updates it before executing fresh closures;
+//! see the repository's `docs/research/2026-09-10-replay-logging.md` (#202).
 //!
 //! Register the endpoint with the server, then call a handler through the ingress; the
 //! ingress URL grammar is Restate's, `/{service}/{key}/{handler}` for a Virtual Object,

@@ -29,6 +29,26 @@ use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
 use crate::config::{ValidatedWorkerConfig, WorkerConfig, format_duration};
 use crate::gateway::Gateway;
 
+tokio::task_local! {
+    /// SDK 0.12.0 replay-filter mitigation; see `mark_fresh_work`.
+    static SDK_SPAN: tracing::Span;
+}
+
+/// SDK 0.12.0 records replay transitions on the current child span, while
+/// its filter reads the endpoint ancestor. It also updates too late for the
+/// first executing run closure. Retain that ancestor before entering our
+/// execution span, and clear its flag only when the SDK actually runs a
+/// closure. Replayed runs never call this; correlation stays on the child.
+///
+/// Remove this task-local and call when the minimum SDK version retains its
+/// own span AND updates it before `ExecuteRun` invokes the closure. Evidence
+/// and the upstream patch: docs/research/2026-09-10-replay-logging.md (#202).
+pub(super) fn mark_fresh_work() {
+    let _ = SDK_SPAN.try_with(|span| {
+        span.record("restate.sdk.is_replaying", false);
+    });
+}
+
 /// What one handler execution runs on: the journaled account, the lazy gateway
 /// and the deployment settings with the namespace pinned by the journal.
 ///
@@ -89,13 +109,18 @@ where
     F: FnOnce(Execution) -> Fut + Send,
     Fut: Future<Output = Result<T, HandlerError>> + Send,
 {
+    let sdk_span = tracing::Span::current();
     let span = execution_span(ctx.scope(), ctx.key(), ctx.invocation_id());
-    async move {
-        let execution = run_prologue(ctx, &parts.accounts, &parts.config).await?;
-        body(execution).await
-    }
-    .instrument(span)
-    .await
+    SDK_SPAN
+        .scope(
+            sdk_span,
+            async move {
+                let execution = run_prologue(ctx, &parts.accounts, &parts.config).await?;
+                body(execution).await
+            }
+            .instrument(span),
+        )
+        .await
 }
 
 /// The prologue of every handler: pin → resolve. Runs inside
@@ -439,6 +464,9 @@ fn open(account: Account, credentials: Credentials) -> Result<Arc<Gateway>, Faul
             )
         })
 }
+
+#[cfg(test)]
+mod logging_tests;
 
 #[cfg(test)]
 mod tests {

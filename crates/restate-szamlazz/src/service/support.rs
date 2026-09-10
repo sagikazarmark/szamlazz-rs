@@ -492,9 +492,12 @@ macro_rules! run_ctx {
                 F: FnOnce() -> Fut + Send + 'ctx,
                 Fut: Future<Output = Result<T, HandlerError>> + Send + 'ctx,
             {
-                let run = ContextSideEffects::run(self, || async move { Ok(Json(f().await?)) })
-                    .name(name)
-                    .retry_policy(policy);
+                let run = ContextSideEffects::run(self, || async move {
+                    super::prologue::mark_fresh_work();
+                    Ok(Json(f().await?))
+                })
+                .name(name)
+                .retry_policy(policy);
                 Box::pin(async move {
                     let Json(value) = run.await?;
                     Ok(value)

@@ -193,6 +193,14 @@ account.id}`** (`prologue::execute`, generic over `support::RunCtx`): `scope` is
 line the execution emits, the prologue's warnings, the gateway steps' `gateway.*` spans and events, the paging
 `credentials_rejected` warning (whose own fields stay `namespace` and `code`), is thereby attributable to a scope,
 an account and an invocation from the worker's log alone, which a multi-account deployment's alerting needs (#65).
+
+Use the SDK's `ReplayAwareFilter` with the SDK endpoint and worker execution INFO spans enabled
+(`RUST_LOG=info,restate_szamlazz=debug`). SDK 0.12.0 updates replay state on the current child span and too late
+for the first executing run closure. The worker retains the SDK endpoint span in an execution-scoped Tokio
+task-local and clears that span's replay flag only inside an actually executed `RunCtx::run` closure. Completed
+runs do not clear it; fresh operation events and credential warnings remain attributable. This mitigation is
+removed when the minimum SDK retains its own span and refreshes it before `ExecuteRun`; the real-server
+[regression and upstream evidence](../research/2026-09-10-replay-logging.md) must pass without it first (#202).
 Never the key: the account id is journaled and shown in the Restate UI already.
 
 The scope reaches the worker only under protocol v7. Restate's ingress (1.7.8, `ingress-http/src/handler/service_handler.rs`)

@@ -50,7 +50,7 @@
 mod common;
 
 pub(crate) use common::{
-    CreditRecord, Doc, ORIGINAL_TELJ, SUPPLIER, http_client, numbered_reply_body,
+    CreditRecord, Doc, ORIGINAL_TELJ, SUPPLIER, api_error, http_client, numbered_reply_body,
 };
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
