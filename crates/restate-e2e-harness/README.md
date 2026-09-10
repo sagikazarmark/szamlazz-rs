@@ -132,6 +132,19 @@ the selection falls idle after being seen in flight. Queued or concurrent matchi
 `Retries::observed_completion` means the selection fell idle. To wait for **one invocation** to complete, use
 `Admin::await_status(id, statuses)`. `Watch::finish` stops sampling even if matching invocations are still running.
 
+### Retry-sampling limits
+
+**A missing observed retry is not evidence that no retry occurred.** The public
+[`Watch` / `Retries` module guidance](src/watch.rs)
+explains invoker counts versus durable-step executions, scheduler-yield resets,
+completion clearing, sampling gaps and key-wide aggregation, with evidence for
+Restate **1.7.8 / vqueues / protocol v7 / scoped Virtual Objects**.
+Its **Configuring a retry-observation test** section
+covers the one-second test delay below that configuration's observed two-second
+yield threshold and how sample/query-error counts help diagnose incomplete
+observation. Neither that delay nor the nominal 100 ms poll interval guarantees
+visibility; a two-second delay can yield instead of widening the window.
+
 ## Reading run results
 
 `run_result(&journal, name)` returns the matching `Notification: Run` row, or

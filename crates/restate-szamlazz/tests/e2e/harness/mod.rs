@@ -426,15 +426,10 @@ impl Harness {
         self.admin().await_in_flight_on(&order(key), count).await
     }
 
-    /// Watches the invocations on Virtual Object `key` and records what
-    /// `sys_invocation` reports **while they are in flight**: `retry_count`
-    /// (the invoker's count of starts), `last_failure` and
-    /// `last_failure_related_command_name` are in-flight columns, cleared once
-    /// the invocation completes; a completed row shows neither the count nor
-    /// the failing command (verified against 1.7.8). Start it before the
-    /// call, [`finish`](Watch::finish) it after: the sampler ends as soon as
-    /// it observes the invocation completed, and `finish` ends one whose call
-    /// was answered between two samples.
+    /// Watches this suite's unscoped Order `key`. Start it before the call and
+    /// [`finish`](Watch::finish) it after; see the harness crate's
+    /// [retry-observation guidance](restate_e2e_harness::watch) for interpreting
+    /// the key-wide results and choosing a test retry delay.
     pub(crate) fn watch(&self, key: &str) -> Watch {
         Watch::start(self.admin().clone(), &order(key))
     }

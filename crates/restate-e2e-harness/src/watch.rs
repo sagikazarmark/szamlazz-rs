@@ -1,10 +1,68 @@
-//! Object-wide sampling ([`Watch`]) of run retries: what `sys_invocation`
-//! reports of the selected objects' invocations **while they are in flight**
-//! (`retry_count`, `last_failure` and `last_failure_related_command_name` are
-//! in-flight columns, cleared once the invocation completes; verified against
-//! 1.7.8), recorded as [`Retries`]. The watch ends when the selection is idle
-//! after being seen in flight. It aggregates every matching invocation, not
-//! one invocation id; a queued or concurrent invocation keeps it sampling.
+//! Object-wide sampling ([`Watch`]) of the retry state `sys_invocation`
+//! exposes while selected invocations are in flight, recorded as [`Retries`].
+//!
+//! # Observation limits
+//!
+//! **A missing observed retry is not evidence that no retry occurred.** These
+//! observations are qualified to **Restate server 1.7.8**, with **vqueues,
+//! protocol v7 and scoped Virtual Objects enabled**, using **Rust SDK 0.12.0**.
+//! Recheck them when changing the server version, features or configuration.
+//!
+//! - `retry_count` is the **invoker's count of starts, including the first
+//!   execution**, not the total executions of a durable step (`ctx.run`) and
+//!   not the number of external sends. A start may replay completed steps;
+//!   different steps may fail during one invocation.
+//! - With vqueues, a retry delay at or above `invocation_yield_threshold`
+//!   (**2 seconds** in the recorded configuration) yields to the scheduler.
+//!   The invoker drops its status row: `sys_invocation` shows `ready` without
+//!   `retry_count`, `last_failure` or `last_failure_related_command_name`, and
+//!   `retry_count` starts again at 1 on the next execution. The watch does not
+//!   query the vqueue tables or reconstruct these resets.
+//! - Completion also clears these invoker columns. An invocation, or an
+//!   entire retry window, can pass between samples unseen. Starting a watch
+//!   before the call does not ensure its task samples before the call runs.
+//! - Sampling is **key-wide aggregation**: every invocation matching the
+//!   [`Target`]'s service, key and scope selection contributes. The maximum
+//!   count and distinct failures can come from different invocations; they
+//!   are not one invocation's history. An all-scope target combines scopes
+//!   too. Queued or concurrent matching invocations keep the watch sampling.
+//!   [`Retries::observed_completion`] means the selection fell idle after
+//!   being seen in flight; use [`Admin::await_status`] for one invocation.
+//!
+//! # Configuring a retry-observation test
+//!
+//! Start [`Watch`] before the call and [`finish`](Watch::finish) it after the
+//! call answers, so a call missed entirely does not leave a sampler running.
+//! Use an isolated key and an explicit scope selection when asserting on one
+//! scenario. Pair observations with the scenario's independent evidence, such
+//! as its mock's external-call count, when asserting that work re-executed.
+//!
+//! A **one-second test retry delay** kept the invoker state visible below the
+//! observed two-second yield threshold on the configuration above. This is a
+//! version-qualified test choice, not a production retry recommendation or a
+//! visibility guarantee. In particular, increasing it to two seconds does not
+//! widen the observable window: it takes the scheduler-yield path instead.
+//! Check the delays a test actually reaches, including any policy multiplier
+//! and cap, rather than just its initial delay.
+//!
+//! The poll interval is nominally **100 ms**. Slow admin queries and task
+//! scheduling can leave larger gaps; no one- or two-second delay guarantees
+//! ten samples. [`Retries::samples`] counts successful queries (even empty
+//! results), while [`Retries::query_errors`] and [`Retries::last_query_error`]
+//! expose failed queries. These help diagnose sparse or failing observation,
+//! but neither many successful samples nor zero query errors proves complete
+//! coverage. A query cancelled by `finish` contributes to neither count.
+//!
+//! # Evidence
+//!
+//! The [recorded 1.7.8 experiment, §7](https://github.com/sagikazarmark/szamlazz-rs/blob/dad170068c7826e815d5af2629888c8b24797193/docs/research/2026-09-06-pretix-invoice-sync/raw/02-restate.md#7-observability-for-a-ui--reconciler)
+//! observed a two-second run delay as `running` → `ready` (no invoker fields)
+//! → `running` with the count reset to 1; one-second delays showed
+//! `backing-off` with those fields. Its pinned server source reading covers
+//! [`handle_task_error`](https://github.com/restatedev/restate/blob/v1.7.8/crates/invoker-impl/src/invocation_state_machine.rs),
+//! the [`RetryViaScheduler` arm](https://github.com/restatedev/restate/blob/v1.7.8/crates/invoker-impl/src/lib.rs)
+//! (`status_store.on_end`), and the
+//! [yield configuration](https://github.com/restatedev/restate/blob/v1.7.8/crates/types/src/config/invocation.rs).
 //!
 //! The sampling decision (the sampler behind [`Watch`]) is a pure function
 //! of the rows, tested here without a server.
@@ -18,10 +76,9 @@ use tokio::time::Instant;
 
 use crate::admin::{Admin, Target};
 
-/// How often [`Watch`] samples `sys_invocation`: a run retry under a test
-/// policy of one or two seconds of back-off is visible for ten samples or
-/// more. A sample that takes longer than this is followed by the next one at
-/// once, never by a full interval's sleep.
+/// Nominal interval between sample starts; it guarantees no sample count or
+/// retry visibility (see the module's observation limits). A sample that
+/// takes longer is followed by the next one at once, without another sleep.
 const POLL: Duration = Duration::from_millis(100);
 
 /// The query [`Watch`] runs on `target`: every invocation on the Virtual
@@ -35,17 +92,23 @@ fn retries_query(target: &Target<'_>) -> String {
 }
 
 /// What a [`Watch`] saw of all selected invocations' run retries.
+///
+/// Partial, key-wide observations; absence is not evidence that no retry
+/// occurred. See the [observation limits](self#observation-limits) for invoker
+/// resets, scheduler yield, completion clearing and sampling gaps.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Retries {
     /// The highest `retry_count` seen: the invoker's count of starts, the
-    /// first execution included.
+    /// first execution included. A maximum across all matching rows, not a
+    /// sum or a durable-step execution count; scheduler yield can reset it.
     pub max_retry_count: u64,
     /// Every distinct `last_failure` seen, in order of first sight.
     pub failures: Vec<String>,
     /// Every distinct `last_failure_related_command_name` seen, in order of
     /// first sight.
     pub failing_commands: Vec<String>,
-    /// How many samples answered; the density behind the three above.
+    /// Successful queries, including empty results, not rows or retries.
+    /// Helps diagnose sampling density, but does not prove complete coverage.
     pub samples: u64,
     /// Whether the watch observed no selected invocation in flight after
     /// previously seeing one, rather than ending by [`Watch::finish`]. This
@@ -53,7 +116,7 @@ pub struct Retries {
     /// completion; an invocation can also finish between samples unseen.
     pub observed_completion: bool,
     /// How many samples the admin API failed to answer (retried, never
-    /// fatal).
+    /// fatal). Zero errors does not rule out gaps between successful samples.
     pub query_errors: u64,
     /// The last such failure.
     pub last_query_error: Option<String>,
@@ -135,6 +198,9 @@ impl Sampler {
 ///
 /// This is object-wide aggregation, not sampling one invocation id. To observe
 /// a particular invocation's completion, use [`Admin::await_status`].
+/// See [observation limits](self#observation-limits) and
+/// [test configuration guidance](self#configuring-a-retry-observation-test)
+/// before interpreting a missing retry or choosing a test retry delay.
 #[derive(Debug)]
 pub struct Watch {
     stop: watch::Sender<bool>,
@@ -143,9 +209,9 @@ pub struct Watch {
 
 impl Watch {
     /// Samples `admin`'s `sys_invocation` for the invocations on `target`
-    /// every 100 ms until one of the three ends above. Start it before the
-    /// call, [`finish`](Self::finish) it after: the sampler ends as soon as
-    /// it observes the selection fall idle, and `finish` ends one whose call
+    /// at a nominal 100 ms interval until one of the three ends above. Start
+    /// it before the call, [`finish`](Self::finish) it after: the sampler ends
+    /// as soon as it observes the selection fall idle, and `finish` ends one whose call
     /// was answered between two samples. Other matching invocations contribute
     /// to the same [`Retries`] and keep the selection in flight.
     #[must_use]

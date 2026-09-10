@@ -80,21 +80,12 @@ pub(crate) fn services_with_config(
 /// an exhausted read are observable; and a one-second resolve policy so a
 /// scripted outage is retried within it.
 ///
-/// **One second is not a free parameter.** The scenarios that assert a run
-/// retry read what `sys_invocation` shows while the invoker waits out a run
-/// retry delay in place (status `backing-off`, `retry_count`, `last_failure`,
-/// `last_failure_related_command_name`; the harness's `watch`). Under vqueues
-/// a run retry delay at or above the server's `invocation_yield_threshold`
-/// (2 s in 1.7.8) is retried via the scheduler instead: the invoker drops its
-/// status row and the entry waits in the vqueue inbox, so `sys_invocation`
-/// shows `ready` with none of those columns, `retry_count` starts over at 1
-/// on the next execution, and every such assertion fails. Verified end to end with a
-/// 2 s read delay (the invocation was picked up again after about 1.2 s;
-/// `docs/research/2026-09-06-pretix-invoice-sync/raw/02-restate.md`, section
-/// 7, has the source reading). Widening the delays to make the windows easier
-/// to catch is therefore not available; what makes a window catchable is the
-/// sampler's 100 ms interval (ten samples per window), and a missed one is
-/// diagnosable by the sample count in `Retries`.
+/// The suite chooses one-second retry delays below the observed yield
+/// threshold on its Restate 1.7.8 configuration. The harness crate owns the
+/// [retry-observation constraints](restate_e2e_harness::watch), including
+/// scheduler yield and sampling gaps. Keep this choice when adjusting these
+/// policies; it makes the retry assertions observable on that configuration
+/// without guaranteeing that every window is sampled.
 ///
 /// Built with `ValidatedWorkerConfig::unchecked` (the `test-util` feature),
 /// never through `WorkerConfig::validate`: the 1 s issue delay is under the
