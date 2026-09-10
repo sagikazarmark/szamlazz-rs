@@ -322,7 +322,9 @@ impl Admin {
 
     /// Purges a completed invocation (`PATCH /invocations/{id}/purge`) and
     /// waits for its `sys_invocation` row to go (the purge is asynchronous),
-    /// so a later call runs against a key Restate has no memory of.
+    /// removing its retained completion, journal and deduplication record.
+    /// A later call can execute as a fresh invocation. Virtual Object state
+    /// remains; purging an invocation does not reset its object.
     pub async fn purge(&self, invocation_id: &str) {
         self.patch_invocation(invocation_id, "purge").await;
         poll_until(
@@ -512,8 +514,13 @@ impl Admin {
             .await
             .expect("GET /services");
         let status = response.status().as_u16();
-        let body: Value = response.json().await.expect("the /services body is JSON");
-        assert_eq!(status, 200, "GET /services failed ({status}): {body}");
+        let text = response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("GET /services body ({status}): {error}"));
+        assert_eq!(status, 200, "GET /services failed ({status}): {text}");
+        let body: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("GET /services JSON ({status}): {error}; body: {text}"));
         Handler::from_services(&body)
     }
 }

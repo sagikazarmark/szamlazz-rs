@@ -7,6 +7,81 @@
 
 use serde_json::Value;
 
+// Journal-v2 SQL display names in Restate 1.7.8's journal_v2::{CommandType,
+// CompletionType, NotificationType}. Keep the supported representation explicit:
+// an unfamiliar entry must not disappear from a named-run assertion.
+const COMMANDS: &[&str] = &[
+    "Input",
+    "Output",
+    "GetLazyState",
+    "SetState",
+    "ClearState",
+    "ClearAllState",
+    "GetLazyStateKeys",
+    "GetEagerState",
+    "GetEagerStateKeys",
+    "GetPromise",
+    "PeekPromise",
+    "CompletePromise",
+    "Sleep",
+    "Call",
+    "OneWayCall",
+    "SendSignal",
+    "Run",
+    "AttachInvocation",
+    "GetInvocationOutput",
+    "CompleteAwakeable",
+];
+const COMPLETIONS: &[&str] = &[
+    "GetLazyState",
+    "GetLazyStateKeys",
+    "GetPromise",
+    "PeekPromise",
+    "CompletePromise",
+    "Sleep",
+    "CallInvocationId",
+    "Call",
+    "Run",
+    "AttachInvocation",
+    "GetInvocationOutput",
+];
+
+fn assert_supported_type(entry_type: &str, index: u64) {
+    let supported = entry_type
+        .strip_prefix("Command: ")
+        .is_some_and(|ty| COMMANDS.contains(&ty))
+        || entry_type
+            .strip_prefix("Notification: ")
+            .is_some_and(|ty| ty == "Signal" || COMPLETIONS.contains(&ty));
+    assert!(
+        supported,
+        "unsupported entry_type {entry_type:?} at journal entry {index}"
+    );
+}
+
+/// Read only the enum tags, leaving unrelated command payloads opaque.
+fn entry_classification(entry: &Value) -> Option<String> {
+    fn variant(value: &Value) -> Option<(&str, &Value)> {
+        let object = value.as_object()?;
+        if object.len() != 1 {
+            return None;
+        }
+        object
+            .iter()
+            .next()
+            .map(|(name, value)| (name.as_str(), value))
+    }
+    match variant(entry)? {
+        ("Command", command) => Some(format!("Command: {}", variant(command)?.0)),
+        ("Notification", notification) => match variant(notification)? {
+            ("Completion", completion) => Some(format!("Notification: {}", variant(completion)?.0)),
+            ("Signal", _) => Some("Notification: Signal".to_owned()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A handler of a registered service, as the admin API lists it
 /// (`GET /services`, [`Admin::handlers`](crate::Admin::handlers)): what a
 /// deployment offers, whether or not the run invoked it.
@@ -66,7 +141,8 @@ pub struct JournalEntry {
     /// `entry_type` as the server names it (`Command: Run`, `Notification:
     /// Run`, …).
     pub entry_type: String,
-    /// The name of a named entry (a `ctx.run`'s).
+    /// The name of a named entry (a `ctx.run`'s). Run commands require a
+    /// string; an unnamed run carries `Some(String::new())`, not `None`.
     pub name: Option<String>,
     /// The run command's or run notification's `completion_id`, read from
     /// journal-v2 `entry_json`. Not the row index; `None` for other entry types
@@ -85,6 +161,9 @@ impl JournalEntry {
     /// A missing, empty or non-string `entry_type`, or missing/non-string/invalid
     /// hex `raw`, panics: unavailable evidence cannot establish absence. Select
     /// these columns even when only inspecting content, without [`run_result`].
+    /// For v2, unknown classifications, a missing/non-string run name, and
+    /// contradictions with a decoded `entry_json` classification or run name
+    /// also panic. Unnamed runs carry an empty string.
     pub fn from_row(row: &Value) -> Self {
         let index = row["index"].as_u64().expect("index");
         let entry_type = row["entry_type"]
@@ -98,6 +177,34 @@ impl JournalEntry {
         let entry = row["entry_json"]
             .as_str()
             .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let version = row["version"].as_u64();
+        let name = row["name"].as_str().map(str::to_owned);
+        if version == Some(2) {
+            assert_supported_type(entry_type, index);
+            if let Some(entry) = &entry {
+                assert_eq!(
+                    entry_classification(entry).as_deref(),
+                    Some(entry_type),
+                    "entry_json classification disagrees with entry_type at journal entry {index}"
+                );
+            }
+            if entry_type == "Command: Run" {
+                assert!(
+                    name.is_some(),
+                    "missing or malformed run name at journal entry {index}"
+                );
+                if let Some(json_name) = entry
+                    .as_ref()
+                    .and_then(|entry| entry["Command"]["Run"].get("name"))
+                {
+                    assert_eq!(
+                        json_name.as_str(),
+                        name.as_deref(),
+                        "entry_json run name disagrees with SQL name at journal entry {index}"
+                    );
+                }
+            }
+        }
         let run_completion_id = entry.as_ref().and_then(|entry| {
             let id = match entry_type {
                 "Command: Run" => &entry["Command"]["Run"]["completion_id"],
@@ -108,21 +215,29 @@ impl JournalEntry {
         });
         Self {
             index,
-            version: row["version"].as_u64(),
+            version,
             entry_type: entry_type.to_owned(),
-            name: row["name"].as_str().map(str::to_owned),
+            name,
             run_completion_id,
             raw,
         }
     }
 
     /// Whether the entry is a `ctx.run` command (named).
-    /// Panics on a missing or unsupported journal version: only journal v2
-    /// is understood, and another spelling cannot establish absence of runs.
+    /// Panics on a missing or unsupported journal version or classification,
+    /// or a run without name evidence: only the journal-v2 representation in
+    /// Restate 1.7.8 is understood; another spelling cannot establish absence.
     #[must_use]
     pub fn is_run(&self) -> bool {
         self.assert_supported_version();
-        self.entry_type == "Command: Run"
+        assert_supported_type(&self.entry_type, self.index);
+        let is_run = self.entry_type == "Command: Run";
+        assert!(
+            !is_run || self.name.is_some(),
+            "missing run name at journal entry {}",
+            self.index
+        );
+        is_run
     }
 
     fn assert_supported_version(&self) {
@@ -275,20 +390,31 @@ impl Invocation {
     pub const COLUMNS: &str =
         "status, completion_failure, scope, target_service_name, target_handler_name";
 
-    /// One `sys_invocation` row with [`Self::COLUMNS`].
+    /// One `sys_invocation` row queried with [`Self::COLUMNS`]. Required strings
+    /// must be present; nullable columns accept a string, null or omission
+    /// (Restate 1.7.8's JSON writer omits SQL nulls). Other types panic.
+    /// A row alone cannot distinguish an omitted SQL null from an unselected
+    /// nullable column: custom queries must select all columns themselves.
+    /// Unknown status strings are preserved.
+    #[must_use]
     pub fn from_row(row: &Value) -> Self {
+        let string = |column: &str| {
+            row.get(column)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing or malformed sys_invocation column {column}"))
+                .to_owned()
+        };
+        let nullable_string = |column: &str| match row.get(column) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(value.clone()),
+            _ => panic!("malformed nullable sys_invocation column {column}"),
+        };
         Self {
-            status: row["status"].as_str().unwrap_or_default().to_owned(),
-            completion_failure: row["completion_failure"].as_str().map(str::to_owned),
-            scope: row["scope"].as_str().map(str::to_owned),
-            service: row["target_service_name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-            handler: row["target_handler_name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
+            status: string("status"),
+            completion_failure: nullable_string("completion_failure"),
+            scope: nullable_string("scope"),
+            service: string("target_service_name"),
+            handler: string("target_handler_name"),
         }
     }
 }

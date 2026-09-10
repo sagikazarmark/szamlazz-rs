@@ -64,6 +64,9 @@ with vqueues, protocol v7 and scoped Virtual Objects enabled. This crate require
 
 Admin and ingress base URLs accept trailing slashes; the harness removes those
 separators while preserving any path prefix, including in the exported base URLs.
+With reuse allowed, setting only one of `RESTATE_ADMIN_URL` and `RESTATE_INGRESS_URL`
+fails immediately and names the missing variable. An incomplete pair never falls
+back to a spawned server or a skip. `ReusePolicy::Never` ignores both reuse URLs.
 Spawned servers use TCP for the node, admin and ingress listeners, overriding
 listener modes inherited from the environment or supplied through `ServerSpec.env`.
 
@@ -293,6 +296,20 @@ content-only inspection. Missing, null or malformed values panic at decoding, ra
 rows or empty bytes that could falsely pass an absence or leak assertion. An explicitly supplied empty hex
 string is valid empty evidence. Custom queries must select both columns; sources that cannot provide the
 raw bytes are not usable for content assertions through this decoder.
+
+For journal v2, unknown `entry_type` classifications and contradictions with a
+decoded `entry_json` classification are refused. Run commands require a string
+SQL `name`; an unnamed run is the empty string, not null or a missing column.
+When `entry_json` also supplies the run name, it must agree. The same classification
+and name-evidence rules apply to hand-built rows during semantic inspection, so an
+unreadable run cannot disappear from `Admin::runs`, result lookup or the table check.
+
+Query every column in `Invocation::COLUMNS` when using `Invocation::from_row`.
+Nullable `completion_failure` and `scope` accept a string, explicit null or omission:
+Restate 1.7.8's JSON writer omits SQL-null values. Other types panic instead of looking
+like no failure or an unscoped invocation. A row alone cannot distinguish an omitted
+SQL null from an unselected nullable column; custom queries must select them themselves.
+The status, service and handler must be present strings; unknown status strings are preserved.
 
 ## Checking step-name sequences
 

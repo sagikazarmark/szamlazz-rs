@@ -111,14 +111,15 @@ pub enum ReusePolicy {
 /// `RESTATE_INGRESS_URL` (when `reuse` allows), `RESTATE_SERVER_BIN`,
 /// `RESTATE_ENDPOINT_HOST` and `CI`; an empty variable is unset (a
 /// `RESTATE_ADMIN_URL=` in a CI matrix is not a server to wait 90 s on).
+/// With reuse allowed, supplying only one reuse URL panics, naming the missing
+/// variable. An incomplete configuration never falls back to a binary or a skip.
 pub fn launcher_or_skip(reuse: ReusePolicy) -> Option<Launcher> {
     let non_empty = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let reusable = match reuse {
-        ReusePolicy::Allowed => {
-            non_empty("RESTATE_ADMIN_URL").zip(non_empty("RESTATE_INGRESS_URL"))
-        }
-        ReusePolicy::Never => None,
-    };
+    let reusable = reuse_urls(
+        reuse,
+        non_empty("RESTATE_ADMIN_URL"),
+        non_empty("RESTATE_INGRESS_URL"),
+    );
     let binary = std::env::var_os("RESTATE_SERVER_BIN")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -138,6 +139,23 @@ pub fn launcher_or_skip(reuse: ReusePolicy) -> Option<Launcher> {
             None
         }
         Err(message) => panic!("{message}"),
+    }
+}
+
+fn reuse_urls(
+    policy: ReusePolicy,
+    admin: Option<String>,
+    ingress: Option<String>,
+) -> Option<(String, String)> {
+    match (policy, admin, ingress) {
+        (ReusePolicy::Never, _, _) | (ReusePolicy::Allowed, None, None) => None,
+        (ReusePolicy::Allowed, Some(admin), Some(ingress)) => Some((admin, ingress)),
+        (ReusePolicy::Allowed, Some(_), None) => panic!(
+            "RESTATE_ADMIN_URL is set but RESTATE_INGRESS_URL is missing; server reuse requires both"
+        ),
+        (ReusePolicy::Allowed, None, Some(_)) => panic!(
+            "RESTATE_INGRESS_URL is set but RESTATE_ADMIN_URL is missing; server reuse requires both"
+        ),
     }
 }
 
@@ -273,6 +291,43 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_reuse_configuration_is_refused_only_when_reuse_is_allowed() {
+        for (admin, ingress, missing) in [
+            (Some("http://admin".to_owned()), None, "RESTATE_INGRESS_URL"),
+            (None, Some("http://ingress".to_owned()), "RESTATE_ADMIN_URL"),
+        ] {
+            let panic = std::panic::catch_unwind(|| {
+                reuse_urls(ReusePolicy::Allowed, admin.clone(), ingress.clone())
+            })
+            .expect_err("an incomplete pair cannot become a skip or binary fallback");
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .expect("a panic message");
+            assert!(
+                message.contains(&format!("{missing} is missing")),
+                "{message}"
+            );
+            assert_eq!(reuse_urls(ReusePolicy::Never, admin, ingress), None);
+        }
+        assert_eq!(reuse_urls(ReusePolicy::Allowed, None, None), None);
+        let urls = ("http://admin".to_owned(), "http://ingress".to_owned());
+        assert_eq!(
+            reuse_urls(
+                ReusePolicy::Allowed,
+                Some(urls.0.clone()),
+                Some(urls.1.clone())
+            ),
+            Some(urls.clone())
+        );
+        assert_eq!(
+            reuse_urls(ReusePolicy::Never, Some(urls.0), Some(urls.1)),
+            None
+        );
+    }
 
     /// The gate reads the environment once: a reusable server wins, then a
     /// `restate-server` binary; with neither the suite skips on a developer

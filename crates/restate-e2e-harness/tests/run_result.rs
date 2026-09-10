@@ -206,7 +206,12 @@ fn unavailable_raw_cannot_pass_a_negative_content_assertion() {
         );
     }
     // An explicitly supplied empty byte string remains usable evidence.
-    let empty = row(0, "Command: Input", None, &json!({}));
+    let empty = row(
+        0,
+        "Command: Input",
+        None,
+        &json!({"Command": {"Input": {}}}),
+    );
     assert!(empty.raw.is_empty());
     assert!(!empty.raw_contains("secret"));
 }
@@ -230,7 +235,8 @@ async fn unsupported_journals_cannot_establish_no_runs_or_table_conformance() {
     let invocations = [(
         "inv".into(),
         Invocation::from_row(&json!({
-            "status": "completed", "target_service_name": "Svc", "target_handler_name": "h"
+            "status": "completed", "target_service_name": "Svc", "target_handler_name": "h",
+            "completion_failure": null, "scope": null
         })),
     )];
     for version in [Value::Null, json!(1), json!(3)] {
@@ -254,6 +260,96 @@ async fn unsupported_journals_cannot_establish_no_runs_or_table_conformance() {
             std::panic::catch_unwind(|| table.check(&handlers, &invocations, &journals)).is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn unavailable_names_and_unknown_classifications_cannot_erase_runs() {
+    use restate_e2e_harness::{Admin, Handler, Invocation, RunPath, Table, run_result_at};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    const PATHS: &[RunPath] = &[RunPath::new("Svc", "h", &[])];
+    let server = MockServer::start().await;
+    let admin = Admin::new(server.uri(), reqwest::Client::new());
+    let table = Table::new(PATHS);
+    let handlers = [Handler {
+        service: "Svc".into(),
+        name: "h".into(),
+    }];
+    let invocations = [(
+        "inv".into(),
+        Invocation {
+            status: "completed".into(),
+            completion_failure: None,
+            scope: None,
+            service: "Svc".into(),
+            handler: "h".into(),
+        },
+    )];
+    let valid = json!({
+        "index": 0, "version": 2, "entry_type": "Command: Run", "name": "A", "raw": "",
+        "entry_json": r#"{"Command":{"Run":{"completion_id":0,"name":"A"}}}"#
+    });
+    let mut cases = Vec::new();
+    for name in [None, Some(Value::Null), Some(json!(42)), Some(json!("B"))] {
+        let mut row = valid.clone();
+        row.as_object_mut().expect("an object row").remove("name");
+        if let Some(name) = name {
+            row["name"] = name;
+        }
+        cases.push(row);
+    }
+    for ty in [
+        "Command: FutureRun",
+        "Notification: FutureRun",
+        "Command: Sleep",
+        "Notification: Run",
+    ] {
+        let mut row = valid.clone();
+        row["entry_type"] = json!(ty);
+        cases.push(row);
+    }
+    for row in cases {
+        assert!(
+            std::panic::catch_unwind(|| JournalEntry::from_row(&row)).is_err(),
+            "{row}"
+        );
+        server.reset().await;
+        Mock::given(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rows": [row]})))
+            .mount(&server)
+            .await;
+        let admin = admin.clone();
+        assert!(
+            tokio::spawn(async move { admin.runs("inv").await })
+                .await
+                .expect_err("unusable run evidence")
+                .is_panic()
+        );
+    }
+    // Plain public rows must obey the same rules during semantic inspection.
+    for (ty, name) in [
+        ("Command: Run", None),
+        ("Command: FutureRun", Some("A")),
+        ("Notification: FutureRun", None),
+    ] {
+        let mut entry = command(0, "A", 0);
+        entry.entry_type = ty.into();
+        entry.name = name.map(str::to_owned);
+        let journal = vec![entry];
+        for name in ["A", "absent"] {
+            assert!(std::panic::catch_unwind(|| run_result(&journal, name)).is_err());
+            assert!(std::panic::catch_unwind(|| run_result_at(&journal, name, 0)).is_err());
+        }
+        let journals = [("inv".into(), journal)].into();
+        assert!(
+            std::panic::catch_unwind(|| table.check(&handlers, &invocations, &journals)).is_err()
+        );
+    }
+    let unnamed = [command(0, "", 0), notification(1, 0)];
+    assert_eq!(
+        run_result(&unnamed, "").expect("unnamed run result").index,
+        1
+    );
 }
 
 #[test]
