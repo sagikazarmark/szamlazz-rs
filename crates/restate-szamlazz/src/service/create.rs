@@ -464,7 +464,7 @@ fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Id
     }
     let message = if is_cancelled(error) {
         format!(
-            "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: read get, then retry with a new Idempotency-Key",
+            "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: read get, then retry with a new Idempotency-Key only if issuance is still intended",
             error.code()
         )
     } else {
@@ -474,7 +474,7 @@ fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Id
             error.message()
         )
     };
-    identity.about(order, Fault::outcome_unknown(message))
+    identity.about(order, Fault::outcome_unknown(message).with_run_cause(error))
 }
 
 /// The target ownership decision before prerequisites. Only an absent

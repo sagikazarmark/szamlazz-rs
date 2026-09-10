@@ -160,7 +160,7 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    deadline, so a hung database pool behind an embedder's resolver is re-executed by the resolve policy rather than
    holding the execution until the handler's inactivity timeout (the policy bounds re-executions, not one hung
    call). Outside the closure: `unscoped | unknown` → `TerminalError{unknown_account, 400}`;
-   exhaustion or cancellation of the run → `TerminalError{unavailable}`. One `account` entry per invocation: the
+   exhaustion → `TerminalError{unavailable}`; cancellation → `TerminalError{cancelled}` (409). One `account` entry per invocation: the
    invocation finishes on the account it started on, and the Restate UI shows the journaled `Account` (id,
    endpoint, defaults, seller, credential reference, never the key) for the retention period.
 3. **Fetch lazily inside the first external-operation closure that executes**: `store.fetch(account.credential_ref)`,
@@ -376,7 +376,7 @@ gateway opened for this execution.
    `Collision` → `conflict{external_id_collision, number}`; `Foreign` → `conflict{foreign, existing_number}`;
    `Api` → `TerminalError{unavailable}`; `CredentialsRejected` → `TerminalError{credentials_rejected}` (§7);
    `Absent` → proceed. The run's own `Err`, the read policy exhausted (500, the last `Unanswered`) or a cancel (409),
-   is `TerminalError{unavailable, json{order, kind, external_id}}` naming the step and the last failure.
+   is `TerminalError{unavailable, json{order, kind, external_id}}` on exhaustion or `cancelled` (409) on cancellation, naming the step.
 4. **Create**: one durable step under the issue policy, `ctx.run("create-{kind}", || gateway.create(CreateStepRequest{
    external_id, kind, order, create, reversed }))` with `RunRetryPolicy::new().initial_delay(2m)
    .exponentiation_factor(2.0).max_delay(10m).max_attempts(5).max_duration(1h)` (§9). **Every execution is
@@ -481,7 +481,7 @@ answers when one account names another's invoice number is unverified, behaviour
    Some(true)` → `outcome: reversed{storno_number?}` (idempotent; storno number via the hint when the newest document
    is the matching `SS`; best effort: a hint the read policy could not get answered reports the reversal without the
    number, after a `warn` naming the step, rather than failing a handler whose answer is already known; a
-   **cancellation** of the hint is never swallowed; the SDK's 409 propagates, so a cancelled invocation does not
+   **cancellation** of the hint is never swallowed; a structured `cancelled` (409) propagates, so a cancelled invocation does not
    complete as `reversed` (J13, #65; `support::best_effort`)); `tipus ∉ {SZ, ES, VS, HS}` →
    `rejected{not_stornoable}`. **Then, last**, a document without a `telj` → `TerminalError{unavailable,
    json{order, kind, external_id}}` naming the invoice (ADR 0007): the storno must repeat that date and no default
@@ -596,13 +596,13 @@ another code on any query → `TerminalError{unavailable}`; 3/135/136/164 on any
 ## 7. Outcome contract
 
 Domain outcomes are **data** (HTTP 200 through the ingress, typed in the OpenAPI export). `TerminalError` is reserved
-for faults: every fault either service raises carries one of the seven known codes of `TerminalCode` below
+for faults: every fault either service raises carries one of the eight known codes of `TerminalCode` below
 in `code`, with the status that `TerminalCode::status` reports as `Some(status)`; a szamlazz.hu code never travels in `code` but in the
 fault's own `szamlazz_code` field, present on every fault a szamlazz.hu answer caused (`szamlazz_error`,
 `credentials_rejected`, `unavailable` on an inconclusive code). Three of the codes mean "outcome unknown"
 (`outcome_unknown`, `unavailable`, `credentials_rejected`); the other known codes are settled: the same request never succeeds
 (`invalid_input`, `unknown_account`, `not_found`) or szamlazz.hu's answer is passed through
-(`szamlazz_error`) (§4). No response names the account: `external_id` (with its namespace) is the only deployment
+(`szamlazz_error`), or an intentional read cancellation (`cancelled`, 409) (§4). No response names the account: `external_id` (with its namespace) is the only deployment
 marker a response carries, and `order_key` in a `StornoResponse` (`managed_by_order{key}`) is meaningful only under
 the scope the call was made under.
 
@@ -618,13 +618,28 @@ StornoResponse { outcome ∈ reversed | rejected | conflict | managed_by_order |
                  invoice_number, storno_number?, order_key?, code?, message? }
 DeleteProformaResponse { deleted, reason? }
 OrderStatus, see §6
-Fault { code, message, szamlazz_code?, order?, kind?, external_id? }   (contract::Fault, the TerminalError body)
+Fault { code, message, cause?, szamlazz_code?, order?, kind?, external_id? }   (contract::Fault, the TerminalError body)
 TerminalError codes: invalid_input (400) | unknown_account (400) | not_found (404) | szamlazz_error (422)
-                   | outcome_unknown (500) | unavailable (503) | credentials_rejected (503)
+                   | cancelled (409) | outcome_unknown (500) | unavailable (503) | credentials_rejected (503)
 On the wire (Restate 1.7.8 ingress), a TerminalError is the JSON *string* in `message` of Restate's own envelope:
   { "code": <HTTP status>, "message": "<the Fault JSON above>", "source": "invocation" }
   + header x-restate-error-source: invocation
 ```
+
+**Cancellation (ADR 0011, #203):** every ordinary read, resolver read and best-effort read maps intentional
+cancellation to `cancelled` (409). A cancelled create, storno or one-shot write retains `outcome_unknown`
+(500) with `cause: "cancelled"`. `FaultCause` is an open string token; `Fault::is_cancelled()` is independent
+of the code's uncertainty classification, and returns `None` for unknown codes or causes. Neither cancellation
+shape authorizes automatic retry or reissue; reconcile a cancelled write before deliberately renewing it.
+The mappings describe the executing step, not proof that an earlier execution never sent anything.
+This is a breaking behavior change: earlier read/resolver cancellations were 503 and best-effort cancellation
+was native text. Stored completions keep their old shape; deployment handling follows ADR 0009.
+
+Generated ingress clients use `service::decode_fault(&ClientError)` to check actual status/source, decode the
+Restate envelope and attempt the inner fault. Native cancellation/kill text, non-invocation errors, malformed
+envelopes and inconsistent known statuses retain the raw SDK error. Unknown tokens retain their actual HTTP
+status without invented classification. `Fault` deriving `JsonSchema` does not publish it through the handler's
+success-output discovery schema; the decoder's rustdoc is a compiling generated-client example.
 
 These are the **known** tokens, not a closed wire set. `CreateOutcome`, `StornoOutcome`, `ConflictReason`,
 `Warning` and `TerminalCode` preserve unknown strings verbatim in `Other(String)`; `KNOWN` lists the known
@@ -705,7 +720,7 @@ a code on a create or storno send is the `rejected` outcome.
 by scope only, or under a scope no account is reachable by (on a single-account deployment, any scope). Raised by the
 prologue's `account` step before anything is issued; the same request never succeeds, so it is a 400 and the caller
 fixes the scope rather than retrying. `unavailable` is the answer to an *exhausted read policy* (§9) (szamlazz.hu did
-not answer a read through every execution the policy allows, or the invocation was cancelled mid-read) naming the
+not answer a read through every execution the policy allows) naming the
 step and the last failure, about the document when the step knows one; a szamlazz.hu code a read cannot conclude
 from (`Api`) is the same fault without a retry, so is the same code, or `szlahu_down`, answered to a write step's
 *leading* query (§5 step 4, §6 step 3: settled data, nothing sent, never `Unconfirmed`, #63), and so is a verified
@@ -742,11 +757,14 @@ rules below, which are also the rules for an embedder. The rules:
    the write handlers;
    verified): an **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler
    means "outcome unknown; retry with a **new** key, or read `get`"; the handler reconciles by external id, so the
-   retry is safe. Never interpret one of these as "no document exists". No answer (a client timeout, an ingress 5xx
+   retry reconciles. Check cancellation first: `cancelled` or `cause: cancelled` does not authorize automatic retry.
+   Reconcile a cancelled write, then deliberately renew it with a new key only if still intended.
+   Never interpret an uncertain fault as "no document exists". No answer (a client timeout, an ingress 5xx
    whose source is not `invocation`) is an invocation still in flight, re-dispatched by Restate for as long as the
    handler's invocation retry policy allows: **keep the key** (a retry with it attaches to the in-flight invocation) or
    read `get`. A killed invocation is a fault whose envelope `message` is the last retryable error's text, not `{code, message}`;
-   treat it as `outcome_unknown`. The one exception to "retry with a new key" is `Szamlazz.Agent.set_credit_entries` with
+   preserve the native/raw error without inventing a fault code; a write may have landed, so reconcile first.
+   Another exception to "retry with a new key" is `Szamlazz.Agent.set_credit_entries` with
    `additive: true`, which has nothing to reconcile by: every send that reached szamlazz.hu appended the entries, so
    query the invoice before re-sending (the fault's message says so). The other faults are settled (§7): nothing
    landed: `invalid_input`, `unknown_account` and `not_found` are raised before anything is sent, and

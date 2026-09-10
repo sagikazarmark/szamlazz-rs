@@ -405,6 +405,11 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
     assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
+    assert_eq!(fault.is_cancelled(), Some(true));
+    assert_eq!(
+        fault.cause,
+        Some(restate_szamlazz::contract::FaultCause::Cancelled)
+    );
     assert_eq!(fault.order.as_deref(), Some("E2E-L4"));
     assert_eq!(fault.kind, Some(IssuedKind::Invoice));
     assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-L4:invoice"));
@@ -415,7 +420,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     assert!(
         fault
             .message
-            .contains("a send may have landed: read get, then retry with a new Idempotency-Key"),
+            .contains("a send may have landed: read get, then retry with a new Idempotency-Key only if issuance is still intended"),
         "a cancelled write reconciles before it retries: {fault:?}"
     );
     assert!(
@@ -495,6 +500,11 @@ pub(crate) async fn cancel_after_send(
     assert_eq!(reply.status, 500, "{}", reply.body);
     let fault = reply.fault();
     assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
+    assert_eq!(fault.is_cancelled(), Some(true));
+    assert_eq!(
+        fault.cause,
+        Some(restate_szamlazz::contract::FaultCause::Cancelled)
+    );
     assert!(
         fault.message.contains("409") && fault.message.contains("cancelled"),
         "{fault:?}"

@@ -252,8 +252,9 @@ impl Execution {
         )
         .await
         .map_err(|error| {
-            initialization_fault(&error, credit_entries_recovery(additive))
-                .unwrap_or_else(|| set_credit_entries_unknown(additive, &error))
+            initialization_fault(&error, credit_entries_recovery(additive)).unwrap_or_else(|| {
+                set_credit_entries_unknown(additive, &error).with_run_cause(&error)
+            })
         })?;
         set_credit_entries_response(outcome, invoice_number, additive, &self.config.namespace)
             .map_err(HandlerError::from)

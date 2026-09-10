@@ -344,11 +344,10 @@ fn account_of(resolution: Resolution) -> Result<Account, Fault> {
 
 /// The fault of an `account` step that ended without a resolution: the
 /// resolve policy is exhausted (500) or the invocation was cancelled (409).
-/// Both `unavailable`; the message tells them apart, and only the exhausted
-/// one is told to retry (nothing was sent either way).
+/// Exhaustion is `unavailable`; intentional cancellation is `cancelled`.
 fn resolve_exhausted(error: &TerminalError) -> Fault {
     if is_cancelled(error) {
-        return Fault::unavailable(format!(
+        return Fault::cancelled(format!(
             "the account resolution was cancelled ({}); nothing was sent",
             error.code()
         ));
@@ -831,8 +830,8 @@ mod tests {
             409,
             "cancelled",
         )));
-        assert_eq!(status, 503);
-        assert_eq!(body["code"], "unavailable");
+        assert_eq!(status, 409);
+        assert_eq!(body["code"], "cancelled");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("cancelled (409)"), "{body}");
         assert!(!message.contains("retry"), "not told to retry: {body}");

@@ -525,15 +525,17 @@ for a caller:
      the write handlers), so the same key would replay the failure. An **`outcome_unknown`, `unavailable` or
      `credentials_rejected`** fault from an issuing or storno handler means "outcome unknown: retry with a
      **new** key, or read `Szamlazz.Order.get`", never "no document exists"; the retry with a new key reconciles
-     by external id and is safe.
+     by external id. Check cancellation first: `cancelled` (409) or `cause: "cancelled"`
+     does **not** authorize automatic retry. For a cancelled write, reconcile through `get` or a
+     by-number query, then deliberately renew the operation with a new key only if still intended.
    - **No answer** (your client timed out, or the ingress answered with a 5xx whose source is *not*
      `invocation`) means the invocation is still in flight: it runs on once the key frees, and under a worker
      outage Restate re-dispatches it for up to ~24 min on `Szamlazz.Order` (five attempts, 2 m → 10 m). **Keep
      the key** and retry with it (the retry attaches to the in-flight invocation and receives its outcome) or
      read `get`; a new key here would start a second invocation that queues behind the first.
    - **A killed invocation** (attempts exhausted) is a fault whose envelope `message` is the last retryable
-     error's **text**, not the worker's `{code, message}` JSON: treat an unparsable 5xx `invocation` body as
-     `outcome_unknown`.
+      error's **text**, not the worker's `{code, message}` JSON. Preserve that native/raw error without
+      inventing a fault code. For a write, assume its external effect may have landed and reconcile first.
    - **The other known faults are settled**, nothing landed: `invalid_input`, `unknown_account` and `not_found` are
      raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or
      refusing the credit entries it was sent). Retrying as is repeats the answer: fix the request, the number,
@@ -559,12 +561,29 @@ for a caller:
 
 ### Faults
 
-Faults are `TerminalError`s whose message is the JSON `{ "code", "message", "szamlazz_code"?, "order"?, "kind"?,
+Faults are `TerminalError`s whose message is the JSON `{ "code", "message", "cause"?, "szamlazz_code"?, "order"?, "kind"?,
 "external_id"? }`. **On the wire that JSON is a string inside Restate's ingress envelope**: the body is
 `{"code": <HTTP status>, "message": "<the fault JSON>", "source": "invocation"}` under
 `x-restate-error-source: invocation`, so a caller parses `message` a second time; the envelope's own `code` is
 the status below, never the token (the Rust SDK carries a terminal error as code plus message and offers no other
 channel).
+
+For SDK-generated `AgentIngressClient` / `OrderIngressClient` callers,
+`service::decode_fault(&ClientError) -> Option<Fault>` checks the actual HTTP error status and
+`x-restate-error-source`, decodes the envelope and attempts the inner `Fault`. Its rustdoc contains a
+compiling generated-client example. `None` leaves the original SDK error intact, including native
+cancellation/kill text, transport failures, non-invocation errors and unfamiliar envelope shapes.
+Unknown fault codes and causes decode but remain unclassified; read the actual response status.
+**Discovery limitation:** deriving `JsonSchema` for `Fault` does not publish its shape in a handler's
+success-output discovery schema. Generated clients still need this error-decoding step.
+
+**Cancellation (ADR 0011):** ordinary reads, account resolution and best-effort reads return `cancelled`
+(409). Cancelled create/storno/deletion/credit-entry writes return `outcome_unknown` (500) with
+`cause: "cancelled"`. `Fault::is_cancelled() -> Option<bool>` identifies cancellation independently of
+`TerminalCode::is_outcome_unknown()`; unknown codes or causes return `None`. An absent cause makes no
+machine-readable cancellation claim about an older stored completion. Cancellation is not rollback:
+do not automatically retry or reissue. Reconcile a cancelled write before deliberately renewing it.
+This changes cancellation behavior in the next breaking release; stored completions retain their old shape.
 
 This worker emits the known tokens of `contract::TerminalCode`; a client preserves a newer token as `Other`.
 A szamlazz.hu code never travels in
@@ -583,6 +602,7 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
+| `cancelled` | 409 | Intentional cancellation during an ordinary read, account resolution or best-effort read. No write was sent. | Respect the stop; do not automatically retry. |
 | `invalid_input` | 400 | The request is malformed: its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent. Or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_credit_entries`, a replacing `set_credit_entries` (`additive: false`) with no entries (the wire contract takes five, and an empty replace would clear the invoice's credit entries; nothing is sent), or a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
@@ -591,8 +611,8 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
-A 5xx whose `x-restate-error-source` is `invocation` is **this worker's** answer, not the Restate ingress being
-down. Restate's HTTP invocation docs say to treat `invocation` errors as non-retryable and to auto-retry a 5xx
+A 5xx whose `x-restate-error-source` is `invocation` is an invocation failure, including native kill errors,
+not the Restate ingress being down. Restate's HTTP invocation docs say to treat `invocation` errors as non-retryable and to auto-retry a 5xx
 only when its source is `ingress` (or absent); do that here: page on an `invocation` 503 instead of retrying into
 it (`credentials_rejected` in particular repeats identically until the deployment is fixed) and only then retry
 with a new `Idempotency-Key` or read `get`.

@@ -20,7 +20,7 @@ use restate_sdk::prelude::{Context, ObjectContext, SharedObjectContext};
 use restate_sdk::serde::Json;
 
 use crate::account::BoxFuture;
-use crate::contract::{IssuedKind, TerminalCode};
+use crate::contract::{FaultCause, IssuedKind, TerminalCode};
 use crate::gateway::{
     FoundDocument, Gateway, OwnershipOutcome, QueryOutcome, SzamlazzAnswer, Unanswered,
 };
@@ -95,12 +95,30 @@ mod journaled {
 
 pub(super) use crate::contract::Fault;
 
+#[cfg(test)]
+#[path = "support/cancellation_tests.rs"]
+mod cancellation_tests;
+
 /// The service-side constructors of the contract's [`Fault`], one per way the
 /// handlers fail: each names its [`TerminalCode`] and writes the message the
 /// caller reads. The wire shape is the contract's; the conversion to the
 /// SDK's `TerminalError` hands it the code's status and the fault JSON as
 /// the message, which the ingress wraps in its envelope.
 impl Fault {
+    pub(super) fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(TerminalCode::Cancelled, message)
+    }
+
+    /// Annotate an operation-specific uncertain write fault from the SDK's
+    /// run verdict, never from the dependency's prose.
+    pub(super) fn with_run_cause(self, error: &TerminalError) -> Self {
+        if is_cancelled(error) {
+            self.with_cause(FaultCause::Cancelled)
+        } else {
+            self
+        }
+    }
+
     pub(super) fn invalid_input(message: impl Into<String>) -> Self {
         Self::new(TerminalCode::InvalidInput, message)
     }
@@ -298,11 +316,8 @@ impl From<Fault> for HandlerError {
 
 /// The fault of a read step that ended without an answer: the read policy is
 /// exhausted (500, carrying the last `Unanswered`'s message) or the
-/// invocation was cancelled (409). Both are the `unavailable` fault (the
-/// fault vocabulary is the seven codes, and a cancelled read sent nothing,
-/// so nothing is unknown about the document), but the message tells them
-/// apart: an exhausted read says to retry, a cancelled one does not, since
-/// Restate's guidance on a cancellation is that the caller does not retry it.
+/// invocation was cancelled (409). Exhaustion is `unavailable`; cancellation
+/// is `cancelled`, with no advice to automatically retry.
 /// The caller attaches the document it was reading about when it knows one.
 pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
     if let Some(fault) = initialization_fault(
@@ -312,7 +327,7 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
         return fault;
     }
     if is_cancelled(error) {
-        return Fault::unavailable(format!(
+        return Fault::cancelled(format!(
             "the {step} read was cancelled ({}) before szamlazz.hu answered; nothing was sent",
             error.code()
         ));
@@ -352,15 +367,14 @@ pub(super) fn is_cancelled(error: &TerminalError) -> bool {
 /// unknown, rather than failing a handler whose answer is known. A
 /// cancellation is never swallowed: the invocation was told to stop, and a
 /// cancelled invocation must not complete as `reversed` as if nothing had
-/// happened; it is propagated as it came, so the SDK reports the
-/// cancellation.
+/// happened; it is reported as the same structured cancellation as every read.
 ///
 /// # Errors
 ///
-/// The cancellation, unchanged.
-pub(super) fn best_effort(step: &str, error: TerminalError) -> Result<(), TerminalError> {
-    if is_cancelled(&error) {
-        return Err(error);
+/// The structured read cancellation.
+pub(super) fn best_effort(step: &str, error: &TerminalError) -> Result<(), Fault> {
+    if is_cancelled(error) {
+        return Err(read_exhausted(step, error));
     }
     tracing::warn!(
         step,
@@ -534,7 +548,16 @@ where
             RunRetryPolicy::new().max_attempts(1),
             || async move { Ok(f().await) },
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if is_cancelled(&error) {
+                HandlerError::from(Fault::cancelled(
+                    "namespace pinning was cancelled; nothing was sent",
+                ))
+            } else {
+                HandlerError::from(error)
+            }
+        })?;
     Ok(value)
 }
 
@@ -647,14 +670,14 @@ where
 ///
 /// # Errors
 ///
-/// A cancellation of the invocation, as it came: never swallowed, so a
+/// A structured cancellation of the invocation: never swallowed, so a
 /// cancelled invocation does not complete as if nothing had happened.
 pub(in crate::service) async fn run_best_effort<'ctx, C, T, F, Fut>(
     ctx: &C,
     name: impl Into<String>,
     exec: &Execution,
     f: F,
-) -> Result<Option<T>, TerminalError>
+) -> Result<Option<T>, Fault>
 where
     C: RunCtx<'ctx>,
     F: FnOnce(Arc<Gateway>) -> Fut + Send + 'ctx,
@@ -672,7 +695,7 @@ where
     .await
     {
         Ok(value) => Ok(Some(value)),
-        Err(error) => best_effort(&name, error).map(|()| None),
+        Err(error) => best_effort(&name, &error).map(|()| None),
     }
 }
 
@@ -970,7 +993,7 @@ mod tests {
 
     /// A read step that ended without an answer (the read policy exhausted
     /// (500 carrying the last `Unanswered`) or the invocation cancelled (409))
-    /// is the `unavailable` fault naming the step and the last failure, about
+    /// is `unavailable` on exhaustion or `cancelled`, about
     /// the document when the caller attaches one.
     #[test]
     fn an_exhausted_read_is_a_structured_unavailable() {
@@ -1012,7 +1035,11 @@ mod tests {
         let cancelled = TerminalError::new_with_code(409, "cancelled");
         let error = TerminalError::try_from(read_exhausted("lookup-proforma", &cancelled))
             .expect("known fault");
-        assert_eq!(error.code(), 503, "a cancellation is the same fault code");
+        assert_eq!(
+            error.code(),
+            409,
+            "cancellation is distinct from unavailability"
+        );
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("lookup-proforma"), "{message}");
@@ -1033,26 +1060,26 @@ mod tests {
     /// after a `warn` naming the step. They never swallow a cancellation: the SDK
     /// ends a cancelled run with 409, and an invocation told to stop must not
     /// answer `reversed` as if nothing had happened (#65); the error is
-    /// propagated as it came.
+    /// propagated as a structured fault.
     #[test]
     fn a_best_effort_read_swallows_exhaustion_but_propagates_a_cancellation() {
         let capture = LogCapture::default();
         let guard = capture.subscribe();
         drop(best_effort(
             "hint-storno-warmup",
-            TerminalError::new_with_code(500, "warm-up"),
+            &TerminalError::new_with_code(500, "warm-up"),
         ));
         LogCapture::rebuild_interest();
 
         let exhausted =
             TerminalError::new_with_code(500, "szamlazz.hu is unavailable: maintenance");
-        best_effort("hint-storno-SZ-1", exhausted).expect("exhaustion is swallowed");
+        best_effort("hint-storno-SZ-1", &exhausted).expect("exhaustion is swallowed");
 
         let cancelled = TerminalError::new_with_code(409, "cancelled");
         let error =
-            best_effort("hint-storno-SZ-1", cancelled).expect_err("a cancellation propagates");
-        assert_eq!(error.code(), 409);
-        assert_eq!(error.message(), "cancelled");
+            best_effort("hint-storno-SZ-1", &cancelled).expect_err("a cancellation propagates");
+        assert_eq!(error.status(), Some(409));
+        assert_eq!(error.is_cancelled(), Some(true));
         drop(guard);
 
         let logs = capture.logs();

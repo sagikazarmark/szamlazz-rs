@@ -71,7 +71,7 @@ impl Execution {
             .map_err(|error| {
                 target_fault(
                     initialization_fault(&error, DELETE_RECOVERY)
-                        .unwrap_or_else(|| delete_unknown(&error)),
+                        .unwrap_or_else(|| delete_unknown(&error).with_run_cause(&error)),
                 )
             })?
         };

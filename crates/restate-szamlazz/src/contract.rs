@@ -3,15 +3,18 @@
 //!
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
 //! returned as values with HTTP 200 (see [`CreateOutcome`] and [`ConflictReason`]),
-//! while the [`TerminalCode`]s are reserved for faults. Three of the seven
-//! known codes mean "outcome unknown: retry with a new `Idempotency-Key`, or read
+//! while the [`TerminalCode`]s are reserved for faults. Three of the eight
+//! known codes mean "outcome unknown: reconcile using a new `Idempotency-Key`, or read
 //! `Szamlazz.Order.get`" (`outcome_unknown`,
 //! `unavailable`, `credentials_rejected`); the other known codes are settled: the same
 //! request never succeeds, or szamlazz.hu's own answer is passed through
-//! ([`TerminalCode`] says which). The module depends on
+//! ([`TerminalCode`] says which). Cancellation is independent: a read reports
+//! `cancelled`, a write `outcome_unknown` with [`FaultCause::Cancelled`]. Neither
+//! authorizes automatic retry. The module depends on
 //! [`identity`](crate::identity) alone (one way: `identity` imports nothing
 //! of it) and compiles without `restate-sdk`; with the `schemars` feature the
-//! types also derive JSON Schemas for the `OpenAPI` export.
+//! types also derive JSON Schemas. Faults are outside the success-output
+//! discovery schema; callers use [`crate::service::decode_fault`].
 //!
 //! Every request type refuses a field it does not know
 //! (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the
@@ -106,6 +109,9 @@ use crate::identity::{ExternalId, OrderKey};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TerminalCode {
+    /// Intentional cancellation during a read or account resolution. HTTP 409.
+    /// No write was sent; cancellation does not authorize automatic retry.
+    Cancelled,
     /// The create or storno step ran out of the issue policy while a document
     /// may or may not have been issued; the next call's external-id query
     /// finds whatever landed. HTTP 500.
@@ -151,11 +157,9 @@ pub enum TerminalCode {
 }
 
 impl TerminalCode {
-    /// Known codes, in the order of the fault tables the READMEs carry.
-    /// (`account_mismatch`, 409, was the eighth until the account pins were
-    /// dropped: no handler compares a found document with the account any
-    /// more, so nothing could raise it.)
-    pub const KNOWN: [Self; 7] = [
+    /// Known codes, including intentional read cancellation.
+    pub const KNOWN: [Self; 8] = [
+        Self::Cancelled,
         Self::InvalidInput,
         Self::UnknownAccount,
         Self::NotFound,
@@ -169,6 +173,7 @@ impl TerminalCode {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Unavailable => "unavailable",
             Self::InvalidInput => "invalid_input",
@@ -180,13 +185,16 @@ impl TerminalCode {
         }
     }
 
-    /// Whether the fault means "outcome unknown": the caller retries with a
+    /// Whether the fault means "outcome unknown": the caller reconciles with a
     /// new `Idempotency-Key` or reads `Szamlazz.Order.get`, and pages rather
     /// than auto-retries. Exactly three codes do: `outcome_unknown` (the
     /// write step ran out of its policy), `unavailable` (szamlazz.hu, the
     /// account resolver or the credential store did not answer) and
     /// `credentials_rejected` (the key is wrong, and an earlier execution may
-    /// have landed). The other four are settled: retrying the same request
+    /// have landed). Check [`Fault::is_cancelled`] separately: cancellation
+    /// requires reconciliation before deliberately renewing a write, never an
+    /// automatic retry. `cancelled` itself is a read cancellation and returns
+    /// `Some(false)`. The other four are settled: retrying the same request
     /// repeats the answer, so the caller fixes the request, the number, the
     /// scope or the account, or (for `szamlazz_error`) sends again later with
     /// a new key. An unknown code returns `None`: this version cannot
@@ -221,9 +229,11 @@ impl TerminalCode {
     pub const fn is_outcome_unknown(&self) -> Option<bool> {
         match self {
             Self::OutcomeUnknown | Self::Unavailable | Self::CredentialsRejected => Some(true),
-            Self::InvalidInput | Self::UnknownAccount | Self::NotFound | Self::SzamlazzError => {
-                Some(false)
-            }
+            Self::Cancelled
+            | Self::InvalidInput
+            | Self::UnknownAccount
+            | Self::NotFound
+            | Self::SzamlazzError => Some(false),
             Self::Other(_) => None,
         }
     }
@@ -236,6 +246,7 @@ impl TerminalCode {
             // The caller's request: the same request never succeeds.
             Self::InvalidInput | Self::UnknownAccount => Some(400),
             Self::NotFound => Some(404),
+            Self::Cancelled => Some(409),
             // szamlazz.hu's own answer, passed through.
             Self::SzamlazzError => Some(422),
             Self::OutcomeUnknown => Some(500),
@@ -258,6 +269,7 @@ impl fmt::Display for TerminalCode {
 impl From<String> for TerminalCode {
     fn from(token: String) -> Self {
         match token.as_str() {
+            "cancelled" => Self::Cancelled,
             "outcome_unknown" => Self::OutcomeUnknown,
             "unavailable" => Self::Unavailable,
             "invalid_input" => Self::InvalidInput,
@@ -304,8 +316,53 @@ impl schemars::JsonSchema for TerminalCode {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "The worker fault code. Known values: invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Other strings are preserved without an inferred HTTP status or outcome classification.",
+            "description": "The worker fault code. Known values: cancelled (409), invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Cancellation does not authorize automatic retry. Other strings are preserved without an inferred HTTP status or outcome classification.",
         })
+    }
+}
+
+/// A machine-readable cause, independent of the fault's outcome classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum FaultCause {
+    /// The invocation was intentionally cancelled; an external write may still
+    /// have landed. Reconcile before deliberately renewing the operation.
+    Cancelled,
+    /// An unfamiliar cause, preserved without invented recovery advice.
+    Other(String),
+}
+
+impl FaultCause {
+    /// The causes this release understands.
+    pub const KNOWN: [Self; 1] = [Self::Cancelled];
+
+    /// The cause's wire token.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Other(token) => token,
+        }
+    }
+}
+
+impl From<String> for FaultCause {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "cancelled" => Self::Cancelled,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<FaultCause> for String {
+    fn from(cause: FaultCause) -> Self {
+        match cause {
+            FaultCause::Cancelled => "cancelled".to_owned(),
+            FaultCause::Other(token) => token,
+        }
     }
 }
 
@@ -342,6 +399,10 @@ pub struct Fault {
     pub code: TerminalCode,
     /// What happened and what the caller does next, in prose.
     pub message: String,
+    /// Why the operation ended, when separately known. A cancelled write keeps
+    /// `outcome_unknown` and carries `cancelled` here. Older faults omit it.
+    #[serde(default)]
+    pub cause: Option<FaultCause>,
     /// The szamlazz.hu code, when szamlazz.hu's answer is what the fault is
     /// about (`szamlazz_error` always; `credentials_rejected`; `unavailable`
     /// on an inconclusive code).
@@ -364,11 +425,36 @@ impl Fault {
         Self {
             code,
             message: message.into(),
+            cause: None,
             szamlazz_code: None,
             order: None,
             kind: None,
             external_id: None,
         }
+    }
+
+    /// The same fault carrying a machine-readable cause.
+    #[must_use]
+    pub fn with_cause(mut self, cause: FaultCause) -> Self {
+        self.cause = Some(cause);
+        self
+    }
+
+    /// Whether this fault reports intentional cancellation. This is separate
+    /// from [`TerminalCode::is_outcome_unknown`]: a cancelled write is both.
+    /// Unknown codes or causes return `None`; no prose is inspected. An older
+    /// fault without a cause makes no machine-readable cancellation claim.
+    #[must_use]
+    pub const fn is_cancelled(&self) -> Option<bool> {
+        if matches!(self.code, TerminalCode::Other(_))
+            || matches!(self.cause, Some(FaultCause::Other(_)))
+        {
+            return None;
+        }
+        Some(
+            matches!(self.code, TerminalCode::Cancelled)
+                || matches!(self.cause, Some(FaultCause::Cancelled)),
+        )
     }
 
     /// The same fault carrying the szamlazz.hu code its answer had.
@@ -506,6 +592,7 @@ mod tests {
             serde_json::json!({
                 "code": "invalid_input",
                 "message": "malformed request body",
+                "cause": null,
                 "szamlazz_code": null,
                 "order": null,
                 "kind": null,
@@ -528,6 +615,7 @@ mod tests {
             serde_json::json!({
                 "code": "not_found",
                 "message": "invoice SZ-9 is not known (code 7)",
+                "cause": null,
                 "szamlazz_code": "7",
                 "order": "ORD-1",
                 "kind": "invoice",
@@ -545,12 +633,13 @@ mod tests {
         assert_eq!(newer.code, TerminalCode::Unavailable);
     }
 
-    /// Every fault either service raises is one of these seven codes, each
+    /// Every fault either service raises is one of these eight codes, each
     /// with the HTTP status the ingress reports for it; the token is the
     /// snake-case variant name and round-trips through serde.
     #[test]
     fn terminal_code_tokens() {
         let expected = [
+            (TerminalCode::Cancelled, "cancelled", 409, false),
             (TerminalCode::OutcomeUnknown, "outcome_unknown", 500, true),
             (TerminalCode::Unavailable, "unavailable", 503, true),
             (TerminalCode::InvalidInput, "invalid_input", 400, false),
@@ -601,6 +690,7 @@ mod tests {
         let wire = serde_json::json!({
             "code": " future_fault/é 🧾 ",
             "message": "a newer worker's explanation",
+            "cause": null,
             "szamlazz_code": "999",
             "order": "ORD-1",
             "kind": "invoice",

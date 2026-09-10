@@ -9,7 +9,9 @@
 //! "outcome unknown: retry with a new `Idempotency-Key`, or read `get`"
 //! (`outcome_unknown`, `unavailable`, `credentials_rejected`), the rest are
 //! settled: the same request never succeeds, or szamlazz.hu's own answer is
-//! passed through. On the wire a fault is the JSON string inside Restate's
+//! passed through, or a read was intentionally `cancelled` (409). A cancelled
+//! write keeps `outcome_unknown` with `cause: cancelled`; reconcile before
+//! deliberately renewing it. On the wire a fault is the JSON string inside Restate's
 //! ingress envelope (`{"code": <HTTP status>, "message": "<fault JSON>",
 //! "source": "invocation"}`): the fault → `TerminalError` conversion in
 //! `support` hands the SDK the status and the fault JSON as the message, and
@@ -52,6 +54,7 @@ mod body;
 mod create;
 mod delete;
 mod handlers;
+mod ingress;
 #[cfg(test)]
 mod journal;
 mod prologue;
@@ -61,6 +64,7 @@ mod support;
 
 pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
+pub use ingress::decode_fault;
 pub use support::FaultConversionError;
 
 use prologue::Execution;

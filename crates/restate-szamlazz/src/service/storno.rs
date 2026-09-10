@@ -249,11 +249,11 @@ fn storno_response(
 /// issue policy exhausted (500, carrying the last `Unconfirmed`'s display) or
 /// the invocation cancelled (409). `outcome_unknown` either way, since a
 /// cancelled write step's send may have landed (the SDK's bare `409
-/// cancelled` would lose that); the message names which. Nothing is
+/// cancelled` would lose that); the cause names which. Nothing is
 /// recorded, and the next call's verify and lookup find whatever landed.
 /// `next` is what the caller does about it (`retry with a new
-/// Idempotency-Key`, `call storno again`): the storno is idempotent on the
-/// server, so the same next step serves a cancellation.
+/// Idempotency-Key`, `call storno again`) after exhaustion. Cancellation
+/// instead requires reconciliation before deliberately renewing the operation.
 fn storno_outcome_unknown(error: &TerminalError, next: &str) -> Fault {
     if let Some(fault) = initialization_fault(
         error,
@@ -263,9 +263,9 @@ fn storno_outcome_unknown(error: &TerminalError, next: &str) -> Fault {
     }
     if is_cancelled(error) {
         return Fault::outcome_unknown(format!(
-            "the storno step was cancelled ({}) before its outcome was confirmed; a send may have landed: {next}",
+            "the storno step was cancelled ({}) before its outcome was confirmed; a send may have landed: query the original invoice, then retry with a new Idempotency-Key if still intended",
             error.code()
-        ));
+        )).with_run_cause(error);
     }
     Fault::outcome_unknown(format!(
         "the storno step ended without a confirmed outcome ({}): {}; {next}",
@@ -1118,7 +1118,8 @@ mod tests {
             message.contains("cancelled (409)") && message.contains("a send may have landed"),
             "names the cancellation and its consequence: {message}"
         );
-        assert!(message.ends_with("call storno again"), "{message}");
+        assert!(message.contains("query the original invoice"), "{message}");
+        assert!(message.ends_with("if still intended"), "{message}");
     }
 
     /// What the two best-effort reads make of an answer, for a document the

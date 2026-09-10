@@ -27,6 +27,8 @@
 //!   manifest and the `OpenAPI` export carry typed request and response schemas. It enables
 //!   `restate-sdk/schemars` too, and Cargo unifies features per build: with it on, every
 //!   `Json<T>` handler on the same endpoint (your own included) needs `T: JsonSchema`.
+//!   Faults are outside the success-output discovery schema; generated ingress
+//!   clients use [`service::decode_fault`] in addition to their success types.
 //!
 //! ## Compatibility
 //!
@@ -257,12 +259,15 @@
 //!
 //! Domain outcomes (`issued`, `already_issued`, `reconciled`, `reversed`, `rejected`,
 //! `conflict{reason}`) are returned as data with HTTP 200. A `TerminalError` is a fault, whose body
-//! is a [`contract::Fault`] with a [`contract::TerminalCode`]. Three of the seven codes mean
+//! is a [`contract::Fault`] with a [`contract::TerminalCode`]. Three of the eight codes mean
 //! "outcome unknown: retry with a new `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no
 //! document exists": `outcome_unknown`, `unavailable`, `credentials_rejected`. The other four are
 //! settled and are not retried as they are: `invalid_input`, `unknown_account` and `not_found` are
 //! the caller's request (fix it), `szamlazz_error` is szamlazz.hu's own answer passed through.
-//! [`contract::TerminalCode`] says which is which.
+//! Intentional read cancellation is `cancelled` (409); a cancelled write keeps
+//! `outcome_unknown` with `cause: cancelled`. Check [`contract::Fault::is_cancelled`]
+//! before considering retry: reconcile a cancelled write before deliberately
+//! renewing it. [`contract::TerminalCode`] says which is which.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
