@@ -6,10 +6,12 @@
 //! of a `restate_sdk` endpoint served in-process ([`Restate::deploy`]).
 //!
 //! A server the harness starts is stopped when the handle drops, and by a
-//! SIGINT or SIGTERM to the test process (a handler installed with the first
-//! server started), which unwinds
-//! nothing: the process leads a process group of its own and the group is
-//! killed.
+//! SIGINT or SIGTERM to the test process, which unwinds nothing: the process
+//! leads a process group of its own and the group is killed. Both signals are
+//! registered before the first spawn; initialization failure prevents launch.
+//! Spawn and registration share a lock with shutdown, which closes admission
+//! before killing the groups, covering concurrent launches too. Signal exits
+//! use statuses 130 / 143; normal drop also reaps the child.
 
 use std::fmt;
 use std::fs;
@@ -125,9 +127,17 @@ pub struct Restate {
 /// Every server this test process started and has not stopped yet, by the
 /// process group that stops it: what [`stop_on_signal`] kills when the process
 /// is told to stop.
-static STARTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static STARTED: Mutex<Started> = Mutex::new(Started {
+    groups: Vec::new(),
+    stopping: false,
+});
 
-fn started() -> std::sync::MutexGuard<'static, Vec<u32>> {
+struct Started {
+    groups: Vec<u32>,
+    stopping: bool,
+}
+
+fn started() -> std::sync::MutexGuard<'static, Started> {
     STARTED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -157,66 +167,58 @@ fn kill_group(pid: u32) {
 /// exits with the signal's conventional status. A signal ends the process
 /// without unwinding, so nothing's `Drop` runs; without this, a Ctrl-C leaves
 /// the server (in a group of its own, so the terminal's SIGINT does not reach
-/// it) holding its ports. Installed once, on the first server started; its
-/// own thread and runtime, so it outlives the test that started the first
-/// server.
+/// it) holding its ports. Installed once, before the first server can spawn;
+/// the caller waits for both registrations and panics if initialization fails.
+/// Its own thread and runtime outlive the test that started the first server.
 fn stop_on_signal() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
-        let handler = std::thread::Builder::new()
+        // Concurrent first launches all wait for this handshake. A failed
+        // initialization poisons INSTALL, preventing later launches as well.
+        let (ready, registered) = std::sync::mpsc::sync_channel(0);
+        std::thread::Builder::new()
             .name("e2e-stop-on-signal".to_owned())
-            .spawn(|| {
+            .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
-                    .build();
-                let Ok(runtime) = runtime else {
-                    eprintln!(
-                        "WARNING: no runtime for the stop-signal handler; a Ctrl-C will leave the \
-                         Restate servers this run starts behind (`pkill restate-server`)"
-                    );
-                    return;
-                };
+                    .build()
+                    .expect("a runtime for the stop-signal handler before spawning any server");
                 runtime.block_on(async {
-                    let (signal, status) = match stop_signal().await {
-                        Ok(stopped) => stopped,
-                        Err(error) => {
-                            eprintln!(
-                                "WARNING: the stop-signal handler could not register ({error}); a \
-                                 Ctrl-C will leave the Restate servers this run starts behind \
-                                 (`pkill restate-server`)"
-                            );
-                            return;
-                        }
+                    use tokio::signal::unix::{SignalKind, signal};
+                    #[cfg(test)]
+                    lifecycle_tests::pause("register");
+                    let mut interrupt = signal(SignalKind::interrupt())
+                        .expect("register SIGINT before spawning any server");
+                    let mut terminate = signal(SignalKind::terminate())
+                        .expect("register SIGTERM before spawning any server");
+                    ready.send(()).expect("the launching thread waits for registration");
+                    let (signal, status) = tokio::select! {
+                        _ = interrupt.recv() => ("SIGINT", 130),
+                        _ = terminate.recv() => ("SIGTERM", 143),
                     };
-                    let groups = started().clone();
-                    eprintln!(
-                        "{signal}: stopping {} Restate server(s) the suite started, then exiting",
-                        groups.len()
-                    );
-                    for group in &groups {
-                        kill_group(*group);
+                    #[cfg(test)]
+                    lifecycle_tests::pause("signal");
+                    {
+                        let mut started = started();
+                        started.stopping = true;
+                        eprintln!(
+                            "{signal}: stopping {} Restate server(s) the suite started, then exiting",
+                            started.groups.len()
+                        );
+                        // Keep teardown from reaping a leader (and allowing
+                        // its pid to be reused) before we signal its group.
+                        for group in &started.groups {
+                            kill_group(*group);
+                        }
                     }
+                    #[cfg(test)]
+                    lifecycle_tests::pause("shutdown");
                     std::process::exit(status);
                 });
-            });
-        if let Err(error) = handler {
-            eprintln!(
-                "WARNING: no thread for the stop-signal handler ({error}); a Ctrl-C will leave the \
-                 Restate servers this run starts behind (`pkill restate-server`)"
-            );
-        }
+            })
+            .expect("a stop-signal thread before spawning any server");
+        registered.recv().expect("both stop signals registered before spawning any server");
     });
-}
-
-/// The first of SIGINT and SIGTERM, with the exit status convention for it.
-async fn stop_signal() -> std::io::Result<(&'static str, i32)> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    Ok(tokio::select! {
-        _ = interrupt.recv() => ("SIGINT", 130),
-        _ = terminate.recv() => ("SIGTERM", 143),
-    })
 }
 
 impl Restate {
@@ -309,9 +311,20 @@ impl Restate {
             .stdout(Stdio::from(log.try_clone().expect("the server log")))
             .stderr(Stdio::from(log))
             .process_group(0);
+        #[cfg(test)]
+        lifecycle_tests::pause("install");
+        stop_on_signal();
+        // A signal cannot miss a child between spawn and registration.
+        let mut registry = started();
+        assert!(
+            !registry.stopping,
+            "cannot launch a Restate server during signal shutdown"
+        );
         let child = command
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {}: {error}", binary.display()));
+        #[cfg(test)]
+        lifecycle_tests::spawned(child.id());
         eprintln!(
             "restate-server (pid {}) on {ports}, base dir {}",
             child.id(),
@@ -322,8 +335,10 @@ impl Restate {
             child,
             base_dir,
         };
-        started().push(process.group());
-        stop_on_signal();
+        registry.groups.push(process.group());
+        drop(registry);
+        #[cfg(test)]
+        lifecycle_tests::pause("registered");
         Self::new(
             format!("http://127.0.0.1:{admin}"),
             format!("http://127.0.0.1:{ingress}"),
@@ -541,11 +556,15 @@ impl Drop for Restate {
             return;
         };
         let group = process.group();
+        // Serialize normal teardown with shutdown and launches too: a group
+        // stays registered until it has been killed and its leader reaped.
+        let mut registry = started();
         kill_group(group);
-        started().retain(|started| *started != group);
         // The group is killed above; this reaps the leader.
         let _ = process.child.kill();
         let _ = process.child.wait();
+        registry.groups.retain(|started| *started != group);
+        drop(registry);
         if std::thread::panicking() {
             eprintln!(
                 "restate-server's base dir is kept for inspection: {}",
@@ -567,3 +586,6 @@ pub struct Deployment {
     /// reaches it there, on every interface of this host otherwise.
     pub port: u16,
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

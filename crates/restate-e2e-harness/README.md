@@ -58,6 +58,21 @@ server, `host.docker.internal` for a reused one). The endpoint is bound to the l
 there (a spawned server, no override) and to every interface otherwise (a reused server may be a container reaching
 back to the host).
 
+### Process lifecycle
+
+Before any child can be spawned, the launcher waits for both SIGINT and SIGTERM
+to be registered on a dedicated thread/runtime. Initialization failure panics
+and prevents this and later launches. Spawning and registering a process group
+share a lock with shutdown: a launch already inside that boundary is included
+in cleanup; once shutdown closes admission, further launches are refused.
+
+A stop signal kills every registered server's process group (including descendants
+that remain in it), then exits the test process with status **130** for SIGINT or
+**143** for SIGTERM. This covers signals during first startup and concurrent
+launches. Normal handle drop kills the group and reaps the child. Signal exit does
+not unwind or remove the server's temporary directory; normal drop removes it
+unless the test is panicking. SIGKILL cannot run cleanup.
+
 ## Example
 
 The one copy, compiled as a doctest of the crate:
@@ -87,7 +102,11 @@ let runs = restate.admin().runs(reply.invocation_id()).await;
 ## Tests
 
 `cargo test -p restate-e2e-harness` runs the pure decisions (the gate, the sampler, the table check, the call
-grammar, the envelope check) without a server.
+grammar, the envelope check) and subprocess lifecycle regressions without a real
+server. The lifecycle tests use a fake executable with a descendant, real SIGINT
+and SIGTERM, and test-only barriers around registration, spawn and shutdown; they
+check signal exit statuses and that no child or descendant remains alive, plus
+refusal to launch when signal initialization fails.
 `RESTATE_SERVER_BIN=… cargo test -p restate-e2e-harness -- --ignored` runs `e2e_smoke`, the crate's contract
 against a server of its own (never a reused one: the test deploys a service and leaves its invocations retained,
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the

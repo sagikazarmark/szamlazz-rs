@@ -244,6 +244,9 @@ impl Launcher {
     /// answering and `/version` reporting each of `spec`'s features as the
     /// spec has it. Panics when the server does not come up (a spawned
     /// server's own log tail in the message) or reports a feature otherwise.
+    /// A binary launch also panics if stop-signal initialization fails or
+    /// signal shutdown has begun; both signal registrations are ready before
+    /// any child can spawn. See the [`crate::server`] lifecycle guarantee.
     pub async fn launch(self, spec: &ServerSpec) -> Restate {
         spec.assert_valid();
         let restate = match self {
