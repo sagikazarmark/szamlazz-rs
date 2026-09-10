@@ -62,8 +62,10 @@
 //!
 //! # Example
 //!
-//! The README's example (a spec, the gate, a deployment, a call and its runs)
-//! is compiled as a doctest of this crate; the example is kept there, once.
+//! The README's standalone quick start includes dev-dependencies, a bound
+//! service and a complete async test: the gate, deployment, call and retained
+//! run. It is compiled as a doctest and executed by `e2e_quick_start` in an
+//! isolated consumer crate; the example is kept in the README, once.
 //!
 //! # Evolvability
 //!

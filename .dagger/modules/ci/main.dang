@@ -51,13 +51,16 @@ type Ci {
   The `tests/e2e` suite of `restate-szamlazz` (the `Szamlazz.Order` and
   `Szamlazz.Agent` handlers, the multi-account flag day and scope isolation,
   the journal scan for the agent key, the step-name table check and the protocol-v7
-  canary) and the `restate-e2e-harness` crate's own `e2e_smoke` (its contract
-  with no consumer). `CI` is set, so a run without a server fails instead of
+  canary) and the `restate-e2e-harness` crate's own e2e tests, including
+  `e2e_quick_start` (the README copied into an isolated consumer crate).
+  `CI` is set, so a run without a server fails instead of
   skipping.
 
   Runs with the selection `compiled` built (`--workspace --all-features`, every
-  test target), narrowed to the ignored e2e tests by name, so nothing is
-  compiled here: selecting a package (`-p restate-szamlazz`) or a target
+  test target), narrowed to the ignored e2e tests by name, so workspace targets
+  need no compilation here. The quick-start test separately resolves and builds
+  its documented dev-dependencies outside workspace feature unification.
+  Selecting a package (`-p restate-szamlazz`) or a target
   (`--test e2e`) unifies dev-dependency features differently (only the
   packages with a selected dev target contribute theirs) and recompiles
   fifty-odd crates, `tokio`, `hyper`, `reqwest` and `restate-sdk` among them,

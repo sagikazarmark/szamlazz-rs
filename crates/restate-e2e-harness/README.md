@@ -46,15 +46,20 @@ run names, its scenarios and the harness type that composes them.
 Either reuse a running one (`RESTATE_ADMIN_URL=http://127.0.0.1:9070 RESTATE_INGRESS_URL=http://127.0.0.1:8080`; a
 container of the Restate image with the features the suite expects), or point `RESTATE_SERVER_BIN` at the binary,
 which the Restate image carries at `/usr/local/bin/restate-server`. In this workspace the Dagger `ci` module
-exports it (`dagger call ci restate-server export --path ./restate-server`); anywhere else, copy it out of the
-image:
+exports it (`dagger call ci restate-server export --path ./restate-server`); anywhere else on Linux, copy it out of
+the image (Docker selects the host architecture):
 
 ```sh
 id=$(docker create docker.restate.dev/restatedev/restate:1.7.8)
 docker cp "$id:/usr/local/bin/restate-server" ./restate-server
 docker rm "$id"
-RESTATE_SERVER_BIN=$PWD/restate-server cargo test -p restate-e2e-harness -- --ignored
 ```
+
+The image's binary is Linux-only. On macOS, use a native `restate-server` from the
+[Restate installation instructions](https://docs.restate.dev/installation).
+The quick start below is tested with **Rust SDK 0.12.0 and Restate server 1.7.8**,
+with vqueues, protocol v7 and scoped Virtual Objects enabled. This crate requires
+**Unix** and **Rust 1.92 or later**.
 
 `RESTATE_ENDPOINT_HOST` overrides the host the server reaches the in-process endpoint at (`127.0.0.1` for a spawned
 server, `host.docker.internal` for a reused one). The endpoint is bound to the loopback when the server reaches it
@@ -76,31 +81,88 @@ launches. Normal handle drop kills the group and reaps the child. Signal exit do
 not unwind or remove the server's temporary directory; normal drop removes it
 unless the test is panicking. SIGKILL cannot run cleanup.
 
-## Example
+## Quick start
 
-The one copy, compiled as a doctest of the crate:
+In a Rust crate using edition `2024`, add these to `Cargo.toml`:
 
-```rust,no_run
+```toml
+[dev-dependencies]
+restate-e2e-harness = "0.1"
+restate-sdk = "=0.12.0"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Save the complete test below as `tests/e2e.rs`. `macros` provides `#[tokio::test]`;
+`rt-multi-thread` enables the runtime selected by the test. The service retains its
+journal explicitly so its named run is still available after the call completes.
+
+```rust,no_run,test_harness
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
-use restate_e2e_harness::{Call, ReusePolicy, ServerSpec, launcher_or_skip};
-use restate_sdk::prelude::Endpoint;
+use restate_e2e_harness::{Call, ReusePolicy, ServerSpec, launcher_or_skip, run_result};
+use restate_sdk::prelude::*;
+use serde_json::json;
 
 const SERVER: ServerSpec = ServerSpec {
-    name: "main",
+    name: "quick-start",
     features: &[(VQUEUES, true), (PROTOCOL_V7, true), (SCOPED_VIRTUAL_OBJECTS, true)],
     env: &[],
 };
 
-# async fn run() {
-let Some(launcher) = launcher_or_skip(ReusePolicy::Allowed) else { return };
-let restate = launcher.launch(&SERVER).await;
-let endpoint = Endpoint::builder() /* .bind(MyService) */ .build();
-restate.deploy(endpoint).await;
-let reply = restate.invoke(&Call::service("MyService", "handler"), None, None).await;
-assert_eq!(reply.status, 200, "{}", reply.body);
-let runs = restate.admin().runs(reply.invocation_id()).await;
-# }
+struct Greeting;
+
+#[restate_sdk::service(name = "Greeting")]
+impl Greeting {
+    #[handler(journal_retention = "1d")]
+    async fn greet(&self, ctx: Context<'_>, name: String) -> HandlerResult<String> {
+        let greeting = ctx.run(|| async move { Ok(format!("Hello, {name}!")) })
+            .name("greet-person")
+            .await?;
+        Ok(greeting)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs RESTATE_SERVER_BIN"]
+async fn e2e_greeting() {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else { return };
+    let restate = launcher.launch(&SERVER).await;
+    restate.deploy(Endpoint::builder().bind(Greeting).build()).await;
+
+    let reply = restate
+        .invoke(&Call::service("Greeting", "greet"), Some(&json!("Ada")), None)
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body, json!("Hello, Ada!"));
+
+    let id = reply.invocation_id();
+    assert_eq!(restate.admin().runs(id).await, ["greet-person"]);
+    let journal = restate.admin().journal(id).await;
+    assert!(run_result(&journal, "greet-person")
+        .expect("retained greet-person result")
+        .raw_contains("Hello, Ada!"));
+}
 ```
+
+Select the binary obtained above and run the ignored test:
+
+```sh
+RESTATE_SERVER_BIN="$PWD/restate-server" cargo test --test e2e -- --ignored --nocapture
+```
+
+`ReusePolicy::Never` gives this test a server of its own, so its retained invocations
+cannot interfere with another suite. The gate ignores reuse URLs for this policy.
+Without `RESTATE_SERVER_BIN`, an explicitly run test prints a skip message on a
+developer machine; with `CI` set, it fails instead. Without `--ignored`, Cargo
+does not run this test at all, including in CI. Server ports are selected at launch;
+the handle stops the server on drop.
+
+This is the one maintained Rust example: the README is compiled by the crate's
+doctests using `test_harness` (so the async test body is typechecked). The ignored
+`e2e_quick_start` regression copies both blocks into a temporary standalone crate,
+patches only the harness dependency to the local source, and runs this exact test
+against a real server. Its fresh dependency resolution checks these features
+without workspace dev-dependency unification.
 
 ## Selecting objects to observe
 
@@ -219,6 +281,9 @@ service made private and public, and the server stops on drop.
 The same command runs `e2e_targets`: the same service/key unscoped and in two named scopes, exact and all-scope
 in-flight/await selection, and isolated versus aggregate `Watch` sampling. Another service and another key are
 excluded from every selection.
+It also runs `e2e_quick_start`, compiling and executing the README in a separate
+temporary crate. That check needs access to the Cargo registry (or a populated
+cache), retains the crate on failure, and removes it on success.
 
 ## License
 
