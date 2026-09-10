@@ -218,7 +218,13 @@ guarantee the rest.
    (two scopes reaching one account would split an order's per-key lock across two Virtual Objects). The static
    resolver's single `[account]` is served unscoped and knows no scope; its `[accounts.<scope>]` shape is served
    by scope only and is checked at load time: unique `(endpoint, agent_key)` pairs, the endpoint compared
-   normalised (`Endpoint::normalized`, so two spellings of one server are one), and unique ids.
+   normalised (`Endpoint::normalized`), and unique ids. Endpoint validation and comparison use the bundled
+   transport's URL parser, including default ports, dot segments (also encoded dots) and equivalent host
+   spellings. Comparison additionally drops fragments and deliberately folds trailing slashes; original text
+   stays in display, serialized Accounts and client configuration. This detects equivalent URL spellings,
+   not arbitrary DNS aliases, redirects, proxies or different keys opening one account. Preventing those
+   forms of fan-in remains the resolver's and operator's responsibility. Invalid URL syntax, including invalid
+   ports, fails configuration loading; endpoints require HTTP(S), a host and no userinfo.
 2. The scope → account mapping is append-only: moving traffic to another account means a new scope, never
    re-pointing an existing one. Appending a scope cannot create fan-in; any change that could put one account
    under two identities at once (the single → multi flag day above all) is a drain, switch, resume.

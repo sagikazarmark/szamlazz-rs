@@ -8,7 +8,7 @@ use restate_szamlazz::account::{Account, Endpoint};
 use restate_szamlazz::contract::Selector;
 use restate_szamlazz::gateway::{Gateway, QueryOutcome};
 use szamlazz_agent::{Credentials, reqwest};
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer};
 
 fn agent_key_on_the_wire(body: &str) -> Option<&str> {
@@ -24,6 +24,8 @@ fn agent_key_on_the_wire(body: &str) -> Option<&str> {
 async fn a_gateway_opened_over_a_caller_built_client_sends_through_it() {
     let server = MockServer::start().await;
     external_id_query("acme:ORD-1:invoice")
+        .and(path("/szamla//"))
+        .and(query_param("a", "1"))
         .respond_with(not_found())
         .mount(&server)
         .await;
@@ -34,9 +36,12 @@ async fn a_gateway_opened_over_a_caller_built_client_sends_through_it() {
         .build()
         .expect("http client");
     let mut account = Account::new("acme", "acme");
-    account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+    let original = format!("{}/a/../szamla//?a=1#ignored", server.uri());
+    account.endpoint = Endpoint::parse(&original).expect("endpoint");
+    let _comparison = account.endpoint.normalized();
     let gateway = Gateway::open_with_http(account, Credentials::agent_key("key-acme"), http)
         .expect("gateway");
+    assert_eq!(gateway.account().endpoint.as_str(), original);
 
     let outcome = gateway
         .query(&Selector::ExternalId("acme:ORD-1:invoice".to_owned()))

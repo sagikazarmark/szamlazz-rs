@@ -141,6 +141,14 @@ half of rule 1 at load time: unique `(endpoint, agent_key)` pairs and unique ids
 accounts that pinned one; the pin became optional, then was dropped, see the decision bullet below. A
 database-backed resolver must guarantee rules 1 and 2 itself.
 
+*Endpoint comparison follow-up (#214, 2026-09-10):* the check uses the bundled
+transport's URL parser for validation and canonicalization, then removes fragments
+and deliberately folds trailing slashes. Original configured text remains in the
+Account and client input. This catches equivalent URL spellings, including encoded
+dot segments, but cannot detect fan-in through arbitrary DNS aliases, redirects,
+proxies or different keys opening the same account; those remain the resolver's
+and operator's responsibility.
+
 ### Experimental Restate dependencies
 
 The scope reaches the SDK only under **service protocol v7**, and a scoped call to a Virtual Object needs

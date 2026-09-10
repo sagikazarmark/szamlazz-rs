@@ -51,7 +51,11 @@
 //! scopes. Which account a key opens (and whether it is
 //! a test account) is not checkable here or anywhere in the worker (no
 //! operation answers "which account am I?"), so the right key under the right
-//! scope is the operator's go-live check.
+//! scope is the operator's go-live check. Endpoint comparison uses the
+//! transport's URL canonicalization plus fragment removal and deliberate
+//! trailing-slash folding ([`Endpoint::normalized`]). DNS aliases, redirects,
+//! proxies and different keys opening one account remain the operator's
+//! responsibility; this check detects equivalent URL spellings.
 //! It implements both [`AccountResolver`] and [`CredentialStore`]: the agent
 //! key is inline and the credential reference is the account id.
 
@@ -856,7 +860,7 @@ mod tests {
     }
 
     /// The same key on the same endpoint is one szamlazz.hu account under two
-    /// scopes; the same key on another endpoint is not. The production
+    /// scopes; a distinct endpoint remains outside this comparison. The production
     /// endpoint is compared as such whether written or defaulted, and the
     /// error never echoes the key.
     #[test]
@@ -878,7 +882,7 @@ mod tests {
         config["accounts"]["acme"]["agent_key"] = json!(KEY);
         config["accounts"]["beta_events"]["agent_key"] = json!(KEY);
         config["accounts"]["beta_events"]["endpoint"] = json!("http://127.0.0.1:2/");
-        resolver(config).expect("the same key on another endpoint is another account");
+        resolver(config).expect("distinct endpoints are outside this comparison");
 
         let mut config = multi();
         config["accounts"]["acme"]["agent_key"] = json!(KEY);
@@ -899,8 +903,44 @@ mod tests {
 
     /// The fan-in rule holds across spellings of one endpoint: a
     /// trailing slash, the scheme's or the host's case, or the default port
-    /// written out do not make one szamlazz.hu account two. Two paths, two
-    /// schemes or two keys still do.
+    /// written out do not make one szamlazz.hu account two.
+    #[test]
+    fn duplicate_credentials_follow_transport_url_canonicalization() {
+        let http = crate::test_support::http_client();
+        for (acme, beta) in [
+            ("https://host/szamla/", "https://host/a/../szamla/"),
+            ("https://host/szamla/", "https://host/a/%2e%2E/szamla/"),
+            ("https://host/szamla/", "https://host/%2e/szamla/"),
+            ("https://host/szamla/", "https://%68ost/szamla/"),
+            ("https://xn--bcher-kva.example/", "https://bücher.example/"),
+            ("http://127.0.0.1/", "http://0x7f000001/"),
+            ("http://[::1]/", "http://[0:0:0:0:0:0:0:1]/"),
+        ] {
+            let first = http.post(acme).build().expect(acme);
+            let second = http.post(beta).build().expect(beta);
+            assert_eq!(
+                first.url(),
+                second.url(),
+                "transport control: {acme} vs {beta}"
+            );
+            let mut config = multi();
+            config["accounts"]["acme"]["agent_key"] = json!("shared-key");
+            config["accounts"]["beta_events"]["agent_key"] = json!("shared-key");
+            config["accounts"]["acme"]["endpoint"] = json!(acme);
+            config["accounts"]["beta_events"]["endpoint"] = json!(beta);
+            assert!(
+                matches!(
+                    resolver(config.clone()),
+                    Err(StaticConfigError::DuplicateCredentials { .. })
+                ),
+                "{acme} vs {beta}"
+            );
+            config["accounts"]["beta_events"]["agent_key"] = json!("separate-key");
+            resolver(config).expect("distinct keys are outside this check");
+        }
+    }
+
+    /// Distinct paths, schemes or keys remain outside this check.
     #[test]
     fn duplicate_credentials_are_found_across_endpoint_spellings() {
         const KEY: &str = "shared-sentinel-key-3c9e";
@@ -948,6 +988,7 @@ mod tests {
                 "https://www.szamlazz.hu:8443/szamla/",
                 "https://www.szamlazz.hu/szamla/",
             ),
+            ("https://host/szamla/?a=1", "https://host/szamla/?a=2"),
         ] {
             resolver(with_endpoints(acme, beta))
                 .unwrap_or_else(|e| panic!("{acme} and {beta} are two endpoints: {e}"));
@@ -957,7 +998,7 @@ mod tests {
             "https://www.szamlazz.hu/szamla",
         );
         config["accounts"]["beta_events"]["agent_key"] = json!("another-sentinel-key-7f10");
-        resolver(config).expect("one endpoint with two keys is two accounts");
+        resolver(config).expect("distinct keys are outside this comparison");
     }
 
     /// Two scopes with one id would share a credential reference.

@@ -33,6 +33,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 unicode-normalization = "0.1.25"
+# reqwest's URL parser diagnostics, including userinfo it canonicalizes away.
+url = "2.5.8"
 
 [dev-dependencies]
 # The crate itself with `test-util`, so the e2e harness can build the

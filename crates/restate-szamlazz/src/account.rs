@@ -12,9 +12,9 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use http::Uri;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::Seller;
+use szamlazz_agent::reqwest::Url;
 use szamlazz_agent::{Credentials, SellerEmail};
 
 use crate::identity::bounded_conversions;
@@ -285,11 +285,12 @@ opaque_string! {
     CredentialRef
 }
 
-/// A Számla Agent endpoint URL: an `http` or `https` URI with a host and no
+/// A Számla Agent endpoint URL: an `http` or `https` URL with a host and no
 /// userinfo.
 ///
-/// Validated when parsed and when deserialized, so an [`Account`] never
-/// carries an endpoint the client cannot post to, or one that would leak:
+/// Validated with the bundled transport's URL parser when parsed and when
+/// deserialized, so an [`Account`] never carries URL syntax the client cannot
+/// build, or userinfo that would leak:
 /// the endpoint is journaled with the account and printed in the start-up
 /// log, so a `user:password@` in it would be shown in the Restate UI for the
 /// retention period, and it is refused. Plain `http` stays allowed (a
@@ -315,22 +316,28 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns an error when the text is not a URI, its scheme is neither
+    /// Returns an error when the transport cannot parse the URL, its scheme is neither
     /// `http` nor `https`, it has no host, or its authority carries userinfo
     /// (`user:password@host`).
     pub fn parse(value: &str) -> Result<Self, InvalidEndpoint> {
-        let uri: Uri = value.parse()?;
-        match uri.scheme_str().map(str::to_ascii_lowercase).as_deref() {
-            Some("http" | "https") => {}
+        let userinfo = std::cell::Cell::new(false);
+        let violation = |violation| {
+            if violation == url::SyntaxViolation::EmbeddedCredentials {
+                userinfo.set(true);
+            }
+        };
+        let url = Url::options()
+            .syntax_violation_callback(Some(&violation))
+            .parse(value)?;
+        match url.scheme() {
+            "http" | "https" => {}
             _ => return Err(InvalidEndpoint::Scheme),
         }
-        if uri.host().is_none_or(str::is_empty) {
+        if url.host_str().is_none() {
             return Err(InvalidEndpoint::Host);
         }
-        if uri
-            .authority()
-            .is_some_and(|authority| authority.as_str().contains('@'))
-        {
+        // The parser drops empty userinfo, so inspect its diagnostic too.
+        if userinfo.get() || !url.username().is_empty() || url.password().is_some() {
             return Err(InvalidEndpoint::Userinfo);
         }
         Ok(Self(value.to_owned()))
@@ -349,13 +356,13 @@ impl Endpoint {
     #[must_use]
     pub fn is_cleartext(&self) -> bool {
         // Validated on construction, so this parses.
-        let Ok(uri) = self.0.parse::<Uri>() else {
+        let Ok(url) = Url::parse(&self.0) else {
             return false;
         };
-        if uri.scheme_str().map(str::to_ascii_lowercase).as_deref() != Some("http") {
+        if url.scheme() != "http" {
             return false;
         }
-        let host = uri.host().unwrap_or_default();
+        let host = url.host_str().unwrap_or_default();
         let host = host.trim_start_matches('[').trim_end_matches(']');
         let loopback = host.eq_ignore_ascii_case("localhost")
             || host
@@ -366,48 +373,44 @@ impl Endpoint {
 
     /// The endpoint as the comparison key of the safety contract's fan-in
     /// rule (unique `(endpoint, credentials)` pairs): two endpoints with
-    /// equal keys reach one server, so one agent key under both is one
-    /// szamlazz.hu account under two scopes.
+    /// equal keys are treated as one target, so one agent key under both
+    /// is refused across scopes.
     ///
-    /// Folds what a URL may spell two ways for one target: the scheme's and
-    /// the host's case, the scheme's default port written out (`:443` on
-    /// `https`, `:80` on `http`) and the path's trailing slashes, so
+    /// Uses the bundled transport's URL canonicalization (including scheme
+    /// and host case, default ports, dot segments including encoded dots,
+    /// IDNA and alternate IP spellings). Drops fragments, which HTTP never
+    /// sends, then deliberately folds the path's trailing slashes, so
     /// `https://www.szamlazz.hu/szamla/` (the default) and
     /// `https://www.szamlazz.hu/szamla` (typed) are one endpoint. The rule
     /// errs toward refusing: a pair refused at load time costs the operator a
     /// configuration fix, a pair admitted costs duplicate documents. Nothing
-    /// else is folded (a path's case and a query are kept as written), and
-    /// the endpoint itself is untouched: what the client posts to, what is
-    /// journaled and what the start-up log prints stay the text as written.
+    /// beyond transport canonicalization and those two rules is folded:
+    /// distinct paths, query values and schemes stay distinct. This detects
+    /// equivalent URL spellings, not DNS aliases, redirects, proxies or
+    /// different credentials opening one account; the resolver and operator
+    /// must still prevent that fan-in. The endpoint itself is untouched:
+    /// the client receives the original text and parses it as usual, and
+    /// journals, display and serialization keep that original text.
     #[must_use]
     pub fn normalized(&self) -> NormalizedEndpoint {
         // Validated on construction, so this parses; the fallback keeps the
         // comparison textual rather than panicking.
-        let Ok(uri) = self.0.parse::<Uri>() else {
+        let Ok(mut url) = Url::parse(&self.0) else {
             return NormalizedEndpoint(self.0.clone());
         };
-        let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
-        let host = uri.host().unwrap_or_default().to_ascii_lowercase();
-        let default_port = if scheme == "https" { 443 } else { 80 };
-        let port = uri
-            .port_u16()
-            .filter(|port| *port != default_port)
-            .map(|port| format!(":{port}"))
-            .unwrap_or_default();
-        let path = uri.path().trim_end_matches('/');
-        let query = uri
-            .query()
-            .map(|query| format!("?{query}"))
-            .unwrap_or_default();
-        NormalizedEndpoint(format!("{scheme}://{host}{port}{path}{query}"))
+        let path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&path);
+        // Fragments never travel in an HTTP request target.
+        url.set_fragment(None);
+        NormalizedEndpoint(url.into())
     }
 }
 
 /// An [`Endpoint`] reduced to what identifies its target, for the fan-in
 /// rule's `(endpoint, credentials)` comparison ([`Endpoint::normalized`]).
 /// Compared, hashed and ordered; never displayed and never posted to: the
-/// folding that makes two spellings equal (the trimmed trailing slash above
-/// all) may produce a URL szamlazz.hu does not serve, so the type exposes no
+/// folding that makes two spellings equal (trailing slashes above all) may
+/// produce a URL szamlazz.hu does not serve, so the type exposes no
 /// text. Not journaled.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NormalizedEndpoint(String);
@@ -455,13 +458,14 @@ impl<'de> Deserialize<'de> for Endpoint {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InvalidEndpoint {
-    /// The text is not a URI.
-    #[error("endpoint is not a valid URI: {0}")]
-    Uri(#[from] http::uri::InvalidUri),
+    /// The transport URL parser refused the text. Carries only its diagnostic,
+    /// never the rejected URL.
+    #[error("endpoint is not a valid URL: {0}")]
+    Url(#[from] url::ParseError),
     /// The scheme is neither `http` nor `https`.
     #[error("endpoint must be an http or https URL")]
     Scheme,
-    /// The URI has no host.
+    /// The URL has no host.
     #[error("endpoint has no host")]
     Host,
     /// The authority carries userinfo (`user:password@host`), which the
@@ -498,11 +502,13 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///   scope; a scope's account is never changed in place. A running
 ///   invocation stays on the account it journaled either way.
 /// - **Unique `(endpoint, credentials)` pairs.** The same agent key on the
-///   same endpoint is one account, whatever its `id`, and the same endpoint
-///   is the same server, however spelled: compare on
-///   [`Endpoint::normalized`] (scheme and host case, a default port written
-///   out, a trailing slash), as the static resolver does, so `…/szamla/`
-///   beside `…/szamla` with one key is refused rather than admitted as two.
+///   same endpoint is one account, whatever its `id`: compare on
+///   [`Endpoint::normalized`] (transport URL canonicalization, fragments
+///   removed and trailing slashes folded), as the static resolver does.
+///   This catches equivalent URL spellings, including dot segments, not
+///   arbitrary DNS aliases, redirects, proxies or different keys opening
+///   one account. Preventing those forms of fan-in is still the resolver's
+///   and operator's responsibility.
 /// - **The right key under the right scope.** The worker holds no account
 ///   pin: nothing on a found document is checked against the account (see
 ///   [`Account`], *No account pin*), so a key that opens another szamlazz.hu
@@ -797,13 +803,13 @@ mod tests {
     #[test]
     fn account_journals_as_json_without_a_secret_and_reads_back() {
         let mut account = Account::new("acme", "acme-key");
-        account.endpoint = Endpoint::parse("http://127.0.0.1:1/").expect("endpoint");
+        account.endpoint = Endpoint::parse("HTTP://127.1:1/a/../szamla/").expect("endpoint");
         account.seller.bank_account = Some("11111111-22222222".to_owned());
 
         let json = serde_json::to_value(&account).expect("serialize");
         assert_eq!(json["id"], "acme");
         assert_eq!(json["credential_ref"], "acme-key");
-        assert_eq!(json["endpoint"], "http://127.0.0.1:1/");
+        assert_eq!(json["endpoint"], "HTTP://127.1:1/a/../szamla/");
         assert_eq!(json["seller"]["bank_account"], "11111111-22222222");
         assert_eq!(json["defaults"]["currency"], "HUF");
         assert!(
@@ -870,12 +876,49 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_requires_an_http_or_https_uri_with_a_host() {
+    fn endpoint_rejects_urls_the_transport_cannot_build() {
+        let http = crate::test_support::http_client();
+        for invalid in [
+            "https://host:abc/szamla/",
+            "https://host:99999/szamla/",
+            "https://[::gg]/",
+            "https://host%zz/",
+            "https://256.1.1.1/",
+            "https://u5er:s3cret@host:99999/",
+        ] {
+            assert!(http.post(invalid).build().is_err(), "{invalid}");
+            let error = Endpoint::parse(invalid).expect_err(invalid);
+            assert!(!error.to_string().contains("s3cret"));
+            assert!(!error.to_string().contains("u5er"));
+            assert!(invalid.parse::<Endpoint>().is_err());
+            assert!(Endpoint::try_from(invalid).is_err());
+            assert!(Endpoint::try_from(invalid.to_owned()).is_err());
+            assert!(serde_json::from_value::<Endpoint>(json!(invalid)).is_err());
+            assert!(
+                serde_json::from_value::<Account>(json!({
+                    "id": "acme", "credential_ref": "acme", "endpoint": invalid,
+                }))
+                .is_err()
+            );
+            let config = serde_json::from_value::<StaticConfig>(json!({
+                "account": { "id": "acme", "agent_key": "key", "endpoint": invalid },
+            }))
+            .expect("raw configuration");
+            assert!(matches!(
+                StaticResolver::try_from(config),
+                Err(StaticConfigError::InvalidEndpoint { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn endpoint_requires_an_http_or_https_url_with_a_host() {
         for valid in [
             "http://127.0.0.1:1234",
             "http://127.0.0.1:1234/",
             "https://www.szamlazz.hu/szamla/",
             "HTTPS://example.com/x?y=1",
+            "http:///x", // The transport reads this as http://x/.
         ] {
             let endpoint = Endpoint::parse(valid).unwrap_or_else(|e| panic!("{valid}: {e}"));
             assert_eq!(endpoint.as_str(), valid, "the text is kept as written");
@@ -884,12 +927,12 @@ mod tests {
         for (invalid, is_expected) in [
             (
                 "",
-                (|e: &InvalidEndpoint| matches!(e, InvalidEndpoint::Uri(_))) as fn(&_) -> bool,
+                (|e: &InvalidEndpoint| matches!(e, InvalidEndpoint::Url(_))) as fn(&_) -> bool,
             ),
-            ("not a url", |e| matches!(e, InvalidEndpoint::Uri(_))),
-            ("http:///x", |e| matches!(e, InvalidEndpoint::Uri(_))),
-            ("localhost", |e| matches!(e, InvalidEndpoint::Scheme)),
-            ("/szamla/", |e| matches!(e, InvalidEndpoint::Scheme)),
+            ("not a url", |e| matches!(e, InvalidEndpoint::Url(_))),
+            ("http://", |e| matches!(e, InvalidEndpoint::Url(_))),
+            ("localhost", |e| matches!(e, InvalidEndpoint::Url(_))),
+            ("/szamla/", |e| matches!(e, InvalidEndpoint::Url(_))),
             ("ftp://example.com/", |e| {
                 matches!(e, InvalidEndpoint::Scheme)
             }),
@@ -913,6 +956,11 @@ mod tests {
             "https://u5er:s3cret@www.szamlazz.hu/szamla/",
             "https://u5er@example.com/",
             "http://:s3cret@127.0.0.1:1234/",
+            "https://u5er%40mail:s3cret@example.com/",
+            "https://u5er\t:s3cret@example.com/",
+            "https://@host/szamla/",
+            "https://:@host/szamla/",
+            "https://\t:\n@host/szamla/",
         ] {
             let error = Endpoint::parse(invalid).expect_err(invalid);
             assert!(
@@ -921,6 +969,31 @@ mod tests {
             );
             assert!(!error.to_string().contains("s3cret"), "{error}");
             assert!(!error.to_string().contains("u5er"), "{error}");
+            assert!(invalid.parse::<Endpoint>().is_err());
+            assert!(Endpoint::try_from(invalid).is_err());
+            assert!(Endpoint::try_from(invalid.to_owned()).is_err());
+            assert!(serde_json::from_value::<Endpoint>(json!(invalid)).is_err());
+            assert!(
+                serde_json::from_value::<Account>(json!({
+                    "id": "acme", "credential_ref": "acme", "endpoint": invalid,
+                }))
+                .is_err()
+            );
+            let config = serde_json::from_value::<StaticConfig>(json!({
+                "account": { "id": "acme", "agent_key": "key", "endpoint": invalid },
+            }))
+            .expect("raw configuration");
+            assert!(matches!(
+                StaticResolver::try_from(config),
+                Err(StaticConfigError::InvalidEndpoint { .. })
+            ));
+        }
+        for valid in [
+            "https://host/@path",
+            "https://host/?a=@query",
+            "https://host/#@fragment",
+        ] {
+            Endpoint::parse(valid).expect("@ outside userinfo");
         }
         assert!(
             serde_json::from_value::<Endpoint>(json!("https://u:p@example.com/")).is_err(),
@@ -951,6 +1024,11 @@ mod tests {
             "http://localhost:1234/",
             "http://LOCALHOST/",
             "http://[::1]:1234/",
+            "http://127.1/",
+            "http://0x7f000001/",
+            "http://2130706433/",
+            "http://%6cocalhost/",
+            "http://[0:0:0:0:0:0:0:1]/",
         ] {
             let endpoint = Endpoint::parse(safe).expect(safe);
             assert!(!endpoint.is_cleartext(), "{safe}");
@@ -962,6 +1040,14 @@ mod tests {
     /// of one server are one endpoint, two servers stay two. The endpoint
     /// itself keeps its text, and the key is not a URL: it has no text to
     /// post to.
+    #[test]
+    fn endpoint_fragments_do_not_distinguish_request_targets() {
+        let plain = Endpoint::parse("https://host/szamla/").expect("endpoint");
+        let fragment = Endpoint::parse("https://host/szamla/#section").expect("endpoint");
+        assert_eq!(plain.normalized(), fragment.normalized());
+        assert_eq!(fragment.as_str(), "https://host/szamla/#section");
+    }
+
     #[test]
     fn endpoint_normalizes_for_comparison_only() {
         let same = [
@@ -992,9 +1078,17 @@ mod tests {
             ("https://x:80/", "https://x/"),
             ("https://x/a?b=1", "https://x/a?b=2"),
             ("https://x/a?b=1", "https://x/a"),
+            ("https://x/a?b=1&c=2", "https://x/a?c=2&b=1"),
+            ("https://x/a%2Fb", "https://x/a/b"),
+            ("https://x/a?", "https://x/a"),
             ("https://x/", "https://y/"),
         ];
+        let http = crate::test_support::http_client();
         for (a, b) in different {
+            assert_ne!(
+                http.post(a).build().expect(a).url(),
+                http.post(b).build().expect(b).url()
+            );
             let (a, b) = (Endpoint::parse(a).expect(a), Endpoint::parse(b).expect(b));
             assert_ne!(
                 a.normalized(),
