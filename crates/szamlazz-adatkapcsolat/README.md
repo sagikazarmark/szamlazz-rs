@@ -91,6 +91,7 @@ One release, so a receiver pays the migration once:
 - `InvoiceAck::for_document` is public and no longer behind the `axum` feature.
 - The integer-width policy (ADR 0010): every integer of a pushed document is an `i64`, so `InvoiceInfo::id` and `Party::location` are `i64` (they were `i32`), and `InvoiceAck::accept` / `for_document` take an `i64`. `InvoiceAppearance::is_e_invoice` is the `Electronic` variant, whatever code it carries.
 - The English names of two wire elements follow the workspace's vocabulary: `InvoiceInfo::kind` is `document_type` and `InvoiceInfo::e_invoice` is `appearance` (a code, not a flag); `BankTransaction::kind` is `transaction_type`, `ReceiptInfo::kind` is `document_type`. The archived JSON carries the new keys.
+- Invoice `RecordedPayment` is `RecordedCreditEntry`, `InvoiceDocument::payments` is `credit_entries`, and the entry's `method` is `title` (`jogcim`, the payment method's wire token, kept as `Option<String>`). This follows the shared vocabulary of ADR 0010. Receipt payments remain `payments` / `ReceiptPayment::method`: they describe how the buyer paid. XML element names are unchanged. Newly archived invoice JSON uses `credit_entries` and `title`; there are no compatibility aliases or archive migrations, and historical JSON is not rewritten.
 
 ## Archiving
 

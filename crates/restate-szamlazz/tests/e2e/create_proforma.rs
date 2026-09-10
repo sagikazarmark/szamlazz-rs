@@ -1,8 +1,9 @@
 //! `Szamlazz.Order.create_proforma` under Restate, and what follows it: the
-//! proforma issued through its path (the three exclusivity reads, the
-//! lookup, the create step), the invoice that names it by number (the
-//! `verify-proforma-{number}` path of `create_invoice`), and `get` reporting
-//! the proforma `consumed` by the invoice (the `get` path). The link's
+//! proforma issued through its path (the target lookup, three exclusivity
+//! reads, the full lookup, the create step), the invoice that names it by
+//! number (the `verify-proforma-{number}` path of `create_invoice`), a fresh
+//! retry finding that invoice before verifying the consumed proforma, and
+//! `get` reporting the proforma `consumed` by the invoice. The link's
 //! decisions (`auto`, `none`, `{number}` on a proforma of another order or
 //! none at all, on a non-proforma) are unit tests of `service::create`; the
 //! reference on the create body is `tests/gateway/`'s.
@@ -12,12 +13,12 @@ use serde_json::json;
 use wiremock::matchers::body_string_contains;
 
 use crate::harness::szamlazz::{
-    Doc, create_for, created, holds_after_misses, number_query, order_query,
+    Doc, create_for, created, holds_after_misses, not_found, number_query, order_query,
 };
 use crate::harness::{Harness, document};
 
 /// A proforma, then the invoice naming it (`options.proforma: {number}`),
-/// then `get`: the proforma is `issued` with `dijbekero` on the wire; the
+/// a fresh retry, then `get`: the proforma is `issued` with `dijbekero` on the wire; the
 /// invoice verifies the named proforma by number (this order's) and carries
 /// `dijbekeroSzamlaszam`; after the conversion the proforma is gone from the
 /// query surface and the invoice carries `hivdijbekszam`, which `get` derives
@@ -40,11 +41,11 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         .mount(&h.mock)
         .await;
     // The invoice id: absent for the proforma create's exclusivity read, the
-    // invoice's lookup and its leading query; then the issued invoice,
-    // carrying the proforma it consumed, for `get`.
+    // invoice's target lookup, full lookup and leading query; then the issued
+    // invoice, carrying the proforma it consumed, for the retry and `get`.
     holds_after_misses(
         &h.mock,
-        3,
+        4,
         &Doc {
             external_id: Some("acct:E2E-7:invoice"),
             referenced_proforma: Some("D-7"),
@@ -55,7 +56,13 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     // The invoice's verify of the named proforma.
     number_query("D-7")
         .respond_with(Doc::of("D-7", "D", "E2E-7").response())
+        .up_to_n_times(1)
         .expect(1)
+        .mount(&h.mock)
+        .await;
+    number_query("D-7")
+        .respond_with(not_found())
+        .expect(0)
         .mount(&h.mock)
         .await;
     create_for("E2E-7")
@@ -92,6 +99,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         [
             "namespace",
             "account",
+            "lookup-proforma",
             "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
@@ -121,6 +129,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         [
             "namespace",
             "account",
+            "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
             "verify-proforma-D-7",
@@ -134,6 +143,31 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
         2,
         "the proforma and the invoice"
     );
+
+    // The named proforma is now consumed. A fresh invocation must find the
+    // invoice before trying to verify that disappeared reference again.
+    let before = h.requests_of_order("E2E-7").await.len();
+    let again = h
+        .call(
+            "E2E-7",
+            "create_invoice",
+            &json!({
+                "document": document(dec!(1000)),
+                "options": { "proforma": { "number": "D-7" } },
+            }),
+            "e2e-7-k2",
+        )
+        .await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_ne!(again.invocation_id(), reply.invocation_id());
+    assert_eq!(again.body["outcome"], "already_issued", "{}", again.body);
+    assert_eq!(again.body["invoice_number"], "SZ-7");
+    assert_eq!(
+        h.admin().runs(again.invocation_id()).await,
+        ["namespace", "account", "lookup-invoice"]
+    );
+    assert_eq!(h.requests_of_order("E2E-7").await.len(), before + 1);
+    assert_eq!(h.create_bodies_of("E2E-7").await.len(), 2);
 
     let reply = h.get_reply("E2E-7").await;
     assert_eq!(reply.status, 200, "{}", reply.body);

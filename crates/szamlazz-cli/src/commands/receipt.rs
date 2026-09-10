@@ -80,26 +80,15 @@ fn print_receipt(
     receipt: &Receipt,
     pdf_target: Option<&Path>,
 ) -> anyhow::Result<()> {
-    output::warn_missing_pdf(pdf_target.is_some(), receipt.pdf.is_some());
-    let pdf_on_stdout = pdf_target.is_some_and(output::is_stdout);
-
-    if let (Some(target), Some(pdf)) = (pdf_target, &receipt.pdf) {
-        output::write_pdf(pdf.as_bytes(), target)?;
-    }
-    let out = output::report(pdf_on_stdout);
-
-    if cli.json {
-        return out.json(receipt);
-    }
-    out.field_required("Receipt number", &receipt.receipt_number);
-    out.field_required("Type", &receipt.document_type);
-    out.field_required("Issued", &receipt.issue_date);
-    out.field_required("Payment method", &receipt.payment_method);
-    out.field_required("Currency", &receipt.currency);
-    out.field_required("Reversed", &receipt.reversed);
-    out.field("Reverses", receipt.reversed_receipt_number.as_ref());
-
-    Ok(())
+    output::document(cli.json, receipt, receipt.pdf.as_ref(), pdf_target, |out| {
+        out.field_required("Receipt number", &receipt.receipt_number);
+        out.field_required("Type", &receipt.document_type);
+        out.field_required("Issued", &receipt.issue_date);
+        out.field_required("Payment method", &receipt.payment_method);
+        out.field_required("Currency", &receipt.currency);
+        out.field_required("Reversed", &receipt.reversed);
+        out.field("Reverses", receipt.reversed_receipt_number.as_ref());
+    })
 }
 
 /// Runs a receipt subcommand.

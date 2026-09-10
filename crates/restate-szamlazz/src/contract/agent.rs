@@ -100,6 +100,9 @@ impl From<&RecordedCreditEntry> for CreditEntryRecord {
 
 /// Output of `Szamlazz.Agent.query`: a projection of the queried document,
 /// read off the `FoundDocument` the handler's one step journaled.
+/// Deliberately omits the seller block. The deploy-side go-live check is
+/// `examples/verify_seller.rs`, using the actual deployed `Accounts` bundle
+/// and a fresh Számla Agent client outside Restate's journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -151,8 +154,9 @@ pub struct QueryResponse {
     #[serde(default)]
     pub outstanding: Option<Decimal>,
     /// Issued from a test account (`teszt`), as szamlazz.hu reported it:
-    /// what the go-live check reads off a known document, since the worker
-    /// compares it with nothing. `None` (`null`) is a document that does not
+    /// compared with nothing by the worker. This projection omits the seller
+    /// block, so the go-live check uses a direct Számla Agent query through
+    /// the deployed resolver/store instead. `None` (`null`) is a document that does not
     /// say: the schema has the element mandatory, so it is szamlazz.hu
     /// breaking its schema, never a live document; a reader deciding "is this
     /// scope live?" must not read it as `false`.
@@ -185,7 +189,7 @@ impl QueryResponse {
 }
 
 /// The projection of a found document: identity, references, dates, totals
-/// and credit entries; no buyer data (the journaled document carries none either).
+/// and credit entries; no buyer or seller data (the journaled document carries neither).
 /// `outstanding` is `gross − Σ credit entries`; `test` is `teszt` exactly as
 /// reported, `None` included.
 impl From<&FoundDocument> for QueryResponse {
@@ -401,13 +405,17 @@ pub struct SetCreditEntriesRequest {
     pub entries: Vec<CreditEntryInput>,
     /// Add to the existing entries instead of replacing them.
     ///
-    /// **At-least-once.** Replacing is idempotent (a repeat sends the same
-    /// final state), but additive entries are appended by every send that
+    /// **At-least-once.** A replacement sends a full snapshot, so a stale
+    /// retry can overwrite newer entries. Additive entries are appended by every send that
     /// reaches szamlazz.hu, and the handler cannot tell a lost reply from a
     /// lost request: an `outcome_unknown` fault, or the handler's one retry
     /// after a crash, may have landed the entries already. A caller that sees
     /// `outcome_unknown` on an additive call queries the invoice
-    /// (`Szamlazz.Agent.query`) before re-sending.
+    /// (`Szamlazz.Agent.query`) before sending only entries still missing,
+    /// with a new `Idempotency-Key`. A replacing call likewise queries first
+    /// and sends the current intended snapshot if replacement is still wanted.
+    /// Cancellation of the one-shot write is the same structured
+    /// `outcome_unknown`: it cannot prove that nothing landed.
     #[serde(default)]
     pub additive: bool,
 }
@@ -426,7 +434,7 @@ impl SetCreditEntriesRequest {
 }
 
 /// One credit entry (`jóváírás`) as the caller sends it: the input side of
-/// [`CreditEntryRecord`], with the same words (`title`, `comment`).
+/// `CreditEntryRecord`, with the same words (`title`, `comment`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -492,15 +500,18 @@ impl SetCreditEntriesResponse {
 
 /// Output of `Szamlazz.Agent.check_account`: what the deploy pipeline needs
 /// to prove, per scope, that the scope reaches the worker, resolves to the
-/// intended account and its credentials work, without issuing anything.
+/// configured account and its credentials work, without issuing anything.
 ///
 /// Credential acceptance is the only szamlazz.hu-verified fact here; the
 /// account field echoes the *configured* account's id. *Which* szamlazz.hu
 /// account the key opens (and whether it is a test account) is not in the
 /// answer and is checked nowhere in the worker: a not-found probe has no
 /// document to read, and no operation answers "which account am I?". That is
-/// the operator's go-live check: query a document known to be the account's
-/// under the scope and read its `test` and seller block.
+/// the operator's go-live check: `examples/verify_seller.rs` uses the actual
+/// deployed `Accounts` resolver/store, a fresh Számla Agent client per scope
+/// and independent expectations for a known document's `test`, seller name
+/// and tax number, outside Restate's journal. The Restate `query` deliberately
+/// omits the seller block. Repeat the check after key rotation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -560,9 +571,9 @@ impl From<&Account> for CheckedAccount {
 ///
 /// Tagged by `state`: `ok`, or `rejected` with the szamlazz.hu code (3, 135,
 /// 136 or 164) and message. Data, not a fault: the probe's purpose is to
-/// report it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+/// report it. Unknown states preserve their token and payload fields without
+/// inferring whether credentials were accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CredentialsCheck {
@@ -575,6 +586,88 @@ pub enum CredentialsCheck {
         /// The szamlazz.hu message.
         message: String,
     },
+    /// A newer state and its payload, preserved without interpreting it.
+    #[serde(untagged)]
+    Other {
+        /// The unknown state token.
+        state: String,
+        /// The state's payload (excluding `state`).
+        #[serde(flatten)]
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl CredentialsCheck {
+    /// Known state tokens; a rejection's payload is carried by its variant.
+    pub const KNOWN: [&'static str; 2] = ["ok", "rejected"];
+
+    /// The state token, including an unknown token verbatim.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected { .. } => "rejected",
+            Self::Other { state, .. } => state,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CredentialsCheck {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            state: String,
+            #[serde(flatten)]
+            fields: serde_json::Map<String, serde_json::Value>,
+        }
+        let Wire { state, mut fields } = Wire::deserialize(deserializer)?;
+        match state.as_str() {
+            "ok" => Ok(Self::Ok),
+            "rejected" => Ok(Self::Rejected {
+                code: serde_json::from_value(
+                    fields
+                        .remove("code")
+                        .ok_or_else(|| serde::de::Error::missing_field("code"))?,
+                )
+                .map_err(serde::de::Error::custom)?,
+                message: serde_json::from_value(
+                    fields
+                        .remove("message")
+                        .ok_or_else(|| serde::de::Error::missing_field("message"))?,
+                )
+                .map_err(serde::de::Error::custom)?,
+            }),
+            _ => Ok(Self::Other { state, fields }),
+        }
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for CredentialsCheck {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CredentialsCheck".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::CredentialsCheck").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Credential acceptance: ok, or rejected with required code and message strings. Unknown state strings and their payload fields are preserved without classifying credential acceptance.",
+            "required": ["state"],
+            "properties": { "state": { "type": "string" } },
+            "if": { "properties": { "state": { "const": "rejected" } } },
+            "then": {
+                "required": ["code", "message"],
+                "properties": {
+                    "code": { "type": "string" },
+                    "message": { "type": "string" }
+                }
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +680,56 @@ mod tests {
     use super::*;
     use crate::contract::document::tests::{refuses_unknown_field, round_trip};
     use crate::test_support::{CreditRecord, Doc};
+
+    #[test]
+    fn unknown_credentials_states_preserve_the_full_probe_response() {
+        let wire = json!({
+            "scope": "acme",
+            "account": {"id": "account-1"},
+            "namespace": "acct",
+            "credentials": {
+                "state": " future_state/é ",
+                "code": {"new": "shape"},
+                "details": [null, true, 17, "é"]
+            }
+        });
+        let decoded: CheckAccountResponse =
+            serde_json::from_value(wire.clone()).expect("open probe");
+        let CredentialsCheck::Other { state, fields } = &decoded.credentials else {
+            panic!(
+                "unknown credentials must not be classified: {:?}",
+                decoded.credentials
+            );
+        };
+        assert_eq!(state, " future_state/é ");
+        assert_eq!(decoded.credentials.as_str(), state);
+        assert_eq!(fields["details"], wire["credentials"]["details"]);
+        assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
+    }
+
+    #[test]
+    fn known_credentials_payloads_stay_validated() {
+        for wire in [
+            json!({"state": "rejected"}),
+            json!({"state": "rejected", "code": "3"}),
+            json!({"state": "rejected", "code": 3, "message": "no"}),
+            json!({"state": "rejected", "code": "3", "message": null}),
+            json!({"state": 17}),
+            json!({}),
+        ] {
+            assert!(serde_json::from_value::<CredentialsCheck>(wire).is_err());
+        }
+        for state in [
+            CredentialsCheck::Ok,
+            CredentialsCheck::Rejected {
+                code: "3".to_owned(),
+                message: "no".to_owned(),
+            },
+        ] {
+            assert!(CredentialsCheck::KNOWN.contains(&state.as_str()));
+            round_trip(&state);
+        }
+    }
 
     #[test]
     fn query_request_selectors() {

@@ -338,7 +338,7 @@ mod tests {
     fn an_answered_code_on_a_get_read_is_a_fault() {
         let namespace = namespace();
         let fault_body = |fault: Fault| {
-            let error = TerminalError::from(fault);
+            let error = TerminalError::try_from(fault).expect("known fault");
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             (error.code(), body)
         };

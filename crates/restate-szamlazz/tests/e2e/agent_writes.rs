@@ -107,3 +107,76 @@ pub(crate) async fn agent_storno_and_set_credit_entries_run_on_the_scoped_accoun
         "the one send, nothing read"
     );
 }
+
+/// Both credit-entry modes can land before cancellation. The fault is stored
+/// under the same retry identity; its advice distinguishes an additive send
+/// from replacing the current intended snapshot. No re-query or resend is
+/// performed inside either one-shot step.
+pub(crate) async fn cancelled_credit_entries_are_unknown_with_mode_specific_guidance(h: &Harness) {
+    use restate_e2e_harness::Call;
+    use std::{sync::Arc, time::Duration};
+
+    h.reset().await;
+    for (number, additive, key) in [
+        ("SZ-CANCEL-ADD", true, "cancel-credit-add"),
+        ("SZ-CANCEL-REPLACE", false, "cancel-credit-replace"),
+    ] {
+        let received = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&received);
+        credit_of(number)
+            .respond_with(move |_: &wiremock::Request| {
+                signal.notify_one();
+                credited(number, "1270", "270").set_delay(Duration::from_secs(4))
+            })
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        let call = Call::service("Szamlazz.Agent", "set_credit_entries").scoped("acme");
+        let body = json!({
+            "invoice_number": number,
+            "entries": [{"date": "2026-09-05", "title": "transfer", "amount": "1000"}],
+            "additive": additive,
+        });
+        let reply = crate::policies::cancel_after_send(h, call, &body, key, &received).await;
+        let fault = reply.fault();
+        let guidance = if additive {
+            "query the invoice before re-sending"
+        } else {
+            "current intended snapshot and a new Idempotency-Key"
+        };
+        assert!(fault.message.contains(guidance), "{fault:?}");
+        assert_eq!(
+            h.admin().runs(reply.invocation_id()).await,
+            [
+                "namespace".to_owned(),
+                "account".to_owned(),
+                format!("set-credit-entries-{number}")
+            ]
+        );
+        let stored = h.invoke(&call, Some(&body), Some(key)).await;
+        assert_eq!(stored.invocation_id(), reply.invocation_id());
+        assert_eq!(stored.fault(), fault);
+        assert_eq!(
+            h.requests_mentioning(&format!("<szamlaszam>{number}</szamlaszam>"))
+                .await
+                .len(),
+            1,
+            "one send and no read, including after replay"
+        );
+    }
+    // Invalid reported order numbers stop after the verify, as data. This
+    // also proves the new open token survives the real Restate response path.
+    holds(&h.mock, &Doc::of("SZ-UNSUPPORTED", "SZ", "legacy:order")).await;
+    let reply = h
+        .call_agent_scoped("acme", "storno", &storno_of("SZ-UNSUPPORTED"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "unsupported_order_number");
+    assert_eq!(reply.body["order_key"], "legacy:order");
+    assert_eq!(
+        h.admin().runs(reply.invocation_id()).await,
+        ["namespace", "account", "verify-original-SZ-UNSUPPORTED"]
+    );
+    assert!(h.storno_bodies_of("SZ-UNSUPPORTED").await.is_empty());
+    h.mock.verify().await;
+}

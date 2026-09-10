@@ -101,7 +101,7 @@ enum StornoVerdict {
     AlreadyReversed,
     /// Answered without a send: `conflict{not_managed}` and
     /// `rejected{not_stornoable}` at the order's handler,
-    /// `managed_by_order` at the by-number one.
+    /// `managed_by_order` or `unsupported_order_number` at the by-number one.
     Answered(StornoResponse),
 }
 
@@ -137,13 +137,25 @@ fn storno_verdict(found: &FoundDocument, order: &OrderKey, number: &str) -> Stor
 /// the caller named it: one carrying an order number (`rendelesszam`
 /// trimmed; an empty or whitespace-only element is none) is
 /// `Szamlazz.Order`'s, answered as `managed_by_order` with that number as the
-/// `order_key`, and this service never calls into it; one already reversed,
+/// `order_key`, and this service never calls into it. A reported order number
+/// outside the key's alphabet is `unsupported_order_number`, with the
+/// reported string kept for operator reconciliation, never normalized or
+/// treated as unmanaged. One already reversed,
 /// by anyone, is [`StornoVerdict::AlreadyReversed`] (the storno number is the
 /// by-number lookup's, which the handler reads best effort); a live
 /// unmanaged document proceeds. No document type pre-check: szamlazz.hu's
 /// echo tells.
 fn unmanaged_storno_verdict(found: &FoundDocument, number: &str) -> StornoVerdict {
     if let Some(order) = &found.order_number {
+        if let Err(error) = OrderKey::parse(order) {
+            return StornoVerdict::Answered(
+                StornoResponse::new(StornoOutcome::UnsupportedOrderNumber, number)
+                    .with_order_key(order)
+                    .with_message(format!(
+                        "the reported order number cannot be used as a Szamlazz.Order key: {error}; nothing was sent; reverse this invoice in szamlazz.hu and reconcile it in your system; do not normalize the order number or bypass the order guard"
+                    )),
+            );
+        }
         return StornoVerdict::Answered(
             StornoResponse::new(StornoOutcome::ManagedByOrder, number).with_order_key(order),
         );
@@ -371,7 +383,7 @@ async fn storno_step<'ctx, C: RunCtx<'ctx>>(
 /// a best-effort read under the read policy, [`run_best_effort`]). Rejected
 /// credentials are a fault about the storno (`storno_id`); everything else
 /// the hint can answer is data ([`storno_number_from_hint`]).
-async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
+pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
     order: &OrderKey,
@@ -604,7 +616,7 @@ mod tests {
     }
 
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         let body = serde_json::from_str(error.message()).expect("json body");
         (error.code(), body)
     }
@@ -787,6 +799,49 @@ mod tests {
             }),
             StornoVerdict::AlreadyReversed
         );
+    }
+
+    #[test]
+    fn unsupported_reported_order_numbers_are_actionable_and_never_redirected() {
+        let too_long = "x".repeat(OrderKey::MAX_LEN + 1);
+        for order in [
+            "ORD:1",
+            "ORD 1",
+            "ORD\u{a0}1",
+            "ORD\t1",
+            "ORD\u{7f}1",
+            "rendele\u{301}s-42",
+            too_long.as_str(),
+        ] {
+            // Project a parsed wire value directly, so XML whitespace handling
+            // does not hide the alphabet variant being exercised.
+            let found = Doc::default().assigned_order(Some(order));
+            let StornoVerdict::Answered(response) = unmanaged_storno_verdict(&found, "SZ-1") else {
+                panic!("unsupported order {order:?} must not proceed");
+            };
+            assert_eq!(response.outcome, StornoOutcome::UnsupportedOrderNumber);
+            assert_eq!(response.order_key.as_deref(), Some(order));
+            assert_eq!(response.invoice_number, "SZ-1");
+            assert_eq!(response.storno_number, None);
+            let message = response.message.expect("actionable explanation");
+            assert!(message.contains("nothing was sent"), "{message}");
+            assert!(
+                message.contains("reverse this invoice in szamlazz.hu"),
+                "{message}"
+            );
+            assert!(
+                message.contains(&OrderKey::parse(order).expect_err("invalid").to_string()),
+                "{message}"
+            );
+        }
+        for order in ["ORD-1", "rendelés-42", "MixedCase_42"] {
+            let found = Doc::default().assigned_order(Some(order));
+            let StornoVerdict::Answered(response) = unmanaged_storno_verdict(&found, "SZ-1") else {
+                panic!("supported order must redirect");
+            };
+            assert_eq!(response.outcome, StornoOutcome::ManagedByOrder);
+            assert_eq!(response.order_key.as_deref(), Some(order));
+        }
     }
 
     /// `Szamlazz.Agent.storno`'s verify: code 7 is 404 `not_found` naming the

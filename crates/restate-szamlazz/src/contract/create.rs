@@ -113,9 +113,7 @@ impl CorrectRequest {
 }
 
 /// The domain outcome of a create or correct request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CreateOutcome {
     /// szamlazz.hu issued the document in this invocation.
@@ -135,12 +133,14 @@ pub enum CreateOutcome {
     /// The request contradicts what szamlazz.hu holds for the order; see
     /// `conflict_reason`.
     Conflict,
+    /// A token this version does not know, preserved verbatim.
+    Other(String),
 }
 
 impl CreateOutcome {
-    /// Every outcome, in the order the crate README lists them (`issued`
+    /// Known outcomes, in the order the crate README lists them (`issued`
     /// first, then the answers that issue nothing).
-    pub const ALL: [Self; 6] = [
+    pub const KNOWN: [Self; 6] = [
         Self::Issued,
         Self::AlreadyIssued,
         Self::Reconciled,
@@ -149,9 +149,9 @@ impl CreateOutcome {
         Self::Conflict,
     ];
 
-    /// The snake-case token carried in `outcome`.
+    /// The wire token carried in `outcome`, including an unknown token verbatim.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Issued => "issued",
             Self::AlreadyIssued => "already_issued",
@@ -159,6 +159,7 @@ impl CreateOutcome {
             Self::Reversed => "reversed",
             Self::Rejected => "rejected",
             Self::Conflict => "conflict",
+            Self::Other(token) => token,
         }
     }
 }
@@ -169,11 +170,62 @@ impl fmt::Display for CreateOutcome {
     }
 }
 
+impl From<String> for CreateOutcome {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "issued" => Self::Issued,
+            "already_issued" => Self::AlreadyIssued,
+            "reconciled" => Self::Reconciled,
+            "reversed" => Self::Reversed,
+            "rejected" => Self::Rejected,
+            "conflict" => Self::Conflict,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<CreateOutcome> for String {
+    fn from(outcome: CreateOutcome) -> Self {
+        match outcome {
+            CreateOutcome::Other(token) => token,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl Serialize for CreateOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for CreateOutcome {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CreateOutcome".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::CreateOutcome").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "The domain outcome of a create or correct request. Known values: issued, already_issued, reconciled, reversed, rejected, conflict. Other strings are preserved for newer outcomes.",
+        })
+    }
+}
+
 /// Why a create, correct or storno request was answered with `outcome:
 /// conflict`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ConflictReason {
     /// A live prepayment invoice or final invoice (or, for `create_prepayment`,
@@ -214,12 +266,14 @@ pub enum ConflictReason {
     /// storno). Use the managing order, or `Szamlazz.Agent.storno` for an
     /// unmanaged invoice.
     NotManaged,
+    /// A token this version does not know, preserved verbatim.
+    Other(String),
 }
 
 impl ConflictReason {
-    /// Every reason, in the order of the crate README's `conflict_reason`
+    /// Known reasons, in the order of the crate README's `conflict_reason`
     /// table.
-    pub const ALL: [Self; 12] = [
+    pub const KNOWN: [Self; 12] = [
         Self::Live,
         Self::PrepaidChain,
         Self::OrderInvoiced,
@@ -234,9 +288,9 @@ impl ConflictReason {
         Self::ExternalIdCollision,
     ];
 
-    /// The snake-case token carried in `conflict_reason`.
+    /// The wire token carried in `conflict_reason`, including an unknown token verbatim.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::PrepaidChain => "prepaid_chain",
             Self::OrderInvoiced => "order_invoiced",
@@ -250,6 +304,7 @@ impl ConflictReason {
             Self::PrepaymentReversed => "prepayment_reversed",
             Self::BaseReversed => "base_reversed",
             Self::NotManaged => "not_managed",
+            Self::Other(token) => token,
         }
     }
 }
@@ -260,15 +315,142 @@ impl fmt::Display for ConflictReason {
     }
 }
 
+impl From<String> for ConflictReason {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "prepaid_chain" => Self::PrepaidChain,
+            "order_invoiced" => Self::OrderInvoiced,
+            "live" => Self::Live,
+            "foreign" => Self::Foreign,
+            "duplicate_order_number" => Self::DuplicateOrderNumber,
+            "external_id_collision" => Self::ExternalIdCollision,
+            "proforma_live" => Self::ProformaLive,
+            "proforma_missing" => Self::ProformaMissing,
+            "prepayment_missing" => Self::PrepaymentMissing,
+            "prepayment_reversed" => Self::PrepaymentReversed,
+            "base_reversed" => Self::BaseReversed,
+            "not_managed" => Self::NotManaged,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<ConflictReason> for String {
+    fn from(reason: ConflictReason) -> Self {
+        match reason {
+            ConflictReason::Other(token) => token,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl Serialize for ConflictReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConflictReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ConflictReason {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConflictReason".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::ConflictReason").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Why a create, correct or storno request conflicts. Known values: live, prepaid_chain, order_invoiced, proforma_live, proforma_missing, not_managed, prepayment_missing, prepayment_reversed, base_reversed, foreign, duplicate_order_number, external_id_collision. Other strings are preserved for newer reasons.",
+        })
+    }
+}
+
 /// Informational flags attached to a successful response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Warning {
     /// The document was issued but szamlazz.hu could not deliver its
     /// notification email (code 56).
     NotificationDeliveryFailed,
+    /// A token this version does not know, preserved verbatim.
+    Other(String),
+}
+
+impl Warning {
+    /// Known informational flags.
+    pub const KNOWN: [Self; 1] = [Self::NotificationDeliveryFailed];
+
+    /// The warning as its wire string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::NotificationDeliveryFailed => "notification_delivery_failed",
+            Self::Other(token) => token,
+        }
+    }
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for Warning {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "notification_delivery_failed" => Self::NotificationDeliveryFailed,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<Warning> for String {
+    fn from(warning: Warning) -> Self {
+        match warning {
+            Warning::Other(token) => token,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl Serialize for Warning {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Warning {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Warning {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Warning".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Warning").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Informational flags attached to a successful response. Known value: notification_delivery_failed (issued, but notification email delivery failed). Other strings are preserved for newer warnings.",
+        })
+    }
 }
 
 /// Output of every create and correct handler.
@@ -604,6 +786,62 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_warning_preserves_the_full_successful_response() {
+        let issued = CreateResponse::new(
+            CreateOutcome::Issued,
+            IssuedKind::Invoice,
+            "acct:ORD-1:invoice",
+        )
+        .with_invoice_number("SZ-1")
+        .with_net_total(dec!(20000))
+        .with_gross_total(dec!(25400))
+        .with_outstanding(dec!(15400))
+        .with_customer_account_url("https://example.test/acct")
+        .with_warning(Warning::NotificationDeliveryFailed);
+        let mut wire = serde_json::to_value(&issued).expect("json");
+        let future_warning = " későbbi_értesítés/🧾 ";
+        wire["warnings"]
+            .as_array_mut()
+            .expect("warnings")
+            .push(json!(future_warning));
+
+        let decoded: CreateResponse = serde_json::from_value(wire.clone()).expect("success");
+        assert_eq!(
+            decoded,
+            issued.with_warning(Warning::Other(future_warning.to_owned()))
+        );
+        assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
+    }
+
+    #[test]
+    fn unknown_create_outcomes_and_conflict_reasons_preserve_the_response() {
+        for (outcome, reason) in [
+            ("future_outcome", None),
+            ("conflict", Some("future_reason")),
+        ] {
+            let mut wire = serde_json::to_value(
+                CreateResponse::new(
+                    CreateOutcome::Conflict,
+                    IssuedKind::Invoice,
+                    "acct:ORD-1:invoice",
+                )
+                .with_existing_number("SZ-9")
+                .with_message("new worker decision"),
+            )
+            .expect("json");
+            wire["outcome"] = json!(outcome);
+            wire["conflict_reason"] = json!(reason);
+            let decoded: CreateResponse = serde_json::from_value(wire.clone()).expect("open");
+            assert_eq!(decoded.outcome.as_str(), outcome);
+            assert_eq!(
+                decoded.conflict_reason.as_ref().map(ConflictReason::as_str),
+                reason
+            );
+            assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
+        }
+    }
+
+    #[test]
     fn create_response_conflict_and_rejection() {
         let conflict = CreateResponse::conflict(
             ConflictReason::Live,
@@ -640,7 +878,7 @@ mod tests {
         assert_eq!(response.invoice_number, None);
     }
 
-    /// Every reason is in `ALL`, and its `as_str` token is the snake-case
+    /// Every known reason is in `KNOWN`, and its `as_str` token is the snake-case
     /// serde token, what a caller branches on and what the crate README's
     /// `conflict_reason` table is held to.
     #[test]
@@ -662,12 +900,15 @@ mod tests {
             (ConflictReason::BaseReversed, "base_reversed"),
             (ConflictReason::NotManaged, "not_managed"),
         ];
-        assert_eq!(ConflictReason::ALL.len(), reasons.len());
+        assert_eq!(ConflictReason::KNOWN.len(), reasons.len());
         for (reason, token) in reasons {
-            assert!(ConflictReason::ALL.contains(&reason), "{token} is in ALL");
+            assert!(
+                ConflictReason::KNOWN.contains(&reason),
+                "{token} is in KNOWN"
+            );
             assert_eq!(reason.as_str(), token);
             assert_eq!(
-                serde_json::to_value(reason).expect("serialize"),
+                serde_json::to_value(&reason).expect("serialize"),
                 json!(token)
             );
             assert_eq!(
@@ -677,7 +918,7 @@ mod tests {
         }
     }
 
-    /// Every outcome is in `ALL` with its snake-case token, the same way.
+    /// Every known outcome is in `KNOWN` with its snake-case token, the same way.
     #[test]
     fn every_outcome_is_snake_case() {
         let outcomes = [
@@ -688,13 +929,20 @@ mod tests {
             (CreateOutcome::Rejected, "rejected"),
             (CreateOutcome::Conflict, "conflict"),
         ];
-        assert_eq!(CreateOutcome::ALL.len(), outcomes.len());
+        assert_eq!(CreateOutcome::KNOWN.len(), outcomes.len());
         for (outcome, token) in outcomes {
-            assert!(CreateOutcome::ALL.contains(&outcome), "{token} is in ALL");
+            assert!(
+                CreateOutcome::KNOWN.contains(&outcome),
+                "{token} is in KNOWN"
+            );
             assert_eq!(outcome.as_str(), token);
             assert_eq!(
-                serde_json::to_value(outcome).expect("serialize"),
+                serde_json::to_value(&outcome).expect("serialize"),
                 json!(token)
+            );
+            assert_eq!(
+                serde_json::from_value::<CreateOutcome>(json!(token)).expect("deserialize"),
+                outcome
             );
         }
     }

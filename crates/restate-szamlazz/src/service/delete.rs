@@ -5,11 +5,12 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use restate_sdk::context::RunRetryPolicy;
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
-use super::support::{AnsweredCode, Fault, lookup, run_once};
+use super::support::{AnsweredCode, Fault, lookup, run_retrying};
 use crate::contract::{
     DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentKind, IssuedKind,
 };
@@ -49,12 +50,16 @@ impl Execution {
         let outcome = {
             let gateway = Arc::clone(&self.gateway);
             let number = found.number;
-            run_once(
+            run_retrying(
                 ctx,
                 format!("delete-proforma-{number}"),
-                move || async move { gateway.delete_proforma(&number).await },
+                RunRetryPolicy::new().max_attempts(1),
+                move || async move {
+                    Ok::<_, std::convert::Infallible>(gateway.delete_proforma(&number).await)
+                },
             )
-            .await?
+            .await
+            .map_err(|error| about(delete_unknown(&error)))?
         };
         delete_response(outcome, &self.config.namespace).map_err(|fault| about(fault).into())
     }
@@ -104,6 +109,13 @@ fn delete_guard(
     Ok(ControlFlow::Continue(found))
 }
 
+/// A lost reply or a cancelled one-shot run: the caller reconciles first.
+fn delete_unknown(lost: &impl std::fmt::Display) -> Fault {
+    Fault::outcome_unknown(format!(
+        "proforma deletion outcome unknown: {lost}; deletion may have landed: read get, then, if deletion is still intended, retry with a new Idempotency-Key"
+    ))
+}
+
 /// The settled delete step as the response: deleted, and gone since the
 /// lookup (335), are both `deleted`; szamlazz.hu refusing is `not_deleted`
 /// with its code as the reason.
@@ -127,9 +139,7 @@ fn delete_response(
         DeleteOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
-        DeleteOutcome::Lost(lost) => Err(Fault::outcome_unknown(format!(
-            "proforma deletion outcome unknown: {lost}; retry with a new Idempotency-Key"
-        ))),
+        DeleteOutcome::Lost(lost) => Err(delete_unknown(&lost)),
     }
 }
 
@@ -147,7 +157,7 @@ mod tests {
     }
 
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         let body = serde_json::from_str(error.message()).expect("json body");
         (error.code(), body)
     }

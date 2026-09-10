@@ -3,9 +3,9 @@
 //!
 //! [`StornoRequest`] and [`StornoResponse`] are shared with
 //! `Szamlazz.Agent.storno`, the by-number storno of an unmanaged invoice:
-//! the same request and the same response, with one more outcome
-//! ([`StornoOutcome::ManagedByOrder`]) for the invoice that turns out to be
-//! an order's.
+//! the same request and the same response, with outcomes for an invoice
+//! carrying an order number: [`StornoOutcome::ManagedByOrder`] or
+//! [`StornoOutcome::UnsupportedOrderNumber`].
 
 use std::fmt;
 
@@ -38,9 +38,7 @@ impl StornoRequest {
 }
 
 /// The domain outcome of a storno request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StornoOutcome {
     /// The invoice is reversed (now or already); `storno_number` is set when
@@ -55,6 +53,94 @@ pub enum StornoOutcome {
     /// it is managed by the `Order` with key `order_key`: call
     /// `Szamlazz.Order.storno_invoice` there instead.
     ManagedByOrder,
+    /// `Szamlazz.Agent.storno` only: the document carries an order number
+    /// outside the worker's supported key alphabet. Nothing was sent, and
+    /// there is no usable `order_key` to route to.
+    UnsupportedOrderNumber,
+    /// A token this version does not know, preserved verbatim.
+    Other(String),
+}
+
+impl StornoOutcome {
+    /// Known storno outcomes.
+    pub const KNOWN: [Self; 5] = [
+        Self::Reversed,
+        Self::Rejected,
+        Self::Conflict,
+        Self::ManagedByOrder,
+        Self::UnsupportedOrderNumber,
+    ];
+
+    /// The outcome as its wire string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Reversed => "reversed",
+            Self::Rejected => "rejected",
+            Self::Conflict => "conflict",
+            Self::ManagedByOrder => "managed_by_order",
+            Self::UnsupportedOrderNumber => "unsupported_order_number",
+            Self::Other(token) => token,
+        }
+    }
+}
+
+impl fmt::Display for StornoOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for StornoOutcome {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "reversed" => Self::Reversed,
+            "rejected" => Self::Rejected,
+            "conflict" => Self::Conflict,
+            "managed_by_order" => Self::ManagedByOrder,
+            "unsupported_order_number" => Self::UnsupportedOrderNumber,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<StornoOutcome> for String {
+    fn from(outcome: StornoOutcome) -> Self {
+        match outcome {
+            StornoOutcome::Other(token) => token,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl Serialize for StornoOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StornoOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for StornoOutcome {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "StornoOutcome".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::StornoOutcome").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "The domain outcome of a storno request. Known values: reversed, rejected, conflict, managed_by_order (call the managing Order), unsupported_order_number (the document's order number is not a supported Order key; nothing was sent). Other strings are preserved for newer outcomes.",
+        })
+    }
 }
 
 /// Output of `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
@@ -418,9 +504,9 @@ impl DocumentStatus {
 /// The state of a document as szamlazz.hu reports it.
 ///
 /// Tagged by `state`: `live`, `reversed` (with `storno_number` when known) or
-/// `consumed` (with the consuming document in `by`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+/// `consumed` (with the consuming document in `by`). Unknown states preserve
+/// their token and all payload fields, including when flattened in a status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DocumentState {
@@ -432,7 +518,6 @@ pub enum DocumentState {
         /// fills it (finding the storno would take the order-number hint,
         /// which shows only the newest document); the create and storno
         /// handlers report it in their own responses when the hint yields it.
-        #[serde(default)]
         storno_number: Option<String>,
     },
     /// A proforma szamlazz.hu no longer returns because the document `by`
@@ -441,6 +526,91 @@ pub enum DocumentState {
         /// The invoice or prepayment that references the proforma.
         by: String,
     },
+    /// A newer state and its payload, preserved without interpreting it.
+    #[serde(untagged)]
+    Other {
+        /// The unknown state token.
+        state: String,
+        /// The state's payload (excluding `state`).
+        #[serde(flatten)]
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl DocumentState {
+    /// Known state tokens; payloads are carried by the variants.
+    pub const KNOWN: [&'static str; 3] = ["live", "reversed", "consumed"];
+
+    /// The state token, including an unknown token verbatim.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Live => "live",
+            Self::Reversed { .. } => "reversed",
+            Self::Consumed { .. } => "consumed",
+            Self::Other { state, .. } => state,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DocumentState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            state: String,
+            #[serde(flatten)]
+            fields: serde_json::Map<String, serde_json::Value>,
+        }
+        let Wire { state, mut fields } = Wire::deserialize(deserializer)?;
+        match state.as_str() {
+            "live" => Ok(Self::Live),
+            "reversed" => Ok(Self::Reversed {
+                storno_number: serde_json::from_value(
+                    fields.remove("storno_number").unwrap_or_default(),
+                )
+                .map_err(serde::de::Error::custom)?,
+            }),
+            "consumed" => Ok(Self::Consumed {
+                by: serde_json::from_value(
+                    fields
+                        .remove("by")
+                        .ok_or_else(|| serde::de::Error::missing_field("by"))?,
+                )
+                .map_err(serde::de::Error::custom)?,
+            }),
+            _ => Ok(Self::Other { state, fields }),
+        }
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DocumentState {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DocumentState".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::DocumentState").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "The document state: live, reversed (optional storno_number), or consumed (required by). Unknown state strings and their payload fields are preserved.",
+            "required": ["state"],
+            "properties": { "state": { "type": "string" } },
+            "allOf": [
+                {
+                    "if": { "properties": { "state": { "const": "reversed" } } },
+                    "then": { "properties": { "storno_number": { "type": ["string", "null"] } } }
+                },
+                {
+                    "if": { "properties": { "state": { "const": "consumed" } } },
+                    "then": { "required": ["by"], "properties": { "by": { "type": "string" } } }
+                }
+            ]
+        })
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +620,63 @@ mod tests {
 
     use super::*;
     use crate::contract::document::tests::{refuses_unknown_field, round_trip};
+
+    #[test]
+    fn unknown_document_states_preserve_payloads_inside_the_full_order_status() {
+        let mut wire = serde_json::to_value(OrderStatus {
+            invoice: Some(DocumentStatus::new("SZ-1", DocumentState::Live)),
+            ..OrderStatus::default()
+        })
+        .expect("json");
+        wire["invoice"]["state"] = json!(" future_state/é ");
+        wire["invoice"]["gross"] = json!("25400");
+        wire["invoice"]["credit_entries"] = json!(["1000"]);
+        wire["invoice"]["future_details"] = json!({"nested": [null, true, 17, "é"]});
+        // A newer state can use a known state's payload name differently.
+        wire["invoice"]["by"] = json!({"new": "shape"});
+        let decoded: OrderStatus = serde_json::from_value(wire.clone()).expect("open status");
+        let invoice = decoded.invoice.as_ref().expect("invoice");
+        assert_eq!(invoice.gross, Some(dec!(25400)));
+        let DocumentState::Other { state, fields } = &invoice.state else {
+            panic!("unknown state must not be classified: {:?}", invoice.state);
+        };
+        assert_eq!(state, " future_state/é ");
+        assert_eq!(invoice.state.as_str(), state);
+        assert_eq!(fields["future_details"], wire["invoice"]["future_details"]);
+        assert!(
+            !fields.contains_key("gross"),
+            "sibling fields stay with the status"
+        );
+        assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
+    }
+
+    #[test]
+    fn known_document_state_payloads_stay_validated() {
+        for wire in [
+            json!({"state": "consumed"}),
+            json!({"state": "consumed", "by": null}),
+            json!({"state": "reversed", "storno_number": 17}),
+            json!({"state": 17}),
+            json!({}),
+        ] {
+            assert!(serde_json::from_value::<DocumentState>(wire).is_err());
+        }
+        for state in [
+            DocumentState::Live,
+            DocumentState::Reversed {
+                storno_number: None,
+            },
+            DocumentState::Consumed {
+                by: "SZ-1".to_owned(),
+            },
+        ] {
+            assert!(DocumentState::KNOWN.contains(&state.as_str()));
+            round_trip(&state);
+        }
+        let wire = json!({"state": "future", "storno_number": {"unknown": true}});
+        let decoded: DocumentState = serde_json::from_value(wire.clone()).expect("unknown payload");
+        assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
+    }
 
     #[test]
     fn storno_request_round_trips() {
@@ -513,6 +740,44 @@ mod tests {
             .with_code("221")
             .with_message("has corrective");
         round_trip(&rejected);
+    }
+
+    #[test]
+    fn known_storno_tokens_include_unsupported_order_number() {
+        let expected = [
+            (StornoOutcome::Reversed, "reversed"),
+            (StornoOutcome::Rejected, "rejected"),
+            (StornoOutcome::Conflict, "conflict"),
+            (StornoOutcome::ManagedByOrder, "managed_by_order"),
+            (
+                StornoOutcome::UnsupportedOrderNumber,
+                "unsupported_order_number",
+            ),
+        ];
+        assert_eq!(StornoOutcome::KNOWN.len(), expected.len());
+        for (outcome, token) in expected {
+            assert!(StornoOutcome::KNOWN.contains(&outcome));
+            assert_eq!(outcome.as_str(), token);
+            let response = StornoResponse::new(outcome, "SZ-1");
+            assert_eq!(round_trip(&response)["outcome"], token);
+        }
+    }
+
+    #[test]
+    fn an_unknown_storno_outcome_preserves_the_response() {
+        let mut wire = serde_json::to_value(
+            StornoResponse::new(StornoOutcome::Reversed, "SZ-1")
+                .with_storno_number("SS-1")
+                .with_message("a newer worker's explanation"),
+        )
+        .expect("json");
+        wire["outcome"] = json!("future_storno_outcome");
+        let decoded: StornoResponse = serde_json::from_value(wire.clone()).expect("open");
+        assert_eq!(
+            decoded.outcome,
+            StornoOutcome::Other("future_storno_outcome".to_owned())
+        );
+        assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
     }
 
     /// The delete response's `reason` is the worker's own token or

@@ -183,7 +183,7 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
 
 To skip re-authentication on consecutive calls, replay `RawResponse::session_cookie()` as the `Cookie` header of the next request; the reqwest client does this through its cookie store.
 
-The HTTP status is optional but worth passing: szamlazz.hu answers in-band (HTTP 200 with `szlahu_*` headers and a `<hibakod>` body), so the parsers read those first, and the status only decides the case where neither carries an answer; a non-2xx there is `ResponseError::HttpStatus` (`ClientError::HttpStatus` through the client), a proxy or CDN speaking instead of szamlazz.hu, rather than a puzzling `UnexpectedBody`. Without the status that case is still an `UnexpectedBody` parse error; both are `OutcomeClass::Unknown`.
+The HTTP status is optional but worth passing. Before reading the body, every parser checks, in order: a non-empty `szlahu_down` (`ServiceUnavailable`), a `szlahu_error_code` (the operation judges it; issuance can tolerate 56), then a known non-2xx status (`ResponseError::HttpStatus`, `ClientError::HttpStatus` through the client). Only after that does the body decide: a `<hibakod>` body does not override a non-2xx status without either in-band header. This distinguishes a proxy or CDN's answer from a puzzling `UnexpectedBody`; without the status, such a body is left to the operation's parser. HTTP-status and parse failures both have `OutcomeClass::Unknown`.
 
 ## Feature Flags
 

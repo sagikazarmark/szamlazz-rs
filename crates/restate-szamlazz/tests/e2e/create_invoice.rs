@@ -1,8 +1,10 @@
 //! `Szamlazz.Order.create_invoice` under Restate: the durable sequence of a
-//! first create and its `already_issued` twin, the `Idempotency-Key` replaying
-//! the stored completion, and the create step's leading query on a
+//! first create and its target-first `already_issued` twin, the
+//! `Idempotency-Key` replaying the stored completion, and the create step's leading query on a
 //! **re-executed** closure meeting a reversal that happened between the two
-//! executions. The decisions the sequence takes (`decide_lookup`,
+//! executions. Also walks all four ordinary kinds' early-reversal paths:
+//! target lookup, then best-effort storno-number hint, before prerequisites.
+//! The decisions the sequence takes (`decide_lookup`,
 //! `respond_to`, the duplicate order number, the proforma link) are unit
 //! tests of `service::create`; the wire of the create step is
 //! `tests/gateway/`.
@@ -14,15 +16,16 @@ use wiremock::ResponseTemplate;
 
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{
-    Doc, create_for, created, holds_after_misses, not_found, order_query,
+    Doc, create_for, create_never_sent, created, external_id_query, holds_after_misses, not_found,
+    order_query,
 };
 use crate::harness::{Harness, create_body};
 
 /// The first create of an order is `issued` through the full create path
-/// (`namespace`, `account`, the two exclusivity reads, the proforma link, the
-/// lookup, the create step), with exactly one `account` entry whose journaled
-/// account carries its id and never the agent key; a second call with a
-/// **new** `Idempotency-Key` is `already_issued` from the lookup step, with no
+/// (`namespace`, `account`, the target lookup, the two exclusivity reads, the
+/// proforma link, the full lookup, the create step), with one `account` entry
+/// whose journaled account carries its id and never the agent key; a second call with a
+/// **new** `Idempotency-Key` is `already_issued` from the target lookup, with no
 /// second send; and the **same** `Idempotency-Key` replays the stored
 /// completion, byte for byte, without a single request to szamlazz.hu: the
 /// create mock's `expect(1)` holds over all three calls.
@@ -37,11 +40,11 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    // The lookup step and the create step's own leading query both miss;
+    // The target lookup, full lookup and create step's own leading query miss;
     // the second call's lookup finds the document.
     holds_after_misses(
         &h.mock,
-        2,
+        3,
         &Doc {
             external_id: Some("acct:E2E-1:invoice"),
             ..Doc::of("SZ-1", "SZ", "E2E-1")
@@ -85,6 +88,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         [
             "namespace",
             "account",
+            "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
             "lookup-proforma",
@@ -119,13 +123,9 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
     assert_eq!(again.body["gross_total"], "1270");
     assert_eq!(again.body["outstanding"], "1270");
     assert_eq!(
-        h.admin()
-            .runs(again.invocation_id())
-            .await
-            .last()
-            .map(String::as_str),
-        Some("lookup-invoice"),
-        "the lookup answered; no create step"
+        h.admin().runs(again.invocation_id()).await,
+        ["namespace", "account", "lookup-invoice"],
+        "the target lookup answered before any prerequisite"
     );
 
     // The same key: the stored completion, no request of this order.
@@ -173,12 +173,12 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    // The lookup step, the first execution's leading query and its re-query
+    // The target lookup, full lookup, first execution's leading query and re-query
     // miss; the second execution's leading query finds the document
     // reversed.
     holds_after_misses(
         &h.mock,
-        3,
+        4,
         &Doc {
             external_id: Some("acct:E2E-6B:invoice"),
             reversed: true,
@@ -218,4 +218,88 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
         1,
         "one create on the wire"
     );
+}
+
+/// Every ordinary kind's early reversal path is a target ownership lookup
+/// followed by the best-effort storno-number hint. No prerequisite selector
+/// is mounted: the exact wire count proves none was queried. The proforma
+/// row deliberately exercises a reported reversal even though szamlazz.hu
+/// does not normally reverse proformas.
+pub(crate) async fn reversed_targets_answer_before_prerequisites(h: &Harness) {
+    for (kind, document_type, order, number) in [
+        ("proforma", "D", "E2E-TARGET-D", "D-TARGET"),
+        ("invoice", "SZ", "E2E-TARGET-SZ", "SZ-TARGET"),
+        ("prepayment", "ES", "E2E-TARGET-ES", "ES-TARGET"),
+        ("final", "VS", "E2E-TARGET-VS", "VS-TARGET"),
+    ] {
+        let external_id = format!("acct:{order}:{kind}");
+        external_id_query(&external_id)
+            .respond_with(
+                Doc {
+                    reversed: true,
+                    ..Doc::of(number, document_type, order)
+                }
+                .response(),
+            )
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        let storno_number = format!("SS-{number}");
+        // An absent hint is also settled: the reversal is known already.
+        let hint = if kind == "proforma" {
+            not_found()
+        } else {
+            Doc {
+                referenced_invoice: Some(number),
+                ..Doc::of(&storno_number, "SS", order)
+            }
+            .response()
+        };
+        order_query(order)
+            .respond_with(hint)
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        create_never_sent(&h.mock, order).await;
+
+        let reply = h
+            .call(
+                order,
+                &format!("create_{kind}"),
+                &create_body(dec!(1000), false),
+                &format!("{order}-k1"),
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{kind}: {}", reply.body);
+        assert_eq!(reply.body["outcome"], "reversed", "{kind}: {}", reply.body);
+        assert_eq!(reply.body["invoice_number"], number);
+        assert_eq!(reply.body["kind"], kind);
+        assert_eq!(reply.body["external_id"], external_id);
+        assert_eq!(
+            reply.body["storno_number"],
+            if kind == "proforma" {
+                Value::Null
+            } else {
+                Value::String(storno_number)
+            }
+        );
+        assert_eq!(
+            h.admin().runs(reply.invocation_id()).await,
+            [
+                "namespace".to_owned(),
+                "account".to_owned(),
+                format!("lookup-{kind}"),
+                format!("hint-storno-{number}")
+            ]
+        );
+        assert_eq!(
+            h.requests_of_order(order).await.len(),
+            2,
+            "{kind}: only target and hint"
+        );
+        assert!(
+            h.create_bodies_of(order).await.is_empty(),
+            "{kind}: no send"
+        );
+    }
 }

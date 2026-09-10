@@ -12,19 +12,20 @@
 
 use std::sync::Arc;
 
+use restate_sdk::context::RunRetryPolicy;
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::Context;
 use szamlazz_agent::ops::taxpayer::TaxpayerPrefix;
 
 use super::prologue::Execution;
-use super::support::{AnsweredCode, Fault, run_once, run_reading};
+use super::support::{AnsweredCode, Fault, run_reading, run_retrying};
 use crate::contract::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, QueryRequest, QueryResponse,
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetCreditEntriesRequest, SetCreditEntriesResponse,
 };
 use crate::gateway::{
     ProbeOutcome, QueryOutcome, RejectionCode, SetCreditEntriesOutcome, SzamlazzAnswer,
-    TaxpayerOutcome, Unanswered,
+    TaxpayerOutcome,
 };
 use crate::identity::{ExternalId, Namespace};
 
@@ -60,14 +61,14 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
 }
 
 /// The `outcome_unknown` fault of `set_credit_entries` after a lost reply. What the
-/// caller does next depends on `additive`: a replacing call is idempotent and
-/// is simply repeated; an additive one is at-least-once (the lost send may
-/// have appended the entries), so the caller queries the invoice first.
-fn set_credit_entries_unknown(additive: bool, lost: &Unanswered) -> Fault {
+/// caller does next depends on `additive`: a replacing call uses the current
+/// intended snapshot (an older one could overwrite newer entries); an
+/// additive one may already have appended the entries, so query first.
+fn set_credit_entries_unknown(additive: bool, lost: &impl std::fmt::Display) -> Fault {
     let next = if additive {
-        "the entries are additive and may have landed; query the invoice before re-sending"
+        "the entries are additive and may have landed; query the invoice before re-sending; if entries are still missing, send only those entries with a new Idempotency-Key"
     } else {
-        "call set_credit_entries again"
+        "query the invoice; if replacement is still intended, call set_credit_entries again with the current intended snapshot and a new Idempotency-Key"
     };
     Fault::outcome_unknown(format!(
         "credit entry registration outcome unknown: {lost}; {next}"
@@ -180,8 +181,8 @@ impl Execution {
     /// The `query` handler: one durable step (`query`) under the read policy
     /// (the document as szamlazz.hu returned it, the same entry `verify`
     /// writes), then the projection. The projection carries `test` (`teszt`)
-    /// as szamlazz.hu reported it: the go-live check reads it off a known
-    /// document here, since the worker compares it with nothing.
+    /// as szamlazz.hu reported it, compared with nothing. Seller verification
+    /// uses a direct Számla Agent query outside the journal.
     pub(super) async fn query_request(
         &self,
         ctx: &Context<'_>,
@@ -235,16 +236,20 @@ impl Execution {
         let invoice_number = String::from(invoice_number);
         let gateway = Arc::clone(&self.gateway);
         let number = invoice_number.clone();
-        let outcome = run_once(
+        let outcome = run_retrying(
             ctx,
             format!("set-credit-entries-{invoice_number}"),
+            RunRetryPolicy::new().max_attempts(1),
             move || async move {
-                gateway
-                    .set_credit_entries(&number, &entries, additive)
-                    .await
+                Ok::<_, std::convert::Infallible>(
+                    gateway
+                        .set_credit_entries(&number, &entries, additive)
+                        .await,
+                )
             },
         )
-        .await?;
+        .await
+        .map_err(|error| set_credit_entries_unknown(additive, &error))?;
         set_credit_entries_response(outcome, invoice_number, additive, &self.config.namespace)
             .map_err(HandlerError::from)
     }
@@ -255,14 +260,14 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::gateway::Rejection;
+    use crate::gateway::{Rejection, Unanswered};
 
     fn namespace() -> Namespace {
         "acct".parse().expect("namespace")
     }
 
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         let body = serde_json::from_str(error.message()).expect("json body");
         (error.code(), body)
     }
@@ -360,11 +365,13 @@ mod tests {
 
     /// `set_credit_entries` with `additive: true` is at-least-once: a lost reply
     /// may have appended the entries, so the fault tells the caller to query
-    /// the invoice before re-sending; a replacing call is repeated as is.
+    /// the invoice before re-sending; a replacing call uses the current
+    /// intended snapshot, not a stale retry.
     #[test]
     fn the_set_credit_entries_fault_tells_an_additive_caller_to_query_first() {
         let lost = Unanswered::Transport("connection reset".to_owned());
-        let additive = TerminalError::from(set_credit_entries_unknown(true, &lost));
+        let additive =
+            TerminalError::try_from(set_credit_entries_unknown(true, &lost)).expect("known fault");
         assert_eq!(additive.code(), 500);
         assert!(
             additive.message().contains("connection reset"),
@@ -384,7 +391,8 @@ mod tests {
             additive.message()
         );
 
-        let replacing = TerminalError::from(set_credit_entries_unknown(false, &lost));
+        let replacing =
+            TerminalError::try_from(set_credit_entries_unknown(false, &lost)).expect("known fault");
         assert_eq!(replacing.code(), 500);
         assert!(
             replacing
@@ -394,7 +402,7 @@ mod tests {
             replacing.message()
         );
         assert!(
-            !replacing.message().contains("query the invoice"),
+            replacing.message().contains("current intended snapshot"),
             "{}",
             replacing.message()
         );
@@ -438,7 +446,7 @@ mod tests {
         ] {
             let fault =
                 taxpayer_prefix(&QueryTaxpayerRequest::new(tax_number)).expect_err(tax_number);
-            let error = TerminalError::from(fault);
+            let error = TerminalError::try_from(fault).expect("known fault");
             assert_eq!(error.code(), 400, "{tax_number:?}");
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json");
             assert_eq!(body["code"], "invalid_input", "{tax_number:?}: {body}");
@@ -468,7 +476,8 @@ mod tests {
 
         let prefix = taxpayer_prefix(&QueryTaxpayerRequest::new("12345678-2-42")).expect("full");
         let last = TerminalError::new_with_code(500, "szamlazz.hu is unavailable: maintenance");
-        let error = TerminalError::from(read_exhausted(&taxpayer_step(&prefix), &last));
+        let error = TerminalError::try_from(read_exhausted(&taxpayer_step(&prefix), &last))
+            .expect("known fault");
         assert_eq!(error.code(), 503);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json");
         assert_eq!(body["code"], "unavailable", "{body}");

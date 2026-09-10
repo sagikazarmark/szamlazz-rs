@@ -14,7 +14,7 @@ use szamlazz_adatkapcsolat::{
 };
 
 /// An outgoing invoice (`<szamla>`): id 123456, number 2015-123, issued
-/// 2015-12-01, one line item, one payment, an empty `<pdf>`.
+/// 2015-12-01, one line item, one credit entry, an empty `<pdf>`.
 pub const OUTGOING_INVOICE: &str = include_str!("../synthetic/szamla.xml");
 
 /// A bank transaction (`<banktranz>`): id 987, value date 2026-07-03, an

@@ -371,6 +371,7 @@ async fn e2e_order_protocol() {
         scenarios![
             create_invoice::issued_already_issued_and_the_key_replays,
             create_invoice::reversal_between_executions_is_reversed_not_reissued,
+            create_invoice::reversed_targets_answer_before_prerequisites,
             create_proforma::proforma_then_the_invoice_naming_it_then_get_consumed,
             create_prepayment::prepayment_converts_the_proforma_under_auto_and_by_number,
             create_final::create_final_names_its_live_prepayment_invoice,
@@ -380,6 +381,7 @@ async fn e2e_order_protocol() {
             delete_proforma::proforma_is_deleted_by_the_orders_handler,
             policies::run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault,
             policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,
+            policies::cancelled_one_shot_deletion_is_unknown_and_get_reconciles,
             get::run_retries_do_not_spend_invocation_attempts,
             faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
             invariants::plant_the_leak_positive_control,
@@ -394,6 +396,7 @@ async fn e2e_order_protocol() {
             concurrency::same_idempotency_key_in_flight_attaches_to_the_invocation,
             agent_reads::the_scope_selects_the_account_for_every_agent_read,
             agent_writes::agent_storno_and_set_credit_entries_run_on_the_scoped_account,
+            agent_writes::cancelled_credit_entries_are_unknown_with_mode_specific_guidance,
             storno::purged_order_is_stornoed_and_reissued,
             prologue::a_flaky_resolver_is_retried_by_the_resolve_policy,
             prologue::a_killed_invocation_releases_the_order_key,

@@ -431,7 +431,7 @@ mod tests {
     }
 
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         let body = serde_json::from_str(error.message()).expect("json body");
         (error.code(), body)
     }

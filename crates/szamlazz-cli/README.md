@@ -31,6 +31,61 @@ Számla Agent commands support `--json` for machine-readable output. The `listen
 
 The command remains named `payment register` for shell ergonomics; it registers a credit entry against an invoice through the Számla Agent.
 
+## JSON input
+
+`invoice create` and `receipt create` read their request from `--file` (`-` for
+stdin). Unknown fields are rejected recursively before any request is sent,
+including fields inside enum variants, line items, carrier blocks and email
+attachments. The error names the ignored field's path. Wrong types, missing
+required fields and trailing JSON are also rejected. Optional fields may be
+omitted; open wire tokens such as payment methods and VAT codes remain accepted.
+
+## Document results and PDF output
+
+`invoice create`, `invoice storno`, and `receipt create`, `storno`, and `get`
+report the remote result even if writing the requested PDF fails. A local write
+failure exits nonzero; it does **not** undo issuance. Use the reported document
+number to fetch the PDF rather than issuing the document again.
+
+Their `--json` output separates the two results:
+
+```json
+{
+  "remote": { "issued": { "invoice_number": "E-2026-123" } },
+  "pdf_output": {
+    "status": "failed",
+    "target": "invoice.pdf",
+    "error": "writing PDF to invoice.pdf: Permission denied (os error 13)"
+  }
+}
+```
+
+The `remote` value above is abbreviated: invoice creation returns either
+`{"issued": {...}}` or `{"preview": {...}}` (a preview issues nothing).
+Receipt commands return the receipt, including its number and type. Invoice
+storno returns `{outcome, message, original_number, document}`, with the returned
+document and one of these outcomes:
+
+- `reversed`: a different number and a non-positive gross total confirm a
+  reversal. A repeated storno returns the existing reversal and the same outcome;
+  the reply cannot establish whether it was issued just now. Zero-total reversals
+  also qualify.
+- `noop`: the reply echoes the requested number; nothing was reversed (as happens
+  for a proforma or delivery note). Exits nonzero.
+- `unconfirmed`: a different number with a missing or positive gross total does
+  not confirm a reversal. Exits nonzero; inspect the returned document before
+  retrying.
+
+`pdf_output.status` is `not_requested`, `written`, `missing`, or `failed`.
+`written`, `missing`, and `failed` include `target`; `failed` also includes the
+local `error`. `target` is a display string: non-UTF-8 path bytes are rendered
+lossily with replacement characters in JSON; the filesystem write uses the
+original path bytes. A missing PDF remains a warning, not a write failure. Human output
+likewise retains the remote result and labels a local PDF failure separately.
+With `--pdf -`, stdout contains only PDF bytes; the human or JSON report goes to
+stderr, followed by any exit-error diagnostic. This separation also applies when
+the stdout PDF write fails.
+
 ## License
 
 Licensed under either of

@@ -854,8 +854,9 @@ pub enum SetCreditEntriesOutcome {
     /// The *Lost answer*: the entries were sent and szamlazz.hu did not
     /// answer (a transport or parse failure, or `szlahu_down`), so whether
     /// they landed is not known. Data, not an error: the step runs once
-    /// (`run_once`) and the handler answers `outcome_unknown`; a replacing
-    /// call is repeated as is, an additive one queries the invoice first.
+    /// without a run retry and the handler answers `outcome_unknown`. Query
+    /// first: an additive caller sends only missing entries; a replacing
+    /// caller sends the current intended snapshot if replacement is still wanted.
     Lost(Unanswered),
 }
 

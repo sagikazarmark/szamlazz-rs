@@ -1007,21 +1007,21 @@ pub struct Totals {
     pub grand: Option<VatTotal>,
 }
 
-/// A payment recorded on the invoice (`kifizetes`).
+/// A credit entry recorded on the invoice (`kifizetes`).
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
-pub struct RecordedPayment {
-    /// Payment date (`datum`).
+pub struct RecordedCreditEntry {
+    /// Credit entry date (`datum`).
     #[serde(
         default,
         rename(deserialize = "datum"),
         deserialize_with = "de::opt_xs_date"
     )]
     pub date: Option<Date>,
-    /// Payment method / legal title (`jogcim`).
+    /// Title: the payment method's wire token (`jogcim`), preserved as received.
     #[doc(alias = "jogcím")]
     #[serde(default, rename(deserialize = "jogcim"))]
-    pub method: Option<String>,
+    pub title: Option<String>,
     /// Amount (`osszeg`).
     #[serde(
         default,
@@ -1032,7 +1032,7 @@ pub struct RecordedPayment {
     /// Comment (`megjegyzes`).
     #[serde(default, rename(deserialize = "megjegyzes"))]
     pub comment: Option<String>,
-    /// Bank account the payment arrived on (`bankszamlaszam`).
+    /// Bank account credited (`bankszamlaszam`).
     #[serde(default, rename(deserialize = "bankszamlaszam"))]
     pub bank_account: Option<String>,
     /// Linked bank transaction id (`banktranzid`).
@@ -1164,13 +1164,13 @@ pub struct InvoiceDocument {
     /// Totals (`osszegek`).
     #[serde(default, rename(deserialize = "osszegek"))]
     pub totals: Totals,
-    /// Recorded payments (`kifizetesek`).
+    /// Recorded credit entries (`kifizetesek`).
     #[serde(
         default,
         rename(deserialize = "kifizetesek"),
-        deserialize_with = "de::payments"
+        deserialize_with = "de::credit_entries"
     )]
-    pub payments: Vec<RecordedPayment>,
+    pub credit_entries: Vec<RecordedCreditEntry>,
     /// The invoice PDF (`pdf`), base64 on the wire, decoded here.
     ///
     /// `None` when the element is absent or empty, and when its content does
@@ -1264,10 +1264,10 @@ impl InvoiceDocument {
             required(item.ordering.as_ref(), "invoice tetel/sztetordering")?;
         }
         validate_totals(&self.totals, "invoice")?;
-        for payment in &self.payments {
-            required(payment.date.as_ref(), "invoice kifizetes/datum")?;
-            required_text(payment.method.as_deref(), "invoice kifizetes/jogcim")?;
-            required(payment.amount.as_ref(), "invoice kifizetes/osszeg")?;
+        for entry in &self.credit_entries {
+            required(entry.date.as_ref(), "invoice kifizetes/datum")?;
+            required_text(entry.title.as_deref(), "invoice kifizetes/jogcim")?;
+            required(entry.amount.as_ref(), "invoice kifizetes/osszeg")?;
         }
         for item in &self.financial_items {
             required_text(item.name.as_deref(), "invoice qutet/nev")?;
@@ -1964,7 +1964,7 @@ pub(crate) mod de {
     }
 
     wrapped_list!(items, "tetel", super::InvoiceItem);
-    wrapped_list!(payments, "kifizetes", super::RecordedPayment);
+    wrapped_list!(credit_entries, "kifizetes", super::RecordedCreditEntry);
     wrapped_list!(receipt_items, "tetel", super::ReceiptItem);
     wrapped_list!(receipt_payments, "kifizetes", super::ReceiptPayment);
     wrapped_list!(financial_items, "qutet", super::FinancialItem);

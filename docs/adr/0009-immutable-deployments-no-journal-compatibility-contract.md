@@ -73,6 +73,10 @@ of the handlers.
      are a review of the release's diff (this ADR permits reshaping the result types, so a resume across such a
      release is refused, and the invocation killed for the caller to retry). That path is an operator's
      deliberate act on a named invocation; the table is what makes one of its three questions answerable.
+     The target-first cleanup inserts an ownership `lookup-{kind}` before prerequisites and adds
+     `hint-storno-{number}` paths for reversed non-corrective targets. Its sequence differs from the previous
+     deployment's: **do not resume an invocation from that sequence onto this release**. Keep it on its original
+     deployment, or kill it and reconcile through a new invocation with a new `Idempotency-Key`.
 
 4. **The journaled value types are closed themselves** (*amendment, 2026-09-09, #175*). `Defaults`,
    `SellerConfig` and `SellerEmailConfig` carry `#[serde(deny_unknown_fields)]` and the static resolver reads its

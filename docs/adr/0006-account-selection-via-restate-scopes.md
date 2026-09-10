@@ -105,8 +105,9 @@ credentials)` pairs, the right key under the right scope, a stable `credential_r
 caching `Unscoped` / `Unknown` on `AccountResolver`; the fetch-every-execution and stable-reference rules on
 `CredentialStore`; #43). The worker enforces what it can (the static resolver at load time) and *relies on* the
 rest, including, since the account-pin amendment below, that the key under a scope opens the account the scope
-names, live or test as meant: the worker holds no account pin, and the go-live check (query a document known to be
-the account's under each scope and read its `test` and seller block) is the operator's. *Amended (account-pin
+names, live or test as meant: the worker holds no account pin, and the go-live check is the operator's:
+`examples/verify_seller.rs` uses the actual deployed `Accounts` resolver/store to compare a known document's
+`test`, seller name and tax number with independent expectations, outside Restate's journal. *Amended (account-pin
 amendment, 2026-09-07):* the original text's `mode` matching `teszt`, the `supplier_id` recommendation, the
 unique-supplier-ids load-time check and the prologue's `warn` on an unpinned scoped resolution are gone with the
 pins.
@@ -228,7 +229,7 @@ all under scope `acme` with namespace `acct`:
 Restate contributed the lock and, within each invocation, replay. The e2e suite performs exactly this with
 the journals purged between the steps (`purged_order_is_stornoed_and_reissued`).
 
-### Issuing is two durable steps; the query lives inside the closure
+### Target ownership, prerequisites, then lookup and create; the query lives inside the closure
 
 The hand-rolled attempt loop (one `ctx.run` per attempt, a durable sleep, an attempt counter) became two
 steps (#22, ADR 0004 amended): a read-only **lookup** (`lookup-{kind}`) that settles every case needing no
@@ -237,6 +238,14 @@ factor 2, five executions, bounded by one hour) whose closure returns `Err(Uncon
 szamlazz.hu's answer is not known and every known answer as `Ok` data. **Every execution of the create step
 is query-first, inside the closure**: a separate journaled pre-query would replay its stale "nothing" on
 the retry and the re-executed closure would send again. Storno has the same shape (#30).
+
+The create/correct handlers now first settle the target, after validation and the prologue and before any
+prerequisite: an ownership-only `lookup-{kind}` answers live (`already_issued`, or `conflict{live}` with
+`reissue`), collision, or reversed without reissue. Reversed non-correctives take a best-effort
+`hint-storno-{number}` (exhaustion leaves the number absent, cancellation propagates). Only an absent target or
+explicit reissue proceeds through prerequisites and the full lookup/create pair above. Both target reads use
+`lookup-{kind}`, the first journaling `OwnershipOutcome`, the later `LookupOutcome`. The inserted step and
+reversed-target paths change the sequence: no resume from the previous deployment's sequence (ADR 0009).
 
 **Accepted risk: the attempt count is not durable.** The SDK restores a run's retry count and elapsed
 duration from the server's `retry_count_since_last_stored_command` only when the failing run is the *first*
@@ -307,7 +316,7 @@ The SDK's default retry policy for a `ctx.run` is `RetryPolicy::Infinite`, which
 `next_retry_delay`; the server then spends *this handler's* `invocation_retry_policy` (five attempts, kill)
 on the run's failures. So every step that must not consume the invocation budget sets a policy explicitly,
 the issue policy on the create and storno steps, the resolve policy on the `account` step, `max_attempts(1)`
-on every read and one-shot write, and builds it with `RunRetryPolicy::new()` (factor 1.0, no caps), **not**
+on one-shot writes, the read policy on reads, and builds it with `RunRetryPolicy::new()` (factor 1.0, no caps), **not**
 `RunRetryPolicy::default()`, which caps the delay at 2 s and the duration at 50 s. Verified end to end: with
 a 1 s test policy the re-execution follows the run's delay, not the handler's 2 m.
 
@@ -361,14 +370,20 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   not gone live, so none exists. `AccountMode`, `StaticAccount.mode` / `supplier_id` and the endpoint's `mode` /
   `supplier_id` configuration keys are gone (either in a deployment file is refused as an unknown key like any
   other); `QueryResponse.supplier_id` and `CheckedAccount.mode` / `supplier_id` are gone from the responses
-  (`QueryResponse.test` stays: it is `teszt` as reported, what the go-live check reads); the `account_mismatch`
+  (`QueryResponse.test` stays: it is `teszt` as reported, compared with nothing); the `account_mismatch`
   fault code (409) is gone (nothing can raise it), so `TerminalCode` has seven codes; ownership validation is
   `rendelesszam == order ∧ tipus ∈ kind-set`; and the unique-supplier-ids load-time check and the prologue's
   `warn` went with the pins. The agent crate still parses `<szallito>` and `<teszt>` in full: they are what
   szamlazz.hu sends. What replaces the pins is a documented **go-live check**, last line of the deploy checklist:
-  under each scope, `Szamlazz.Agent.query` a document known to be the account's (a number from its szamlazz.hu
-  UI; issue one in the UI first on a fresh live account) and read `test` and the seller block (name, tax number)
-  on the answer. **The residual risk is accepted and stated** in the library README (*Go-live*), `Account`'s
+  run [`examples/verify_seller.rs`](../../crates/restate-szamlazz/examples/verify_seller.rs) with the **actual
+  deployed `Accounts` resolver and credential store**, not a separately copied agent key. Its executable form is
+  `cargo run -p restate-szamlazz --example verify_seller < deploy-check.json`; a custom host uses its
+  `verified_endpoint` with the exact bundle bound to both services. Supply a known document under every scope
+  (null for unscoped), with independently established expected `test`, seller name and tax number. It resolves
+  and fetches through that bundle and queries at the resolved endpoint with a fresh Számla Agent client,
+  outside Restate's journal. `Szamlazz.Agent.query` deliberately omits the seller block; it cannot do this check.
+  `check_account` through each deployed scope separately proves routing/protocol v7. Repeat the seller check
+  after key rotation; it is point-in-time, not a permanent pin. **The residual risk is accepted and stated** in the library README (*Go-live*), `Account`'s
   rustdoc and CONTEXT.md: a key pasted into the wrong scope, a live key
   where a test one was meant or the reverse, issues there, answers `issued`, and nothing in the worker fails.
   Considered and not taken: pinning the seller **tax number** instead of `szallito/id` (documented, legally

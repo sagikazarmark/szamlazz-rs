@@ -129,8 +129,9 @@ pub use ack::{Ack, ControlCode, InvoiceAck, InvoiceDirection};
 pub use document::{
     Address, Bank, BankTransaction, BuyerLedger, Document, FinancialItem, InvoiceAppearance,
     InvoiceDocument, InvoiceInfo, InvoiceItem, InvoiceItemLedger, Party, Pdf, ReceiptBatch,
-    ReceiptDocument, ReceiptInfo, ReceiptItem, ReceiptItemLedger, ReceiptPayment, RecordedPayment,
-    RootKind, Totals, TransactionDirection, TransactionPartner, VatRate, VatTotal,
+    ReceiptDocument, ReceiptInfo, ReceiptItem, ReceiptItemLedger, ReceiptPayment,
+    RecordedCreditEntry, RootKind, Totals, TransactionDirection, TransactionPartner, VatRate,
+    VatTotal,
 };
 pub use error::{AckError, ParseError, ValidationError, XmlError};
 pub use fanout::{BoxError, Fanout, FanoutError, HandlerFailure};

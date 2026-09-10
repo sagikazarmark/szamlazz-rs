@@ -127,8 +127,9 @@ is Rust 1.92.
 ### What `Szamlazz.Order` guarantees
 
 - **Exactly one live document per kind per order** (proforma, invoice, prepayment, final) under caller retries,
-  process crashes and concurrent callers. Same-key handlers run one at a time. Issuing is a read-only **lookup**
-  step that settles every case needing no create, then a **create** step under a run retry policy whose every
+  process crashes and concurrent callers. Same-key handlers run one at a time. After validation and the prologue,
+  a target **ownership lookup** settles an existing document before prerequisites for a new send. An absent
+  target, or an explicit reissue, proceeds through prerequisites, the full **lookup**, then a **create** step whose every
   execution queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it
   creates, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
 - **Correctives** are issued under a caller-supplied `correction_id`: the same id finds the corrective it
@@ -158,7 +159,8 @@ pin**. A create's reply carries neither `teszt` nor the seller block (only a que
 them could fire only after the first document of a fresh order had been issued into whatever account the key
 opens; 0.3's two tripwires (`mode` against `teszt`, `supplier_id` against the undocumented `szallito/id`) were
 dropped for that reason. Which account a key opens, and whether it is a test account, is the operator's go-live
-check: query a known document under each scope and read `test` and the seller block.
+check: use [`examples/verify_seller.rs`](examples/verify_seller.rs) with the deployed `Accounts` resolver and
+credential store to compare a known document's `test` and seller block with independent expectations.
 
 **A permanent namespace.** The deployment's namespace prefixes the external ids; changing it would hide every
 document issued so far. It is pinned per invocation, so a redeploy cannot move a running invocation.
@@ -245,7 +247,8 @@ response.
 
 Every request type, and every object it nests, is closed (`#[serde(deny_unknown_fields)]`,
 `additionalProperties: false` in the schema): a field the contract does not know is refused as `invalid_input`
-naming the field, never silently dropped. Response types stay open. The `conflict_reason` table is below; the
+naming the field, never silently dropped. Response objects tolerate added fields; response tokens and states
+preserve unknown values as described below. The `conflict_reason` table is below; the
 `schemars` feature puts the full request and response schemas into the discovery manifest.
 
 `service::Body<T>` is how every handler takes its input: a `Json<T>` whose decode runs in the handler, so a
@@ -253,8 +256,10 @@ malformed body is the structured `invalid_input` fault instead of the SDK's plai
 as `Json<T>`; built with `Body::new` / `From<T>` for calls through the generated clients.
 
 `contract::CreateOutcome` / `ConflictReason`: `issued`, `already_issued`, `reconciled`, `reversed`, `rejected` or
-`conflict` with a reason. Both carry `ALL` and `as_str` (the snake-case token, what a caller branches on), and
-both are `#[non_exhaustive]`: a client branches with a default arm. The
+`conflict` with a reason. Both carry `KNOWN` and `as_str` and preserve an unknown string verbatim in
+`Other(String)`, as do `StornoOutcome`, `Warning` and `TerminalCode`. `#[non_exhaustive]` requires a default arm
+in downstream Rust matches; the serde handling of `Other` is what makes the wire open. An unknown warning
+does not undo a known success; an unknown outcome stays unclassified, never assumed successful or safe to retry. The
 reasons:
 
 | Reason | When |
@@ -271,7 +276,11 @@ reasons:
 | `not_managed` | A document named by number does not carry this order's number. |
 
 `contract::TerminalCode` is the set of fault codes a `TerminalError` carries, each with its HTTP status
-(`TerminalCode::status`; `TerminalCode::ALL` lists them in the order of the fault table below):
+(`TerminalCode::KNOWN` lists the known codes in the order of the fault table below). `TerminalCode::status`
+and `Fault::status` return `Option<u16>`; `TerminalCode::is_outcome_unknown` returns `Option<bool>`:
+`Some(true)` for the three outcome-unknown codes, `Some(false)` for the other known codes, `None` for an unknown
+token. Unknown codes acquire neither an inferred status nor retry advice; read the actual ingress status.
+The known codes are:
 
 - `invalid_input` (400)
 - `unknown_account` (400): the request names no account of this deployment
@@ -288,6 +297,8 @@ reasons:
 `Szamlazz.Agent.check_account`: `scope`, `account: {id}`, `namespace` and
 `credentials: {state: ok} | {state: rejected, code, message}`. Credential acceptance is its only
 szamlazz.hu-verified fact; the rest echoes the configuration.
+`CredentialsCheck::Other { state, fields }` preserves an unknown state and all its payload fields without
+inferring credential acceptance; `KNOWN` lists `ok` and `rejected`.
 
 `contract::QueryTaxpayerRequest` / `QueryTaxpayerResponse` (`TaxpayerAddress`) is the contract of
 `Szamlazz.Agent.query_taxpayer`. In: `tax_number`, the bare eight-digit stem (`12345678`) or the full
@@ -297,8 +308,12 @@ projection of the agent crate's `TaxpayerInfo` (what the read step journals), wi
 answer. Not cached by the worker; cache it in the caller with a TTL on the order of a day.
 
 `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
-`managed_by_order`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
+`managed_by_order`, `unsupported_order_number`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
 `QueryResponse` and `SetCreditEntriesRequest` / `SetCreditEntriesResponse` are the remaining handler contracts.
+`Szamlazz.Agent.storno` returns `managed_by_order` only when the reported order number is a supported `OrderKey`.
+Otherwise it returns `UnsupportedOrderNumber` (`unsupported_order_number`), preserves the reported string in
+`order_key`, and explains the failed rule in `message`. Nothing was sent: reverse in szamlazz.hu and reconcile
+in the caller's system, without normalising the number or bypassing the order guard.
 
 `contract::OrderStatus` / `DocumentStatus` is the live view `get` returns: one optional `DocumentStatus` per kind
 (`number`, `state`, `gross`, `net`, `credit_entries`, `referenced_proforma`, `e_invoice`) with `DocumentState`
@@ -307,6 +322,8 @@ flattened as `{state: live}`, `{state: reversed, storno_number}` or, for a consu
 which shows only the newest document); the create and storno handlers report it. A `null` slot is *nothing of
 ours* under that external id, which may still be a foreign holder (a create there answers
 `conflict{external_id_collision}`). Correctives are not in the view.
+`DocumentState::Other { state, fields }` preserves an unknown state and its payload fields;
+`DocumentState::KNOWN` lists `live`, `reversed` and `consumed`. Unknown states stay unclassified.
 
 ### Identity
 
@@ -373,8 +390,8 @@ is the configuration-backed implementation of both.
 
 The traits are object-safe (`BoxFuture`), require no `Debug`, and carry the checklist a resolver of your own
 guarantees: no fan-in, append-only, unique `(endpoint, credentials)` pairs, the right key under the right scope
-(the worker holds no account pin: verified at go-live by reading `test` and the seller block of a known document
-under each scope, never inferred), a stable `credential_ref` across rotations, never caching `Unscoped` /
+(the worker holds no account pin: verified at go-live with the actual deployed `Accounts` bundle by
+[`verify_seller`](examples/verify_seller.rs), never inferred), a stable `credential_ref` across rotations, never caching `Unscoped` /
 `Unknown`. `Accounts`' `Debug` (and so `Order`'s and `Agent`'s) names the trait objects without descending into
 them, so a store that derives `Debug` over a key map cannot print its keys through the services.
 
@@ -437,7 +454,8 @@ limit), because its parts are bounded: the namespace at 16, the order key, the `
 invoice number at 40 each (a dashed UUID fits every one). `:` is the separator and is excluded from every part; a
 `correction_id` equal to one of the tokens (`invoice`, `storno`, `check-account`, …) is refused.
 
-The id is queried by the lookup step and again by every execution of the create step, inside the create's own
+The id is queried first by the target ownership lookup, again by the full lookup after prerequisites, and by
+every execution of the create step, inside the create's own
 `ctx.run` closure, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
 There is **no generation counter**: external ids are not unique server-side and a query returns the newest
 holder, which is exactly the question asked ("what is the newest document of this kind we issued for this
@@ -496,7 +514,7 @@ for a caller:
    - **A killed invocation** (attempts exhausted) is a fault whose envelope `message` is the last retryable
      error's **text**, not the worker's `{code, message}` JSON: treat an unparsable 5xx `invocation` body as
      `outcome_unknown`.
-   - **The other faults are settled**, nothing landed: `invalid_input`, `unknown_account` and `not_found` are
+   - **The other known faults are settled**, nothing landed: `invalid_input`, `unknown_account` and `not_found` are
      raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or
      refusing the credit entries it was sent). Retrying as is repeats the answer: fix the request, the number,
      the scope or the account, or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
@@ -528,9 +546,15 @@ Faults are `TerminalError`s whose message is the JSON `{ "code", "message", "sza
 the status below, never the token (the Rust SDK carries a terminal error as code plus message and offers no other
 channel).
 
-The fault's `code` is always one of the tokens of `contract::TerminalCode`. A szamlazz.hu code never travels in
+This worker emits the known tokens of `contract::TerminalCode`; a client preserves a newer token as `Other`.
+A szamlazz.hu code never travels in
 it, but in `szamlazz_code` beside it, present on every fault a szamlazz.hu answer caused: the `szamlazz_error`
 pass-through, `credentials_rejected`, and `unavailable` on a code a read cannot conclude from.
+
+Converting a `Fault` to the SDK's `TerminalError` uses `TryFrom<Fault>` and returns the typed
+`service::FaultConversionError`: `UnknownStatus` for an unknown code, `Serialization` if JSON encoding fails.
+It never invents a terminal status. Conversion to `HandlerError` keeps known faults terminal and surfaces a
+conversion failure as an internal retryable error, not as a classification of the decoded fault.
 
 A malformed body is the same shape: every handler decodes its own body (`service::Body<T>`, not the SDK's
 `Json<T>`), so an unknown field, a wrong type, a missing required field or invalid JSON is
@@ -543,7 +567,7 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_credit_entries` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
-| `outcome_unknown` | 500 | The create or storno step ran out of the issue policy while a document may or may not have been issued, or `set_credit_entries` lost the reply to its one send. | Rule 2. For `set_credit_entries` with `additive: true` (**at-least-once**: every send that reached szamlazz.hu appended the entries) query the invoice before re-sending; a replacing call is repeated as is. |
+| `outcome_unknown` | 500 | The create or storno step exhausted its issue policy or was cancelled, or a one-shot `delete_proforma` / `set_credit_entries` write lost its reply or was cancelled mid-send. The write may have landed. | Rule 2 for create/storno. For deletion, read `get`, then retry with a new key if deletion is still intended. For credit entries, query the invoice first: an additive call sends only entries still missing; a replacing call sends the current intended snapshot, never a stale retry. Use a new `Idempotency-Key`. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
@@ -594,7 +618,18 @@ execution until the handler's inactivity timeout.
 
 ### Issuing, step by step
 
-Inside a handler, issuing is two durable steps.
+After validation and the prologue, the first read is the **target ownership lookup** (`lookup-{kind}`),
+including `lookup-corrective` for a `correction_id`. It settles a live target as `already_issued` (or
+`conflict{live}` with `reissue`), a collision as `conflict{external_id_collision}`, and a reversed target without
+`reissue` as `reversed`, **before prerequisites**. A reversed non-corrective gets a best-effort
+`hint-storno-{number}` for its storno number; exhaustion leaves the number absent, cancellation propagates.
+Correctives take no hint. A consumed proforma, reversed prepayment or changed corrective base therefore cannot
+hide an already-issued target.
+
+Only an absent target or an explicit reissue proceeds through prerequisites (exclusivity, prepayment, proforma
+link or corrective base), then the existing full lookup and query-first create. Both target reads are named
+`lookup-{kind}`: the first journals `OwnershipOutcome`, the later full lookup journals `LookupOutcome` and
+observes changes outside the order's lock as well as foreign documents.
 
 **The lookup** (`lookup-{kind}`) is read-only and settles every case that needs no create: a live document of
 ours is `already_issued` (or `conflict{live}` with `reissue`), a reversed one is `reversed` (or proceeds with
@@ -692,7 +727,7 @@ one place.
 
 The same run checks what a `ctx.run` result may hold (`service::journal`): a sample of every variant of every
 journaled type round-trips through serde; none carries the agent key (an account resolved from configuration whose
-key is a sentinel, and the two `Transport` write outcomes from a gateway opened with the sentinel credentials, are
+key is a sentinel, and the two `Lost` write outcomes from a gateway opened with the sentinel credentials, are
 scanned for it); and none carries the document body: no `supplier`, `buyer`, `items`, `financial_items`, `labels`
 or `pdf` key at any depth, since the document outcomes carry the worker's own projections
 (`gateway::document::{FoundDocument, IssuedDocument}`: what the handlers read of a queried document or a create
@@ -727,7 +762,7 @@ for szamlazz.hu, in two phases on one server. It is two things and nothing else:
   protocol-v7 canary; and, over the whole run, the object keeping no state, no agent key in any journal entry
   (the hex-decoded `raw`) with a planted positive control found, and the step-name table check.
 
-**Phase 1** registers the single-account deployment (the static resolver's `[account]`) and runs its fourteen
+**Phase 1** registers the single-account deployment (the static resolver's `[account]`) and runs its
 scenarios **concurrently**, unscoped, on one runtime (a `JoinSet`): every scenario owns its order keys, numbers
 and `Idempotency-Key`s, every stub is mounted once and discriminated by them (`create_for(order)` matches the
 `<rendelesSzam>` the worker puts on every create, a storno or credit entry by its `<szamlaszam>`, a query by its
@@ -740,7 +775,8 @@ replayed; a reversal between two executions of the create step; the proforma, th
 live prepayment invoice; the corrective under its correction id; storno then reissue; the storno answered from the
 hint and a storno re-executed with a byte-identical body; the proforma deleted and then absent; the three
 policies (an exhausted create and the key replaying its fault, a flaky read, an exhausted read) on three orders at
-once; the cancellation mid-send; run retries against `get`'s `max_attempts`; the wire faults; the positive
+once; cancellation mid-create and mid-delete; existing targets settling before changed
+prerequisites and the reversed-target hint paths; run retries against `get`'s `max_attempts`; the wire faults; the positive
 control.
 
 **Phase 2** performs the documented flag day (private, drain, register the multi-account revision, public; the one
@@ -759,7 +795,8 @@ account its scope selects (`check_account` under each scope with that account's 
 `unknown_account`; `query` with `test` as reported and no `supplier_id`; `query_taxpayer` under each scope with
 its key, the full number and the stem one step); the `Szamlazz.Agent` writes on the scoped account (`storno`
 with `<teljesitesDatum>` equal to the original's `telj` and no `<keltDatum>`, `set_credit_entries` with the flag, the
-entries and the key on the wire and the totals answered); an order whose invocations were purged stornoed and
+entries and the key on the wire and the totals answered, cancellation mid-credit-entry-send as structured
+`outcome_unknown`); an order whose invocations were purged stornoed and
 reissued; a resolver failing twice then answering, the `account` step re-executed under the resolve policy with
 one entry; an invocation held at its fetch after its `account` step, killed, the queued call on the same key
 running at once; an account change and a credential rotation between two executions, the journaled `account`
@@ -874,9 +911,23 @@ follows its output. `dagger check ci:end-to-end` runs it locally the same way.
 
 The [go-live checklist](../../docs/szamlazz-hu-behaviour.md#go-live-checklist) re-establishes the verified
 szamlazz.hu facts on a target account before the worker is enabled; every step issues real documents there. After
-a deploy, call `Szamlazz.Agent.check_account` under each configured scope, then `Szamlazz.Agent.query` a document
-known to be the account's and read its `test` and seller block: that is what tells the right key under the right
-scope, since the worker holds no account pin.
+a deploy, call `Szamlazz.Agent.check_account` through each configured Restate scope to verify routing and protocol
+v7. Verify the seller separately with the executable [`examples/verify_seller.rs`](examples/verify_seller.rs):
+
+```sh
+cargo run -p restate-szamlazz --example verify_seller < deploy-check.json
+```
+
+The example documents the private JSON input. Supply the **actual deployed resolver configuration and credential
+source**, plus an independently known invoice number, expected `test`, seller name and seller tax number for every
+scope (`null` for the unscoped account). For a custom host, use the example's `verified_endpoint` with the exact
+`Accounts` bundle bound to `Order` and `Agent`; the host supplies its complete scope list. The check resolves each
+scope, fetches its credentials and opens a fresh Számla Agent client at its resolved endpoint, outside Restate's
+journal. A separately copied agent key does not verify the deployed mapping. `Szamlazz.Agent.query` deliberately
+omits the seller block and cannot perform this check.
+
+Repeat after key rotation. This is a point-in-time check, not an account pin: a wrong key introduced afterwards
+can still issue in another company's name, or in live instead of test, with nothing in the worker failing.
 
 ### Deploying
 
@@ -893,11 +944,15 @@ waits for an operator, so a deployment with a backlog can hold invocations for h
 one way to strand it.
 
 A stuck invocation can be moved onto a newer deployment (`restate invocations pause` / `resume --deployment`); the
-newer code then replays the old journal, which needs **three** things to hold, none of which this crate checks
-mechanically: the `ctx.run` sequence (the *step-name table* above is the diff to read), the journaled result types
+newer code then replays the old journal, which needs **three** things to hold: the `ctx.run` sequence (the
+*step-name table* checks the current paths; its diff is the sequence check between releases), the journaled result types
 still decoding (a release may reshape them; review the diff of `gateway`'s outcome enums and `Resolution`), and the
 steps' inputs unchanged. Review all three before a resume, or kill and let the caller retry with a new
 `Idempotency-Key`.
+
+The target-first cleanup inserts an ownership lookup before prerequisites and adds reversed-target hint paths.
+Its `ctx.run` sequence differs from the previous deployment's: **do not resume an invocation from that sequence
+on this release**. Keep it on its original deployment, or kill it and reconcile through a new invocation.
 
 ## License
 

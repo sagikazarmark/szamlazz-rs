@@ -1,8 +1,9 @@
 //! The create protocol for the four document kinds and for correctives, in
 //! the order the steps run.
 //!
-//! The handlers keep no state. After validation and the reference checks
-//! (read-only steps under the read policy), issuing is two durable steps: a
+//! The handlers keep no state. After validation, an ownership lookup settles
+//! an existing target before prerequisites for a new send are checked.
+//! After those reference checks, issuing is two durable steps: a
 //! read-only **lookup** (`lookup-{kind}`) under the read policy that settles
 //! every case needing no create, and a **create** (`create-{kind}`) under the
 //! issue policy's run retry policy, query-first on every execution; the
@@ -471,22 +472,39 @@ fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Id
     identity.about(order, Fault::outcome_unknown(message))
 }
 
-/// Step 3's decision on what the lookup step found, pure: every case that
-/// needs no create is settled as the caller's response (`Break`), and what
-/// proceeds to the create step carries the number of the reversed document
-/// the lookup saw (`Continue(Some)`, a reissue: the one holder the create
-/// step may send past) or nothing (`Continue(None)`).
-///
-/// A live document of ours is `already_issued`, or `conflict{live}` under
-/// `reissue`, so the flag can never cause a duplicate; a reversed one is
-/// `reversed{storno_number}` without `reissue`; a collision or a foreign
-/// document refuses with or without it.
-///
-/// # Errors
-///
-/// The faults an answered lookup can be: another szamlazz.hu code
-/// (`unavailable`, nothing may be concluded) or a credential code
-/// (`credentials_rejected`). The caller attaches the document's identity.
+/// The target ownership decision before prerequisites. Only an absent
+/// target or an explicit reissue proceeds. The shell enriches an early
+/// reversed answer with a best-effort storno hint when appropriate.
+fn decide_existing_target(
+    outcome: OwnershipOutcome,
+    reissue: bool,
+    identity: &Identity,
+    namespace: &Namespace,
+) -> Result<Option<CreateResponse>, Fault> {
+    Ok(match outcome {
+        OwnershipOutcome::Live(found) if reissue => {
+            Some(identity.conflict_about(ConflictReason::Live, found.number))
+        }
+        OwnershipOutcome::Live(found) => Some(identity.found(CreateOutcome::AlreadyIssued, &found)),
+        OwnershipOutcome::Reversed(found) if !reissue => {
+            Some(identity.reversed(&found.number, None))
+        }
+        OwnershipOutcome::Collision(found) => {
+            Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
+        }
+        OwnershipOutcome::Absent | OwnershipOutcome::Reversed(_) => None,
+        OwnershipOutcome::Api(answer) => {
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+        }
+        OwnershipOutcome::CredentialsRejected(answer) => {
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
+        }
+    })
+}
+
+/// The full lookup decision after references: settle what needs no create,
+/// or carry the reversed document the create step may send past. The later
+/// read also detects changes outside the order's lock and foreign documents.
 fn decide_lookup(
     outcome: LookupOutcome,
     reissue: bool,
@@ -536,13 +554,19 @@ impl Execution {
         // Step 0: validate (pure).
         let prepared = self.prepare(order, kind, request)?;
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
+        if let Some(response) = self
+            .existing_target(ctx, &prepared.order, &identity, prepared.reissue)
+            .await?
+        {
+            return Ok(response);
+        }
         let mut refs = Refs::default();
 
         // Step 1: exclusivity (the other kinds whose live document refuses
         // this create), then, for a final invoice, its prepayment.
-        for &(other, reason) in exclusive_with(kind) {
+        for (other, reason) in exclusive_with(kind) {
             if let Some(response) = self
-                .exclusivity(ctx, &prepared, &identity, other, reason)
+                .exclusivity(ctx, &prepared, &identity, *other, reason.clone())
                 .await?
             {
                 return Ok(response);
@@ -604,6 +628,9 @@ impl Execution {
             kind: IssuedKind::Corrective,
             external_id: ExternalId::for_corrective(&self.config.namespace, &order, &correction_id),
         };
+        if let Some(response) = self.existing_target(ctx, &order, &identity, false).await? {
+            return Ok(response);
+        }
 
         // The base must be a live invoice carrying this order's number
         // (`decide_base`).
@@ -636,6 +663,40 @@ impl Execution {
     }
 
     // ----- step 0: validation ----------------------------------------------
+
+    /// Resolve the target before a consumed or changed prerequisite can hide
+    /// it. This is ownership only: the foreign-document hint needs the
+    /// references resolved later. The later lookup and query-first create
+    /// still observe changes made outside the order's lock.
+    async fn existing_target(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        identity: &Identity,
+        reissue: bool,
+    ) -> Result<Option<CreateResponse>, HandlerError> {
+        let found = lookup(
+            ctx,
+            self,
+            format!("lookup-{}", identity.kind),
+            &identity.external_id,
+            order,
+            identity.kind,
+        )
+        .await?;
+        let mut response = decide_existing_target(found, reissue, identity, &self.config.namespace)
+            .map_err(|fault| identity.about(order, fault))?;
+        if let Some(response) = &mut response
+            && response.outcome == CreateOutcome::Reversed
+            && identity.kind != IssuedKind::Corrective
+            && let Some(number) = &response.invoice_number
+        {
+            response.storno_number =
+                super::storno::storno_number_of(ctx, self, order, number, &identity.external_id)
+                    .await?;
+        }
+        Ok(response)
+    }
 
     fn prepare(
         &self,
@@ -1079,7 +1140,7 @@ mod tests {
 
     /// The `{code, message}` body of a fault, with its HTTP status.
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         let body = serde_json::from_str(error.message()).expect("json body");
         (error.code(), body)
     }

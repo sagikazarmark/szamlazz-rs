@@ -90,7 +90,7 @@ pub struct FoundDocument {
     pub currency: Option<String>,
     /// Issued from a test account (`teszt`), as szamlazz.hu reported it:
     /// `None` is a document that does not say. Compared with nothing by the
-    /// worker; what the go-live check reads through `Szamlazz.Agent.query`.
+    /// worker. Seller verification reads the full document outside the journal.
     pub test: Option<bool>,
     /// The net grand total (`osszegek/totalossz/netto`).
     pub net_total: Decimal,

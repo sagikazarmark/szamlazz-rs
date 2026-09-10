@@ -36,6 +36,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-proforma",
             "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
@@ -49,6 +50,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
             "lookup-proforma",
@@ -62,6 +64,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
             "verify-proforma-{number}",
@@ -75,6 +78,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-prepayment",
             "lookup-invoice",
             "lookup-final",
             "lookup-proforma",
@@ -88,6 +92,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-prepayment",
             "lookup-invoice",
             "lookup-final",
             "verify-proforma-{number}",
@@ -101,6 +106,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-final",
             "lookup-prepayment",
             "lookup-final",
             "create-final",
@@ -112,9 +118,50 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
         &[
             "namespace",
             "account",
+            "lookup-corrective",
             "verify-base-{number}",
             "lookup-corrective",
             "create-corrective",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_proforma",
+        &[
+            "namespace",
+            "account",
+            "lookup-proforma",
+            "hint-storno-{number}",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_invoice",
+        &[
+            "namespace",
+            "account",
+            "lookup-invoice",
+            "hint-storno-{number}",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_prepayment",
+        &[
+            "namespace",
+            "account",
+            "lookup-prepayment",
+            "hint-storno-{number}",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
+        "create_final",
+        &[
+            "namespace",
+            "account",
+            "lookup-final",
+            "hint-storno-{number}",
         ],
     ),
     RunPath::new(

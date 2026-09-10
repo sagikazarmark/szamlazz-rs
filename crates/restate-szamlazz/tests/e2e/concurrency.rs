@@ -103,15 +103,8 @@ async fn assert_second_call_queued_behind_the_first(
     );
     assert_eq!(
         h.admin().runs(second.reply.invocation_id()).await,
-        [
-            "namespace",
-            "account",
-            "lookup-prepayment",
-            "lookup-final",
-            "lookup-proforma",
-            "lookup-invoice",
-        ],
-        "the second call's runs end at the lookup step: no create step"
+        ["namespace", "account", "lookup-invoice"],
+        "the second call answers at the target lookup, before prerequisites"
     );
 }
 

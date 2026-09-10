@@ -57,12 +57,15 @@ pub use static_resolver::{
 ///
 /// So **the right key under the right scope is the resolver's guarantee**,
 /// and the deployment's to verify: under each scope, at go-live and after
-/// every key rotation, `Szamlazz.Agent.query` a document known to be the
-/// account's and read `<teszt>` and the seller block (name, tax number) on
-/// the answer. A key pasted into the wrong scope issues that scope's
+/// every key rotation, use `examples/verify_seller.rs` with the actual
+/// deployed `Accounts` resolver and credential store. It opens a fresh
+/// Számla Agent client at the resolved endpoint and compares a known
+/// document's `test`, seller name and tax number with independent expectations,
+/// outside Restate's journal. `Szamlazz.Agent.query` omits the seller block.
+/// A key pasted into the wrong scope issues that scope's
 /// documents in another company's name (or on a test account, or on a live
-/// one from staging), with nothing in the worker failing. The endpoint
-/// README's deploy checklist carries the check.
+/// one from staging), with nothing in the worker failing. The library
+/// README's Go-live section carries the executable check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Account {
@@ -506,8 +509,10 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///   account than the scope names, or a test account where a live one is
 ///   meant (and the reverse), issues there with nothing failing. The
 ///   resolver guarantees it; the deployment verifies it at go-live and after
-///   every rotation by querying a known document under each scope and
-///   reading its `<teszt>` and seller block.
+///   every rotation with `examples/verify_seller.rs`, using this exact
+///   deployed resolver/store bundle and a fresh Számla Agent client per scope
+///   to compare a known document's `test`, seller name and tax number with
+///   independent expectations. The Restate `query` omits the seller block.
 /// - **A stable `credential_ref` across rotations.** Rotate the value behind
 ///   the reference, never the reference: the reference is journaled with the
 ///   account and an in-flight invocation fetches by it on its next

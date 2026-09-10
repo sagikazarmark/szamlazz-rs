@@ -91,14 +91,7 @@ fn selector(
     }
 }
 
-fn print_created(
-    cli: &crate::Cli,
-    out: &output::Report,
-    created: &CreatedInvoice,
-) -> anyhow::Result<()> {
-    if cli.json {
-        return out.json(created);
-    }
+fn print_created(out: &output::Report, created: &CreatedInvoice) {
     out.field_required("Invoice number", &created.invoice_number);
     out.field("Net total", created.net_total.as_ref());
     out.field("Gross total", created.gross_total.as_ref());
@@ -107,31 +100,71 @@ fn print_created(
         "Customer account URL",
         created.customer_account_url.as_ref(),
     );
-
-    Ok(())
 }
 
 /// The create's outcome: the issued document, or the preview that issued
 /// nothing (`header.preview_pdf` in the JSON description).
-fn print_creation_outcome(
-    cli: &crate::Cli,
-    out: &output::Report,
-    outcome: &CreationOutcome,
-) -> anyhow::Result<()> {
-    if cli.json {
-        return out.json(outcome);
-    }
+fn print_creation_outcome(out: &output::Report, outcome: &CreationOutcome) {
     match outcome {
-        CreationOutcome::Issued(created) => print_created(cli, out, created),
+        CreationOutcome::Issued(created) => {
+            out.field_required("Outcome", &"issued");
+            print_created(out, created);
+        }
         CreationOutcome::Preview(_) => {
             out.field_required("Preview", &"rendered; no document was issued");
-            Ok(())
         }
         _ => {
             out.field_required("Outcome", &"no document number in the reply");
-            Ok(())
         }
     }
+}
+
+/// A successful exchange alone does not establish that a storno reversed its
+/// original. Keep the returned document even when the verdict is inconclusive.
+fn print_storno(
+    cli: &crate::Cli,
+    args: &StornoArgs,
+    original: &szamlazz_agent::InvoiceNumber,
+    created: &CreatedInvoice,
+) -> anyhow::Result<()> {
+    let (outcome, explanation) = if created.reverses(original) {
+        ("reversed", "reversal confirmed (may be an existing storno)")
+    } else if created.invoice_number == *original {
+        ("noop", "same invoice number returned; nothing was reversed")
+    } else if created.gross_total.is_none() {
+        (
+            "unconfirmed",
+            "gross total missing; reversal is not confirmed",
+        )
+    } else {
+        (
+            "unconfirmed",
+            "positive gross total; reversal is not confirmed",
+        )
+    };
+    let remote = serde_json::json!({
+        "outcome": outcome,
+        "message": explanation,
+        "original_number": original,
+        "document": created,
+    });
+    output::document(
+        cli.json,
+        &remote,
+        created.pdf.as_ref(),
+        args.pdf.as_deref(),
+        |out| {
+            out.field_required("Outcome", &outcome);
+            out.field_required("Storno", &explanation);
+            out.field_required("Original number", original);
+            print_created(out, created);
+        },
+    )?;
+    anyhow::ensure!(
+        outcome == "reversed",
+        "{explanation}; inspect the returned document before retrying"
+    );
+    Ok(())
 }
 
 /// Runs an invoice subcommand.
@@ -146,13 +179,15 @@ pub async fn run(cli: &crate::Cli, command: &InvoiceCommand) -> anyhow::Result<(
                 request.download_pdf = true;
             }
             let outcome = client.send(&request).await?;
-            output::warn_missing_pdf(args.pdf.is_some(), outcome.pdf().is_some());
-            let pdf_on_stdout = args.pdf.as_deref().is_some_and(output::is_stdout);
-
-            if let (Some(target), Some(pdf)) = (&args.pdf, outcome.pdf()) {
-                output::write_pdf(pdf.as_bytes(), target)?;
-            }
-            print_creation_outcome(cli, &output::report(pdf_on_stdout), &outcome)
+            output::document(
+                cli.json,
+                &outcome,
+                outcome.pdf(),
+                args.pdf.as_deref(),
+                |out| {
+                    print_creation_outcome(out, &outcome);
+                },
+            )
         }
         InvoiceCommand::Get(args) => {
             let request = QueryInvoiceXml::new(selector(
@@ -220,14 +255,7 @@ pub async fn run(cli: &crate::Cli, command: &InvoiceCommand) -> anyhow::Result<(
                 ..StornoInvoice::new(args.number.as_str())
             };
             let created = client.send(&request).await?;
-            output::warn_missing_pdf(args.pdf.is_some(), created.pdf.is_some());
-            let pdf_on_stdout = args.pdf.as_deref().is_some_and(output::is_stdout);
-
-            if let (Some(target), Some(pdf)) = (&args.pdf, &created.pdf) {
-                output::write_pdf(pdf.as_bytes(), target)?;
-            }
-
-            print_created(cli, &output::report(pdf_on_stdout), &created)
+            print_storno(cli, args, &request.invoice_number, &created)
         }
     }
 }

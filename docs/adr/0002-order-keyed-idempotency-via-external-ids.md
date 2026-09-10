@@ -49,6 +49,16 @@ repetition" is ON**; it is the second guard, not the first.
 
 ## The crash window, and what closes it
 
+- **An existing target is settled before prerequisites.** After validation and the prologue, every
+  create/correct handler journals a target ownership lookup named `lookup-{kind}`. A live target is
+  `already_issued` (or `conflict{live}` with `reissue`), a collision is `conflict{external_id_collision}`,
+  and a reversed target without reissue is `reversed`; a non-corrective takes a best-effort
+  `hint-storno-{number}` for its storno number (exhaustion leaves it absent, cancellation propagates).
+  Only an absent target or explicit reissue proceeds through prerequisites, then the full lookup and
+  query-first create. The repeated `lookup-{kind}` name represents two different reads, ownership first,
+  full lookup after references. A consumed proforma, reversed prepayment or changed corrective base cannot
+  hide what a prior invocation issued. This inserted step changes the sequence: no resume from the
+  previous deployment's sequence onto this release (ADR 0009).
 - The create step is one `ctx.run` whose closure begins with the external-id query and ends with
   the send (or the re-query after a lost reply). A crash mid-closure leaves no journal entry;
   Restate re-dispatches the invocation as an ordinary retryable failure and the closure runs again,
@@ -165,6 +175,10 @@ J-07-12). The decisions:
   collapsed or normalised on the caller's behalf. The `OrderKey` type still trims its edges (its `FromStr`,
   `TryFrom<String>` and serde are the lenient entry for a caller building keys from its own order numbers);
   the handler refuses an untrimmed *raw* key as before (#40).
+  A reported `rendelesszam` outside this alphabet is not a usable redirect from `Szamlazz.Agent.storno`:
+  `UnsupportedOrderNumber` (`unsupported_order_number`) keeps the reported string in `order_key`, names
+  the failed rule and asks the operator to reverse in szamlazz.hu and reconcile in the caller's system.
+  Nothing is sent, and the number is neither normalised nor treated as unmanaged.
 - **A `correction_id` is never an external-id token.** `invoice`, `proforma`, `prepayment`, `final`,
   `corrective`, `storno`, `by-number`, `check-account` (in any letter case) are refused
   (`InvalidCorrectionId::Reserved`). With `:` out of the key this was already impossible to exploit; the rule

@@ -12,6 +12,7 @@
 
 use std::time::{Duration, Instant};
 
+use restate_e2e_harness::Call;
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
@@ -34,8 +35,8 @@ use crate::harness::{Harness, create_body};
 ///   exhaustion is `outcome_unknown` (500) naming the order, kind and
 ///   external id; the same `Idempotency-Key` then replays the stored fault
 ///   without a request, and a new key finds the document that landed after
-///   all and answers `already_issued` from the lookup step with nothing sent;
-/// - **the read policy re-executes a read** (`E2E-27`): the lookup's
+///   all and answers `already_issued` from the target lookup with nothing sent;
+/// - **the read policy re-executes a read** (`E2E-27`): the target lookup's
 ///   external-id query answers 500 once and code 7 afterwards; the create
 ///   completes `issued` in one invocation with `lookup-invoice` the failing
 ///   command, one journal entry per step, exactly one create;
@@ -53,9 +54,9 @@ use crate::harness::{Harness, create_body};
 pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault(
     h: &Harness,
 ) {
-    // The exhausted create: the lookup, then two executions' leading query
-    // and re-query miss (five queries); the document that landed after all
-    // is found by the next call's lookup.
+    // The exhausted create: the target lookup, full lookup, then two
+    // executions' leading query and re-query miss (six queries); the document
+    // that landed after all is found by the next call's target lookup.
     h.absent("E2E-11", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-11")
@@ -64,7 +65,7 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .await;
     holds_after_misses(
         &h.mock,
-        5,
+        6,
         &Doc {
             external_id: Some("acct:E2E-11:invoice"),
             ..Doc::of("SZ-11", "SZ", "E2E-11")
@@ -76,8 +77,8 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .expect(2)
         .mount(&h.mock)
         .await;
-    // The flaky lookup: the first execution loses its reply; the second, and
-    // the create step's own leading query, miss cleanly.
+    // The flaky target lookup: the first execution loses its reply; the
+    // second, the full lookup and the create step's leading query miss cleanly.
     h.absent("E2E-27", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-27")
@@ -94,7 +95,7 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .expect(1)
         .mount(&h.mock)
         .await;
-    // The exhausted lookup: three executions, no answer.
+    // The exhausted target lookup: three executions, no answer, no prerequisites.
     h.absent("E2E-28", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-28")
@@ -221,13 +222,9 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     assert_eq!(reply.body["invoice_number"], "SZ-11");
     assert_eq!(reply.body["external_id"], "acct:E2E-11:invoice");
     assert_eq!(
-        h.admin()
-            .runs(reply.invocation_id())
-            .await
-            .last()
-            .map(String::as_str),
-        Some("lookup-invoice"),
-        "the lookup answered; no create step"
+        h.admin().runs(reply.invocation_id()).await,
+        ["namespace", "account", "lookup-invoice"],
+        "the target lookup answered before prerequisites"
     );
     assert_eq!(
         h.create_bodies_of("E2E-11").await.len(),
@@ -279,6 +276,7 @@ async fn flaky_read_is_re_executed(h: &Harness) {
         [
             "namespace",
             "account",
+            "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
             "lookup-proforma",
@@ -342,15 +340,8 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
     );
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
-        [
-            "namespace",
-            "account",
-            "lookup-prepayment",
-            "lookup-final",
-            "lookup-proforma",
-            "lookup-invoice",
-        ],
-        "the lookup is journaled by name, the create step never ran"
+        ["namespace", "account", "lookup-invoice"],
+        "the target lookup is journaled; prerequisites and create never ran"
     );
     assert!(
         h.create_bodies_of("E2E-28").await.is_empty(),
@@ -445,6 +436,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         [
             "namespace",
             "account",
+            "lookup-invoice",
             "lookup-prepayment",
             "lookup-final",
             "lookup-proforma",
@@ -471,17 +463,119 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     assert_eq!(next.body["outcome"], "already_issued", "{}", next.body);
     assert_eq!(next.body["invoice_number"], "SZ-L4");
     assert_eq!(
-        h.admin()
-            .runs(next.invocation_id())
-            .await
-            .last()
-            .map(String::as_str),
-        Some("lookup-invoice"),
-        "the next call answered from its lookup"
+        h.admin().runs(next.invocation_id()).await,
+        ["namespace", "account", "lookup-invoice"],
+        "the next call answered from its target lookup before prerequisites"
     );
     assert_eq!(
         h.create_bodies_of("E2E-L4").await.len(),
         1,
         "nothing more was sent"
+    );
+}
+
+/// Submit with a known retry identity, wait until szamlazz.hu has the write,
+/// then cancel while its reply is delayed. Attaching with the same key reads
+/// the cancelled invocation's stored completion, rather than issuing again.
+pub(crate) async fn cancel_after_send(
+    h: &Harness,
+    call: Call<'_>,
+    body: &serde_json::Value,
+    idempotency: &str,
+    received: &tokio::sync::Notify,
+) -> crate::harness::ingress::Reply {
+    let submitted = h.invoke(&call.send(), Some(body), Some(idempotency)).await;
+    assert_eq!(submitted.status, 202, "{}", submitted.body);
+    tokio::time::timeout(Duration::from_secs(30), received.notified())
+        .await
+        .expect("the write reached szamlazz.hu");
+    h.admin().cancel(submitted.invocation_id()).await;
+    let reply = h.invoke(&call, Some(body), Some(idempotency)).await;
+    assert_eq!(reply.invocation_id(), submitted.invocation_id());
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    let fault = reply.fault();
+    assert_eq!(fault.code, TerminalCode::OutcomeUnknown, "{fault:?}");
+    assert!(
+        fault.message.contains("409") && fault.message.contains("cancelled"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.admin().invocation(reply.invocation_id()).await.status,
+        "completed"
+    );
+    reply
+}
+
+/// A deletion has reached szamlazz.hu when cancelled: its successful delayed
+/// reply must not make the invocation claim success. The next invocation's
+/// lookup reconciles the deletion, and the cancelled completion sends once.
+pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h: &Harness) {
+    use crate::harness::szamlazz::{delete_of, proforma_deleted};
+    use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let landed = Arc::new(AtomicBool::new(false));
+    let received = Arc::new(tokio::sync::Notify::new());
+    let query_landed = Arc::clone(&landed);
+    external_id_query("acct:E2E-CANCEL-DELETE:proforma")
+        .respond_with(move |_: &wiremock::Request| {
+            if query_landed.load(Ordering::SeqCst) {
+                not_found()
+            } else {
+                Doc::of("D-CANCEL", "D", "E2E-CANCEL-DELETE").response()
+            }
+        })
+        .mount(&h.mock)
+        .await;
+    h.absent("E2E-CANCEL-DELETE", &["invoice", "prepayment", "final"])
+        .await;
+    let signal = Arc::clone(&received);
+    delete_of("D-CANCEL")
+        .respond_with(move |_: &wiremock::Request| {
+            landed.store(true, Ordering::SeqCst);
+            signal.notify_one();
+            proforma_deleted().set_delay(Duration::from_secs(4))
+        })
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let call = Call::object("Szamlazz.Order", "E2E-CANCEL-DELETE", "delete_proforma");
+    let reply = cancel_after_send(h, call, &json!({}), "cancel-delete-k1", &received).await;
+    let fault = reply.fault();
+    assert_eq!(fault.order.as_deref(), Some("E2E-CANCEL-DELETE"));
+    assert_eq!(fault.kind, Some(IssuedKind::Proforma));
+    assert_eq!(
+        fault.external_id.as_deref(),
+        Some("acct:E2E-CANCEL-DELETE:proforma")
+    );
+    assert!(fault.message.contains("read get"), "{fault:?}");
+    assert!(
+        fault.message.contains("if deletion is still intended"),
+        "{fault:?}"
+    );
+    assert_eq!(
+        h.admin().runs(reply.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "lookup-proforma",
+            "delete-proforma-D-CANCEL"
+        ]
+    );
+    // The cancelled order lock is released, and a read sees the landed delete.
+    let get = h.get_reply("E2E-CANCEL-DELETE").await;
+    assert_eq!(get.status, 200, "{}", get.body);
+    assert!(get.body["proforma"].is_null(), "{}", get.body);
+    let again = h
+        .invoke(&call, Some(&json!({})), Some("cancel-delete-k2"))
+        .await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_eq!(again.body["reason"], "absent", "{}", again.body);
+    assert_eq!(
+        h.admin().runs(again.invocation_id()).await,
+        ["namespace", "account", "lookup-proforma"]
     );
 }

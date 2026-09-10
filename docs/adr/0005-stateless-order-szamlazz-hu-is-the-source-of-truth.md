@@ -91,6 +91,14 @@ line of the closure on every execution) is the guard, the key is deduplication.
 `outcome: reversed`; with `reissue: true` it proceeds, and on a live document it is `conflict{live}`. There is no
 "the service stornoed this, so the next create is flag-free" path, because there is no record of who stornoed.
 
+**The target comes before prerequisites.** After validation and the prologue, `lookup-{kind}` journals the
+target's `OwnershipOutcome`: live, collision and reversed without reissue settle before any exclusivity,
+proforma, prepayment or corrective-base check. A reversed non-corrective takes a best-effort
+`hint-storno-{number}` (exhaustion leaves the number absent, cancellation propagates); a corrective takes no hint.
+An absent target or explicit reissue proceeds through prerequisites, then the full `lookup-{kind}` and
+query-first `create-{kind}`. Finding what was already issued must not depend on a prerequisite still existing.
+This changes the run sequence and refuses resume from the previous deployment's sequence (ADR 0009).
+
 ## Considered options
 
 - **Keep the ledger.** Rejected. It was a second source of truth that had to be verified against the first on
@@ -125,11 +133,11 @@ line of the closure on every execution) is the guard, the key is deduplication.
 - **Gained**: nothing to migrate, repair or drift; `get` is never stale; a UI storno, a support storno and a
   service storno are one case (`sztornozott`); a kill has nothing to compensate; a reset Restate cluster loses
   only in-flight invocations; the crate is a fraction of its former size.
-- **Caller contract** (design §8, in the crate READMEs): (1) send an `Idempotency-Key` per logical request;
-  (2) any error from an issuing or storno handler means "outcome unknown, retry with a **new** key" (Restate
-  replays a failed invocation's stored completion for `idempotency_retention`, verified), the retry reconciles by
-  external id and is safe; never read an error as "no document exists" (#67 later scoped this to the three
-  "outcome unknown" codes; `outcome_unknown`, `unavailable`, `credentials_rejected`; design §7); (3) after any
+- **Caller contract** (design §8, in the library README): (1) send an `Idempotency-Key` per logical request;
+  (2) an `outcome_unknown`, `unavailable` or `credentials_rejected` fault from an issuing or storno handler means
+  "outcome unknown, retry with a **new** key" (Restate replays a failed invocation's stored completion for
+  `idempotency_retention`, verified), or read `get`; no answer keeps the same key and attaches to the in-flight
+  invocation. Other known faults are settled; an unknown token stays unclassified (design §7); (3) after any
   reversal a create returns `reversed`; send `reissue: true` with a new key when a new invoice is wanted.
 - **Still required**: the toggle ON (the server-side guard against a second live document of the same kind);
   the byte-stable buyer name (the replay guard); the 2-minute gap before a re-check (the handlers'
@@ -244,13 +252,13 @@ what the handlers read, and nothing else (`restate_szamlazz::gateway::document`)
   `referenced_proforma_number` (`hivdijbekszam`), `appearance` (the `eszamla` code as an integer; the agent
   crate's `InvoiceAppearance` reads it, so a code the crate learns later is read on replay), `issue_date`
   (`kelt`), `fulfillment_date` (`telj`), `due_date` (`fizh`), `currency`, `test` (`teszt`), the grand total
-  (`net_total`, `vat_total`, `gross_total`) and `payments` (`RecordedCreditEntry`: date, title, amount, comment,
+  (`net_total`, `vat_total`, `gross_total`) and `credit_entries` (`RecordedCreditEntry`: date, title, amount, comment,
   bank account). `document_id` is read by no handler and is carried so that an entry names the document the way
   szamlazz.hu's records do. The external id of #127's field list is **not** carried: szamlazz.hu never echoes
   `szamlaKulsoAzon` in a query or create response (above), so it cannot be read off a document, and every handler
   holds it from the key already. `LookupOutcome`, `CreateOutcome` and `QueryOutcome` carry it boxed where they carried
   `Box<InvoiceDocument>`. The checks the services make on a found document (`is_live`, `is_ours`,
-  `carries_order`, `is_storno_of`, `e_invoice`, `payment_amounts`) are its methods; `InvoiceDocumentExt` is gone.
+  `carries_order`, `is_storno_of`, `e_invoice`, `credit_entry_amounts`) are its methods; `InvoiceDocumentExt` is gone.
   `Szamlazz.Agent.query`'s `QueryResponse` (a caller contract, unchanged) is projected from it.
 - `IssuedDocument`, from a create reply (`InvoiceCreationResult`, `TryFrom` rather than the `From` #127 named:
   the agent type's number is optional, a PDF preview's reply has none, and on `main` the create step already turned

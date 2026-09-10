@@ -28,10 +28,13 @@ The review's estimate for a shared core crate (`szamlazz-xml`, holding the `<sza
    `Other(String)`, a numeric code an `Unknown(n)`), one JSON shape for `InvoiceAppearance` (the
    integer code), and the same English name for the same Hungarian element wherever both read it
    (`document_type` for `tipus`, `appearance` for `eszamla`, `registration_number` for
-   `iktatoszam`, `economic_event_id` for `gazdEsemAzon`, `is_e_invoice` as the `Electronic`
+    `iktatoszam`, `economic_event_id` for `gazdEsemAzon`, `RecordedCreditEntry` / `credit_entries` for
+    `kifizetes` / `kifizetesek`, `title` for `jogcim`, `is_e_invoice` as the `Electronic`
    variant). The receiver keeps `tipus` as the wire token (`Option<String>`) rather than adopting
    the agent's `DocumentType`: the type would be the one shared item and would pull a dependency
-   for it.
+    for it.
+    The credit-entry names align in both models too; the receiver keeps `title` as `Option<String>`, the
+    wire text, while the agent reads a `PaymentMethod`. Receipt `payments` still describe the buyer's tenders.
 2. **One integer-width policy.** Every integer element of a queried or pushed document (`xs:int`,
    `xs:integer`, `xs:long`) is an `i64` in both crates, signed and wide whatever the schema declares:
    the schema is szamlazz.hu's description of its own output and has been wrong about presence
@@ -70,7 +73,7 @@ The review's estimate for a shared core crate (`szamlazz-xml`, holding the `<sza
 
 ## Consequences
 
-- Breaking 0.4 changes in both crates, listed in each README's *Breaking Changes in 0.4*: the agent's
+- The aligned model in both crates uses `i64`: the agent's
   `InvoiceInfo::id`, `Supplier::id`, `BuyerInfo::id`, `economic_event_id`, `source`, `ordering`,
   `deductible_vat`, `bank_transaction_id`, `CreatedInvoice::document_id`, `Receipt`'s `id` and the
   `InvoiceAppearance` code are `i64`; the agent's `InvoiceAppearance` serialises as an integer (the
@@ -78,6 +81,8 @@ The review's estimate for a shared core crate (`szamlazz-xml`, holding the `<sza
   `Party::location` and the `InvoiceAck` id are `i64`; the receiver's `InvoiceInfo::kind` /
   `e_invoice`, `BankTransaction::kind` and `ReceiptInfo::kind` are `document_type` / `appearance` /
   `transaction_type` / `document_type`, in the archived JSON too.
+- Both invoice models expose `RecordedCreditEntry`, `credit_entries` and `title`; receipt `payments` remain
+  the buyer's tenders. The vocabulary is shared without coupling either crate to the other's types.
 - The worker's `FoundDocument::document_id` / `appearance` and `IssuedDocument::document_id` follow
   the agent's width (a journaled reshape, which ADR 0009 allows between releases).
 - CONTEXT.md's *Document type* and *Invoice appearance* entries name the shared vocabulary; no new

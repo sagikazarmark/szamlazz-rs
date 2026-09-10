@@ -248,19 +248,49 @@ impl AnsweredCode {
     }
 }
 
-/// The SDK's terminal error carrying the fault: the code's status and the
-/// fault JSON as the message, which the ingress wraps in its envelope.
-impl From<Fault> for TerminalError {
-    fn from(fault: Fault) -> Self {
-        let body = serde_json::to_string(&fault)
-            .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", fault.code));
-        Self::new_with_code(fault.status(), body)
+/// A fault that cannot be represented as an SDK terminal error.
+///
+/// An unknown public fault code has no inferred HTTP status. This error is
+/// an internal conversion failure, not a classification of that fault or
+/// advice to retry the request that originally produced it.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FaultConversionError {
+    /// This version does not know the code's HTTP status.
+    #[error("cannot emit fault with unknown HTTP status for code {code}")]
+    UnknownStatus {
+        /// The unclassified code, preserved verbatim.
+        code: TerminalCode,
+    },
+    /// The fault could not be encoded as JSON.
+    #[error("cannot encode fault JSON: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+/// The SDK's terminal error carrying a known fault: the code's status and
+/// the complete fault JSON as the message. Unknown codes fail conversion;
+/// no terminal status is invented for a fault decoded from a newer worker.
+impl TryFrom<Fault> for TerminalError {
+    type Error = FaultConversionError;
+
+    fn try_from(fault: Fault) -> Result<Self, Self::Error> {
+        let Some(status) = fault.status() else {
+            return Err(FaultConversionError::UnknownStatus { code: fault.code });
+        };
+        let body = serde_json::to_string(&fault)?;
+        Ok(Self::new_with_code(status, body))
     }
 }
 
+/// Service constructors emit known codes. If that invariant is broken,
+/// surface a retryable internal conversion failure to Restate rather than
+/// completing the invocation with a fabricated terminal status.
 impl From<Fault> for HandlerError {
     fn from(fault: Fault) -> Self {
-        TerminalError::from(fault).into()
+        match TerminalError::try_from(fault) {
+            Ok(terminal) => terminal.into(),
+            Err(internal) => internal.into(),
+        }
     }
 }
 
@@ -472,9 +502,10 @@ run_ctx!(Context, |_ctx| None);
 
 /// Journals the result of `f` under `name`, executing it at most once per
 /// journal entry (`RunRetryPolicy::max_attempts(1)`): the pure `namespace`
-/// pin and the write steps that have no retry of their own
-/// (`delete-proforma-*`, `set-credit-entries-*`) return every outcome as data, so a
-/// closure failure is a bug, not a retry. Reads go through [`run_reading`].
+/// pin returns its outcome as data, so a closure failure is a bug, not a retry.
+/// One-shot writes use [`run_retrying`] with one execution so their sites can
+/// map a run cancellation to an operation-specific fault. Reads go through
+/// [`run_reading`].
 pub(in crate::service) async fn run_once<'ctx, C, T, F, Fut>(
     ctx: &C,
     name: impl Into<String>,
@@ -637,7 +668,7 @@ mod tests {
             Some(IssuedKind::Invoice),
             &ExternalId::new("acct:ORD-1:invoice"),
         );
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         assert_eq!(error.code(), 500);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], TerminalCode::OutcomeUnknown.as_str());
@@ -666,12 +697,54 @@ mod tests {
             ),
         ];
         for (fault, status, code) in cases {
-            let error = TerminalError::from(fault);
+            let error = TerminalError::try_from(fault).expect("known fault");
             assert_eq!(error.code(), status);
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             assert_eq!(body["code"], code);
             assert_eq!(body["order"], serde_json::Value::Null);
         }
+    }
+
+    #[test]
+    fn every_known_fault_converts_without_changing_its_body() {
+        for code in TerminalCode::KNOWN {
+            let fault = Fault::new(code, "known fault").with_szamlazz_code("999");
+            let expected_status = fault.status().expect("known status");
+            let terminal = TerminalError::try_from(fault.clone()).expect("known fault");
+            assert_eq!(terminal.code(), expected_status);
+            assert_eq!(
+                serde_json::from_str::<Fault>(terminal.message()).expect("fault"),
+                fault
+            );
+            let handler = HandlerError::from(fault);
+            let error: &(dyn StdError + 'static) = handler.as_ref();
+            assert!(error.to_string().starts_with("Terminal error"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_decoded_fault_cannot_acquire_a_terminal_status() {
+        let fault: Fault =
+            serde_json::from_str(r#"{"code":"future_fault/é","message":"new worker decision"}"#)
+                .expect("open fault");
+        let error = TerminalError::try_from(fault.clone()).expect_err("no known status");
+        assert!(matches!(
+            error,
+            FaultConversionError::UnknownStatus { ref code } if code == &fault.code
+        ));
+        let handler = HandlerError::from(fault);
+        let source: &(dyn StdError + 'static) = handler.as_ref();
+        assert!(
+            source.to_string().starts_with("Retryable error"),
+            "{source}"
+        );
+        assert!(matches!(
+            source
+                .source()
+                .expect("conversion failure")
+                .downcast_ref::<FaultConversionError>(),
+            Some(FaultConversionError::UnknownStatus { .. })
+        ));
     }
 
     /// A szamlazz.hu code never travels in `code` (that field carries a
@@ -680,10 +753,11 @@ mod tests {
     /// caused carry no `szamlazz_code` at all.
     #[test]
     fn a_szamlazz_code_travels_in_its_own_field() {
-        let error = TerminalError::from(Fault::szamlazz_error(SzamlazzAnswer::new(
+        let error = TerminalError::try_from(Fault::szamlazz_error(SzamlazzAnswer::new(
             "152",
             "Már létezik ilyen rendelésszámú számla.",
-        )));
+        )))
+        .expect("known fault");
         assert_eq!(error.code(), 422);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], "szamlazz_error");
@@ -704,7 +778,7 @@ mod tests {
             Fault::unknown_account("x"),
             Fault::missing_fulfillment_date("SZ-1"),
         ] {
-            let error = TerminalError::from(fault);
+            let error = TerminalError::try_from(fault).expect("known fault");
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
         }
@@ -765,7 +839,8 @@ mod tests {
         ];
         for (code, status, terminal, szamlazz_code, phrase) in table {
             let label = format!("{code:?}");
-            let error = TerminalError::from(code.into_fault(&namespace()));
+            let error =
+                TerminalError::try_from(code.into_fault(&namespace())).expect("known fault");
             assert_eq!(error.code(), status, "{label}");
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             assert_eq!(body["code"], terminal.as_str(), "{label}: {body}");
@@ -819,7 +894,7 @@ mod tests {
                     Some(IssuedKind::Invoice),
                     &ExternalId::new("acct:ORD-1:invoice"),
                 );
-        let error = TerminalError::from(fault);
+        let error = TerminalError::try_from(fault).expect("known fault");
         assert_eq!(error.code(), 503);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], "credentials_rejected");
@@ -840,7 +915,7 @@ mod tests {
             "transport failure: error decoding response body: empty response",
         );
         let fault = read_exhausted("lookup-invoice", &last);
-        let error = TerminalError::from(fault.clone());
+        let error = TerminalError::try_from(fault.clone()).expect("known fault");
         assert_eq!(error.code(), 503);
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["code"], "unavailable");
@@ -864,14 +939,15 @@ mod tests {
             Some(IssuedKind::Invoice),
             &ExternalId::new("acct:ORD-1:invoice"),
         );
-        let error = TerminalError::from(about);
+        let error = TerminalError::try_from(about).expect("known fault");
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(body["order"], "ORD-1");
         assert_eq!(body["kind"], "invoice");
         assert_eq!(body["external_id"], "acct:ORD-1:invoice");
 
         let cancelled = TerminalError::new_with_code(409, "cancelled");
-        let error = TerminalError::from(read_exhausted("lookup-proforma", &cancelled));
+        let error = TerminalError::try_from(read_exhausted("lookup-proforma", &cancelled))
+            .expect("known fault");
         assert_eq!(error.code(), 503, "a cancellation is the same fault code");
         let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         let message = body["message"].as_str().expect("message");
@@ -950,7 +1026,7 @@ mod tests {
                 "{raw:?}: OrderKey::parse stays lenient"
             );
             let fault = order_key(raw).expect_err("refused");
-            let error = TerminalError::from(fault);
+            let error = TerminalError::try_from(fault).expect("known fault");
             assert_eq!(error.code(), 400, "{raw:?}");
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             assert_eq!(body["code"], "invalid_input", "{raw:?}");
@@ -977,7 +1053,7 @@ mod tests {
             (too_long.as_str(), "at most 40 are allowed"),
         ] {
             let fault = order_key(raw).expect_err(rule);
-            let error = TerminalError::from(fault);
+            let error = TerminalError::try_from(fault).expect("known fault");
             assert_eq!(error.code(), 400, "{raw:?}");
             let body: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
             assert_eq!(body["code"], "invalid_input", "{raw:?}");

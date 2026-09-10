@@ -112,8 +112,53 @@ async fn archives_invoice_pdf_and_data_monthly() {
     assert_eq!(value["financial_items"][0]["name"], "Fee");
     assert_eq!(value["financial_items"][0]["tags"][0], "finance");
     assert_eq!(value["tags"][0], "priority");
-    assert_eq!(value["payments"][0]["exchange_rate"], "275");
+    assert_eq!(value["credit_entries"][0]["exchange_rate"], "275");
+    assert_eq!(value["credit_entries"][0]["title"], "transfer");
+    assert!(value.get("payments").is_none());
+    assert!(value["credit_entries"][0].get("method").is_none());
     assert!(value.get("pdf").is_none());
+}
+
+#[tokio::test]
+async fn archives_invoice_credit_entry_titles_as_received_in_both_directions() {
+    for incoming in [false, true] {
+        for title in [Some("új elszámolási mód"), None] {
+            let op = memory();
+            let archiver = Archiver::new(op.clone());
+            let element =
+                title.map_or_else(String::new, |title| format!("<jogcim>{title}</jogcim>"));
+            let body = common::with(OUTGOING_INVOICE, "<jogcim>transfer</jogcim>", &element);
+            let (body, directory) = if incoming {
+                (common::as_incoming(&body), "incoming-invoices")
+            } else {
+                (body, "outgoing-invoices")
+            };
+            let _ = match Document::parse(body.as_bytes()).expect("parse fixture") {
+                Document::OutgoingInvoice(invoice) => archiver.outgoing_invoice(invoice).await,
+                Document::IncomingInvoice(invoice) => archiver.incoming_invoice(invoice).await,
+                other => panic!("expected invoice, got {other:?}"),
+            }
+            .expect("archive invoice");
+
+            let json = op
+                .read(&format!("{directory}/2015/12/123456.json"))
+                .await
+                .expect("read JSON");
+            let value: serde_json::Value = serde_json::from_slice(&json.to_vec()).expect("JSON");
+            let entries = value["credit_entries"].as_array().expect("credit entries");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].get("title"), Some(&serde_json::json!(title)));
+            assert_eq!(entries[0]["amount"], "200");
+            assert!(value.get("payments").is_none());
+            assert!(entries[0].get("method").is_none());
+
+            let xml = op
+                .read(&format!("{directory}/2015/12/123456.xml"))
+                .await
+                .expect("read XML");
+            assert_eq!(xml.to_vec(), body.as_bytes());
+        }
+    }
 }
 
 #[tokio::test]
@@ -273,6 +318,10 @@ async fn bank_transactions_and_receipt_batches() {
         serde_json::from_slice(&receipt.to_vec()).expect("receipt json");
     assert_eq!(receipt["info"]["customer_ledger"], "311");
     assert_eq!(receipt["items"][0]["ledger"]["revenue"], "911");
+    assert_eq!(receipt["payments"][0]["method"], "készpénz");
+    assert_eq!(receipt["payments"][0]["amount"], "25400");
+    assert!(receipt.get("credit_entries").is_none());
+    assert!(receipt["payments"][0].get("title").is_none());
 
     assert_eq!(
         keys(&op).await,

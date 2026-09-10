@@ -36,10 +36,13 @@ use crate::contract::{
 /// attributable): the prologue (pin the namespace, resolve the request's
 /// scope to its account, journaled once per invocation, fetch the
 /// credentials for this execution, open the gateway) and then its operation.
-/// Issuing is two durable steps (a read-only lookup and a query-first create
-/// under the issue policy's run retry policy), and every handler that calls
-/// szamlazz.hu kills the invocation after five attempts; the external-id
-/// query inside the create step is what makes both safe.
+/// After validation, a target ownership lookup (`lookup-{kind}`) settles a
+/// live target, a collision or a reversal without reissue before prerequisites.
+/// Reversed non-correctives take a best-effort `hint-storno-{number}`; an
+/// absent target or explicit reissue proceeds through prerequisites, then
+/// the full lookup (also `lookup-{kind}`) and query-first create under the
+/// issue policy. Write handlers kill after five invocation attempts; `get`
+/// after three. The query inside every create execution guards a repeated send.
 #[restate_sdk::object(name = "Szamlazz.Order")]
 impl Order {
     /// Issues the proforma (`díjbekérő`) of the order.
@@ -239,6 +242,9 @@ impl Order {
     }
 
     /// Deletes the order's proforma.
+    /// A lost answer or cancellation of the one-shot write is structured
+    /// `outcome_unknown`: read `get`, then retry with a new `Idempotency-Key`
+    /// if deletion is still intended. The deletion may already have landed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -303,17 +309,21 @@ impl Order {
 /// The `Szamlazz.Agent` service: query, credit entries and storno by document
 /// number, the NAV taxpayer lookup by tax number, and the `check_account`
 /// probe. Never calls into `Order`; a document that carries an order number
-/// is reported as `managed_by_order` instead, read off the verified document.
+/// is reported as `managed_by_order` when it is a supported key, otherwise
+/// `unsupported_order_number` with the reported string and reconciliation
+/// guidance. Neither sends a storno.
 /// Unkeyed: invocations run concurrently, so two by-number writes on one
 /// invoice are not serialised here; that is the caller's (see [`Agent`]).
 #[restate_sdk::service(name = "Szamlazz.Agent")]
 impl Agent {
     /// Proves, for the scope the request arrived under, that it reaches the
-    /// worker, resolves to the intended account and the account's agent key
+    /// worker, resolves to the configured account and the account's agent key
     /// works, with one read-only query of a sentinel external id, issuing
     /// nothing. For onboarding and deploy pipelines; also the deploy-time
     /// canary for the experimental Restate flags (`scope: null` under a
     /// scoped call means the server did not forward the scope). No input.
+    /// It does not identify the seller or test/live account. Verify those
+    /// with `examples/verify_seller.rs` and the deployed `Accounts` bundle.
     /// The journal is retained a day so that the leak assertion can scan it.
     /// The timeouts are the reads' 2m / 2m: one 60 s round trip plus
     /// the margin a stalling szamlazz.hu needs.
@@ -338,7 +348,8 @@ impl Agent {
         .map(Json)
     }
 
-    /// Queries a document by number, order number or external id. The
+    /// Queries a document by number, order number or external id, returning
+    /// a projection that deliberately omits the seller block. The
     /// journal is retained a day so that it can be inspected; there is
     /// nothing to replay. The timeouts are the reads' 2m / 2m: one
     /// 60 s round trip plus the margin a stalling szamlazz.hu needs.
@@ -407,12 +418,15 @@ impl Agent {
 
     /// Registers credit entries (`jóváírás`) on an invoice.
     ///
-    /// With `additive: true` this is **at-least-once**: a lost reply is
+    /// With `additive: true` this is **at-least-once**: a lost reply or
+    /// cancellation of the one-shot write is the structured
     /// `outcome_unknown`, and the one retry after a crash re-sends the same
     /// entries, each of which appends a second copy. The retry waits out the
     /// 60 s client timeout (never the server's ~500 ms default) so that it
     /// cannot re-send while the first send is still in flight; a caller that
-    /// sees `outcome_unknown` queries the invoice before re-sending.
+    /// sees `outcome_unknown` queries the invoice before sending only missing
+    /// entries with a new `Idempotency-Key`. A replacing call queries first
+    /// too, then sends the current intended snapshot if still wanted.
     ///
     /// Not serialised per invoice: the service is unkeyed, so two concurrent
     /// replacing calls on one invoice race and the last send to land wins

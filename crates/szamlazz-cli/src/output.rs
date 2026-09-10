@@ -80,9 +80,9 @@ pub fn warn_missing_pdf(requested: bool, present: bool) {
 pub fn write_pdf(pdf: &[u8], target: &Path) -> anyhow::Result<()> {
     use std::io::Write as _;
     if is_stdout(target) {
-        std::io::stdout()
-            .write_all(pdf)
-            .context("writing PDF to stdout")?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(pdf).context("writing PDF to stdout")?;
+        stdout.flush().context("flushing PDF to stdout")?;
     } else {
         std::fs::write(target, pdf)
             .with_context(|| format!("writing PDF to {}", target.display()))?;
@@ -90,6 +90,71 @@ pub fn write_pdf(pdf: &[u8], target: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Reports the remote result even when saving its PDF fails. Local output is
+/// a separate part of the JSON contract, never a replacement for that result.
+pub fn document<T: serde::Serialize>(
+    json: bool,
+    remote: &T,
+    pdf: Option<&szamlazz_agent::Pdf>,
+    target: Option<&Path>,
+    human: impl FnOnce(&Report),
+) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    enum PdfOutput {
+        NotRequested,
+        Missing { target: String },
+        Written { target: String },
+        Failed { target: String, error: String },
+    }
+
+    #[derive(serde::Serialize)]
+    struct DocumentReport<'a, T> {
+        remote: &'a T,
+        pdf_output: PdfOutput,
+    }
+
+    // The filesystem gets the original path; JSON gets its lossy display
+    // representation so non-UTF-8 paths cannot hide an issued document.
+    let (pdf_output, result) = match (target, pdf) {
+        (Some(target), Some(pdf)) => match write_pdf(pdf.as_bytes(), target) {
+            Ok(()) => (
+                PdfOutput::Written {
+                    target: target.display().to_string(),
+                },
+                Ok(()),
+            ),
+            Err(error) => (
+                PdfOutput::Failed {
+                    target: target.display().to_string(),
+                    error: format!("{error:#}"),
+                },
+                Err(error.context("local PDF output failed; the remote result above still applies")),
+            ),
+        },
+        (Some(target), None) => {
+            warn_missing_pdf(true, false);
+            (
+                PdfOutput::Missing {
+                    target: target.display().to_string(),
+                },
+                Ok(()),
+            )
+        }
+        (None, _) => (PdfOutput::NotRequested, Ok(())),
+    };
+    let out = report(target.is_some_and(is_stdout));
+    if json {
+        out.json(&DocumentReport { remote, pdf_output })?;
+    } else {
+        human(&out);
+        if let PdfOutput::Failed { error, .. } = &pdf_output {
+            out.field_required("PDF output failed", error);
+        }
+    }
+    result
 }
 
 /// Reads a JSON input document: a file path, or stdin for `-`.
@@ -106,7 +171,24 @@ pub fn read_json_input<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::R
             .with_context(|| format!("reading JSON from {}", path.display()))?
     };
 
-    serde_json::from_str(&content).with_context(|| {
+    let parse = || -> anyhow::Result<T> {
+        let mut deserializer = serde_json::Deserializer::from_str(&content);
+        let mut ignored = Vec::new();
+        // Wrap the actual deserialize traversal, including enum payloads and
+        // custom serde collections (e.g. InvoiceAttachments), rather than
+        // maintaining a second list of the library's request fields.
+        let value = serde_ignored::deserialize(&mut deserializer, |path| {
+            ignored.push(path.to_string());
+        })?;
+        deserializer.end()?;
+        anyhow::ensure!(
+            ignored.is_empty(),
+            "unknown JSON field(s): {}",
+            ignored.join(", ")
+        );
+        Ok(value)
+    };
+    parse().with_context(|| {
         if path == Path::new("-") {
             "parsing JSON from stdin".to_owned()
         } else {

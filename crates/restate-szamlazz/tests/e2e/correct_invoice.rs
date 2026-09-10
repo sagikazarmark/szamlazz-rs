@@ -1,8 +1,9 @@
-//! `Szamlazz.Order.correct_invoice` under Restate: its one path, the base
-//! verified by number, the lookup of the correction id (no order-number hint:
-//! correctives are exempt) and the create naming the base on the wire; the
-//! same `correction_id` again finding the corrective. The verify's refusals
-//! (7, a reversed base, another order's) are unit tests of `service::create`;
+//! `Szamlazz.Order.correct_invoice` under Restate: the target lookup, the base
+//! verified by number, the full lookup of the correction id (no order-number
+//! hint: correctives are exempt) and the create naming the base on the wire;
+//! the same `correction_id` again finding the corrective before verifying its
+//! now-reversed base. The verify's refusals (7, a reversed base, another
+//! order's) are unit tests of `service::create`;
 //! the 71/152 on a corrective is `tests/gateway/`'s.
 
 use rust_decimal::dec;
@@ -14,7 +15,8 @@ use crate::harness::szamlazz::{
 };
 use crate::harness::{Harness, document};
 
-/// The base is verified by number (it must carry this order's number); then
+/// The target lookup misses, then the base is verified by number (it must
+/// carry this order's number); then
 /// the corrective is issued under `{namespace}:{order}:corrective:{correction_id}`
 /// with the base named on the wire (`helyesbitettSzamlaszam` beside the
 /// `helyesbitoszamla` flag), through `verify-base-{number}`,
@@ -27,6 +29,19 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
     // mounted match, so the zero expectation could never fire.
     number_query("SZ-C1")
         .respond_with(Doc::of("SZ-C1", "SZ", "E2E-C1").response())
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    number_query("SZ-C1")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::of("SZ-C1", "SZ", "E2E-C1")
+            }
+            .response(),
+        )
+        .expect(0)
         .mount(&h.mock)
         .await;
     // A live invoice of another channel under the order: never queried.
@@ -35,11 +50,11 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
         .expect(0)
         .mount(&h.mock)
         .await;
-    // The corrective's id: absent for the lookup step and the create step's
+    // The corrective's id: absent for the target lookup, full lookup and create step's
     // leading query, then the issued corrective.
     holds_after_misses(
         &h.mock,
-        2,
+        3,
         &Doc {
             external_id: Some("acct:E2E-C1:corrective:fix-1"),
             referenced_invoice: Some("SZ-C1"),
@@ -80,15 +95,27 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
         [
             "namespace",
             "account",
+            "lookup-corrective",
             "verify-base-SZ-C1",
             "lookup-corrective",
             "create-corrective"
         ]
     );
 
-    let again = h.ok("E2E-C1", "correct_invoice", &body, "e2e-c1-k2").await;
-    assert_eq!(again["outcome"], "already_issued", "{again}");
-    assert_eq!(again["invoice_number"], "HS-C1");
+    // The base is now reversed: only the existing corrective is queried.
+    let before = h.requests_of_order("E2E-C1").await.len();
+    let again = h
+        .call("E2E-C1", "correct_invoice", &body, "e2e-c1-k2")
+        .await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_ne!(again.invocation_id(), reply.invocation_id());
+    assert_eq!(again.body["outcome"], "already_issued", "{}", again.body);
+    assert_eq!(again.body["invoice_number"], "HS-C1");
+    assert_eq!(
+        h.admin().runs(again.invocation_id()).await,
+        ["namespace", "account", "lookup-corrective"]
+    );
+    assert_eq!(h.requests_of_order("E2E-C1").await.len(), before + 1);
     assert_eq!(
         h.create_bodies_of("E2E-C1").await.len(),
         1,

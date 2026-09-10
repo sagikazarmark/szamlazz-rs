@@ -54,20 +54,20 @@ layering below is unchanged by that.
 
 ## Consequences
 
-- Every szamlazz.hu call happens inside an `Order` (or `Szamlazz.Agent`) `ctx.run`. The lookup,
-  storno and delete runs use `RunRetryPolicy::max_attempts(1)` with outcome-as-data; the create
-  step runs under the issue policy (a run retry policy, ADR 0004) and is the one closure that may
-  return a retryable `Err`, only for an outcome that is not known. A run failure surfaces as a
-  terminal error (HTTP 500 to a synchronous caller: verified), which is why the module must never
-  return `Err` for an expected outcome. *Amended (ADR 0004, #30, #37):* the lookup runs under the read
-  policy and the storno step under the issue policy; only the one-shot writes and the `namespace` step
-  stay at one attempt.
+- Every handler's szamlazz.hu call happens inside an `Order` (or `Szamlazz.Agent`) `ctx.run`.
+  Reads run under the read policy (`Err(Unanswered)`); create and storno under the issue policy
+  (`Err(Unconfirmed)`); one-shot writes use `max_attempts(1)` and journal a lost answer as data.
+  A lost answer or cancellation mid-one-shot-write becomes structured `outcome_unknown`, with
+  operation-specific reconciliation guidance. Best-effort read cancellation still propagates.
+  The deploy-side seller check (`examples/verify_seller.rs`) deliberately runs outside Restate's journal.
 - A process crash re-executes only the *open* closure; completed runs, sets and sleeps replay from
   the journal. Worst case per episode in a pathological crash loop is (issue policy executions) +
   (invocation attempts − 1) = 9 executions of the create closure, each query-first (ADR 0002),
   finite because of `kill` and of the issue policy's `max_duration` (ADR 0004).
 - `Szamlazz.Agent.storno` on a document that carries `rendelesszam` returns
-  `outcome: managed_by_order{key}`, a convention on the key scheme, never a call into `Order`.
+  `outcome: managed_by_order` with `order_key` when the reported number is a supported `OrderKey`,
+  otherwise `unsupported_order_number` with the reported string and reconciliation guidance.
+  Neither sends a storno or calls into `Order`; an unsupported number is not normalised or treated as unmanaged.
   Documents without an order number (no `Order` exists for them) are reversed directly.
 - `lookup`, `create` and `delete_proforma` exist only as module functions. When a second Restate
   caller appears, the upgrade path is an `ingress_private` handler over the module; the module

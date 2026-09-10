@@ -4,9 +4,9 @@
 //! Everything here is plain data with a stable JSON shape: domain outcomes are
 //! returned as values with HTTP 200 (see [`CreateOutcome`] and [`ConflictReason`]),
 //! while the [`TerminalCode`]s are reserved for faults. Three of the seven
-//! codes mean "outcome unknown: retry with a new `Idempotency-Key`, or read
+//! known codes mean "outcome unknown: retry with a new `Idempotency-Key`, or read
 //! `Szamlazz.Order.get`" (`outcome_unknown`,
-//! `unavailable`, `credentials_rejected`); the rest are settled: the same
+//! `unavailable`, `credentials_rejected`); the other known codes are settled: the same
 //! request never succeeds, or szamlazz.hu's own answer is passed through
 //! ([`TerminalCode`] says which). The module depends on
 //! [`identity`](crate::identity) alone (one way: `identity` imports nothing
@@ -17,7 +17,11 @@
 //! (`#[serde(deny_unknown_fields)]`, `additionalProperties: false` in the
 //! schema): a misspelt `reissue` or `additive` is an error naming the field,
 //! never a silent default. Response types stay open: a client must tolerate
-//! fields added later.
+//! fields added later. Scalar response outcomes, reasons, warnings and fault
+//! codes also preserve unknown strings; an unknown fault
+//! code has no inferred HTTP status or outcome classification.
+//! Tagged response states (`DocumentState`, `CredentialsCheck`) preserve
+//! unknown state strings together with their payload fields.
 //!
 //! The submodules mirror the handler modules of [`service`](crate::service),
 //! one per handler family, each holding its requests beside its responses:
@@ -93,14 +97,13 @@ use crate::identity::{ExternalId, OrderKey};
 /// "outcome unknown: retry with a new `Idempotency-Key`, or read
 /// `Szamlazz.Order.get`": `outcome_unknown`, `unavailable` and
 /// `credentials_rejected` ([`is_outcome_unknown`](Self::is_outcome_unknown)
-/// names exactly them). The rest are settled: the same request never
-/// succeeds (`invalid_input`, `unknown_account`, `not_found`) or
+/// names exactly them). The other known codes are settled: the same request
+/// never succeeds (`invalid_input`, `unknown_account`, `not_found`) or
 /// szamlazz.hu's own answer is passed through
 /// (`szamlazz_error`, whose szamlazz.hu code travels in the fault's separate
-/// `szamlazz_code` field; `code` is always one of these tokens).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+/// `szamlazz_code` field). Unknown codes are preserved without assigning an
+/// HTTP status or telling the caller whether the outcome is unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TerminalCode {
     /// The create or storno step ran out of the issue policy while a document
@@ -143,14 +146,16 @@ pub enum TerminalCode {
     /// szamlazz.hu code is in the fault's `szamlazz_code`, the message is
     /// szamlazz.hu's. HTTP 422.
     SzamlazzError,
+    /// A token this version does not know, preserved without classification.
+    Other(String),
 }
 
 impl TerminalCode {
-    /// Every code, in the order of the fault tables the READMEs carry.
+    /// Known codes, in the order of the fault tables the READMEs carry.
     /// (`account_mismatch`, 409, was the eighth until the account pins were
     /// dropped: no handler compares a found document with the account any
     /// more, so nothing could raise it.)
-    pub const ALL: [Self; 7] = [
+    pub const KNOWN: [Self; 7] = [
         Self::InvalidInput,
         Self::UnknownAccount,
         Self::NotFound,
@@ -160,9 +165,9 @@ impl TerminalCode {
         Self::CredentialsRejected,
     ];
 
-    /// The snake-case token carried in the error.
+    /// The wire token, preserved verbatim for an unknown code.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Unavailable => "unavailable",
@@ -171,6 +176,7 @@ impl TerminalCode {
             Self::UnknownAccount => "unknown_account",
             Self::NotFound => "not_found",
             Self::SzamlazzError => "szamlazz_error",
+            Self::Other(token) => token,
         }
     }
 
@@ -183,14 +189,15 @@ impl TerminalCode {
     /// have landed). The other four are settled: retrying the same request
     /// repeats the answer, so the caller fixes the request, the number, the
     /// scope or the account, or (for `szamlazz_error`) sends again later with
-    /// a new key.
+    /// a new key. An unknown code returns `None`: this version cannot
+    /// classify it and gives no retry advice for it.
     ///
     /// ```
     /// use restate_szamlazz::contract::TerminalCode;
     ///
-    /// let outcome_unknown: Vec<TerminalCode> = TerminalCode::ALL
+    /// let outcome_unknown: Vec<TerminalCode> = TerminalCode::KNOWN
     ///     .into_iter()
-    ///     .filter(|code| code.is_outcome_unknown())
+    ///     .filter(|code| code.is_outcome_unknown() == Some(true))
     ///     .collect();
     /// assert_eq!(
     ///     outcome_unknown,
@@ -207,34 +214,37 @@ impl TerminalCode {
     ///     TerminalCode::NotFound,
     ///     TerminalCode::SzamlazzError,
     /// ] {
-    ///     assert!(!code.is_outcome_unknown());
+    ///     assert_eq!(code.is_outcome_unknown(), Some(false));
     /// }
     /// ```
     #[must_use]
-    pub const fn is_outcome_unknown(self) -> bool {
+    pub const fn is_outcome_unknown(&self) -> Option<bool> {
         match self {
-            Self::OutcomeUnknown | Self::Unavailable | Self::CredentialsRejected => true,
+            Self::OutcomeUnknown | Self::Unavailable | Self::CredentialsRejected => Some(true),
             Self::InvalidInput | Self::UnknownAccount | Self::NotFound | Self::SzamlazzError => {
-                false
+                Some(false)
             }
+            Self::Other(_) => None,
         }
     }
 
-    /// The HTTP status the ingress reports for a fault with this code.
+    /// The HTTP status the ingress reports for a known code; `None` for an
+    /// unknown code. Read the actual ingress status for a newer fault.
     #[must_use]
-    pub const fn status(self) -> u16 {
+    pub const fn status(&self) -> Option<u16> {
         match self {
             // The caller's request: the same request never succeeds.
-            Self::InvalidInput | Self::UnknownAccount => 400,
-            Self::NotFound => 404,
+            Self::InvalidInput | Self::UnknownAccount => Some(400),
+            Self::NotFound => Some(404),
             // szamlazz.hu's own answer, passed through.
-            Self::SzamlazzError => 422,
-            Self::OutcomeUnknown => 500,
+            Self::SzamlazzError => Some(422),
+            Self::OutcomeUnknown => Some(500),
             // The worker's misconfiguration or szamlazz.hu not answering, not
             // the caller's request: the same request succeeds once the key
             // is fixed or szamlazz.hu answers, so neither a 4xx ("do not
             // retry") nor 401/403 ("you are unauthenticated") fits.
-            Self::Unavailable | Self::CredentialsRejected => 503,
+            Self::Unavailable | Self::CredentialsRejected => Some(503),
+            Self::Other(_) => None,
         }
     }
 }
@@ -242,6 +252,60 @@ impl TerminalCode {
 impl fmt::Display for TerminalCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for TerminalCode {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "outcome_unknown" => Self::OutcomeUnknown,
+            "unavailable" => Self::Unavailable,
+            "invalid_input" => Self::InvalidInput,
+            "credentials_rejected" => Self::CredentialsRejected,
+            "unknown_account" => Self::UnknownAccount,
+            "not_found" => Self::NotFound,
+            "szamlazz_error" => Self::SzamlazzError,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<TerminalCode> for String {
+    fn from(code: TerminalCode) -> Self {
+        match code {
+            TerminalCode::Other(token) => token,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl Serialize for TerminalCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for TerminalCode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TerminalCode".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::TerminalCode").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "The worker fault code. Known values: invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Other strings are preserved without an inferred HTTP status or outcome classification.",
+        })
     }
 }
 
@@ -253,8 +317,8 @@ impl fmt::Display for TerminalCode {
 /// answer is what the fault is about; `order`, `kind` and `external_id`
 /// identify the document the fault is about when the handler knows one (the
 /// `Szamlazz.Order` handlers' faults; a by-number fault of `Szamlazz.Agent`
-/// carries none). The HTTP status the ingress reports is the code's,
-/// [`TerminalCode::status`].
+/// carries none). For known codes, [`TerminalCode::status`] gives the HTTP
+/// status the ingress reports; for an unknown code, read the ingress status.
 ///
 /// On the wire the fault is the JSON **string** inside Restate's ingress
 /// envelope: `{"code": <HTTP status>, "message": "<fault JSON>", "source":
@@ -264,11 +328,17 @@ impl fmt::Display for TerminalCode {
 /// type. A response type: open (a client tolerates fields added later) and
 /// `#[non_exhaustive]`, built with [`Fault::new`] and the setters; like every
 /// response type's, its optional fields are present as `null` when absent.
+///
+/// Conversion to the SDK's `TerminalError` is fallible (`TryFrom<Fault>`):
+/// an unknown code returns `service::FaultConversionError::UnknownStatus`
+/// rather than acquiring a made-up HTTP status. Conversion to `HandlerError`
+/// keeps known faults terminal and treats a conversion failure as an internal
+/// retryable error, not a terminal fault or retry advice for the decoded code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct Fault {
-    /// The fault's code: one of the seven [`TerminalCode`] tokens.
+    /// The fault's code; unknown tokens are preserved for newer faults.
     pub code: TerminalCode,
     /// What happened and what the caller does next, in prose.
     pub message: String,
@@ -323,9 +393,9 @@ impl Fault {
         self
     }
 
-    /// The HTTP status the ingress reports for the fault: its code's.
+    /// The HTTP status of a known fault code, or `None` for an unknown code.
     #[must_use]
-    pub const fn status(&self) -> u16 {
+    pub const fn status(&self) -> Option<u16> {
         self.code.status()
     }
 }
@@ -442,7 +512,7 @@ mod tests {
                 "external_id": null,
             })
         );
-        assert_eq!(bare.status(), 400);
+        assert_eq!(bare.status(), Some(400));
         assert_eq!(serde_json::from_value::<Fault>(json).expect("back"), bare);
 
         let about = Fault::new(TerminalCode::NotFound, "invoice SZ-9 is not known (code 7)")
@@ -464,7 +534,7 @@ mod tests {
                 "external_id": "acct:ORD-1:invoice",
             })
         );
-        assert_eq!(about.status(), 404);
+        assert_eq!(about.status(), Some(404));
         assert_eq!(serde_json::from_value::<Fault>(json).expect("back"), about);
 
         // Open: a field added later does not fail an older reader.
@@ -481,23 +551,25 @@ mod tests {
     #[test]
     fn terminal_code_tokens() {
         let expected = [
-            (TerminalCode::OutcomeUnknown, "outcome_unknown", 500),
-            (TerminalCode::Unavailable, "unavailable", 503),
-            (TerminalCode::InvalidInput, "invalid_input", 400),
+            (TerminalCode::OutcomeUnknown, "outcome_unknown", 500, true),
+            (TerminalCode::Unavailable, "unavailable", 503, true),
+            (TerminalCode::InvalidInput, "invalid_input", 400, false),
             (
                 TerminalCode::CredentialsRejected,
                 "credentials_rejected",
                 503,
+                true,
             ),
-            (TerminalCode::UnknownAccount, "unknown_account", 400),
-            (TerminalCode::NotFound, "not_found", 404),
-            (TerminalCode::SzamlazzError, "szamlazz_error", 422),
+            (TerminalCode::UnknownAccount, "unknown_account", 400, false),
+            (TerminalCode::NotFound, "not_found", 404, false),
+            (TerminalCode::SzamlazzError, "szamlazz_error", 422, false),
         ];
-        assert_eq!(TerminalCode::ALL.len(), expected.len());
-        for (code, token, status) in expected {
-            assert!(TerminalCode::ALL.contains(&code), "{token} is in ALL");
+        assert_eq!(TerminalCode::KNOWN.len(), expected.len());
+        for (code, token, status, outcome_unknown) in expected {
+            assert!(TerminalCode::KNOWN.contains(&code), "{token} is in KNOWN");
             assert_eq!(code.as_str(), token);
-            assert_eq!(code.status(), status, "{token}");
+            assert_eq!(code.status(), Some(status), "{token}");
+            assert_eq!(code.is_outcome_unknown(), Some(outcome_unknown), "{token}");
             let json = serde_json::to_string(&code).expect("serialize");
             assert_eq!(json, format!("\"{token}\""));
             assert_eq!(
@@ -513,15 +585,175 @@ mod tests {
     #[test]
     fn every_terminal_code_is_in_the_fault_table() {
         let readme = include_str!("../README.md");
-        for code in TerminalCode::ALL {
-            let row = format!("| `{}` | {} |", code.as_str(), code.status());
+        for code in TerminalCode::KNOWN {
+            let status = code.status().expect("known code");
+            let row = format!("| `{}` | {status} |", code.as_str());
             assert!(
                 readme.contains(&row),
-                "README.md lists `{}` with status {}",
+                "README.md lists `{}` with status {status}",
                 code.as_str(),
-                code.status()
             );
         }
+    }
+
+    #[test]
+    fn an_unknown_fault_preserves_its_code_and_context_without_classification() {
+        let wire = serde_json::json!({
+            "code": " future_fault/é 🧾 ",
+            "message": "a newer worker's explanation",
+            "szamlazz_code": "999",
+            "order": "ORD-1",
+            "kind": "invoice",
+            "external_id": "acct:ORD-1:invoice",
+        });
+        let fault: Fault = serde_json::from_value(wire.clone()).expect("open fault");
+        assert_eq!(
+            fault.code,
+            TerminalCode::Other(" future_fault/é 🧾 ".to_owned())
+        );
+        assert_eq!(fault.status(), None);
+        assert_eq!(fault.code.is_outcome_unknown(), None);
+        assert_eq!(serde_json::to_value(fault).expect("json"), wire);
+    }
+
+    #[test]
+    fn response_tokens_preserve_unknown_strings_and_refuse_non_strings() {
+        fn check<T>(known: impl IntoIterator<Item = T>, other: fn(String) -> T)
+        where
+            T: serde::de::DeserializeOwned
+                + Serialize
+                + PartialEq
+                + std::fmt::Debug
+                + std::fmt::Display
+                + From<String>
+                + Into<String>
+                + Clone,
+        {
+            for token in known {
+                let wire = serde_json::to_value(&token).expect("json");
+                let text = wire.as_str().expect("scalar string");
+                assert_eq!(token.to_string(), text);
+                assert_eq!(Into::<String>::into(token.clone()), text);
+                assert_eq!(T::from(text.to_owned()), token);
+                assert_eq!(serde_json::from_value::<T>(wire).expect("known"), token);
+            }
+            for text in ["", "future_token", " MixedCase/é 🧾 \n"] {
+                let decoded: T = serde_json::from_value(serde_json::json!(text)).expect("open");
+                assert_eq!(decoded, other(text.to_owned()));
+                assert_eq!(decoded.to_string(), text);
+                assert_eq!(serde_json::to_value(&decoded).expect("json"), text);
+                assert_eq!(Into::<String>::into(decoded), text);
+            }
+            for value in [
+                serde_json::json!(null),
+                serde_json::json!(42),
+                serde_json::json!({"other": "future"}),
+                serde_json::json!(["issued"]),
+            ] {
+                assert!(serde_json::from_value::<T>(value).is_err());
+            }
+        }
+        check(CreateOutcome::KNOWN, CreateOutcome::Other);
+        check(ConflictReason::KNOWN, ConflictReason::Other);
+        check(Warning::KNOWN, Warning::Other);
+        check(StornoOutcome::KNOWN, StornoOutcome::Other);
+        check(TerminalCode::KNOWN, TerminalCode::Other);
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn response_token_schemas_are_open_strings_with_known_values_documented() {
+        fn check<T: schemars::JsonSchema + std::fmt::Display>(known: impl IntoIterator<Item = T>) {
+            let schema = serde_json::to_value(schemars::schema_for!(T)).expect("json");
+            assert_eq!(schema["type"], "string", "{schema}");
+            for closed in ["enum", "const", "oneOf", "anyOf", "allOf"] {
+                assert!(schema.get(closed).is_none(), "{schema}");
+            }
+            let description = schema["description"].as_str().expect("description");
+            for token in known {
+                assert!(
+                    description.contains(&token.to_string()),
+                    "{token}: {description}"
+                );
+            }
+        }
+        check(CreateOutcome::KNOWN);
+        check(ConflictReason::KNOWN);
+        check(Warning::KNOWN);
+        check(StornoOutcome::KNOWN);
+        check(TerminalCode::KNOWN);
+
+        let create = serde_json::to_value(schemars::schema_for!(CreateResponse)).expect("json");
+        assert_eq!(
+            create["properties"]["outcome"]["$ref"],
+            "#/$defs/CreateOutcome"
+        );
+        assert_eq!(
+            create["properties"]["warnings"]["items"]["$ref"],
+            "#/$defs/Warning"
+        );
+        let fault = serde_json::to_value(schemars::schema_for!(Fault)).expect("json");
+        assert_eq!(fault["properties"]["code"]["$ref"], "#/$defs/TerminalCode");
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn structured_response_schemas_leave_state_open_and_keep_known_payload_requirements() {
+        for (schema, known) in [
+            (
+                schemars::schema_for!(DocumentState),
+                DocumentState::KNOWN.as_slice(),
+            ),
+            (
+                schemars::schema_for!(CredentialsCheck),
+                CredentialsCheck::KNOWN.as_slice(),
+            ),
+        ] {
+            let schema = serde_json::to_value(schema).expect("json");
+            assert_eq!(schema["type"], "object");
+            assert_eq!(
+                schema["properties"]["state"],
+                serde_json::json!({"type": "string"})
+            );
+            assert_eq!(schema["required"], serde_json::json!(["state"]));
+            assert!(schema.get("additionalProperties").is_none());
+            for token in known {
+                assert!(
+                    schema["description"]
+                        .as_str()
+                        .expect("description")
+                        .contains(token)
+                );
+            }
+        }
+        let document = serde_json::to_value(schemars::schema_for!(DocumentState)).expect("json");
+        assert_eq!(
+            document["allOf"][1]["if"]["properties"]["state"]["const"],
+            "consumed"
+        );
+        assert_eq!(
+            document["allOf"][1]["then"]["required"],
+            serde_json::json!(["by"])
+        );
+        let credentials =
+            serde_json::to_value(schemars::schema_for!(CredentialsCheck)).expect("json");
+        assert_eq!(
+            credentials["if"]["properties"]["state"]["const"],
+            "rejected"
+        );
+        assert_eq!(
+            credentials["then"]["required"],
+            serde_json::json!(["code", "message"])
+        );
+        let status = serde_json::to_value(schemars::schema_for!(DocumentStatus)).expect("json");
+        assert_eq!(
+            status["properties"]["state"],
+            serde_json::json!({"type": "string"})
+        );
+        assert!(
+            status["allOf"].is_array(),
+            "flattening retains payload conditions: {status}"
+        );
     }
 
     /// A by-number request's schema references the bounded invoice-number

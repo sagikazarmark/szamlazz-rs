@@ -33,6 +33,12 @@
 //!   NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_account`
 //!   probe, registered as `Szamlazz.Agent`.
 
+// Pure service decisions return the public, context-rich Fault as data. Its
+// open string code puts it just above Clippy's error-size threshold; boxing
+// every decision would add allocation and conversion plumbing throughout the
+// protocol. The SDK boundary already moves it into a serialized message.
+#![allow(clippy::result_large_err)]
+
 use std::future::Future;
 
 use restate_sdk::errors::HandlerError;
@@ -54,6 +60,7 @@ mod support;
 
 pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
+pub use support::FaultConversionError;
 
 use prologue::Execution;
 use support::RunCtx;

@@ -401,7 +401,8 @@ fn a_malformed_body_is_a_structured_invalid_input() {
     where
         T: for<'de> serde::Deserialize<'de> + std::fmt::Debug,
     {
-        let error = TerminalError::from(body::<T>(bytes).into_request().expect_err("refused"));
+        let error = TerminalError::try_from(body::<T>(bytes).into_request().expect_err("refused"))
+            .expect("known fault");
         assert_eq!(error.code(), 400);
         let fault: serde_json::Value = serde_json::from_str(error.message()).expect("json body");
         assert_eq!(fault["code"], "invalid_input");
@@ -549,9 +550,10 @@ async fn credentials_rejected_never_leaks_the_agent_key() {
         panic!("expected CredentialsRejected, got {outcome:?}");
     };
     assert_eq!(answer.code, "3");
-    let error = TerminalError::from(
+    let error = TerminalError::try_from(
         AnsweredCode::CredentialsRejected(answer).into_fault(&order.config().namespace),
-    );
+    )
+    .expect("known fault");
     drop(guard);
 
     let sent = server.received_requests().await.expect("requests");

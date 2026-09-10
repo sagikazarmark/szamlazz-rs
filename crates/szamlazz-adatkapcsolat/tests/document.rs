@@ -10,7 +10,8 @@ use common::{
 };
 use rust_decimal::dec;
 use szamlazz_adatkapcsolat::{
-    Document, InvoiceAppearance, ParseError, Pdf, TransactionDirection, ValidationError, VatRate,
+    Document, InvoiceAppearance, InvoiceDirection, ParseError, Pdf, RecordedCreditEntry,
+    TransactionDirection, ValidationError, VatRate,
 };
 
 /// An outgoing invoice carrying nothing but its identity: the root,
@@ -51,13 +52,48 @@ fn parses_outgoing_invoice_fixture() {
             .and_then(|ledger| ledger.revenue.as_deref()),
         Some("12345A")
     );
-    assert_eq!(invoice.payments[0].exchange_rate, Some(dec!(275)));
+    assert_eq!(invoice.credit_entries[0].exchange_rate, Some(dec!(275)));
     assert_eq!(invoice.totals.per_vat_rate[0].vat_rate, Some(dec!(0)));
     assert_eq!(
         invoice.items[0].effective_vat(),
         Some(VatRate::Special("ÁKK"))
     );
     assert_eq!(invoice.raw_xml(), Some(OUTGOING_INVOICE));
+}
+
+#[test]
+fn invoice_credit_entry_titles_preserve_wire_tokens_and_absence_in_both_directions() {
+    for direction in [InvoiceDirection::Outgoing, InvoiceDirection::Incoming] {
+        for title in [Some("transfer"), Some("új elszámolási mód"), None] {
+            let element =
+                title.map_or_else(String::new, |title| format!("<jogcim>{title}</jogcim>"));
+            let body = with(OUTGOING_INVOICE, "<jogcim>transfer</jogcim>", &element);
+            let body = match direction {
+                InvoiceDirection::Outgoing => body,
+                InvoiceDirection::Incoming => as_incoming(&body),
+            };
+            let invoice = match direction {
+                InvoiceDirection::Outgoing => outgoing(&body),
+                InvoiceDirection::Incoming => incoming(&body),
+            }
+            .expect("credit entry content parses");
+            assert_eq!(invoice.credit_entries.len(), 1);
+            let entry: &RecordedCreditEntry = &invoice.credit_entries[0];
+            assert_eq!(entry.title.as_deref(), title);
+            assert_eq!(entry.amount, Some(dec!(200)));
+            assert_eq!(invoice.raw_xml(), Some(body.as_str()));
+            if title.is_some() {
+                invoice.validate(direction).expect("open title token");
+            } else {
+                assert_eq!(
+                    invoice.validate(direction),
+                    Err(ValidationError::MissingRequired {
+                        path: "invoice kifizetes/jogcim".into(),
+                    })
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -184,6 +220,7 @@ fn parses_receipt_batch() {
         Some("911")
     );
     assert_eq!(first.payments[0].amount, Some(dec!(25400)));
+    assert_eq!(first.payments[0].method.as_deref(), Some("készpénz"));
     assert_eq!(
         batch.receipts[1].info.receipt_number.as_deref(),
         Some("NYGTA-2026-2")
@@ -339,7 +376,7 @@ fn identity_only_invoice_parses_with_every_other_field_absent() {
     assert!(invoice.items.is_empty());
     assert!(invoice.totals.per_vat_rate.is_empty());
     assert!(invoice.totals.grand.is_none());
-    assert!(invoice.payments.is_empty());
+    assert!(invoice.credit_entries.is_empty());
     assert!(invoice.pdf.is_none());
     assert_eq!(invoice.raw_xml(), Some(IDENTITY_ONLY_INVOICE));
 }
@@ -1000,5 +1037,5 @@ fn vendor_example_parses_leniently_and_strictly() {
     assert_eq!(invoice.buyer.name.as_deref(), Some(""));
     assert!(invoice.pdf.is_none());
     assert_eq!(invoice.items.len(), 1);
-    assert_eq!(invoice.payments[0].bank_transaction_id, Some(1234));
+    assert_eq!(invoice.credit_entries[0].bank_transaction_id, Some(1234));
 }
