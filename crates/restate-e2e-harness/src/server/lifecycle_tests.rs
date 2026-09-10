@@ -100,7 +100,7 @@ impl Suite {
             .env("TMPDIR", &root)
             .env("RESTATE_LIFECYCLE_PAUSES", pauses)
             .stdout(Stdio::from(log.try_clone().expect("suite log")))
-            .stderr(if scenario == "stderr-failure" {
+            .stderr(if matches!(scenario, "stderr-failure" | "signal-stderr-failure") {
                 Stdio::piped()
             } else {
                 Stdio::from(log)
@@ -304,6 +304,20 @@ fn failing_stderr_after_spawn_stops_and_reaps_the_process_group() {
             }),
         "failed startup retains its diagnostic directory"
     );
+}
+
+#[test]
+fn signals_with_broken_stderr_still_stop_the_process_group() {
+    for (signal, status) in [(Signal::SIGINT, 130), (Signal::SIGTERM, 143)] {
+        let mut suite = Suite::start("signal-stderr-failure", signal, "registered-first");
+        // Hold startup after its diagnostics and outside the lifecycle lock:
+        // only the signal thread writes to the broken sink from here.
+        suite.await_point("registered-first");
+        let processes = suite.await_server("first");
+        drop(suite.child.stderr.take().expect("piped stderr"));
+        suite.signal(signal);
+        suite.assert_stopped(status, &processes);
+    }
 }
 
 #[test]

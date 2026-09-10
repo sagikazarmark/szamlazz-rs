@@ -231,24 +231,28 @@ fn started() -> std::sync::MutexGuard<'static, Started> {
 }
 
 /// `SIGKILL` to the process group `pid` leads; a group already gone
-/// (`ESRCH`) is the wanted state, any other failure is reported on stderr,
-/// never swallowed (a process group is the operator's to find).
+/// (`ESRCH`) is the wanted state; any other failure is reported best-effort
+/// on stderr. A broken diagnostic sink must not interrupt cleanup.
 fn kill_group(pid: u32) {
     use nix::errno::Errno;
     use nix::sys::signal::{Signal, killpg};
     use nix::unistd::Pid;
     let Ok(pid) = i32::try_from(pid) else {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr(),
             "WARNING: the pid {pid} does not fit `killpg(2)`; the restate-server is left behind"
         );
         return;
     };
     match killpg(Pid::from_raw(pid), Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => {}
-        Err(error) => eprintln!(
-            "WARNING: killpg({pid}, SIGKILL) failed ({error}); the restate-server may be left \
-             behind (`pkill restate-server`)"
-        ),
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "WARNING: killpg({pid}, SIGKILL) failed ({error}); the restate-server may be left \
+                 behind (`pkill restate-server`)"
+            );
+        }
     }
 }
 
@@ -290,7 +294,9 @@ fn stop_on_signal() {
                     {
                         let mut started = started();
                         started.stopping = true;
-                        eprintln!(
+                        // Diagnostics must not prevent group cleanup or exit.
+                        let _ = writeln!(
+                            std::io::stderr(),
                             "{signal}: stopping {} Restate server(s) the suite started, then exiting",
                             started.groups.len()
                         );
