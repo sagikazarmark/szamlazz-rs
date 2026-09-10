@@ -719,7 +719,7 @@ struct AlapXml {
     #[serde(
         default,
         rename(deserialize = "hivasAzonosito"),
-        deserialize_with = "xml::de::empty_as_none"
+        deserialize_with = "xml::de::business_text"
     )]
     hivas_azonosito: Option<String>,
     nyugtaszam: String,
@@ -729,22 +729,23 @@ struct AlapXml {
     #[serde(
         default,
         rename(deserialize = "stornozottNyugtaszam"),
-        deserialize_with = "xml::de::empty_as_none"
+        deserialize_with = "xml::de::business_text"
     )]
     stornozott_nyugtaszam: Option<String>,
+    #[serde(deserialize_with = "xml::de::date")]
     kelt: Date,
     fizmod: String,
     penznem: String,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     devizabank: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     devizaarf: Option<Decimal>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
     #[serde(
         default,
         rename(deserialize = "fokonyvVevo"),
-        deserialize_with = "xml::de::empty_as_none"
+        deserialize_with = "xml::de::business_text"
     )]
     fokonyv_vevo: Option<String>,
     #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
@@ -752,7 +753,7 @@ struct AlapXml {
     #[serde(
         default,
         rename(deserialize = "rendelesSzam"),
-        deserialize_with = "xml::de::empty_as_none"
+        deserialize_with = "xml::de::business_text"
     )]
     rendeles_szam: Option<String>,
 }
@@ -766,7 +767,7 @@ struct TetelekXml {
 #[derive(Debug, serde::Deserialize)]
 struct TetelXml {
     megnevezes: String,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     azonosito: Option<String>,
     #[serde(deserialize_with = "xml::de::from_text")]
     mennyiseg: Decimal,
@@ -777,7 +778,7 @@ struct TetelXml {
         deserialize_with = "xml::de::from_text"
     )]
     netto_egysegar: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     afakulcs: String,
     #[serde(alias = "nettoErtek", deserialize_with = "xml::de::from_text")]
@@ -792,9 +793,9 @@ struct TetelXml {
 
 #[derive(Debug, serde::Deserialize)]
 struct TetelFokonyvXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     arbevetel: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     afa: Option<String>,
 }
 
@@ -830,7 +831,7 @@ struct KifizetesXml {
     fizetoeszkoz: String,
     #[serde(deserialize_with = "xml::de::from_text")]
     osszeg: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     leiras: Option<String>,
 }
 
@@ -886,6 +887,59 @@ mod tests {
         QueryReceipt::new(ReceiptSelector::ReceiptNumber(ReceiptNumber::new(
             "NYGTA-2026-1",
         )))
+    }
+
+    #[test]
+    fn receipt_operations_read_civil_dates() {
+        for spelling in [
+            "2024-02-29",
+            "2024-02-29Z",
+            "2024-02-29+01:30",
+            "2024-02-29-02:00",
+            "2024-02-29+00:00",
+            "2024-02-29-00:00",
+            "2024-02-29+14:00",
+            "2024-02-29-14:00",
+            " \t2024-02-29Z\n",
+            "0000-02-29",
+            "-000001-02-28",
+            "20240229",
+            "2023-02-29",
+            "2024-02-29+14:01",
+            "2024-02-29-15:00",
+            "2024-02-29+01:60",
+            "2024-02-29junk",
+            "é123456789",
+            "é",
+            "",
+        ] {
+            let body = include_str!("../../tests/synthetic/xmlnyugtavalasz.xml")
+                .replace("2026-01-01", spelling);
+            let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+            for result in [
+                create_sample().parse(&response),
+                StornoReceipt::new("R-1").parse(&response),
+                query_sample().parse(&response),
+            ] {
+                let expected = match spelling {
+                    "0000-02-29" => Some(date(0, 2, 29)),
+                    "-000001-02-28" => Some(date(-1, 2, 28)),
+                    "2023-02-29" | "2024-02-29+14:01" | "2024-02-29-15:00" | "2024-02-29+01:60"
+                    | "2024-02-29junk" | "é123456789" | "é" | "" => None,
+                    _ => Some(date(2024, 2, 29)),
+                };
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        result
+                            .unwrap_or_else(|e| panic!("{spelling:?}: {e}"))
+                            .issue_date,
+                        expected
+                    );
+                } else {
+                    assert!(result.is_err(), "{spelling}");
+                }
+            }
+        }
     }
 
     fn send_sample() -> SendReceipt {

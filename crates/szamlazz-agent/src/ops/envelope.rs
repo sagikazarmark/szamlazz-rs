@@ -298,8 +298,59 @@ fn parse_decimal_header(
 ) -> Result<Option<Decimal>, ParseError> {
     response
         .header(name)
-        .map(|value| parse_decimal(value, name))
+        .map(|value| header_decimal(value, name))
         .transpose()
+}
+
+/// HTTP money is ungrouped, with either decimal separator. Validate the
+/// grammar before Decimal (whose own parser also accepts underscores).
+fn header_decimal(value: &str, field: &'static str) -> Result<Decimal, ParseError> {
+    let value = value.trim_matches([' ', '\t']);
+    let mut bytes = value.bytes().peekable();
+    if matches!(bytes.peek(), Some(b'+' | b'-')) {
+        bytes.next();
+    }
+    let mut digits = 0;
+    while bytes.peek().is_some_and(u8::is_ascii_digit) {
+        bytes.next();
+        digits += 1;
+    }
+    if matches!(bytes.peek(), Some(b'.' | b',')) {
+        bytes.next();
+        while bytes.peek().is_some_and(u8::is_ascii_digit) {
+            bytes.next();
+            digits += 1;
+        }
+    }
+    let mut valid = digits > 0;
+    if matches!(bytes.peek(), Some(b'e' | b'E')) {
+        bytes.next();
+        if matches!(bytes.peek(), Some(b'+' | b'-')) {
+            bytes.next();
+        }
+        let mut exponent_digits = 0;
+        while bytes.peek().is_some_and(u8::is_ascii_digit) {
+            bytes.next();
+            exponent_digits += 1;
+        }
+        valid &= exponent_digits > 0;
+    }
+    if !valid || bytes.next().is_some() {
+        return Err(ParseError::Invalid {
+            field,
+            message: "expected an ungrouped decimal header".into(),
+        });
+    }
+    let normalized = value.replace(',', ".");
+    let result = if normalized.contains(['e', 'E']) {
+        Decimal::from_scientific(&normalized)
+    } else {
+        normalized.parse()
+    };
+    result.map_err(|error| ParseError::Invalid {
+        field,
+        message: error.to_string(),
+    })
 }
 
 #[cfg(test)]

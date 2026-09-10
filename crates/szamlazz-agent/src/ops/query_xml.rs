@@ -610,7 +610,7 @@ struct SzamlaXml {
 
 #[derive(Debug, serde::Deserialize)]
 struct CimXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     orszag: Option<String>,
     irsz: String,
     telepules: String,
@@ -630,9 +630,9 @@ impl From<CimXml> for Address {
 
 #[derive(Debug, serde::Deserialize)]
 struct BankXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     nev: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     bankszamla: Option<String>,
 }
 
@@ -653,11 +653,11 @@ struct SzallitoXml {
     cim: CimXml,
     #[serde(default)]
     postacim: Option<CimXml>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     adoszam: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     csoportazonosito: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     adoszameu: Option<String>,
     #[serde(default)]
     bank: Option<BankXml>,
@@ -692,7 +692,7 @@ struct AlapXml {
     gazd_esem_azon: Option<i64>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     forras: Option<i64>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     iktatoszam: Option<String>,
     tipus: DocumentType,
     eszamla: InvoiceAppearance,
@@ -700,31 +700,31 @@ struct AlapXml {
     hivszamlaszam: Option<InvoiceNumber>,
     #[serde(default, deserialize_with = "empty_invoice_number")]
     hivdijbekszam: Option<InvoiceNumber>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     kelt: Option<Date>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     telj: Option<Date>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     fizh: Option<Date>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     fizmod: Option<PaymentMethod>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     fizmodunified: Option<String>,
     #[serde(default, deserialize_with = "xml::de::flexible_bool")]
     keszpenz: bool,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     rendelesszam: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     nyelv: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     devizanem: Option<Currency>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     devizabank: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     devizaarf: Option<Decimal>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     #[serde(default, deserialize_with = "xml::de::flexible_bool")]
     penzforg: bool,
@@ -732,7 +732,7 @@ struct AlapXml {
     kata: bool,
     #[serde(default, deserialize_with = "xml::de::flexible_bool")]
     katafokonyv: bool,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     email: Option<String>,
     #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
     teszt: Option<bool>,
@@ -777,15 +777,15 @@ impl From<AlapXml> for InvoiceInfo {
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct PostacimXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     nev: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     orszag: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     irsz: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     telepules: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     cim: Option<String>,
 }
 
@@ -803,24 +803,24 @@ impl From<PostacimXml> for BuyerPostalAddress {
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct VevoFokonyvXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     vevo: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     vevoazon: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     datum: Option<Date>,
     #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
     folyamatostelj: Option<bool>,
     #[serde(
         rename(deserialize = "elszDatTol"),
         default,
-        deserialize_with = "xml::de::empty_as_none"
+        deserialize_with = "xml::de::optional_date"
     )]
     elsz_dat_tol: Option<Date>,
     #[serde(
         rename(deserialize = "elszDatIg"),
         default,
-        deserialize_with = "xml::de::empty_as_none"
+        deserialize_with = "xml::de::optional_date"
     )]
     elsz_dat_ig: Option<Date>,
 }
@@ -843,19 +843,19 @@ struct VevoXml {
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     id: Option<i64>,
     nev: String,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     azonosito: Option<String>,
     #[serde(default)]
     cim: Option<CimXml>,
     #[serde(default)]
     postacim: Option<PostacimXml>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     email: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     adoszam: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     csoportazonosito: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     adoszameu: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     lokacio: Option<i64>,
@@ -897,14 +897,14 @@ struct TetelekXml {
 #[derive(Debug, serde::Deserialize)]
 struct TetelXml {
     nev: String,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     azonosito: Option<String>,
     #[serde(deserialize_with = "xml::de::from_text")]
     mennyiseg: Decimal,
     mennyisegiegyseg: String,
     #[serde(deserialize_with = "xml::de::from_text")]
     nettoegysegar: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     afakulcs: String,
     #[serde(deserialize_with = "xml::de::from_text")]
@@ -915,7 +915,7 @@ struct TetelXml {
     afa: Decimal,
     #[serde(deserialize_with = "xml::de::from_text")]
     brutto: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     sztetordering: Option<i64>,
@@ -946,17 +946,17 @@ impl From<TetelXml> for DocumentItem {
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct TetelFokonyvXml {
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     arbevetel: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     afa: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     gazdasagiesemeny: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     gazdasagiesemenyafa: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     elszdattol: Option<Date>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     elszdatig: Option<Date>,
 }
 
@@ -982,7 +982,7 @@ struct QutetekXml {
 #[derive(Debug, serde::Deserialize)]
 struct QutetXml {
     nev: String,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     afakulcs: String,
     #[serde(deserialize_with = "xml::de::from_text")]
@@ -991,9 +991,9 @@ struct QutetXml {
     afa: Decimal,
     #[serde(deserialize_with = "xml::de::from_text")]
     brutto: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     elszdattol: Option<Date>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_date")]
     elszdatig: Option<Date>,
     #[serde(deserialize_with = "xml::de::from_text")]
     afalevon: i64,
@@ -1033,13 +1033,14 @@ struct KifizetesekXml {
 
 #[derive(Debug, serde::Deserialize)]
 struct KifizetesXml {
+    #[serde(deserialize_with = "xml::de::date")]
     datum: Date,
     jogcim: PaymentMethod,
     #[serde(deserialize_with = "xml::de::from_text")]
     osszeg: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::business_text")]
     bankszamlaszam: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     banktranzid: Option<i64>,
@@ -1067,7 +1068,7 @@ where
 {
     use serde::Deserialize as _;
     let value = String::deserialize(deserializer)?;
-    Ok((!value.trim().is_empty()).then(|| InvoiceNumber::new(value)))
+    Ok((!value.chars().all(xml::is_xml_space)).then(|| InvoiceNumber::new(value)))
 }
 
 #[cfg(test)]
@@ -1304,6 +1305,144 @@ mod tests {
           <kifizetesek><kifizetes><datum>2026-07-04</datum><jogcim>transfer</jogcim><osszeg>10</osszeg><megjegyzes>Paid</megjegyzes>
             <bankszamlaszam>ACC</bankszamlaszam><banktranzid>99</banktranzid><devizaarf>401</devizaarf></kifizetes></kifizetesek>
           <pdf>JVBERi0=</pdf></szamla>"#;
+
+    #[test]
+    fn date_spellings_retain_the_civil_date_at_every_position() {
+        for spelling in [
+            "2024-02-29",
+            "2024-02-29Z",
+            "2024-02-29+01:30",
+            "2024-02-29-02:00",
+            "2024-02-29+00:00",
+            "2024-02-29-00:00",
+            "2024-02-29+14:00",
+            "2024-02-29-14:00",
+            " \t2024-02-29Z\n",
+            "0000-02-29",
+            "-000001-02-28",
+            "20240229",
+        ] {
+            let mut body = ALL_SECTIONS.to_owned();
+            for original in [
+                "2026-07-01",
+                "2026-07-02",
+                "2026-07-03",
+                "2026-07-04",
+                "2026-07-10",
+                "2026-07-31",
+            ] {
+                body = body.replace(original, spelling);
+            }
+            let doc = sample()
+                .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+                .unwrap_or_else(|e| panic!("{spelling:?}: {e}"));
+            let expected = match spelling {
+                "0000-02-29" => date(0, 2, 29),
+                "-000001-02-28" => date(-1, 2, 28),
+                _ => date(2024, 2, 29),
+            };
+            let buyer = doc.buyer.ledger.expect("buyer ledger");
+            let item = doc.items[0].ledger.as_ref().expect("item ledger");
+            assert_eq!(
+                [
+                    doc.info.issue_date,
+                    doc.info.fulfillment_date,
+                    doc.info.due_date,
+                    buyer.date,
+                    buyer.settlement_from,
+                    buyer.settlement_to,
+                    item.settlement_from,
+                    item.settlement_to,
+                    doc.financial_items[0].settlement_from,
+                    doc.financial_items[0].settlement_to,
+                    Some(doc.credit_entries[0].date)
+                ],
+                [Some(expected); 11],
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_date_content_is_refused_without_panicking() {
+        for spelling in [
+            "2023-02-29",
+            "2024-02-29+14:01",
+            "2024-02-29-15:00",
+            "2024-02-29+01:60",
+            "2024-02-29junk",
+            "2024-02-29Zjunk",
+            "",
+            "é",
+            "é123456789",
+            "2024-02",
+        ] {
+            let body = ALL_SECTIONS.replace("2026-07-04", spelling);
+            assert!(
+                sample()
+                    .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+                    .is_err(),
+                "{spelling}"
+            );
+        }
+        for original in [
+            "2026-07-01",
+            "2026-07-02",
+            "2026-07-03",
+            "2026-07-04",
+            "2026-07-10",
+            "2026-07-31",
+        ] {
+            for invalid in [
+                "2023-02-29",
+                "2024-02-29+14:01",
+                "2024-02-29junk",
+                "é123456789",
+            ] {
+                let body = ALL_SECTIONS.replace(original, invalid);
+                assert!(
+                    sample()
+                        .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+                        .is_err(),
+                    "{original}: {invalid}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn optional_date_absence_is_preserved() {
+        let mut body = ALL_SECTIONS.to_owned();
+        for original in [
+            "2026-07-01",
+            "2026-07-02",
+            "2026-07-03",
+            "2026-07-10",
+            "2026-07-31",
+        ] {
+            body = body.replace(original, " \t\r\n ");
+        }
+        let doc = sample()
+            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+            .expect("optional empty dates");
+        let buyer = doc.buyer.ledger.expect("buyer ledger");
+        let item = doc.items[0].ledger.as_ref().expect("item ledger");
+        assert_eq!(
+            [
+                doc.info.issue_date,
+                doc.info.fulfillment_date,
+                doc.info.due_date,
+                buyer.date,
+                buyer.settlement_from,
+                buyer.settlement_to,
+                item.settlement_from,
+                item.settlement_to,
+                doc.financial_items[0].settlement_from,
+                doc.financial_items[0].settlement_to
+            ],
+            [None; 10]
+        );
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)]

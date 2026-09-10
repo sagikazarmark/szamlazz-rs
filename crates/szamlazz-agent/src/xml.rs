@@ -71,40 +71,137 @@ pub(crate) fn response_root<'a>(
         message: error.to_string(),
     })?;
     let mut reader = quick_xml::reader::NsReader::from_str(text);
+    reader.config_mut().check_comments = true;
+    let mut depth = 0usize;
+    let mut matched = None;
+    let mut first = true;
+    let invalid = || ParseError::UnexpectedBody(body_excerpt(body));
 
     loop {
         let (namespace, event) = reader
             .read_resolved_event()
             .map_err(quick_xml::DeError::from)?;
 
+        let empty = matches!(event, Event::Empty(_));
         match event {
-            Event::Start(start) | Event::Empty(start) => {
+            Event::Start(start) | Event::Empty(start) if depth == 0 => {
+                if matched.is_some() {
+                    return Err(invalid());
+                }
                 let local_name = start.local_name();
                 let local = local_name.as_ref();
-                let matched = expected.iter().position(|(root, expected_namespace)| {
+                matched = expected.iter().position(|(root, expected_namespace)| {
                     local == *root
                         && namespace == ResolveResult::Bound(Namespace(expected_namespace))
                 });
 
-                if let Some(index) = matched {
-                    return Ok((index, text));
+                if matched.is_some() {
+                    depth = usize::from(!empty);
+                } else {
+                    let wanted = expected
+                        .iter()
+                        .map(|(root, namespace)| format!("{root} in namespace {namespace}"))
+                        .collect::<Vec<_>>()
+                        .join(" or ");
+                    return Err(ParseError::UnexpectedBody(format!(
+                        "expected {wanted}, got {local}: {}",
+                        body_excerpt(body)
+                    )));
                 }
-                let wanted = expected
-                    .iter()
-                    .map(|(root, namespace)| format!("{root} in namespace {namespace}"))
-                    .collect::<Vec<_>>()
-                    .join(" or ");
-                return Err(ParseError::UnexpectedBody(format!(
-                    "expected {wanted}, got {local}: {}",
-                    body_excerpt(body)
-                )));
             }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth = depth.checked_sub(1).ok_or_else(invalid)?;
+            }
+            Event::Decl(decl) => {
+                if !first {
+                    return Err(invalid());
+                }
+                validate_declaration(&decl)?;
+            }
+            Event::Text(value) if depth == 0 => {
+                if !value.as_ref().chars().all(is_xml_space) {
+                    return Err(invalid());
+                }
+            }
+            Event::CData(_) | Event::GeneralRef(_) if depth == 0 => return Err(invalid()),
+            Event::DocType(_) => return Err(invalid()),
+            Event::PI(pi) if !valid_pi_target(pi.target()) => return Err(invalid()),
             Event::Eof => {
-                return Err(ParseError::UnexpectedBody(body_excerpt(body)));
+                return if depth == 0 {
+                    matched.map(|index| (index, text)).ok_or_else(invalid)
+                } else {
+                    Err(invalid())
+                };
             }
             _ => {}
         }
+        first = false;
     }
+}
+
+/// Check declaration separators as well as pseudo-attribute order and values:
+/// quick-xml's attribute iterator permits adjacent quoted attributes.
+fn validate_declaration(decl: &BytesDecl<'_>) -> Result<(), ParseError> {
+    let invalid = || ParseError::UnexpectedBody("invalid XML declaration".into());
+    if decl.version().map_err(quick_xml::DeError::from)?.as_ref() != "1.0" {
+        return Err(invalid());
+    }
+    let start = BytesStart::from_content(decl.as_ref(), 3);
+    let mut quote = None;
+    let mut needs_space = false;
+    for ch in start.attributes_raw().chars() {
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+                needs_space = true;
+            }
+        } else {
+            if needs_space && !is_xml_space(ch) {
+                return Err(invalid());
+            }
+            needs_space = false;
+            if matches!(ch, '\'' | '"') {
+                quote = Some(ch);
+            }
+        }
+    }
+    let mut last = 0;
+    for attribute in start.attributes() {
+        let attribute = attribute
+            .map_err(quick_xml::Error::from)
+            .map_err(quick_xml::DeError::from)?;
+        let rank = match attribute.key.as_ref() {
+            "version" if attribute.value.as_ref() == "1.0" => 1,
+            "encoding" if valid_encoding_name(attribute.value.as_ref()) => 2,
+            "standalone" if matches!(attribute.value.as_ref(), "yes" | "no") => 3,
+            _ => return Err(invalid()),
+        };
+        if rank <= last {
+            return Err(invalid());
+        }
+        last = rank;
+    }
+    Ok(())
+}
+
+/// XML 1.0 Name, with the reserved PI target excluded. Prefixes have no
+/// namespace meaning on a PI, and non-ASCII Name characters are legal.
+fn valid_pi_target(value: &str) -> bool {
+    let mut chars = value.chars();
+    !value.eq_ignore_ascii_case("xml")
+        && chars.next().is_some_and(xml_name_start)
+        && chars.all(|ch| xml_name_start(ch) || matches!(ch, '-' | '.' | '0'..='9' | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}'))
+}
+
+fn xml_name_start(ch: char) -> bool {
+    matches!(ch, ':' | '_' | 'A'..='Z' | 'a'..='z' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
+}
+
+fn valid_encoding_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// The verdict every Számla Agent response envelope opens with: `sikeres`,
@@ -264,7 +361,70 @@ impl Element<'_> {
 /// Serde helpers for szamlazz.hu's lenient response XML, where absent values
 /// arrive as empty elements and booleans may be `0`/`1`.
 pub(crate) mod de {
+    use jiff::civil::Date;
     use serde::{Deserialize, Deserializer};
+
+    /// Read a printed civil date, discarding only a complete XSD timezone.
+    /// The checked fallback retains the legacy reader's finite date domain.
+    fn civil_date(value: &str) -> Result<Date, String> {
+        let value = value.trim_matches(super::is_xml_space);
+        let legacy = value.parse::<Date>();
+        if let Ok(date) = legacy {
+            return Ok(date);
+        }
+        let bare = if let Some(bare) = value.strip_suffix('Z') {
+            bare
+        } else if let Some((bare, offset)) = value
+            .len()
+            .checked_sub(6)
+            .and_then(|n| value.split_at_checked(n))
+        {
+            let bytes = offset.as_bytes();
+            if !matches!(bytes[0], b'+' | b'-')
+                || bytes[3] != b':'
+                || ![bytes[1], bytes[2], bytes[4], bytes[5]]
+                    .iter()
+                    .all(u8::is_ascii_digit)
+            {
+                return Err(format!("invalid civil date: {value}"));
+            }
+            let hours = (bytes[1] - b'0') * 10 + bytes[2] - b'0';
+            let minutes = (bytes[4] - b'0') * 10 + bytes[5] - b'0';
+            if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+                return Err(format!("invalid date offset: {value}"));
+            }
+            bare
+        } else {
+            return Err(format!("invalid civil date: {value}"));
+        };
+        // Only a whole hyphenated date may precede the new suffix forms.
+        let parts: Vec<_> = bare.trim_start_matches(['+', '-']).split('-').collect();
+        if parts.len() != 3
+            || parts[0].len() < 4
+            || parts[1].len() != 2
+            || parts[2].len() != 2
+            || !parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(format!("invalid civil date: {value}"));
+        }
+        bare.parse::<Date>().map_err(|error| error.to_string())
+    }
+
+    pub fn date<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Date, D::Error> {
+        civil_date(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+
+    pub fn optional_date<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Date>, D::Error> {
+        let value = Option::<String>::deserialize(deserializer)?;
+        match value.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(value) => civil_date(value)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 
     /// Deserializes an optional value from an element that may be absent or
     /// empty; non-empty content is parsed with `FromStr`.
@@ -280,6 +440,20 @@ pub(crate) mod de {
             None | Some("") => Ok(None),
             Some(text) => text.parse().map(Some).map_err(serde::de::Error::custom),
         }
+    }
+
+    /// Optional decoded business text: XML whitespace alone is absent;
+    /// otherwise every decoded character (including NBSP) is retained.
+    pub fn business_text<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        Option::<String>::deserialize(deserializer)?
+            .filter(|value| !value.chars().all(super::is_xml_space))
+            .map(|value| value.parse().map_err(serde::de::Error::custom))
+            .transpose()
     }
 
     /// Deserializes a bool that may be spelled `true`/`false` or `0`/`1`.
@@ -329,6 +503,10 @@ pub(crate) mod de {
     }
 }
 
+pub(crate) fn is_xml_space(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\r' | '\n')
+}
+
 /// The `osszegek` totals block, byte-identical on a queried invoice
 /// (`szamla`) and on a receipt (`nyugta`), and its one projection onto the
 /// public [`Totals`](crate::types::Totals) tree.
@@ -353,7 +531,7 @@ pub(crate) mod totals {
     #[derive(Debug, serde::Deserialize)]
     pub struct AfakulcsosszXml {
         /// The special VAT code (`afatipus`); an empty element is none.
-        #[serde(default, deserialize_with = "de::empty_as_none")]
+        #[serde(default, deserialize_with = "de::business_text")]
         pub afatipus: Option<String>,
         /// The numeric VAT rate token (`afakulcs`).
         pub afakulcs: String,

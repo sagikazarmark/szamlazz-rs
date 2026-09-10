@@ -3,8 +3,11 @@
 
 use std::str::FromStr;
 
-use quick_xml::Reader;
+use std::collections::HashSet;
+
 use quick_xml::events::Event;
+use quick_xml::name::{Namespace, ResolveResult};
+use quick_xml::reader::NsReader;
 
 use crate::credentials::Credentials;
 use crate::error::{ApiError, ErrorCode, ParseError, ResponseError};
@@ -198,13 +201,97 @@ struct TaxpayerResponse {
     addresses: Vec<TaxpayerAddress>,
 }
 
+/// Only recognized direct children can contribute data. An unknown frame
+/// remains unknown all the way down, even if a descendant has a familiar name.
+#[derive(Default)]
+struct Frame {
+    name: &'static str,
+    scalar: bool,
+    address: bool,
+    seen: HashSet<&'static str>,
+    text: String,
+}
+
+struct Layout {
+    api: &'static str,
+    result: &'static str,
+    component: &'static str,
+}
+
+impl Layout {
+    fn for_root_index(root_index: usize) -> Self {
+        if root_index == 0 {
+            Self {
+                api: "http://schemas.nav.gov.hu/OSA/2.0/api",
+                result: "http://schemas.nav.gov.hu/OSA/2.0/api",
+                component: "http://schemas.nav.gov.hu/OSA/2.0/data",
+            }
+        } else {
+            Self {
+                api: "http://schemas.nav.gov.hu/OSA/3.0/api",
+                result: "http://schemas.nav.gov.hu/NTCA/1.0/common",
+                component: "http://schemas.nav.gov.hu/OSA/3.0/base",
+            }
+        }
+    }
+
+    fn child(
+        &self,
+        parent: &str,
+        namespace: &ResolveResult<'_>,
+        name: &str,
+    ) -> (&'static str, bool) {
+        let (ns, containers, leaves): (&str, &[&'static str], &[&'static str]) = match parent {
+            "QueryTaxpayerResponse" if name == "result" => (self.result, &["result"], &[]),
+            "QueryTaxpayerResponse" => (self.api, &["taxpayerData"], &["taxpayerValidity"]),
+            "result" => (self.result, &[], &["funcCode", "errorCode", "message"]),
+            "taxpayerData" => (
+                self.api,
+                &["taxNumberDetail", "taxpayerAddressList"],
+                &["taxpayerName"],
+            ),
+            "taxNumberDetail" => (self.component, &[], &["taxpayerId", "vatCode"]),
+            "taxpayerAddressList" => (self.api, &["taxpayerAddressItem"], &[]),
+            "taxpayerAddressItem" => (self.api, &["taxpayerAddress"], &["taxpayerAddressType"]),
+            "taxpayerAddress" => (
+                self.component,
+                &[],
+                &[
+                    "countryCode",
+                    "region",
+                    "postalCode",
+                    "city",
+                    "streetName",
+                    "publicPlaceCategory",
+                    "number",
+                    "building",
+                    "staircase",
+                    "floor",
+                    "door",
+                    "lotNumber",
+                    "additionalAddressDetail",
+                ],
+            ),
+            _ => return ("", false),
+        };
+        if *namespace != ResolveResult::Bound(Namespace(ns)) {
+            return ("", false);
+        }
+        if let Some(name) = containers.iter().find(|&&candidate| candidate == name) {
+            return (name, false);
+        }
+        leaves
+            .iter()
+            .find(|&&candidate| candidate == name)
+            .map_or(("", false), |name| (*name, true))
+    }
+}
+
 impl TaxpayerResponse {
-    /// Parses the body with a pull parser matching on *local* element names:
-    /// the document mixes a default API namespace with `ns2:`-prefixed data
-    /// elements, which the serde deserializer cannot express. Both NAV OSA 2.0
-    /// and 3.0 response namespaces are accepted; unknown elements are skipped.
+    /// Read the root-selected NAV layout by expanded name and parent path.
+    #[expect(clippy::too_many_lines, reason = "one pull-parser event loop")]
     fn from_body(body: &[u8]) -> Result<Self, ParseError> {
-        let (_, text) = xml::response_root(
+        let (root_index, text) = xml::response_root(
             body,
             &[
                 (
@@ -217,71 +304,118 @@ impl TaxpayerResponse {
                 ),
             ],
         )?;
-        let mut reader = Reader::from_str(text);
+        let layout = Layout::for_root_index(root_index);
+        let mut reader = NsReader::from_str(text);
         let mut parsed = Self::default();
-        let mut content = String::new();
-        let mut in_address = false;
-        let mut root_seen = false;
+        let mut stack: Vec<Frame> = Vec::new();
 
         loop {
-            match reader.read_event().map_err(quick_xml::DeError::from)? {
-                Event::Start(start) => {
-                    if !root_seen {
-                        root_seen = true;
-                        debug_assert_eq!(start.local_name().as_ref(), "QueryTaxpayerResponse");
-                    }
-                    content.clear();
-                    if start.local_name().as_ref() == "taxpayerAddressItem" {
-                        in_address = true;
+            let (namespace, event) = reader
+                .read_resolved_event()
+                .map_err(quick_xml::DeError::from)?;
+            let empty = matches!(event, Event::Empty(_));
+            match event {
+                Event::Start(start) | Event::Empty(start) => {
+                    let (name, scalar, address) = if let Some(parent) = stack.last_mut() {
+                        if parent.scalar {
+                            return Err(ParseError::Invalid {
+                                field: parent.name,
+                                message: "child element in scalar".into(),
+                            });
+                        }
+                        let (name, scalar) =
+                            layout.child(parent.name, &namespace, start.local_name().as_ref());
+                        if !name.is_empty()
+                            && name != "taxpayerAddressItem"
+                            && !parent.seen.insert(name)
+                        {
+                            return Err(ParseError::Invalid {
+                                field: name,
+                                message: "duplicate singleton".into(),
+                            });
+                        }
+                        (
+                            name,
+                            scalar,
+                            parent.address || name == "taxpayerAddressItem",
+                        )
+                    } else {
+                        ("QueryTaxpayerResponse", false, false)
+                    };
+                    if name == "taxpayerAddressItem" {
                         parsed.addresses.push(TaxpayerAddress::default());
+                    }
+                    let frame = Frame {
+                        name,
+                        scalar,
+                        address,
+                        ..Frame::default()
+                    };
+                    if empty {
+                        parsed.finish(&frame)?;
+                    } else {
+                        stack.push(frame);
                     }
                 }
                 Event::Text(text) => {
-                    content.push_str(&text.xml10_content());
+                    if let Some(frame) = stack.last_mut().filter(|f| f.scalar) {
+                        frame.text.push_str(&text.xml10_content());
+                    }
                 }
                 Event::CData(cdata) => {
-                    content.push_str(&cdata.xml10_content());
+                    if let Some(frame) = stack.last_mut().filter(|f| f.scalar) {
+                        frame.text.push_str(&cdata.xml10_content());
+                    }
                 }
                 Event::GeneralRef(reference) => {
                     let resolved = reference
                         .resolve_char_ref()
                         .map_err(quick_xml::DeError::from)?;
-                    match resolved {
-                        Some(ch) => content.push(ch),
+                    let ch = match resolved {
+                        Some(ch) => ch,
                         None => match reference.as_ref() {
-                            "amp" => content.push('&'),
-                            "lt" => content.push('<'),
-                            "gt" => content.push('>'),
-                            "apos" => content.push('\''),
-                            "quot" => content.push('"'),
-                            _ => {}
+                            "amp" => '&',
+                            "lt" => '<',
+                            "gt" => '>',
+                            "apos" => '\'',
+                            "quot" => '"',
+                            _ => {
+                                return Err(ParseError::Invalid {
+                                    field: "taxpayer response",
+                                    message: format!("undefined entity: {}", reference.as_ref()),
+                                });
+                            }
                         },
+                    };
+                    if let Some(frame) = stack.last_mut().filter(|f| f.scalar) {
+                        frame.text.push(ch);
                     }
                 }
-                Event::End(end) => {
-                    let name = end.local_name();
-                    let value = content.trim();
-
-                    if !value.is_empty() {
-                        parsed.set(name.as_ref(), value, in_address)?;
+                Event::End(_) => {
+                    if let Some(frame) = stack.pop() {
+                        parsed.finish(&frame)?;
                     }
-                    if name.as_ref() == "taxpayerAddressItem" {
-                        in_address = false;
-                    }
-                    content.clear();
                 }
                 Event::Eof => break,
                 _ => {}
             }
         }
 
-        if !root_seen {
-            return Err(ParseError::UnexpectedBody(
-                "empty taxpayer response".to_owned(),
-            ));
-        }
-
         Ok(parsed)
+    }
+
+    fn finish(&mut self, frame: &Frame) -> Result<(), ParseError> {
+        if frame.scalar {
+            let value = if matches!(frame.name, "funcCode" | "errorCode" | "taxpayerValidity") {
+                frame.text.trim()
+            } else {
+                &frame.text
+            };
+            if !value.chars().all(xml::is_xml_space) {
+                self.set(frame.name, value, frame.address)?;
+            }
+        }
+        Ok(())
     }
 
     /// Records a leaf element's text content, keyed by local name.
@@ -406,11 +540,8 @@ mod tests {
 
     #[test]
     fn parses_nav_3_taxpayer_response() {
-        let body = include_str!("../../tests/synthetic/taxpayer.xml").replace(
-            "http://schemas.nav.gov.hu/OSA/2.0/",
-            "http://schemas.nav.gov.hu/OSA/3.0/",
-        );
-        let response = RawResponse::new::<&str, &str>([], body.into_bytes());
+        let body = include_bytes!("../../tests/synthetic/taxpayer_v3.xml");
+        let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let info = sample().parse(&response).expect("success");
         assert!(info.valid);
         assert_eq!(info.tax_number.as_deref(), Some("12345678"));
@@ -464,13 +595,13 @@ mod tests {
     #[test]
     fn parses_detailed_address_fields() {
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
-            <taxpayerValidity>true</taxpayerValidity><taxpayerAddressItem>
-            <taxpayerAddressType>SITE</taxpayerAddressType><taxpayerAddress>
+            <taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerAddressList><taxpayerAddressItem>
+            <taxpayerAddressType>SITE</taxpayerAddressType><api:taxpayerAddress xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data">
             <countryCode>HU</countryCode><region>Pest</region><postalCode>1111</postalCode>
             <city>Budapest</city><streetName>Fo</streetName><publicPlaceCategory>UTCA</publicPlaceCategory>
             <number>1</number><building>A</building><staircase>2</staircase><floor>3</floor>
-            <door>4</door><lotNumber>123/4</lotNumber></taxpayerAddress></taxpayerAddressItem>
-            </QueryTaxpayerResponse>"#;
+            <door>4</door><lotNumber>123/4</lotNumber></api:taxpayerAddress></taxpayerAddressItem>
+            </taxpayerAddressList></taxpayerData></QueryTaxpayerResponse>"#;
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let info = sample().parse(&response).expect("success");
         let address = &info.addresses[0];
@@ -515,11 +646,11 @@ mod tests {
     #[test]
     fn parses_simple_address_detail() {
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
-            <taxpayerValidity>true</taxpayerValidity><taxpayerAddressItem>
-            <taxpayerAddressType>HQ</taxpayerAddressType><taxpayerAddress>
+            <taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerAddressList><taxpayerAddressItem>
+            <taxpayerAddressType>HQ</taxpayerAddressType><api:taxpayerAddress xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data">
             <countryCode>HU</countryCode><postalCode>1111</postalCode><city>Budapest</city>
             <additionalAddressDetail>Main road 1.</additionalAddressDetail>
-            </taxpayerAddress></taxpayerAddressItem></QueryTaxpayerResponse>"#;
+            </api:taxpayerAddress></taxpayerAddressItem></taxpayerAddressList></taxpayerData></QueryTaxpayerResponse>"#;
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let info = sample().parse(&response).expect("success");
         assert_eq!(

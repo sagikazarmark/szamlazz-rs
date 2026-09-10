@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<api:QueryTaxpayerResponse xmlns:api="http://schemas.nav.gov.hu/OSA/3.0/api" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
+  <common:result><common:funcCode>OK</common:funcCode></common:result>
+  <api:taxpayerValidity>true</api:taxpayerValidity>
+  <api:taxpayerData><api:taxpayerName>SYNTHETIC SOFTWARE KFT.</api:taxpayerName>
+    <api:taxNumberDetail><base:taxpayerId>12345678</base:taxpayerId><base:vatCode>2</base:vatCode></api:taxNumberDetail>
+    <api:taxpayerAddressList><api:taxpayerAddressItem><api:taxpayerAddressType>HQ</api:taxpayerAddressType><api:taxpayerAddress>
+      <base:countryCode>HU</base:countryCode><base:postalCode>1111</base:postalCode><base:city>TESTVAROS</base:city>
+      <base:streetName>MINTA</base:streetName><base:publicPlaceCategory>UTCA</base:publicPlaceCategory><base:number>1.</base:number>
+    </api:taxpayerAddress></api:taxpayerAddressItem></api:taxpayerAddressList>
+  </api:taxpayerData>
+</api:QueryTaxpayerResponse>

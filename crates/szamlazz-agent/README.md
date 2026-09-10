@@ -152,6 +152,43 @@ async fn issue_once(client: &Client, request: &CreateInvoice) -> Outcome {
 
 `Outcome::Unknown` is answered by querying again, never by re-sending: the create may have landed, and a second one would be a second legal document. `ClientError::Api` carries the typed `ErrorCode` with the verbatim message; `OutcomeClass::DuplicateOrderNumber` (71/152) means another document already carries the order number; query by `InvoiceSelector::OrderNumber` to find it.
 
+## Response parsing
+
+Invoice and receipt dates retain the printed **civil date**, without UTC conversion.
+Alongside the existing finite date-domain spellings, hyphenated dates accept XML
+padding and `Z` or `±hh:mm` timezone suffixes (up to `±14:00`). Invalid calendar
+dates, offsets and suffix junk are parse failures. Optional empty dates remain absent.
+This is a civil-date reader, not strict XSD lexical validation or a new CE-year restriction.
+
+Monetary **headers** accept ungrouped decimals with a dot or comma, an optional sign
+and scientific exponent, with outer HTTP space/tab padding. `1,234` means `1.234`;
+grouping intent cannot be inferred. Mixed/repeated separators, underscores and
+embedded spaces are refused, as is outer whitespace other than HTTP space/tab
+(including forms the former Decimal-based header reader accepted). Conversion uses
+Decimal directly. XML amounts keep their separate grammar and take precedence:
+a malformed nonblank XML amount fails rather than falling back to a header.
+A missing header is absent; a present blank header is malformed. Numbered code-56
+replies retain readable metadata and drop malformed optional metadata.
+
+Optional business text in queried invoices, receipts and taxpayer records preserves
+decoded characters, including padding and non-breaking spaces. Absent, empty or
+XML-space/tab/CR/LF-only text is `None`; NBSP-only text is `Some`. This affects
+identifiers, comments, bank/ledger values and optional open string tokens. XML
+entities and line endings are decoded, so this is character fidelity rather than
+raw-byte preservation. Issuance-envelope numbers, numeric/verdict parsing, URLs
+and base64 retain their own policies; the Restate worker still normalizes order
+numbers at its projection boundary.
+
+Structured replies must contain one completed expected XML root with matching
+closes and a legal prolog/epilog through EOF. Truncation, extra roots, outside
+text/CDATA/references and malformed tails are refused. Taxpayer extraction follows
+NAV 2.0/3.0 expanded names and recognized parent paths: foreign or unknown subtrees
+cannot supply a verdict or business data. Duplicate recognized singleton fields
+or containers, children inside scalar values and undefined entities are refused.
+Sparse records, unknown tokens and `taxpayerValidity=false` remain data; an `OK`
+verdict still requires validity. Header/down/status precedence and numbered-header-56
+non-XML tolerance remain in effect.
+
 ## Bring Your Own HTTP Client
 
 Without `client-reqwest`, `AgentRequest::to_wire` builds the request body and `RawResponse` takes whatever your HTTP client returns. The transport is yours: `POST` to `wire::ENDPOINT` with the given `Content-Type`, and hand every response to `parse`; szamlazz.hu signals errors in-band. Here with the blocking [`ureq`](https://crates.io/crates/ureq):

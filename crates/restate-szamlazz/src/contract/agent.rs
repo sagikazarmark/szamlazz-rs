@@ -1072,13 +1072,13 @@ mod tests {
 
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
             <taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerName>SYNTHETIC SOFTWARE KFT.</taxpayerName>
-            <taxNumberDetail><taxpayerId>12345678</taxpayerId><vatCode>2</vatCode></taxNumberDetail>
-            <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>SITE</taxpayerAddressType><taxpayerAddress>
+            <api:taxNumberDetail xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data"><taxpayerId>12345678</taxpayerId><vatCode>2</vatCode></api:taxNumberDetail>
+            <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>SITE</taxpayerAddressType><api:taxpayerAddress xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data">
             <countryCode>HU</countryCode><region>Pest</region><postalCode>1111</postalCode>
             <city>Budapest</city><streetName>Fo</streetName><publicPlaceCategory>UTCA</publicPlaceCategory>
             <number>1</number><building>A</building><staircase>2</staircase><floor>3</floor>
             <door>4</door><lotNumber>123/4</lotNumber><additionalAddressDetail>Main road 1.</additionalAddressDetail>
-            </taxpayerAddress></taxpayerAddressItem></taxpayerAddressList></taxpayerData>
+            </api:taxpayerAddress></taxpayerAddressItem></taxpayerAddressList></taxpayerData>
             </QueryTaxpayerResponse>"#;
         let info = QueryTaxpayer::new("12345678")
             .expect("prefix")
