@@ -690,7 +690,7 @@ fn unsupported_on_receipt(item: &LineItem) -> Option<&'static str> {
 fn parse_receipt(response: &RawResponse) -> Result<Receipt, ResponseError> {
     let body: ReceiptBody = xml::valasz(response, VALASZ_ROOT, VALASZ_NAMESPACE)?;
     let nyugta = body.nyugta.ok_or(ParseError::Missing("nyugta"))?;
-    let pdf = match body.nyugta_pdf.filter(|s| !s.is_empty()) {
+    let pdf = match body.nyugta_pdf.filter(|s| !s.trim().is_empty()) {
         Some(encoded) => Some(Pdf::from_base64(&encoded)?),
         None => None,
     };
@@ -761,7 +761,7 @@ struct AlapXml {
     hivas_azonosito: Option<String>,
     nyugtaszam: String,
     tipus: ReceiptType,
-    #[serde(deserialize_with = "xml::de::flexible_bool")]
+    #[serde(deserialize_with = "xml::de::required_bool")]
     stornozott: bool,
     #[serde(
         default,

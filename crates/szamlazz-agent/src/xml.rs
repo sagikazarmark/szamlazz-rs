@@ -154,6 +154,7 @@ pub(crate) fn response_root<'a>(
             Event::DocType(_) => return Err(invalid()),
             Event::PI(pi) if !valid_pi_target(pi.target()) => return Err(invalid()),
             Event::Eof => {
+                validate_lexical(text)?;
                 return if depth == 0 {
                     matched.map(|index| (index, text)).ok_or_else(invalid)
                 } else {
@@ -164,6 +165,32 @@ pub(crate) fn response_root<'a>(
         }
         first = false;
     }
+}
+
+/// quick-xml checks structure and namespaces, but not the full token grammar.
+/// Use a zero-allocation tokenizer rather than duplicating XML name/attribute/
+/// character-data grammar here. Neither reader performs XSD validation.
+fn validate_lexical(text: &str) -> Result<(), ParseError> {
+    for token in xmlparser::Tokenizer::from(text) {
+        let token = token.map_err(|error| {
+            ParseError::UnexpectedBody(format!("invalid XML syntax at {}", error.pos()))
+        })?;
+        let value = match token {
+            xmlparser::Token::Text { text } => text,
+            xmlparser::Token::Attribute { value, .. } => value,
+            _ => continue,
+        };
+        // The tokenizer leaves references uninterpreted. DTDs are refused by
+        // the structural reader, so only the predefined and character entities
+        // are legal, even in fields the operation will ignore. quick-xml rejects
+        // non-Unicode references; check XML's narrower character domain too.
+        let decoded =
+            quick_xml::escape::unescape(value.as_str()).map_err(quick_xml::DeError::from)?;
+        if !decoded.chars().all(crate::wire::is_xml_10_character) {
+            return Err(ParseError::UnexpectedBody("forbidden XML character".into()));
+        }
+    }
+    Ok(())
 }
 
 /// Present only the protocol namespace to serde, which matches local names.
@@ -247,8 +274,9 @@ pub(crate) fn namespace_uri<'a>(
     }
 }
 
-/// Check declaration separators as well as pseudo-attribute order and values:
-/// quick-xml's attribute iterator permits adjacent quoted attributes.
+/// XML 1.0 declaration policy beyond the tokenizer's lexical checks.
+/// xmlparser recognizes declarations only after a literal space, treating the
+/// legal tab/CR/LF forms as PIs. Keep separator checks for those forms too.
 fn validate_declaration(decl: &BytesDecl<'_>) -> Result<(), ParseError> {
     let invalid = || ParseError::UnexpectedBody("invalid XML declaration".into());
     if decl.version().map_err(quick_xml::DeError::from)?.as_ref() != "1.0" {
@@ -584,6 +612,15 @@ pub(crate) mod de {
             .transpose()
     }
 
+    /// A required boolean fact: empty content is not a negative answer.
+    pub fn required_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        boolean_token(value.trim_matches(super::is_xml_space))
+    }
+
     /// Deserializes a bool that may be spelled `true`/`false` or `0`/`1`.
     pub fn flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
     where
@@ -592,9 +629,8 @@ pub(crate) mod de {
         let value = String::deserialize(deserializer)?;
 
         match value.trim() {
-            "true" | "1" => Ok(true),
-            "false" | "0" | "" => Ok(false),
-            other => Err(serde::de::Error::custom(format!("invalid bool: {other}"))),
+            "" => Ok(false),
+            value => boolean_token(value),
         }
     }
 
@@ -608,9 +644,15 @@ pub(crate) mod de {
 
         match value.as_deref().map(str::trim) {
             None | Some("") => Ok(None),
-            Some("true" | "1") => Ok(Some(true)),
-            Some("false" | "0") => Ok(Some(false)),
-            Some(other) => Err(serde::de::Error::custom(format!("invalid bool: {other}"))),
+            Some(value) => boolean_token(value).map(Some),
+        }
+    }
+
+    fn boolean_token<E: serde::de::Error>(value: &str) -> Result<bool, E> {
+        match value {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            other => Err(E::custom(format!("invalid bool: {other}"))),
         }
     }
 

@@ -90,7 +90,8 @@ pub use client::{Client, ClientError};
 /// ([`client::ClientBuilder::http_client`]: a proxy, a custom TLS setup) has
 /// the one version this crate compiles against without a second dependency.
 /// No new coupling: `reqwest::Client` and `reqwest::Error` are already in this
-/// crate's public API through that method and `ClientError::Transport`.
+/// crate's public API through that method, `ClientError::Transport` and
+/// [`client::IncompleteResponse`].
 #[cfg(feature = "client-reqwest")]
 pub use reqwest;
 

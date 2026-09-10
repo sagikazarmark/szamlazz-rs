@@ -26,6 +26,8 @@ reqwest = { version = "0.13.2", default-features = false, optional = true, featu
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# Zero-allocation lexical checks complement quick-xml's structural reader.
+xmlparser = "0.13.6"
 
 [dev-dependencies]
 jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }

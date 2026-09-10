@@ -230,6 +230,70 @@ async fn maps_transport_errors() {
 }
 
 #[tokio::test]
+async fn interrupted_response_retains_headers_without_promoting_them_to_a_verdict() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    for vendor_headers in [
+        "szlahu_error_code: 3\r\nszlahu_error: login\r\n",
+        "szlahu_down: maintenance\r\n",
+        "szlahu_error_code: 56\r\nszlahu_szamlaszam: I-2\r\n",
+        "szlahu_szamlaszam: I-2\r\n",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}/", listener.local_addr().expect("address"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("request");
+                assert_ne!(read, 0, "incomplete request");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|s| s == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("length"))
+                        })
+                        .expect("content length");
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n{vendor_headers}Set-Cookie: JSESSIONID=COOKIE_SECRET\r\nSet-Cookie: other=SECOND_SECRET\r\n\r\nx").expect("partial reply");
+        });
+        let error = client_for(endpoint)
+            .send(&sample_invoice())
+            .await
+            .expect_err("incomplete body");
+        server.join().expect("server");
+        assert_eq!(error.outcome_class(), OutcomeClass::Unknown);
+        let diagnostic = format!("{error:?} {error}");
+        assert!(!diagnostic.contains("COOKIE_SECRET"));
+        assert!(!diagnostic.contains("SECOND_SECRET"));
+        let ClientError::IncompleteResponse(received) = &error else {
+            panic!("missing received evidence: {error:?}");
+        };
+        assert_eq!(received.status, 200);
+        assert_eq!(received.headers.get_all("set-cookie").iter().count(), 2);
+        for line in vendor_headers.lines() {
+            let (name, value) = line.split_once(':').expect("header");
+            assert_eq!(received.headers[name], value.trim());
+        }
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}
+
+#[tokio::test]
 async fn rejects_invalid_request_before_http() {
     let server = MockServer::start().await;
     let client = client_for(server.uri());

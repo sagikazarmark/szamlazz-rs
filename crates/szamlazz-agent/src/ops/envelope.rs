@@ -185,11 +185,13 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
         return Err(error.clone().into());
     }
 
-    let (verdict, payload_result) = match parse_envelope(response.body()) {
+    let (verdict, payload_result) = match parse_envelope(response.body(), header_error.is_some()) {
         Ok((verdict, payload_result)) => (Some(verdict), payload_result),
-        // A 56 in the headers may come with a body that is not the envelope
-        // ("notification failed" as text): the headers alone name the document.
-        Err(_) if header_error.is_some() => (None, Ok(Body::default())),
+        // A 56 may have only plain notification text (or no body). Never use
+        // this exception for malformed XML: it could conceal a body refusal.
+        Err(_) if header_error.is_some() && plain_notification_body(response.body()) => {
+            (None, Ok(Body::default()))
+        }
         Err(parse_error) => return Err(parse_error.into()),
     };
     let body_error = verdict.as_ref().and_then(xml::Verdict::api_error);
@@ -249,6 +251,11 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
     }))
 }
 
+fn plain_notification_body(body: &[u8]) -> bool {
+    std::str::from_utf8(body)
+        .is_ok_and(|text| !text.contains('<') && text.chars().all(crate::wire::is_xml_10_character))
+}
+
 /// `value` as read, or `None` in place of a failure when `lenient`.
 fn lenient<T>(
     lenient: bool,
@@ -278,11 +285,35 @@ pub(crate) fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, Res
 /// The envelope's verdict and payload, read from the same text.
 /// The outer error means no verdict was established; the inner error retains
 /// a known verdict even when decoding the optional payload fails.
-fn parse_envelope(body: &[u8]) -> Result<(xml::Verdict, Result<Body, ParseError>), ParseError> {
+fn parse_envelope(
+    body: &[u8],
+    notification_header: bool,
+) -> Result<(xml::Verdict, Result<Body, ParseError>), ParseError> {
     let text = xml::response_text(body, ROOT, NAMESPACE)?;
     let text = xml::protocol_text(text, NAMESPACE)?;
-    let verdict = quick_xml::de::from_str(&text)?;
-    let payload = quick_xml::de::from_str(&text).map_err(ParseError::from);
+    let verdict: xml::Verdict = quick_xml::de::from_str(&text)?;
+    let notification_failed = verdict.api_error().map_or(notification_header, |error| {
+        error.code == ErrorCode::InvoiceNotificationDeliveryFailed
+    });
+    let payload = quick_xml::de::from_str(&text)
+        .or_else(|error| {
+            // Optional metadata must not erase a usable body-only number. A
+            // separate scalar field still refuses duplicate or nested identity;
+            // it reads the already checked, namespace-filtered document.
+            #[derive(serde::Deserialize)]
+            struct Identity {
+                #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+                szamlaszam: Option<String>,
+            }
+            if !notification_failed {
+                return Err(error);
+            }
+            quick_xml::de::from_str::<Identity>(&text).map(|identity| Body {
+                szamlaszam: identity.szamlaszam,
+                ..Body::default()
+            })
+        })
+        .map_err(ParseError::from);
 
     Ok((verdict, payload))
 }

@@ -6,8 +6,62 @@ use serde::Deserialize;
 use szamlazz_agent::ops::receipt::{
     CreateReceipt, QueryReceipt, ReceiptEmail, ReceiptSelector, SendReceipt,
 };
-use szamlazz_agent::wire::AgentRequest;
+use szamlazz_agent::wire::{AgentRequest, RawResponse};
 use szamlazz_agent::{Credentials, Currency, LineItem, PaymentMethod, VatRate};
+
+#[test]
+fn receipt_reversal_requires_a_boolean_fact() {
+    let request = QueryReceipt::new(ReceiptSelector::ReceiptNumber("NY-1".into()));
+    let sample = include_str!("synthetic/xmlnyugtavalasz.xml");
+    assert!(sample.contains("<stornozott>false</stornozott>"));
+    for (value, reversed) in [("false", false), ("0", false), ("true", true), ("1", true)] {
+        let body = sample.replace(
+            "<stornozott>false</stornozott>",
+            &format!("<stornozott>{value}</stornozott>"),
+        );
+        let receipt = request
+            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+            .expect("boolean");
+        assert_eq!(receipt.reversed, reversed);
+    }
+    for element in [
+        "",
+        "<stornozott/>",
+        "<stornozott></stornozott>",
+        "<stornozott> \t\n </stornozott>",
+        "<stornozott>unknown</stornozott>",
+    ] {
+        let body = sample.replace("<stornozott>false</stornozott>", element);
+        assert!(
+            request
+                .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+                .is_err(),
+            "{element:?}"
+        );
+    }
+}
+
+#[test]
+fn blank_receipt_pdf_is_absent_without_losing_receipt_identity() {
+    let request = QueryReceipt {
+        download_pdf: true,
+        ..QueryReceipt::new(ReceiptSelector::ReceiptNumber("NY-1".into()))
+    };
+    let sample = include_str!("synthetic/xmlnyugtavalasz.xml");
+    for element in [
+        "",
+        "<nyugtaPdf/>",
+        "<nyugtaPdf></nyugtaPdf>",
+        "<nyugtaPdf> \t\n </nyugtaPdf>",
+    ] {
+        let body = sample.replace("<nyugta>", &format!("{element}<nyugta>"));
+        let receipt = request
+            .parse(&RawResponse::new::<&str, &str>([], body.into_bytes()))
+            .expect("receipt retained");
+        assert_eq!(receipt.receipt_number.as_str(), "NYGT-TST-2026-123");
+        assert_eq!(receipt.pdf, None, "{element:?}");
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct SendXml {

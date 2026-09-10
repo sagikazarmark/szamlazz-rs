@@ -450,6 +450,58 @@ fn numbered_56_does_not_hide_a_body_refusal_behind_malformed_optional_payload() 
 }
 
 #[test]
+fn numbered_header_56_cannot_promote_a_malformed_xml_envelope() {
+    for extension in [
+        "<extension>&unknown;</extension>",
+        "<extension a='1'b='2'/>",
+        "<extension>A]]>B</extension>",
+    ] {
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>3</hibakod>{extension}</xmlszamlavalasz>"#
+        );
+        let raw = RawResponse::new(
+            [("szlahu_error_code", "56"), ("szlahu_szamlaszam", "I-2")],
+            body.into_bytes(),
+        );
+        let error = StornoInvoice::new("I-1")
+            .parse(&raw)
+            .expect_err("malformed envelope is not issuance evidence");
+        assert_eq!(error.outcome_class(), szamlazz_agent::OutcomeClass::Unknown);
+    }
+}
+
+#[test]
+fn numbered_56_preserves_unique_body_identity_despite_bad_optional_structure() {
+    for payload in [
+        "<szamlabrutto><bad/></szamlabrutto>",
+        "<pdf>JVBERi0=</pdf><pdf>JVBERi0=</pdf>",
+    ] {
+        for headers in [vec![], vec![("szlahu_error_code", "56")]] {
+            let raw = RawResponse::new(headers, format!(
+                r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod><szamlaszam>I-2</szamlaszam>{payload}</xmlszamlavalasz>"#
+            ).into_bytes());
+            let issued = StornoInvoice::new("I-1")
+                .parse(&raw)
+                .expect("numbered warning");
+            assert_eq!(issued.invoice_number.as_str(), "I-2");
+            assert!(issued.notification_delivery_failed);
+            assert_eq!(issued.gross_total, None);
+            assert_eq!(issued.pdf, None);
+        }
+    }
+    for identity in [
+        "<szamlaszam>I-2</szamlaszam><szamlaszam>I-3</szamlaszam>",
+        "<szamlaszam><bad/></szamlaszam>",
+        "<szamlaszam xmlns='urn:foreign'>I-2</szamlaszam>",
+    ] {
+        let raw = RawResponse::new::<&str, &str>([], format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod>{identity}<szamlabrutto><bad/></szamlabrutto></xmlszamlavalasz>"#
+        ).into_bytes());
+        assert!(StornoInvoice::new("I-1").parse(&raw).is_err(), "{identity}");
+    }
+}
+
+#[test]
 fn numbered_56_retains_comma_metadata_and_drops_malformed_metadata() {
     let raw = RawResponse::new(
         [

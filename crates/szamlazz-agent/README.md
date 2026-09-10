@@ -232,7 +232,14 @@ embedded spaces are refused, as is outer whitespace other than HTTP space/tab
 Decimal directly. XML amounts keep their separate grammar and take precedence:
 a malformed nonblank XML amount fails rather than falling back to a header.
 A missing header is absent; a present blank header is malformed. Numbered code-56
-replies retain readable metadata and drop malformed optional metadata.
+replies retain readable metadata and drop malformed optional metadata. A unique
+body-only invoice number survives a structural failure in optional totals/PDF;
+malformed or duplicate body identity is never selected as a usable number.
+
+Receipt reversal state requires `true`, `false`, `1` or `0`: an empty
+`stornozott` is refused rather than interpreted as an unreversed receipt. Missing,
+empty or whitespace-only receipt PDFs are `None`, even when requested. Keep the
+returned receipt number and query it to recover the artifact; do not create again.
 
 Optional business text in queried invoices, receipts and taxpayer records preserves
 decoded characters, including padding and non-breaking spaces. Absent, empty or
@@ -245,13 +252,19 @@ numbers at its projection boundary.
 
 Structured replies must contain one completed expected XML root with matching
 closes and a legal prolog/epilog through EOF. Truncation, extra roots, outside
-text/CDATA/references and malformed tails are refused. Taxpayer extraction follows
+text/CDATA/references and malformed tails are refused. A zero-allocation XML
+tokenizer complements the structural reader: illegal XML characters, malformed
+names/attributes, forbidden character-data delimiters and undefined references
+are refused even in ignored extensions. This is XML checking, not XSD business
+validation; sparse content and well-formed unknown extensions remain supported.
+Taxpayer extraction follows
 NAV 2.0/3.0 expanded names and recognized parent paths: foreign or unknown subtrees
 cannot supply a verdict or business data. Duplicate recognized singleton fields
 or containers, children inside scalar values and undefined entities are refused.
 Sparse records, unknown tokens and `taxpayerValidity=false` remain data; an `OK`
-verdict still requires validity. Header/down/status precedence and numbered-header-56
-non-XML tolerance remain in effect.
+verdict still requires validity. Header/down/status precedence remains in effect.
+Numbered-header-56 fallback permits empty or plain-text notification bodies only;
+malformed XML must not conceal a refusal and become issued success.
 
 ## Bring Your Own HTTP Client
 
@@ -348,6 +361,7 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused (it is silently ignored), so read the issued document's `hivdijbekszam` to see which link landed.
 - **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice (by `elolegSzamlaszam` or by the shared order number), but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account.
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
+- A body download that fails after headers arrive returns `ClientError::IncompleteResponse` with `client::IncompleteResponse { status, headers, source }`. Raw headers preserve repeated values and may contain session cookies; its `Debug` lists header names only. This error remains `OutcomeClass::Unknown`, even with number/error headers: the unread body could contradict them. Use the evidence to reconcile, never turn it into a completed response with an invented empty body.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client has no application-level retry/recovery loop. Supplied HTTP clients retain their retry policies; one `send` need not mean one POST, and transport retries do not perform reconciliation.
 - A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
 - `HttpStatus` and `UnexpectedBody` diagnostics quote bounded body excerpts (`error::BODY_EXCERPT_LEN`, with the total length noted). Other API/parser messages may contain full upstream text; the verbatim `ApiError.message` is not truncated. `RawResponse`'s `Debug` redacts `Set-Cookie` and prints the body length, but other headers remain visible. Apply your application's logging policy to these messages and headers.
@@ -356,6 +370,11 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
 
 ## Breaking Changes in 0.4
+
+Interrupted body downloads now return `ClientError::IncompleteResponse` instead
+of `Transport`, retaining received evidence and the reqwest source. Receipt
+reversal booleans refuse empty values. Structured XML rejects the lexical defects
+listed above, including malformed content inside previously ignored extensions.
 
 Derived line-item arithmetic now refuses lossy intermediates instead of silently
 rounding or underflowing before the chosen rounding policy. Arithmetic-error

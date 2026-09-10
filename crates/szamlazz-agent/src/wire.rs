@@ -422,7 +422,7 @@ fn validate_xml_10(xml: &[u8]) -> Result<(), RequestError> {
     Ok(())
 }
 
-fn is_xml_10_character(character: char) -> bool {
+pub(crate) fn is_xml_10_character(character: char) -> bool {
     matches!(
         character,
         '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'

@@ -63,6 +63,41 @@ pub enum ClientError {
     /// open; use the [operation recovery table](crate::error#recovery).
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
+    /// Status and headers arrived, but the response body did not complete.
+    /// The retained evidence is not a completed response or a success verdict.
+    #[error(transparent)]
+    IncompleteResponse(Box<IncompleteResponse>),
+}
+
+/// Received HTTP evidence alongside a failed body transfer.
+///
+/// Even a number or refusal header does not settle an incomplete exchange:
+/// unread body content may contradict it. Inspect these fields for diagnostics
+/// and reconciliation, never pass an invented empty body to a response parser.
+/// No partial body is retained. `Debug` lists header names only; the explicitly
+/// accessed headers may contain session cookies and sensitive document data.
+#[derive(thiserror::Error)]
+#[error("incomplete HTTP {status} response: {source}")]
+#[non_exhaustive]
+pub struct IncompleteResponse {
+    /// The received HTTP status.
+    pub status: u16,
+    /// Received headers, preserving repeated values and their original bytes.
+    /// Vendor textual headers remain URL-encoded as received.
+    pub headers: reqwest::header::HeaderMap,
+    /// The body-transfer failure, also available through the error source chain.
+    #[source]
+    pub source: reqwest::Error,
+}
+
+impl std::fmt::Debug for IncompleteResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncompleteResponse")
+            .field("status", &self.status)
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 impl ClientError {
@@ -86,6 +121,7 @@ impl ClientError {
             Self::Parse(_)
             | Self::ServiceUnavailable(_)
             | Self::HttpStatus { .. }
+            | Self::IncompleteResponse(_)
             | Self::Transport(_) => OutcomeClass::Unknown,
         }
     }
@@ -347,8 +383,15 @@ impl Client {
             .await?;
 
         let status = response.status().as_u16();
-        let headers: Vec<(String, String)> = response
-            .headers()
+        let headers = response.headers().clone();
+        let body = response.bytes().await.map_err(|source| {
+            ClientError::IncompleteResponse(Box::new(IncompleteResponse {
+                status,
+                headers: headers.clone(),
+                source,
+            }))
+        })?;
+        let headers: Vec<(String, String)> = headers
             .iter()
             .map(|(name, value)| {
                 (
@@ -357,8 +400,6 @@ impl Client {
                 )
             })
             .collect();
-        let body = response.bytes().await?;
-
         let raw = RawResponse::new(headers, body.to_vec()).with_status(status);
 
         Ok(request.parse(&raw)?)
