@@ -20,8 +20,9 @@
 //!   caller's own type).
 //! - [`admin`]: the admin API ([`Admin`]): SQL introspection, journals and
 //!   `sys_invocation` rows, the registered handlers, kill / cancel / purge.
-//! - [`watch`]: the sampler ([`Watch`]) over an invocation's run retries
-//!   while it is in flight ([`Retries`]).
+//! - [`watch`]: object-wide sampling ([`Watch`]) of run retries while matching
+//!   invocations are in flight ([`Retries`]), selected by [`Target`] and
+//!   [`ScopeSelection`].
 //! - [`introspection`]: `sys_journal` and `sys_invocation` rows
 //!   ([`JournalEntry`], [`Invocation`], [`run_result`]) and a handler as
 //!   `GET /services` lists it ([`Handler`]).
@@ -109,7 +110,7 @@ pub mod run_names;
 pub mod server;
 pub mod watch;
 
-pub use admin::{Admin, Target, sql_literal};
+pub use admin::{Admin, ScopeSelection, Target, sql_literal};
 #[cfg(unix)]
 pub use gate::{Feature, Launcher, ReusePolicy, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::{Call, Mode, Reply};

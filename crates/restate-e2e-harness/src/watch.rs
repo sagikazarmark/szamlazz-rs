@@ -1,9 +1,10 @@
-//! The sampler ([`Watch`]) over an invocation's run retries: what
-//! `sys_invocation` reports of an invocation **while it is in flight**
+//! Object-wide sampling ([`Watch`]) of run retries: what `sys_invocation`
+//! reports of the selected objects' invocations **while they are in flight**
 //! (`retry_count`, `last_failure` and `last_failure_related_command_name` are
 //! in-flight columns, cleared once the invocation completes; verified against
-//! 1.7.8), recorded as [`Retries`]; the watch ends as soon as it observes the
-//! invocation completed.
+//! 1.7.8), recorded as [`Retries`]. The watch ends when the selection is idle
+//! after being seen in flight. It aggregates every matching invocation, not
+//! one invocation id; a queued or concurrent invocation keeps it sampling.
 //!
 //! The sampling decision (the sampler behind [`Watch`]) is a pure function
 //! of the rows, tested here without a server.
@@ -24,7 +25,7 @@ use crate::admin::{Admin, Target};
 const POLL: Duration = Duration::from_millis(100);
 
 /// The query [`Watch`] runs on `target`: every invocation on the Virtual
-/// Object, its status and its in-flight columns.
+/// Objects selected by service, key and scope, their status and in-flight columns.
 fn retries_query(target: &Target<'_>) -> String {
     format!(
         "SELECT status, retry_count, last_failure, last_failure_related_command_name \
@@ -33,7 +34,7 @@ fn retries_query(target: &Target<'_>) -> String {
     )
 }
 
-/// What a [`Watch`] saw of an invocation's run retries while it ran.
+/// What a [`Watch`] saw of all selected invocations' run retries.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Retries {
     /// The highest `retry_count` seen: the invoker's count of starts, the
@@ -46,10 +47,10 @@ pub struct Retries {
     pub failing_commands: Vec<String>,
     /// How many samples answered; the density behind the three above.
     pub samples: u64,
-    /// Whether the watch ended by observing the invocation completed (the
-    /// key idle after it was in flight), rather than by
-    /// [`Watch::finish`]: a watch that ended the second way saw the whole
-    /// run only if the call was answered between two samples.
+    /// Whether the watch observed no selected invocation in flight after
+    /// previously seeing one, rather than ending by [`Watch::finish`]. This
+    /// describes the selection falling idle, not a particular invocation's
+    /// completion; an invocation can also finish between samples unseen.
     pub observed_completion: bool,
     /// How many samples the admin API failed to answer (retried, never
     /// fatal).
@@ -61,17 +62,16 @@ pub struct Retries {
 /// Whether the sampler goes on.
 #[derive(Debug, PartialEq, Eq)]
 enum Progress {
-    /// Keep sampling: nothing on the key was seen in flight yet, or
+    /// Keep sampling: nothing in the selection was seen in flight yet, or
     /// something still is.
     Sampling,
-    /// The key was seen in flight and nothing on it is any more: the
-    /// invocation completed, its in-flight columns are gone.
+    /// The selection was seen in flight and nothing in it is any more.
     Done,
 }
 
 /// The sampling decision over `sys_invocation` rows, pure: records the
-/// in-flight columns of every row and decides when the watched invocation is
-/// over. A key may carry older, completed invocations from earlier
+/// in-flight columns of every row and decides when the selection falls idle.
+/// An object may carry older, completed invocations from earlier
 /// scenarios; they carry none of the columns and do not count as in flight.
 #[derive(Debug, Default)]
 struct Sampler {
@@ -128,10 +128,13 @@ impl Sampler {
     }
 }
 
-/// A running sampler of one Virtual Object key: started before the call,
-/// finished after it ([`Watch::finish`]). It ends on its own once it observes
-/// the invocation completed, on `finish`, or when dropped; there is no
-/// window to wait out.
+/// A running sampler of all invocations matching a [`Target`]: one unscoped
+/// object, one named scope's object, or the same service/key across all scopes.
+/// It ends on its own once the selection falls idle after being seen in
+/// flight, on [`Self::finish`], or when dropped; there is no window to wait out.
+///
+/// This is object-wide aggregation, not sampling one invocation id. To observe
+/// a particular invocation's completion, use [`Admin::await_status`].
 #[derive(Debug)]
 pub struct Watch {
     stop: watch::Sender<bool>,
@@ -142,8 +145,9 @@ impl Watch {
     /// Samples `admin`'s `sys_invocation` for the invocations on `target`
     /// every 100 ms until one of the three ends above. Start it before the
     /// call, [`finish`](Self::finish) it after: the sampler ends as soon as
-    /// it observes the invocation completed, and `finish` ends one whose call
-    /// was answered between two samples.
+    /// it observes the selection fall idle, and `finish` ends one whose call
+    /// was answered between two samples. Other matching invocations contribute
+    /// to the same [`Retries`] and keep the selection in flight.
     #[must_use]
     pub fn start(admin: Admin, target: &Target<'_>) -> Self {
         let query = retries_query(target);
@@ -194,9 +198,8 @@ impl Watch {
         Self { stop, task }
     }
 
-    /// Stops sampling (the call has returned, so the invocation is complete
-    /// and its in-flight columns gone) and returns what was seen; a sample in
-    /// flight is cancelled, not awaited.
+    /// Stops sampling and returns what was seen, even if matching invocations
+    /// are still in flight. A sample in flight is cancelled, not awaited.
     pub async fn finish(mut self) -> Retries {
         let _ = self.stop.send(true);
         (&mut self.task).await.expect("the watch task")

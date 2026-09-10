@@ -80,7 +80,7 @@ pub(crate) const SERVICES: [&str; 2] = ["Szamlazz.Order", "Szamlazz.Agent"];
 /// The `Szamlazz.Order` object `key`, in whatever scope: the suite's keys are
 /// unique across the run, so no scenario watches one key under two scopes.
 fn order(key: &str) -> Target<'_> {
-    Target::object(SERVICES[0], key)
+    Target::object(SERVICES[0], key).all_scopes()
 }
 
 // ----- request bodies ----------------------------------------------------------

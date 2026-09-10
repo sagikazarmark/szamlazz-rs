@@ -2,7 +2,7 @@
 //! introspection endpoint ([`Admin::sql`]) and what is read through it
 //! (journals, runs, `sys_invocation` rows, the registered handlers), the
 //! invocation operations (kill, cancel, purge) and the deployment writes
-//! (register, `set_public`). The sampler over an invocation's run retries is
+//! (register, `set_public`). The object-wide sampler of run retries is
 //! [`Watch`](crate::watch::Watch).
 
 use std::collections::BTreeMap;
@@ -64,30 +64,41 @@ where
     }
 }
 
-/// One Virtual Object as `sys_invocation` identifies it: the service, the
-/// key, and the scope under scoped Virtual Objects. A key alone is not an
-/// identity: two services, or two scopes, may hold the same key, and a read
-/// by key alone would merge their invocations.
+/// Which scopes an object selector includes. The default is the unscoped
+/// object, matching [`Call::object`](crate::Call::object).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeSelection<'a> {
+    /// Only the unscoped object (`scope IS NULL`).
+    #[default]
+    Unscoped,
+    /// Only the object under this named scope.
+    Named(&'a str),
+    /// The unscoped object and every named scope's object.
+    All,
+}
+
+/// Virtual Objects selected by service, key and scope selection. A key alone
+/// is not an identity: two services, or two scopes, may hold the same key.
+/// [`Self::object`] selects one unscoped object; [`Self::scoped`] selects one
+/// named scope, and [`Self::all_scopes`] deliberately aggregates across them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target<'a> {
     /// `target_service_name`.
     pub service: &'a str,
     /// `target_service_key`.
     pub key: &'a str,
-    /// `scope`: `Some` selects the object under that scope alone, `None`
-    /// does not filter on the scope (the unscoped object, or every scope's,
-    /// for a suite that keys uniquely across them).
-    pub scope: Option<&'a str>,
+    /// Which scopes to include; service and key are always matched.
+    pub scope: ScopeSelection<'a>,
 }
 
 impl<'a> Target<'a> {
-    /// The object `key` of `service`, in whatever scope.
+    /// The unscoped object `key` of `service` (`scope IS NULL`).
     #[must_use]
     pub const fn object(service: &'a str, key: &'a str) -> Self {
         Self {
             service,
             key,
-            scope: None,
+            scope: ScopeSelection::Unscoped,
         }
     }
 
@@ -95,7 +106,16 @@ impl<'a> Target<'a> {
     #[must_use]
     pub const fn scoped(self, scope: &'a str) -> Self {
         Self {
-            scope: Some(scope),
+            scope: ScopeSelection::Named(scope),
+            ..self
+        }
+    }
+
+    /// The same service/key in every scope, including the unscoped object.
+    #[must_use]
+    pub const fn all_scopes(self) -> Self {
+        Self {
+            scope: ScopeSelection::All,
             ..self
         }
     }
@@ -108,8 +128,9 @@ impl<'a> Target<'a> {
             sql_literal(self.key)
         );
         match self.scope {
-            Some(scope) => format!("{object} AND scope = {}", sql_literal(scope)),
-            None => object,
+            ScopeSelection::Unscoped => format!("{object} AND scope IS NULL"),
+            ScopeSelection::Named(scope) => format!("{object} AND scope = {}", sql_literal(scope)),
+            ScopeSelection::All => object,
         }
     }
 }
@@ -347,8 +368,9 @@ impl Admin {
         .await
     }
 
-    /// The ids of the invocations on Virtual Object `target` the server holds
-    /// and has not completed, in id order.
+    /// The ids of the invocations matching `target` the server holds and has
+    /// not completed, in id order. All-scope targets include the same
+    /// service/key's invocations in every scope, including unscoped.
     pub async fn in_flight_ids_on(&self, target: &Target<'_>) -> Vec<String> {
         self.sql_or_panic(&format!(
             "SELECT id FROM sys_invocation WHERE {} AND status <> 'completed' ORDER BY id",
@@ -360,7 +382,7 @@ impl Admin {
         .collect()
     }
 
-    /// The one invocation in flight on Virtual Object `target`: its id, from
+    /// The one invocation in flight matching `target`: its id, from
     /// `sys_invocation`; panics on none or more than one. How a scenario
     /// names an invocation the ingress has not answered yet (a call returns
     /// its id only with its answer): to cancel it, or to check that a retry
@@ -375,8 +397,8 @@ impl Admin {
         in_flight[0].clone()
     }
 
-    /// Waits until `sys_invocation` holds `count` invocations in flight on
-    /// Virtual Object `target` (accepted by the server, not completed): the
+    /// Waits until `sys_invocation` holds at least `count` invocations in flight
+    /// matching `target` (accepted by the server, not completed): the
     /// server-side moment a call made while the key is held is queued behind
     /// it, which the ingress reports only with the call's answer. The ids.
     pub async fn await_in_flight_on(&self, target: &Target<'_>, count: usize) -> Vec<String> {
@@ -509,7 +531,7 @@ mod tests {
         let target = Target::object("Svc", "O'Brien");
         assert_eq!(
             target.predicate(),
-            "target_service_name = 'Svc' AND target_service_key = 'O''Brien'"
+            "target_service_name = 'Svc' AND target_service_key = 'O''Brien' AND scope IS NULL"
         );
         assert!(
             target

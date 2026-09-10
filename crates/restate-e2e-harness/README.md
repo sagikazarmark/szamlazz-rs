@@ -23,9 +23,9 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   `source` = `invocation`, the header) and decodes the JSON string in `message` into the caller's own fault type.
 - **The admin API**: SQL introspection, journals (`raw` hex-decoded to bytes), `ctx.run` names, `sys_invocation`
   rows, the registered handlers (`GET /services`), kill / cancel / purge (waiting for the row to go),
-  `await_status`, the in-flight invocations on a key, and a `Watch` that samples an invocation's run retries
+  `await_status`, the in-flight invocations selected by service/key/scope, and a `Watch` that samples their run retries
   (`retry_count`, `last_failure`, the failing command: in-flight columns, gone once the invocation completes) while
-  it runs.
+  they run.
 - **The step-name table**: a consumer tables, per handler, the ordered `ctx.run` names of every path it journals
   (`RunPath`), and `Table::check` verifies a whole run against it: every invocation's run sequence is a prefix of
   one of its handler's paths (a journaled name read as its pattern, `lookup-{sku}` by its prefix), every handler
@@ -99,10 +99,40 @@ let runs = restate.admin().runs(reply.invocation_id()).await;
 # }
 ```
 
+## Selecting objects to observe
+
+`Target` always includes a service and key. Its public `scope: ScopeSelection` distinguishes three selections:
+
+```rust
+use restate_e2e_harness::{ScopeSelection, Target};
+
+// Exactly the unscoped object, matching Call::object's default.
+let unscoped = Target::object("Stock", "item-1");
+assert_eq!(unscoped.scope, ScopeSelection::Unscoped);
+// Exactly the object in one named scope.
+let scoped = unscoped.scoped("warehouse_a");
+assert_eq!(scoped.scope, ScopeSelection::Named("warehouse_a"));
+// Deliberate aggregation: unscoped plus every named scope, same service/key.
+let all = unscoped.all_scopes();
+assert_eq!(all.scope, ScopeSelection::All);
+```
+
+`ScopeSelection::default()` is `Unscoped`. Selectors remain plain data and const-constructible.
+**Migration:** `Target::object` previously included all scopes and `Target.scope` was an `Option<&str>`.
+Use `.all_scopes()` to retain that aggregation; replace literal `None` with `ScopeSelection::All` for the old
+behavior (or `Unscoped` for an exact unscoped selection), and `Some(name)` with `ScopeSelection::Named(name)`.
+This is a breaking interface change of the independently versioned harness crate.
+
+`Admin::in_flight_ids_on`, `in_flight_on`, `await_in_flight_on` and `Watch::start` all apply this selection.
+`Watch` is **object-wide**: all matching invocations contribute retry counts and failures, and it stops when
+the selection falls idle after being seen in flight. Queued or concurrent matching invocations keep it sampling;
+`Retries::observed_completion` means the selection fell idle. To wait for **one invocation** to complete, use
+`Admin::await_status(id, statuses)`. `Watch::finish` stops sampling even if matching invocations are still running.
+
 ## Tests
 
 `cargo test -p restate-e2e-harness` runs the pure decisions (the gate, the sampler, the table check, the call
-grammar, the envelope check) and subprocess lifecycle regressions without a real
+grammar, the envelope check), admin HTTP-boundary SQL escaping, and subprocess lifecycle regressions without a real
 server. The lifecycle tests use a fake executable with a descendant, real SIGINT
 and SIGTERM, and test-only barriers around registration, spawn and shutdown; they
 check signal exit statuses and that no child or descendant remains alive, plus
@@ -112,6 +142,9 @@ against a server of its own (never a reused one: the test deploys a service and 
 which a suite sharing that server would meet as a stranger's) with a trivial service: the gate launches a server, the service is deployed (twice), invoked through the
 ingress, its run read from the journal, a fault decoded out of the envelope, an invocation killed and purged, a
 service made private and public, and the server stops on drop.
+The same command runs `e2e_targets`: the same service/key unscoped and in two named scopes, exact and all-scope
+in-flight/await selection, and isolated versus aggregate `Watch` sampling. Another service and another key are
+excluded from every selection.
 
 ## License
 
