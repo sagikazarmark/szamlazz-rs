@@ -13,7 +13,16 @@ The three journal amendments (#47, #125, #127) are **superseded by
 [ADR 0009](0009-immutable-deployments-no-journal-compatibility-contract.md)**: deployments are immutable, so an
 in-flight invocation stays on its original code under normal routing and the journal carries no general cross-version
 compatibility contract. The crate-owned projections of #127 stay for the reason that was never about replay
-(nothing a handler does not read, and never the agent key, in an entry the UI shows). The rest of this ADR stands.
+(nothing a handler does not read, and never the agent key, in an entry the UI shows).
+
+**#205 (2026-09-10): approved narrow exception, implementation pending.** ADR 0004's
+[unresolved-write decision](0004-kill-not-pause-on-exhausted-retries.md#unresolved-order-writes-205-2026-09-10)
+selects retention plus a durable pre-send unresolved-write marker. It protects across cancellation/kill and
+ambiguous send replay; it does not mirror invoice status. Production still keeps no state. The follow-up must
+replace that invariant, define marker schema/migration and recovery, and reconcile old unmarked uncertainty
+before switching. szamlazz.hu remains the document source of truth. The older caller-contract instruction below
+to retry uncertain faults with a new key is superseded too: reconcile first; absence or elapsed time does not
+settle a send. New keys authorize deliberate renewal only after uncertainty is settled. The rest of this ADR stands.
 
 The v1 design (ADRs 0002–0004 as first written) gave `Szamlazz.Order` a **ledger** in Virtual Object state:
 one slot per document kind with a status machine (`pending`, `committed`, `rejected`, `blocked`, `reversed`,

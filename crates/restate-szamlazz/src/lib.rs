@@ -260,8 +260,10 @@
 //! Domain outcomes (`issued`, `already_issued`, `reconciled`, `reversed`, `rejected`,
 //! `conflict{reason}`) are returned as data with HTTP 200. A `TerminalError` is a fault, whose body
 //! is a [`contract::Fault`] with a [`contract::TerminalCode`]. Three of the eight codes mean
-//! "outcome unknown: retry with a new `Idempotency-Key`, or read `Szamlazz.Order.get`", never "no
-//! document exists": `outcome_unknown`, `unavailable`, `credentials_rejected`. The other four are
+//! "outcome unknown: reconcile before deliberately renewing", never "no document exists":
+//! `outcome_unknown`, `unavailable`, `credentials_rejected`. Empty queries, elapsed time and kill do not
+//! prove an earlier send cannot still land. Keep the original key while unfinished; use a new key only
+//! after uncertainty is settled and renewal is intended. The other four are
 //! settled and are not retried as they are: `invalid_input`, `unknown_account` and `not_found` are
 //! the caller's request (fix it), `szamlazz_error` is szamlazz.hu's own answer passed through.
 //! Intentional read cancellation is `cancelled` (409); a cancelled write keeps

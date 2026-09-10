@@ -76,7 +76,11 @@ repetition" is ON**; it is the second guard, not the first.
   must exceed timeout plus stall; 2 min keeps a margin, never below ~90 s. In code since #61:
   `WorkerConfig::validate` floors `issue.initial_delay` at the client's exported `REQUEST_TIMEOUT`
   plus a 30 s margin, and every write handler's `initial_interval` is pinned at 2 m by the discovery
-  test (ADR 0004, #61 amendment).
+  test (ADR 0004, #61 amendment). **Qualified by #205:** these delays apply within an invocation, not after
+  terminal exhaustion releases the lock. Neither the delay nor an empty query establishes that an unanswered
+  send cannot still land. The named stall probe records no issuance; stronger delayed-issuance history has
+  conflicting provenance. [ADR 0004's decision](0004-kill-not-pause-on-exhausted-retries.md#unresolved-order-writes-205-2026-09-10)
+  selects retention plus a pre-send marker, with implementation pending.
 - External ids are **not unique** server-side (two invoices under different orders with the same id
   were both issued, no warning) and a query by a shared id returns the newest holder (last-writer-
   wins), verified. Every `Found` document is therefore validated before adoption:

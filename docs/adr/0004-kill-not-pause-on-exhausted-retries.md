@@ -5,12 +5,13 @@ amended by #22 (the create step under a run retry policy), #30 (the storno step)
 (the `Szamlazz.Agent` writes' timeouts and retry interval), #61 (the ≥ 90 s re-check rule in code), #87 (what
 an invocation attempt is spent on; `Szamlazz.Agent.storno` on `Order`'s policy; the read policy widened) and #114
 (every wait has a bound), below.
-Still holds: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu, the verified Restate facts, and
+Current implementation: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu. The #205 decision
+below selects retention plus a marker for a follow-up; it is not implemented by this amendment. Still holds: the verified Restate facts and
 the operational alerts; the retry policy and timeout values hold as amended (#41, #61, #87, #114, the current values are
 in the paragraph below and in the code). Withdrawn by #87: the third "considered option"'s etiquette rationale
 (etiquette bounds sends, which the issue policy governs, not invocation attempts). Kill itself is under review for
 the `Order` writes (#87's follow-up). Superseded: the `pending` slot as what makes
-kill safe (there is no state; the external-id query inside the create step is), the runbook and caller
+kill safe (there is currently no state; query-first alone does not establish safety after an unanswered send), the runbook and caller
 contract phrased in terms of `request_id` (→ retry with a **new** `Idempotency-Key`, since a stored failure is
 replayed under the same key), the operator handlers, and `idempotency_retention = 7d` (the code sets `30d`).
 
@@ -312,11 +313,56 @@ may leave a send processing: [#205](https://github.com/sagikazarmark/szamlazz-rs
 policy, and [#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) the broader operational runbook. The
 configuration above remains the current behavior, not proof that absence authorizes an immediate reissue.
 
+## Unresolved Order writes (#205, 2026-09-10)
+
+**Decision: retain the original invocation for read-only reconciliation, with pause on unresolved recovery or
+invocation-policy exhaustion, plus a minimal durable unresolved-write marker armed before sending.** The owner
+explicitly selected “Retain plus marker” after reviewing the reproduction and alternatives. This is the approved
+direction and bounded [implementation brief](../design/unresolved-order-writes.md), not a production recovery
+change in #205. The current terminal run exhaustion and kill attributes remain until that work lands.
+
+The required protection is order-wide: no subsequent mutation may send while an earlier send might still act,
+including correctives and cross-kind creates. Retention protects queued invocations while the owner reconciles;
+the marker protects after cooperative cancellation or manual/automatic kill releases its lock. Marker state
+answers only “may a write still act?”, not document status. This is a narrow exception to ADR 0005's no-state
+decision. It requires guarding replay of the owner's **open send closure** too: a marker check replayed as
+absent does not protect that closure. The brief specifies the candidate one-use execution-local send permit and
+the crash-window tests required before shipping it.
+
+Alternatives considered:
+
+| Option | Benefit | Cost / decision |
+|---|---|---|
+| Keep terminal completion/kill and query-first renewal | Reachable order, simple state-free worker | Reject as sufficient protection: an immediate empty query permits another send while the first may still act |
+| Retain and pause, no marker | Keeps original identity and lock; no cross-invocation state | Operational quarantine required after kill/cancel and ambiguous replay; insufficient for the selected cooperative cross-invocation protection |
+| Marker and terminal completion | Caller gets a bounded failure; later writes can fail closed | Recovery becomes a separate operator/caller protocol; original invocation cannot finish reconciling for its attached callers |
+| **Retain plus marker** | Original invocation owns normal recovery; marker survives release | **Selected**: paused orders block exclusive work, false-positive markers can need manual evidence, state migration and operator recovery are required |
+
+A real-server script with a valid one-execution issue policy observed a queued second send before the first
+became visible, for invoice→invoice, corrective→same corrective and invoice→prepayment. Its initially failing
+one-send assertion was 2 versus 1. A test-only protection probe verified pause/queue/attach/shared read/resume,
+and that a marker survives manual kill and refuses a queued mutation. These are **scripted vendor assumptions**,
+not observations of duplicate invoices at szamlazz.hu. The named 57 s stall probe says no issuance; older
+“stalled and still issued” prose has conflicting provenance. Post-success visibility at 771 ms is not a bound
+on unanswered processing. No delay or immediate empty query proves an external effect cannot still land.
+
+The pinned Rust SDK exposes invocation-policy pause, but explicit `RunRetryPolicy` exhaustion always maps to
+`FailAsTerminal`. Changing `kill` to `pause` alone misses that path. The brief records source links, the event-by-event
+lock/recovery matrix, the available read-only pause sequence, marker lifecycle, permissible positive/negative
+evidence, cancellation, operator recovery, Idempotency-Key rules and deployment/journal implications.
+
+**Superseding recovery guidance:** keep the original key while the invocation is unfinished, paused included.
+After a completed uncertain fault, cancellation or kill, reconcile before deliberately renewing with a new key.
+Negative settlement requires evidence that the earlier send did not act **and cannot act later**; if unavailable,
+remain blocked. Before manual kill/recovery, quiesce producers and account for queued mutations. Neither `get`
+absence nor kill is permission to issue again. This corrects #45's “kill is always safe — query-first” premise
+and the older consequences below; #45 supplies the broader operational runbook.
+
 ## Consequences
 
 - Kill releases the key without compensating external effects. The next create queries by external id before
   considering a send; absence alone does not establish that the earlier send cannot still land (#205).
-- Caller contract, documented in the crate README: **any error from an issuing or storno handler
+- Historical caller contract, superseded for renewal permission by #205 above: **any error from an issuing or storno handler
   means "outcome unknown, retry with a **new** `Idempotency-Key`, or read `Szamlazz.Order.get`"**,
   never "no document exists". A call that timed out on the client side may still run once the key
   frees; attach/output is the way to learn that invocation's completion. Fresh `get` polls observe external

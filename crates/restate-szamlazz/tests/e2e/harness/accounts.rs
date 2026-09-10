@@ -47,6 +47,14 @@ pub(crate) const BANK_ACCOUNT_CHANGED: &str = "44444444-55555555-66666666";
 /// (which sees no order key) would fire on whichever invocation resolved
 /// next; the scripted account steps run in phase 2, per scope.
 pub(crate) fn services(endpoint: &str) -> (Order, Agent) {
+    services_with_config(endpoint, worker_config())
+}
+
+/// Services over a scenario's policy, including validated one-execution policies.
+pub(crate) fn services_with_config(
+    endpoint: &str,
+    config: ValidatedWorkerConfig,
+) -> (Order, Agent) {
     let accounts: StaticConfig = serde_json::from_value(json!({
         "account": {
             "id": "acct",
@@ -60,8 +68,8 @@ pub(crate) fn services(endpoint: &str) -> (Order, Agent) {
         Arc::clone(&resolver) as Arc<dyn AccountResolver>,
         resolver as Arc<dyn CredentialStore>,
     );
-    let order = Order::from_parts(accounts.clone(), worker_config());
-    let agent = Agent::from_parts(accounts, worker_config());
+    let order = Order::from_parts(accounts.clone(), config.clone());
+    let agent = Agent::from_parts(accounts, config);
     (order, agent)
 }
 

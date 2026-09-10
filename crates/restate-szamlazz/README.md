@@ -6,8 +6,9 @@
 **Restate services issuing and managing szamlazz.hu documents with durable, idempotent execution.**
 
 The `Szamlazz.Order` Virtual Object, keyed by the order number, serializes issuing per key: a caller says "issue
-the invoice for order X" and gets exactly one legal document under retries, process crashes, concurrent callers
-and reversals. It keeps **no state**. szamlazz.hu is the source of truth, reached through deterministic external
+the invoice for order X" and reconciles retries through deterministic external ids. An unanswered send that
+remains invisible can outlive invocation completion; the current worker does not guard later mutations against
+that uncertainty (see **Unresolved writes** below). It keeps **no state**. szamlazz.hu is the source of truth, reached through deterministic external
 ids (`{namespace}:{order}:{kind}`), so any invocation can find what an earlier one issued.
 
 The stateless `Szamlazz.Agent` service exposes by-number operations (query, credit entries, storno of unmanaged
@@ -531,9 +532,10 @@ for a caller:
    - **A fault** is a 4xx/5xx **with a body the worker wrote** and `x-restate-error-source: invocation`: the
      invocation completed, and Restate stores that completion under the key for the retention period (30 days on
      the write handlers), so the same key would replay the failure. An **`outcome_unknown`, `unavailable` or
-     `credentials_rejected`** fault from an issuing or storno handler means "outcome unknown: retry with a
-     **new** key, or read `Szamlazz.Order.get`", never "no document exists"; the retry with a new key reconciles
-     by external id. Check cancellation first: `cancelled` (409) or `cause: "cancelled"`
+     `credentials_rejected`** fault from an issuing or storno handler means "outcome unknown: reconcile first",
+     never "no document exists". Read `Szamlazz.Order.get` or query the relevant external id/number; an empty
+     query does not prove the earlier send cannot still land. Use a **new** key only for a deliberately renewed
+     operation after the uncertainty is settled (see **Unresolved writes** below). Check cancellation first: `cancelled` (409) or `cause: "cancelled"`
      does **not** authorize automatic retry. For a cancelled write, reconcile through `get` or a
      by-number query, then deliberately renew the operation with a new key only if still intended.
    - **No answer** (your client timed out, or the ingress answered with a 5xx whose source is *not*
@@ -554,7 +556,7 @@ for a caller:
 4. A `credentials_rejected` fault (503) means szamlazz.hu refused the worker's agent key (codes 3, 135, 136,
    164) on some step: the deployment is misconfigured, not the request. The request that drew the code was not
    acted on, but the code may have come to a re-query after a send, and an earlier execution may have landed
-   with a lost reply, so rule 2 applies: once the key is fixed, retry with a new key or read `get`. The worker
+    with a lost reply, so rule 2 applies: once the key is fixed, reconcile before deliberately renewing. The worker
    logs every occurrence at `warn` with the namespace and the code, inside the execution's span
    (`execution{scope, order, restate.invocation.id, account.id}`, which every handler execution runs in), so the
    line says whose key broke and under which invocation (`restate.invocation.id` is the `x-restate-id` the caller
@@ -692,10 +694,22 @@ policy how long a worker outage is (~24 min of back-off on the `Szamlazz.Order` 
 `Szamlazz.Agent.storno`, 2 min on `set_credit_entries`), and szamlazz.hu's "max 5 attempts" etiquette is the issue
 policy's business. Create/storno re-executions are query-first, but the run thresholds are not hard send limits.
 
-**Kill, not pause.** A paused invocation holds the order's key and blocks the very handler that would reconcile
-it. Kill releases the key; it does not undo an external effect or establish that a still-processing send has
-finished. The next create queries first. Protection across unresolved-write exhaustion/kill is tracked in
-[#205](https://github.com/sagikazarmark/szamlazz-rs/issues/205); no additional fence is implied here.
+**Unresolved writes.** Current handlers complete on run exhaustion and kill on invocation-policy exhaustion.
+Either can release the Order lock while an external send is still processing. A valid one-execution issue policy
+can admit a queued second send immediately; the delay floor does not apply across invocations. This is reproduced
+with a scripted vendor in [#205's investigation and implementation brief](../../docs/design/unresolved-order-writes.md),
+including correctives and invoice/prepayment competition. It is not evidence of a live vendor duplicate.
+
+The approved follow-up retains the original invocation for read-only reconciliation/pause and writes a minimal
+durable unresolved-write marker before sending, guarding later mutations after cancellation/kill. **That
+protection is not implemented yet.** Until then, quiesce producers and account for queued mutations when recovering
+an unresolved order. A timeout, kill, delay or empty `get` is not permission to send again. Positive evidence must
+identify the intended document; negative settlement must establish that the earlier send did not act and cannot
+act later. Without that evidence, keep the operation blocked. Correctives require their own external-id/number
+query because `get` reads only the four ordinary kinds. Keep the original Idempotency-Key while an invocation is
+unfinished, including paused; a new key cannot settle uncertainty. The brief covers operator recovery and limits.
+Current fault messages may still say “retry with a new Idempotency-Key”; this evidence-before-renewal rule
+qualifies that wording. Aligning those runtime messages and their assertions is part of the recovery follow-up.
 
 **The prologue's own waits are bounded too.** One `AccountResolver::resolve` or `CredentialStore::fetch` call
 gets ten seconds (a worker constant, not a setting: a resolver that has not answered by then is not going to),

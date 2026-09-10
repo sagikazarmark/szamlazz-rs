@@ -431,8 +431,8 @@ gateway opened for this execution.
      for it (up to five times, as the pre-#41 `Err(Contradiction)` did) would only repeat it.
    Any `Err` from the run, exhaustion (`TerminalError` 500 carrying the last `Unconfirmed`) or cancellation (409),
    is mapped by the handler to `TerminalError{outcome_unknown, json{order, kind, external_id}}`; a cancel
-   mid-create therefore reports `outcome_unknown`. Nothing is recorded: the next invocation's lookup finds whatever
-   landed.
+   mid-create therefore reports `outcome_unknown`. No cross-invocation marker is recorded: the next invocation's
+   lookup can miss an earlier send still processing. #205's approved recovery direction below addresses this gap.
 5. **Branch on data.** `Issued(r)` → `outcome: issued` (+ `warnings: [notification_delivery_failed]`); `Found(doc)`
    → `outcome: issued{number, totals}` (the caller asked for this document and has it; ADR 0003); `Reversed(doc)` →
    `outcome: reversed{number}` (no storno number: the next call's lookup reports it); `LiveAgain(doc)` →
@@ -473,6 +473,21 @@ Agent's final invoice can carry `dijbekeroSzamlaszam` too, but the order's `D` w
 steps with the corrective exemption (verified): no order-number hint (the live base invoice under the order is
 expected), and a 71/152 the re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new
 corrective by contract.
+
+### Unresolved Order writes (#205)
+
+The protocol above describes current production behavior. A real-server scripted investigation demonstrated
+that terminal exhaustion releases the lock and a queued invocation can send while the earlier write remains
+invisible, including same-correction-ID and invoice→prepayment cases. The delay floor is not a cross-invocation
+guard, and an empty query after any delay is not proof of negative settlement.
+
+The owner selected **retain the original invocation for read-only reconciliation/pause, plus a durable pre-send
+unresolved-write marker**. Implementation is pending. [The bounded brief](unresolved-order-writes.md) specifies
+the event/lock matrix, permissible evidence, candidate execution-local one-use send permit (needed because an
+entry marker check itself replays), marker/recovery scope, cancellation, operator procedure, command-sequence
+and migration implications, and acceptance scenarios. This narrowly amends ADR 0005's no-state rule without
+introducing a document ledger. Until implemented, recovery must quiesce producers and account for queued writes;
+kill/timeout/absence is never permission to renew an unresolved operation.
 
 ## 6. Storno protocol (`Szamlazz.Order.storno_invoice`)
 
@@ -743,8 +758,9 @@ the invoice, and `Szamlazz.Order.storno_invoice` attaches the order, kind and st
 prologue's exhausted resolve policy and operation-local initialization faults: Gateway build failure or the
 credential store gone or unavailable, reporting so, or silent past the ten-second deadline on each
 call (#114), through the in-process retry (#200). One of the three "outcome unknown"
-codes: a read that fails may sit before a create that an earlier execution already landed, so the caller retries with a
-new `Idempotency-Key` or reads `get`, never concludes that no document exists.
+codes: a read that fails may sit before a create that an earlier execution already landed, so the caller
+reconciles first through fresh external observations. A new key is for deliberate renewal after uncertainty is
+settled, never a conclusion from absence that no document can still appear (#205).
 
 `credentials_rejected`: szamlazz.hu answered 3 (invalid credentials), 135 (browser session active), 136 (login blocked)
 or 164 (multiple accounts) to any step of any handler. It is the worker's misconfiguration, not the caller's request
@@ -769,8 +785,9 @@ rules below, which are also the rules for an embedder. The rules:
    completed invocation whose stored completion is replayed under the same key for the retention period (30 days on
    the write handlers;
    verified): an **`outcome_unknown`, `unavailable` or `credentials_rejected`** fault from an issuing or storno handler
-   means "outcome unknown; retry with a **new** key, or read `get`"; the handler reconciles by external id, so the
-   retry reconciles. Check cancellation first: `cancelled` or `cause: cancelled` does not authorize automatic retry.
+   means "outcome unknown; reconcile first". Read `get` or query the relevant external id/number; absence alone
+   cannot authorize another send. A **new** key is for deliberate renewal after uncertainty is settled, not a
+   recovery probe (#205). Check cancellation first: `cancelled` or `cause: cancelled` does not authorize automatic retry.
    Reconcile a cancelled write, then deliberately renew it with a new key only if still intended.
    Never interpret an uncertain fault as "no document exists". No answer (a client timeout, an ingress 5xx
    whose source is not `invocation`) is an invocation still in flight, re-dispatched by Restate for as long as the
