@@ -78,7 +78,7 @@ async fn sample(admin: &Admin, target: &Target<'_>, expected: &[&str]) {
             query_errors += retries.query_errors;
             assert_eq!(query_errors, 0, "{target:?}: {retries:?}");
             assert!(
-                !retries.observed_completion,
+                !retries.observed_idle,
                 "{target:?} is still in flight: {retries:?}"
             );
             for label in &retries.failing_commands {

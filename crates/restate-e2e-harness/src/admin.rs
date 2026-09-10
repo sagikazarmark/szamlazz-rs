@@ -38,10 +38,10 @@ pub fn sql_literal(text: &str) -> String {
 /// an endpoint to register). The deadline bounds the wait as a whole: a probe
 /// still running at it is cut (the HTTP client's own timeout, 120 s, would
 /// otherwise outlast a 30 s wait on one stalled request) and reported as the
-/// probe that did not answer; a failed probe whose retry sleep would cross
-/// the deadline is the last, reported with `describe` of what it saw, so a
-/// server's own refusal (a rejected registration) is what the panic carries,
-/// never a generic message from a probe started at the deadline.
+/// probe that did not answer. Near the deadline the retry sleep uses half the
+/// remaining budget (with a one-millisecond floor), leaving time to observe a
+/// change even when the timeout is shorter than `interval`. No probe starts at
+/// or after the deadline: exhaustion between probes reports the last refusal.
 /// Both failures include `operation` and the configured timeout; an in-flight
 /// timeout has that context even when no probe has answered yet.
 pub(crate) async fn poll_until<T, E, Fut>(
@@ -55,19 +55,26 @@ where
     Fut: Future<Output = Result<T, E>>,
 {
     let deadline = Instant::now() + timeout;
+    let mut last = None;
     loop {
+        assert!(
+            Instant::now() < deadline,
+            "{operation}: observation did not succeed within {timeout:?}: {}",
+            last.as_ref()
+                .map_or_else(|| "no probe completed".to_owned(), &describe)
+        );
         let Ok(answer) = tokio::time::timeout_at(deadline, probe()).await else {
             panic!("{operation}: deadline passed after {timeout:?} while a probe was in flight")
         };
         match answer {
             Ok(answer) => return answer,
-            Err(last) => assert!(
-                Instant::now() + interval < deadline,
-                "{operation}: observation did not succeed within {timeout:?}: {}",
-                describe(&last)
-            ),
+            Err(error) => last = Some(error),
         }
-        tokio::time::sleep(interval).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let delay = interval
+            .min((remaining / 2).max(Duration::from_millis(1)))
+            .min(remaining);
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -640,11 +647,35 @@ mod tests {
         );
     }
 
-    /// A probe that keeps failing ends with what it saw last, never with the
-    /// in-flight message: the retry sleep that would cross the deadline is
-    /// not taken.
+    /// Even a wait shorter than the normal polling interval can observe a
+    /// change after an initially unsuccessful probe.
+    #[tokio::test(start_paused = true)]
+    async fn poll_until_retries_within_a_short_timeout() {
+        let started = Instant::now();
+        let visible = started + Duration::from_millis(60);
+        poll_until(
+            Duration::from_millis(90),
+            "await visible row",
+            Duration::from_millis(100),
+            || {
+                std::future::ready(if Instant::now() >= visible {
+                    Ok(())
+                } else {
+                    Err(())
+                })
+            },
+            |()| "row absent".to_owned(),
+        )
+        .await;
+        assert!(Instant::now() >= visible);
+        assert!(started.elapsed() < Duration::from_millis(90));
+    }
+
+    /// A probe that keeps failing uses the full wait and reports what it saw
+    /// last, without starting another probe at the deadline.
     #[tokio::test(start_paused = true)]
     async fn poll_until_reports_the_last_failure_not_a_probe_started_at_the_deadline() {
+        let started = Instant::now();
         let outcome = tokio::spawn(poll_until::<(), u32, _>(
             Duration::from_secs(1),
             "register endpoint",
@@ -659,6 +690,7 @@ mod tests {
             |attempt| format!("registration refused, attempt {attempt}"),
         ))
         .await;
+        assert!(started.elapsed() >= Duration::from_secs(1));
         let message = outcome
             .expect_err("the deadline panics")
             .into_panic()

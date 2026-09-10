@@ -26,7 +26,7 @@
 //!   count and distinct failures can come from different invocations; they
 //!   are not one invocation's history. An all-scope target combines scopes
 //!   too. Queued or concurrent matching invocations keep the watch sampling.
-//!   [`Retries::observed_completion`] means the selection fell idle after
+//!   [`Retries::observed_idle`] means the selection fell idle after
 //!   being seen in flight; use [`Admin::await_status`] for one invocation.
 //!
 //! # Configuring a retry-observation test
@@ -119,7 +119,7 @@ pub struct Retries {
     /// previously seeing one, rather than ending by [`Watch::finish`]. This
     /// describes the selection falling idle, not a particular invocation's
     /// completion; an invocation can also finish between samples unseen.
-    pub observed_completion: bool,
+    pub observed_idle: bool,
     /// How many queries failed or contained malformed rows (retried, never
     /// fatal). A malformed sample contributes no observations. Zero errors
     /// does not rule out gaps between successful samples.
@@ -221,7 +221,7 @@ impl Sampler {
             self.seen_in_flight = true;
             Progress::Sampling
         } else if self.seen_in_flight {
-            self.retries.observed_completion = true;
+            self.retries.observed_idle = true;
             Progress::Done
         } else {
             Progress::Sampling
@@ -410,7 +410,7 @@ mod tests {
                 failures: vec!["transport failure: reply lost".to_owned()],
                 failing_commands: vec!["place-hold".to_owned()],
                 samples: 6,
-                observed_completion: true,
+                observed_idle: true,
                 query_errors: 0,
                 last_query_error: None,
             }
@@ -489,7 +489,7 @@ mod tests {
             assert_eq!(retries.max_retry_count, 0);
             assert!(retries.failures.is_empty());
             assert!(retries.failing_commands.is_empty());
-            assert!(!retries.observed_completion);
+            assert!(!retries.observed_idle);
             assert_eq!(
                 sampler.observe(&[]),
                 Progress::Sampling,
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(retries.max_retry_count, 3);
         assert_eq!(retries.failures, ["failure"]);
         assert_eq!(retries.failing_commands, ["step"]);
-        assert!(retries.observed_completion);
+        assert!(retries.observed_idle);
     }
 
     /// The watch ends by itself when a sample shows the key idle after it was
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(retries.query_errors, 1);
         assert_eq!(retries.max_retry_count, 2);
         assert_eq!(retries.failing_commands, ["lookup-stock"]);
-        assert!(retries.observed_completion);
+        assert!(retries.observed_idle);
         assert!(script.lock().expect("script").is_empty());
     }
 
@@ -600,7 +600,7 @@ mod tests {
             "finish does not wait out a poll interval"
         );
         assert!(retries.samples >= 2, "{retries:?}");
-        assert!(!retries.observed_completion, "{retries:?}");
+        assert!(!retries.observed_idle, "{retries:?}");
         assert_eq!(retries.max_retry_count, 0);
         assert!(retries.failing_commands.is_empty());
         assert_eq!(
@@ -626,6 +626,6 @@ mod tests {
             retries.samples, 0,
             "the one sample never answered: {retries:?}"
         );
-        assert!(!retries.observed_completion);
+        assert!(!retries.observed_idle);
     }
 }

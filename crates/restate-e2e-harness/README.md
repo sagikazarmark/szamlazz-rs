@@ -233,6 +233,9 @@ admin.await_status_with_timeout(id, &["completed"], Duration::from_secs(90)).awa
 ```
 
 The timeout covers all observation probes, their response bodies and sleeps.
+Polling intervals shorten near the deadline so even a timeout shorter than the
+normal interval allows another observation; exhaustion between probes reports
+the last observation without starting a request at the deadline.
 For `pause` and `purge`, it starts after the initiating PATCH succeeds; that
 request has the HTTP client's own timeout. A timeout fails the test and does
 not cancel an invocation or undo an admin operation. A custom HTTP timeout
@@ -272,7 +275,7 @@ assert_eq!(all.scope, ScopeSelection::All);
 `Admin::in_flight_ids_on`, `in_flight_on`, `await_in_flight_on` and `Watch::start` all apply this selection.
 `Watch` is **object-wide**: all matching invocations contribute retry counts and failures, and it stops when
 the selection falls idle after being seen in flight. Queued or concurrent matching invocations keep it sampling;
-`Retries::observed_completion` means the selection fell idle. To wait for **one invocation** to complete, use
+`Retries::observed_idle` means the selection fell idle. To wait for **one invocation** to complete, use
 `Admin::await_status(id, statuses)`. `Watch::finish` stops sampling even if matching invocations are still running.
 
 ### Retry-sampling limits
