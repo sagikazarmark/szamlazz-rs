@@ -21,9 +21,11 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
   retried); repeatable, so a redeploy is a second call. `set_public`, `drain` (nothing in flight on
   `sys_invocation`).
 - **The ingress**: a `Call` (Restate's URL grammar written once: a service or a Virtual Object key, under a scope,
-  called or sent) and `invoke(&call, body, idempotency)` → a `Reply` (status, parsed body, `x-restate-id`,
+  called or sent; logical segments percent-encoded by the harness) and `invoke(&call, body, idempotency)` → a `Reply` (status, parsed body, `x-restate-id`,
   `x-restate-error-source`); `Reply::fault::<F>()` asserts Restate's error envelope (`code` = the HTTP status,
   `source` = `invocation`, the header) and decodes the JSON string in `message` into the caller's own fault type.
+  `Restate::ingress_url()` exposes the base URL for consumer-owned HTTP clients sending raw bodies or custom
+  headers, or using a different timeout.
 - **The admin API**: SQL introspection, journals (`raw` hex-decoded to bytes), `ctx.run` names, `sys_invocation`
   rows, the registered handlers (`GET /services`), kill / cancel / purge (waiting for the row to go),
   `await_status`, the in-flight invocations selected by service/key/scope, and a `Watch` that samples their run retries
@@ -163,6 +165,12 @@ without workspace dev-dependency unification.
 
 ## Selecting objects to observe
 
+`Call::object` and `Target::object` take the **same logical key**. Pass `invoice/2026` to both: `Call::path()`
+renders the key as `invoice%2F2026`, while the SQL selector matches `invoice/2026`. A literal `%2F` is encoded
+as `%252F`; callers must not pre-encode keys, services, handlers or scopes. Standalone `.` and `..` segments
+are refused because HTTP URL parsers normalize them even when encoded. This is a breaking change from the
+previous caller-encoded `Call` convention; remove caller-side percent encoding when migrating.
+
 `Target` always includes a service and key. Its public `scope: ScopeSelection` distinguishes three selections:
 
 ```rust
@@ -261,6 +269,12 @@ Use `run_result_at` where names repeat. Custom SQL must select `version` and
 `run_completion_id` fields. This is a breaking interface change of the
 independently versioned harness crate. `raw` remains the hex-decoded entry bytes
 for content and leak assertions; it is not the correlation source.
+
+`JournalEntry::from_row` requires a non-empty string `entry_type` and a valid hex string `raw`, even for
+content-only inspection. Missing, null or malformed values panic at decoding, rather than becoming unrelated
+rows or empty bytes that could falsely pass an absence or leak assertion. An explicitly supplied empty hex
+string is valid empty evidence. Custom queries must select both columns; sources that cannot provide the
+raw bytes are not usable for content assertions through this decoder.
 
 ## Checking step-name sequences
 

@@ -72,7 +72,8 @@ pub struct JournalEntry {
     /// journal-v2 `entry_json`. Not the row index; `None` for other entry types
     /// or when the run identity is missing or cannot be decoded.
     pub run_completion_id: Option<u32>,
-    /// `raw`, hex-decoded.
+    /// `raw`, hex-decoded. An empty vector means explicitly supplied empty
+    /// bytes, never missing evidence.
     pub raw: Vec<u8>,
 }
 
@@ -81,8 +82,19 @@ impl JournalEntry {
     /// `entry_json`, `raw`). `entry_json` is the server's JSON-encoded string;
     /// only the run identity is retained from it. Missing or malformed identity
     /// metadata stays `None` so [`run_result`] can explicitly reject it.
+    /// A missing, empty or non-string `entry_type`, or missing/non-string/invalid
+    /// hex `raw`, panics: unavailable evidence cannot establish absence. Select
+    /// these columns even when only inspecting content, without [`run_result`].
     pub fn from_row(row: &Value) -> Self {
-        let entry_type = row["entry_type"].as_str().unwrap_or_default();
+        let index = row["index"].as_u64().expect("index");
+        let entry_type = row["entry_type"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| panic!("missing or malformed entry_type at journal entry {index}"));
+        let raw = row["raw"]
+            .as_str()
+            .and_then(decode_hex)
+            .unwrap_or_else(|| panic!("missing or malformed hex raw at journal entry {index}"));
         let entry = row["entry_json"]
             .as_str()
             .and_then(|text| serde_json::from_str::<Value>(text).ok());
@@ -95,15 +107,12 @@ impl JournalEntry {
             id.as_u64().and_then(|id| u32::try_from(id).ok())
         });
         Self {
-            index: row["index"].as_u64().expect("index"),
+            index,
             version: row["version"].as_u64(),
             entry_type: entry_type.to_owned(),
             name: row["name"].as_str().map(str::to_owned),
             run_completion_id,
-            raw: row["raw"]
-                .as_str()
-                .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
-                .unwrap_or_default(),
+            raw,
         }
     }
 
@@ -302,7 +311,7 @@ mod tests {
                 "entry_json": r#"{"Command":{"Run":{"completion_id":0,"name":"step"}}}"# }),
             json!({ "index": 2, "version": 2, "entry_type": "Notification: Run", "name": null, "raw": "7b7d",
                 "entry_json": r#"{"Notification":{"Completion":{"Run":{"completion_id":0,"result":{"Success":[]}}}}}"# }),
-            json!({ "index": 3, "version": 2, "entry_type": "Command: Output", "name": null, "raw": null }),
+            json!({ "index": 3, "version": 2, "entry_type": "Command: Output", "name": null, "raw": "" }),
         ]
         .iter()
         .map(JournalEntry::from_row)

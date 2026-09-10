@@ -146,6 +146,7 @@ async fn e2e_smoke() {
     assert!(restate.admin().all_journals().await.contains_key(id));
 
     check_run_correlation(&restate).await;
+    check_raw_ingress(&restate).await;
 
     // A fault, decoded out of the envelope into the caller's type.
     let reply = restate.invoke(&REFUSE, None, None).await;
@@ -211,6 +212,35 @@ async fn e2e_smoke() {
         std::net::TcpStream::connect(admin_addr).is_err(),
         "the spawned server is gone with the handle: {admin_addr} still accepts connections"
     );
+}
+
+async fn check_raw_ingress(restate: &restate_e2e_harness::Restate) {
+    // Send malformed bytes rather than a valid JSON string. The SDK must
+    // refuse this before running the handler.
+    let http = reqwest::Client::builder()
+        .tls_certs_only(std::iter::empty())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("consumer HTTP client");
+    let response = http
+        .post(format!(
+            "{}{}",
+            restate.ingress_url(),
+            Call::service("Smoke", "echo").path()
+        ))
+        .header("content-type", "application/json")
+        .body("\"unfinished")
+        .send()
+        .await
+        .expect("raw ingress request");
+    assert_eq!(response.status().as_u16(), 400);
+    let id = response
+        .headers()
+        .get("x-restate-id")
+        .expect("invocation id")
+        .to_str()
+        .expect("text invocation id");
+    assert!(restate.admin().runs(id).await.is_empty());
 }
 
 async fn check_run_correlation(restate: &restate_e2e_harness::Restate) {

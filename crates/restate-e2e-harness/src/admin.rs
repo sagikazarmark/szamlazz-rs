@@ -176,13 +176,15 @@ impl Admin {
             .await
             .map_err(|error| format!("sql query: {error}"))?;
         let status = response.status().as_u16();
-        let body: Value = response
-            .json()
+        let text = response
+            .text()
             .await
-            .map_err(|error| format!("sql json: {error}"))?;
+            .map_err(|error| format!("sql body ({status}): {error}"))?;
         if status != 200 {
-            return Err(format!("sql failed ({status}): {body}"));
+            return Err(format!("sql failed ({status}): {text}"));
         }
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|error| format!("sql json ({status}): {error}; body: {text}"))?;
         body["rows"]
             .as_array()
             .cloned()

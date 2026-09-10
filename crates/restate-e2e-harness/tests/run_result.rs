@@ -179,3 +179,48 @@ fn missing_or_malformed_sql_identity_metadata_has_no_adjacency_fallback() {
         assert!(std::panic::catch_unwind(|| run_result(&journal, "A")).is_err());
     }
 }
+
+#[test]
+fn unavailable_raw_cannot_pass_a_negative_content_assertion() {
+    for raw in [
+        None,
+        Some(Value::Null),
+        Some(json!([115, 101, 99, 114, 101, 116])),
+        Some(json!("zz")),
+    ] {
+        let mut row = json!({
+            "index": 2, "version": 2, "entry_type": "Notification: Run",
+            "entry_json": json!({"Notification": {"Completion": {"Run": {
+                "completion_id": 0, "result": {"Success": [115, 101, 99, 114, 101, 116]}
+            }}}}).to_string()
+        });
+        if let Some(raw) = raw {
+            row["raw"] = raw;
+        }
+        assert!(
+            std::panic::catch_unwind(|| JournalEntry::from_row(&row)).is_err(),
+            "{row}"
+        );
+    }
+    // An explicitly supplied empty byte string remains usable evidence.
+    let empty = row(0, "Command: Input", None, &json!({}));
+    assert!(empty.raw.is_empty());
+    assert!(!empty.raw_contains("secret"));
+}
+
+#[test]
+fn missing_classification_cannot_hide_a_malformed_run() {
+    for entry_type in [None, Some(Value::Null), Some(json!(42)), Some(json!(""))] {
+        let mut row = json!({
+            "index": 0, "version": 2, "name": "A", "raw": "00",
+            "entry_json": r#"{"Command":{"Run":{}}}"#
+        });
+        if let Some(entry_type) = entry_type {
+            row["entry_type"] = entry_type;
+        }
+        assert!(
+            std::panic::catch_unwind(|| JournalEntry::from_row(&row)).is_err(),
+            "{row}"
+        );
+    }
+}

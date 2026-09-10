@@ -27,6 +27,16 @@ struct ScopedObject;
 
 #[restate_sdk::object(name = "ScopedObject")]
 impl ScopedObject {
+    #[handler]
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "a handler is async"
+    )]
+    async fn key(&self, ctx: SharedObjectContext<'_>) -> HandlerResult<String> {
+        Ok(ctx.key().to_owned())
+    }
+
     #[handler(
         journal_retention = "1d",
         invocation_retry_policy(initial_interval = "1s")
@@ -87,8 +97,11 @@ async fn e2e_targets_isolate_the_same_service_and_key_in_each_scope() {
         )
         .await;
 
-    let object = Target::object("ScopedObject", "O'Brien");
-    let call = Call::object("ScopedObject", "O'Brien", "retry").send();
+    // The same logical key reaches both the ingress and SQL selector. Reserved
+    // characters must survive URL construction and the server's decoding once.
+    let key = "O'Brien/é ?#%2F";
+    let object = Target::object("ScopedObject", key);
+    let call = Call::object("ScopedObject", key, "retry").send();
     let cases = [
         (object, call, "unscoped"),
         (object.scoped("alpha"), call.scoped("alpha"), "alpha"),
@@ -111,7 +124,7 @@ async fn e2e_targets_isolate_the_same_service_and_key_in_each_scope() {
             Call::object("ScopedObject", "another-key", "retry").send(),
             Some(json!("decoy")),
         ),
-        (Call::object("OtherObject", "O'Brien", "hang").send(), None),
+        (Call::object("OtherObject", key, "hang").send(), None),
     ] {
         let reply = restate.invoke(&call, body.as_ref(), None).await;
         assert_eq!(reply.status, 202, "{}", reply.body);
@@ -160,4 +173,21 @@ async fn e2e_targets_isolate_the_same_service_and_key_in_each_scope() {
         restate.admin().kill(id).await;
     }
     restate.drain().await;
+
+    for key in [
+        "invoice/2026",
+        "why?",
+        "hash#tag",
+        "%2F",
+        "100%",
+        "é space",
+        "O'Brien",
+        "a/../b",
+    ] {
+        let reply = restate
+            .invoke(&Call::object("ScopedObject", key, "key"), None, None)
+            .await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.body, json!(key));
+    }
 }

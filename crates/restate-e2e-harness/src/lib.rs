@@ -18,6 +18,8 @@
 //!   service or an object, under a scope, called or sent), its [`Reply`] and
 //!   the fault inside Restate's error envelope ([`Reply::fault`], into the
 //!   caller's own type).
+//!   Segments are logical values encoded by [`Call::path`]; [`Restate::ingress_url`]
+//!   lets consumer-owned HTTP clients send raw bodies and custom headers.
 //! - [`admin`]: the admin API ([`Admin`]): SQL introspection, journals and
 //!   `sys_invocation` rows, the registered handlers, kill / cancel / purge.
 //! - [`watch`]: object-wide sampling ([`Watch`]) of run retries while matching

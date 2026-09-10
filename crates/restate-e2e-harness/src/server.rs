@@ -468,6 +468,15 @@ impl Restate {
         self.admin.base()
     }
 
+    /// The ingress base URL. Combine with [`Call::path`] and a consumer-owned
+    /// HTTP client for raw bodies, custom headers or a different timeout.
+    /// For example, malformed JSON must be sent as raw bytes rather than a
+    /// JSON string through [`Self::invoke`].
+    #[must_use]
+    pub fn ingress_url(&self) -> &str {
+        &self.ingress
+    }
+
     /// Serves `endpoint` on a free port of this host (a task of the current
     /// runtime, for the runtime's life) and registers it with the server as
     /// `http://{endpoint_host}:{port}` with `force: true`, retried until the

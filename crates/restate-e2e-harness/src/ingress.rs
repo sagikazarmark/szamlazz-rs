@@ -22,8 +22,9 @@ pub enum Mode {
 /// `/restate/call/{service}/{handler}` for a service,
 /// `/restate/call/{service}/{key}/{handler}` for a Virtual Object,
 /// `/restate/scope/{scope}/…` under a scope, `send` in place of `call` to
-/// submit without waiting. Every segment is inserted as given: a key with a
-/// character a URL path cannot carry is the caller's to encode.
+/// submit without waiting. Segments are logical values, never pre-encoded:
+/// [`Self::path`] percent-encodes them, so the key is the same value that
+/// [`Target`](crate::Target) selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Call<'a> {
     /// The service.
@@ -82,26 +83,49 @@ impl<'a> Call<'a> {
         }
     }
 
-    /// The ingress path.
+    /// The ingress path, with each logical segment percent-encoded. A literal
+    /// `%2F` in a key becomes `%252F`, distinct from a slash (`%2F`).
+    ///
+    /// Panics for a segment equal to `.` or `..`: HTTP URL parsing normalizes
+    /// those even when percent-encoded, so they cannot be sent faithfully.
     #[must_use]
     pub fn path(&self) -> String {
         let mut path = String::from("/restate");
         if let Some(scope) = self.scope {
             path.push_str("/scope/");
-            path.push_str(scope);
+            push_segment(&mut path, scope);
         }
         path.push_str(match self.mode {
             Mode::Call => "/call/",
             Mode::Send => "/send/",
         });
-        path.push_str(self.service);
+        push_segment(&mut path, self.service);
         if let Some(key) = self.key {
             path.push('/');
-            path.push_str(key);
+            push_segment(&mut path, key);
         }
         path.push('/');
-        path.push_str(self.handler);
+        push_segment(&mut path, self.handler);
         path
+    }
+}
+
+/// RFC 3986 unreserved bytes can appear literally; encode everything else,
+/// including each byte of UTF-8, so a value stays exactly one path segment.
+fn push_segment(path: &mut String, segment: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    assert!(
+        !matches!(segment, "." | ".."),
+        "an ingress path segment cannot be {segment:?}: HTTP URL parsing normalizes dot segments"
+    );
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            path.push(char::from(byte));
+        } else {
+            path.push('%');
+            path.push(char::from(HEX[usize::from(byte >> 4)]));
+            path.push(char::from(HEX[usize::from(byte & 15)]));
+        }
     }
 }
 
@@ -204,6 +228,20 @@ mod tests {
             "/restate/scope/acme/send/Inv.Stock/SKU-1/reserve"
         );
         assert_eq!(Mode::default(), Mode::Call);
+    }
+
+    #[test]
+    fn all_segments_are_logical_values_encoded_once() {
+        assert_eq!(
+            Call::object("Svc/name", "O'Brien/é ?#%2F", "read?all")
+                .scoped("scope#one")
+                .send()
+                .path(),
+            "/restate/scope/scope%23one/send/Svc%2Fname/O%27Brien%2F%C3%A9%20%3F%23%252F/read%3Fall"
+        );
+        for key in [".", ".."] {
+            assert!(std::panic::catch_unwind(|| Call::object("Svc", key, "h").path()).is_err());
+        }
     }
 
     /// A fault reply as the ingress wraps a handler's `TerminalError`.
