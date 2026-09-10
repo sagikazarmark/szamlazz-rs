@@ -332,7 +332,9 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
             assert!(
                 fault.message.contains(returned)
                     && fault.message.contains("135")
-                    && fault.message.contains("expired verification key"),
+                    && fault
+                        .message
+                        .contains("credentials rejected: browser session active"),
                 "{fault:?}"
             );
         }

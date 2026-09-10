@@ -95,6 +95,7 @@ mod get;
 mod invariants;
 mod multi_account;
 mod policies;
+mod privacy;
 mod prologue;
 mod storno;
 mod unresolved;
@@ -409,6 +410,7 @@ async fn e2e_order_protocol() {
             get::run_retries_do_not_spend_invocation_attempts,
             faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
             invariants::plant_the_leak_positive_control,
+            privacy::diagnostics_are_safe_in_run_failures_journals_and_ingress,
         ],
     );
     let (phase2, skipped2) = Only::select(

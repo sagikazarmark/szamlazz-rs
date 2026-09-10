@@ -516,7 +516,7 @@ mod tests {
             ))),
             CredentialsCheck::Rejected {
                 code: "3".to_owned(),
-                message: "Sikertelen bejelentkezés.".to_owned(),
+                message: "credentials rejected: invalid credentials".to_owned(),
             }
         );
     }

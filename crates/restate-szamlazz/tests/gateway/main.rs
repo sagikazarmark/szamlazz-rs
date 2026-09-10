@@ -29,6 +29,7 @@ mod credentials;
 mod duplicate;
 mod lookup;
 mod open;
+mod privacy;
 mod probe;
 mod reads;
 mod storno;

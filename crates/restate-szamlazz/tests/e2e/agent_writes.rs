@@ -43,7 +43,14 @@ pub(crate) async fn inconclusive_credit_entry_answers_are_stored_unknown_outcome
                 fault.szamlazz_code.as_deref(),
                 Some(if code.is_empty() { "absent" } else { code })
             );
-            assert!(fault.message.contains("vendor cause"), "{fault:?}");
+            assert!(
+                fault.message.contains(if code == "3" {
+                    "credentials rejected"
+                } else {
+                    "vendor cause"
+                }),
+                "{fault:?}"
+            );
             match code {
                 "57" | "463" => {
                     assert_eq!(reply.status, 422);

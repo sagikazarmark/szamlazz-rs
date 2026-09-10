@@ -352,7 +352,7 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
             szlahu_down(),
             None,
             0,
-            "Unavailable maintenance",
+            "Unavailable query: szlahu_down",
         ),
         (
             "a credential code never sends",
@@ -493,12 +493,12 @@ async fn create_with_an_open_outcome_re_queries_once_and_is_unconfirmed_when_not
         (
             "down",
             ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
-            Unconfirmed::Unavailable("maintenance".to_owned()),
+            Unconfirmed::Unavailable("create: szlahu_down".to_owned()),
         ),
         (
             "no number",
             created_without_a_number(),
-            Unconfirmed::Transport("missing szamlaszam in response".to_owned()),
+            Unconfirmed::Transport("create: parse: missing response field".to_owned()),
         ),
     ];
     for (label, response, expected) in cases {
@@ -527,7 +527,7 @@ async fn a_failed_post_send_re_query_names_both_the_send_and_its_own_failure() {
         (
             "down",
             ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
-            "maintenance",
+            "szlahu_down",
         ),
     ];
     for (label, re_query, expected_in_re_query) in re_query_failures {

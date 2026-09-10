@@ -1163,6 +1163,16 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   pause; a store that never answers is bounded per attempt by `CALL_DEADLINE`; and one that recovers within the
   attempts (unavailable, then silent, then the key) answers the credentials it gave after two pauses and one
   deadline.
+- Gateway diagnostic privacy (#215): `gateway::diagnostic` projects every unanswered exchange onto its
+  operation, HTTP status where exposed and static parse/transport/`szlahu_down` category before durable storage
+  or formatting. No body excerpt, offending value, transport URL or raw source chain crosses that boundary.
+  Nested send/re-query failures preserve both safe causes. Non-credential vendor-code messages deliberately
+  remain pass-through business data (including NAV, open codes, duplicate answers and one-shot inconclusive
+  answers); credential codes 3/135/136/164 carry static descriptions on every path. The full inventory is the
+  [README's Diagnostic privacy section](../../crates/restate-szamlazz/README.md#diagnostic-privacy).
+  Gateway regressions scan serialized strings and conversion-site logs; real-Restate coverage scans run failures,
+  retained outcomes/completion failures and ingress faults with category/context positive controls. Initialization
+  hygiene (#200) and immutable-deployment/exceptional-replay policy (ADR 0009) remain separate invariants.
 - `service::journal` (what a `ctx.run` result may hold; ADR 0009): a sample of every variant of every type the
   services journal, `Namespace`, `Resolution` (with an `Account` carrying every optional field), `QueryOutcome`,
   `LookupOutcome`, `CreateOutcome`, `StornoLookupOutcome`, `StornoOutcome`, `DeleteOutcome`, `SetCreditEntriesOutcome`,

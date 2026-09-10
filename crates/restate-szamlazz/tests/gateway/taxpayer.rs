@@ -150,6 +150,6 @@ async fn taxpayer_query_without_an_answer_is_unanswered() {
         .await;
     assert!(matches!(
         h.gateway.query_taxpayer(&prefix()).await,
-        Err(Unanswered::Unavailable(message)) if message.contains("maintenance")
+        Err(Unanswered::Unavailable(message)) if message.contains("szlahu_down")
     ));
 }

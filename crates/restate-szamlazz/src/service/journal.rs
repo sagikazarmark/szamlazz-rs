@@ -318,11 +318,10 @@ const NAV: Code = Code {
 
 /// The failure text of the `Lost(Transport)` samples of the two one-shot
 /// write steps.
-const TRANSPORT: &str = "error sending request for url (https://www.szamlazz.hu/szamla/)";
+const TRANSPORT: &str = "set-credit-entries: transport: connection";
 
-/// The `szlahu_down` header value of the `Unavailable` samples: szamlazz.hu's
-/// maintenance notice.
-const DOWN: &str = "Karbantartás miatt a szolgáltatás átmenetileg nem elérhető.";
+/// The safe category of the `Unavailable` samples, never the header value.
+const DOWN: &str = "query: szlahu_down";
 
 /// The reply of a create, with every field the `xmlszamlavalasz` body and
 /// the `szlahu_id` header can carry, parsed the way the gateway parses it

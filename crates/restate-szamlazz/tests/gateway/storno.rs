@@ -354,9 +354,13 @@ async fn inconclusive_storno_identity_uses_external_id_reconciliation() {
         (
             "credentials",
             body_error("3", "login"),
-            "credentials (3: login)",
+            "credentials (3: credentials rejected: invalid credentials)",
         ),
-        ("unavailable", szlahu_down(), "unavailable: maintenance"),
+        (
+            "unavailable",
+            szlahu_down(),
+            "unavailable: query: szlahu_down",
+        ),
         ("another code", body_error("57", "unknown"), "57: unknown"),
     ];
     for (label, verification, cause) in checks {
@@ -449,13 +453,13 @@ async fn post_send_storno_checks_preserve_uncertainty_and_both_causes() {
                         sent.contains("transport failure")
                             || (sent.contains("SS-1")
                                 && sent.contains("unavailable")
-                                && sent.contains("maintenance")),
+                                && sent.contains("szlahu_down")),
                         "preserve how the send or its identity check ended: {sent}"
                     );
                     assert!(
-                        (re_query.contains("135") && re_query.contains("expired key"))
+                        (re_query.contains("135") && re_query.contains("browser session active"))
                             || (re_query.contains("unavailable")
-                                && re_query.contains("maintenance")),
+                                && re_query.contains("szlahu_down")),
                         "{re_query}"
                     );
                 }
@@ -543,7 +547,7 @@ async fn the_storno_steps_leading_query_settles_or_proceeds() {
             "szlahu_down is data",
             szlahu_down(),
             0,
-            "Unavailable maintenance",
+            "Unavailable query: szlahu_down",
         ),
         (
             "a credential code never sends",

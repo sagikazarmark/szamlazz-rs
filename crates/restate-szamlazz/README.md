@@ -459,6 +459,31 @@ gateway is then the caller's to keep, since two gateways over one client share i
 calls it inside `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate
 service calls another.
 
+#### Diagnostic privacy
+
+Gateway exchange failures cross one allowlisted diagnostic projection before they reach a run failure,
+journaled outcome, caller fault or conversion-site warning. It retains the operation (`query`, `query-taxpayer`,
+`create`, `storno`, `delete-proforma`, `set-credit-entries`), HTTP status where the client exposes it, and static
+parse/transport categories. `szlahu_down` remains distinct, but its arbitrary header text is discarded. Response
+excerpts, offending XML values, transport URLs and source chains are never copied or formatted there. Nested
+send/re-query failures retain both categories; order, kind, external id and document context remain supplied by
+the operation and handler. These diagnostics do not change uncertainty, cancellation or retry semantics.
+
+**Vendor-answer exception:** non-credential `ApiError` codes and messages remain business data under the existing
+contract. This includes query and taxpayer faults (`szamlazz_code` and message, NAV tokens included), create/storno
+rejections, duplicate-order answers, open-code uncertainty and its re-query combinations, and one-shot
+rejections/inconclusive answers. These messages can name order numbers, line items or other document content;
+the worker does not claim they are redacted. A not-found answer or an accepted probe discards its message.
+Credential codes **3/135/136/164** are deliberately different: every Gateway answer uses a static description
+instead of the upstream credential message, including `check_account` and post-send verification/re-query
+failures. Local request refusals retain the wire contract's own diagnostic, not an upstream response.
+
+The Számla Agent client's richer diagnostic API remains available to direct consumers. Initialization keeps its
+separate credential-hygiene boundary (#200). This change does not scrub already retained journals or introduce
+a cross-release replay contract: use immutable deployments and review any exceptional replay under ADR 0009.
+`tests/gateway/privacy.rs` exercises hostile diagnostics and conversion-site logs; `tests/e2e/privacy.rs` checks
+real run failures, retained run results, completion failures and ingress faults, with positive category controls.
+
 `Order` / `Agent` are the Restate Virtual Object registered as `Szamlazz.Order` and the stateless service
 registered as `Szamlazz.Agent`, with generated `OrderClient` and `AgentClient` for typed calls from other
 handlers. Both are built `from_parts(Accounts, ValidatedWorkerConfig)`. Every handler decodes its body (`Body<T>`; a

@@ -157,31 +157,9 @@ pub(crate) async fn initialization_failure_is_journaled_at_the_operation(h: &Har
     }
     h.multi().set_unavailable("beta", false);
 
-    // http::Uri accepts this port; the Számla Agent URL builder refuses it.
-    // This reaches Gateway::open after a successful credential fetch.
-    h.multi().update("beta", |account| {
-        account.endpoint = "http://127.0.0.1:99999/".parse().expect("endpoint");
-    });
-    let reply = h.check_account(Some("beta")).await;
-    h.multi().update("beta", |account| {
-        account.endpoint = h.mock.uri().parse().expect("endpoint");
-    });
-    assert_eq!(reply.status, 503, "{}", reply.body);
-    let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::Unavailable);
-    assert!(
-        fault.message.contains("client could not be built"),
-        "{fault:?}"
-    );
-    assert!(
-        !fault.message.contains("99999"),
-        "source is private: {fault:?}"
-    );
-    assert_eq!(
-        h.admin().runs(reply.invocation_id()).await,
-        ["namespace", "account", "probe"]
-    );
-    assert!(run_result(&h.admin().journal(reply.invocation_id()).await, "probe").is_some());
+    // Endpoint validation now uses the transport URL parser (#214): an invalid
+    // port cannot construct an Account and no longer reaches Gateway::open.
+    // The initialization failures above exercise the remaining injectable seam.
 }
 
 /// The single → multi flag day. While the services are private the

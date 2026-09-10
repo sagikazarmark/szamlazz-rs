@@ -92,6 +92,6 @@ async fn probe_without_an_answer_is_unanswered() {
         .await;
     assert!(matches!(
         h.gateway.probe(&probe_id()).await,
-        Err(Unanswered::Unavailable(message)) if message.contains("maintenance")
+        Err(Unanswered::Unavailable(message)) if message.contains("szlahu_down")
     ));
 }

@@ -50,6 +50,11 @@
 //! the seller block, the line items, the PDF) is not in the journal, and the
 //! agent key never is. `service::journal` checks both on a sample of every
 //! variant, and that each round-trips through serde.
+//! Exchange diagnostics are projected too: `diagnostic` retains operation,
+//! HTTP status where available, and static parse/transport/`szlahu_down`
+//! categories. Upstream bodies, offending values, URLs and source chains are
+//! never formatted into these outcomes or run failures. Composed send and
+//! re-query failures therefore retain both safe causes.
 //!
 //! What szamlazz.hu answers with when it answers a code is one type wherever
 //! it appears: [`SzamlazzAnswer`] (`code`, `message`) in every
@@ -59,6 +64,11 @@
 //! wire contract's (the `request` pseudo-code, never sent). Both serialise to
 //! the two string fields the variants carried before them, so the journal
 //! layout is unchanged (#128).
+//! Non-credential vendor codes and messages (including NAV, open codes and
+//! duplicates) deliberately remain pass-through business data, which can name
+//! document content. Credential codes 3/135/136/164 instead carry static
+//! descriptions on every path, including the probe and nested failures (#215).
+//! This is a privacy boundary, not a general cross-release replay guarantee.
 //!
 //! [`FoundDocument`]'s methods are the checks the services make on a queried
 //! document before trusting or acting on it.
@@ -89,6 +99,7 @@ use crate::contract::{
 use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
+mod diagnostic;
 pub mod document;
 
 pub use build::{DocumentRefs, InputError};
@@ -106,17 +117,29 @@ pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 pub struct SzamlazzAnswer {
     /// The code as szamlazz.hu wrote it.
     pub code: String,
-    /// The message beside it.
+    /// The message beside it, or a static description for credential codes.
     pub message: String,
 }
 
 impl SzamlazzAnswer {
-    /// An answer of `code` and `message`.
+    /// An answer of `code` and `message`. Credential codes retain a static
+    /// description instead of the supplied message, which may echo credentials.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
+        let code = code.into();
+        let message =
+            diagnostic::credential_message(&code).map_or_else(|| message.into(), str::to_owned);
+        Self { code, message }
+    }
+
+    /// Preserve the already-projected send cause when a create's re-query
+    /// returns a credential code. This remains a credential fault, not a new
+    /// run retry; only the diagnostic gains the earlier send's context.
+    fn after_send(mut self, sent: impl fmt::Display) -> Self {
+        self.message = format!(
+            "{sent}; the re-query that would have settled it failed: {}",
+            self.message
+        );
+        self
     }
 }
 
@@ -438,7 +461,7 @@ pub enum CreateOutcome {
     /// [`CreateOutcome::Api`]. (The lookup step, under the read policy sized
     /// for reads, re-executes on the same answer, [`Unanswered::Unavailable`].)
     Unavailable {
-        /// szamlazz.hu's message.
+        /// The safe query diagnostic, never the `szlahu_down` header value.
         message: String,
     },
 }
@@ -570,11 +593,8 @@ impl Unanswered {
     /// is [`Unanswered::Unavailable`], anything else [`Unanswered::Transport`].
     /// The caller has matched the answers (`ClientError::Api`, and for a
     /// write `ClientError::Request`) off first.
-    fn from_exchange(error: ClientError) -> Self {
-        match error {
-            ClientError::ServiceUnavailable(message) => Self::Unavailable(message),
-            other => Self::Transport(other.to_string()),
-        }
+    fn from_exchange(operation: &str, error: &ClientError) -> Self {
+        diagnostic::exchange(operation, error)
     }
 }
 
@@ -832,7 +852,7 @@ pub enum StornoOutcome {
     /// query: nothing was sent. Settled data, as [`CreateOutcome::Unavailable`]
     /// is for the create step.
     Unavailable {
-        /// szamlazz.hu's message.
+        /// The safe query diagnostic, never the `szlahu_down` header value.
         message: String,
     },
 }
@@ -1208,7 +1228,7 @@ impl Gateway {
                 };
                 self.settle_or(request, open).await
             }
-            Err(error) => match classify_failure(error) {
+            Err(error) => match classify_failure("create", error) {
                 Failure::Rejected(rejection) => {
                     tracing::info!(code = %rejection.code, "document rejected");
                     Ok(CreateOutcome::Rejected(rejection))
@@ -1251,6 +1271,9 @@ impl Gateway {
         unconfirmed: Unconfirmed,
     ) -> Result<CreateOutcome, Unconfirmed> {
         match self.settled_by_query(request, false).await {
+            Ok(Some(CreateOutcome::CredentialsRejected(answer))) => Ok(
+                CreateOutcome::CredentialsRejected(answer.after_send(unconfirmed)),
+            ),
             Ok(Some(settled)) => Ok(settled),
             Ok(None) => Err(unconfirmed),
             Err(error) => Err(unconfirmed.re_query_failed(&error)),
@@ -1281,6 +1304,11 @@ impl Gateway {
             Ok(Some(CreateOutcome::Found(found))) => {
                 tracing::info!(number = %found.number, "reconciled after duplicate");
                 return Ok(CreateOutcome::Reconciled(found));
+            }
+            Ok(Some(CreateOutcome::CredentialsRejected(credentials))) => {
+                return Ok(CreateOutcome::CredentialsRejected(
+                    credentials.after_send(format!("duplicate order number {answer}")),
+                ));
             }
             Ok(Some(settled)) => return Ok(settled),
             Ok(None) => {}
@@ -1551,7 +1579,7 @@ impl Gateway {
                 Ok(TaxpayerOutcome::CredentialsRejected(api.into()))
             }
             Err(ClientError::Api(api)) => Ok(TaxpayerOutcome::Api(api.into())),
-            Err(error) => Err(Unanswered::from_exchange(error)),
+            Err(error) => Err(Unanswered::from_exchange("query-taxpayer", &error)),
         }
     }
 
@@ -1697,7 +1725,7 @@ impl Gateway {
                     self.verify_storno_reply(&request, created).await
                 }
             },
-            Err(error) => match classify_failure(error) {
+            Err(error) => match classify_failure("storno", error) {
                 Failure::Rejected(rejection) => {
                     tracing::info!(code = %rejection.code, "storno rejected");
                     Ok(StornoOutcome::Rejected(rejection))
@@ -1897,7 +1925,7 @@ impl Gateway {
             Err(ClientError::Request(error)) => {
                 DeleteOutcome::Rejected(Rejection::request(error.to_string()))
             }
-            Err(error) => DeleteOutcome::Lost(Unanswered::from_exchange(error)),
+            Err(error) => DeleteOutcome::Lost(Unanswered::from_exchange("delete-proforma", &error)),
         }
     }
 
@@ -1932,7 +1960,10 @@ impl Gateway {
             Err(ClientError::Request(error)) => {
                 SetCreditEntriesOutcome::Rejected(Rejection::request(error.to_string()))
             }
-            Err(error) => SetCreditEntriesOutcome::Lost(Unanswered::from_exchange(error)),
+            Err(error) => SetCreditEntriesOutcome::Lost(Unanswered::from_exchange(
+                "set-credit-entries",
+                &error,
+            )),
         }
     }
 
@@ -1955,8 +1986,10 @@ impl Gateway {
                 Err(QueryError::CredentialsRejected(api.into()))
             }
             Err(ClientError::Api(api)) => Err(QueryError::Api(api.into())),
-            Err(ClientError::ServiceUnavailable(message)) => Err(QueryError::Unavailable(message)),
-            Err(error) => Err(QueryError::Transport(error.to_string())),
+            Err(error) => Err(match Unanswered::from_exchange("query", &error) {
+                Unanswered::Unavailable(message) => QueryError::Unavailable(message),
+                Unanswered::Transport(message) => QueryError::Transport(message),
+            }),
         }
     }
 }
@@ -2000,7 +2033,7 @@ enum Failure {
     Transport(String),
 }
 
-fn classify_failure(error: ClientError) -> Failure {
+fn classify_failure(operation: &str, error: ClientError) -> Failure {
     match error {
         ClientError::Api(api) if api.code.is_credential_error() => {
             Failure::CredentialsRejected(api.into())
@@ -2013,9 +2046,11 @@ fn classify_failure(error: ClientError) -> Failure {
             // claims `rejected`.
             _ => Failure::Unknown(api.into()),
         },
-        ClientError::ServiceUnavailable(message) => Failure::Unavailable(message),
         ClientError::Request(error) => Failure::Rejected(Rejection::request(error.to_string())),
-        other => Failure::Transport(other.to_string()),
+        other => match Unanswered::from_exchange(operation, &other) {
+            Unanswered::Unavailable(message) => Failure::Unavailable(message),
+            Unanswered::Transport(message) => Failure::Transport(message),
+        },
     }
 }
 
@@ -2344,7 +2379,7 @@ mod tests {
                 message: "üzenet".to_owned(),
             })
         };
-        let classified = |code: ErrorCode| classify_failure(api(code));
+        let classified = |code: ErrorCode| classify_failure("create", api(code));
 
         for code in [
             ErrorCode::InvalidCredentials,
@@ -2437,33 +2472,39 @@ mod tests {
     /// as `Rejected` under the `request` pseudo-code with the contract's
     /// message; and the two remaining `ClientError`s, a parse failure and a
     /// `reqwest` error (from a request that cannot be built, the one such
-    /// error a test can make without a wire), as `Transport` with their
-    /// display.
+    /// error a test can make without a wire), as `Transport` with safe categories.
     #[test]
     fn a_failed_send_without_a_code_is_unavailable_the_request_or_transport() {
         assert_eq!(
-            classify_failure(ClientError::ServiceUnavailable("karbantartás".to_owned())),
-            Failure::Unavailable("karbantartás".to_owned())
+            classify_failure(
+                "create",
+                ClientError::ServiceUnavailable("karbantartás".to_owned())
+            ),
+            Failure::Unavailable("create: szlahu_down".to_owned())
         );
 
         let request = ClientError::Request(RequestError::MissingLineItems);
         let message = request.to_string();
         assert_eq!(
-            classify_failure(request),
+            classify_failure("create", request),
             Failure::Rejected(Rejection::request(message))
         );
 
         let parse = ClientError::Parse(ParseError::Missing("szamlaszam"));
-        let message = parse.to_string();
-        assert_eq!(classify_failure(parse), Failure::Transport(message));
+        assert_eq!(
+            classify_failure("create", parse),
+            Failure::Transport("create: parse: missing response field".to_owned())
+        );
 
         let unbuildable = crate::test_support::http_client()
             .get("http://")
             .build()
             .expect_err("an empty host does not build");
         let reqwest_error = ClientError::Transport(unbuildable);
-        let message = reqwest_error.to_string();
-        assert_eq!(classify_failure(reqwest_error), Failure::Transport(message));
+        assert_eq!(
+            classify_failure("create", reqwest_error),
+            Failure::Transport("create: transport: request construction".to_owned())
+        );
     }
 
     /// What the run journals as its last failure (`Unconfirmed`'s display) names
