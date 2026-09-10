@@ -90,7 +90,7 @@ fn order_discovers_as_a_virtual_object_with_eight_public_handlers() {
         );
         if name == "get" {
             // Read-only: shared, an empty input, the reads' back-off (10s →
-            // 1m) with three attempts, no idempotency retention; an explicit journal
+            // 1m) with three attempts, inherited idempotency retention; an explicit journal
             // retention so the journal is inspectable. The timeouts are the
             // reads' 2m / 2m (#114): a read step is one szamlazz.hu round trip
             // bounded by the 60 s client timeout, and szamlazz.hu has been
@@ -182,8 +182,8 @@ fn agent_discovers_as_a_service_with_five_handlers() {
             "{name}"
         );
         if name == "query" || name == "query_taxpayer" || name == "check_account" {
-            // Read-only: a short 10s → 1m back-off, three attempts, no
-            // idempotency retention (nothing to replay); an explicit journal
+            // Read-only: a short 10s → 1m back-off, three attempts, inherited
+            // idempotency retention (None does not disable deduplication); an explicit journal
             // retention so the journal is inspectable, and, for the probe,
             // so the leak assertion can scan it. The reads' 2m / 2m timeouts
             // (#114): one 60 s round trip plus the margin a stalling

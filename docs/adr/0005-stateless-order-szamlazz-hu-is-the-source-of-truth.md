@@ -11,7 +11,7 @@ go-live an archived fixture of a type still journaled is never deleted: a shape 
 the old one retired with its directory (the *Completeness by mechanism, and the archive rule* section).
 The three journal amendments (#47, #125, #127) are **superseded by
 [ADR 0009](0009-immutable-deployments-no-journal-compatibility-contract.md)**: deployments are immutable, so an
-in-flight invocation never replays against a later release's code and the journal carries no cross-version
+in-flight invocation stays on its original code under normal routing and the journal carries no general cross-version
 compatibility contract. The crate-owned projections of #127 stay for the reason that was never about replay
 (nothing a handler does not read, and never the agent key, in an entry the UI shows). The rest of this ADR stands.
 
@@ -130,7 +130,8 @@ This changes the run sequence and refuses resume from the previous deployment's 
   snapshot (`get` is four live queries and can return `unavailable`); the operator handlers `record_reversal` /
   `forget` (nothing to repair); the account fingerprint learned into state (pin `supplier_id` on the `Account`,
   itself dropped since: ADR 0006, account-pin amendment); schema versioning and state migrations.
-- **Gained**: nothing to migrate, repair or drift; `get` is never stale; a UI storno, a support storno and a
+- **Gained**: no mirrored document state to migrate, repair or drift; `get` observes szamlazz.hu (with the
+  non-atomic/replay qualifications below); a UI storno, a support storno and a
   service storno are one case (`sztornozott`); a kill has nothing to compensate; a reset Restate cluster loses
   only in-flight invocations; the crate is a fraction of its former size.
 - **Caller contract** (design §8, in the library README): (1) send an `Idempotency-Key` per logical request;
@@ -156,6 +157,23 @@ This changes the run sequence and refuses resume from the previous deployment's 
 - ADR 0002's `{gen}` suffix, `request_id` and "written to state before the first call", ADR 0003's `request_id`
   and flag-free service-side reissue, and ADR 0004's `pending` slot, operator runbook and
   `idempotency_retention = 7d` (now `30d`) are superseded; the rest of each still holds.
+
+## Shared observations (#204, 2026-09-10)
+
+`get` is a **non-atomic observation**, not a snapshot or completion barrier. Its four sequential, separately
+journaled reads run alongside exclusive writes and can mix observation times and replay ages. A new poll is a
+fresh invocation/key; a retained key can replay a completed answer. Unspecified discovery idempotency retention
+means the server's effective setting applies, not that deduplication is disabled. Absence in a poll does not
+establish that an in-flight create will never land. Native Restate attach/output answers whether a particular
+invocation completed; `get` answers what szamlazz.hu reports. The crate README has examples of both.
+
+This follows the shared-reader model in [Restate's database guide](https://docs.restate.dev/guides/databases)
+and [HTTP invocation access](https://docs.restate.dev/services/invocation/http). The current sequential reads
+follow Rust SDK 0.12.0's immediate-await rule for runs; [#50](https://github.com/sagikazarmark/szamlazz-rs/issues/50)
+is a proposal, not an implemented concurrent reader. Immutable normal routing is distinct from the exceptional
+resume and retained-prefix restart paths reviewed in ADR 0009. Retention-independent mutation intent belongs to
+[#206](https://github.com/sagikazarmark/szamlazz-rs/issues/206); persistent external-id discovery does not provide
+indefinite historical command deduplication.
 
 ## Amended (#47): journal compatibility; every journaled type is additive-only, pinned by fixtures
 

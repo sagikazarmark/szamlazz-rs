@@ -169,8 +169,9 @@ pub(crate) async fn no_agent_key_in_any_journal_of_the_run(h: &Harness) {
 /// so a handler added with neither a row nor a scenario is not invisible; and
 /// every path was walked in full by at least one invocation. A renamed,
 /// inserted, reordered or dropped step, on any handler of either service,
-/// fails here and shows in the table's diff (the sequence half of what a
-/// pause-and-resume onto a new deployment depends on; ADR 0009). The floor
+/// fails here and shows in the table's diff: a regression signal when reviewing
+/// exceptional replay, not proof of a particular old invocation's branch or
+/// exact commands (ADR 0009). The floor
 /// of the suite: a scenario that is the only walker of a path stays, however
 /// plain its decision.
 pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {

@@ -525,10 +525,11 @@ run_ctx!(ObjectContext, |ctx| Some(ctx.key()));
 run_ctx!(SharedObjectContext, |ctx| Some(ctx.key()));
 run_ctx!(Context, |_ctx| None);
 
-/// Journals the result of `f` under `name`, executing it at most once per
-/// journal entry (`RunRetryPolicy::max_attempts(1)`): the pure `namespace`
-/// pin returns its outcome as data, so a closure failure is a bug, not a retry.
-/// One-shot writes use [`run_retrying`] with one execution so their sites can
+/// Journals the result of `f` under `name` without policy-driven retries
+/// (`RunRetryPolicy::max_attempts(1)`). A crash before the result is recorded
+/// can still re-execute the closure; this is not at-most-once execution.
+/// The pure `namespace` pin returns its outcome as data.
+/// One-shot writes use [`run_retrying`] with the same threshold so their sites can
 /// map a run cancellation to an operation-specific fault. Reads go through
 /// [`run_reading`].
 pub(in crate::service) async fn run_once<'ctx, C, T, F, Fut>(

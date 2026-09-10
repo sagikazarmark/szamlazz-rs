@@ -13,10 +13,11 @@ use restate_e2e_harness::{RunPath, Table};
 /// The durable steps of every handler of both services, in order, as the
 /// `ctx.run` names they journal. Deployments are immutable (ADR 0009), so an
 /// in-flight invocation never replays against a later release's code by
-/// itself; what does replay a journal on other code is Restate's *pause and
-/// resume on a new deployment*, which needs the same run sequence, result
-/// types that decode and unchanged inputs: this table is the sequence part,
-/// and its diff between two releases is that part's answer. A
+/// itself. Exceptional replay includes deployment-changing resume and restart
+/// from a retained journal prefix. This table is a regression signal, not a
+/// replay-compatibility proof: review the actual invocation prefix, branch
+/// logic, exact commands (including names), serialization and inputs. Allowed
+/// path patterns do not prove that old data takes the same branch. A
 /// `{number}` / `{prefix}` segment is a parameter ([`Table::pattern`]); a
 /// handler with two rows has two paths. The check ([`Table::check`]) holds
 /// when every observed sequence of a handler is a prefix of one of its paths

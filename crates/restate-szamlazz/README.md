@@ -150,8 +150,8 @@ is Rust 1.92.
   caller cannot set it.
 - **Domain outcomes are data** (HTTP 200) and errors are reserved for faults, so a caller can always tell "the
   document exists" from "the outcome is unknown".
-- **`get`** is a live view: what szamlazz.hu holds under the order's four external ids right now, never a
-  cached snapshot.
+- **`get`** is a non-atomic observation of the order's four external ids. Its separately journaled reads
+  can mix observation times and replay ages, and run alongside exclusive writes. See *Polling and invocation completion*.
 
 ### What it relies on
 
@@ -376,10 +376,18 @@ accepted and queryable) because its parts are bounded (namespace 16, order key, 
   permanent.
 - `[issue]`, `[read]`, `[resolve]`: the three run retry policies, one `RetryPolicyConfig` each with the table's
   defaults (`IssueConfig`, `ReadConfig`, `ResolveConfig` are the three instantiations): `max_attempts` (optional; the
-  duration is the sole bound when unset), `initial_delay`, `factor`, `max_delay`, `max_duration`. The issue policy
-  runs the create and storno steps, by default `5` executions, `2m` → `10m`, bounded by `1h`; the read policy runs
-  every read-only step, by default `5` executions, `5s` → `60s`, bounded by `5m`; the resolve policy runs the
-  `account` step, by default with no attempt cap, `1s` → `10s`, bounded by `1m`.
+  duration is the sole exhaustion threshold when unset), `initial_delay`, `factor`, `max_delay`, `max_duration`.
+  The issue policy runs the create and storno steps, with default thresholds of `5` executions / `1h` and delays
+  `2m` → `10m`; the read policy runs every read-only step, `5` / `5m`, `5s` → `60s`; the resolve policy runs the
+  `account` step, with no attempt cap, a `1m` duration threshold and `1s` → `10s` delays.
+
+**Run limits are exhaustion thresholds, not deadlines or external-send caps.**
+[Rust SDK 0.12.0](https://docs.rs/restate-sdk/0.12.0/restate_sdk/context/struct.RunRetryPolicy.html)
+allows both actual execution count and duration to exceed the configured values. Shared core 7.0.3 evaluates
+limits after a closure fails; `max_duration` does not interrupt a hung closure. A crash after an external effect
+but before its result is journaled can re-execute the closure, even with `max_attempts(1)`. The one-shot writes
+disable policy-driven retries; they do not guarantee at-most-once external execution across crashes. Keep the
+per-call deadlines and execution timeouts described under *Retry policy*.
 
 Durations are written the way Restate's own handler attributes write them (jiff's friendly format: `"90s"`, `"2m"`,
 `"1h 30m"`, `"3d"`, `"500ms"`; months and years are refused, having no fixed length) or as a bare integer of seconds,
@@ -559,6 +567,41 @@ for a caller:
    scope. `order_key` in a storno response is meaningful only under the same scope; `external_id` is the only
    namespace marker in any response, and no response names the account.
 
+### Polling and invocation completion
+
+Use `get` to ask **what szamlazz.hu reports**, with a fresh invocation for each new observation. For example,
+these are two independent polls (no `Idempotency-Key` header):
+
+```sh
+curl http://localhost:8080/restate/call/Szamlazz.Order/ORD-1/get
+sleep 5
+curl http://localhost:8080/restate/call/Szamlazz.Order/ORD-1/get
+```
+
+For scoped calls use `/restate/scope/<scope>/call/Szamlazz.Order/ORD-1/get` on each poll. If your client supplies
+keys, use a fresh key per poll; keep that poll's key only when retrying its unanswered request. Reusing a retained
+key after completion can replay the old answer. `get` leaves idempotency retention unspecified in discovery;
+that means the server's effective setting applies, **not** that deduplication is disabled.
+
+Each poll performs four sequential, separately journaled reads. They can observe different moments; after
+replay, earlier reads may be old while later ones execute afresh. Shared `get` runs alongside exclusive writes,
+so even a fresh poll is neither an atomic snapshot nor a completion barrier. An absent invoice does not prove
+that an in-flight create will never land.
+
+Use native **attach/output** to ask **whether one particular invocation completed**. Record `x-restate-id` from
+the call or `invocationId` from `/restate/send/…`, and use the authorized ingress:
+
+```sh
+# INVOCATION_ID is the id returned for the original call/send.
+curl "http://localhost:8080/restate/attach/$INVOCATION_ID"  # wait for completion
+curl "http://localhost:8080/restate/output/$INVOCATION_ID"  # peek without waiting
+```
+
+These retrieve that invocation's retained result, including a fault, rather than start another create. Output
+can be not ready or not found (including after retention); neither is evidence of external absence. See
+[Restate's invocation access guidance](https://docs.restate.dev/services/invocation/http#attach-to-an-invocation).
+Completion itself does not settle an `outcome_unknown` write: use the external observations to reconcile it.
+
 ### Faults
 
 Faults are `TerminalError`s whose message is the JSON `{ "code", "message", "cause"?, "szamlazz_code"?, "order"?, "kind"?,
@@ -630,13 +673,16 @@ Every handler that calls szamlazz.hu pins its own invocation retry policy.
 | `Szamlazz.Agent.query`, `query_taxpayer`, `check_account` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
 
 `set_credit_entries` gets two attempts because an additive send is at-least-once and every attempt is a potential
-second copy of the entries. The timeouts follow one rule: a step's szamlazz.hu round trips at the client's 60 s
+second copy of the entries. Inactivity timeout waits for progress before requesting SDK suspension;
+**abort timeout starts after that request** and bounds the subsequent wait before aborting the execution.
+They are not concurrent timers starting with the external call, nor a terminal invocation kill.
+The timeouts follow one sizing rule: a step's szamlazz.hu round trips at the client's 60 s
 `REQUEST_TIMEOUT` each, plus the margin a stalling szamlazz.hu needs. `4m` / `3m` where the step is three trips
 (the create and storno steps' leading query, send and re-query); `2m` / `2m` where it is one, which is
-`set_credit_entries`' send and every read step alike. The reads never run on the server's 1 m defaults, on which a read
-stalled for the minute szamlazz.hu has been seen to stall would be suspended and then aborted, an invocation
-attempt spent on a read that would have completed. The 2 m interval is longer than the 60 s client timeout, so
-the retry after a crash cannot run while the first send is still in flight.
+`set_credit_entries`' send and every read step alike. The reads avoid the server's 1 m inactivity default, which
+could request suspension during a slow read; abort follows only if the SDK does not suspend within the further
+abort interval. The 2 m retry interval is longer than the client timeout and allows the observed server stall
+to settle; a client deadline does not prove that szamlazz.hu has stopped processing a request.
 
 **An invocation attempt is spent only on a worker-side failure** (the worker unreachable, a rollout cutting the
 connection, the abort timeout, an undecodable journal), never on a run retry: a step re-executed under `[issue]`,
@@ -644,10 +690,12 @@ connection, the abort timeout, an undecodable journal), never on a run retry: a 
 to end against 1.7.8). So the run policies decide how long a szamlazz.hu outage is tolerated, the invocation
 policy how long a worker outage is (~24 min of back-off on the `Szamlazz.Order` writes and
 `Szamlazz.Agent.storno`, 2 min on `set_credit_entries`), and szamlazz.hu's "max 5 attempts" etiquette is the issue
-policy's business: every re-dispatch is query-first and multiplies no sends.
+policy's business. Create/storno re-executions are query-first, but the run thresholds are not hard send limits.
 
 **Kill, not pause.** A paused invocation holds the order's key and blocks the very handler that would reconcile
-it. Kill releases the key, and the external-id query inside the create step is what makes that safe.
+it. Kill releases the key; it does not undo an external effect or establish that a still-processing send has
+finished. The next create queries first. Protection across unresolved-write exhaustion/kill is tracked in
+[#205](https://github.com/sagikazarmark/szamlazz-rs/issues/205); no additional fence is implied here.
 
 **The prologue's own waits are bounded too.** One `AccountResolver::resolve` or `CredentialStore::fetch` call
 gets ten seconds (a worker constant, not a setting: a resolver that has not answered by then is not going to),
@@ -679,14 +727,14 @@ ours is `conflict{foreign}`.
 Like every read-only step of both services (the exclusivity and proforma-link lookups before it, the verifies,
 the order-number hint, the storno lookup, `get`'s four queries, `Szamlazz.Agent.query`, `query_taxpayer`'s one
 step `lookup-taxpayer-{prefix}`, the `check_account` probe) it runs under the **read policy** (`[read]`: `5` executions
-`5s` → `60s`, bounded by `5m` by default). Every szamlazz.hu *answer* is journaled data, and a query szamlazz.hu
+`5s` → `60s`, duration threshold `5m` by default). Every szamlazz.hu *answer* is journaled data, and a query szamlazz.hu
 did not answer (a transport or parse failure, `szlahu_down`) is the step's retryable error (`Unanswered`),
 re-executed after the policy's delay; a read writes nothing, so re-executing it is safe and its answer is as
 fresh as a first one. When the read policy is exhausted the handler fails with `TerminalError{unavailable}`
 naming the step, the last failure and, where the step knows it, the order, kind and external id.
 
 **The create** (`create-{kind}`) runs under the issue policy (`[issue]`: `max_attempts` executions,
-`initial_delay` growing by `factor` to `max_delay`, bounded by `max_duration`) and every execution is
+`initial_delay` growing by `factor` to `max_delay`, duration threshold `max_duration`) and every execution is
 query-first. It sends only when the external id holds **nothing**, or **exactly the document the lookup step saw
 reversed**:
 
@@ -698,7 +746,7 @@ reversed**:
   `szlahu_down`) is settled data too, with nothing sent: the handler raises the same `unavailable` the lookup
   step raises for that code, at once, rather than spending the issue policy on a read.
 
-A lost reply is re-queried once, immediately; when nothing landed the step is *unconfirmed* and Restate
+A lost reply is re-queried once, immediately; when nothing is found the step is *unconfirmed* and Restate
 re-executes it after the delay (a re-query that fails itself leaves the step unconfirmed naming both the send's
 cause and the re-query's failure). When the policy is exhausted (or the invocation is cancelled mid-create) the
 handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next invocation's
@@ -871,7 +919,8 @@ once; cancellation mid-create and mid-delete; existing targets settling before c
 prerequisites and the reversed-target hint paths; run retries against `get`'s `max_attempts`; the wire faults; the positive
 control.
 
-**Phase 2** performs the documented flag day (private, drain, register the multi-account revision, public; the one
+**Phase 2** performs the documented flag day with ingress-only producers and no pending delayed sends
+(private, drain, register the multi-account revision, public; the one
 step whose failure ends the run, since everything after it runs on that deployment) and runs, **in sequence** (its
 scenarios script the shared resolver and store per scope, `acme` or `beta`), each as a task of its own so that a
 failure is recorded under its name, the mock reset without verifying the failed scenario's expectations, and the
@@ -902,10 +951,10 @@ same scan finds the positive control's sentinel; and the **step-name table check
 lists, per handler of both services, the ordered `ctx.run` names of every path it journals, and the scenario
 asserts (through the crate's `Table::check`) that every invocation's run sequence is a prefix of one of its
 handler's paths, that every handler the deployments offer (`GET /services`) or an invocation names is in the table
-and that every path was walked in full. Under immutable deployments the table serves one path,
-Restate's *pause and resume on a new deployment*: it is the **sequence half** of what that resume needs (the other
-two, the result types decoding and the inputs unchanged, are a review; *Deploying*), and a step renamed, inserted,
-reordered or dropped since the invocation's journal was written shows in its diff.
+and that every path was walked in full. The table is a regression signal for exceptional replay (*Deploying*),
+including deployment-changing resume and retained-prefix restart. A renamed, inserted, reordered or dropped step
+shows in its diff; allowed path patterns alone cannot prove that an old invocation takes the same branch or emits
+the same exact commands.
 
 The harness calls through `/restate/call/…` and `/restate/scope/{scope}/call/…`, reports `x-restate-id`, parses
 fault bodies out of the ingress envelope (asserting on every fault that the body is
@@ -1026,25 +1075,52 @@ can still issue in another company's name, or in live instead of test, with noth
 A release is a **new Restate deployment** (ADR 0009): register it under a URI of its own (`restate deployments
 register http://worker-v2/`, a new Lambda version, a new `RestateDeployment` under the Kubernetes operator), never
 re-register the same URI in place. Restate routes new invocations to the latest deployment and keeps every in-flight
-invocation, retries included, on the deployment it started on; the worker therefore has no journal compatibility
-logic and needs none. Keep the previous release running until `restate deployment describe <id> --extra` reports no
-invocations on it, then remove it; that report, not a clock, is the drain. The run policies bound one step's retries
-(and `max_duration` is a threshold checked between attempts, not a hard cut), but same-key invocations queue behind
+invocation, retries included, on the deployment it started on under normal routing; the worker therefore has no
+general cross-release journal compatibility contract. Keep the previous release running until
+`restate deployment describe <id> --extra` reports no active invocations on it, then remove it if it is no longer
+needed for exceptional replay below; that report, not a clock, is the drain. Run limits can overshoot, same-key invocations queue behind
 the one holding the key, a crashed handler is re-dispatched under its invocation retry policy, and a paused invocation
 waits for an operator, so a deployment with a backlog can hold invocations for hours. `restate deployments register
---force` is for local development: it replaces the code an in-flight invocation will replay against, which is the
-one way to strand it.
+--force` is for local development: replacing code behind a pinned URI can strand its invocations.
 
-A stuck invocation can be moved onto a newer deployment (`restate invocations pause` / `resume --deployment`); the
-newer code then replays the old journal, which needs **three** things to hold: the `ctx.run` sequence (the
-*step-name table* checks the current paths; its diff is the sequence check between releases), the journaled result types
-still decoding (a release may reshape them; review the diff of `gateway`'s outcome enums and `Resolution`), and the
-steps' inputs unchanged. Review all three before a resume, or kill and let the caller retry with a new
-`Idempotency-Key`.
+**Exceptional replay is an operator-selected repair**, both moving a stuck invocation to another deployment
+(`pause` / `resume --deployment`) and restarting a completed invocation from a retained journal prefix. Server
+**1.7.8 source** keeps the existing pin on resume unless explicitly overridden; prefix restart inherits the old
+pin unless patched, creates a new invocation and clears the original idempotency key. These are version-qualified
+facts, not defaults inferred from current unversioned docs. Verify the actual server, CLI/API request and selected
+deployment before repair; the server's protocol-version check does not prove application replay compatibility.
+See [ADR 0009's pinned sources and repair review](../../docs/adr/0009-immutable-deployments-no-journal-compatibility-contract.md#exceptional-replay-204-2026-09-10).
+
+Review the **actual invocation prefix**, old and new branch logic, exact context commands (names and parameters
+included), serialization and operation inputs. The step-name table checks allowed current path patterns; its diff
+is useful evidence, not a proof that this old invocation replays. A prefix restart can also execute operations
+beyond the copied prefix again, so reconcile their external effects before authorizing it, even on the same code.
+If this review cannot establish compatibility, retain the original deployment; killing or starting a new invocation
+is not rollback or permission to reissue. Completed-result retention and journal retention are separate from
+keeping code available, and neither bounds the drain time.
 
 The target-first cleanup inserts an ownership lookup before prerequisites and adds reversed-target hint paths.
 Its `ctx.run` sequence differs from the previous deployment's: **do not resume an invocation from that sequence
-on this release**. Keep it on its original deployment, or kill it and reconcile through a new invocation.
+on this release**, including a restart carrying that incompatible prefix. Keep it on its original deployment;
+reconcile external effects before deliberately choosing a new invocation.
+
+**Mapping flag days require quiesced producers.** Making services private blocks ingress calls, but internal SDK
+calls still work. Before the [single → multi procedure](../../docs/design/restate-szamlazz.md#9-configuration-deployment-constant-never-in-payloads),
+stop internal producers and account for pending delayed sends (drain them under the old mapping or deliberately
+cancel and reconcile them); stopping their originator alone does not remove detached sends. Keep producers stopped
+through drain and switch, update their scope routing, then reopen. The e2e procedure assumes ingress-only producers.
+
+Related guarantees have their own work: [#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) owns broader
+alerting/runbooks; [#50](https://github.com/sagikazarmark/szamlazz-rs/issues/50) proposes concurrent `get` reads
+(current reads are sequential; Rust SDK 0.12 requires immediately awaiting runs before other context calls);
+[#195](https://github.com/sagikazarmark/szamlazz-rs/issues/195) owns Számla Agent recovery evidence;
+[#200](https://github.com/sagikazarmark/szamlazz-rs/issues/200) credential initialization/rotation;
+[#201](https://github.com/sagikazarmark/szamlazz-rs/issues/201) one-shot recovery;
+[#202](https://github.com/sagikazarmark/szamlazz-rs/issues/202) replay-aware logging;
+[#203](https://github.com/sagikazarmark/szamlazz-rs/issues/203) cancellation;
+[#205](https://github.com/sagikazarmark/szamlazz-rs/issues/205) unresolved-write exhaustion/kill; and
+[#206](https://github.com/sagikazarmark/szamlazz-rs/issues/206) retention-independent mutation intent. External-id
+discovery surviving retention does not mean an old mutation request is deduplicated indefinitely.
 
 ## License
 

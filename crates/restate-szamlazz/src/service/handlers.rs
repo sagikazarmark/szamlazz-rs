@@ -274,10 +274,14 @@ impl Order {
         .map(Json)
     }
 
-    /// What szamlazz.hu holds under the order's external ids right now: four
-    /// queries, no state. Read-only, so it runs concurrently with the
-    /// exclusive handlers. The journal is retained a day so that it can be
-    /// inspected; there is nothing to replay. The retry policy is the reads'
+    /// A non-atomic observation of the order's four external ids: separately
+    /// journaled reads that can mix observation times and replay ages. Runs
+    /// alongside exclusive writes, so absence does not prove an in-flight
+    /// create will never land. Use a fresh invocation/key for each new poll;
+    /// a retained `Idempotency-Key` can replay the completed answer. Unspecified
+    /// discovery retention does not disable deduplication. Use Restate's
+    /// attach/output to learn whether a particular invocation completed.
+    /// The journal is retained a day for inspection. The retry policy is the reads'
     /// (`10s → 1m`, three attempts, the same as `Szamlazz.Agent.query`'s):
     /// pinned like every other handler's, so no server default leaks through.
     /// The timeouts are the reads': a read step is one round trip bounded by
@@ -351,8 +355,9 @@ impl Agent {
 
     /// Queries a document by number, order number or external id, returning
     /// a projection that deliberately omits the seller block. The
-    /// journal is retained a day so that it can be inspected; there is
-    /// nothing to replay. The timeouts are the reads' 2m / 2m: one
+    /// journal is retained a day for inspection; completed reads replay, and
+    /// a retained idempotency key can replay the completed answer. The
+    /// timeouts are the reads' 2m / 2m: one
     /// 60 s round trip plus the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(

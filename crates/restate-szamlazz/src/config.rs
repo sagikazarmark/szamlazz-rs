@@ -331,7 +331,8 @@ pub mod table {
 /// The issue policy: the run retry policy of the create step and the storno
 /// step. Restate re-executes the step after `initial_delay`, multiplying the
 /// delay by `factor` up to `max_delay`, until `max_attempts` executions or
-/// `max_duration`; then the step fails and the handler reports
+/// `max_duration` is reached on failure; these are exhaustion thresholds,
+/// with the overshoot caveats on [`RetryPolicyConfig`]. The handler reports
 /// `outcome_unknown`. The policy shapes no journal entry.
 ///
 /// `initial_delay` has a floor, [`MIN_INITIAL_DELAY`](Self::MIN_INITIAL_DELAY),
@@ -345,7 +346,8 @@ pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 /// szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`)
 /// is the step's retryable error, re-executed after `initial_delay`, the
 /// delay multiplied by `factor` up to `max_delay`, until `max_attempts`
-/// executions or `max_duration`; then the step fails and the handler reports
+/// executions or `max_duration` is reached on failure (subject to the
+/// overshoot caveats on [`RetryPolicyConfig`]); the handler reports
 /// `unavailable`. Every szamlazz.hu *answer* is data and never retried. The
 /// policy shapes no journal entry.
 ///
@@ -354,7 +356,7 @@ pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 /// sized for szamlazz.hu, not for the worker: five executions 5 → 10 → 20 →
 /// 40 s apart ride out a blip of about a minute, and, since szamlazz.hu is
 /// observed to stall for a minute at a time, a stalling szamlazz.hu is waited
-/// out up to the 5 m bound, instead of failing the invocation with a terminal
+/// out with a 5 m exhaustion threshold, instead of immediately failing with a terminal
 /// `unavailable` that is stored under the caller's `Idempotency-Key` for the
 /// retention period. This policy, not the handlers' invocation retry policy,
 /// is what decides how long a szamlazz.hu outage is tolerated: a run retry is
@@ -365,7 +367,8 @@ pub type ReadConfig = RetryPolicyConfig<table::Read>;
 /// The resolve policy: the run retry policy of the `account` step of every
 /// handler, which asks the account resolver for the request's account. An
 /// unavailable resolver is retried under it (`initial_delay` growing by
-/// `factor` to `max_delay`, bounded by `max_duration`; no attempt cap by
+/// `factor` to `max_delay`, with `max_duration` as an exhaustion threshold;
+/// see [`RetryPolicyConfig`] for overshoot, and no attempt cap is set by
 /// default), and its exhaustion is the `unavailable` fault. Unscoped and
 /// unknown are answers, journaled as data, never retried. Shapes no journal
 /// entry.
@@ -380,7 +383,14 @@ pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
 /// struct with the table's defaults ([`Table::defaults`]). Restate
 /// re-executes the step after `initial_delay`, multiplying the delay by
 /// `factor` up to `max_delay`, until `max_attempts` executions (when set) or
-/// `max_duration`, whichever comes first.
+/// `max_duration` is reached when evaluating a failed closure.
+///
+/// These are exhaustion thresholds, not hard wall-clock or external-send
+/// limits. Rust SDK 0.12.0 permits both execution-count and duration overshoot:
+/// the closure executes before its result is recorded, and a crash in that
+/// gap can re-execute it. Shared core 7.0.3 evaluates the limits after failure;
+/// `max_duration` does not interrupt a hung closure. Keep per-call deadlines
+/// independently of these policies and the handler's execution timeouts.
 ///
 /// Durations are written in the grammar Restate's own handler attributes
 /// take (jiff's friendly format: `"90s"`, `"2m"`, `"1h 30m"`, `"3d"`,
@@ -401,8 +411,9 @@ pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RetryPolicyConfig<T: Table> {
-    /// Executions of the step, including the first; `None` leaves the
-    /// duration as the sole bound. Default `5` on `[issue]` and `[read]`,
+    /// Execution-count exhaustion threshold, including the first; actual
+    /// executions can exceed it. `None` leaves duration as the sole exhaustion
+    /// threshold. Default `5` on `[issue]` and `[read]`,
     /// unset on `[resolve]`.
     pub max_attempts: Option<u32>,
     /// Delay before the first re-execution. Default `2m` on `[issue]` (at
@@ -416,7 +427,8 @@ pub struct RetryPolicyConfig<T: Table> {
     /// on `[resolve]`.
     #[serde(with = "duration_str")]
     pub max_delay: Duration,
-    /// Hard bound on the time spent re-executing the step. Default `1h` on
+    /// Retry-duration exhaustion threshold, checked after closure failure;
+    /// can overshoot and does not interrupt a hung closure. Default `1h` on
     /// `[issue]`, `5m` on `[read]`, `1m` on `[resolve]`.
     #[serde(with = "duration_str")]
     pub max_duration: Duration,

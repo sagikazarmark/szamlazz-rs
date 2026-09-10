@@ -27,8 +27,8 @@
 //!   `GET /services` lists it ([`Handler`]).
 //! - [`run_names`]: the step-name table ([`Table`] over [`RunPath`] rows,
 //!   [`Table::check`] over a whole run) a consumer holds its handlers'
-//!   `ctx.run` names to: the sequence an in-place redeploy replays and a
-//!   pause-and-resume onto new code needs.
+//!   `ctx.run` names to: a regression signal when reviewing exceptional resume
+//!   or retained-prefix restart, not proof of replay compatibility.
 //!
 //! The crate knows nothing of any particular endpoint: what it deploys is a
 //! `restate_sdk` [`Endpoint`](restate_sdk::prelude::Endpoint), and what it

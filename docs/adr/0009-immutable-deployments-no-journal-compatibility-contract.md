@@ -40,8 +40,8 @@ of the handlers.
 1. **A release is a new deployment.** The host registers each release under a URI of its own and keeps the
    previous release running until Restate reports it drained (`restate deployment describe <id> --extra` shows
    no invocations). Nothing is ever re-registered in place with `--force` outside local development. The drain
-   has no fixed bound: the run policies bound one step's retries (`max_duration` is a threshold checked between
-   attempts), but same-key invocations queue serially behind the one holding the key, a crashed handler is
+   has no fixed bound: run exhaustion thresholds can overshoot and do not interrupt a hung closure;
+   same-key invocations queue serially behind the one holding the key, a crashed handler is
    re-dispatched under its invocation retry policy, and a paused invocation waits for an operator; the report is
    the check, not a clock. (Restate's guidance to keep handlers short so that old deployments drain quickly is
    met as far as the worker can meet it: no handler sleeps or awaits an awakeable.)
@@ -50,8 +50,8 @@ of the handlers.
    fixtures under `tests/journal/`, the generator and its `UPDATE_JOURNAL_FIXTURES` mode, the compatibility test
    (fixture → current type → superset), the `DELIBERATE_BREAKS` list and the archive rule are removed. A journaled
    type may be reshaped in any release: under normal routing no invocation started under the previous release
-   decodes it with the new code, and the one path that does (an operator's *pause and resume*, item 3) is
-   refused across such a release.
+   decodes it with the new code. Operator-selected exceptional replay (deployment-changing resume or restart
+   from a retained prefix, amendment below) requires its own review and is refused across incompatible changes.
 
 3. **What stays**, because it costs almost nothing or serves a different purpose:
    - the crate-owned projections `FoundDocument` / `IssuedDocument` stay, for the reason #127 also gave that
@@ -66,17 +66,14 @@ of the handlers.
      samples are held to the list by type name, and each enum's samples to an exhaustive `variants!` match, so a
      type or variant journaled without a sample fails by name. It is the one part of #125's "completeness by
      mechanism" whose reason survives the contract;
-   - the *Step-name table* (`RUN_NAMES`, checked against `sys_journal` in the e2e) stays. Restate's **pause and
-     resume on a new deployment** is the one path on which a journal written by one release is read by another,
-     and it needs three things of the new code: the same `ctx.run` sequence, result types that still decode, and
-     unchanged step inputs. The table is the **sequence half**, and the only half with a mechanism; the other two
-     are a review of the release's diff (this ADR permits reshaping the result types, so a resume across such a
-     release is refused, and the invocation killed for the caller to retry). That path is an operator's
-     deliberate act on a named invocation; the table is what makes one of its three questions answerable.
+   - the *Step-name table* (`RUN_NAMES`, checked against `sys_journal` in the e2e) stays as a regression signal
+     for exceptional replay. It checks allowed path patterns, not whether a particular old invocation takes the
+     same branch. Its diff helps identify changed run sequences; compatibility still requires reviewing the actual
+     invocation prefix, branch logic, exact context commands, serialization and inputs (amendment below).
      The target-first cleanup inserts an ownership `lookup-{kind}` before prerequisites and adds
      `hint-storno-{number}` paths for reversed non-corrective targets. Its sequence differs from the previous
-     deployment's: **do not resume an invocation from that sequence onto this release**. Keep it on its original
-     deployment, or kill it and reconcile through a new invocation with a new `Idempotency-Key`.
+     deployment's: **do not resume an invocation from that sequence onto this release**, or restart with that
+     incompatible prefix. Keep it on its original deployment; reconcile effects before choosing a new invocation.
 
 4. **The journaled value types are closed themselves** (*amendment, 2026-09-09, #175*). `Defaults`,
    `SellerConfig` and `SellerEmailConfig` carry `#[serde(deny_unknown_fields)]` and the static resolver reads its
@@ -96,10 +93,44 @@ unchanged; initialization failure is now a terminal failure of the operation Run
 handler Output. The old early Output could diverge from recorded operation commands (RT0016, reproduced
 on server 1.7.8 / SDK 0.12.0 / shared core 7.0.3).
 
-Normal immutable-deployment routing still applies. Exceptional resume onto this release requires reviewing
+Normal immutable-deployment routing still applies. Exceptional replay onto this release requires reviewing
 all intervening changes, including the target-first sequence change above. Matching step names alone does
-not authorize a cross-deployment resume. Retained deployments using `StaticResolver` retain startup keys;
+not authorize a cross-deployment resume or prefix restart. Retained deployments using `StaticResolver` retain startup keys;
 a new deployment does not update their credential store.
+
+## Exceptional replay (#204, 2026-09-10)
+
+Immutable deployments remain the normal routing recommendation, and justify having no general cross-release
+journal compatibility contract. There are two deliberate exceptions to review:
+
+- **Resume with a changed deployment.** In server **1.7.8**, `resolve_pinned_deployment` keeps the existing pin
+  when no patch is supplied (or `KeepPinned` is selected). An explicit deployment or latest-deployment patch can
+  replace it, subject to a protocol-version check.
+- **Restart from a retained journal prefix.** Server **1.7.8** `restart_as_new` creates a new invocation from a
+  completed invocation's retained prefix, copies the associated completions, inherits the deployment pin unless
+  patched, and clears the original idempotency key. Commands beyond the copied prefix may execute again.
+
+These facts are source-verified at the pinned tag, not a runtime repair probe:
+[`manual_resume.rs`](https://github.com/restatedev/restate/blob/v1.7.8/crates/worker/src/partition/state_machine/lifecycle/manual_resume.rs)
+(`resolve_pinned_deployment`) and
+[`restart_as_new.rs`](https://github.com/restatedev/restate/blob/v1.7.8/crates/worker/src/partition/state_machine/lifecycle/restart_as_new.rs)
+(`OnRestartAsNewInvocationCommand::apply`). Verify the deployed server version, the CLI/API request and the
+selected deployment before acting; current unversioned [invocation management](https://docs.restate.dev/services/invocation/managing-invocations)
+and [versioning](https://docs.restate.dev/services/versioning) guidance must not override these version-specific defaults.
+
+For either path review the actual invocation's retained prefix against the candidate code: **branch logic,
+exact context commands (including names and parameters), serialization and operation inputs**, not only the
+`ctx.run` names. The step-name table is a regression signal, not proof of replay compatibility; an old result may
+choose a different branch even when both paths remain allowed by the table. The server's protocol check is not
+this application review. For restart, also reconcile effects of operations outside the copied prefix before
+deliberately allowing them to run again, even if the deployment is unchanged. Kill does not undo those effects.
+
+Keep the original deployment if compatibility cannot be established. Completion/idempotency retention preserves
+answers for deduplication; journal retention makes prefix restart possible while history is retained. Neither
+keeps the old code available or provides a deadline for draining it. After normal drain, remove a deployment only
+when it is no longer needed for an intended repair. Unresolved-write exhaustion/kill policy belongs to
+[#205](https://github.com/sagikazarmark/szamlazz-rs/issues/205), not to a claim that a fresh invocation or prefix
+restart is automatically safe.
 
 ## Considered options
 
@@ -124,7 +155,7 @@ a new deployment does not update their credential store.
 - ADR 0005's three journal amendments are marked superseded by this ADR; the rest of ADR 0005 stands.
 - CONTEXT.md's *Journaled type* entry is replaced by a short one (a `ctx.run` result type; crate-owned; carries
   neither the agent key nor the document body; no compatibility rule), and *Run-name pin* is reworded to name
-  pause-and-resume as its reason. The word "pin" is retired from the journal fixtures' vocabulary.
+  exceptional replay as its reason. The word "pin" is retired from the journal fixtures' vocabulary.
 - The e2e's flag day (`Harness::switch_to_multi_account`, the second `deploy` into one server) keeps proving that a second deployment can
   be registered beside a first; it no longer proves anything about replay across them, and says so.
 - The host's deployment procedure carries the one operational obligation this ADR creates: do not remove, stop or

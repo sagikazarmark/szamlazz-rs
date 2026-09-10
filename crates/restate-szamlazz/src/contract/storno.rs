@@ -413,15 +413,19 @@ impl schemars::JsonSchema for DeleteReason {
     }
 }
 
-/// Output of `Szamlazz.Order.get`: what szamlazz.hu holds under the order's
-/// four external ids right now. Carries numbers and totals, never buyer
-/// data.
+/// Output of `Szamlazz.Order.get`: a non-atomic observation of the order's
+/// four external ids. The separately journaled reads can mix observation
+/// times and replay ages, and run alongside exclusive writes. Carries numbers
+/// and totals, never buyer data. Poll with a fresh invocation/key; a retained
+/// key can replay a completed answer. Use Restate's attach/output for the
+/// completion of a particular invocation, rather than this observation.
 ///
 /// A slot is `None` when szamlazz.hu holds nothing under its external id
 /// *or* when the newest holder of the id fails validation (an external-id
 /// collision: another order or kind). A read must
 /// not fail, so `get` reports such a slot as absent; the issuing handlers
 /// refuse the same situation as `conflict{external_id_collision}`.
+/// Absence does not establish that an in-flight create will never land.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default)]

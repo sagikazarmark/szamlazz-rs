@@ -233,6 +233,8 @@ impl Harness {
     /// flight, register the multi-account deployment (the same namespace, the
     /// same szamlazz.hu account now under scope `acme` plus a second one under
     /// `beta`), make the services public again. Callers then use scoped paths.
+    /// This suite has ingress-only producers and no pending delayed sends;
+    /// private services would still accept internal SDK calls.
     pub(crate) async fn switch_to_multi_account(&mut self) {
         self.set_public(false).await;
         self.restate.drain().await;

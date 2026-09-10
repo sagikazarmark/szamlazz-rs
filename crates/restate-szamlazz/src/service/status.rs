@@ -1,6 +1,7 @@
-//! `Szamlazz.Order.get`: the live view of what szamlazz.hu holds under the
-//! order's four external ids right now, four read-only steps under the read
-//! policy and a fold; no state.
+//! `Szamlazz.Order.get`: a non-atomic observation of the order's four external
+//! ids, four separately journaled reads under the read policy and a fold.
+//! Reads run alongside exclusive writes and can mix observation times and
+//! replay ages; this is neither a snapshot nor an invocation-completion barrier.
 
 use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::SharedObjectContext;
@@ -12,8 +13,8 @@ use crate::gateway::{FoundDocument, OwnershipOutcome};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
 impl Execution {
-    /// The live view: what szamlazz.hu holds under the order's four external
-    /// ids right now: four read-only steps under the read policy, on the
+    /// Observe the order's four external ids with separately journaled,
+    /// sequential read-only steps under the read policy, on the
     /// `order` the handler parsed from its key, then [`order_status`] on
     /// what they found.
     pub(super) async fn status(

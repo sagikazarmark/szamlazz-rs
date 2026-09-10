@@ -29,9 +29,10 @@ An end-to-end test harness for [`restate_sdk`](https://docs.rs/restate-sdk) endp
 - **The step-name table**: a consumer tables, per handler, the ordered `ctx.run` names of every path it journals
   (`RunPath`), and `Table::check` verifies a whole run against it: every invocation's run sequence is a prefix of
   one of its handler's paths (a journaled name read as its pattern, `lookup-{sku}` by its prefix), every handler
-  the deployments offer is tabled, and every path was walked in full. Under in-place re-registration a renamed,
-  inserted or reordered step strands every in-flight invocation on the next deploy; under immutable deployments the
-  same sequence is what a pause-and-resume onto new code needs; either way the test fails first.
+  the deployments offer is tabled, and every path was walked in full. A renamed, inserted or reordered step can
+  strand an invocation replayed on changed code. The table is a regression signal for exceptional resume or
+  retained-prefix restart, not a compatibility proof: review the actual invocation prefix, branch logic, exact
+  commands, serialization and inputs. Allowed patterns do not establish that old data takes the same branch.
 
 The crate knows no particular endpoint: it deploys a `restate_sdk::prelude::Endpoint` and decodes a fault into the
 caller's type. What is the consumer's stays with the consumer: its endpoint and mocks, its fault type, its table of

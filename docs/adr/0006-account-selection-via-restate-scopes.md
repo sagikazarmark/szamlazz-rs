@@ -236,7 +236,7 @@ the journals purged between the steps (`purged_order_is_stornoed_and_reissued`).
 The hand-rolled attempt loop (one `ctx.run` per attempt, a durable sleep, an attempt counter) became two
 steps (#22, ADR 0004 amended): a read-only **lookup** (`lookup-{kind}`) that settles every case needing no
 create, and a **create** (`create-{kind}`) under the **issue policy** (a run retry policy, `2m → 10m`,
-factor 2, five executions, bounded by one hour) whose closure returns `Err(Unconfirmed)` only when
+factor 2, exhaustion thresholds of five executions and one hour, both subject to overshoot) whose closure returns `Err(Unconfirmed)` only when
 szamlazz.hu's answer is not known and every known answer as `Ok` data. **Every execution of the create step
 is query-first, inside the closure**: a separate journaled pre-query would replay its stale "nothing" on
 the retry and the re-executed closure would send again. Storno has the same shape (#30).
@@ -253,7 +253,8 @@ reversed-target paths change the sequence: no resume from the previous deploymen
 duration from the server's `retry_count_since_last_stored_command` only when the failing run is the *first*
 journal entry after replay; true for these handlers, whose code is deterministic and whose open entry on
 re-dispatch is the create step (or the storno step). Otherwise the count restarts, so `max_attempts` is
-best-effort and `max_duration` is the hard bound (verified: an exhausted create step with a short test
+an exhaustion threshold, and `max_duration` can overshoot too (#204; ADR 0004). Neither is a hard send or
+wall-clock bound (verified: an exhausted create step with a short test
 policy returns the structured `outcome_unknown` within the run's delays, not the handler's, with
 `retry_count = 1` and `last_failure_related_command_name = create-invoice` visible in flight). No
 propagation-lag retry is added inside the closure: read-your-writes lag by external id is measured at ≈ 0.
@@ -425,12 +426,28 @@ Reviewer and judge rulings during #20–#31, recorded so they are not re-litigat
   scopes breaks rule 1. Limit keys exist for flow control and are not part of the identity (docs: "A limit
   key only influences concurrency. It is **not** part of an invocation's identity").
 
+## Quiesced producers (#204, 2026-09-10)
+
+The private → drain → switch shorthand assumes **ingress-only producers with no pending delayed sends**,
+as in the e2e suite. [Private services](https://docs.restate.dev/services/security#private-services) still accept
+internal SDK calls. For a deployment with internal producers, stop their admission of work before the drain
+and keep them stopped through the mapping switch. Account for pending delayed sends: drain them under the old
+mapping or deliberately cancel and reconcile them before switching. They are detached from their originator;
+stopping or killing that originator does not remove the send
+([invocation management](https://docs.restate.dev/services/invocation/managing-invocations)).
+
+Make both services private, drain outstanding invocations under the old mapping, register the new immutable
+deployment, update **all** callers' scope routing, then reopen ingress and resume producers. Privacy alone is
+not a global producer stop, and an empty drain observed while internal producers can still admit work is not a
+mapping boundary. Design §9 is the procedure; [#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) owns
+the broader operational SQL, alerting and per-fault runbook.
+
 ## Consequences
 
 - Single-account deployments are unchanged for callers: the static resolver's `[account]` is served
   unscoped, `resolve(None)` is the account, any scope is unknown.
-- Single → multi is a **flag day** with no data migration: make both services private (the ingress refuses
-  new calls without creating invocations), drain `sys_invocation`, register the revision with
+- Single → multi is a **flag day** with no data migration: quiesce producers as amended above, make both
+  services private (the ingress refuses new calls without creating invocations), drain `sys_invocation`, register the revision with
   `[accounts.<scope>]` keeping the namespace, point callers at scoped paths, make the services public, probe
   every scope. The first scoped create for an already-invoiced order finds it under the unchanged external
   id (verified: `flag_day_keeps_the_documents_and_refuses_unscoped_calls`). The same drain–switch–resume

@@ -6,15 +6,13 @@
 //! ([`RunPatterns`]) and the prefix rule ([`is_prefix_of_path`]) are the
 //! table's parts, reachable for a consumer that composes its own check.
 //!
-//! A journal replays by name and position. Under in-place re-registration an
-//! in-flight invocation replays the *previous* deployment's entries, so a
-//! renamed, inserted or reordered step strands it; under immutable deployments
-//! the same sequence is what a pause-and-resume onto new code needs. A
-//! consumer that keeps its table and checks, over every invocation a run
-//! leaves on the server, that the observed run names are a prefix of one of
-//! its handler's paths, that every handler the deployments offer is tabled
-//! and that every path was walked in full, makes either a failing test
-//! instead of a stranded invocation.
+//! Run names and positions participate in replay checks. A renamed, inserted
+//! or reordered step can strand an invocation replayed on changed code. This
+//! table detects changed sequences as a regression signal for exceptional
+//! resume or retained-prefix restart. It does not prove replay compatibility:
+//! review the actual invocation prefix, branch logic, exact commands,
+//! serialization and inputs. Allowed patterns do not prove that old results
+//! take the same branch, and parametrized names do not compare exact inputs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -349,11 +347,10 @@ impl fmt::Display for Violations {
             writeln!(
                 f,
                 "\nrun sequences no path of their handler explains:\n  {}\n  The table is the \
-                 record of which steps a handler journals and in what order: the sequence half of \
-                 what a pause-and-resume of a stuck invocation onto a new deployment replays (the \
-                 result types and the inputs are the other half, reviewed by hand). Bring the \
-                 table to match the code; a changed row means such a resume across this release \
-                 fails.",
+                 record of which steps a handler journals and in what order. Bring the table to \
+                 match the code. Its diff is a regression signal for exceptional resume or prefix \
+                 restart, not proof of replay compatibility: review the actual invocation prefix, \
+                 branch logic, exact commands, serialization and inputs.",
                 self.unexplained.join("\n  ")
             )?;
         }
@@ -763,10 +760,6 @@ mod tests {
         );
         let message = violations.to_string();
         assert!(message.contains("inv_7"), "{message}");
-        assert!(
-            message.contains("pause-and-resume"),
-            "the message says what the table is for: {message}"
-        );
     }
 
     /// A path no invocation walked to its end is reported: a scenario dropped,
