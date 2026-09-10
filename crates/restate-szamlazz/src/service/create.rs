@@ -26,7 +26,7 @@ use super::support::{
 };
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateOutcome, CreateRequest, CreateResponse, DocumentInput,
-    DocumentKind, IssuedKind, ProformaLink, Warning, outstanding,
+    DocumentKind, IssuedKind, ProformaLink, Reissue, Warning, outstanding,
 };
 use crate::gateway::{
     self, CreateStepRequest, DocumentRefs, FoundDocument, LookupOutcome, LookupRequest,
@@ -109,6 +109,11 @@ impl Identity {
         namespace: &Namespace,
     ) -> Result<CreateResponse, Fault> {
         Ok(match outcome {
+            gateway::CreateOutcome::TargetChanged => {
+                return Err(Fault::outcome_unknown(
+                    "the expected reversed holder disappeared inside the create step; no further create was sent, but an earlier send may have landed; reconcile before deliberately renewing the operation with the same expected number",
+                ));
+            }
             gateway::CreateOutcome::Issued(issued) => {
                 let mut response = self
                     .respond(CreateOutcome::Issued)
@@ -176,7 +181,7 @@ impl Identity {
 struct Prepared {
     order: OrderKey,
     document: DocumentInput,
-    reissue: bool,
+    reissue: Option<Reissue>,
     proforma: ProformaLink,
 }
 
@@ -195,7 +200,7 @@ struct Refs {
 struct Intent {
     identity: Identity,
     create: CreateInvoice,
-    reissue: bool,
+    reissue: Option<Reissue>,
     /// Numbers known to be ours; the hint ignores them.
     our_numbers: Vec<String>,
 }
@@ -477,21 +482,47 @@ fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Id
     identity.about(order, Fault::outcome_unknown(message).with_run_cause(error))
 }
 
-/// The target ownership decision before prerequisites. Only an absent
-/// target or an explicit reissue proceeds. The shell enriches an early
-/// reversed answer with a best-effort storno hint when appropriate.
+/// Both target decisions require explicit reissue intent to name the owned
+/// holder. Ordinary creation has no expected-number precondition.
+fn expected_target(
+    reissue: Option<&Reissue>,
+    holder: Option<&str>,
+    identity: &Identity,
+) -> Option<CreateResponse> {
+    let intent = reissue?;
+    if holder == Some(intent.expected_number.as_str()) {
+        return None;
+    }
+    let mut response = identity.conflict(ConflictReason::TargetChanged);
+    response.existing_number = holder.map(str::to_owned);
+    Some(response)
+}
+
+/// The target ownership decision before prerequisites. Only an ordinary
+/// create's absent target or the expected reversed target proceeds. The shell
+/// enriches an early reversed answer with a best-effort storno hint.
 fn decide_existing_target(
     outcome: OwnershipOutcome,
-    reissue: bool,
+    reissue: Option<&Reissue>,
     identity: &Identity,
     namespace: &Namespace,
 ) -> Result<Option<CreateResponse>, Fault> {
+    let changed = match &outcome {
+        OwnershipOutcome::Absent => expected_target(reissue, None, identity),
+        OwnershipOutcome::Live(found) | OwnershipOutcome::Reversed(found) => {
+            expected_target(reissue, Some(&found.number), identity)
+        }
+        _ => None,
+    };
+    if changed.is_some() {
+        return Ok(changed);
+    }
     Ok(match outcome {
-        OwnershipOutcome::Live(found) if reissue => {
+        OwnershipOutcome::Live(found) if reissue.is_some() => {
             Some(identity.conflict_about(ConflictReason::Live, found.number))
         }
         OwnershipOutcome::Live(found) => Some(identity.found(CreateOutcome::AlreadyIssued, &found)),
-        OwnershipOutcome::Reversed(found) if !reissue => {
+        OwnershipOutcome::Reversed(found) if reissue.is_none() => {
             Some(identity.reversed(&found.number, None))
         }
         OwnershipOutcome::Collision(found) => {
@@ -512,10 +543,21 @@ fn decide_existing_target(
 /// read also detects changes outside the order's lock and foreign documents.
 fn decide_lookup(
     outcome: LookupOutcome,
-    reissue: bool,
+    reissue: Option<&Reissue>,
     identity: &Identity,
     namespace: &Namespace,
 ) -> Result<ControlFlow<CreateResponse, Option<String>>, Fault> {
+    let changed = match &outcome {
+        LookupOutcome::Absent => expected_target(reissue, None, identity),
+        LookupOutcome::Live(found)
+        | LookupOutcome::Reversed {
+            document: found, ..
+        } => expected_target(reissue, Some(&found.number), identity),
+        _ => None,
+    };
+    if let Some(response) = changed {
+        return Ok(ControlFlow::Break(response));
+    }
     Ok(match outcome {
         LookupOutcome::Api(answer) => {
             return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
@@ -523,7 +565,7 @@ fn decide_lookup(
         LookupOutcome::CredentialsRejected(answer) => {
             return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
-        LookupOutcome::Live(found) if reissue => {
+        LookupOutcome::Live(found) if reissue.is_some() => {
             ControlFlow::Break(identity.conflict_about(ConflictReason::Live, found.number))
         }
         LookupOutcome::Live(found) => {
@@ -532,7 +574,9 @@ fn decide_lookup(
         LookupOutcome::Reversed {
             document,
             storno_number,
-        } if !reissue => ControlFlow::Break(identity.reversed(&document.number, storno_number)),
+        } if reissue.is_none() => {
+            ControlFlow::Break(identity.reversed(&document.number, storno_number))
+        }
         LookupOutcome::Reversed { document, .. } => ControlFlow::Continue(Some(document.number)),
         LookupOutcome::Collision(found) => ControlFlow::Break(
             identity.conflict_about(ConflictReason::ExternalIdCollision, found.number),
@@ -560,7 +604,7 @@ impl Execution {
         let prepared = self.prepare(order, kind, request)?;
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
         if let Some(response) = self
-            .existing_target(ctx, &prepared.order, &identity, prepared.reissue)
+            .existing_target(ctx, &prepared.order, &identity, prepared.reissue.as_ref())
             .await?
         {
             return Ok(response);
@@ -633,7 +677,7 @@ impl Execution {
             kind: IssuedKind::Corrective,
             external_id: ExternalId::for_corrective(&self.config.namespace, &order, &correction_id),
         };
-        if let Some(response) = self.existing_target(ctx, &order, &identity, false).await? {
+        if let Some(response) = self.existing_target(ctx, &order, &identity, None).await? {
             return Ok(response);
         }
 
@@ -661,7 +705,7 @@ impl Execution {
         let intent = Intent {
             identity,
             create,
-            reissue: false,
+            reissue: None,
             our_numbers: Vec::new(),
         };
         self.issue(ctx, &order, intent).await
@@ -678,7 +722,7 @@ impl Execution {
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
         identity: &Identity,
-        reissue: bool,
+        reissue: Option<&Reissue>,
     ) -> Result<Option<CreateResponse>, HandlerError> {
         let found = lookup(
             ctx,
@@ -884,8 +928,13 @@ impl Execution {
 
         // Step 3: lookup, then decide on what it found.
         let found = self.lookup_step(ctx, order, &intent).await.map_err(about)?;
-        let reversed = match decide_lookup(found, intent.reissue, identity, &self.config.namespace)
-            .map_err(about)?
+        let reversed = match decide_lookup(
+            found,
+            intent.reissue.as_ref(),
+            identity,
+            &self.config.namespace,
+        )
+        .map_err(about)?
         {
             ControlFlow::Break(response) => return Ok(response),
             ControlFlow::Continue(reversed) => reversed,
@@ -1152,6 +1201,12 @@ mod tests {
         Identity::of_kind(&namespace(), &ord_1(), DocumentKind::Invoice)
     }
 
+    fn reissue(number: &str) -> Reissue {
+        Reissue {
+            expected_number: number.parse().expect("invoice number"),
+        }
+    }
+
     /// The `{code, message}` body of a fault, with its HTTP status.
     fn fault_body(fault: Fault) -> (u16, serde_json::Value) {
         let error = TerminalError::try_from(fault).expect("known fault");
@@ -1174,8 +1229,8 @@ mod tests {
     /// Step 3, a live document of ours under the external id: the caller
     /// asked for this document and has it (`already_issued`, with its number
     /// and totals); with `reissue` the same document is `conflict{live}`
-    /// naming it, so the flag can never cause a duplicate. Nothing proceeds
-    /// to the create step either way.
+    /// naming it. A different expected number is `target_changed`. Nothing
+    /// proceeds to the create step either way.
     #[test]
     fn a_live_document_under_the_id_is_already_issued_or_a_live_conflict_under_reissue() {
         let identity = invoice_identity();
@@ -1183,7 +1238,7 @@ mod tests {
 
         let response = settled(decide_lookup(
             LookupOutcome::Live(live.clone()),
-            false,
+            None,
             &identity,
             &namespace(),
         ));
@@ -1196,8 +1251,8 @@ mod tests {
         assert_eq!(response.kind, IssuedKind::Invoice);
 
         let response = settled(decide_lookup(
-            LookupOutcome::Live(live),
-            true,
+            LookupOutcome::Live(live.clone()),
+            Some(&reissue("SZ-1")),
             &identity,
             &namespace(),
         ));
@@ -1205,6 +1260,28 @@ mod tests {
         assert_eq!(response.conflict_reason, Some(ConflictReason::Live));
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
         assert_eq!(response.invoice_number, None);
+        let intent = reissue("SZ-OLD");
+        let response = settled(decide_lookup(
+            LookupOutcome::Live(live.clone()),
+            Some(&intent),
+            &identity,
+            &namespace(),
+        ));
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::TargetChanged)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+        assert_eq!(
+            decide_existing_target(
+                OwnershipOutcome::Live(live),
+                Some(&intent),
+                &identity,
+                &namespace(),
+            )
+            .expect("data"),
+            Some(response)
+        );
     }
 
     /// Step 3, a reversed document of ours under the external id: without
@@ -1225,7 +1302,7 @@ mod tests {
                 document: reversed.clone(),
                 storno_number: Some("SS-1".to_owned()),
             },
-            false,
+            None,
             &identity,
             &namespace(),
         ));
@@ -1240,7 +1317,7 @@ mod tests {
                 document: reversed.clone(),
                 storno_number: None,
             },
-            false,
+            None,
             &identity,
             &namespace(),
         ));
@@ -1250,10 +1327,10 @@ mod tests {
         assert_eq!(
             decide_lookup(
                 LookupOutcome::Reversed {
-                    document: reversed,
+                    document: reversed.clone(),
                     storno_number: Some("SS-1".to_owned()),
                 },
-                true,
+                Some(&reissue("SZ-1")),
                 &identity,
                 &namespace(),
             )
@@ -1261,22 +1338,64 @@ mod tests {
             ControlFlow::Continue(Some("SZ-1".to_owned())),
             "reissue proceeds past the reversed document, carrying its number"
         );
+        assert_eq!(
+            decide_existing_target(
+                OwnershipOutcome::Reversed(reversed.clone()),
+                Some(&reissue("SZ-1")),
+                &identity,
+                &namespace(),
+            )
+            .expect("data"),
+            None
+        );
+        let intent = reissue("SZ-OLD");
+        let response = settled(decide_lookup(
+            LookupOutcome::Reversed {
+                document: reversed.clone(),
+                storno_number: None,
+            },
+            Some(&intent),
+            &identity,
+            &namespace(),
+        ));
+        assert_eq!(
+            response.conflict_reason,
+            Some(ConflictReason::TargetChanged)
+        );
+        assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
+        assert_eq!(
+            decide_existing_target(
+                OwnershipOutcome::Reversed(reversed),
+                Some(&intent),
+                &identity,
+                &namespace(),
+            )
+            .expect("data"),
+            Some(response)
+        );
     }
 
     /// Step 3, nothing to settle or something never to create past: `Absent`
-    /// proceeds carrying nothing; a collision (the newest holder of the id is
-    /// another order's or kind's) and a foreign document (another channel's
-    /// live invoice under the order) are conflicts naming the document, with
-    /// or without `reissue`.
+    /// proceeds only for ordinary creation; a collision (the newest holder of
+    /// the id is another order's or kind's) and a foreign document (another
+    /// channel's live invoice under the order) are conflicts naming the
+    /// document, with or without `reissue`.
     #[test]
     fn absent_proceeds_while_a_collision_or_a_foreign_document_refuses() {
         let identity = invoice_identity();
-        for reissue in [false, true] {
+        let intent = reissue("SZ-1");
+        for reissue in [None, Some(&intent)] {
+            let expected = reissue.map(|_| identity.conflict(ConflictReason::TargetChanged));
+            assert_eq!(
+                decide_existing_target(OwnershipOutcome::Absent, reissue, &identity, &namespace())
+                    .expect("data"),
+                expected
+            );
             assert_eq!(
                 decide_lookup(LookupOutcome::Absent, reissue, &identity, &namespace())
                     .expect("data"),
-                ControlFlow::Continue(None),
-                "reissue {reissue}"
+                expected.map_or(ControlFlow::Continue(None), ControlFlow::Break),
+                "reissue {reissue:?}"
             );
 
             let other_order = Doc {
@@ -1293,12 +1412,12 @@ mod tests {
             assert_eq!(
                 response.outcome,
                 CreateOutcome::Conflict,
-                "reissue {reissue}"
+                "reissue {reissue:?}"
             );
             assert_eq!(
                 response.conflict_reason,
                 Some(ConflictReason::ExternalIdCollision),
-                "reissue {reissue}"
+                "reissue {reissue:?}"
             );
             assert_eq!(response.existing_number.as_deref(), Some("SZ-9"));
 
@@ -1312,12 +1431,12 @@ mod tests {
             assert_eq!(
                 response.outcome,
                 CreateOutcome::Conflict,
-                "reissue {reissue}"
+                "reissue {reissue:?}"
             );
             assert_eq!(
                 response.conflict_reason,
                 Some(ConflictReason::Foreign),
-                "reissue {reissue}"
+                "reissue {reissue:?}"
             );
             assert_eq!(response.existing_number.as_deref(), Some("SZ-77"));
         }
@@ -1333,7 +1452,7 @@ mod tests {
 
         let fault = decide_lookup(
             LookupOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")),
-            false,
+            None,
             &identity,
             &namespace(),
         )
@@ -1355,7 +1474,7 @@ mod tests {
                 "135",
                 "Aktív böngésző session.",
             )),
-            true,
+            Some(&reissue("SZ-1")),
             &identity,
             &namespace(),
         )

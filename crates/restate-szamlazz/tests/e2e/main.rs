@@ -89,6 +89,7 @@ mod create_invoice;
 mod create_prepayment;
 mod create_proforma;
 mod delete_proforma;
+mod expected_document;
 mod faults;
 mod get;
 mod invariants;
@@ -376,6 +377,13 @@ async fn e2e_order_protocol() {
         only.as_ref(),
         scenarios![
             create_invoice::issued_already_issued_and_the_key_replays,
+            expected_document::purged_reissue_intent_cannot_replace_its_replacement,
+            expected_document::purged_deletion_intent_cannot_delete_a_replacement,
+            expected_document::expected_target_outcomes_precede_prerequisites,
+            expected_document::reissue_rechecks_the_expected_holder_after_prerequisites,
+            expected_document::purged_corrective_request_still_cannot_reissue,
+            expected_document::deletion_preserves_ownership_and_consumed_target_outcomes,
+            expected_document::missing_target_after_a_lost_reissue_preserves_uncertainty,
             create_invoice::reversal_between_executions_is_reversed_not_reissued,
             create_invoice::reversed_targets_answer_before_prerequisites,
             create_proforma::proforma_then_the_invoice_naming_it_then_get_consumed,

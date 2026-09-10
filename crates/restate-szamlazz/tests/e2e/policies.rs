@@ -130,7 +130,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
         .call(
             "E2E-11",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-11-k1",
         )
         .await;
@@ -195,7 +195,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
         .call(
             "E2E-11",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-11-k1",
         )
         .await;
@@ -213,7 +213,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
         .call(
             "E2E-11",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-11-k2",
         )
         .await;
@@ -242,7 +242,7 @@ async fn flaky_read_is_re_executed(h: &Harness) {
         .call(
             "E2E-27",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-27-k1",
         )
         .await;
@@ -301,7 +301,7 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
         .call(
             "E2E-28",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-28-k1",
         )
         .await;
@@ -383,7 +383,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
     )
     .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     let started = Instant::now();
     let (reply, cancelled) = tokio::join!(
         h.call("E2E-L4", "create_invoice", &body, "e2e-l4-k1"),
@@ -557,18 +557,22 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
         .mount(&h.mock)
         .await;
     let call = Call::object("Szamlazz.Order", "E2E-CANCEL-DELETE", "delete_proforma");
-    let reply = cancel_after_send(h, call, &json!({}), "cancel-delete-k1", &received).await;
+    let reply = cancel_after_send(
+        h,
+        call,
+        &json!({"expected_number": "D-CANCEL"}),
+        "cancel-delete-k1",
+        &received,
+    )
+    .await;
     let fault = reply.fault();
     assert_eq!(fault.order.as_deref(), Some("E2E-CANCEL-DELETE"));
     assert!(fault.message.contains("D-CANCEL"), "{fault:?}");
     assert!(
-        fault.message.contains("query the pinned number"),
+        fault.message.contains("query the expected number"),
         "{fault:?}"
     );
-    assert!(
-        fault.message.contains("current external-id holder"),
-        "{fault:?}"
-    );
+    assert!(fault.message.contains("same expected_number"), "{fault:?}");
     assert_eq!(fault.kind, Some(IssuedKind::Proforma));
     assert_eq!(
         fault.external_id.as_deref(),
@@ -593,7 +597,11 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
     assert_eq!(get.status, 200, "{}", get.body);
     assert!(get.body["proforma"].is_null(), "{}", get.body);
     let again = h
-        .invoke(&call, Some(&json!({})), Some("cancel-delete-k2"))
+        .invoke(
+            &call,
+            Some(&json!({"expected_number": "D-CANCEL"})),
+            Some("cancel-delete-k2"),
+        )
         .await;
     assert_eq!(again.status, 200, "{}", again.body);
     assert_eq!(again.body["reason"], "absent", "{}", again.body);

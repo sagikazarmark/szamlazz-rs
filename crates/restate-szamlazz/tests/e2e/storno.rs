@@ -135,7 +135,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
         .ok(
             "E2E-4",
             "create_invoice",
-            &create_body(dec!(1000), true),
+            &crate::harness::reissue_body(dec!(1000), "SZ-4"),
             "e2e-4-k1",
         )
         .await;
@@ -386,7 +386,7 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
             "acme",
             "E2E-18",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-18-k1",
         )
         .await;
@@ -468,7 +468,7 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
             "acme",
             "E2E-18",
             "create_invoice",
-            &create_body(dec!(1000), true),
+            &crate::harness::reissue_body(dec!(1000), "SZ-18"),
             "e2e-18-k2",
         )
         .await;

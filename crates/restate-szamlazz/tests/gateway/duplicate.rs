@@ -15,9 +15,13 @@ const DUPLICATE_MESSAGE: &str = "M%C3%A1r+l%C3%A9tez%C5%91+rendel%C3%A9ssz%C3%A1
 /// The leading query misses, the create answers 152, and the re-query sees
 /// `under_id`.
 async fn duplicate_harness(under_id: ResponseTemplate) -> Harness {
+    duplicate_harness_after(not_found(), under_id).await
+}
+
+async fn duplicate_harness_after(leading: ResponseTemplate, under_id: ResponseTemplate) -> Harness {
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
-        .respond_with(not_found())
+        .respond_with(leading)
         .up_to_n_times(1)
         .mount(&h.server)
         .await;
@@ -91,7 +95,7 @@ async fn duplicate_order_number_names_the_existing_document_when_our_kind_is_new
     let absent = (not_found(), None);
     let reversed = (Doc::reversed("SZ-1", "SZ").response(), Some("SZ-1"));
     for (label, (under_id, reversed)) in [("absent", absent), ("reversed", reversed)] {
-        let h = duplicate_harness(under_id).await;
+        let h = duplicate_harness_after(under_id.clone(), under_id).await;
         order_query("ORD-1")
             .respond_with(Doc::new("SZ-77", "SZ").response())
             .expect(1)

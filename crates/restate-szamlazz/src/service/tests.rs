@@ -417,7 +417,7 @@ fn a_malformed_body_is_a_structured_invalid_input() {
         .into_request()
         .expect("a well-formed body");
     assert_eq!(request.document, sample_document());
-    assert!(!request.options.reissue);
+    assert!(request.options.reissue.is_none());
 
     // A misspelt option: refused, naming the field and the known ones.
     let message = refused::<CreateRequest>(

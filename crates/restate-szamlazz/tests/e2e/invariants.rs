@@ -37,7 +37,7 @@ pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
         .call(
             "E2E-12",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-12-k1",
         )
         .await;

@@ -358,7 +358,8 @@ pub struct CreateStepRequest<'a> {
     /// external id (a reissue). It is the one holder the step may send past;
     /// a live document that is not this one was issued by an earlier
     /// execution of the step, and a reversed document that is not this one
-    /// was reversed since the lookup.
+    /// was reversed since the lookup. If this expected holder disappears,
+    /// the leading query answers `TargetChanged`, never authorizing a send.
     pub reversed: Option<&'a str>,
 }
 
@@ -371,6 +372,9 @@ pub struct CreateStepRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CreateOutcome {
+    /// The expected reversed holder disappeared before a send. No create is
+    /// authorized by this observation; it does not settle any earlier send.
+    TargetChanged,
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
     /// create, indistinguishable and reported either way), numbered.
     Issued(IssuedDocument),
@@ -1123,7 +1127,7 @@ impl Gateway {
     ///    `request.reversed` is [`CreateOutcome::Reversed`] (issued and
     ///    reversed since the lookup); `request.reversed` reported live is
     ///    [`CreateOutcome::LiveAgain`]; an invalid hit is
-    ///    [`CreateOutcome::Collision`]; code 7 and `request.reversed` still
+    ///    [`CreateOutcome::Collision`]; code 7 without reissue and `request.reversed` still
     ///    reversed continue; rejected credentials are
     ///    [`CreateOutcome::CredentialsRejected`]; another code is
     ///    [`CreateOutcome::Api`] and `szlahu_down` [`CreateOutcome::Unavailable`]
@@ -1163,11 +1167,14 @@ impl Gateway {
     ) -> Result<CreateOutcome, Unconfirmed> {
         // Step 1: the leading query. An answer settles the step: nothing
         // has been sent; only an exchange without one is unconfirmed.
-        match self.settled_by_query(request).await {
+        match self.settled_by_query(request, true).await {
             Ok(Some(settled)) => return Ok(settled),
-            // Nothing under the id, or the lookup's reversed document still
-            // reversed: send. (`seen` settles 7 as `Absent`; the `NotFound`
+            // Nothing under the id for ordinary creation, or the expected
+            // document still reversed: send. (`seen` settles 7 as `Absent`; the `NotFound`
             // arm keeps the match exhaustive and is right if reached.)
+            Err(QueryError::NotFound) if request.reversed.is_some() => {
+                return Ok(CreateOutcome::TargetChanged);
+            }
             Ok(None) | Err(QueryError::NotFound) => {}
             Err(QueryError::Api(answer)) => {
                 tracing::warn!(code = %answer.code, "the leading query was answered with another code");
@@ -1243,7 +1250,7 @@ impl Gateway {
         request: &CreateStepRequest<'_>,
         unconfirmed: Unconfirmed,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        match self.settled_by_query(request).await {
+        match self.settled_by_query(request, false).await {
             Ok(Some(settled)) => Ok(settled),
             Ok(None) => Err(unconfirmed),
             Err(error) => Err(unconfirmed.re_query_failed(&error)),
@@ -1270,7 +1277,7 @@ impl Gateway {
         request: &CreateStepRequest<'_>,
         answer: SzamlazzAnswer,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        match self.settled_by_query(request).await {
+        match self.settled_by_query(request, false).await {
             Ok(Some(CreateOutcome::Found(found))) => {
                 tracing::info!(number = %found.number, "reconciled after duplicate");
                 return Ok(CreateOutcome::Reconciled(found));
@@ -1340,12 +1347,15 @@ impl Gateway {
     async fn settled_by_query(
         &self,
         request: &CreateStepRequest<'_>,
+        before_send: bool,
     ) -> Result<Option<CreateOutcome>, QueryError> {
-        let settled = settle_create(
-            self.seen(request.external_id, request.order, request.kind)
-                .await,
-            request.reversed,
-        );
+        let seen = self
+            .seen(request.external_id, request.order, request.kind)
+            .await;
+        if before_send && request.reversed.is_some() && matches!(&seen, Ok(Seen::Absent)) {
+            return Ok(Some(CreateOutcome::TargetChanged));
+        }
+        let settled = settle_create(seen, request.reversed);
         match &settled {
             // The document the lookup saw reversed, reported live: a server
             // inconsistency the step never sends past.

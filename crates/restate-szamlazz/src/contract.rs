@@ -72,7 +72,7 @@ pub use agent::{
 };
 pub use create::{
     ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,
-    ProformaLink, Warning,
+    ProformaLink, Reissue, Warning,
 };
 pub use document::{
     BuyerInput, DocumentInput, DocumentOverrides, ExchangeRateInput, LineItemInput, PaymentMethod,

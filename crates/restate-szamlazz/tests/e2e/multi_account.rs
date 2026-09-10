@@ -38,7 +38,7 @@ pub(crate) async fn credential_failure_on_replay_preserves_operation_commands(h:
         .mount(&h.mock)
         .await;
     let hold = h.multi().hold_fetch("beta", 2);
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     let call = h.call_scoped("beta", "E2E-INIT", "create_invoice", &body, "e2e-init");
     let failure = async {
         hold.reached().await;
@@ -199,7 +199,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .call(
             "E2E-16",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-16-private",
         )
         .await;
@@ -227,7 +227,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
             "acme",
             "E2E-1",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-1-scoped-k1",
         )
         .await;
@@ -252,7 +252,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
         .call(
             "E2E-16",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-16-unscoped",
         )
         .await;
@@ -281,7 +281,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
             "gamma",
             "E2E-16",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-16-gamma",
         )
         .await;
@@ -326,7 +326,7 @@ pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h
         .mount(&h.mock)
         .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     let (acme, beta) = tokio::join!(
         h.call_scoped("acme", "E2E-17", "create_invoice", &body, "e2e-17-acme"),
         h.call_scoped("beta", "E2E-17", "create_invoice", &body, "e2e-17-beta"),
@@ -470,7 +470,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
         .mount(&h.mock)
         .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     // The second execution's fetch (the first execution's is the first).
     let hold = h.multi().hold_fetch("acme", 2);
     let call = h.call_scoped("acme", "E2E-19", "create_invoice", &body, "e2e-19-k1");
@@ -532,7 +532,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
             "acme",
             "E2E-19B",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-19b-k1",
         )
         .await;
@@ -566,7 +566,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
         .mount(&h.mock)
         .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     // The second execution's fetch (the first execution's is the first).
     let hold = h.multi().hold_fetch("beta", 2);
     let call = h.call_scoped("beta", "E2E-20", "create_invoice", &body, "e2e-20-k1");

@@ -50,7 +50,7 @@ pub(crate) async fn a_flaky_resolver_is_retried_by_the_resolve_policy(h: &Harnes
             SCOPE,
             "E2E-14",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-14-k1",
         )
         .await;
@@ -109,7 +109,12 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     h.absent("E2E-K", &["proforma"]).await;
     let hold = h.multi().hold_fetch(SCOPE, 1);
     let stuck = h
-        .submit_scoped(SCOPE, "E2E-K", "delete_proforma", &json!({}))
+        .submit_scoped(
+            SCOPE,
+            "E2E-K",
+            "delete_proforma",
+            &json!({"expected_number": "D-K"}),
+        )
         .await;
     hold.reached().await;
     h.admin().await_status(&stuck, &["running"]).await;
@@ -117,7 +122,12 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
     // The queued call: submitted while the lock is held, answered after the
     // kill.
     let queued = h
-        .submit_scoped(SCOPE, "E2E-K", "delete_proforma", &json!({}))
+        .submit_scoped(
+            SCOPE,
+            "E2E-K",
+            "delete_proforma",
+            &json!({"expected_number": "D-K"}),
+        )
         .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     let waiting = h.admin().invocation(&queued).await;

@@ -101,11 +101,17 @@ pub(crate) fn document(unit_price: Decimal) -> DocumentInput {
     )
 }
 
-pub(crate) fn create_body(unit_price: Decimal, reissue: bool) -> Value {
+pub(crate) fn create_body(unit_price: Decimal) -> Value {
     json!({
         "document": document(unit_price),
-        "options": { "reissue": reissue },
+        "options": {},
     })
+}
+
+pub(crate) fn reissue_body(unit_price: Decimal, expected_number: &str) -> Value {
+    let mut body = create_body(unit_price);
+    body["options"]["reissue"] = json!({"expected_number": expected_number});
+    body
 }
 
 // ----- the harness -----------------------------------------------------------

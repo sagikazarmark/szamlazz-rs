@@ -38,7 +38,7 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
         number_query(&number).respond_with(fresh.unwrap_or_else(|| doc.response())).expect(1).mount(&h.mock).await;
         delete_of(&number).respond_with(send).expect(u64::from(reaches_send)).mount(&h.mock).await;
         let key = format!("delete-{suffix}");
-        let body = json!({"force": true});
+        let body = json!({"expected_number": number, "force": true});
         let reply = h.call(&order, "delete_proforma", &body, &key).await;
         assert_eq!(reply.status, status, "{suffix}: {}", reply.body);
         if status == 200 {
@@ -105,7 +105,7 @@ pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Har
         .mount(&h.mock)
         .await;
 
-    let body = json!({});
+    let body = json!({"expected_number": "D-PINNED"});
     let call = h.call("E2E-D-REPLAY", "delete_proforma", &body, "delete-replay");
     let interrupt = async {
         reached.notified().await;
@@ -169,7 +169,12 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
         .await;
 
     let reply = h
-        .call("E2E-D1", "delete_proforma", &json!({}), "e2e-d1-k1")
+        .call(
+            "E2E-D1",
+            "delete_proforma",
+            &json!({"expected_number": "D-D1"}),
+            "e2e-d1-k1",
+        )
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["deleted"], true, "{}", reply.body);
@@ -185,7 +190,12 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     );
 
     let again = h
-        .call("E2E-D1", "delete_proforma", &json!({}), "e2e-d1-k2")
+        .call(
+            "E2E-D1",
+            "delete_proforma",
+            &json!({"expected_number": "D-D1"}),
+            "e2e-d1-k2",
+        )
         .await;
     assert_eq!(again.status, 200, "{}", again.body);
     assert_eq!(again.body["deleted"], true, "{}", again.body);

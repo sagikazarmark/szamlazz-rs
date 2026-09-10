@@ -17,6 +17,53 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 
 #[tokio::test]
+async fn a_missing_expected_reissue_target_never_becomes_an_ordinary_create() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(created("SZ-2", "1000", "1270"))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    let outcome = h.create(Some("SZ-1")).await.expect("answered query");
+    assert_eq!(outcome, CreateOutcome::TargetChanged);
+}
+
+#[tokio::test]
+async fn a_lost_reissue_followed_by_absence_stops_without_another_send() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::reversed("SZ-1", "SZ").response())
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.create(Some("SZ-1")).await,
+        Err(Unconfirmed::Transport(_))
+    ));
+    assert_eq!(
+        h.create(Some("SZ-1")).await,
+        Ok(CreateOutcome::TargetChanged)
+    );
+    assert_eq!(h.bodies().await.len(), 4);
+}
+
+#[tokio::test]
 async fn corrective_with_a_live_base_under_the_order_is_issued() {
     // Lookup, then create: the base invoice is the newest document under the
     // order throughout and is never queried; the corrective is issued.
@@ -143,9 +190,16 @@ async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_noth
     // (`reissue: true`) that this live one is not.
     for (label, reversed) in [("plain", None), ("reissue", Some("SZ-0"))] {
         let h = Harness::start().await;
+        if let Some(number) = reversed {
+            external_id_query("acct:ORD-1:invoice")
+                .respond_with(Doc::reversed(number, "SZ").response())
+                .up_to_n_times(1)
+                .mount(&h.server)
+                .await;
+        }
         external_id_query("acct:ORD-1:invoice")
             .respond_with(not_found())
-            .up_to_n_times(2)
+            .up_to_n_times(if reversed.is_some() { 1 } else { 2 })
             .mount(&h.server)
             .await;
         external_id_query("acct:ORD-1:invoice")

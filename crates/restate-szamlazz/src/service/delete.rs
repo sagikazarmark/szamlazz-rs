@@ -41,6 +41,13 @@ impl Execution {
             kind.into(),
         )
         .await?;
+        if let OwnershipOutcome::Live(doc) | OwnershipOutcome::Reversed(doc) = &found
+            && doc.number != request.expected_number.as_str()
+        {
+            return Ok(DeleteProformaResponse::not_deleted(
+                DeleteReason::TargetChanged,
+            ));
+        }
         let found =
             match delete_guard(found, request.force, &self.config.namespace).map_err(about)? {
                 ControlFlow::Break(response) => return Ok(response),
@@ -125,7 +132,7 @@ fn delete_guard(
 }
 
 /// A lost/inconclusive answer or cancelled one-shot run: reconcile first.
-const DELETE_RECOVERY: &str = "read get and query the pinned number; a new invocation selects the current external-id holder, so confirm that document is the intended target; then, if deletion is still intended, retry with a new Idempotency-Key";
+const DELETE_RECOVERY: &str = "read get and query the expected number; reconcile the earlier send, then, if deletion is still intended, retry with a new Idempotency-Key and the same expected_number; never substitute a replacement automatically";
 
 fn delete_unknown(lost: &impl std::fmt::Display) -> Fault {
     Fault::outcome_unknown(format!(

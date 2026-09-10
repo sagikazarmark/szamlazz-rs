@@ -183,6 +183,16 @@ _Avoid_: cancellation as rollback, cancellation as dependency unavailability, ca
 Issuing a new document of a kind after the one under its external id was reversed, by the service, the UI or anyone, at any distance in time: the service needs nothing from Restate to do it months later, only the key and the scope the caller recorded. Always explicit: `reissue: true` (with a new `Idempotency-Key`); without it the create returns `outcome: reversed`. Explicit because the service has no record of who reversed and cannot tell a stale retry of the original create from a deliberate new request; the flag on a live document is `conflict{live}`, so it can never cause a duplicate. The new document becomes the newest holder of the same external id. A reissue whose create reply was lost is reported as `issued` by the re-executed create step, not as a conflict.
 _Avoid_: re-create, retry (a retry targets the same document)
 
+**Expected-document intent**:
+The particular known document a caller means to replace or delete. A reissue or
+deletion retains that expected number across retries; a replacement does not
+inherit the caller's permission. Distinct from external-id discovery (finding
+the newest holder) and finite request deduplication (replaying a retained
+completion). A changed target requires a new business decision, not an automatic
+substitution of its number. Since #206, this supersedes the boolean reissue rule
+above; ADR 0012 records the request contract and migration.
+_Avoid_: generation, indefinite idempotency, expected number as vendor atomic compare-and-set
+
 **Reversal (as observed)**:
 A document is reversed when szamlazz.hu reports `<sztornozott>true</sztornozott>` on it; the storno document carries `hivszamlaszam` = original and is the order-number hint only until something newer is issued under the order. The service does not track who reversed a document or when.
 _Avoid_: reversal origin (v1 concept; gone), cancellation

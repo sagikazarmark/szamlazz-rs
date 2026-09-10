@@ -108,7 +108,7 @@ through deterministic external ids:
 | `create_final` | exclusive | `CreateRequest` → `CreateResponse` (requires a live prepayment; passes `elolegSzamlaszam`; the caller supplies the negative prepayment line) |
 | `correct_invoice` | exclusive | `CorrectRequest { invoice_number, correction_id, document }` → `CreateResponse` |
 | `storno_invoice` | exclusive | `StornoRequest { invoice_number, comment? }` → `StornoResponse`; the storno repeats the verified original's `telj` as `teljesitesDatum` (ADR 0007), never a caller's date |
-| `delete_proforma` | exclusive | `DeleteProformaRequest { force }` → `DeleteProformaResponse` |
+| `delete_proforma` | exclusive | `DeleteProformaRequest { expected_number, force }` → `DeleteProformaResponse` |
 | `get` | shared | `()` → `OrderStatus` (non-atomic external observation) |
 
 Attributes on every handler that calls szamlazz.hu (ADR 0004):
@@ -269,7 +269,7 @@ The names are what the Restate UI shows, what a `sys_invocation.last_failure_rel
 what an `unavailable` fault's message means by "the step". `{kind}` is the document kind the handler issues or reads:
 `proforma | invoice | prepayment | final`, and `corrective` on `correct_invoice`'s lookup and create; `{number}` is an
 invoice number, the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
-(`delete_proforma` takes no number); `{prefix}` the eight-digit taxpayer prefix. A handler with two shapes has two
+(`delete_proforma` requires the expected number); `{prefix}` the eight-digit taxpayer prefix. A handler with two shapes has two
 rows; a handler that answers early (a conflict, a refusal, `unknown_account`) journals a prefix of its row.
 
 | Service | Handler | Path |
@@ -329,7 +329,9 @@ gateway opened for this execution.
    `conflict{external_id_collision}`; `Reversed` without `reissue` → `reversed`. On that reversed path every
    non-corrective takes the best-effort `hint-storno-{number}`: exhaustion leaves the number absent,
    cancellation propagates; a corrective takes no hint. `Api` → `unavailable`, `CredentialsRejected` →
-   `credentials_rejected`. Only `Absent` or `Reversed` with explicit `reissue` proceeds to prerequisites below.
+   `credentials_rejected`. Explicit `reissue: {expected_number}` requires the owned holder to match that number:
+   absent or different → `conflict{target_changed, existing_number?}`, before live/reversed handling.
+   Only an ordinary create's `Absent` or the expected `Reversed` proceeds to prerequisites below.
    Thus a consumed proforma, reversed prepayment or changed corrective base cannot hide an existing target.
    The later full lookup keeps its name and logic: it re-observes the target and takes the foreign-document hint
    after references are resolved, before the query-first create. Two entries can therefore be named
@@ -381,7 +383,9 @@ gateway opened for this execution.
    totals}`; `Reversed` → `reissue ? proceed, remembering the number : outcome: reversed{number, storno_number?}`;
    `Collision` → `conflict{external_id_collision, number}`; `Foreign` → `conflict{foreign, existing_number}`;
    `Api` → `TerminalError{unavailable}`; `CredentialsRejected` → `TerminalError{credentials_rejected}` (§7);
-   `Absent` → proceed. The run's own `Err`, the read policy exhausted (500, the last `Unanswered`) or a cancel (409),
+   `Absent` → proceed for ordinary creation. Before these live/reversed/absent decisions, explicit reissue
+   repeats the expected-number check: a different owned holder or absence is `target_changed` (#206).
+   The run's own `Err`, the read policy exhausted (500, the last `Unanswered`) or a cancel (409),
    is `TerminalError{unavailable, json{order, kind, external_id}}` on exhaustion or `cancelled` (409) on cancellation, naming the step.
 4. **Create**: one durable step under the issue policy, `ctx.run("create-{kind}", || gateway.create(CreateStepRequest{
    external_id, kind, order, create, reversed }))` with `RunRetryPolicy::new().initial_delay(2m)
@@ -395,7 +399,9 @@ gateway opened for this execution.
      → `Reversed(doc)` (issued by an earlier execution and reversed since: a reversal the caller has not
      acknowledged; **nothing is sent**, the handler answers `outcome: reversed`); `reversed` itself reported live →
      `LiveAgain(doc)` (a server inconsistency; **nothing is sent**, answered `conflict{live}`); invalid →
-     `Collision(doc)`; 7 or `reversed` still reversed → send; 3/135/136/164 → `Ok(CredentialsRejected{code,
+      `Collision(doc)`; 7 without reissue, or `reversed` still reversed → send; 7 with an expected reversed
+      holder → `TargetChanged`, no further send, mapped to `outcome_unknown` because an earlier execution
+      may have sent; 3/135/136/164 → `Ok(CredentialsRejected{code,
      message})` (settled, nothing sent); **another code → `Ok(Api{code, message})` and `szlahu_down` →
      `Ok(Unavailable{message})`**; answers, settled with nothing sent (#63): the handler raises
      `TerminalError{unavailable}` at once, for a code, the same fault the lookup step raises for it; for
@@ -403,7 +409,8 @@ gateway opened for this execution.
      under is sized for the post-send window and would otherwise be spent on a read, ending `outcome_unknown` ~39
      minutes later although nothing was ever sent; only a transport failure of the leading query → `Err(Transport)`
      (never create when the check itself failed, an exchange without an answer). **The rule (ADR 0003, #36): the step sends only when the
-     external id holds nothing, or exactly the document the lookup step saw reversed.**
+      external id holds nothing for ordinary creation, or exactly the expected document the lookup step saw
+      reversed for reissue (ADR 0012, #206).**
    - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
      → `CredentialsRejected{code, message}`: settled data, **not** `Unconfirmed`: re-executing with the same key would
      only repeat the answer, so the run policy is not spent on it.
@@ -582,9 +589,10 @@ requested number on a proforma or delivery note is the verified, success-shaped 
 delivery note reaching it is `unavailable` rather than `rejected{not_stornoable}`, accepted, twice theoretical (ADR
 0007).
 
-`delete_proforma({force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed,
+`delete_proforma({expected_number, force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed,
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
-live `D` with credit entries ∧ `!force` → `{deleted: false, reason: proforma_paid}` (the server has no guard, verified);
+different owned number → `{deleted: false, reason: target_changed}`, even with `force`;
+matching `D` with credit entries ∧ `!force` → `{deleted: false, reason: proforma_paid}` (the server has no guard, verified);
 The lookup pins the document number and id. Inside `delete-proforma-{number}` (`max_attempts(1)`),
 query that number again, never the external id: changed id/number/order/type →
 `{deleted: false, reason: target_changed}` even with `force`; current credit entries ∧ `!force` →
@@ -599,9 +607,9 @@ journaling can re-execute the closure, which repeats the guard; query/delete is 
 against other writers (#201).
 The response is `DeleteProformaResponse { deleted, reason? }` throughout, never a `rejected` outcome.
 Cancellation of the one-shot write is likewise the structured `outcome_unknown`, since deletion may have landed.
-Read `get` and query the pinned number named in the fault. A new invocation selects the current
-external-id holder: confirm deletion of that document is still intended before using a new
-`Idempotency-Key`. This does not change
+Read `get` and query the expected number named in the fault. Reconcile the earlier send before deliberately
+renewing with a new `Idempotency-Key` and the same expected number; never substitute a replacement automatically.
+This does not change
 best-effort read cancellation: it still propagates rather than completing as `reversed`.
 
 `get`: four `ctx.run` queries under the read policy (`lookup-{kind}`, `…:proforma|invoice|prepayment|final`) → `OrderStatus { proforma?, invoice?,
@@ -801,9 +809,12 @@ rules below, which are also the rules for an embedder. The rules:
    `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit entries it was sent).
    Retrying as is repeats the answer: the caller fixes the request, the number, the scope or the account, or, for a
    `szamlazz_error` relaying a NAV outage, retries later with a new key.
-3. After a storno (by this service, the UI or anyone) a create returns `outcome: reversed`. Send `reissue: true`
-   (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document → `conflict{live}`; the
-   flag can never cause a duplicate.
+3. After a storno (by this service, the UI or anyone) a create returns `outcome: reversed`. Send
+   `options.reissue: {expected_number}` naming that response's invoice number (with a new key) when replacing
+   that invoice is actually wanted. The matching live document → `conflict{live}`; a different owned holder
+   or absence → `conflict{target_changed}`. Retain the expected number across retries; a replacement does
+   not inherit permission to be replaced. Restate deduplication is finite; external-id discovery is not
+   historical command deduplication. ADR 0012 records the breaking 0.4 migration and the purge lifecycle.
 4. On a multi-account deployment, **set the scope on every call** (`/restate/scope/{scope}/call/…`) (it is a path
    segment of the request, not a session), and record the order key *and the scope as used* per order; nothing else is needed to storno,
    correct, reissue or inspect the order later. `order_key` in a storno response is meaningful only under the same

@@ -237,7 +237,8 @@ guarantee the rest.
 PDF download, receipts, IPN and Adatkapcsolat ingestion, the proforma → payment → invoice lifecycle workflow,
 multiple prepayments per order, tracking *who* reversed a document, serialising `Szamlazz.Agent`'s by-number
 writes per invoice (the service is unkeyed, see above), and reissuing on its own initiative: a create after any
-reversal returns `reversed` and issues a replacement only with `reissue: true` and a new `Idempotency-Key`.
+reversal returns `reversed` and issues a replacement only with an explicit
+`reissue: {"expected_number": "SZ-A"}` and a new `Idempotency-Key`. Correctives have no reissue option.
 
 ## Feature Flags
 
@@ -287,7 +288,8 @@ reasons:
 |---|---|
 | `prepaid_chain` | A plain invoice while the order's own prepayment invoice or final invoice is live, or a prepayment invoice while the order's own invoice or final invoice is. The final invoice keeps the chain closed after its prepayment is reversed. |
 | `order_invoiced` | A proforma after the order's own live invoice, prepayment invoice or final invoice. |
-| `live` | `reissue: true` on a live document. |
+| `live` | The expected reissue document is still live. |
+| `target_changed` | The expected reissue document is absent or a different owned holder is newest (`existing_number` when known). No send; never automatically substitute that number. |
 | `foreign` | A live invoice under the order number that is under none of the order's external ids (another channel's). |
 | `duplicate_order_number` | szamlazz.hu refused the order number (71/152) and the external-id re-query found nothing of ours live. |
 | `external_id_collision` | The external id's holder does not carry this order's number and kind. |
@@ -551,8 +553,10 @@ for a caller:
      refusing the credit entries it was sent). Retrying as is repeats the answer: fix the request, the number,
      the scope or the account, or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
 3. After a storno (by this service, the UI or anyone) a create returns `outcome: reversed`. Send
-   `reissue: true` (with a new key) when a new invoice is actually wanted. `reissue: true` on a live document is
-   `conflict{live}`, so the flag can never cause a duplicate.
+   `options.reissue: {"expected_number": "SZ-A"}` (with a new key) when replacing that reversed invoice is
+   actually wanted. Obtain `SZ-A` from the reversed response's `invoice_number` or a fresh `get`, and retain it
+   with the logical command across retries. The same holder live is `conflict{live}`; another holder or absence
+   is `conflict{target_changed}`. A changed number needs a new business decision.
 4. A `credentials_rejected` fault (503) means szamlazz.hu refused the worker's agent key (codes 3, 135, 136,
    164) on some step: the deployment is misconfigured, not the request. The request that drew the code was not
    acted on, but the code may have come to a re-query after a send, and an earlier execution may have landed
@@ -652,7 +656,7 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_credit_entries` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
-| `outcome_unknown` | 500 | The create or storno step exhausted its issue policy or was cancelled, or a one-shot `delete_proforma` / `set_credit_entries` write lost its reply, received an inconclusive code (including no code), or was cancelled mid-send. The write may have landed. | Rule 2 for create/storno. For deletion, read `get` and query the pinned number named in the fault; a new call selects the current external-id holder, so confirm that deletion of that document is still intended before using a new key. For credit entries, query the invoice first: an additive call sends only entries still missing; a replacing call sends the current intended snapshot, never a stale retry. Use a new `Idempotency-Key`. |
+| `outcome_unknown` | 500 | The create or storno step exhausted its issue policy or was cancelled, or a one-shot `delete_proforma` / `set_credit_entries` write lost its reply, received an inconclusive code (including no code), or was cancelled mid-send. The write may have landed. | Rule 2 for create/storno. For deletion, read `get` and query the expected number named in the fault; reconcile the earlier send, then deliberately renew with the same `expected_number` if still intended. For credit entries, query the invoice first: an additive call sends only entries still missing; a replacing call sends the current intended snapshot, never a stale retry. Use a new `Idempotency-Key`. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
@@ -728,7 +732,9 @@ including `lookup-corrective` for a `correction_id`. It settles a live target as
 Correctives take no hint. A consumed proforma, reversed prepayment or changed corrective base therefore cannot
 hide an already-issued target.
 
-Only an absent target or an explicit reissue proceeds through prerequisites (exclusivity, prepayment, proforma
+For explicit reissue, both target reads first require the expected number: absence or a different owned
+holder is `conflict{target_changed}`; ownership collisions keep `external_id_collision`.
+Only an ordinary create's absent target or a matching, reversed reissue target proceeds through prerequisites (exclusivity, prepayment, proforma
 link or corrective base), then the existing full lookup and query-first create. Both target reads are named
 `lookup-{kind}`: the first journals `OwnershipOutcome`, the later full lookup journals `LookupOutcome` and
 observes changes outside the order's lock as well as foreign documents.
@@ -749,8 +755,10 @@ naming the step, the last failure and, where the step knows it, the order, kind 
 
 **The create** (`create-{kind}`) runs under the issue policy (`[issue]`: `max_attempts` executions,
 `initial_delay` growing by `factor` to `max_delay`, duration threshold `max_duration`) and every execution is
-query-first. It sends only when the external id holds **nothing**, or **exactly the document the lookup step saw
-reversed**:
+query-first. An ordinary create sends only when the external id holds **nothing**. A reissue sends only past
+**exactly the expected document the lookup step saw reversed**, still reversed. Absence inside the create step
+stops with `outcome_unknown`: this execution may follow an earlier unconfirmed send. Before that step, absence
+is `conflict{target_changed}`:
 
 - a live document an earlier execution issued is answered `issued` without sending;
 - a document reversed since the lookup is answered `reversed` without sending (a new document needs an explicit
@@ -799,7 +807,9 @@ reversal without the number after a `warn`, while a cancellation of the invocati
 
 ### One-shot deletion and credit entries (#201 release notes)
 
-`delete_proforma` keeps the number selected by the journaled ownership lookup. Inside
+`delete_proforma` requires `expected_number` and compares it with the owned holder found by the journaled
+ownership lookup. A different holder is `target_changed`, and absence is `{deleted: true, reason: "absent"}`
+(deleted earlier or consumed, not proof this invocation deleted it). Inside
 `delete-proforma-{number}`, each execution queries **that number** and checks its document id,
 number, order and proforma type, then its current credit entries. A changed target yields
 `{deleted: false, reason: "target_changed"}`; credit entries with `force: false` yield
@@ -808,6 +818,52 @@ or deletion code 335 yields `deleted: true` (already deleted or consumed). A fai
 yields `unavailable` (503), a credential code `credentials_rejected` (503), with no delete sent
 by that execution. The step never reselects a replacement by external id. This narrows the
 replay gap; the vendor's query and delete are **not atomic** against other writers.
+
+### Expected-document intent (0.4 breaking release notes, #206)
+
+The new request shapes are:
+
+```json
+{
+  "document": {
+    "buyer": {"name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23."},
+    "items": [{"name": "Consulting", "quantity": "1", "unit": "db", "unit_price": "1000", "vat_rate": "27"}],
+    "fulfillment_date": "2026-09-10",
+    "due_date": "2026-09-18"
+  },
+  "options": {"reissue": {"expected_number": "SZ-A"}}
+}
+```
+
+Deletion takes `{"expected_number": "D-A", "force": false}`. Both expected numbers use the existing
+bounded `InvoiceNumber` contract (1–40 bytes, no whitespace, controls or `:`), and both request objects are
+closed to unknown fields. Rust callers use `CreateOptions.reissue: Option<Reissue>` and
+`DeleteProformaRequest::new(expected_number, force)`; deletion no longer implements `Default` or `Copy`.
+
+**Migration:** omit former `reissue: false`; replace `true` with the object naming the intended reversed
+original; add the intended number to every deletion. Booleans and numberless deletion are `invalid_input`
+before the prologue. Obtain the number from a create/reversed response or a fresh `get`, and persist it with
+the command. `correct_invoice` still has no reissue field: its repeat request reports `reversed`; issuing a
+new corrective requires a deliberate new `correction_id` (correctives are not in `get`).
+
+**Response handling:** a retained completion replays success. After expiry or purge, an immediate retry of a
+successful reissue sees the replacement and answers `conflict{target_changed}`, even if it is live. After
+that replacement is reversed, the old request still conflicts. A repeated deletion sees `absent`, or
+`{deleted: false, reason: "target_changed"}` if a replacement exists, even with `force`. Handle these as
+observations, not historical success or permission to substitute `existing_number` automatically. The
+matching live reissue target is still `conflict{live}`; ownership collisions retain their existing outcomes.
+
+**Separate guarantees:** external ids recover documents after journal expiry; Restate request deduplication
+lasts only for its retention period; expected-document intent prevents an old command authorizing a mutation
+of a replacement. Longer retention is not indefinite idempotency, and a conflict/empty observation does not
+settle an unresolved earlier send (#205). The Order remains stateless. Query/send races with other writers
+remain possible; the mock lifecycle tests establish worker decisions, not vendor atomic compare-and-set.
+
+Drain legacy commands on their original immutable deployment before changing callers. Register this release
+as a new deployment; exceptional replay requires reviewing actual inputs and journal under ADR 0009. The
+create step adds the journaled `TargetChanged` outcome for an expected holder disappearing before a send,
+mapped to `outcome_unknown` because an earlier execution may have sent;
+completed old invocations keep their original results. See [ADR 0012](../../docs/adr/0012-expected-document-mutation-intent.md).
 
 Both one-shot operations now preserve inconclusive send answers as journaled data and return
 `outcome_unknown` (500), including the vendor cause and `szamlazz_code` where supplied

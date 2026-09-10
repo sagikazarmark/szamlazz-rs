@@ -48,16 +48,27 @@ impl CreateRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct CreateOptions {
-    /// Issue a new document after the existing one was reversed, by this
-    /// service, the UI or anyone. Without it a reversed document answers
-    /// `outcome: reversed`; with it a live document answers
-    /// `conflict{live}`, so the flag can never cause a duplicate.
-    pub reissue: bool,
+    /// Explicitly replace the named reversed document. Keep this intent on
+    /// retries; a different or absent holder at lookup answers
+    /// `conflict{target_changed}`. Absence inside the create step instead
+    /// preserves possible earlier-send uncertainty as `outcome_unknown`.
+    /// Omit for ordinary creation; legacy booleans are refused.
+    pub reissue: Option<Reissue>,
     /// Which proforma the document converts, on `create_invoice` and
     /// `create_prepayment`, the two kinds the Agent lets carry the reference
     /// (`dijbekeroSzamlaszam`); `create_proforma` and `create_final` refuse
     /// anything but `auto` as `invalid_input`.
     pub proforma: ProformaLink,
+}
+
+/// Permission to replace exactly one known, reversed document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Reissue {
+    /// The original number from a create/reversed response or fresh `get`.
+    /// A replacement never inherits this permission.
+    pub expected_number: InvoiceNumber,
 }
 
 /// How a create request refers to a proforma.
@@ -126,7 +137,9 @@ pub enum CreateOutcome {
     /// send had landed.
     Reconciled,
     /// The document of this kind was reversed; nothing new was issued. Pass
-    /// `reissue: true` (with a new `Idempotency-Key`) to issue a new one.
+    /// `options.reissue: {"expected_number": "…"}` (with a new
+    /// `Idempotency-Key`) to replace that document on an ordinary create.
+    /// Correctives have no reissue option.
     Reversed,
     /// szamlazz.hu refused the document; see `code` and `message`.
     Rejected,
@@ -238,8 +251,11 @@ pub enum ConflictReason {
     /// the invoice makes no sense. Not `foreign`: the document is this
     /// order's, issued by this service.
     OrderInvoiced,
-    /// `reissue: true` while the document is live.
+    /// The expected reissue document is live.
     Live,
+    /// The expected reissue target is absent or a different owned document
+    /// holds the external id. A new target requires a new business decision.
+    TargetChanged,
     /// A live invoice-kind document under the order number that is under none
     /// of this order's external ids: another channel or namespace on the
     /// same szamlazz.hu account; see `existing_number`.
@@ -273,8 +289,9 @@ pub enum ConflictReason {
 impl ConflictReason {
     /// Known reasons, in the order of the crate README's `conflict_reason`
     /// table.
-    pub const KNOWN: [Self; 12] = [
+    pub const KNOWN: [Self; 13] = [
         Self::Live,
+        Self::TargetChanged,
         Self::PrepaidChain,
         Self::OrderInvoiced,
         Self::ProformaLive,
@@ -295,6 +312,7 @@ impl ConflictReason {
             Self::PrepaidChain => "prepaid_chain",
             Self::OrderInvoiced => "order_invoiced",
             Self::Live => "live",
+            Self::TargetChanged => "target_changed",
             Self::Foreign => "foreign",
             Self::DuplicateOrderNumber => "duplicate_order_number",
             Self::ExternalIdCollision => "external_id_collision",
@@ -321,6 +339,7 @@ impl From<String> for ConflictReason {
             "prepaid_chain" => Self::PrepaidChain,
             "order_invoiced" => Self::OrderInvoiced,
             "live" => Self::Live,
+            "target_changed" => Self::TargetChanged,
             "foreign" => Self::Foreign,
             "duplicate_order_number" => Self::DuplicateOrderNumber,
             "external_id_collision" => Self::ExternalIdCollision,
@@ -369,7 +388,7 @@ impl schemars::JsonSchema for ConflictReason {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Why a create, correct or storno request conflicts. Known values: live, prepaid_chain, order_invoiced, proforma_live, proforma_missing, not_managed, prepayment_missing, prepayment_reversed, base_reversed, foreign, duplicate_order_number, external_id_collision. Other strings are preserved for newer reasons.",
+            "description": "Why a create, correct or storno request conflicts. Known values: live, target_changed, prepaid_chain, order_invoiced, proforma_live, proforma_missing, not_managed, prepayment_missing, prepayment_reversed, base_reversed, foreign, duplicate_order_number, external_id_collision. Other strings are preserved for newer reasons.",
         })
     }
 }
@@ -633,11 +652,16 @@ mod tests {
     #[test]
     fn create_request_round_trips() {
         let mut request = CreateRequest::new(sample_document());
-        request.options.reissue = true;
+        request.options.reissue = Some(Reissue {
+            expected_number: "SZ-1".parse().expect("number"),
+        });
         request.options.proforma = ProformaLink::Number("D-1".parse().expect("valid number"));
         let json = round_trip(&request);
         assert_eq!(json.get("request_id"), None);
-        assert_eq!(json["options"]["reissue"], true);
+        assert_eq!(
+            json["options"]["reissue"],
+            json!({"expected_number": "SZ-1"})
+        );
         assert_eq!(json["options"]["proforma"], json!({"number": "D-1"}));
     }
 
@@ -649,7 +673,7 @@ mod tests {
         .expect("deserialize");
         assert_eq!(request.options, CreateOptions::default());
         assert_eq!(request.options.proforma, ProformaLink::Auto);
-        assert!(!request.options.reissue);
+        assert!(request.options.reissue.is_none());
     }
 
     #[test]
@@ -698,7 +722,7 @@ mod tests {
             "resissue",
         );
         refuses_unknown_field::<CreateRequest>(
-            json!({"document": document, "options": {"reissue": true, "proforma": "auto", "x": 1}}),
+            json!({"document": document, "options": {"reissue": {"expected_number": "SZ-1"}, "proforma": "auto", "x": 1}}),
             "x",
         );
 
@@ -754,7 +778,7 @@ mod tests {
         serde_json::from_value::<CreateRequest>(json!({"document": document}))
             .expect("a bare create body");
         serde_json::from_value::<CreateRequest>(
-            json!({"document": document, "options": {"reissue": true}}),
+            json!({"document": document, "options": {"reissue": {"expected_number": "SZ-1"}}}),
         )
         .expect("create_body");
         serde_json::from_value::<CreateRequest>(
@@ -887,6 +911,7 @@ mod tests {
             (ConflictReason::PrepaidChain, "prepaid_chain"),
             (ConflictReason::OrderInvoiced, "order_invoiced"),
             (ConflictReason::Live, "live"),
+            (ConflictReason::TargetChanged, "target_changed"),
             (ConflictReason::Foreign, "foreign"),
             (
                 ConflictReason::DuplicateOrderNumber,

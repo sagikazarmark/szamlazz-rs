@@ -242,10 +242,11 @@ impl Order {
         .map(Json)
     }
 
-    /// Deletes the order's proforma.
+    /// Deletes the order's expected proforma; a replacement is never selected.
     /// A lost answer or cancellation of the one-shot write is structured
-    /// `outcome_unknown`: read `get`, then retry with a new `Idempotency-Key`
-    /// if deletion is still intended. The deletion may already have landed.
+    /// `outcome_unknown`: reconcile using `get` and the expected number, then
+    /// deliberately renew with a new `Idempotency-Key` and the same expected
+    /// number if still intended. The deletion may already have landed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",

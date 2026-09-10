@@ -238,24 +238,31 @@ impl StornoResponse {
 }
 
 /// Input of `Szamlazz.Order.delete_proforma`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteProformaRequest {
+    /// The intended proforma's number. Retain it across retries; a replacement
+    /// under the external id answers `target_changed`, even with `force`.
+    pub expected_number: InvoiceNumber,
     /// Delete even when the proforma has registered credit entries. szamlazz.hu has
     /// no guard of its own; without `force` a paid proforma is answered
     /// `{deleted: false, reason: "proforma_paid"}`. Checked again by number
     /// inside the one-shot delete step. `force` never bypasses identity/type
     /// checks, and the fresh query and delete are not atomic against other writers.
+    #[serde(default)]
     pub force: bool,
 }
 
 impl DeleteProformaRequest {
-    /// A delete request; `force` deletes a proforma with registered credit entries
-    /// too. `Default::default()` is `new(false)`.
+    /// A delete request for the expected proforma; `force` bypasses only the
+    /// credit-entry guard.
     #[must_use]
-    pub const fn new(force: bool) -> Self {
-        Self { force }
+    pub const fn new(expected_number: InvoiceNumber, force: bool) -> Self {
+        Self {
+            expected_number,
+            force,
+        }
     }
 }
 
@@ -321,8 +328,9 @@ pub enum DeleteReason {
     /// The proforma's external id resolves to another order's or kind's
     /// document, which the handler never touches.
     ExternalIdCollision,
-    /// The pinned number's fresh query returned a different document id,
-    /// number, order or type. `force` never bypasses this guard.
+    /// A different owned holder occupies the external id, or the pinned
+    /// number's fresh query returned a different document id, number, order
+    /// or type. `force` never bypasses these guards.
     TargetChanged,
     /// szamlazz.hu refused the deletion with this code.
     Szamlazz(String),
@@ -705,10 +713,14 @@ mod tests {
     #[test]
     fn delete_request_defaults_to_false() {
         assert_eq!(
-            serde_json::from_value::<DeleteProformaRequest>(json!({})).expect("deserialize"),
-            DeleteProformaRequest { force: false }
+            serde_json::from_value::<DeleteProformaRequest>(json!({"expected_number": "D-1"}))
+                .expect("deserialize"),
+            DeleteProformaRequest::new("D-1".parse().expect("number"), false)
         );
-        round_trip(&DeleteProformaRequest { force: true });
+        round_trip(&DeleteProformaRequest::new(
+            "D-1".parse().expect("number"),
+            true,
+        ));
     }
 
     /// A misspelt field is refused, never a silent default: `froce` as
@@ -728,7 +740,8 @@ mod tests {
     fn documented_bodies_deserialize() {
         serde_json::from_value::<StornoRequest>(json!({"invoice_number": "SZ-1"}))
             .expect("a storno body");
-        serde_json::from_value::<DeleteProformaRequest>(json!({})).expect("an empty delete body");
+        serde_json::from_value::<DeleteProformaRequest>(json!({"expected_number": "D-1"}))
+            .expect("a named delete target");
     }
 
     #[test]

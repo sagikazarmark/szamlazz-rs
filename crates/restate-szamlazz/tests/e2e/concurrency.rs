@@ -143,7 +143,7 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
     )
     .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     // The first invocation's one and only fetch: held until the second call is
     // queued behind it.
     let hold = h.multi().hold_fetch(SCOPE, 1);
@@ -249,7 +249,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
     )
     .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     // The second execution's fetch (the first execution's is the first).
     let hold = h.multi().hold_fetch(SCOPE, 2);
     let watch = h.watch("E2E-L2");
@@ -332,7 +332,7 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         .mount(&h.mock)
         .await;
 
-    let body = create_body(dec!(1000), false);
+    let body = create_body(dec!(1000));
     let hold = h.multi().hold_fetch(SCOPE, 1);
     let (first, (in_flight, retry)) = tokio::join!(
         timed(h.call_scoped(SCOPE, "E2E-L3", "create_invoice", &body, "e2e-l3-shared")),

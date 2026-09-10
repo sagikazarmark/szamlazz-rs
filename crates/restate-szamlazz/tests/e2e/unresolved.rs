@@ -145,7 +145,7 @@ async fn e2e_unresolved_exhaustion_admits_a_second_send() {
             .respond_with(not_found())
             .mount(&mock)
             .await;
-        let mut body = create_body(dec!(1000), false);
+        let mut body = create_body(dec!(1000));
         if first_handler == "correct_invoice" {
             number_query("BASE")
                 .respond_with(Doc::of("BASE", "SZ", key).response())

@@ -61,7 +61,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         .call(
             "E2E-1",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-1-k1",
         )
         .await;
@@ -113,7 +113,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         .call(
             "E2E-1",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-1-k2",
         )
         .await;
@@ -134,7 +134,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
         .call(
             "E2E-1",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-1-k1",
         )
         .await;
@@ -196,7 +196,7 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
         .call(
             "E2E-6B",
             "create_invoice",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-6b-k1",
         )
         .await;
@@ -266,7 +266,7 @@ pub(crate) async fn reversed_targets_answer_before_prerequisites(h: &Harness) {
             .call(
                 order,
                 &format!("create_{kind}"),
-                &create_body(dec!(1000), false),
+                &create_body(dec!(1000)),
                 &format!("{order}-k1"),
             )
             .await;

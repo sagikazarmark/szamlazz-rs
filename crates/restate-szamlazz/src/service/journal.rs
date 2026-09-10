@@ -191,6 +191,7 @@ fn entries() -> Vec<Entry> {
         ], &variants!(LookupOutcome { Absent, Live(_), Reversed { .. }, Collision(_), Foreign(_), CredentialsRejected(_), Api(_) })));
     all.extend(entries_of(vec![
             CreateOutcome::Issued(issued_document()),
+            CreateOutcome::TargetChanged,
             CreateOutcome::Found(document("SZ-1", false)),
             CreateOutcome::Reversed(document("SZ-1", true)),
             CreateOutcome::LiveAgain(document("SZ-1", false)),
@@ -206,7 +207,7 @@ fn entries() -> Vec<Entry> {
             CreateOutcome::Unavailable {
                 message: DOWN.to_owned(),
             },
-        ], &variants!(CreateOutcome { Issued(_), Found(_), Reversed(_), LiveAgain(_), Reconciled(_), Collision(_), DuplicateOrderNumber { .. }, Rejected(_), CredentialsRejected(_), Api(_), Unavailable { .. } })));
+        ], &variants!(CreateOutcome { TargetChanged, Issued(_), Found(_), Reversed(_), LiveAgain(_), Reconciled(_), Collision(_), DuplicateOrderNumber { .. }, Rejected(_), CredentialsRejected(_), Api(_), Unavailable { .. } })));
     all.extend(entries_of(vec![
             StornoLookupOutcome::Absent,
             StornoLookupOutcome::AlreadyReversed {

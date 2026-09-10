@@ -67,7 +67,7 @@ pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) 
         .call(
             "E2E-43",
             "create_final",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-43-k1",
         )
         .await;
@@ -100,7 +100,7 @@ pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) 
         .call(
             "E2E-43",
             "create_final",
-            &create_body(dec!(1000), false),
+            &create_body(dec!(1000)),
             "e2e-43-k2",
         )
         .await;

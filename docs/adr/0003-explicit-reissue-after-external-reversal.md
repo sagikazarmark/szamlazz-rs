@@ -1,5 +1,10 @@
 # A repeat create after an external reversal returns `reversed` and reissues only on explicit request
 
+**Amended by [ADR 0012](0012-expected-document-mutation-intent.md), #206 (0.4):** the boolean below is
+replaced by mandatory expected-document intent: `reissue: {expected_number}`. A different owned holder or
+absence is `target_changed`, not authorization to replace the newest document. Correctives still have no
+reissue option. ADR 0012 specifies the outcomes and release migration.
+
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md).
 Still holds, and is now the rule after **every** reversal, not only external ones: a create that finds its
 document reversed (`sztornozott`) returns `outcome: reversed` and issues only with an explicit `reissue: true`;
