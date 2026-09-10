@@ -1,5 +1,9 @@
-//! Proforma deletion (`xmlszamladbkdel`): removes an unpaid proforma
+//! Proforma deletion (`xmlszamladbkdel`): removes an existing proforma
 //! (díjbekérő) from the account.
+//!
+//! This operation does not check payment status before sending. Deletion of
+//! a fully paid proforma was observed on the test account. If paid proformas
+//! must be retained, the caller must enforce that policy before deletion.
 
 use crate::credentials::Credentials;
 use crate::error::ResponseError;
@@ -25,6 +29,10 @@ pub enum ProformaSelector {
 
 /// The proforma-deletion operation (`xmlszamladbkdel`,
 /// `action-szamla_agent_dijbekero_torlese`).
+///
+/// Targets an existing proforma without a local paid-state check. A fully
+/// paid proforma was deletable on the test account; callers needing to retain
+/// paid proformas must enforce that policy before sending.
 ///
 /// Success carries no payload. Deleting a proforma that does not exist (or was
 /// already deleted) fails with

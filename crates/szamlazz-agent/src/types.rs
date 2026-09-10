@@ -191,8 +191,8 @@ pub enum VatRate {
     Aam,
     /// `TAM`: tárgyi adómentes (objective exemption / exempt activity).
     Tam,
-    /// `TAHK`: tárgyi adómentes, a tevékenység közérdekű vagy sajátos
-    /// jellegére tekintettel (exempt due to public-interest or special nature).
+    /// `TAHK`: áfa tárgyi hatályán kívül (outside the subject-matter scope
+    /// of VAT), distinct from [`VatRate::Tam`]'s exempt activity.
     Tahk,
     /// `EUT`: EU-n belüli ügylet (intra-EU transaction).
     Eut,
@@ -360,7 +360,8 @@ impl<'de> serde::Deserialize<'de> for VatRate {
 
 /// A currency code (`pénznem`).
 ///
-/// szamlazz.hu accepts 37 ISO-style codes; `HUF` may also be written `Ft`.
+/// See szamlazz.hu's [supported currencies](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/currencies);
+/// `HUF` may also be written `Ft`.
 /// The set is open: any code converts via [`Currency::new`] or `From`.
 #[doc(alias = "pénznem")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -979,7 +980,8 @@ impl ExchangeRate {
 pub enum InvoiceTemplate {
     /// `SzlaMost`.
     Most,
-    /// `SzlaAlap`.
+    /// `SzlaAlap`, the traditional invoice layout. This selects a named
+    /// template; it is not the same as omitting `szamlaSablon`.
     Default,
     /// `SzlaNoEnv`.
     NoEnvelope,

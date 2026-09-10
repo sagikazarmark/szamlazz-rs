@@ -20,14 +20,14 @@ pub use super::waybill::{Mpl, PickPackPoint, Sprinter, TransOFlex, Waybill};
 
 /// What kind of document the invoice operation issues.
 ///
-/// The wire encodes these as independent boolean flags (`dijbekero`,
-/// `elolegszamla`, …) and references; this enum makes the meaningless
-/// combinations unrepresentable (a proforma consuming a proforma, a
-/// corrective without the invoice it corrects) and attaches to each kind the
-/// references it can carry. The proforma being consumed
-/// (`dijbekeroSzamlaszam`) is one of them on the three kinds the XSD lets
-/// carry it (an invoice, a prepayment invoice and a final invoice), and
-/// [`InvoiceKind::proforma_number`] reads it uniformly.
+/// The wire uses independent boolean flags (`dijbekero`, `elolegszamla`, …)
+/// and reference elements. This enum selects one document kind and attaches
+/// the references exposed for that kind.
+///
+/// It exposes the proforma reference (`dijbekeroSzamlaszam`) on regular,
+/// prepayment and final invoices; [`InvoiceKind::proforma_number`] reads it
+/// uniformly. The XSD declares that reference independently of the kind
+/// flags, rather than restricting it to these three kinds.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +66,8 @@ pub enum InvoiceKind {
     /// the prepayment twice. A `végszámla` lists the full performance and
     /// deducts the prepayment as a **negative line item at the same VAT
     /// rate**; the caller supplies that line. Verified on the test account.
+    /// Explicit `dijbekeroSzamlaszam` on a final invoice has not been
+    /// exercised there; implicit linking does not verify that reference.
     #[doc(alias = "végszámla")]
     Final {
         /// The prepayment invoice being settled (`elolegSzamlaszam`), if
@@ -99,9 +101,9 @@ impl InvoiceKind {
         }
     }
 
-    /// The proforma this document converts (`dijbekeroSzamlaszam`), on the
-    /// kinds that can carry one: an invoice, a prepayment invoice, a final
-    /// invoice. `None` for the other kinds.
+    /// The proforma reference (`dijbekeroSzamlaszam`) carried by this value:
+    /// available on regular, prepayment and final invoice variants, and
+    /// `None` for the other variants.
     #[must_use]
     pub fn proforma_number(&self) -> Option<&InvoiceNumber> {
         match self {
@@ -173,21 +175,32 @@ pub struct InvoiceHeader {
     pub number_prefix: Option<String>,
     /// Adjustment to the payable total (`fizetendoKorrekcio`).
     pub payable_adjustment: Option<Decimal>,
-    /// Marks the invoice as already paid (`fizetve`).
+    /// Marks the invoice as already paid (`fizetve`). False omits the element.
     #[serde(default)]
     pub paid: bool,
     /// Apply margin-scheme VAT (`arresAfa`).
     pub margin_vat: Option<bool>,
-    /// VAT belongs to another EU member state (`eusAfa`).
+    /// Indicates that the invoice contains no Hungarian VAT (`eusAfa`).
+    /// When `Some(true)` is accepted, szamlazz.hu does not submit the invoice
+    /// to NAV Online Invoice. The vendor permits this only for an
+    /// OSS-registered seller or a seller with a non-Hungarian tax number.
+    ///
+    /// This does not replace the correct VAT code on each line item. The
+    /// vendor states that retroactive submission is not possible if this
+    /// setting was wrong. `None` omits the element; `Some(false)` sends false.
+    /// See the [vendor VAT guidance](https://docs.szamlazz.hu/hu/agent/generating_invoice/settings_and_rules/vat-rates).
     pub eu_vat: Option<bool>,
-    /// Invoice PDF template (`szamlaSablon`).
+    /// Requested invoice PDF template (`szamlaSablon`). `None` leaves the
+    /// element absent, except for [`InvoiceKind::DeliveryNote`]: the library
+    /// always sends `SzlaFuvarlevelesAlap` for that kind, overriding this field.
     pub template: Option<InvoiceTemplate>,
     /// Return a preview PDF without issuing the document (`elonezetpdf`).
     pub preview_pdf: Option<bool>,
 }
 
 impl InvoiceHeader {
-    /// A header with the required fields; optional fields default to absent.
+    /// A header with the required fields. `Option` fields default to `None`
+    /// and `paid` to false; the writer omits `fizetve` when `paid` is false.
     #[must_use]
     pub fn new(
         fulfillment_date: Date,
@@ -285,7 +298,17 @@ pub struct Buyer {
     pub postal_address: Option<PostalAddress>,
     /// Buyer general-ledger metadata (`vevoFokonyv`).
     pub ledger: Option<BuyerLedger>,
-    /// Partner identifier from the account's partner database (`azonosito`).
+    /// Partner identifier in the billing account's partner records
+    /// (`azonosito`). Use an identifier for only one partner within that
+    /// account; do not reuse one assigned to another buyer.
+    ///
+    /// When szamlazz.hu recognizes the identifier, it updates that partner
+    /// with the billing data supplied in this request. Possession of the
+    /// customer account link gives access to that customer account's
+    /// documents, so sharing an identifier can expose another buyer's
+    /// documents. This differs from the internal numeric
+    /// [`BuyerInfo::id`](crate::ops::query_xml::BuyerInfo::id) returned by a query.
+    /// See the [vendor's buyer annotations](https://docs.szamlazz.hu/hu/agent/generating_invoice/xml).
     pub id: Option<String>,
     /// Name of the signer on the buyer side (`alairoNeve`).
     pub signer_name: Option<String>,
@@ -510,7 +533,8 @@ pub struct CreateInvoice {
     pub seller: Seller,
     /// Buyer block.
     pub buyer: Buyer,
-    /// Optional waybill/carrier data (`fuvarlevel`).
+    /// Optional waybill/carrier data (`fuvarlevel`), also usable on invoices
+    /// with a layout that can display it; see [`Waybill`].
     pub waybill: Option<Waybill>,
     /// Line items; at least one is required.
     pub items: Vec<LineItem>,
@@ -520,10 +544,11 @@ pub struct CreateInvoice {
 }
 
 impl CreateInvoice {
-    /// An invoice-creation request with the required blocks; optional fields
-    /// (`e_invoice`, `download_pdf`, `external_id`, `seller`) default to
-    /// absent. Set them on the returned value, or override them with
-    /// functional update:
+    /// An invoice-creation request with the supplied blocks and line items.
+    /// `e_invoice` and `download_pdf` default to false and are sent explicitly.
+    /// Optional settings default to `None`; seller fields and attachments
+    /// start empty. The seller XML container is still emitted.
+    /// Set fields on the returned value, or use functional update:
     ///
     /// ```
     /// # use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};

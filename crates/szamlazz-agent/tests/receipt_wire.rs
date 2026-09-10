@@ -11,8 +11,8 @@ use szamlazz_agent::{Credentials, Currency, LineItem, PaymentMethod, VatRate};
 
 #[derive(Debug, Deserialize)]
 struct SendXml {
-    #[serde(rename = "emailKuldes")]
-    email: Option<EmailXml>,
+    #[serde(rename = "emailKuldes", default)]
+    email: Vec<EmailXml>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Default)]
@@ -29,10 +29,36 @@ struct EmailXml {
 
 fn email_xml(request: &SendReceipt) -> EmailXml {
     let xml = request.write_xml(&Credentials::agent_key("key"));
-    quick_xml::de::from_reader::<_, SendXml>(xml.as_slice())
+    let mut blocks = quick_xml::de::from_reader::<_, SendXml>(xml.as_slice())
         .expect("send XML")
-        .email
-        .expect("present emailKuldes block")
+        .email;
+    assert_eq!(blocks.len(), 1, "exactly one present emailKuldes block");
+    blocks.pop().expect("one block")
+}
+
+#[test]
+fn email_presence_observer_distinguishes_absent_paired_and_self_closing_blocks() {
+    for (xml, count) in [
+        ("<xmlnyugtasend/>", 0),
+        ("<xmlnyugtasend><emailKuldes/></xmlnyugtasend>", 1),
+        (
+            "<xmlnyugtasend><emailKuldes></emailKuldes></xmlnyugtasend>",
+            1,
+        ),
+        (
+            "<xmlnyugtasend><emailKuldes/><emailKuldes/></xmlnyugtasend>",
+            2,
+        ),
+    ] {
+        let parsed: SendXml = quick_xml::de::from_str(xml).expect("send XML");
+        assert_eq!(parsed.email.len(), count, "{xml}");
+        assert!(
+            parsed
+                .email
+                .iter()
+                .all(|email| *email == EmailXml::default())
+        );
+    }
 }
 
 #[test]

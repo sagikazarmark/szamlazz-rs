@@ -112,11 +112,15 @@ pub struct LineItem {
     pub comment: Option<String>,
     /// General-ledger metadata (`tetelFokonyv` / `fokonyv`).
     pub ledger: Option<LineItemLedger>,
-    /// Number of data erasure codes to request for this row (`torloKod`), at
-    /// most [`MAX_ERASURE_CODE_COUNT`]. Despite the wire name, the value is a
-    /// requested quantity, not a code identifier: szamlazz.hu generates this
-    /// many codes for the item. Requires the account feature; on invoices the
-    /// `SzlaMost` template (errors 537–539 otherwise).
+    /// Number of data erasure codes requested for this row (`torloKod`), at
+    /// most [`MAX_ERASURE_CODE_COUNT`]. This is a count, not a code identifier.
+    ///
+    /// The account must enable the feature (otherwise code 539); demo and
+    /// test accounts cannot use it (538). Code 537 denotes exceeding the
+    /// per-item count limit. For invoices, the vendor separately requires the
+    /// `SzlaMost` template. Codes may come from the account's uploaded stock
+    /// or be supplied by szamlazz.hu.
+    /// See the [vendor erasure-code guidance](https://tudastar.szamlazz.hu/gyik/adattorlo-kod-hasznalata-apin-keresztul-es-tomeges-szamlageneralaskor).
     #[doc(alias = "adattörlő kód")]
     #[serde(alias = "erasure_code")]
     pub erasure_code_count: Option<u32>,

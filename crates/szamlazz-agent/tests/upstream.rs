@@ -398,6 +398,92 @@ mod responses {
         corpus::run("responses", TABLE);
     }
 
+    /// Fresh acquisitions are separate from the July corpus. The two published
+    /// success bodies have raw ampersands in a URL; the storno also has an
+    /// abbreviated PDF. Original bytes stay on disk; repairs below are explicit
+    /// test inputs, not claims about an actual response or a complete PDF.
+    #[test]
+    fn september_response_examples_keep_source_defects_and_structured_fields() {
+        corpus::run(
+            "2026-09-10",
+            &[
+                ("reversing_invoice_success.xml", september_storno),
+                ("reversing_invoice_error.xml", september_storno_error),
+                ("credit_entry_success.xml", september_credit_entry),
+                ("credit_entry_error.xml", september_credit_entry_error),
+            ],
+        );
+    }
+
+    const SEPTEMBER_URL: &str = "https://www.szamlazz.hu/szamla/?page=vevoifiokpay&partguid=ddddddddddddddd&szfejguid=bbbbbbbbbbbbbbbbbbbbb";
+
+    fn escape_example_url(body: &[u8]) -> Vec<u8> {
+        let text = std::str::from_utf8(body).expect("UTF-8 example");
+        assert!(text.contains(SEPTEMBER_URL));
+        text.replace(SEPTEMBER_URL, &SEPTEMBER_URL.replace('&', "&amp;"))
+            .into_bytes()
+    }
+
+    fn september_storno(body: &[u8]) {
+        let request = examples::storno_invoice();
+        assert!(
+            request.parse(&delivered(body)).is_err(),
+            "raw URL is not XML"
+        );
+        let escaped = escape_example_url(body);
+        refused_as_base64(&request, &escaped);
+        let text = std::str::from_utf8(&escaped).expect("UTF-8");
+        let start = text.find("<pdf>").expect("PDF start");
+        let end = text.find("</pdf>").expect("PDF end") + "</pdf>".len();
+        assert!(text[start..end].contains("...."));
+        let repaired = with_pdf_in_place(&escaped, &text[start..end], "pdf");
+        let created = request
+            .parse(&delivered(&repaired))
+            .expect("repaired example");
+        assert_eq!(created.invoice_number.as_str(), "XXX-2012-3");
+        assert_eq!(created.net_total, Some(dec!(30000)));
+        assert_eq!(created.gross_total, Some(dec!(38100)));
+        assert_eq!(created.outstanding, Some(dec!(0)));
+        assert_eq!(created.customer_account_url.as_deref(), Some(SEPTEMBER_URL));
+        assert_eq!(created.pdf.expect("synthetic PDF").as_bytes(), b"%PDF-");
+    }
+
+    fn september_credit_entry(body: &[u8]) {
+        let request = examples::register_credit_entry();
+        assert!(
+            request.parse(&delivered(body)).is_err(),
+            "raw URL is not XML"
+        );
+        let balance = request
+            .parse(&delivered(&escape_example_url(body)))
+            .expect("URL-escaped example");
+        assert_eq!(balance.invoice_number.as_str(), "XXX-2012-3");
+        assert_eq!(balance.net_total, Some(dec!(30000)));
+        assert_eq!(balance.gross_total, Some(dec!(38100)));
+        assert_eq!(balance.outstanding, Some(dec!(0)));
+        assert_eq!(balance.customer_account_url.as_deref(), Some(SEPTEMBER_URL));
+        assert_eq!(balance.payment_method, None, "no HTTP headers acquired");
+    }
+
+    fn september_storno_error(body: &[u8]) {
+        let (api, class) = refused_with(&examples::storno_invoice(), body);
+        assert_september_login_error(&api, class);
+    }
+
+    fn september_credit_entry_error(body: &[u8]) {
+        let (api, class) = refused_with(&examples::register_credit_entry(), body);
+        assert_september_login_error(&api, class);
+    }
+
+    fn assert_september_login_error(api: &ApiError, class: OutcomeClass) {
+        assert_eq!(api.code, ErrorCode::InvalidCredentials);
+        assert_eq!(
+            api.message,
+            "Bejelentkezési hiba - a megadott login név és jelszó pároshoz nem létezik felhasználó"
+        );
+        assert_eq!(class, OutcomeClass::Rejected);
+    }
+
     /// The error szamlazz.hu's answer carries (`sikeres=false`, a `hibakod`
     /// and its message), and the outcome class the caller acts on.
     fn refused_with<R: AgentRequest>(request: &R, body: &[u8]) -> (ApiError, OutcomeClass)
@@ -1092,10 +1178,12 @@ mod outline {
     ///
     /// Not part of the outline: the XML declaration, comments, whitespace
     /// around text, every attribute but the root's default namespace, and
-    /// an element with no text and no leaf below it; an empty optional
-    /// element and an omitted one are the same request to szamlazz.hu (the
-    /// docs say "omit this tag" beside `<aggregator></aggregator>`), and
-    /// the crate omits.
+    /// an element with no text and no leaf below it. This lossy comparison
+    /// tolerates empty placeholders in these examples (such as `aggregator`,
+    /// annotated "omit this tag"); it does not establish that empty and
+    /// omitted elements have the same server semantics. In particular,
+    /// `emailKuldes` presence matters: `tests/receipt_wire.rs` independently
+    /// checks actual send output, including omitted versus empty children.
     #[derive(Debug, PartialEq, Eq)]
     pub struct Outline {
         pub root: String,

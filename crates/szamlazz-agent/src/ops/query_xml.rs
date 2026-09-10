@@ -352,16 +352,23 @@ pub struct BuyerLedgerInfo {
     pub settlement_to: Option<Date>,
 }
 
-/// The buyer (`vevo`) as recorded on the invoice.
+/// Buyer data (`vevo`) returned by the invoice XML query.
+///
+/// Do not assume this is an immutable snapshot from issuance: on the test
+/// account, a later create changed buyer data returned for an earlier
+/// document. The document-associated email is a separate field on
+/// [`InvoiceInfo`].
 #[doc(alias = "vevő")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BuyerInfo {
-    /// Internal szamlazz.hu identifier (`id`).
+    /// Internal numeric szamlazz.hu identifier (`id`), distinct from the
+    /// request's account-local partner identifier ([`BuyerInfo::identifier`]).
     pub id: Option<i64>,
     /// Name (`nev`).
     pub name: String,
-    /// Partner identifier (`azonosito`).
+    /// Account-local partner identifier (`azonosito`); see the update and
+    /// customer-account-link consequences on [`Buyer::id`](super::invoice::Buyer::id).
     pub identifier: Option<String>,
     /// Billing address (`cim`).
     pub address: Option<Address>,
@@ -476,7 +483,9 @@ pub struct FinancialItem {
     pub settlement_from: Option<Date>,
     /// Settlement period end (`elszdatig`).
     pub settlement_to: Option<Date>,
-    /// Deductible VAT percentage (`afalevon`).
+    /// VAT-deductibility value (`afalevon`), retained as the reported integer.
+    /// The published schema does not specify its unit or range; the crate
+    /// does not interpret it as a percentage or use it in calculations.
     pub deductible_vat: i64,
     /// Labels (`cimkek`).
     pub labels: Vec<String>,
@@ -508,7 +517,9 @@ pub struct RecordedCreditEntry {
     pub amount: Decimal,
     /// Comment (`megjegyzes`).
     pub comment: Option<String>,
-    /// Bank account the amount arrived on (`bankszamlaszam`).
+    /// Sender's bank account, when known; otherwise the bank account shown
+    /// on the invoice (`bankszamlaszam`). The field does not identify which
+    /// of these two sources supplied the value.
     pub bank_account: Option<String>,
     /// Bank transaction identifier (`banktranzid`).
     pub bank_transaction_id: Option<i64>,

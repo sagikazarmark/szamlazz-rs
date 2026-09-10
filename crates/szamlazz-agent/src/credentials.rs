@@ -42,7 +42,9 @@ impl From<&str> for AgentKey {
     }
 }
 
-/// Credentials injected into the `beallitasok` block of every request.
+/// Credentials injected into each request's XML at the location required
+/// by the operation: directly under the root for invoice XML/PDF queries,
+/// and in `beallitasok` for the other built-in operations.
 ///
 /// Credentials are client state, not document data: request types do not carry
 /// them; they are supplied when a request is serialized to the wire.

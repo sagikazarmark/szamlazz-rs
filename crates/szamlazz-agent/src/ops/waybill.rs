@@ -1,8 +1,8 @@
-//! The carrier waybill block (`fuvarlevel`) of an invoice, the one part of
-//! the invoice request only the delivery-note use needs: the block itself and
-//! the four carriers' own sub-blocks. Re-exported from
-//! [`ops::invoice`](crate::ops::invoice), where it is a field of
-//! [`CreateInvoice`](crate::ops::invoice::CreateInvoice).
+//! Optional carrier waybill data (`fuvarlevel`) for the invoice-creation
+//! operation, including four carrier-specific sub-blocks. The block is not
+//! limited to delivery notes; use a document layout that can display it.
+//! Re-exported from [`ops::invoice`](crate::ops::invoice), where it is a field
+//! of [`CreateInvoice`](crate::ops::invoice::CreateInvoice).
 
 use rust_decimal::Decimal;
 
@@ -85,14 +85,20 @@ impl Mpl {
 }
 
 /// Optional carrier waybill block (`fuvarlevel`).
+///
+/// Usable on invoices as well as delivery notes, with a compatible layout.
+/// The library writes the supplied fields; the server renders the waybill
+/// and selects the barcode according to the [vendor annotations](https://docs.szamlazz.hu/hu/agent/generating_invoice/xml).
 #[doc(alias = "fuvarlevel")]
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Waybill {
-    /// Legacy destination (`uticel`).
+    /// Legacy destination (`uticel`), documented as unused. For Sprinter
+    /// routing, use [`Sprinter::routing_code`].
     pub destination: Option<String>,
     /// Carrier service token (`futarSzolgalat`).
     pub carrier: Option<String>,
-    /// General barcode (`vonalkod`).
+    /// General barcode (`vonalkod`), used by szamlazz.hu when the selected
+    /// carrier's sub-block does not supply the data needed to generate one.
     pub barcode: Option<String>,
     /// Waybill comment (`megjegyzes`).
     pub comment: Option<String>,

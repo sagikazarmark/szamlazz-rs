@@ -1,17 +1,18 @@
 //! Live tests against a real szamlazz.hu **test-mode** account.
 //!
 //! Ignored by default: they need `SZAMLAZZ_AGENT_KEY` set to an agent key of
-//! an account switched into test mode (rate limit: 100 invoices/hour), and
+//! an account switched into test mode, and
 //! they create real (test) documents. Run explicitly:
 //!
 //! ```sh
 //! SZAMLAZZ_AGENT_KEY=... cargo test -p szamlazz-agent --features client-reqwest --test live -- --ignored
 //! ```
 //!
-//! These are the tests that answer what the docs leave open: that the
-//! whole-forint HUF line totals of `Rounding::minor_unit` stay inside the
-//! tolerance of szamlazz.hu's `net = price × qty` check, rejected
-//! `InvoiceKind` combinations, and empty-vs-omitted element handling.
+//! Implemented scenarios: taxpayer lookup; a HUF invoice create/storno with
+//! whole-forint `Rounding::minor_unit` totals; proforma create/delete; and
+//! paper/e-invoice appearance with matching and mismatching storno flags.
+//! The [vendor error guidance](https://docs.szamlazz.hu/agent/basics/error-handling)
+//! documents 500 invoices per 10 minutes (checked 2026-09-10).
 
 #![cfg(feature = "client-reqwest")]
 

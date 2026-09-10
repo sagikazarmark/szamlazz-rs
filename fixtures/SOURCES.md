@@ -31,7 +31,7 @@ Files under `crates/szamlazz-agent/tests/golden/` are project-generated
 serialization expectations for the crate's own test inputs. They are likewise
 project-authored test data, not copies of the official request examples.
 
-## Official corpus provenance
+## Official corpus provenance — historical acquisition record
 
 Unless otherwise noted, files were fetched on 2026-07-04 from
 https://docs.szamlazz.hu/ (docs pages, examples extracted verbatim from the
@@ -78,7 +78,7 @@ directly). No values were modified or reformatted, except where noted below.
 | `agent/responses/taxpayer_error.xml` | https://docs.szamlazz.hu/agent/querying_taxpayer/response (failed) |
 | `agent/responses/taxpayer_invalid_taxnumber.xml` | https://docs.szamlazz.hu/agent/querying_taxpayer/response (invalid tax number) |
 
-Not available:
+Not available at the July acquisition:
 
 - https://docs.szamlazz.hu/agent/querying_receipt/response and
   https://docs.szamlazz.hu/agent/reversing_receipt/response contain no example bodies; both state
@@ -108,7 +108,7 @@ Downloaded directly (verified to be XML, not HTML error pages):
 | `agent/xsd/xmlnyugtavalasz.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/nyugtavalasz/xmlnyugtavalasz.xsd |
 | `agent/xsd/xmltaxpayer.xsd` | https://www.szamlazz.hu/szamla/docs/xsds/taxpayer/xmltaxpayer.xsd (the URL linked from the docs, http://www.szamlazz.hu/docs/xsds/agent/xmltaxpayer.xsd, returns 404) |
 
-Extracted verbatim from inline docs code blocks (the canonical URLs linked from the docs,
+Extracted verbatim from inline docs code blocks (the download URLs linked from the docs,
 http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdel.xsd and
 http://www.szamlazz.hu/docs/xsds/szamladbkdel/xmlszamladbkdelvalasz.xsd, return 404, and no
 working variant was found under /szamla/docs/xsds/):
@@ -118,21 +118,142 @@ working variant was found under /szamla/docs/xsds/):
 | `agent/xsd/xmlszamladbkdel.xsd` | https://docs.szamlazz.hu/agent/deleting_pro_forma_invoice/xsd (inline code block) |
 | `agent/xsd/xmlszamladbkdelvalasz.xsd` | https://docs.szamlazz.hu/agent/deleting_pro_forma_invoice/response ("XML response scheme" inline code block) |
 
-Note: each https://docs.szamlazz.hu/agent/&lt;operation&gt;/xsd page also shows the schema inline;
-the downloaded files above are the canonical versions.
+Each https://docs.szamlazz.hu/agent/&lt;operation&gt;/xsd page also shows the schema inline.
+The acquisition originally described the downloads as canonical. That blanket
+interpretation is withdrawn: inline and download schemas conflict; see the dated
+observations below. Neither source is universally authoritative for server behavior.
 
 **Deliberate deviation:** `agent/xsd/xmlszamla.xsd` was patched by hand (commit `3fc523a`) to add
 the `csoportazonosito` (vevő) and `torloKod` (tétel) elements. The docs pages (prose, examples,
 and the inline XSD at https://docs.szamlazz.hu/agent/generating_invoice/xsd) document both
 fields, but the file served at the download URL above is a stale, older revision that omits them
 (verified 2026-08-08: the served file is unchanged since 2026-07-04 and never contained them).
-The docs' inline XSD is the normative one ("The sent XML file must comply with the following XSD
-schema"). Do not refresh this file from the download URL without re-checking the docs' inline
-XSD, or the two elements will be silently dropped again. Similarly, the served `xmlnyugtaget.xsd`
+The inline XSD says "The sent XML file must comply with the following XSD schema";
+the earlier record treated that as a universal source-precedence rule. It is
+evidence for these fields, not a resolution of every schema conflict. This cached
+file is a **project-modified schema**, not an unmodified vendor download. Do not
+refresh it blindly or the two elements will be silently dropped. Similarly, the served `xmlnyugtaget.xsd`
 lacks the documented `rendelesSzam` selector (`agent/xsd/xmlnyugtaget.xsd` was therefore
 refreshed from the docs' inline XSD on 2026-08-11, see the table above), and the served
 `xmlnyugtaarchiv.xsd` dropped `rendelesSzam` after 2026-07-04; the docs pages remain the
-source of truth over the served XSD files where they disagree.
+evidence for those order fields. Preserve these supported fields while examining
+each disagreement on its own terms.
+
+## 2026-09-10 — response examples and source disagreements (#197)
+
+Unauthenticated GETs on **2026-09-10**, distinct from the July acquisition above.
+The docs show site build `v202608271632`, not an acquisition date or a date for
+every statement. These are published examples and source observations, not live
+Számla Agent exchanges. SHA-256 identifies the acquired bytes, not their truth.
+
+### Structured storno and credit-entry examples
+
+The following files under `upstream/agent/2026-09-10/` are the HTML-decoded text
+of the success/error `<pre>` blocks, with one final LF added and no other edits.
+The response pages now contain structured examples; the historical "only response
+example" descriptions above record the July acquisition and are not current claims.
+
+| File | Source | SHA-256 (stored UTF-8 bytes) |
+|---|---|---|
+| `reversing_invoice_success.xml` | https://docs.szamlazz.hu/agent/reversing_invoice/response | `7d4efe3326ecb36a1371a506057da30fec0440c539c7ca53261085829fa84008` |
+| `reversing_invoice_error.xml` | same page | `d70cb409dc85470d4bba94195f512688884c03b30c165250757913e790b67801` |
+| `credit_entry_success.xml` | https://docs.szamlazz.hu/agent/credit_entry/response | `da33ff8914848e50146e7c510cef651a8f7023cc52646ad60e61224c2b20d1b5` |
+| `credit_entry_error.xml` | same page | `d70cb409dc85470d4bba94195f512688884c03b30c165250757913e790b67801` |
+
+Acquired HTML hashes: storno
+`ae60e06a68de317d1cdcef951b6f97a7a9c7065c714be06c655f8ec05cbcb83c`,
+credit entry `5d041bed6d9cc221b6a716c69d72409ca54ff5756205f50db0de94ee2487fb2d`.
+Both success examples contain unescaped `&` in `vevoifiokurl`; the storno PDF
+also contains `....`. The corpus preserves these defects. Tests separately
+label any URL escaping or synthetic PDF substitution used to exercise the
+remaining fields; neither transformation reconstructs a real vendor response.
+The positive storno gross in this example does not prove reversal of any original.
+
+### NAV link observation
+
+https://docs.szamlazz.hu/agent/querying_taxpayer/response now links the schema
+section to [NAV's v3.0 interface PDF](https://onlineszamla.nav.gov.hu/files/container/download/Online_Szamla_interfesz%20specifikacio_HU_v3.0.pdf),
+section 1.8.9 `/queryTaxpayer`. Acquired page SHA-256:
+`a4a6e19bceea88b6d3761d69b41939c38cedac7350cb0e42a56db761a4595612`.
+This records the link on the Agent page, not a fetch/hash of the linked PDF.
+The examples still declare NAV 2.0 api/data namespaces and carry their own
+2020-11-04 update date. A current link to v3.0 does not turn them into v3.0 examples.
+
+### Receipt-create acquisition uncertainty
+
+`agent/xsd/xmlnyugtacreate.xsd` contains `torloKod`; today's direct download at
+https://www.szamlazz.hu/szamla/docs/xsds/nyugtacreate/xmlnyugtacreate.xsd does not
+(download SHA-256 `2c6fcda8bd9d48998df77c97413272f033ee381067fe7dd85694156a4b260a6f`).
+Git history contains the cached element already in initial commit `a3342f0`,
+and no later edit to that file. No original acquisition log or transformation
+record was recovered. The mechanism is **unverified**: this does not establish
+that the July fetch was wrong, nor that someone patched the element locally.
+Keep the cached file and its historical description with this qualification.
+
+### Conflicting invoice schemas
+
+The following are independent acquisitions; hashes of inline blocks refer to
+HTML-decoded UTF-8 code-block text, without reindentation or an added newline.
+These observations do not replace the cached schemas or merge their contents.
+
+| Source | SHA-256 | Observed `fejlecTipus` tail | Buyer group / item erasure |
+|---|---|---|---|
+| [Download](https://www.szamlazz.hu/szamla/docs/xsds/agent/xmlszamla.xsd) | `90af7504bab00e92bcf84971ed3088d9b7c67dd70219148dabe454e32a3b5498` | `szamlaSablon`, `elonezetpdf`, `simpleItems` | both absent |
+| [EN inline](https://docs.szamlazz.hu/agent/generating_invoice/xml) | `06d96231248068d195ee669e6752a6341215ddc82892f886da16c68578776de4` | `szamlaSablon`, `simpleItems`, `elonezetpdf` | both present |
+| [HU inline](https://docs.szamlazz.hu/hu/agent/generating_invoice/xml) | `09141775e3c25532ee9e2ef5616ea2446d753bd80f7b5a9271be524d0879fe6a` | `szamlaSablon`, `simpleItems`, `elonezetpdf` | both present |
+
+EN/HU acquired HTML hashes respectively:
+`039d56a5a7f73b4d2cdf9df11ead144a1fe3688a7ade6c44ccf18eac84cae2d0`,
+`1863f909162b35b10c1edd7f642addba530a34efd49228d5e6a3c79cfecfd398`.
+The table is a project-authored structural observation, not an original XSD.
+The complete newly fetched schemas are not substituted into `agent/xsd/`.
+Keep original source snapshots separate from the documented local transformation
+of `agent/xsd/xmlszamla.xsd` and from `tests/golden` writer expectations.
+
+[#199](https://github.com/sagikazarmark/szamlazz-rs/issues/199) owns the
+`simpleItems` writer policy and its independent order/feature regression cases,
+including separately retained source snapshots. Its chosen order follows the
+download and first-party PHP 2.12.4; this is an implementation policy, not proof
+of combined-preview server acceptance. A merged XSD would establish neither.
+Keep group-id, erasure and order fields supported. The conflict must inform
+#109's drift work and #111's broader validation work; neither is resolved here.
+
+### What the checks establish, and who owns the remaining cases
+
+- `tests/upstream.rs` checks dated examples against operations. Its request
+  outline deliberately loses empty containers and surrounding text; matching
+  outlines do not establish semantic equivalence or exact XML fidelity.
+- `tests/receipt_wire.rs` independently checks actual default `SendReceipt`
+  output for exactly one present empty `emailKuldes`, paired/self-closing
+  presence, and omitted children versus `Some("")`. The vendor's
+  [send XML docs](https://docs.szamlazz.hu/agent/sending_receipt/xml) distinguish
+  an absent block (no send) from empty-present (resend); these offline tests
+  establish serialization, not delivery or partial-override behavior.
+- [#195](https://github.com/sagikazarmark/szamlazz-rs/issues/195) owns the
+  independent source-derived error catalogue (`tests/error_classification.rs`).
+- [#194](https://github.com/sagikazarmark/szamlazz-rs/issues/194) owns genuine
+  NAV mixed-namespace/path cases (`tests/taxpayer_paths.rs`), date/monetary
+  lexical assertions (`tests/response_headers.rs`, invoice/receipt unit tests),
+  and decoded business text (`tests/business_text.rs`). These landed with
+  their fixes; an outline or enum round-trip is not a substitute.
+- #199 owns additional taxpayer-field/version fixtures and simplified-image
+  order assertions with its capability implementation, rather than deferring
+  them to #146/#126's broader test projects.
+- `tests/live.rs` implements taxpayer lookup, HUF invoice create/storno,
+  proforma create/delete and appearance cases. It does not exercise rejected
+  kind combinations or empty/omitted semantics. The current
+  [vendor limit](https://docs.szamlazz.hu/agent/basics/error-handling) is 500
+  invoices per 10 minutes in the test environment; any slower local pacing is
+  a local choice, not the old claimed vendor limit of 100/hour.
+
+Domain guidance in #197 follows the vendor's [VAT rules](https://docs.szamlazz.hu/hu/agent/generating_invoice/settings_and_rules/vat-rates),
+[buyer/waybill annotations](https://docs.szamlazz.hu/hu/agent/generating_invoice/xml),
+[queried bank-account annotation](https://docs.szamlazz.hu/hu/penzugyi-adatkapcsolat/kimeno-szamlak)
+and [erasure guidance](https://tudastar.szamlazz.hu/gyik/adattorlo-kod-hasznalata-apin-keresztul-es-tomeges-szamlageneralaskor).
+The paid-proforma deletion and possible later queried-buyer changes are bounded
+test-account observations in [the behavior notes](../docs/szamlazz-hu-behaviour.md),
+not universal account/master-data rules. No live TAHK/OSS, buyer-ID collision,
+portal access, erasure or carrier-rendering result is established by this sweep.
 
 ## adatkapcsolat/
 
