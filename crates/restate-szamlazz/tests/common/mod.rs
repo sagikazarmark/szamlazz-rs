@@ -306,6 +306,21 @@ pub fn created(number: &str, net: &str, gross: &str) -> ResponseTemplate {
         )
 }
 
+/// A numbered success with optional totals omitted from both body and headers.
+pub fn created_without_totals(number: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(numbered_reply_body(number, None), "application/xml")
+}
+
+/// A numbered reply with only its optional gross, for the storno evidence controls.
+pub fn numbered_reply_body(number: &str, gross: Option<&str>) -> String {
+    let totals = gross.map_or_else(String::new, |value| {
+        format!("<szamlabrutto>{value}</szamlabrutto>")
+    });
+    format!(
+        r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>{number}</szamlaszam>{totals}</xmlszamlavalasz>"#
+    )
+}
+
 /// A success without a number: `xmlszamlavalasz` without `<szamlaszam>`,
 /// which the agent crate refuses to parse for a create.
 pub fn created_without_a_number() -> ResponseTemplate {

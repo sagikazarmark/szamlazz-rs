@@ -378,6 +378,7 @@ async fn e2e_order_protocol() {
             correct_invoice::corrective_is_issued_under_its_correction_id,
             storno::storno_then_reissue,
             storno::storno_answers_from_the_hint_or_re_executes_a_lost_send,
+            storno::ambiguous_storno_retries_and_exhaustion_preserve_the_send,
             delete_proforma::proforma_is_deleted_by_the_orders_handler,
             policies::run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault,
             policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,

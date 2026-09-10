@@ -54,20 +54,27 @@ pub struct CreatedInvoice {
 }
 
 impl CreatedInvoice {
-    /// Whether this document is a reversal of `original`: a *different*
-    /// invoice number with a gross total that is not positive.
+    /// A reply-only reversal heuristic: `true` means a *different* invoice
+    /// number with a known gross total that is not positive.
     ///
-    /// The check every caller must make after a
-    /// [`StornoInvoice`](crate::ops::storno::StornoInvoice): szamlazz.hu
-    /// answers a storno request for a proforma or a delivery note with a
-    /// success-shaped response that merely echoes the requested document
-    /// (same number, positive totals) and reverses nothing. A repeat storno of
-    /// an already reversed invoice also passes this check: it echoes the
-    /// existing storno invoice, which is a genuine reversal. So does the
-    /// storno of a zero-total invoice, whose storno document carries a gross
-    /// of `0`.
+    /// After a [`StornoInvoice`](crate::ops::storno::StornoInvoice), this
+    /// recognizes the observed negative-total reversal of a positive-total
+    /// original, including a repeat echoing the existing storno. On one test
+    /// account, proforma and delivery-note requests instead echoed the
+    /// original number with positive totals and reversed nothing.
     ///
-    /// Returns `false` when the gross total is unknown.
+    /// `false` means **not established by this reply**, never proof that
+    /// nothing was reversed: the optional gross may be absent or positive.
+    /// To resolve a changed number in either case, query that number and check
+    /// [`DocumentType::Storno`](crate::DocumentType::Storno) and its reference
+    /// to the original. This helper performs no query and checks no document
+    /// type or reference. Even `true` is heuristic evidence, not an identity
+    /// check or proof that the storno was issued by this call rather than earlier.
+    ///
+    /// The comparison accepts zero as a deliberate policy; zero-total
+    /// originals and negative-original/positive-total stornos have not been
+    /// verified live. Synthetic tests of this predicate do not establish
+    /// szamlazz.hu's acceptance of those originals.
     #[must_use]
     pub fn reverses(&self, original: &InvoiceNumber) -> bool {
         self.invoice_number != *original
@@ -688,19 +695,20 @@ mod tests {
 
         // A genuine storno invoice (also what a repeat storno echoes).
         assert!(created("CTEST-2026-42", Some(dec!(-1270))).reverses(&original));
-        // The storno of a zero-total invoice: a new number, a gross of 0.
+        // Synthetic zero comparison control, not live zero-original evidence.
         assert!(created("CTEST-2026-42", Some(dec!(0))).reverses(&original));
 
         // Storno of a proforma or delivery note: the requested document is
         // echoed unchanged.
         assert!(!created("CTEST-2026-40", Some(dec!(1270))).reverses(&original));
-        // A different number with positive totals reversed nothing either.
+        // A different number with positive totals needs identity verification.
         assert!(!created("CTEST-2026-41", Some(dec!(1270))).reverses(&original));
-        // Same number, negative gross (not observed) is not a reversal.
+        // Same number, negative gross (synthetic) fails this heuristic.
         assert!(!created("CTEST-2026-40", Some(dec!(-1270))).reverses(&original));
-        // Same number, zero gross: the echo of a zero-total proforma.
+        // Same number, zero gross: synthetic echo-policy control.
         assert!(!created("CTEST-2026-40", Some(dec!(0))).reverses(&original));
         // Unknown totals cannot prove a reversal.
         assert!(!created("CTEST-2026-42", None).reverses(&original));
+        assert!(!created("CTEST-2026-40", None).reverses(&original));
     }
 }

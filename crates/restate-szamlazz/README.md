@@ -674,6 +674,22 @@ with nothing sent, raised after the answers that need no send. Neither the date 
 szamlazz.hu (it issues the storno with whatever `teljesitesDatum` and `eszamla` the request carries), so the
 derivation from the verified original is what keeps a reversal on its original's date and in its original's form.
 
+**Ambiguous storno replies (#196).** A changed number with absent or positive optional gross is now verified
+by querying that number for the storno type and reference to the original. It can return `reversed`; if that
+query is inconclusive, the gateway reconciles by the storno external id. Failure to establish reversal stays
+`Unconfirmed` under the issue policy and becomes `outcome_unknown` on exhaustion, rather than the previous
+`rejected{not_stornoable}` no-op inference. Post-send credential/unavailable failures preserve the uncertainty
+and their causes. The same-number echo policy and changed-number/nonpositive-gross fast path remain; zero is
+a synthetic comparison control, and neither zero-total nor negative-total originals have been verified live.
+
+Release/journal review under [ADR 0009](../../docs/adr/0009-immutable-deployments-no-journal-compatibility-contract.md):
+verification and reconciliation run inside the existing `storno-{number}` closure. Step names, ordered paths,
+step inputs and journaled outcome shapes are unchanged; an ambiguous reply can now produce `Reversed` or a run
+failure instead of `NotStornoable`. The new `Unconfirmed::StornoVerification` is a retryable error, not a
+journaled outcome; its display carries the returned number and verification cause. Register this release as
+a new immutable deployment. A previously completed no-op result stays completed on its original invocation;
+use a new `Idempotency-Key` to reconcile it through a new invocation.
+
 A document the verify already sees reversed is `reversed` with a **best-effort** storno number:
 `Szamlazz.Order.storno_invoice` from the order-number hint, `Szamlazz.Agent.storno` from the by-number storno
 lookup (ours when we issued the storno, unknown after a reversal from the UI). An exhausted read reports the

@@ -20,8 +20,8 @@ use wiremock::{MockBuilder, MockServer, Request, ResponseTemplate};
 
 pub(crate) use crate::common::{
     Doc, agent_key_tag, api_error, create_for, create_with_bank_account, create_with_key, created,
-    credit_of, credited, delete_of, external_id_query, http_client, not_found, number_query,
-    order_query, original_telj_tag, proforma_deleted, storno_of_number,
+    created_without_totals, credit_of, credited, delete_of, external_id_query, http_client,
+    not_found, number_query, order_query, original_telj_tag, proforma_deleted, storno_of_number,
     storno_of_number_repeating_telj, szlahu_down, taxpayer_known, taxpayer_query_with_key,
     taxpayer_unknown,
 };

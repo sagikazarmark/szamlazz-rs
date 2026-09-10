@@ -498,16 +498,24 @@ answers when one account names another's invoice number is unverified, behaviour
    original's `telj`, which NAV requires the storno to repeat (ADR 0007; szamlazz.hu defaults to it when the element
    is omitted and accepts any date silently when it is not, verified, so the explicit date is what fails loudly),
    **without `keltDatum`** (352 otherwise; verified);
-   (c) validate: `invoice_number ≠ requested ∧ gross ≤ 0` → `Reversed` (`CreatedInvoice::reverses`; `≤`, not `<`:
-   the storno of a 0-HUF invoice, a free ticket, lands as a new number with a gross of `0`, and `< 0` reported it
-   `not_stornoable` although the storno document had landed); echo of the requested number →
-   `NotStornoable`; API errors → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
+   (c) read the numbered reply as three-way evidence (#196): `invoice_number ≠ requested ∧ gross ≤ 0` →
+   `Reversed` (`CreatedInvoice::reverses`, a reply-only heuristic; zero is an intentional comparison policy,
+   tested synthetically, not live zero-original acceptance); echo of the requested number → `NotStornoable`;
+   changed number with absent/positive gross → query that number **inside this same step**. The queried number
+   must match and `FoundDocument::is_storno_of(original)` must establish the storno type and original reference
+   → `Reversed` carrying the send reply's optional metadata. Wrong type/reference/number, not-found or any query
+   failure → immediate storno-external-id reconciliation: matching `SS` → `AlreadyReversed`; nothing conclusive →
+   `Err(StornoVerification{number, message})`; reconciliation failure → `Err(ReQueryFailed{sent, re_query})`,
+   preserving the numbered send and verification cause. A post-send credential/unavailable answer does not
+   prove that the send was refused. Positive-original negative stornos and same-number proforma/delivery-note
+   echoes are the live evidence; negative-original, zero-original and missing-gross compound cases remain
+   unverified on the server. API errors of the send → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
    `221` = has a corrective; typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 →
     `CredentialsRejected{code, message}`; a transport failure, an open code (1, 55, 56, a code the agent crate
     does not know) or `szlahu_down` → re-query
    the storno ext id once, immediately → the matching `SS` → `AlreadyReversed{storno_number}` (what was sent landed);
    nothing → `Err(Transport | Open | Unavailable)`; the re-query itself failed → `Err(ReQueryFailed{sent, re_query})`
-   naming both (#63); and the run policy re-executes the step after its delay, beginning again at (a).
+   naming both (#63), credential failures included (#196); and the run policy re-executes the step after its delay, beginning again at (a).
    Any `Err` from the run, exhaustion (500) or cancellation (409), is mapped to `TerminalError{outcome_unknown,
    json{order, kind, external_id}}`; nothing is recorded, the next call's steps 1–2 find the storno if it landed.
 4. **Branch on data.** `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `NotStornoable` →

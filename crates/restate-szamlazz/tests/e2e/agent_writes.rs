@@ -16,7 +16,7 @@ use crate::harness::Harness;
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{
     Doc, agent_key_tag, created, credit_of, credited, external_id_query, holds, not_found,
-    original_telj_tag, storno_of, storno_of_number_repeating_telj,
+    number_query, original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
 /// `Szamlazz.Agent.storno` under `acme` reverses a document carrying no order
@@ -36,7 +36,19 @@ pub(crate) async fn agent_storno_and_set_credit_entries_run_on_the_scoped_accoun
         .await;
     storno_of_number_repeating_telj("SZ-23")
         .and(body_string_contains(agent_key_tag(AGENT_KEY)))
-        .respond_with(created("SS-23", "-1000", "-1270"))
+        .respond_with(created("SS-23", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    // Synthetic positive-gross reply: confirm by identity, not arithmetic.
+    number_query("SS-23")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-23"),
+                ..Doc::unmanaged("SS-23", "SS")
+            }
+            .response(),
+        )
         .expect(1)
         .mount(&h.mock)
         .await;

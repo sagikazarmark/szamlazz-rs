@@ -21,9 +21,11 @@ use crate::xml;
 ///
 /// # Server behaviour
 ///
-/// Observed against a szamlazz.hu test account; the response shape alone does
-/// not tell these cases apart, so check
-/// [`CreatedInvoice::reverses`] after every call.
+/// Observed against one szamlazz.hu test account, with positive-total
+/// originals. [`CreatedInvoice::reverses`] is a reply-only heuristic for
+/// these cases; `false` is inconclusive when the returned number differs
+/// and the optional gross is absent or positive. Query the returned
+/// document's type and original reference to establish reversal identity.
 ///
 /// - **Repeat storno is idempotent.** Reversing an already reversed invoice
 ///   returns success echoing the *existing* storno invoice: same number,
@@ -40,8 +42,8 @@ use crate::xml;
 ///   (221).
 /// - **Storno of a proforma or a delivery note** is a success-shaped no-op:
 ///   the response echoes the *requested* document unchanged (its own number,
-///   positive totals) and nothing is reversed. Only
-///   [`CreatedInvoice::reverses`] detects this.
+///   positive totals) and nothing is reversed. The same-number echo
+///   distinguishes this from the observed reversal replies.
 /// - **Payments are not carried over.** After the reversal, the original
 ///   invoice's recorded payments disappear from its queried XML and the storno
 ///   invoice's outstanding amount is its full negative gross, ignoring prior
@@ -323,7 +325,7 @@ mod tests {
     }
 
     /// Storno of a proforma or delivery note succeeds on the wire but echoes
-    /// the requested document unchanged; `reverses` is the only tell.
+    /// the requested document unchanged; the same number is the echo's tell.
     #[test]
     fn success_shaped_no_op_is_not_a_reversal() {
         let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>D-CTEST-14</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg></xmlszamlavalasz>"#;

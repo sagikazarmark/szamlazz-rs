@@ -61,10 +61,11 @@ Send the original's `telj` explicitly, always, and do not let the caller choose 
   answers, an already
   reversed or not-stornoable document without a `telj` still gets `reversed` or `rejected{not_stornoable}`
   without sending.
-- **No post-storno read.** The storno document is immutable (the vendor's remedy for a wrong storno date is a
+- **No post-storno date check.** The storno document is immutable (the vendor's remedy for a wrong storno date is a
   manual technical invoice) and a storno cannot be stornoed (code 14), so a mismatch found afterwards is
   un-actionable by the worker. Fact 2 shows the equal date lands. The go-live checklist verifies it once per
-  account instead.
+  account instead. This is about the date: #196 adds a post-send **identity** query inside the storno step
+  for a changed-number reply whose optional gross does not establish reversal by the reply heuristic.
 
 The date is a pure function of the journaled verify result, so every re-execution of the storno step
 rebuilds the same request and sends byte-identical bytes; nothing new is journaled.

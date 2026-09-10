@@ -49,7 +49,9 @@
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-pub(crate) use common::{CreditRecord, Doc, ORIGINAL_TELJ, SUPPLIER, http_client};
+pub(crate) use common::{
+    CreditRecord, Doc, ORIGINAL_TELJ, SUPPLIER, http_client, numbered_reply_body,
+};
 use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
 use szamlazz_agent::{Credentials, InvoiceNumber, InvoiceSelector};

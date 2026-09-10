@@ -69,7 +69,7 @@ use szamlazz_agent::client::BuildError;
 use szamlazz_agent::ops::credit_entry::{
     CreditEntries, CreditEntry, InvoiceBalance, RegisterCreditEntry,
 };
-use szamlazz_agent::ops::invoice::{CreateInvoice, CreationOutcome};
+use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, CreationOutcome};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::storno::StornoInvoice;
@@ -441,12 +441,12 @@ pub enum CreateOutcome {
 /// policy re-executes the step, whose leading query then finds whatever
 /// landed.
 ///
-/// Reserved for exchanges whose answer is not known. An *answer* to the
+/// Reserved for exchanges whose outcome is not established. An *answer* to the
 /// leading query (another code, `szlahu_down`) is settled data
 /// ([`CreateOutcome::Api`], [`CreateOutcome::Unavailable`] and the storno
 /// twins), never this. Every variant but [`Unconfirmed::Transport`] on the
 /// leading query follows an immediate external-id re-query: one that found no
-/// live document of ours (read-your-writes lag ≈ 0, so "nothing" is not lag),
+/// live document of ours,
 /// or one that failed itself ([`Unconfirmed::ReQueryFailed`], which names
 /// both causes).
 ///
@@ -476,6 +476,15 @@ pub enum Unconfirmed {
     /// storno: whether it acted first is not known.
     #[error("szamlazz.hu is unavailable (szlahu_down): {0}")]
     Unavailable(String),
+    /// A numbered storno reply did not establish a reversal, and querying
+    /// that number did not confirm its identity as the original's storno.
+    #[error("storno send returned {number}, but its reversal identity is unconfirmed: {message}")]
+    StornoVerification {
+        /// The number returned by the send.
+        number: String,
+        /// The identity mismatch or the failure of the by-number query.
+        message: String,
+    },
     /// The send ended without a settled answer (`sent` says how), and the
     /// immediate re-query that would have settled it failed itself, so
     /// neither is known. Both are named: the re-query's failure never hides
@@ -756,6 +765,26 @@ pub struct StornoStepRequest<'a> {
     pub fulfillment_date: Date,
 }
 
+/// What a numbered storno reply establishes before any further query.
+#[derive(Debug, PartialEq, Eq)]
+enum StornoReplyEvidence {
+    Reversal,
+    SameNumberEcho,
+    NeedsVerification,
+}
+
+impl StornoReplyEvidence {
+    fn of(created: &CreatedInvoice, original: &InvoiceNumber) -> Self {
+        if created.reverses(original) {
+            Self::Reversal
+        } else if created.invoice_number == *original {
+            Self::SameNumberEcho
+        } else {
+            Self::NeedsVerification
+        }
+    }
+}
+
 /// The settled result of the storno step: szamlazz.hu's answer is known.
 /// What is *not* settled is an [`Unconfirmed`] error, which the run retry
 /// policy re-executes.
@@ -763,27 +792,30 @@ pub struct StornoStepRequest<'a> {
 #[non_exhaustive]
 pub enum StornoOutcome {
     /// The invoice is reversed by the storno invoice szamlazz.hu issued (now,
-    /// or echoed by an idempotent repeat), validated with
+    /// or echoed by an idempotent repeat), established by the reply heuristic
     /// [`CreatedInvoice::reverses`](szamlazz_agent::ops::invoice::CreatedInvoice::reverses)
-    /// by [`Gateway::storno`].
+    /// or, for a changed number with absent/positive gross, a by-number query
+    /// confirming its storno type and original reference in [`Gateway::storno`].
     Reversed(IssuedDocument),
     /// The storno invoice is under the storno external id, found by the
     /// leading query (an earlier execution of this step, or the lookup step's
-    /// race, sent it) or by the re-query after a lost reply. Nothing was
+    /// race, sent it) or by reconciliation after a lost or ambiguous reply. Nothing was
     /// sent, or what was sent landed.
     AlreadyReversed {
         /// The storno invoice number.
         storno_number: String,
     },
-    /// szamlazz.hu answered success but echoed the requested document with
-    /// positive totals: a proforma or delivery note, which cannot be reversed.
+    /// szamlazz.hu answered success but echoed the requested number. This
+    /// retains the no-op policy observed on proformas and delivery notes with
+    /// positive totals; the number comparison does not require totals.
     NotStornoable,
     /// szamlazz.hu refused (14: the document is itself a storno; 221: it has a
     /// corrective; …).
     Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
-    /// leading query, the storno or a re-query; this execution issued
-    /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
+    /// leading query or the storno send itself; that request was not acted
+    /// on. A credential failure during post-send verification/reconciliation
+    /// is instead [`Unconfirmed`]. Settled data: re-executing with the same
     /// key would only repeat the answer. See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered the **leading** query with another code (neither
@@ -1539,10 +1571,16 @@ impl Gateway {
     /// 2. Send `xmlszamlast` with the external id, comment, e-invoice flag and
     ///    `teljesitesDatum` (the verified original's `telj`, which NAV
     ///    requires the storno to repeat), and **no issue date**
-    ///    (352 otherwise): a response validated with
+    ///    (352 otherwise): a response satisfying
     ///    [`CreatedInvoice::reverses`](szamlazz_agent::ops::invoice::CreatedInvoice::reverses)
-    ///    is [`StornoOutcome::Reversed`], an
-    ///    echo of the requested number [`StornoOutcome::NotStornoable`], a
+    ///    is [`StornoOutcome::Reversed`] by the existing heuristic. A changed
+    ///    number with absent/positive gross is queried by number: a matching
+    ///    storno referencing the original is also [`StornoOutcome::Reversed`].
+    ///    An inconclusive verification (including wrong identity, not-found,
+    ///    credentials or unavailability) takes external-id reconciliation;
+    ///    no conclusive result leaves [`Unconfirmed::StornoVerification`],
+    ///    or [`Unconfirmed::ReQueryFailed`] if reconciliation itself failed.
+    ///    An echo of the requested number is [`StornoOutcome::NotStornoable`], a
     ///    refusal [`StornoOutcome::Rejected`], rejected credentials
     ///    [`StornoOutcome::CredentialsRejected`]. A lost reply, an open code
     ///    or `szlahu_down` is re-queried once, immediately: a landed storno
@@ -1606,14 +1644,19 @@ impl Gateway {
         };
 
         match self.client.send(&storno).await {
-            Ok(created) if created.reverses(&storno.invoice_number) => {
-                tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
-                Ok(StornoOutcome::Reversed(IssuedDocument::from(created)))
-            }
-            Ok(created) => {
-                tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
-                Ok(StornoOutcome::NotStornoable)
-            }
+            Ok(created) => match StornoReplyEvidence::of(&created, &storno.invoice_number) {
+                StornoReplyEvidence::Reversal => {
+                    tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
+                    Ok(StornoOutcome::Reversed(IssuedDocument::from(created)))
+                }
+                StornoReplyEvidence::SameNumberEcho => {
+                    tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
+                    Ok(StornoOutcome::NotStornoable)
+                }
+                StornoReplyEvidence::NeedsVerification => {
+                    self.verify_storno_reply(&request, created).await
+                }
+            },
             Err(error) => match classify_failure(error) {
                 Failure::Rejected(rejection) => {
                     tracing::info!(code = %rejection.code, "storno rejected");
@@ -1648,7 +1691,41 @@ impl Gateway {
         }
     }
 
-    /// The immediate re-query after a storno whose reply was lost or open:
+    /// A changed number without non-positive gross needs identity evidence,
+    /// inside the same query-first step as the send. A mismatch or query
+    /// failure cannot prove a no-op: try the storno external id before
+    /// leaving the step unconfirmed.
+    async fn verify_storno_reply(
+        &self,
+        request: &StornoStepRequest<'_>,
+        created: CreatedInvoice,
+    ) -> Result<StornoOutcome, Unconfirmed> {
+        let selector = InvoiceSelector::InvoiceNumber(created.invoice_number.clone());
+        let message = match self.query_raw(selector).await {
+            Ok(document)
+                if document.number == created.invoice_number.as_str()
+                    && document.is_storno_of(request.invoice_number) =>
+            {
+                tracing::info!(storno_number = %created.invoice_number, "storno identity verified");
+                return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+            }
+            Ok(document) => format!(
+                "queried {} with document type {} and original {:?}; expected a storno of {}",
+                document.number,
+                document.document_type,
+                document.referenced_invoice_number,
+                request.invoice_number,
+            ),
+            Err(error) => error.to_string(),
+        };
+        let unconfirmed = Unconfirmed::StornoVerification {
+            number: created.invoice_number.to_string(),
+            message,
+        };
+        self.storno_settle_or(request, unconfirmed).await
+    }
+
+    /// The immediate re-query after a storno whose reply was lost, open or ambiguous:
     /// a landed storno settles the step; nothing is `unconfirmed`, and a
     /// re-query that fails itself is unconfirmed naming both causes.
     async fn storno_settle_or(
@@ -1656,8 +1733,13 @@ impl Gateway {
         request: &StornoStepRequest<'_>,
         unconfirmed: Unconfirmed,
     ) -> Result<StornoOutcome, Unconfirmed> {
-        match self.storno_settled_by_query(request).await {
-            Ok(Some(settled)) => Ok(settled),
+        // Unlike the leading query, a credential failure here says nothing
+        // about whether the preceding send landed.
+        match self
+            .storno_seen(request.external_id, request.invoice_number)
+            .await
+        {
+            Ok(Some(storno_number)) => Ok(StornoOutcome::AlreadyReversed { storno_number }),
             Ok(None) => Err(unconfirmed),
             Err(error) => Err(unconfirmed.re_query_failed(&error)),
         }
@@ -2075,6 +2157,34 @@ mod tests {
     // The wiremock suite (`tests/gateway/`) reaches them through HTTP and
     // keeps one exchange per operation for the header-vs-body parse path;
     // the branches are asserted here.
+
+    #[test]
+    fn numbered_storno_reply_evidence_distinguishes_echo_from_uncertainty() {
+        use StornoReplyEvidence::{NeedsVerification, Reversal, SameNumberEcho};
+
+        // Zero and negative-original shapes are synthetic policy controls,
+        // not evidence of szamlazz.hu accepting those originals.
+        let rows = [
+            ("SZ-1", None, SameNumberEcho),
+            ("SZ-1", Some("-1270"), SameNumberEcho),
+            ("SZ-1", Some("0"), SameNumberEcho),
+            ("SZ-1", Some("1270"), SameNumberEcho),
+            ("SS-1", None, NeedsVerification),
+            ("SS-1", Some("-1270"), Reversal),
+            ("SS-1", Some("0"), Reversal),
+            ("SS-1", Some("1270"), NeedsVerification),
+        ];
+        let request = StornoInvoice::new("SZ-1");
+        for (number, gross, expected) in rows {
+            let body = crate::test_support::numbered_reply_body(number, gross);
+            let created = request.parse(&response(&body)).expect("numbered reply");
+            assert_eq!(
+                StornoReplyEvidence::of(&created, &request.invoice_number),
+                expected,
+                "number {number}, gross {gross:?}",
+            );
+        }
+    }
 
     /// Step 2 of the lookup: the order-number hint is foreign when it is a
     /// **live** document of the invoice family (`SZ`, `ES`, `VS`) that is

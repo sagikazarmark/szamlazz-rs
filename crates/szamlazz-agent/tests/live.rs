@@ -229,7 +229,7 @@ async fn eszamla_semantics() {
             .unwrap_or_else(|error| panic!("{label}: storno of {number} refused: {error}"));
         assert!(
             reversal.reverses(&number),
-            "{label}: storno of {number} echoed the original"
+            "{label}: storno of {number} did not satisfy the reply-only reversal heuristic"
         );
         let storno_document = query_by_number(&client, &reversal.invoice_number).await;
         assert_eq!(

@@ -1,11 +1,11 @@
 //! The storno lookup and the storno step: the storno of ours under its id,
-//! the reversal validated (a new number, a non-positive gross, the original's
+//! the reversal established (reply heuristic or queried identity, the original's
 //! `telj` and appearance on the wire), the echo as `NotStornoable`, the
 //! leading query, the lost reply and its re-query.
 
 use super::common::{
-    Doc, api_error, body_error, created, external_id_query, not_found, number_query,
-    original_telj_tag, storno, szlahu_down,
+    Doc, api_error, body_error, created, created_without_totals, external_id_query, not_found,
+    number_query, original_telj_tag, storno, szlahu_down,
 };
 use super::harness::*;
 use restate_szamlazz::gateway::{
@@ -202,10 +202,9 @@ async fn storno_carries_the_verified_originals_appearance() {
 }
 
 #[tokio::test]
-async fn storno_of_a_zero_gross_invoice_is_reversed() {
-    // The storno of a 0-HUF invoice (a free ticket) lands as a document
-    // with a new number and a gross of 0: a reversal, not the echo of a
-    // proforma or delivery note, which keeps the requested number.
+async fn synthetic_changed_number_zero_gross_retains_the_reversal_fast_path() {
+    // Synthetic comparison control: retain the <= 0 policy. This does not
+    // establish szamlazz.hu's acceptance of a zero-total original.
     let h = Harness::start().await;
     let storno_id = storno_id();
     external_id_query(storno_id.as_str())
@@ -234,10 +233,12 @@ async fn storno_echo_is_not_stornoable() {
     let storno_id = storno_id();
     external_id_query(storno_id.as_str())
         .respond_with(not_found())
+        .expect(1)
         .mount(&h.server)
         .await;
     storno()
         .respond_with(created("SZ-1", "1000", "1270"))
+        .expect(1)
         .mount(&h.server)
         .await;
 
@@ -245,6 +246,223 @@ async fn storno_echo_is_not_stornoable() {
         h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::NotStornoable)
     );
+    assert_eq!(h.bodies().await.len(), 2, "an echo needs no further query");
+}
+
+#[tokio::test]
+async fn ambiguous_storno_reply_is_confirmed_by_its_document_identity() {
+    // Synthetic allowed reply shapes, not evidence of live negative-original acceptance.
+    for (reply, gross) in [
+        (created_without_totals("SS-1"), None),
+        (created("SS-1", "1000", "1270"), Some(dec!(1270))),
+    ] {
+        let h = Harness::start().await;
+        let storno_id = storno_id();
+        external_id_query(storno_id.as_str())
+            .respond_with(not_found())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(reply)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        number_query("SS-1")
+            .respond_with(
+                Doc {
+                    referenced_invoice: Some("SZ-1"),
+                    ..Doc::new("SS-1", "SS")
+                }
+                .response(),
+            )
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        match h.gateway.storno(storno_request(&storno_id)).await {
+            Ok(StornoOutcome::Reversed(document)) => {
+                assert_eq!(document.number, "SS-1");
+                assert_eq!(
+                    document.gross_total, gross,
+                    "keep the reply's optional metadata"
+                );
+            }
+            other => panic!("expected identity-confirmed Reversed, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one table of inconclusive identity checks, each with and without successful reconciliation"
+)]
+async fn inconclusive_storno_identity_uses_external_id_reconciliation() {
+    let matching = Doc {
+        referenced_invoice: Some("SZ-1"),
+        ..Doc::new("SS-1", "SS")
+    };
+    let checks = [
+        (
+            "wrong type",
+            Doc {
+                tipus: "HS",
+                ..matching.clone()
+            }
+            .response(),
+            "document type HS",
+        ),
+        (
+            "wrong reference",
+            Doc {
+                referenced_invoice: Some("SZ-9"),
+                ..matching.clone()
+            }
+            .response(),
+            "SZ-9",
+        ),
+        (
+            "missing reference",
+            Doc {
+                referenced_invoice: None,
+                ..matching.clone()
+            }
+            .response(),
+            "None",
+        ),
+        (
+            "wrong number",
+            Doc {
+                number: "SS-9",
+                ..matching.clone()
+            }
+            .response(),
+            "SS-9",
+        ),
+        ("not found", not_found(), "code 7"),
+        (
+            "unanswered",
+            ResponseTemplate::new(500),
+            "transport failure",
+        ),
+        (
+            "malformed",
+            ResponseTemplate::new(200).set_body_string("<szamla>"),
+            "transport failure",
+        ),
+        (
+            "credentials",
+            body_error("3", "login"),
+            "credentials (3: login)",
+        ),
+        ("unavailable", szlahu_down(), "unavailable: maintenance"),
+        ("another code", body_error("57", "unknown"), "57: unknown"),
+    ];
+    for (label, verification, cause) in checks {
+        for landed in [false, true] {
+            let h = Harness::start().await;
+            let storno_id = storno_id();
+            external_id_query(storno_id.as_str())
+                .respond_with(not_found())
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            external_id_query(storno_id.as_str())
+                .respond_with(if landed {
+                    matching.response()
+                } else {
+                    not_found()
+                })
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            storno()
+                .respond_with(created_without_totals("SS-1"))
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            number_query("SS-1")
+                .respond_with(verification.clone())
+                .expect(1)
+                .mount(&h.server)
+                .await;
+
+            let outcome = h.gateway.storno(storno_request(&storno_id)).await;
+            if landed {
+                assert_eq!(
+                    outcome,
+                    Ok(StornoOutcome::AlreadyReversed {
+                        storno_number: "SS-1".to_owned(),
+                    }),
+                    "{label}"
+                );
+            } else {
+                match outcome {
+                    Err(Unconfirmed::StornoVerification { number, message }) => {
+                        assert_eq!(number, "SS-1", "{label}");
+                        assert!(message.contains(cause), "{label}: {message}");
+                    }
+                    other => panic!("{label}: expected Unconfirmed, got {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn post_send_storno_checks_preserve_uncertainty_and_both_causes() {
+    for reconciliation in [body_error("135", "expired key"), szlahu_down()] {
+        for reply in [created_without_totals("SS-1"), ResponseTemplate::new(500)] {
+            let h = Harness::start().await;
+            let storno_id = storno_id();
+            external_id_query(storno_id.as_str())
+                .respond_with(not_found())
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            external_id_query(storno_id.as_str())
+                .respond_with(reconciliation.clone())
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            storno()
+                .respond_with(reply)
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            number_query("SS-1")
+                .respond_with(szlahu_down())
+                .mount(&h.server)
+                .await;
+
+            let error = h
+                .gateway
+                .storno(storno_request(&storno_id))
+                .await
+                .expect_err("a post-send credential failure cannot settle the send");
+            match error {
+                Unconfirmed::ReQueryFailed { sent, re_query } => {
+                    assert!(
+                        sent.contains("transport failure")
+                            || (sent.contains("SS-1")
+                                && sent.contains("unavailable")
+                                && sent.contains("maintenance")),
+                        "preserve how the send or its identity check ended: {sent}"
+                    );
+                    assert!(
+                        (re_query.contains("135") && re_query.contains("expired key"))
+                            || (re_query.contains("unavailable")
+                                && re_query.contains("maintenance")),
+                        "{re_query}"
+                    );
+                }
+                other => panic!("expected both causes, got {other:?}"),
+            }
+        }
+    }
 }
 
 #[tokio::test]

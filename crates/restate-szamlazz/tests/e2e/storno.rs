@@ -16,9 +16,9 @@ use wiremock::matchers::body_string_contains;
 
 use crate::harness::accounts::AGENT_KEY;
 use crate::harness::szamlazz::{
-    Doc, agent_key_tag, create_for, create_with_key, created, external_id_query, holds, not_found,
-    number_query, order_query, original_telj_tag, storno_never_sent, storno_of,
-    storno_of_number_repeating_telj,
+    Doc, agent_key_tag, create_for, create_with_key, created, created_without_totals,
+    external_id_query, holds, not_found, number_query, order_query, original_telj_tag,
+    storno_never_sent, storno_of, storno_of_number_repeating_telj,
 };
 use crate::harness::{Harness, create_body};
 
@@ -29,6 +29,10 @@ use crate::harness::{Harness, create_body};
 /// `issued` as the newest holder of the same external id (the lookup passes
 /// the reversed document and its hint sees the storno; the create step's
 /// leading query sees the same reversed document and issues).
+#[allow(
+    clippy::too_many_lines,
+    reason = "storno with identity verification, then explicit reissue"
+)]
 pub(crate) async fn storno_then_reissue(h: &Harness) {
     // The storno: the original by number, nothing under the storno id.
     // An e-invoice original (`eszamla` 3, what szamlazz.hu reports for a
@@ -48,7 +52,20 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
         .mount(&h.mock)
         .await;
     storno_of_number_repeating_telj("SZ-4")
-        .respond_with(created("SS-4", "-1000", "-1270"))
+        .respond_with(created_without_totals("SS-4"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    // Optional reply totals are absent: identity verification stays inside
+    // storno-SZ-4, so the durable path below is still the same five entries.
+    number_query("SS-4")
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-4"),
+                ..Doc::of("SS-4", "SS", "E2E-4")
+            }
+            .response(),
+        )
         .expect(1)
         .mount(&h.mock)
         .await;
@@ -224,6 +241,121 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
         1,
         "one storno step entry: {runs:?}"
     );
+}
+
+/// Both storno shells retry an inconclusive numbered reply inside the
+/// storno step. A later leading query finds the reversal without resending;
+/// if it stays absent, exhaustion is `outcome_unknown`, stored under the key.
+#[allow(
+    clippy::too_many_lines,
+    reason = "both storno shells, reconciliation and exhaustion with stored completion"
+)]
+pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h: &Harness) {
+    use restate_e2e_harness::Call;
+    use restate_szamlazz::contract::TerminalCode;
+
+    for (order, number, returned, managed, recovered) in [
+        ("E2E-196-O", "SZ-196-O", "SS-196-O", true, true),
+        ("E2E-196-A", "SZ-196-A", "SS-196-A", false, true),
+        ("E2E-196-OX", "SZ-196-OX", "SS-196-OX", true, false),
+        ("E2E-196-AX", "SZ-196-AX", "SS-196-AX", false, false),
+    ] {
+        let external_id = if managed {
+            format!("acct:{order}:storno:{number}")
+        } else {
+            format!("acct:by-number:{number}:storno")
+        };
+        let call = if managed {
+            Call::object("Szamlazz.Order", order, "storno_invoice")
+        } else {
+            Call::service("Szamlazz.Agent", "storno")
+        };
+        let original = if managed {
+            Doc::of(number, "SZ", order)
+        } else {
+            Doc::unmanaged(number, "SZ")
+        };
+        number_query(number)
+            .respond_with(original.response())
+            .expect(1)
+            .mount(&h.mock)
+            .await;
+        // Lookup, first execution's leading query and immediate reconciliation
+        // all miss. Only the next execution's leading query sees what landed.
+        if recovered {
+            external_id_query(&external_id)
+                .respond_with(not_found())
+                .up_to_n_times(3)
+                .expect(3)
+                .mount(&h.mock)
+                .await;
+            external_id_query(&external_id)
+                .respond_with(
+                    Doc {
+                        referenced_invoice: Some(number),
+                        ..Doc::new(returned, "SS")
+                    }
+                    .response(),
+                )
+                .expect(1)
+                .mount(&h.mock)
+                .await;
+        } else {
+            external_id_query(&external_id)
+                .respond_with(not_found())
+                .expect(5)
+                .mount(&h.mock)
+                .await;
+        }
+        let sends = if recovered { 1 } else { 2 };
+        storno_of_number_repeating_telj(number)
+            .respond_with(created_without_totals(returned))
+            .expect(sends)
+            .mount(&h.mock)
+            .await;
+        number_query(returned)
+            .respond_with(crate::common::body_error("135", "expired verification key"))
+            .expect(sends)
+            .mount(&h.mock)
+            .await;
+
+        let body = storno_of(number);
+        let reply = h.invoke(&call, Some(&body), Some(order)).await;
+        if recovered {
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            assert_eq!(reply.body["outcome"], "reversed");
+            assert_eq!(reply.body["storno_number"], returned);
+        } else {
+            assert_eq!(reply.status, 500, "{}", reply.body);
+            let fault = reply.fault();
+            assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+            assert!(
+                fault.message.contains(returned)
+                    && fault.message.contains("135")
+                    && fault.message.contains("expired verification key"),
+                "{fault:?}"
+            );
+        }
+        assert_eq!(
+            h.admin().runs(reply.invocation_id()).await,
+            [
+                "namespace".to_owned(),
+                "account".to_owned(),
+                format!("verify-original-{number}"),
+                format!("lookup-storno-{number}"),
+                format!("storno-{number}"),
+            ],
+            "verification/retry belong to the one storno entry"
+        );
+        let stored = h.invoke(&call, Some(&body), Some(order)).await;
+        assert_eq!(stored.invocation_id(), reply.invocation_id());
+        assert_eq!(stored.body, reply.body);
+        let bodies = h.storno_bodies_of(number).await;
+        assert_eq!(bodies.len(), usize::try_from(sends).expect("one or two"));
+        assert!(bodies.iter().all(|body| body == &bodies[0]
+            && body.contains(&original_telj_tag())
+            && body.contains("<eszamla>false</eszamla>")));
+    }
 }
 
 /// An order Restate has no memory of (phase 2, under `acme`): an invoice is
