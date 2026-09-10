@@ -52,30 +52,54 @@ impl Handler {
 /// stored as bytes and render as integer arrays in `entry_json`, so a text
 /// match on `entry_json` is vacuous.
 ///
-/// Under protocol v7 (journal v2) a run is two rows: `Command: Run`, which
-/// carries the name, and the `Notification: Run` that follows it, which
-/// carries the result bytes (verified against 1.7.8). A leak check must scan
-/// every row, not the named ones.
+/// Under journal v2 a run is two rows: `Command: Run`, which carries the name
+/// and completion id, and `Notification: Run` with the same completion id,
+/// which carries the result bytes (verified against server 1.7.8, protocol v7).
+/// The notification need not be adjacent. A leak check must scan every row,
+/// not the named ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
     /// The entry's position in the journal.
     pub index: u64,
+    /// `version` from `sys_journal`; absent when not selected or not supplied.
+    pub version: Option<u64>,
     /// `entry_type` as the server names it (`Command: Run`, `Notification:
     /// Run`, …).
     pub entry_type: String,
     /// The name of a named entry (a `ctx.run`'s).
     pub name: Option<String>,
+    /// The run command's or run notification's `completion_id`, read from
+    /// journal-v2 `entry_json`. Not the row index; `None` for other entry types
+    /// or when the run identity is missing or cannot be decoded.
+    pub run_completion_id: Option<u32>,
     /// `raw`, hex-decoded.
     pub raw: Vec<u8>,
 }
 
 impl JournalEntry {
-    /// One `sys_journal` row (`index`, `entry_type`, `name`, `raw`).
+    /// One `sys_journal` row (`index`, `version`, `entry_type`, `name`,
+    /// `entry_json`, `raw`). `entry_json` is the server's JSON-encoded string;
+    /// only the run identity is retained from it. Missing or malformed identity
+    /// metadata stays `None` so [`run_result`] can explicitly reject it.
     pub fn from_row(row: &Value) -> Self {
+        let entry_type = row["entry_type"].as_str().unwrap_or_default();
+        let entry = row["entry_json"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let run_completion_id = entry.as_ref().and_then(|entry| {
+            let id = match entry_type {
+                "Command: Run" => &entry["Command"]["Run"]["completion_id"],
+                "Notification: Run" => &entry["Notification"]["Completion"]["Run"]["completion_id"],
+                _ => return None,
+            };
+            id.as_u64().and_then(|id| u32::try_from(id).ok())
+        });
         Self {
             index: row["index"].as_u64().expect("index"),
-            entry_type: row["entry_type"].as_str().unwrap_or_default().to_owned(),
+            version: row["version"].as_u64(),
+            entry_type: entry_type.to_owned(),
             name: row["name"].as_str().map(str::to_owned),
+            run_completion_id,
             raw: row["raw"]
                 .as_str()
                 .map(|hex| decode_hex(hex).unwrap_or_else(|| panic!("hex raw: {hex}")))
@@ -101,18 +125,114 @@ impl JournalEntry {
     }
 }
 
-/// The result of the run named `name`: the `Notification: Run` row that
-/// follows its command before any other command (a handler that awaits every
-/// run has its notification as the next journal event after the command).
+/// The result of the uniquely named run: its `Notification: Run`, matched by
+/// completion id, never proximity. `None` means the name or its notification
+/// is absent. Repeated names require [`run_result_at`].
+///
+/// Supports journal v2's `entry_json` shape as exposed by server 1.7.8 (tested
+/// with Rust SDK 0.12.0, protocol v7). Supply one invocation's unfiltered journal
+/// or prefix in strictly increasing index order, as [`Admin::journal`](crate::Admin::journal)
+/// does. Notifications must follow their commands but may complete in either
+/// order, with unrelated entries between them. Rust SDK 0.12 requires immediately
+/// awaiting each run; interleaved runs are supported here for journal inspection,
+/// not as an endorsement of interleaving SDK context operations.
+///
+/// # Panics
+///
+/// A repeated name is ambiguous. Also rejects unsupported versions (including
+/// missing versions and v1), unordered/duplicate indices, missing run identities,
+/// duplicate command/completion identities and orphan run notifications. Validates
+/// the whole supplied journal even when the requested name is absent. There is
+/// no adjacency fallback when metadata is unavailable.
 #[must_use]
 pub fn run_result<'a>(journal: &'a [JournalEntry], name: &str) -> Option<&'a JournalEntry> {
+    validate_run_journal(journal);
+    let mut commands = journal
+        .iter()
+        .filter(|entry| entry.is_run() && entry.name.as_deref() == Some(name));
+    let command = commands.next()?;
+    assert!(
+        commands.next().is_none(),
+        "ambiguous run name {name:?}; use run_result_at"
+    );
+    result_for_command(journal, command)
+}
+
+/// The result of the zero-based `occurrence` of a run named `name`, in journal
+/// index order. Unlike [`run_result`], permits repeated names. Returns `None`
+/// when that occurrence or its notification is absent.
+///
+/// # Panics
+///
+/// Like [`run_result`], rejects unsupported or ambiguous journal evidence.
+#[must_use]
+pub fn run_result_at<'a>(
+    journal: &'a [JournalEntry],
+    name: &str,
+    occurrence: usize,
+) -> Option<&'a JournalEntry> {
+    validate_run_journal(journal);
     let command = journal
         .iter()
-        .position(|entry| entry.is_run() && entry.name.as_deref() == Some(name))?;
-    journal[command + 1..]
-        .iter()
-        .take_while(|entry| !entry.entry_type.starts_with("Command:"))
-        .find(|entry| entry.entry_type == "Notification: Run")
+        .filter(|entry| entry.is_run() && entry.name.as_deref() == Some(name))
+        .nth(occurrence)?;
+    result_for_command(journal, command)
+}
+
+fn validate_run_journal(journal: &[JournalEntry]) {
+    let mut commands = std::collections::BTreeSet::new();
+    let mut notifications = std::collections::BTreeSet::new();
+    let mut previous = None;
+    for entry in journal {
+        assert_eq!(
+            entry.version,
+            Some(2),
+            "unsupported journal version at entry {}",
+            entry.index
+        );
+        assert!(
+            previous.is_none_or(|index| index < entry.index),
+            "unsupported journal order at entry {}; expected strictly increasing indices",
+            entry.index
+        );
+        previous = Some(entry.index);
+        if entry.is_run() || entry.entry_type == "Notification: Run" {
+            let id = entry.run_completion_id.unwrap_or_else(|| {
+                panic!(
+                    "unsupported run identity at entry {}; select journal-v2 entry_json",
+                    entry.index
+                )
+            });
+            if entry.is_run() {
+                assert!(
+                    commands.insert(id),
+                    "ambiguous run completion identity {id}"
+                );
+            } else {
+                assert!(
+                    commands.contains(&id),
+                    "unsupported orphan run notification at entry {} (completion {id})",
+                    entry.index
+                );
+                assert!(
+                    notifications.insert(id),
+                    "ambiguous run notifications for completion {id}"
+                );
+            }
+        }
+    }
+}
+
+fn result_for_command<'a>(
+    journal: &'a [JournalEntry],
+    command: &JournalEntry,
+) -> Option<&'a JournalEntry> {
+    let completion_id = command
+        .run_completion_id
+        .expect("run command has a completion identity");
+    journal.iter().find(|entry| {
+        entry.entry_type == "Notification: Run" && entry.run_completion_id == Some(completion_id)
+    })
 }
 
 /// A `sys_invocation` row. `retry_count` and the last failure are attempt
@@ -173,14 +293,16 @@ mod tests {
     use serde_json::json;
 
     /// `raw` is hex on the wire and bytes in the entry; a run's result is the
-    /// notification after its command.
+    /// notification sharing its completion id.
     #[test]
     fn a_journal_row_decodes_its_raw_and_a_run_finds_its_result() {
         let journal: Vec<JournalEntry> = [
-            json!({ "index": 0, "entry_type": "Command: Input", "name": null, "raw": "" }),
-            json!({ "index": 1, "entry_type": "Command: Run", "name": "step", "raw": "00" }),
-            json!({ "index": 2, "entry_type": "Notification: Run", "name": null, "raw": "7b7d" }),
-            json!({ "index": 3, "entry_type": "Command: Output", "name": null, "raw": null }),
+            json!({ "index": 0, "version": 2, "entry_type": "Command: Input", "name": null, "raw": "" }),
+            json!({ "index": 1, "version": 2, "entry_type": "Command: Run", "name": "step", "raw": "00",
+                "entry_json": r#"{"Command":{"Run":{"completion_id":0,"name":"step"}}}"# }),
+            json!({ "index": 2, "version": 2, "entry_type": "Notification: Run", "name": null, "raw": "7b7d",
+                "entry_json": r#"{"Notification":{"Completion":{"Run":{"completion_id":0,"result":{"Success":[]}}}}}"# }),
+            json!({ "index": 3, "version": 2, "entry_type": "Command: Output", "name": null, "raw": null }),
         ]
         .iter()
         .map(JournalEntry::from_row)

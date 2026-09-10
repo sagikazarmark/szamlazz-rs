@@ -4,7 +4,7 @@
 //! are two objects, two invocations), an account change and a credential
 //! rotation between two executions of one step.
 
-use restate_e2e_harness::run_result;
+use restate_e2e_harness::{run_result, run_result_at};
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
@@ -44,7 +44,10 @@ pub(crate) async fn credential_failure_on_replay_preserves_operation_commands(h:
         hold.reached().await;
         let id = h.in_flight_on("E2E-INIT").await;
         let journal = h.admin().journal(&id).await;
-        assert!(run_result(&journal, "lookup-invoice").is_some());
+        // Ownership and full lookup deliberately share the name; both must
+        // be completed before the create's credential fetch is interrupted.
+        assert!(run_result_at(&journal, "lookup-invoice", 0).is_some());
+        assert!(run_result_at(&journal, "lookup-invoice", 1).is_some());
         assert_eq!(h.create_bodies_of("E2E-INIT").await.len(), 1);
         h.multi().set_unavailable("beta", true);
         hold.release();

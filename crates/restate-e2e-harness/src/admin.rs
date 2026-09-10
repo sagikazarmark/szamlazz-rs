@@ -424,7 +424,7 @@ impl Admin {
     pub async fn journal(&self, invocation_id: &str) -> Vec<JournalEntry> {
         let rows = self
             .sql_or_panic(&format!(
-                "SELECT index, entry_type, name, raw FROM sys_journal WHERE id = {} ORDER BY index",
+                "SELECT index, version, entry_type, name, entry_json, raw FROM sys_journal WHERE id = {} ORDER BY index",
                 sql_literal(invocation_id)
             ))
             .await;
@@ -462,7 +462,7 @@ impl Admin {
     pub async fn all_journals(&self) -> BTreeMap<String, Vec<JournalEntry>> {
         let rows = self
             .sql_or_panic(
-                "SELECT id, index, entry_type, name, raw FROM sys_journal ORDER BY id, index",
+                "SELECT id, index, version, entry_type, name, entry_json, raw FROM sys_journal ORDER BY id, index",
             )
             .await;
         let mut journals: BTreeMap<String, Vec<JournalEntry>> = BTreeMap::new();

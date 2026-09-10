@@ -114,7 +114,7 @@ pub use admin::{Admin, ScopeSelection, Target, sql_literal};
 #[cfg(unix)]
 pub use gate::{Feature, Launcher, ReusePolicy, ServerSpec, launcher_or_skip, server_gate};
 pub use ingress::{Call, Mode, Reply};
-pub use introspection::{Handler, Invocation, JournalEntry, run_result};
+pub use introspection::{Handler, Invocation, JournalEntry, run_result, run_result_at};
 pub use run_names::{RunPath, Table, Violations, Walked};
 #[cfg(unix)]
 pub use server::{Deployment, Restate};

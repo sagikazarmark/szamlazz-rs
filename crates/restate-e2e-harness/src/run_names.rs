@@ -585,6 +585,8 @@ mod tests {
     ) -> ((String, Invocation), (String, Vec<JournalEntry>)) {
         let mut journal = vec![JournalEntry {
             index: 0,
+            version: Some(2),
+            run_completion_id: None,
             entry_type: "Command: Input".to_owned(),
             name: None,
             raw: Vec::new(),
@@ -593,12 +595,16 @@ mod tests {
             let index = u64::try_from(journal.len()).expect("index");
             journal.push(JournalEntry {
                 index,
+                version: Some(2),
+                run_completion_id: Some(u32::try_from(index).expect("completion id")),
                 entry_type: "Command: Run".to_owned(),
                 name: Some((*run).to_owned()),
                 raw: Vec::new(),
             });
             journal.push(JournalEntry {
                 index: index + 1,
+                version: Some(2),
+                run_completion_id: Some(u32::try_from(index).expect("completion id")),
                 entry_type: "Notification: Run".to_owned(),
                 name: None,
                 raw: b"{}".to_vec(),

@@ -19,8 +19,8 @@ const POSITIVE_CONTROL: &str = "SENTINEL-8f3a2c-LEAK-CONTROL";
 /// szamlazz.hu rejection's message travels into the create run's journaled
 /// result and the output, and nowhere else (the lookup's result never saw
 /// it), so a scan that finds no agent key is known to read real bytes. Under
-/// journal v2 the `Command: Run` row carries only the name; the result is in
-/// the notification that follows, which `run_result` reads.
+/// journal v2 the `Command: Run` row carries the name and completion id; the
+/// result is in the notification with that id, which `run_result` reads.
 pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
     h.absent("E2E-12", &["prepayment", "final", "proforma", "invoice"])
         .await;
@@ -55,12 +55,16 @@ pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
         create_result.index,
         String::from_utf8_lossy(&create_result.raw)
     );
-    let lookup_result =
-        restate_e2e_harness::run_result(&journal, "lookup-invoice").expect("the lookup's result");
-    assert!(
-        !lookup_result.raw_contains(POSITIVE_CONTROL),
-        "the sentinel is not in an entry it did not pass through"
-    );
+    // The ownership and full lookup share this name; inspect both results.
+    for occurrence in 0..2 {
+        let lookup_result =
+            restate_e2e_harness::run_result_at(&journal, "lookup-invoice", occurrence)
+                .expect("the lookup's result");
+        assert!(
+            !lookup_result.raw_contains(POSITIVE_CONTROL),
+            "the sentinel is not in an entry it did not pass through"
+        );
+    }
     let leaked: Vec<u64> = journal
         .iter()
         .filter(|entry| entry.raw_contains(POSITIVE_CONTROL))

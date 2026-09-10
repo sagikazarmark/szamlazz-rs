@@ -17,7 +17,9 @@
 )]
 
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
-use restate_e2e_harness::{Call, Launcher, ReusePolicy, ServerSpec, launcher_or_skip};
+use restate_e2e_harness::{
+    Call, Launcher, ReusePolicy, ServerSpec, launcher_or_skip, run_result, run_result_at,
+};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
@@ -45,6 +47,23 @@ impl Smoke {
             .name("echo-step")
             .await?;
         Ok(echoed)
+    }
+
+    /// SDK-supported ordering: immediately await each run, with a sleep
+    /// between repeated names. Distinct results prove the selected occurrence.
+    #[handler(journal_retention = "1d")]
+    async fn correlation(&self, ctx: Context<'_>) -> HandlerResult<()> {
+        ctx.run(|| async { Ok("first-result".to_owned()) })
+            .name("repeated")
+            .await?;
+        ctx.sleep(std::time::Duration::from_millis(1)).await?;
+        ctx.run(|| async { Ok("second-result".to_owned()) })
+            .name("repeated")
+            .await?;
+        ctx.run(|| async { Ok("unique-result".to_owned()) })
+            .name("unique")
+            .await?;
+        Ok(())
     }
 
     /// A `TerminalError` whose message is a JSON body: what a consumer's
@@ -112,6 +131,12 @@ async fn e2e_smoke() {
     assert_eq!(reply.body, json!("hello"));
     let id = reply.invocation_id();
     assert_eq!(restate.admin().runs(id).await, ["echo-step"]);
+    let journal = restate.admin().journal(id).await;
+    assert!(
+        run_result(&journal, "echo-step")
+            .expect("echo result")
+            .raw_contains("hello")
+    );
     let invocation = restate.admin().invocation(id).await;
     assert_eq!(
         (invocation.service.as_str(), invocation.handler.as_str()),
@@ -119,6 +144,8 @@ async fn e2e_smoke() {
     );
     assert_eq!(invocation.status, "completed");
     assert!(restate.admin().all_journals().await.contains_key(id));
+
+    check_run_correlation(&restate).await;
 
     // A fault, decoded out of the envelope into the caller's type.
     let reply = restate.invoke(&REFUSE, None, None).await;
@@ -184,4 +211,41 @@ async fn e2e_smoke() {
         std::net::TcpStream::connect(admin_addr).is_err(),
         "the spawned server is gone with the handle: {admin_addr} still accepts connections"
     );
+}
+
+async fn check_run_correlation(restate: &restate_e2e_harness::Restate) {
+    let reply = restate
+        .invoke(&Call::service("Smoke", "correlation"), None, None)
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let journal = restate.admin().journal(reply.invocation_id()).await;
+    assert!(
+        journal
+            .iter()
+            .any(|entry| entry.entry_type == "Notification: Sleep")
+    );
+    for (occurrence, expected, other) in [
+        (0, "first-result", "second-result"),
+        (1, "second-result", "first-result"),
+    ] {
+        let result = run_result_at(&journal, "repeated", occurrence).expect("completed occurrence");
+        assert!(result.raw_contains(expected));
+        assert!(!result.raw_contains(other));
+        let command = journal
+            .iter()
+            .filter(|entry| entry.is_run() && entry.name.as_deref() == Some("repeated"))
+            .nth(occurrence)
+            .expect("command");
+        assert_eq!(command.run_completion_id, result.run_completion_id);
+        assert!(command.run_completion_id.is_some());
+    }
+    assert!(std::panic::catch_unwind(|| run_result(&journal, "repeated")).is_err());
+    assert!(
+        run_result(&journal, "unique")
+            .expect("unique result")
+            .raw_contains("unique-result")
+    );
+    assert!(run_result(&journal, "absent").is_none());
+    let all = restate.admin().all_journals().await;
+    assert_eq!(all[reply.invocation_id()], journal);
 }

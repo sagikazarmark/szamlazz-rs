@@ -129,6 +129,64 @@ the selection falls idle after being seen in flight. Queued or concurrent matchi
 `Retries::observed_completion` means the selection fell idle. To wait for **one invocation** to complete, use
 `Admin::await_status(id, statuses)`. `Watch::finish` stops sampling even if matching invocations are still running.
 
+## Reading run results
+
+`run_result(&journal, name)` returns the matching `Notification: Run` row, or
+`None` if the command or its completion is absent. It correlates the command and
+notification by **completion id**, never by adjacency or by journal index.
+An incomplete run cannot borrow a later run's result.
+
+Supply one invocation's unfiltered journal (an unfinished prefix is fine), in
+strictly increasing index order. `Admin::journal` and `Admin::all_journals` select
+the necessary `version` and `entry_json` columns. Supported: **journal v2**, with
+the `entry_json` representation exposed by **Restate server 1.7.8**, verified with
+**Rust SDK 0.12.0 / protocol v7**. Journal v1 and unknown versions are explicitly
+unsupported. The server's
+[SQL projection](https://github.com/restatedev/restate/blob/v1.7.8/crates/storage-query-datafusion/src/journal/row.rs)
+serializes its decoded entry; the
+[run command](https://github.com/restatedev/restate/blob/v1.7.8/crates/types/src/journal_v2/command.rs)
+and [run completion](https://github.com/restatedev/restate/blob/v1.7.8/crates/types/src/journal_v2/notification.rs)
+both carry a `u32` `completion_id`:
+
+```json
+{"Command":{"Run":{"completion_id":0,"name":"lookup"}}}
+{"Notification":{"Completion":{"Run":{"completion_id":0,"result":{"Success":[123,125]}}}}}
+```
+
+Notifications must follow their commands; unrelated entries and completion
+reordering are supported. The
+[SDK 0.12.0 rule](https://docs.rs/restate-sdk/0.12.0/restate_sdk/context/trait.ContextSideEffects.html#tymethod.run)
+is to **immediately await each run before other context operations**. The helper's
+A/B → A/B and A/B → B/A cases are synthetic robustness tests, not live claims
+that interleaving runs is supported by this SDK. The real-server smoke test uses
+immediately awaited runs, repeated names, and an intervening sleep, and verifies
+each result's distinct content and matching identity.
+
+**Ambiguity fails explicitly:** following the harness's assertion convention,
+the helpers panic on unsupported versions, missing/malformed run identities,
+unordered or duplicate indices, duplicate run command/completion identities,
+and orphan run notifications. They validate the whole supplied journal before
+answering, including a lookup of an absent name. There is no proximity fallback.
+`run_result` also panics on repeated names. Select a **zero-based occurrence in
+journal index order** explicitly with `run_result_at`:
+
+```rust,no_run
+use restate_e2e_harness::{JournalEntry, run_result, run_result_at};
+# fn inspect(journal: &[JournalEntry]) {
+let account = run_result(journal, "account").expect("unique completed account run");
+let ownership = run_result_at(journal, "lookup-invoice", 0).expect("ownership lookup");
+let full = run_result_at(journal, "lookup-invoice", 1).expect("full lookup");
+# }
+```
+
+**Migration:** name-only selection previously silently chose the first occurrence.
+Use `run_result_at` where names repeat. Custom SQL must select `version` and
+`entry_json` along with `index`, `entry_type`, `name`, and `raw` when using
+`JournalEntry::from_row`; literals must supply the new `version` and
+`run_completion_id` fields. This is a breaking interface change of the
+independently versioned harness crate. `raw` remains the hex-decoded entry bytes
+for content and leak assertions; it is not the correlation source.
+
 ## Tests
 
 `cargo test -p restate-e2e-harness` runs the pure decisions (the gate, the sampler, the table check, the call
