@@ -157,7 +157,7 @@ pub struct RegisterCreditEntry {
     #[doc(alias = "számlaszám")]
     pub invoice_number: InvoiceNumber,
     /// Tax number of the invoice issuer (`adoszam`); when given, szamlazz.hu
-    /// matches the incoming invoice with the corresponding incoming receipt.
+    /// assigns the incoming credit entry to the corresponding invoice.
     #[doc(alias = "adószám")]
     pub issuer_tax_number: Option<String>,
     /// Keep the invoice's existing credit entries and add these on top

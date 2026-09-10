@@ -564,15 +564,23 @@ impl AgentRequest for QueryInvoiceXml {
                 (envelope::ROOT, envelope::NAMESPACE),
             ],
         )?;
+        let text = xml::protocol_text(
+            text,
+            if root == 1 {
+                envelope::NAMESPACE
+            } else {
+                SZAMLA_NAMESPACE
+            },
+        )?;
         if root == 1 {
-            let verdict: xml::Verdict = quick_xml::de::from_str(text).map_err(ParseError::from)?;
+            let verdict: xml::Verdict = quick_xml::de::from_str(&text).map_err(ParseError::from)?;
             verdict.check()?;
             return Err(ParseError::UnexpectedBody(
                 "successful xmlszamlavalasz for an XML query".to_owned(),
             )
             .into());
         }
-        let szamla: SzamlaXml = quick_xml::de::from_str(text).map_err(ParseError::from)?;
+        let szamla: SzamlaXml = quick_xml::de::from_str(&text).map_err(ParseError::from)?;
 
         Ok(InvoiceDocument {
             supplier: szamla.szallito.into(),
@@ -731,7 +739,7 @@ struct AlapXml {
     devizanem: Option<Currency>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     devizabank: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_decimal")]
     devizaarf: Option<Decimal>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
@@ -910,21 +918,21 @@ struct TetelXml {
     nev: String,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     azonosito: Option<String>,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     mennyiseg: Decimal,
     mennyisegiegyseg: String,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     nettoegysegar: Decimal,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     afakulcs: String,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     netto: Decimal,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_decimal")]
     arresafaalap: Option<Decimal>,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     afa: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     brutto: Decimal,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
@@ -996,11 +1004,11 @@ struct QutetXml {
     #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     afakulcs: String,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     netto: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     afa: Decimal,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     brutto: Decimal,
     #[serde(default, deserialize_with = "xml::de::optional_date")]
     elszdattol: Option<Date>,
@@ -1047,7 +1055,7 @@ struct KifizetesXml {
     #[serde(deserialize_with = "xml::de::date")]
     datum: Date,
     jogcim: PaymentMethod,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     osszeg: Decimal,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
@@ -1055,7 +1063,7 @@ struct KifizetesXml {
     bankszamlaszam: Option<String>,
     #[serde(default, deserialize_with = "xml::de::empty_as_none")]
     banktranzid: Option<i64>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_decimal")]
     devizaarf: Option<Decimal>,
 }
 

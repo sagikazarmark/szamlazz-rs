@@ -137,7 +137,7 @@ async fn issue_once(client: &Client, request: &CreateInvoice, expected_type: Doc
                 Ok(document)
                     if document.info.order_number.as_ref() == Some(order)
                         && document.info.document_type == expected_type
-                        && document.info.reversed == Some(false) => Outcome::Issued(document.info.invoice_number),
+                        && document.info.reversed != Some(true) => Outcome::Issued(document.info.invoice_number),
                 // Wrong identity, reversed, absent (7), or unanswered: no automatic resend.
                 _ => Outcome::Unknown(error),
             }
@@ -344,7 +344,7 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused (it is silently ignored), so read the issued document's `hivdijbekszam` to see which link landed.
 - **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice (by `elolegSzamlaszam` or by the shared order number), but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account.
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
-- Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client never retries automatically.
+- Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client has no application-level retry/recovery loop. Supplied HTTP clients retain their retry policies; one `send` need not mean one POST, and transport retries do not perform reconciliation.
 - A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
 - Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length: a parse failure can be logged as is.
 - A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live".
@@ -352,6 +352,15 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
 
 ## Breaking Changes in 0.4
+
+Response numbers now require exact finite Decimal representation: excess precision,
+underflow and overflow are refused rather than implicitly rounded. Equivalent
+plain/exponent spellings are handled consistently; XML numeric underscores are
+no longer accepted. Numeric VAT tokens (including XML-whitespace padding) are
+interpreted as percentages without changing the raw response fields. Derived
+items reject unrepresentable numeric VAT tokens with
+`ArithmeticError::UnrepresentableVatRate`. Response elements from foreign namespaces
+no longer supply protocol fields; undeclared prefixes are refused.
 
 One release, so a consumer pays the migration once. The naming and shape changes of the 2026-09-09 review are listed in [PR #191](https://github.com/sagikazarmark/szamlazz-rs/pull/191) (the verdict envelope, `CreationOutcome`, `try_calculated`, credit entry / reversed / `title` / `appearance`, the typed `DocumentType`, the Rust-convention batch). On top of them, from the integer-width policy (ADR 0010):
 

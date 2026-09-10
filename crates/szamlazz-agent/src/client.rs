@@ -134,7 +134,11 @@ impl ClientBuilder {
     /// or supply `.cookie_provider(Arc<Jar>)` so the
     /// `JSESSIONID` session cookie is reused and consecutive requests skip
     /// re-authentication; without it every request logs in again.
-    /// The supplied client owns all transport settings. Reuse its jar within
+    /// The supplied client owns all transport settings. Its retry policy
+    /// also remains active: one [`Client::send`]
+    /// may submit several POSTs without application-level reconciliation.
+    /// Configure retries, deadlines and redirects for the operations you send.
+    /// Reuse the jar within
     /// one account, never across independently authenticated accounts. Cloning
     /// a reqwest client shares its jar; a new client over the same provider
     /// also shares it. Refresh with a fresh client **and fresh provider** after

@@ -194,18 +194,26 @@ pub enum VatRate {
     /// `TAHK`: áfa tárgyi hatályán kívül (outside the subject-matter scope
     /// of VAT), distinct from [`VatRate::Tam`]'s exempt activity.
     Tahk,
-    /// `EUT`: EU-n belüli ügylet (intra-EU transaction).
+    /// `EUT`: EU-n belüli termékértékesítés (intra-EU supply of goods).
     Eut,
-    /// `EUKT`: EU-n kívüli ügylet (transaction outside the EU).
+    /// `EUKT`: EU-n kívüli termékértékesítés (supply of goods outside the EU).
     Eukt,
     /// `F.AFA`: fordított áfa (domestic reverse charge).
     FAfa,
     /// `K.AFA`: különbözet szerinti áfa (margin scheme).
+    ///
+    /// The [vendor VAT guide](https://www.szamlazz.hu/wp-content/uploads/2025/11/AFA-kulcsok_NOSZ-UFI-segedlet_2025-11-04.pdf)
+    /// describes NAV subtype selection from the invoice comment, item name
+    /// and item comment, using the exact wording `utazási irodák`,
+    /// `használt cikkek`, `műalkotások`, or `gyűjtemény darabok és régiségek`.
+    /// Absent or unmatched wording defaults to the used-goods subtype.
+    /// Further matching and multiple-match precedence are unspecified.
     KAfa,
-    /// `HO`: területi hatályon kívüli (outside the territorial scope of the
-    /// Hungarian VAT act).
+    /// `HO`: harmadik országban teljesített ügylet (transaction performed
+    /// in a third country, outside Hungary and the EU).
     Ho,
-    /// `EUE`: EU-n belüli, másik tagállamban teljesített ügylet.
+    /// `EUE`: másik tagállamban teljesített, nem fordítottan adózó ügylet
+    /// (transaction in another member state, not subject to reverse charge).
     Eue,
     /// `EUFADE`: EU-n belüli fordított adózású ügylet (intra-EU reverse
     /// charge, not under §37).
@@ -308,7 +316,7 @@ impl From<&str> for VatRate {
             "EU" => Self::Eu,
             "EUK" => Self::Euk,
             "MAA" => Self::Maa,
-            other => match other.parse::<Decimal>() {
+            other => match crate::number::parse(other.trim_matches(crate::xml::is_xml_space)) {
                 Ok(rate) => Self::Percent(rate),
                 Err(_) => Self::Other(other.to_owned()),
             },

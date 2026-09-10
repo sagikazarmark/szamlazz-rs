@@ -3,7 +3,10 @@
 
 `outcome_class()` classifies **this exchange**, not all earlier sends of a
 logical operation. `Rejected` is a refusal, not proof that an earlier lost send
-did nothing. The client performs no automatic retry or recovery.
+did nothing. The client has no application-level retry/recovery loop. A supplied
+HTTP client's retry policy remains active: one `send` can produce multiple POSTs,
+without running reconciliation between them. Configure transport retries with
+the operation's uncertainty and vendor send limit in mind.
 
 | Operation | Recovery after a lost or uncertain answer |
 |---|---|
@@ -13,7 +16,7 @@ did nothing. The client performs no automatic retry or recovery.
 | Receipt storno | Keep the logical call identity. Query the known original to inspect its reversal state; this alone does not recover the `SN` number or PDF. A known storno number can be queried and its original reference checked. Neither invoice-style successful-repeat behavior nor a storno-specific 338 guarantee is established. |
 | Reads (invoice/receipt queries, taxpayer lookup) | A repeat obtains current data and creates no document. Interpret not-found for the selector and operation; code 7 on receipt **send** may instead mean a missing subject. |
 | Credit-entry registration | Query the invoice's current credit entries and balance. Invoice existence does not show that the mutation landed. Repeating additive entries can double amounts; replacing entries can overwrite intervening state. Reconcile the intended mutation with current data before a deliberate new send. |
-| Proforma deletion | Query the proforma; absence can also mean it was consumed by an invoice. Code 335 is a settled deletion refusal, not replayed success. If it still exists, decide whether deletion is still intended before repeating. |
+| Proforma deletion | Number selection targets one proforma; **order selection deletes all matching proformas**, not just the latest one a query returns. Repeating an order-based deletion can reach newly created matches. Query known numbers; absence can also mean consumption by an invoice. Code 335 is a settled refusal, not replayed success. Reconcile the intended target set before deliberately repeating. |
 | Receipt email | Receipt existence does not establish whether an email was sent. A lost acknowledgement leaves delivery unresolved; deliberately repeating may send another email. Empty-block resend requires previously supplied email details. |
 
 ### Receipt selectors

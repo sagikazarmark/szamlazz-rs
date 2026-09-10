@@ -508,6 +508,9 @@ impl std::fmt::Display for ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ArithmeticError {
+    /// A numeric VAT token cannot be represented exactly by a decimal.
+    #[error("line item numeric VAT rate cannot be represented exactly by a decimal")]
+    UnrepresentableVatRate,
     /// `unit_price × quantity` overflows.
     #[error("line item net value (unit price × quantity) overflows a decimal")]
     NetOverflow,

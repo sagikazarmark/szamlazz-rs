@@ -64,7 +64,7 @@ pub(crate) fn response_root<'a>(
     body: &'a [u8],
     expected: &[(&str, &str)],
 ) -> Result<(usize, &'a str), ParseError> {
-    use quick_xml::name::{Namespace, ResolveResult};
+    use quick_xml::name::ResolveResult;
 
     let text = std::str::from_utf8(body).map_err(|error| ParseError::Invalid {
         field: "response body",
@@ -78,9 +78,36 @@ pub(crate) fn response_root<'a>(
     let invalid = || ParseError::UnexpectedBody(body_excerpt(body));
 
     loop {
-        let (namespace, event) = reader
-            .read_resolved_event()
-            .map_err(quick_xml::DeError::from)?;
+        let event = reader.read_event().map_err(quick_xml::DeError::from)?;
+        let namespace = match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                reader.resolver().resolve_element(start.name()).0
+            }
+            Event::End(end) => reader.resolver().resolve_element(end.name()).0,
+            _ => ResolveResult::Unbound,
+        };
+
+        if matches!(namespace, ResolveResult::Unknown(_)) {
+            return Err(ParseError::UnexpectedBody(
+                "undeclared XML element prefix".into(),
+            ));
+        }
+        let namespace_uri = namespace_uri(&namespace)?;
+        if let Event::Start(start) | Event::Empty(start) = &event {
+            for attribute in start.attributes() {
+                let attribute = attribute
+                    .map_err(quick_xml::Error::from)
+                    .map_err(quick_xml::DeError::from)?;
+                if matches!(
+                    reader.resolver().resolve_attribute(attribute.key).0,
+                    ResolveResult::Unknown(_)
+                ) {
+                    return Err(ParseError::UnexpectedBody(
+                        "undeclared XML attribute prefix".into(),
+                    ));
+                }
+            }
+        }
 
         let empty = matches!(event, Event::Empty(_));
         match event {
@@ -91,8 +118,7 @@ pub(crate) fn response_root<'a>(
                 let local_name = start.local_name();
                 let local = local_name.as_ref();
                 matched = expected.iter().position(|(root, expected_namespace)| {
-                    local == *root
-                        && namespace == ResolveResult::Bound(Namespace(expected_namespace))
+                    local == *root && namespace_uri.as_deref() == Some(*expected_namespace)
                 });
 
                 if matched.is_some() {
@@ -137,6 +163,87 @@ pub(crate) fn response_root<'a>(
             _ => {}
         }
         first = false;
+    }
+}
+
+/// Present only the protocol namespace to serde, which matches local names.
+/// Entire foreign subtrees are ignored, including descendants that re-enter
+/// the protocol namespace. Serde then owns parent-path and field recognition.
+/// Slice the original text rather than reserializing it: business whitespace,
+/// entity references, CDATA and namespace aliases retain their exact spelling.
+pub(crate) fn protocol_text<'a>(
+    text: &'a str,
+    namespace: &str,
+) -> Result<std::borrow::Cow<'a, str>, ParseError> {
+    let mut reader = quick_xml::reader::NsReader::from_str(text);
+    let mut skipped_depth = 0usize;
+    let mut kept_until = 0usize;
+    let mut output = None::<String>;
+    loop {
+        let before = usize::try_from(reader.buffer_position()).expect("position within input str");
+        let (resolved, event) = reader
+            .read_resolved_event()
+            .map_err(quick_xml::DeError::from)?;
+        let foreign = namespace_uri(&resolved)?.as_deref() != Some(namespace);
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(_) | Event::Empty(_) => {
+                if skipped_depth == 0 && foreign {
+                    output
+                        .get_or_insert_with(String::new)
+                        .push_str(&text[kept_until..before]);
+                    // Keep an unknown child in the projected shape: deleting
+                    // it entirely could turn `tr<foreign/>ue` into `true`.
+                    output
+                        .as_mut()
+                        .expect("initialized")
+                        .push_str("<__szamlazz_foreign/>");
+                    if empty {
+                        kept_until = usize::try_from(reader.buffer_position())
+                            .expect("position within input str");
+                    } else {
+                        skipped_depth = 1;
+                    }
+                } else if skipped_depth > 0 && !empty {
+                    skipped_depth += 1;
+                }
+            }
+            Event::End(_) if skipped_depth > 0 => {
+                skipped_depth -= 1;
+                if skipped_depth == 0 {
+                    kept_until = usize::try_from(reader.buffer_position())
+                        .expect("position within input str");
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(match output {
+        None => std::borrow::Cow::Borrowed(text),
+        Some(mut output) => {
+            output.push_str(&text[kept_until..]);
+            std::borrow::Cow::Owned(output)
+        }
+    })
+}
+
+/// Namespace declaration values are XML attributes: character references
+/// participate in URI identity just as they do in ordinary attribute values.
+pub(crate) fn namespace_uri<'a>(
+    resolved: &quick_xml::name::ResolveResult<'a>,
+) -> Result<Option<std::borrow::Cow<'a, str>>, ParseError> {
+    match resolved {
+        quick_xml::name::ResolveResult::Bound(namespace) => {
+            quick_xml::escape::unescape(namespace.0)
+                .map(Some)
+                .map_err(quick_xml::DeError::from)
+                .map_err(ParseError::from)
+        }
+        quick_xml::name::ResolveResult::Unbound => Ok(None),
+        quick_xml::name::ResolveResult::Unknown(_) => {
+            Err(ParseError::UnexpectedBody("undeclared XML prefix".into()))
+        }
     }
 }
 
@@ -250,10 +357,11 @@ fn verdict_text<'a>(
     response: &'a RawResponse,
     root: &str,
     namespace: &str,
-) -> Result<&'a str, ResponseError> {
+) -> Result<std::borrow::Cow<'a, str>, ResponseError> {
     response.check()?;
     let text = response_text(response.body(), root, namespace)?;
-    let verdict: Verdict = quick_xml::de::from_str(text).map_err(ParseError::from)?;
+    let text = protocol_text(text, namespace)?;
+    let verdict: Verdict = quick_xml::de::from_str(&text).map_err(ParseError::from)?;
     verdict.check()?;
 
     Ok(text)
@@ -270,7 +378,7 @@ pub(crate) fn valasz<T: serde::de::DeserializeOwned>(
 ) -> Result<T, ResponseError> {
     let text = verdict_text(response, root, namespace)?;
 
-    Ok(quick_xml::de::from_str(text).map_err(ParseError::from)?)
+    Ok(quick_xml::de::from_str(&text).map_err(ParseError::from)?)
 }
 
 /// Checks a response whose success carries no payload: the headers
@@ -363,6 +471,26 @@ impl Element<'_> {
 pub(crate) mod de {
     use jiff::civil::Date;
     use serde::{Deserialize, Deserializer};
+
+    /// Required finite numeric text, without implicit precision loss.
+    pub fn decimal<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<rust_decimal::Decimal, D::Error> {
+        crate::number::parse(String::deserialize(deserializer)?.trim())
+            .map_err(serde::de::Error::custom)
+    }
+
+    pub fn optional_decimal<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<rust_decimal::Decimal>, D::Error> {
+        let value = Option::<String>::deserialize(deserializer)?;
+        match value.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(value) => crate::number::parse(value)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 
     /// Read a printed civil date, discarding only a complete XSD timezone.
     /// The checked fallback retains the legacy reader's finite date domain.
@@ -536,13 +664,13 @@ pub(crate) mod totals {
         /// The numeric VAT rate token (`afakulcs`).
         pub afakulcs: String,
         /// Net subtotal (`netto`).
-        #[serde(deserialize_with = "de::from_text")]
+        #[serde(deserialize_with = "de::decimal")]
         pub netto: Decimal,
         /// VAT subtotal (`afa`).
-        #[serde(deserialize_with = "de::from_text")]
+        #[serde(deserialize_with = "de::decimal")]
         pub afa: Decimal,
         /// Gross subtotal (`brutto`).
-        #[serde(deserialize_with = "de::from_text")]
+        #[serde(deserialize_with = "de::decimal")]
         pub brutto: Decimal,
     }
 
@@ -550,13 +678,13 @@ pub(crate) mod totals {
     #[derive(Debug, serde::Deserialize)]
     pub struct TotalosszXml {
         /// Net total (`netto`).
-        #[serde(deserialize_with = "de::from_text")]
+        #[serde(deserialize_with = "de::decimal")]
         pub netto: Decimal,
         /// VAT total (`afa`).
-        #[serde(deserialize_with = "de::from_text")]
+        #[serde(deserialize_with = "de::decimal")]
         pub afa: Decimal,
         /// Gross total (`brutto`).
-        #[serde(deserialize_with = "de::from_text")]
+        #[serde(deserialize_with = "de::decimal")]
         pub brutto: Decimal,
     }
 

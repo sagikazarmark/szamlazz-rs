@@ -6,7 +6,6 @@ use std::str::FromStr;
 use std::collections::HashSet;
 
 use quick_xml::events::Event;
-use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 
 use crate::credentials::Credentials;
@@ -337,12 +336,7 @@ impl Layout {
         }
     }
 
-    fn child(
-        &self,
-        parent: &str,
-        namespace: &ResolveResult<'_>,
-        name: &str,
-    ) -> (&'static str, bool) {
+    fn child(&self, parent: &str, namespace: Option<&str>, name: &str) -> (&'static str, bool) {
         let (ns, containers, leaves): (&str, &[&'static str], &[&'static str]) = match parent {
             "QueryTaxpayerResponse" if name == "result" => (self.result, &["result"], &[]),
             "QueryTaxpayerResponse" => (
@@ -389,7 +383,7 @@ impl Layout {
             ),
             _ => return ("", false),
         };
-        if *namespace != ResolveResult::Bound(Namespace(ns)) {
+        if namespace != Some(ns) {
             return ("", false);
         }
         if let Some(name) = containers.iter().find(|&&candidate| candidate == name) {
@@ -428,6 +422,7 @@ impl TaxpayerResponse {
             let (namespace, event) = reader
                 .read_resolved_event()
                 .map_err(quick_xml::DeError::from)?;
+            let namespace = xml::namespace_uri(&namespace)?;
             let empty = matches!(event, Event::Empty(_));
             match event {
                 Event::Start(start) | Event::Empty(start) => {
@@ -438,8 +433,11 @@ impl TaxpayerResponse {
                                 message: "child element in scalar".into(),
                             });
                         }
-                        let (name, scalar) =
-                            layout.child(parent.name, &namespace, start.local_name().as_ref());
+                        let (name, scalar) = layout.child(
+                            parent.name,
+                            namespace.as_deref(),
+                            start.local_name().as_ref(),
+                        );
                         if !name.is_empty()
                             && name != "taxpayerAddressItem"
                             && !parent.seen.insert(name)

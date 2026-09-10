@@ -1,0 +1,84 @@
+//! Exact conversion of finite wire numbers, independent of their spelling.
+use rust_decimal::Decimal;
+
+/// `None` denotes a nonnumeric token; a numeric value outside Decimal's domain
+/// is an error, never a special VAT code or an implicitly rounded amount.
+pub(crate) fn numeric(value: &str) -> Option<Result<Decimal, rust_decimal::Error>> {
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
+    let exponent_digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+    if exponent_digits.is_empty() || !exponent_digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut digits = String::with_capacity(mantissa.len());
+    let mut point = None;
+    for byte in mantissa.bytes() {
+        match byte {
+            b'0'..=b'9' => digits.push(char::from(byte)),
+            b'.' if point.is_none() => point = Some(digits.len()),
+            _ => return None,
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    Some((|| {
+        let significant = digits.trim_start_matches('0');
+        if significant.is_empty() {
+            let mut zero = Decimal::ZERO;
+            if let Ok(exponent) = exponent.parse::<i64>()
+                && let Ok(fractional) = i64::try_from(point.map_or(0, |p| digits.len() - p))
+                && let Some(scale) = fractional.checked_sub(exponent)
+                && let Ok(scale) = u32::try_from(scale)
+            {
+                zero.rescale(scale.min(Decimal::MAX_SCALE));
+            }
+            return Ok(zero);
+        }
+        let coefficient = significant.trim_end_matches('0');
+        let trailing = significant.len() - coefficient.len();
+        let fractional = point.map_or(0, |p| digits.len() - p);
+        let exponent = exponent
+            .parse::<i64>()
+            .map_err(|_| rust_decimal::Error::Underflow)?;
+        let scale = i64::try_from(fractional)
+            .ok()
+            .and_then(|n| n.checked_sub(i64::try_from(trailing).ok()?))
+            .and_then(|n| n.checked_sub(exponent))
+            .ok_or(rust_decimal::Error::Underflow)?;
+        if scale > i64::from(Decimal::MAX_SCALE) {
+            return Err(rust_decimal::Error::Underflow);
+        }
+        // At most 29 significant integer digits fit. Check before expanding
+        // an exponent, so hostile exponents cannot allocate enormous strings.
+        let extra = if scale < 0 { scale.unsigned_abs() } else { 0 };
+        if coefficient.len() > 29 || extra > 29 - coefficient.len() as u64 {
+            return Err(rust_decimal::Error::ExceedsMaximumPossibleValue);
+        }
+        let mut normalized = coefficient.to_owned();
+        for _ in 0..extra {
+            normalized.push('0');
+        }
+        let mut integer = normalized
+            .parse::<i128>()
+            .map_err(|_| rust_decimal::Error::ExceedsMaximumPossibleValue)?;
+        if value.starts_with('-') {
+            integer = -integer;
+        }
+        let scale = u32::try_from(scale.max(0)).map_err(|_| rust_decimal::Error::Underflow)?;
+        let mut result = Decimal::try_from_i128_with_scale(integer, scale)?;
+        // Preserve the previous display/serde scale where it fits. Rescaling
+        // upward can stop at the mantissa limit but never discards digits.
+        if let Ok(fractional) = i64::try_from(fractional)
+            && let Some(source_scale) = fractional.checked_sub(exponent)
+            && let Ok(source_scale) = u32::try_from(source_scale)
+        {
+            result.rescale(source_scale.min(Decimal::MAX_SCALE));
+        }
+        Ok(result)
+    })())
+}
+
+pub(crate) fn parse(value: &str) -> Result<Decimal, rust_decimal::Error> {
+    numeric(value).unwrap_or_else(|| Err("expected a finite decimal number".into()))
+}

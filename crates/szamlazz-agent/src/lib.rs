@@ -73,6 +73,7 @@ pub mod client;
 pub mod credentials;
 pub mod error;
 pub mod item;
+mod number;
 pub mod ops;
 pub mod types;
 pub mod wire;

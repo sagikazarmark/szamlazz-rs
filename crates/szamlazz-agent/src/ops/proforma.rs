@@ -1,5 +1,5 @@
-//! Proforma deletion (`xmlszamladbkdel`): removes an existing proforma
-//! (díjbekérő) from the account.
+//! Proforma deletion (`xmlszamladbkdel`): removes one proforma by number,
+//! or all matching proformas by order number, from the account.
 //!
 //! This operation does not check payment status before sending. Deletion of
 //! a fully paid proforma was observed on the test account. If paid proformas
@@ -11,7 +11,7 @@ use crate::types::InvoiceNumber;
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
 
-/// How the deletion identifies the proforma.
+/// How the deletion selects its target or targets.
 ///
 /// The wire carries either `szamlaszam` or `rendelesszam`; this enum makes
 /// sending both (or neither) unrepresentable.
@@ -22,7 +22,9 @@ pub enum ProformaSelector {
     /// By proforma document number (`szamlaszam`).
     #[doc(alias = "számlaszám")]
     InvoiceNumber(InvoiceNumber),
-    /// By order number (`rendelesszam`).
+    /// Deletes **all** proformas carrying this order number (`rendelesszam`).
+    /// A query returning the latest match does not narrow this deletion.
+    /// See the [vendor's batch-scope note](https://docs.szamlazz.hu/hu/agent/deleting_pro_forma_invoice/xml).
     #[doc(alias = "rendelésszám")]
     OrderNumber(String),
 }
@@ -33,20 +35,22 @@ pub enum ProformaSelector {
 /// Targets an existing proforma without a local paid-state check. A fully
 /// paid proforma was deletable on the test account; callers needing to retain
 /// paid proformas must enforce that policy before sending.
+/// Number selection targets one proforma; order selection targets **all**
+/// matching proformas, including any new matches when deliberately repeated.
 ///
-/// Success carries no payload. Deleting a proforma that does not exist (or was
+/// Success carries no count or deleted-number list. Deleting a proforma that does not exist (or was
 /// already deleted) fails with
 /// [`ErrorCode::ProformaNotFound`](crate::ErrorCode::ProformaNotFound).
 #[doc(alias = "xmlszamladbkdel")]
 #[doc(alias = "díjbekérő törlése")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeleteProforma {
-    /// Which proforma to delete.
+    /// Which proforma or order's proformas to delete.
     pub selector: ProformaSelector,
 }
 
 impl DeleteProforma {
-    /// A deletion request for the proforma named by `selector`.
+    /// A deletion request for the target(s) selected by `selector`.
     #[must_use]
     pub fn new(selector: ProformaSelector) -> Self {
         Self { selector }

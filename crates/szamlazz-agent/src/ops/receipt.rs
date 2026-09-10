@@ -766,7 +766,7 @@ struct AlapXml {
     penznem: String,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     devizabank: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::empty_as_none")]
+    #[serde(default, deserialize_with = "xml::de::optional_decimal")]
     devizaarf: Option<Decimal>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     megjegyzes: Option<String>,
@@ -797,23 +797,23 @@ struct TetelXml {
     megnevezes: String,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     azonosito: Option<String>,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     mennyiseg: Decimal,
     #[serde(rename(deserialize = "mennyisegiEgyseg"))]
     mennyisegi_egyseg: String,
     #[serde(
         rename(deserialize = "nettoEgysegar"),
-        deserialize_with = "xml::de::from_text"
+        deserialize_with = "xml::de::decimal"
     )]
     netto_egysegar: Decimal,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
     afakulcs: String,
-    #[serde(alias = "nettoErtek", deserialize_with = "xml::de::from_text")]
+    #[serde(alias = "nettoErtek", deserialize_with = "xml::de::decimal")]
     netto: Decimal,
-    #[serde(alias = "afaErtek", deserialize_with = "xml::de::from_text")]
+    #[serde(alias = "afaErtek", deserialize_with = "xml::de::decimal")]
     afa: Decimal,
-    #[serde(alias = "bruttoErtek", deserialize_with = "xml::de::from_text")]
+    #[serde(alias = "bruttoErtek", deserialize_with = "xml::de::decimal")]
     brutto: Decimal,
     #[serde(default)]
     fokonyv: Option<TetelFokonyvXml>,
@@ -857,7 +857,7 @@ struct KifizetesekXml {
 #[derive(Debug, serde::Deserialize)]
 struct KifizetesXml {
     fizetoeszkoz: String,
-    #[serde(deserialize_with = "xml::de::from_text")]
+    #[serde(deserialize_with = "xml::de::decimal")]
     osszeg: Decimal,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     leiras: Option<String>,

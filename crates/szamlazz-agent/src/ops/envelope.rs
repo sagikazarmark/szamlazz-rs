@@ -271,8 +271,9 @@ pub(crate) fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, Res
 /// The envelope's verdict and payload, read from the same text.
 fn parse_envelope(body: &[u8]) -> Result<(xml::Verdict, Body), ParseError> {
     let text = xml::response_text(body, ROOT, NAMESPACE)?;
-    let verdict = quick_xml::de::from_str(text)?;
-    let payload = quick_xml::de::from_str(text)?;
+    let text = xml::protocol_text(text, NAMESPACE)?;
+    let verdict = quick_xml::de::from_str(&text)?;
+    let payload = quick_xml::de::from_str(&text)?;
 
     Ok((verdict, payload))
 }
@@ -304,13 +305,10 @@ fn parse_document_id_header(response: &RawResponse) -> Option<i64> {
 }
 
 fn parse_decimal(value: &str, field: &'static str) -> Result<Decimal, ParseError> {
-    value
-        .trim()
-        .parse()
-        .map_err(|error: rust_decimal::Error| ParseError::Invalid {
-            field,
-            message: error.to_string(),
-        })
+    crate::number::parse(value.trim()).map_err(|error: rust_decimal::Error| ParseError::Invalid {
+        field,
+        message: error.to_string(),
+    })
 }
 
 fn parse_decimal_header(
@@ -323,51 +321,12 @@ fn parse_decimal_header(
         .transpose()
 }
 
-/// HTTP money is ungrouped, with either decimal separator. Validate the
-/// grammar before Decimal (whose own parser also accepts underscores).
+/// HTTP money is ungrouped, with either decimal separator and HTTP padding.
+/// The shared numeric reader owns mantissa/exponent grammar and exactness.
 fn header_decimal(value: &str, field: &'static str) -> Result<Decimal, ParseError> {
     let value = value.trim_matches([' ', '\t']);
-    let mut bytes = value.bytes().peekable();
-    if matches!(bytes.peek(), Some(b'+' | b'-')) {
-        bytes.next();
-    }
-    let mut digits = 0;
-    while bytes.peek().is_some_and(u8::is_ascii_digit) {
-        bytes.next();
-        digits += 1;
-    }
-    if matches!(bytes.peek(), Some(b'.' | b',')) {
-        bytes.next();
-        while bytes.peek().is_some_and(u8::is_ascii_digit) {
-            bytes.next();
-            digits += 1;
-        }
-    }
-    let mut valid = digits > 0;
-    if matches!(bytes.peek(), Some(b'e' | b'E')) {
-        bytes.next();
-        if matches!(bytes.peek(), Some(b'+' | b'-')) {
-            bytes.next();
-        }
-        let mut exponent_digits = 0;
-        while bytes.peek().is_some_and(u8::is_ascii_digit) {
-            bytes.next();
-            exponent_digits += 1;
-        }
-        valid &= exponent_digits > 0;
-    }
-    if !valid || bytes.next().is_some() {
-        return Err(ParseError::Invalid {
-            field,
-            message: "expected an ungrouped decimal header".into(),
-        });
-    }
     let normalized = value.replace(',', ".");
-    let result = if normalized.contains(['e', 'E']) {
-        Decimal::from_scientific(&normalized)
-    } else {
-        normalized.parse()
-    };
+    let result = crate::number::parse(&normalized);
     result.map_err(|error| ParseError::Invalid {
         field,
         message: error.to_string(),

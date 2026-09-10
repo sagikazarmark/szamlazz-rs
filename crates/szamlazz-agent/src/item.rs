@@ -168,14 +168,16 @@ impl LineItem {
     /// choice ([`Rounding::minor_unit`] for a document that must reconcile
     /// to a ledger), and an overflow of caller-supplied money is an error,
     /// never a panic. Non-percentage VAT codes (AAM, EUT, …) yield a VAT
-    /// value of 0.
+    /// value of 0. Numeric tokens carried by `VatRate::Other` are interpreted
+    /// as percentages while retaining their original wire text.
     /// A successful calculation proves local arithmetic only, not receipt
     /// amount compliance or the precision szamlazz.hu will store.
     ///
     /// # Errors
     ///
     /// [`ArithmeticError`] names the step whose result overflows the 96-bit
-    /// mantissa of a [`Decimal`]: the net, the VAT, or the gross.
+    /// mantissa of a [`Decimal`]: the net, the VAT, or the gross. A numeric
+    /// VAT token outside Decimal's exact domain is `UnrepresentableVatRate`.
     pub fn try_calculated(
         name: impl Into<String>,
         quantity: Decimal,
@@ -188,9 +190,18 @@ impl LineItem {
             .checked_mul(quantity)
             .map(|net| rounding.apply(net))
             .ok_or(ArithmeticError::NetOverflow)?;
-        let vat_value = match &vat_rate {
-            VatRate::Percent(rate) => net_value
-                .checked_mul(*rate)
+        let percentage = match &vat_rate {
+            VatRate::Percent(rate) => Some(*rate),
+            VatRate::Other(token) => {
+                crate::number::numeric(token.trim_matches(crate::xml::is_xml_space))
+                    .transpose()
+                    .map_err(|_| ArithmeticError::UnrepresentableVatRate)?
+            }
+            _ => None,
+        };
+        let vat_value = match percentage {
+            Some(rate) => net_value
+                .checked_mul(rate)
                 .and_then(|scaled| scaled.checked_div(Decimal::ONE_HUNDRED))
                 .map(|vat| rounding.apply(vat))
                 .ok_or(ArithmeticError::VatOverflow)?,

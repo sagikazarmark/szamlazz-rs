@@ -108,13 +108,17 @@ fn disposition_value(value: &str) -> String {
 
 fn multipart_boundary(xml: &[u8], files: &[MultipartFile<'_>]) -> String {
     let mut boundary = BASE_BOUNDARY.to_owned();
+    let mut candidate = 0usize;
 
     while contains_bytes(xml, boundary.as_bytes())
         || files
             .iter()
             .any(|file| contains_bytes(file.content, boundary.as_bytes()))
     {
-        boundary.push('x');
+        // A decimal usize suffix plus the fixed base stays below MIME's 70
+        // characters. Finite in-memory payloads cannot contain every suffix.
+        candidate += 1;
+        boundary = format!("{BASE_BOUNDARY}-{candidate}");
     }
 
     boundary
@@ -454,6 +458,22 @@ mod tests {
         assert!(body.contains("name=\"action-xmlagentxmlfile\""));
         assert!(body.contains("\r\n\r\n<xml/>\r\n"));
         assert!(body.ends_with(&format!("--{BASE_BOUNDARY}--\r\n")));
+    }
+
+    #[test]
+    fn multipart_collision_candidates_stay_within_mime_limit() {
+        let xml = format!("{BASE_BOUNDARY}{}", "x".repeat(70));
+        let content = format!("{BASE_BOUNDARY}-1 {BASE_BOUNDARY}-2");
+        let files = [MultipartFile {
+            name: "attachfile1".into(),
+            filename: "x",
+            content_type: "text/plain",
+            content: content.as_bytes(),
+        }];
+        let boundary = multipart_boundary(xml.as_bytes(), &files);
+        assert!(boundary.len() <= 70, "{}", boundary.len());
+        assert!(!contains_bytes(xml.as_bytes(), boundary.as_bytes()));
+        assert!(!contains_bytes(content.as_bytes(), boundary.as_bytes()));
     }
 
     #[test]
