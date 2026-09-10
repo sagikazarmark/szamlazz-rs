@@ -84,6 +84,22 @@ fn check(request: &impl AgentRequest, body: &str) {
 }
 
 #[test]
+fn unexpected_root_diagnostics_bound_upstream_names() {
+    let query = QueryInvoiceXml::new(InvoiceSelector::OrderNumber("O".into()));
+    for name in ["A".repeat(23_000), "é".repeat(23_000)] {
+        let raw = RawResponse::new::<&str, &str>([], format!("<{name}/>").into_bytes());
+        let error = query.parse(&raw).expect_err("wrong root");
+        assert!(matches!(
+            error,
+            szamlazz_agent::ResponseError::Parse(szamlazz_agent::ParseError::UnexpectedBody(_))
+        ));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.len() < 1024, "length {}", diagnostic.len());
+        assert!(diagnostic.contains("expected"));
+    }
+}
+
+#[test]
 fn operation_parsers_require_completed_documents() {
     check(
         &QueryInvoiceXml::new(InvoiceSelector::OrderNumber("O".into())),

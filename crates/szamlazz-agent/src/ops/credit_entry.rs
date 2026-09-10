@@ -398,7 +398,7 @@ mod tests {
         let error = sample().parse(&response).expect_err("error");
         match error {
             ResponseError::Parse(ParseError::UnexpectedBody(body)) => {
-                assert!(body.contains("got html: <html>yyyy"), "{body}");
+                assert!(body.contains("got another root: <html>yyyy"), "{body}");
                 assert!(body.len() < 600, "bounded: {} bytes", body.len());
                 assert!(
                     body.contains(&format!("{} bytes", page.len())),

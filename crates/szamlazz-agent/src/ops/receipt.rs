@@ -140,6 +140,11 @@ pub struct CreateReceipt {
     #[doc(alias = "fokonyvVevo")]
     pub ledger_customer: Option<String>,
     /// Order number shown on the receipt (`rendelesSzam`).
+    /// Receipts have a [separate repetition toggle](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/order-number)
+    /// in account settings, independent of invoices. With restriction enabled,
+    /// a previously used receipt order number is refused; when repetition is
+    /// allowed, order queries return the last match. This is separate from
+    /// creation call-ID duplicate prevention.
     #[doc(alias = "rendelésszám")]
     pub order_number: Option<String>,
     /// Return the PDF in the response (`pdfLetoltes`).
@@ -298,8 +303,11 @@ impl AgentRequest for CreateReceipt {
 /// [`Receipt::reversed_receipt_number`].
 /// After a lost answer, query the known original's reversal state; this alone
 /// does not recover the `SN` number/PDF. Keep the logical call identity. A
-/// storno-specific 338 guarantee or invoice-style successful repeat has not been
-/// established; see [recovery](crate::error#recovery).
+/// storno-specific 338 guarantee has not been established. The
+/// [vendor documents refusals](https://docs.szamlazz.hu/agent/reversing_receipt/response)
+/// for an already reversed receipt and for a target that is itself a storno
+/// receipt, rather than invoice-style successful replay. That refusal does not
+/// recover the `SN` number or identify who reversed it; see [recovery](crate::error#recovery).
 #[doc(alias = "xmlnyugtast")]
 #[doc(alias = "nyugta sztornó")]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -369,6 +377,7 @@ pub enum ReceiptSelector {
     /// according to the [PHP docs](https://docs.szamlazz.hu/php/nyugta-lekerdezes).
     /// The exact “last” criterion and selection of `SN` remain unresolved;
     /// verify returned identity, type and reversal data before adopting it.
+    /// See [`CreateReceipt::order_number`] for the receipt-specific repetition setting.
     #[doc(alias = "rendelésszám")]
     OrderNumber(String),
 }

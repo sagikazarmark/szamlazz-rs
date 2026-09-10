@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Sparse compatibility fixture with real NAV 3.0 namespaces, not an
+     XSD-conforming complete response: header/software are omitted and the
+     second address deliberately lacks streetName/publicPlaceCategory. -->
 <api:QueryTaxpayerResponse xmlns:api="http://schemas.nav.gov.hu/OSA/3.0/api" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
   <common:result><common:funcCode>OK</common:funcCode></common:result>
   <api:infoDate>2026-09-10T12:34:56.123456789012+02:00</api:infoDate>

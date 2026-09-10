@@ -64,6 +64,10 @@
 //! that default, and injecting another reqwest client does not enable inclusion.
 //! XML authentication may work without cookies, but direct browser feasibility
 //! remains a vendor/platform question, not something native loopback tests prove.
+//! The [vendor authentication guidance](https://docs.szamlazz.hu/agent/basics/authentication)
+//! explicitly forbids including agent keys in client-side code. Keep account
+//! keys on a trusted server (including server-side wasm); browser applications
+//! call that server rather than receiving the key.
 // docs.rs builds with all features on nightly and sets `--cfg docsrs`;
 // current rustdoc's doc_cfg automatically annotates feature- and target gates.
 #![cfg_attr(docsrs, feature(doc_cfg))]

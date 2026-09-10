@@ -130,7 +130,7 @@ pub(crate) fn response_root<'a>(
                         .collect::<Vec<_>>()
                         .join(" or ");
                     return Err(ParseError::UnexpectedBody(format!(
-                        "expected {wanted}, got {local}: {}",
+                        "expected {wanted}, got another root: {}",
                         body_excerpt(body)
                     )));
                 }
@@ -785,7 +785,7 @@ mod tests {
                     message.contains(" or document in namespace http://example.com/doc"),
                     "{message}"
                 );
-                assert!(message.contains("got reply"), "{message}");
+                assert!(message.contains("got another root: <reply"), "{message}");
             }
             other => panic!("expected an unexpected body, got {other:?}"),
         }

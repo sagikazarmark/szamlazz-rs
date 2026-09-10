@@ -13,7 +13,7 @@ the operation's uncertainty and vendor send limit in mind.
 | Invoice creation | Persist an external id and order before sending. Query with `InvoiceSelector::ExternalId`; the id is not unique server-side and returns its newest holder. Check the returned order, document type, number and reversal state before adopting it. Allow earlier sends to finish: an immediate code 7 alone does **not** authorize another create. Unresolved identity or timing means unresolved recovery. |
 | Invoice storno | Query the known original and, if supplied, the storno's external id. Verify that the found document is `SS` and references that original, as well as its order and reversal state. A repeat of an already reversed invoice was observed to return the existing storno number, but still reconcile uncertain sends; a proforma/delivery-note storno can be a success-shaped no-op. |
 | Receipt creation | Persist a unique `CreateReceipt::call_id` **before the first send**, and retain it for that logical issuance. Code 338 prevents another issue but supplies neither the original number nor PDF. Query a known number or a deliberately managed order with `ReceiptSelector`; verify returned call id, order, number, `NY`/`SN` and reversal data. If recovery remains unresolved, do not generate a fresh call id. |
-| Receipt storno | Keep the logical call identity. Query the known original to inspect its reversal state; this alone does not recover the `SN` number or PDF. A known storno number can be queried and its original reference checked. Neither invoice-style successful-repeat behavior nor a storno-specific 338 guarantee is established. |
+| Receipt storno | Keep the logical call identity. Query the known original to inspect its reversal state; this alone does not recover the `SN` number or PDF. A known storno number can be queried and its original reference checked. The [vendor documents refusals](https://docs.szamlazz.hu/agent/reversing_receipt/response) for already reversed receipts and storno-receipt targets, not invoice-style successful replay. A refusal does not identify who reversed the receipt. A storno-specific 338 guarantee remains unestablished. |
 | Reads (invoice/receipt queries, taxpayer lookup) | A repeat obtains current data and creates no document. Interpret not-found for the selector and operation; code 7 on receipt **send** may instead mean a missing subject. |
 | Credit-entry registration | Query the invoice's current credit entries and balance. Invoice existence does not show that the mutation landed. Repeating additive entries can double amounts; replacing entries can overwrite intervening state. Reconcile the intended mutation with current data before a deliberate new send. |
 | Proforma deletion | Number selection targets one proforma; **order selection deletes all matching proformas**, not just the latest one a query returns. Repeating an order-based deletion can reach newly created matches. Query known numbers; absence can also mean consumption by an invoice. Code 335 is a settled refusal, not replayed success. Reconcile the intended target set before deliberately repeating. |
@@ -28,6 +28,10 @@ normal lookups. There is no call-ID-only selector. The
 order lookup as returning the **last matching document**; the exact meaning of
 “last” and selection of `SN` versus `NY` remain unresolved. Never adopt that
 match without checking its identity and type.
+Receipts have their [own order-number repetition toggle](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/order-number),
+independent of the invoice setting. Restriction prevents another receipt with a
+previously used order number; allowing repetition permits multiple matches.
+This does not establish invoice-style replay rules for receipts.
 
 ### Retry limit and evidence
 

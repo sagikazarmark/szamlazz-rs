@@ -185,11 +185,11 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
         return Err(error.clone().into());
     }
 
-    let (verdict, body) = match parse_envelope(response.body()) {
-        Ok((verdict, body)) => (Some(verdict), body),
+    let (verdict, payload_result) = match parse_envelope(response.body()) {
+        Ok((verdict, payload_result)) => (Some(verdict), payload_result),
         // A 56 in the headers may come with a body that is not the envelope
         // ("notification failed" as text): the headers alone name the document.
-        Err(_) if header_error.is_some() => (None, Body::default()),
+        Err(_) if header_error.is_some() => (None, Ok(Body::default())),
         Err(parse_error) => return Err(parse_error.into()),
     };
     let body_error = verdict.as_ref().and_then(xml::Verdict::api_error);
@@ -201,6 +201,13 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
     }
 
     let notification_delivery_failed = header_error.is_some() || body_error.is_some();
+    // A payload failure cannot erase the verdict read above. Only after its
+    // refusal has been considered may numbered-56 metadata be read leniently.
+    let body = match payload_result {
+        Ok(body) => body,
+        Err(_) if notification_delivery_failed => Body::default(),
+        Err(error) => return Err(error.into()),
+    };
 
     let Some(invoice_number) = body.invoice_number(response) else {
         // 56 without a number: an error after all.
@@ -269,11 +276,13 @@ pub(crate) fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, Res
 }
 
 /// The envelope's verdict and payload, read from the same text.
-fn parse_envelope(body: &[u8]) -> Result<(xml::Verdict, Body), ParseError> {
+/// The outer error means no verdict was established; the inner error retains
+/// a known verdict even when decoding the optional payload fails.
+fn parse_envelope(body: &[u8]) -> Result<(xml::Verdict, Result<Body, ParseError>), ParseError> {
     let text = xml::response_text(body, ROOT, NAMESPACE)?;
     let text = xml::protocol_text(text, NAMESPACE)?;
     let verdict = quick_xml::de::from_str(&text)?;
-    let payload = quick_xml::de::from_str(&text)?;
+    let payload = quick_xml::de::from_str(&text).map_err(ParseError::from);
 
     Ok((verdict, payload))
 }

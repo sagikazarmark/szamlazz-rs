@@ -54,10 +54,11 @@ pub enum ClientError {
     /// The HTTP request itself failed.
     ///
     /// Retry with care: invoice creation has no idempotency key, so a timeout
-    /// after the server already issued the document means a retry issues a
+    /// after the server already issued the document means a retry can issue a
     /// duplicate. Receipt creation call ids prevent duplicate issuance by
     /// returning error 338 on reuse, but do not replay the original success.
-    /// Receipt storno repeat semantics are not established.
+    /// Receipt storno of an already reversed receipt is documented as a refusal;
+    /// a storno-specific call-ID/338 guarantee is not established.
     /// [`ClientError::outcome_class`] says which failures leave the outcome
     /// open; use the [operation recovery table](crate::error#recovery).
     #[error("transport error: {0}")]
@@ -102,11 +103,36 @@ impl From<ResponseError> for ClientError {
 }
 
 /// Configures a [`Client`].
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ClientBuilder {
     credentials: Option<Credentials>,
     endpoint: Option<String>,
     http: Option<reqwest::Client>,
+}
+
+impl std::fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("credentials", &self.credentials)
+            .field(
+                "endpoint",
+                &self.endpoint.as_deref().map(endpoint_diagnostic),
+            )
+            .field("http", &self.http.as_ref().map(|_| "reqwest::Client"))
+            .finish()
+    }
+}
+
+// Use the transport's URL parser, rather than guessing where an authority
+// ends. If parsing or userinfo removal fails, do not echo the original text.
+fn endpoint_diagnostic(endpoint: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(endpoint) else {
+        return "[invalid URL]".to_owned();
+    };
+    if url.set_password(None).is_err() || url.set_username("").is_err() {
+        return "[invalid URL]".to_owned();
+    }
+    url.to_string()
 }
 
 impl ClientBuilder {
@@ -180,15 +206,12 @@ impl ClientBuilder {
 /// The endpoint as a URL, or why the string is not one.
 fn parse_endpoint(endpoint: &str) -> Result<reqwest::Url, BuildError> {
     let invalid = |message: String| BuildError::InvalidEndpoint {
-        endpoint: endpoint.to_owned(),
+        endpoint: endpoint_diagnostic(endpoint),
         message,
     };
     let url = reqwest::Url::parse(endpoint).map_err(|error| invalid(error.to_string()))?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(invalid(format!(
-            "scheme {} is not http or https",
-            url.scheme()
-        )));
+        return Err(invalid("scheme is not http or https".to_owned()));
     }
     if url.host_str().is_none() {
         return Err(invalid("no host".to_owned()));
@@ -207,7 +230,8 @@ pub enum BuildError {
     /// The endpoint is not an `http` or `https` URL with a host.
     #[error("invalid endpoint {endpoint:?}: {message}")]
     InvalidEndpoint {
-        /// The endpoint as given.
+        /// The endpoint with URL userinfo removed, or `[invalid URL]` when
+        /// parsing or userinfo removal failed.
         endpoint: String,
         /// What is wrong with it.
         message: String,
@@ -269,11 +293,21 @@ fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
 ///
 /// These native jar guarantees do not describe browser wasm; see
 /// [Features](crate#features) for the Fetch/CORS boundary.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     credentials: Credentials,
     endpoint: reqwest::Url,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("http", &"reqwest::Client")
+            .field("credentials", &self.credentials)
+            .field("endpoint", &endpoint_diagnostic(self.endpoint.as_str()))
+            .finish()
+    }
 }
 
 impl Client {
@@ -335,8 +369,35 @@ impl Client {
 mod tests {
     use super::*;
 
-    /// A malformed endpoint is refused when the client is built, naming the
-    /// string, not on every send as a transport error.
+    /// A malformed endpoint is refused when the client is built, not on
+    /// every send as a transport error.
+    #[test]
+    fn endpoint_diagnostics_redact_url_credentials() {
+        for endpoint in [
+            "https://alice:URL_PASSWORD@example.test/szamla/",
+            "ftp://alice:URL_PASSWORD@example.test/szamla/",
+            "https://alice:URL_PASSWORD@[bad/",
+            "alice:URL_PASSWORD@example.test/szamla/",
+        ] {
+            let builder = Client::builder()
+                .credentials(Credentials::agent_key("XML_SECRET"))
+                .endpoint(endpoint);
+            let mut diagnostics = vec![format!("{builder:?}")];
+            match builder.build() {
+                Ok(client) => diagnostics.push(format!("{client:?}")),
+                Err(error) => {
+                    diagnostics.push(format!("{error:?}"));
+                    diagnostics.push(error.to_string());
+                }
+            }
+            for diagnostic in diagnostics {
+                assert!(!diagnostic.contains("URL_PASSWORD"), "{diagnostic}");
+                assert!(!diagnostic.contains("alice"), "{diagnostic}");
+                assert!(!diagnostic.contains("XML_SECRET"), "{diagnostic}");
+            }
+        }
+    }
+
     #[test]
     fn a_malformed_endpoint_fails_at_build() {
         assert!(
@@ -360,7 +421,7 @@ mod tests {
             match error {
                 BuildError::InvalidEndpoint {
                     endpoint: given, ..
-                } => assert_eq!(given, endpoint),
+                } => assert_eq!(given, endpoint_diagnostic(endpoint)),
                 other => panic!("{endpoint}: expected InvalidEndpoint, got {other:?}"),
             }
         }

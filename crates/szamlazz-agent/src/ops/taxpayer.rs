@@ -255,8 +255,10 @@ pub struct TaxpayerAddress {
     pub door: Option<String>,
     /// Lot number (`lotNumber`).
     pub lot_number: Option<String>,
-    /// Free-form address detail used by NAV simple addresses
-    /// (`additionalAddressDetail`).
+    /// Tolerated extension (`additionalAddressDetail`). NAV declares this on
+    /// simple addresses, but taxpayer addresses use `DetailedAddressType` in
+    /// both 2.0 and 3.0, where this field is not declared. Retained when sent;
+    /// it does not establish a supported taxpayer simple-address alternative.
     pub additional_address_detail: Option<String>,
 }
 
@@ -767,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_simple_address_detail() {
+    fn preserves_additional_address_detail_as_a_tolerated_extension() {
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
             <taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerAddressList><taxpayerAddressItem>
             <taxpayerAddressType>HQ</taxpayerAddressType><api:taxpayerAddress xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data">

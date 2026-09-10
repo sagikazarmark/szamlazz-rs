@@ -1175,7 +1175,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("create_{kind}: overflow is refused"));
             let message = invalid_input(fault);
             assert!(
-                message.contains("items[1]") && message.contains("overflows a decimal"),
+                message.contains("items[1]") && message.contains("cannot fit exactly in a decimal"),
                 "create_{kind}: names the item and the rule: {message}"
             );
         }

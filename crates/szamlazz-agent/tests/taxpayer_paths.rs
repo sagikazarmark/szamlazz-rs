@@ -74,7 +74,7 @@ fn new_business_fields_use_only_their_versioned_paths() {
 }
 
 #[test]
-fn incorporation_tokens_are_open_wire_strings_in_both_nav_versions() {
+fn incorporation_tokens_are_open_in_v3_and_tolerated_as_a_v2_extension() {
     use szamlazz_agent::ops::taxpayer::{Incorporation, TaxpayerInfo};
     for (token, expected) in [
         ("ORGANIZATION", Incorporation::Organization),
@@ -82,6 +82,8 @@ fn incorporation_tokens_are_open_wire_strings_in_both_nav_versions() {
         ("TAXABLE_PERSON", Incorporation::TaxablePerson),
         ("FUTURE_KIND", Incorporation::Other("FUTURE_KIND".into())),
     ] {
+        // Incorporation is declared only in NAV 3.0. This sparse 2.0 sample
+        // checks extension tolerance, not schema conformance.
         let v2 = format!(
             "<result><funcCode>OK</funcCode></result><taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerShortName> Short </taxpayerShortName><taxNumberDetail><d:countyCode>02</d:countyCode></taxNumberDetail><vatGroupMembership>87654321</vatGroupMembership><incorporation>{token}</incorporation></taxpayerData>"
         );

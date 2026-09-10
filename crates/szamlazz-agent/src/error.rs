@@ -82,9 +82,12 @@ pub enum ErrorCode {
     /// invoice, and a delivery note may all carry the same order number), and
     /// storno and corrective invoices are exempt (a storno invoice inherits
     /// its original's order number; a corrective invoice may repeat it).
-    /// Reversing an invoice frees its order number for reuse, and a
-    /// byte-identical resend while the first document is live returns that
-    /// document instead of an error.
+    /// The [documented replay rule](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/order-number)
+    /// additionally requires matching buyer, gross amount and three dates, and
+    /// a document created within the last two days. A live document alone does
+    /// not guarantee replay. Short-interval identical replay and order-number
+    /// reuse after reversal were observed on the test account; those observations
+    /// do not establish an indefinite replay window.
     ///
     /// Nothing new was created ([`OutcomeClass::DuplicateOrderNumber`]); a
     /// query by order number names the existing document. Treat the code as
@@ -511,14 +514,14 @@ pub enum ArithmeticError {
     /// A numeric VAT token cannot be represented exactly by a decimal.
     #[error("line item numeric VAT rate cannot be represented exactly by a decimal")]
     UnrepresentableVatRate,
-    /// `unit_price × quantity` overflows.
-    #[error("line item net value (unit price × quantity) overflows a decimal")]
+    /// `unit_price × quantity` cannot fit exactly (overflow or precision loss).
+    #[error("line item net value (unit price × quantity) cannot fit exactly in a decimal")]
     NetOverflow,
-    /// `net × rate / 100` overflows.
-    #[error("line item VAT value (net × rate / 100) overflows a decimal")]
+    /// An intermediate or result of `net × rate / 100` cannot fit exactly.
+    #[error("line item VAT value (net × rate / 100) cannot fit exactly in a decimal")]
     VatOverflow,
-    /// `net + VAT` overflows.
-    #[error("line item gross value (net + VAT) overflows a decimal")]
+    /// `net + VAT` cannot fit exactly (overflow or precision loss).
+    #[error("line item gross value (net + VAT) cannot fit exactly in a decimal")]
     GrossOverflow,
 }
 

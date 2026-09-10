@@ -429,6 +429,27 @@ fn malformed_headers_and_body_precedence() {
 }
 
 #[test]
+fn numbered_56_does_not_hide_a_body_refusal_behind_malformed_optional_payload() {
+    for payload in [
+        "<szamlabrutto><bad/></szamlabrutto>",
+        "<szamlabrutto>1</szamlabrutto><szamlabrutto>2</szamlabrutto>",
+    ] {
+        let raw = RawResponse::new(
+            [("szlahu_error_code", "56"), ("szlahu_szamlaszam", "I-2")],
+            format!(
+                r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>3</hibakod><hibauzenet>login refused</hibauzenet>{payload}</xmlszamlavalasz>"#
+            ).into_bytes(),
+        );
+        let error = StornoInvoice::new("I-1")
+            .parse(&raw)
+            .expect_err("body refusal");
+        assert!(matches!(error, szamlazz_agent::ResponseError::Api(ref api)
+            if api.code == szamlazz_agent::ErrorCode::InvalidCredentials
+                && api.message == "login refused"));
+    }
+}
+
+#[test]
 fn numbered_56_retains_comma_metadata_and_drops_malformed_metadata() {
     let raw = RawResponse::new(
         [

@@ -48,6 +48,9 @@ const SZAMLA_NAMESPACE: &str = "http://www.szamlazz.hu/szamla";
 /// Like the PDF query, this request document has no `beallitasok` block: the
 /// credentials sit directly under the root element. The response is the
 /// invoice's full data as an [`InvoiceDocument`].
+/// The [vendor retrieval boundary](https://docs.szamlazz.hu/agent/querying_xml/request)
+/// is internal outgoing documents issued in Számlázz.hu, not incoming or
+/// externally issued/imported invoices in the account.
 #[doc(alias = "xmlszamlaxml")]
 #[doc(alias = "számla adatainak lekérdezése")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -233,7 +236,9 @@ pub struct InvoiceInfo {
     /// Economic-event identifier (`gazdEsemAzon`).
     #[doc(alias = "gazdEsemAzon")]
     pub economic_event_id: Option<i64>,
-    /// Source system code (`forras`) for externally issued invoices.
+    /// Source system code (`forras`) for externally issued invoices, retained
+    /// from the shared `szamla` schema. Its presence in this model does not
+    /// expand [`QueryInvoiceXml`]'s internal-outgoing retrieval boundary.
     pub source: Option<i64>,
     /// Registration number (`iktatoszam`).
     pub registration_number: Option<String>,

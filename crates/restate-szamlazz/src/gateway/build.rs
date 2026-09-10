@@ -591,7 +591,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "items[1]: line item net value (unit price × quantity) overflows a decimal"
+            "items[1]: line item net value (unit price × quantity) cannot fit exactly in a decimal"
         );
     }
 

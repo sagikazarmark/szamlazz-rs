@@ -191,7 +191,9 @@ async fn inspect_order(client: &Client, persisted_call_id: &str, order: &str)
 }
 ```
 
-`false` or an error leaves recovery unresolved. A normal number/order query omits `QueryReceipt::call_id`: the XML field is optional and its query behavior unspecified. First-party PHP docs say order queries return the **last matching document**; the exact “last” criterion and `SN` selection remain unresolved. For receipt storno, keep the logical call identity and query the known original's reversal state; that alone does not recover the `SN` number/PDF. Neither storno-specific 338 behavior nor invoice-style successful repeats are promised.
+`false` or an error leaves recovery unresolved. A normal number/order query omits `QueryReceipt::call_id`: the XML field is optional and its query behavior unspecified. First-party PHP docs say order queries return the **last matching document**; the exact “last” criterion and `SN` selection remain unresolved. Receipts have their [own order-number repetition toggle](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/order-number), independent of invoices: restriction refuses a previously used receipt order number, while allowing repetition permits multiple matches.
+
+For receipt storno, keep the logical call identity and query the known original's reversal state; that alone does not recover the `SN` number/PDF. The [vendor documents refusals](https://docs.szamlazz.hu/agent/reversing_receipt/response) for already reversed receipts and targets that are themselves storno receipts, rather than invoice-style successful replay. That refusal does not identify who reversed it. Storno-specific call-ID/338 behavior remains unestablished.
 
 ### Receipt email
 
@@ -301,6 +303,8 @@ No features are enabled by default. The [crate documentation](https://docs.rs/sz
 
 Browser transport compilation does not prove direct Számla Agent access. Vendor CORS must permit the request and expose the `szlahu_*` response headers; browsers manage cookies and hide `Set-Cookie` from application code. Reqwest Fetch defaults to **same-origin credentials** unless set per request. `Client::send` keeps that default; injecting another client does not enable cross-origin credential inclusion. XML authentication may work without cookies. Direct browser feasibility remains an explicit vendor/platform question; native loopback checks establish neither CORS nor browser cookie access.
 
+The [vendor authentication guidance](https://docs.szamlazz.hu/agent/basics/authentication) explicitly says not to include agent keys in client-side code. Keep account keys on a trusted server, including server-side wasm; browser applications call that server rather than receiving the key.
+
 ## Operations
 
 | Operation | Type |
@@ -324,7 +328,7 @@ szamlazz.hu verifies every row's arithmetic server-side (net = unit price × qua
   - `Rounding::Scale(n)`: a fixed number of decimal places.
   - `Rounding::Exact`: no rounding. On the test account, a EUR **invoice** sent with `100.004 / 27.00108 / 127.00508` was stored as `100 / 27 / 127.01`: independent two-decimal rounding without recomputing gross. This is invoice evidence, not receipt evidence or a rule for KWD.
 
-  Rounding is half away from zero and applied at each step (net before VAT), so gross = net + VAT holds exactly on the wire. This calculator invariant does not establish server acceptance or storage precision. HUF **invoice** probes tolerated net discrepancies of 0.5, 1 and 2 HUF and rejected 5 and 10; those observations are not receipt probes.
+  Rounding is half away from zero and applied at each step (net before VAT), so gross = net + VAT holds exactly on the wire. Intermediates that cannot fit exactly are refused, including precision loss and underflow, even if later rounding would make them fit. This calculator invariant does not establish server acceptance or storage precision. HUF **invoice** probes tolerated net discrepancies of 0.5, 1 and 2 HUF and rejected 5 and 10; those observations are not receipt probes.
 - **`LineItem::new(…)`** takes net, VAT and gross as your system computed them and sends them as-is.
 
 `LineItem` is plain data like every request type: set the optional fields with functional update (`LineItem { comment: Some(..), ..item }`). A receipt row carries fewer fields than an invoice row; a `CreateReceipt` whose item sets `margin_vat_base` or the ledger's economic-event or settlement fields is refused before the wire (`RequestError::UnsupportedOnReceipt`) rather than sent without them.
@@ -346,12 +350,18 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client has no application-level retry/recovery loop. Supplied HTTP clients retain their retry policies; one `send` need not mean one POST, and transport retries do not perform reconciliation.
 - A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
-- Error displays quote at most a bounded excerpt of an upstream body (`error::BODY_EXCERPT_LEN`, with the total length noted), and `RawResponse`'s `Debug` names its `Set-Cookie` header without the cookie value and prints the body as its length: a parse failure can be logged as is.
+- `HttpStatus` and `UnexpectedBody` diagnostics quote bounded body excerpts (`error::BODY_EXCERPT_LEN`, with the total length noted). Other API/parser messages may contain full upstream text; the verbatim `ApiError.message` is not truncated. `RawResponse`'s `Debug` redacts `Set-Cookie` and prints the body length, but other headers remain visible. Apply your application's logging policy to these messages and headers.
 - A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live".
 - The vocabulary follows the domain: a `kifizetes` registered against an invoice is a *credit entry* (`CreditEntry` out, `RecordedCreditEntry` back, `InvoiceDocument::credit_entries`; its `jogcim` is the `title`, a `PaymentMethod` on both sides), a `stornozott` receipt is *reversed*, and a queried document's `eszamla` is its `appearance` (a code), while the `e_invoice` of a create or storno request is a flag.
 - Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
 
 ## Breaking Changes in 0.4
+
+Derived line-item arithmetic now refuses lossy intermediates instead of silently
+rounding or underflowing before the chosen rounding policy. Arithmetic-error
+messages describe exact representability, not just overflow. Invalid-endpoint
+errors carry a URL with userinfo removed, or `[invalid URL]` when parsing or userinfo removal fails,
+rather than echoing the original input.
 
 Response numbers now require exact finite Decimal representation: excess precision,
 underflow and overflow are refused rather than implicitly rounded. Equivalent

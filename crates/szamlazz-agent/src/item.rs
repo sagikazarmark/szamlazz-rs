@@ -102,9 +102,9 @@ pub struct LineItem {
     pub vat_rate: VatRate,
     /// Invoice-only margin-scheme VAT base (`arresAfaAlap`).
     pub margin_vat_base: Option<Decimal>,
-    /// Net value (`nettoErtek`); must equal unit price × quantity.
+    /// Net value (`nettoErtek`): unit price × quantity, subject to rounding.
     pub net_value: Decimal,
-    /// VAT value (`afaErtek`); must equal net × rate / 100.
+    /// VAT value (`afaErtek`): net × rate / 100, subject to rounding.
     pub vat_value: Decimal,
     /// Gross value (`bruttoErtek`); must equal net + VAT.
     pub gross_value: Decimal,
@@ -175,8 +175,10 @@ impl LineItem {
     ///
     /// # Errors
     ///
-    /// [`ArithmeticError`] names the step whose result overflows the 96-bit
-    /// mantissa of a [`Decimal`]: the net, the VAT, or the gross. A numeric
+    /// [`ArithmeticError`] names the step whose intermediate or result cannot
+    /// fit exactly in a [`Decimal`]: the net, the VAT, or the gross. This includes
+    /// precision loss and underflow, even if later rounding would make it fit.
+    /// A numeric
     /// VAT token outside Decimal's exact domain is `UnrepresentableVatRate`.
     pub fn try_calculated(
         name: impl Into<String>,
@@ -186,8 +188,7 @@ impl LineItem {
         vat_rate: VatRate,
         rounding: Rounding,
     ) -> Result<Self, ArithmeticError> {
-        let net_value = unit_price
-            .checked_mul(quantity)
+        let net_value = crate::number::exact_mul(unit_price, quantity)
             .map(|net| rounding.apply(net))
             .ok_or(ArithmeticError::NetOverflow)?;
         let percentage = match &vat_rate {
@@ -200,16 +201,14 @@ impl LineItem {
             _ => None,
         };
         let vat_value = match percentage {
-            Some(rate) => net_value
-                .checked_mul(rate)
-                .and_then(|scaled| scaled.checked_div(Decimal::ONE_HUNDRED))
+            Some(rate) => crate::number::exact_mul(net_value, rate)
+                .and_then(crate::number::exact_div_100)
                 .map(|vat| rounding.apply(vat))
                 .ok_or(ArithmeticError::VatOverflow)?,
             _ => Decimal::ZERO,
         };
-        let gross_value = net_value
-            .checked_add(vat_value)
-            .ok_or(ArithmeticError::GrossOverflow)?;
+        let gross_value =
+            crate::number::exact_add(net_value, vat_value).ok_or(ArithmeticError::GrossOverflow)?;
 
         Ok(Self::new(
             name,
@@ -229,6 +228,71 @@ mod tests {
     use rust_decimal::dec;
 
     use super::*;
+
+    #[test]
+    fn derived_amounts_refuse_precision_loss_before_rounding() {
+        for rounding in [Rounding::Exact, Rounding::Scale(2)] {
+            for (quantity, price) in [
+                (dec!(0.9999999999999999999999999999), dec!(0.005)),
+                (dec!(0.1), dec!(0.0000000000000000000000000001)),
+            ] {
+                assert_eq!(
+                    LineItem::try_calculated("x", quantity, "db", price, VatRate::Aam, rounding),
+                    Err(ArithmeticError::NetOverflow),
+                );
+            }
+        }
+        assert_eq!(
+            LineItem::try_calculated(
+                "x",
+                dec!(1),
+                "db",
+                dec!(0.0000000000000000000000000001),
+                VatRate::percent(27),
+                Rounding::Exact,
+            ),
+            Err(ArithmeticError::VatOverflow),
+        );
+        assert_eq!(
+            LineItem::try_calculated(
+                "x",
+                dec!(1),
+                "db",
+                dec!(10000000000000000000000000000),
+                VatRate::Percent(dec!(0.0000000000000000000000000001)),
+                Rounding::Exact,
+            ),
+            Err(ArithmeticError::GrossOverflow),
+        );
+    }
+
+    #[test]
+    fn exact_calculation_keeps_representable_boundary_products() {
+        for (quantity, price, expected) in [
+            (
+                dec!(2.5),
+                dec!(20000000000000000000000000000),
+                dec!(50000000000000000000000000000),
+            ),
+            (
+                dec!(-2.5),
+                dec!(20000000000000000000000000000),
+                dec!(-50000000000000000000000000000),
+            ),
+            (
+                dec!(10000000000000000000000000000),
+                dec!(0.0000000000000000000000000001),
+                dec!(1),
+            ),
+            (Decimal::ZERO, Decimal::MAX, Decimal::ZERO),
+        ] {
+            let item =
+                LineItem::try_calculated("x", quantity, "db", price, VatRate::Aam, Rounding::Exact)
+                    .expect("exact product fits");
+            assert_eq!(item.net_value, expected);
+            assert_eq!(item.gross_value, expected);
+        }
+    }
 
     #[test]
     fn try_calculated_matches_docs_example() {

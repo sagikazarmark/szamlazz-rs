@@ -1,6 +1,63 @@
 //! Exact conversion of finite wire numbers, independent of their spelling.
 use rust_decimal::Decimal;
 
+/// Checked Decimal operations may round on success. Work with integer
+/// coefficients instead, refusing any intermediate that cannot fit exactly.
+pub(crate) fn exact_mul(left: Decimal, right: Decimal) -> Option<Decimal> {
+    let left = left.normalize();
+    let right = right.normalize();
+    let (mut a, mut b) = (left.mantissa(), right.mantissa());
+    let mut scale = left.scale() + right.scale();
+    // Cancel powers of ten before multiplying: a 192-bit product may still
+    // fit Decimal once its trailing zeroes are removed. The factors of ten
+    // can straddle the operands (e.g. 2 × 5).
+    while scale > 0 {
+        if a % 10 == 0 {
+            a /= 10;
+        } else if b % 10 == 0 {
+            b /= 10;
+        } else if a % 2 == 0 && b % 5 == 0 {
+            a /= 2;
+            b /= 5;
+        } else if a % 5 == 0 && b % 2 == 0 {
+            a /= 5;
+            b /= 2;
+        } else {
+            break;
+        }
+        scale -= 1;
+    }
+    exact_coefficient(a.checked_mul(b)?, scale)
+}
+
+pub(crate) fn exact_div_100(value: Decimal) -> Option<Decimal> {
+    exact_coefficient(value.mantissa(), value.scale() + 2)
+}
+
+pub(crate) fn exact_add(left: Decimal, right: Decimal) -> Option<Decimal> {
+    let left = left.normalize();
+    let right = right.normalize();
+    let scale = left.scale().max(right.scale());
+    let a = left
+        .mantissa()
+        .checked_mul(10i128.pow(scale - left.scale()))?;
+    let b = right
+        .mantissa()
+        .checked_mul(10i128.pow(scale - right.scale()))?;
+    exact_coefficient(a.checked_add(b)?, scale)
+}
+
+fn exact_coefficient(mut coefficient: i128, mut scale: u32) -> Option<Decimal> {
+    while scale > 0 && coefficient % 10 == 0 {
+        coefficient /= 10;
+        scale -= 1;
+    }
+    if scale > Decimal::MAX_SCALE {
+        return None;
+    }
+    Decimal::try_from_i128_with_scale(coefficient, scale).ok()
+}
+
 /// `None` denotes a nonnumeric token; a numeric value outside Decimal's domain
 /// is an error, never a special VAT code or an implicitly rounded amount.
 pub(crate) fn numeric(value: &str) -> Option<Result<Decimal, rust_decimal::Error>> {
