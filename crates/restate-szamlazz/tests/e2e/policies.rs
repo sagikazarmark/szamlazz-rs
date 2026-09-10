@@ -510,7 +510,7 @@ pub(crate) async fn cancel_after_send(
 /// reply must not make the invocation claim success. The next invocation's
 /// lookup reconciles the deletion, and the cancelled completion sends once.
 pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h: &Harness) {
-    use crate::harness::szamlazz::{delete_of, proforma_deleted};
+    use crate::harness::szamlazz::{delete_of, number_query, proforma_deleted};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -532,6 +532,10 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
         .await;
     h.absent("E2E-CANCEL-DELETE", &["invoice", "prepayment", "final"])
         .await;
+    number_query("D-CANCEL")
+        .respond_with(Doc::of("D-CANCEL", "D", "E2E-CANCEL-DELETE").response())
+        .mount(&h.mock)
+        .await;
     let signal = Arc::clone(&received);
     delete_of("D-CANCEL")
         .respond_with(move |_: &wiremock::Request| {
@@ -546,6 +550,15 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
     let reply = cancel_after_send(h, call, &json!({}), "cancel-delete-k1", &received).await;
     let fault = reply.fault();
     assert_eq!(fault.order.as_deref(), Some("E2E-CANCEL-DELETE"));
+    assert!(fault.message.contains("D-CANCEL"), "{fault:?}");
+    assert!(
+        fault.message.contains("query the pinned number"),
+        "{fault:?}"
+    );
+    assert!(
+        fault.message.contains("current external-id holder"),
+        "{fault:?}"
+    );
     assert_eq!(fault.kind, Some(IssuedKind::Proforma));
     assert_eq!(
         fault.external_id.as_deref(),

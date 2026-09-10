@@ -30,8 +30,8 @@ use crate::identity::OrderKey;
 /// on (`rendelesszam`, `sztornozott`, `hivszamlaszam`, `hivdijbekszam`,
 /// `eszamla`, `teszt`), the dates the storno and `Szamlazz.Agent.query`
 /// repeat (`kelt`, `telj`, `fizh`), the currency, the grand total and the
-/// credit entries, plus `alap/id`, which no handler reads and the entry
-/// carries so that an operator can correlate it with szamlazz.hu (#127). The
+/// credit entries, plus `alap/id`, which pins a deletion's target across its
+/// fresh query and lets an operator correlate it with szamlazz.hu (#127, #201). The
 /// buyer block, the seller block, the line items and the PDF szamlazz.hu
 /// returns with the document are not here: the worker never reads them, and
 /// a journal entry is visible in the Restate UI for the retention period. The
@@ -41,8 +41,8 @@ use crate::identity::OrderKey;
 #[non_exhaustive]
 pub struct FoundDocument {
     /// szamlazz.hu's internal document identifier (`alap/id`): a document
-    /// identifier, not an account's or a seller's. Read by no handler;
-    /// carried so that a journal entry names the document the way
+    /// identifier, not an account's or a seller's. Compared by the fresh
+    /// deletion guard and carried so that a journal entry names the document the way
     /// szamlazz.hu's own records do (the same value a create reply's
     /// `szlahu_id` header carries, [`IssuedDocument::document_id`]). An
     /// `i64`, the agent crate's width for every XSD integer.

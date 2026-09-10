@@ -59,6 +59,17 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// Delete a pinned unpaid proforma whose fresh number query agrees.
+    pub async fn delete(&self, number: &str) -> restate_szamlazz::gateway::DeleteOutcome {
+        let doc = super::common::Doc::new(number, "D");
+        super::common::number_query(number)
+            .respond_with(doc.response())
+            .mount(&self.server)
+            .await;
+        self.gateway
+            .delete_proforma(&project(&doc), &order(), false)
+            .await
+    }
     pub async fn start() -> Self {
         let server = MockServer::start().await;
         let gateway = gateway(&server);
@@ -160,6 +171,19 @@ impl Harness {
             .map(|request| String::from_utf8_lossy(&request.body).into_owned())
             .collect()
     }
+}
+
+/// Parse the shared wire fixture into the Gateway's projection.
+pub fn project(doc: &super::common::Doc<'_>) -> restate_szamlazz::gateway::FoundDocument {
+    use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
+    use szamlazz_agent::wire::{AgentRequest, RawResponse};
+    use szamlazz_agent::{InvoiceNumber, InvoiceSelector};
+    QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(
+        doc.number,
+    )))
+    .parse(&RawResponse::new::<&str, &str>([], doc.xml().into_bytes()))
+    .expect("fixture parses")
+    .into()
 }
 
 /// An [`Account`] on `server`, and the gateway opened for it with `key` over

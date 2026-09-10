@@ -285,6 +285,17 @@ impl Admin {
         self.patch_invocation(invocation_id, "cancel").await;
     }
 
+    /// Pauses an invocation, preserving its journal for a later replay.
+    pub async fn pause(&self, invocation_id: &str) {
+        self.patch_invocation(invocation_id, "pause").await;
+        self.await_status(invocation_id, &["paused"]).await;
+    }
+
+    /// Resumes an invocation on its pinned deployment.
+    pub async fn resume(&self, invocation_id: &str) {
+        self.patch_invocation(invocation_id, "resume").await;
+    }
+
     /// Purges a completed invocation (`PATCH /invocations/{id}/purge`) and
     /// waits for its `sys_invocation` row to go (the purge is asynchronous),
     /// so a later call runs against a key Restate has no memory of.

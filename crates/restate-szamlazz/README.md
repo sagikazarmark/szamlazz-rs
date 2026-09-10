@@ -577,7 +577,7 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_credit_entries` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
-| `outcome_unknown` | 500 | The create or storno step exhausted its issue policy or was cancelled, or a one-shot `delete_proforma` / `set_credit_entries` write lost its reply or was cancelled mid-send. The write may have landed. | Rule 2 for create/storno. For deletion, read `get`, then retry with a new key if deletion is still intended. For credit entries, query the invoice first: an additive call sends only entries still missing; a replacing call sends the current intended snapshot, never a stale retry. Use a new `Idempotency-Key`. |
+| `outcome_unknown` | 500 | The create or storno step exhausted its issue policy or was cancelled, or a one-shot `delete_proforma` / `set_credit_entries` write lost its reply, received an inconclusive code (including no code), or was cancelled mid-send. The write may have landed. | Rule 2 for create/storno. For deletion, read `get` and query the pinned number named in the fault; a new call selects the current external-id holder, so confirm that deletion of that document is still intended before using a new key. For credit entries, query the invoice first: an additive call sends only entries still missing; a replacing call sends the current intended snapshot, never a stale retry. Use a new `Idempotency-Key`. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
@@ -704,6 +704,42 @@ A document the verify already sees reversed is `reversed` with a **best-effort**
 `Szamlazz.Order.storno_invoice` from the order-number hint, `Szamlazz.Agent.storno` from the by-number storno
 lookup (ours when we issued the storno, unknown after a reversal from the UI). An exhausted read reports the
 reversal without the number after a `warn`, while a cancellation of the invocation is never swallowed.
+
+### One-shot deletion and credit entries (#201 release notes)
+
+`delete_proforma` keeps the number selected by the journaled ownership lookup. Inside
+`delete-proforma-{number}`, each execution queries **that number** and checks its document id,
+number, order and proforma type, then its current credit entries. A changed target yields
+`{deleted: false, reason: "target_changed"}`; credit entries with `force: false` yield
+`proforma_paid`. `force: true` bypasses only the credit-entry guard. Disappearance (query code 7)
+or deletion code 335 yields `deleted: true` (already deleted or consumed). A failed fresh read
+yields `unavailable` (503), a credential code `credentials_rejected` (503), with no delete sent
+by that execution. The step never reselects a replacement by external id. This narrows the
+replay gap; the vendor's query and delete are **not atomic** against other writers.
+
+Both one-shot operations now preserve inconclusive send answers as journaled data and return
+`outcome_unknown` (500), including the vendor cause and `szamlazz_code` where supplied
+(`absent` for a failed verdict without a code). Previously these could claim deletion was
+refused or return `szamlazz_error` saying credit entries were refused. Established XML-input
+refusals 53/57 retain those settled outcomes; the observed credit-registration refusal 463,
+credential codes 3/135/136/164, and deletion 335 retain their operation-specific handling.
+Invoice-creation codes are not treated as evidence that these writes were refused.
+
+The evidence is the vendor's [error-handling documentation](https://docs.szamlazz.hu/agent/basics/error-handling),
+[deletion response](https://docs.szamlazz.hu/agent/deleting_pro_forma_invoice/response), and
+[behaviour notes D1/D3/D8](../../docs/szamlazz-hu-behaviour.md). No live post-action error for
+deletion or credit-entry registration was demonstrated; the uncertainty policy is conservative.
+
+Both runs keep `max_attempts(1)`: no automatic write retry or post-send re-query. A crash or
+interruption before journaling can still re-execute the unfinished closure; this is distinct
+from a policy retry. Replaying a completed run does neither. Recover using the fault guidance
+above, with a new `Idempotency-Key` after a completed fault.
+
+Release/journal review under ADR 0009: register a new immutable deployment. Step names and
+ordered paths stay the same, but deletion now consumes the pinned document and order for its
+fresh guard, and both outcome enums gain variants. Review these changed inputs and result
+shapes before any cross-deployment resume. Completed old refusals stay completed under their
+old key; a new invocation performs the new checks.
 
 ## Testing
 

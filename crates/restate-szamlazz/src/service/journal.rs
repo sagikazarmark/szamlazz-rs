@@ -58,8 +58,8 @@ use crate::gateway::{
     ProbeOutcome, QueryOutcome, Rejection, SetCreditEntriesOutcome, StornoLookupOutcome,
     StornoOutcome, SzamlazzAnswer, TaxpayerOutcome, Unanswered,
 };
-use crate::identity::Namespace;
-use crate::test_support::open_gateway;
+use crate::identity::{Namespace, OrderKey};
+use crate::test_support::{Doc, open_gateway};
 
 use super::prologue::Resolution;
 use super::support::{Journaled, journaled_types};
@@ -234,11 +234,17 @@ fn entries() -> Vec<Entry> {
     all.extend(entries_of(vec![
             DeleteOutcome::Deleted,
             DeleteOutcome::AlreadyGone,
+            DeleteOutcome::TargetChanged,
+            DeleteOutcome::Paid,
+            DeleteOutcome::Inconclusive(API.answer()),
+            DeleteOutcome::Api(API.answer()),
+            DeleteOutcome::GuardFailed(Unanswered::Transport(TRANSPORT.to_owned())),
+            DeleteOutcome::GuardFailed(Unanswered::Unavailable(DOWN.to_owned())),
             DeleteOutcome::Rejected(Rejection::from(REJECTED.answer())),
             DeleteOutcome::CredentialsRejected(CREDENTIALS.answer()),
             DeleteOutcome::Lost(Unanswered::Transport(TRANSPORT.to_owned())),
             DeleteOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
-        ], &variants!(DeleteOutcome { Deleted, AlreadyGone, Rejected(_), CredentialsRejected(_), Lost(_) })));
+        ], &variants!(DeleteOutcome { Deleted, AlreadyGone, TargetChanged, Paid, Api(_), GuardFailed(_), Inconclusive(_), Rejected(_), CredentialsRejected(_), Lost(_) })));
     all.extend(entries_of(vec![
             SetCreditEntriesOutcome::Done {
                 outstanding: Some(dec!(0)),
@@ -249,9 +255,10 @@ fn entries() -> Vec<Entry> {
                 "Sztornózott számlára nem rögzíthető kifizetés.",
             ))),
             SetCreditEntriesOutcome::CredentialsRejected(CREDENTIALS.answer()),
+            SetCreditEntriesOutcome::Inconclusive(API.answer()),
             SetCreditEntriesOutcome::Lost(Unanswered::Transport(TRANSPORT.to_owned())),
             SetCreditEntriesOutcome::Lost(Unanswered::Unavailable(DOWN.to_owned())),
-        ], &variants!(SetCreditEntriesOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Lost(_) })));
+        ], &variants!(SetCreditEntriesOutcome { Done { .. }, Rejected(_), CredentialsRejected(_), Inconclusive(_), Lost(_) })));
     all.extend(entries_of(
         vec![
             ProbeOutcome::Accepted,
@@ -561,8 +568,17 @@ async fn no_journal_entry_carries_the_agent_key() {
     );
 
     let gateway = open_gateway(account, credentials);
-    let delete = gateway.delete_proforma("D-1").await;
-    assert!(matches!(delete, DeleteOutcome::Lost(_)), "{delete:?}");
+    let delete = gateway
+        .delete_proforma(
+            &Doc::new("D-1", "D").parse(),
+            &OrderKey::parse("ORD-1").expect("order"),
+            false,
+        )
+        .await;
+    assert!(
+        matches!(delete, DeleteOutcome::GuardFailed(_)),
+        "{delete:?}"
+    );
     let credit_entries = [CreditEntryInput::new(
         jiff::civil::date(2026, 7, 4),
         ContractPaymentMethod::Transfer,
@@ -577,7 +593,7 @@ async fn no_journal_entry_carries_the_agent_key() {
     );
     for (label, json) in [
         (
-            "DeleteOutcome::Lost",
+            "DeleteOutcome::GuardFailed",
             serde_json::to_string(&delete).expect("serialises"),
         ),
         (

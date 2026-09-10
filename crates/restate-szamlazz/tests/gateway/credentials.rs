@@ -167,7 +167,7 @@ async fn a_credential_code_on_any_operation_is_credentials_rejected() {
         .mount(&h.server)
         .await;
     assert_eq!(
-        h.gateway.delete_proforma("D-1").await,
+        h.delete("D-1").await,
         DeleteOutcome::CredentialsRejected(rejected("164")),
         "delete"
     );

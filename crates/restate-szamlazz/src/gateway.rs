@@ -839,9 +839,22 @@ pub enum StornoOutcome {
 pub enum DeleteOutcome {
     /// Deleted now.
     Deleted,
-    /// szamlazz.hu no longer knows the proforma (335): already deleted or
-    /// consumed.
+    /// szamlazz.hu no longer knows the proforma (fresh query 7 or delete 335):
+    /// already deleted or consumed.
     AlreadyGone,
+    /// The pinned number no longer identifies the same proforma of this order.
+    /// No delete was sent by this execution, even with `force`.
+    TargetChanged,
+    /// The fresh query found credit entries and `force` was false.
+    Paid,
+    /// The fresh query answered an inconclusive code; no delete was sent.
+    Api(SzamlazzAnswer),
+    /// The fresh query produced no answer; no delete was sent. Kept as data
+    /// so the one-shot run gains no policy retry.
+    GuardFailed(Unanswered),
+    /// The delete was sent, but this code (or its absence) does not establish
+    /// refusal. Data, answered as `outcome_unknown`, never retried by policy.
+    Inconclusive(SzamlazzAnswer),
     /// szamlazz.hu refused.
     Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
@@ -850,21 +863,26 @@ pub enum DeleteOutcome {
     /// The *Lost answer*: the delete was sent and szamlazz.hu did not answer
     /// it (a transport or parse failure, or `szlahu_down`), so whether it
     /// acted is not known. Data, not an error: the step runs once
-    /// (`run_once`) and the handler answers `outcome_unknown`.
+    /// (`max_attempts(1)`) and the handler answers `outcome_unknown`.
     Lost(Unanswered),
 }
 
 /// A szamlazz.hu error on a deletion: 335 is [`DeleteOutcome::AlreadyGone`],
-/// a credential code [`DeleteOutcome::CredentialsRejected`], anything else
-/// [`DeleteOutcome::Rejected`].
+/// a credential code [`DeleteOutcome::CredentialsRejected`], and XML-input
+/// refusals (53/57) [`DeleteOutcome::Rejected`]. Everything else is inconclusive.
+/// Evidence: vendor error-handling docs (missing/malformed request XML),
+/// deletion response docs (335), and behaviour note D1. Creation-only codes
+/// cannot establish whether a delete acted.
 impl From<ApiError> for DeleteOutcome {
     fn from(api: ApiError) -> Self {
         if api.code == ErrorCode::ProformaNotFound {
             Self::AlreadyGone
         } else if api.code.is_credential_error() {
             Self::CredentialsRejected(api.into())
-        } else {
+        } else if matches!(api.code, ErrorCode::XmlNotAFile | ErrorCode::MalformedXml) {
             Self::Rejected(api.into())
+        } else {
+            Self::Inconclusive(api.into())
         }
     }
 }
@@ -885,6 +903,9 @@ pub enum SetCreditEntriesOutcome {
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// was registered. See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
+    /// The send's code (or its absence) does not establish refusal. Preserve
+    /// the cause as data and reconcile before any caller-driven repeat.
+    Inconclusive(SzamlazzAnswer),
     /// The *Lost answer*: the entries were sent and szamlazz.hu did not
     /// answer (a transport or parse failure, or `szlahu_down`), so whether
     /// they landed is not known. Data, not an error: the step runs once
@@ -905,14 +926,21 @@ impl From<InvoiceBalance> for SetCreditEntriesOutcome {
     }
 }
 
-/// A szamlazz.hu error on a registration is a rejection, unless it is a
-/// credential code.
+/// Registration refusals supported by evidence: missing/malformed XML (53/57,
+/// vendor error-handling docs) and a reversed invoice (463, behaviour note D8).
+/// Credentials remain settled; other codes are inconclusive for this operation,
+/// even if the issuance-oriented `OutcomeClass` calls them rejected.
 impl From<ApiError> for SetCreditEntriesOutcome {
     fn from(api: ApiError) -> Self {
         if api.code.is_credential_error() {
             Self::CredentialsRejected(api.into())
-        } else {
+        } else if matches!(
+            api.code,
+            ErrorCode::XmlNotAFile | ErrorCode::MalformedXml | ErrorCode::PaymentOnReversedInvoice
+        ) {
             Self::Rejected(api.into())
+        } else {
+            Self::Inconclusive(api.into())
         }
     }
 }
@@ -1800,8 +1828,46 @@ impl Gateway {
         }
     }
 
-    /// Deletes the proforma `number`; 335 is [`DeleteOutcome::AlreadyGone`].
-    pub async fn delete_proforma(&self, number: &str) -> DeleteOutcome {
+    /// Re-queries the pinned proforma by number and checks its identity, order,
+    /// type and current credit entries before deleting it. `force` bypasses
+    /// only the credit-entry guard. Never selects a replacement by external id.
+    ///
+    /// The query and delete are not atomic against other writers. Every result
+    /// is data: the enclosing one-shot run must not retry by policy (a crash
+    /// before journaling can still re-execute it).
+    pub async fn delete_proforma(
+        &self,
+        pinned: &FoundDocument,
+        order: &OrderKey,
+        force: bool,
+    ) -> DeleteOutcome {
+        let number = &pinned.number;
+        match self
+            .query_raw(InvoiceSelector::InvoiceNumber(InvoiceNumber::new(number)))
+            .await
+        {
+            Ok(fresh) => {
+                if fresh.number != *number
+                    || fresh.document_id != pinned.document_id
+                    || !fresh.is_ours(order, IssuedKind::Proforma)
+                {
+                    return DeleteOutcome::TargetChanged;
+                }
+                if !force && !fresh.credit_entries.is_empty() {
+                    return DeleteOutcome::Paid;
+                }
+            }
+            Err(error) => {
+                return match error.answered() {
+                    Ok(Answer::NotFound) => DeleteOutcome::AlreadyGone,
+                    Ok(Answer::CredentialsRejected(answer)) => {
+                        DeleteOutcome::CredentialsRejected(answer)
+                    }
+                    Ok(Answer::Api(answer)) => DeleteOutcome::Api(answer),
+                    Err(unanswered) => DeleteOutcome::GuardFailed(unanswered),
+                };
+            }
+        }
         let request =
             DeleteProforma::new(ProformaSelector::InvoiceNumber(InvoiceNumber::new(number)));
         match self.client.send(&request).await {
@@ -2114,9 +2180,7 @@ mod tests {
         );
         assert_eq!(
             SetCreditEntriesOutcome::from(codeless),
-            SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
-                "absent", "Hiba"
-            )))
+            SetCreditEntriesOutcome::Inconclusive(SzamlazzAnswer::new("absent", "Hiba"))
         );
 
         for code in [

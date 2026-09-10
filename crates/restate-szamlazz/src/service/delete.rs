@@ -1,6 +1,7 @@
 //! `Szamlazz.Order.delete_proforma`: one read (the proforma under its
 //! external id), a guard on what it found, the delete step (a one-shot write
-//! without a retry of its own), and the answer from data.
+//! without a retry of its own, refreshing the pinned number inside the run),
+//! and the answer from data.
 
 use std::ops::ControlFlow;
 
@@ -46,23 +47,35 @@ impl Execution {
                 ControlFlow::Continue(found) => found,
             };
 
+        let number = found.number.clone();
+        let target_fault = |mut fault: Fault| {
+            fault.message = format!("proforma {number}: {}", fault.message);
+            about(fault)
+        };
         let outcome = {
-            let number = found.number;
+            let target_order = order.clone();
             run_operating(
                 ctx,
                 format!("delete-proforma-{number}"),
                 RunRetryPolicy::new().max_attempts(1),
                 self,
                 move |gateway| async move {
-                    Ok::<_, std::convert::Infallible>(gateway.delete_proforma(&number).await)
+                    Ok::<_, std::convert::Infallible>(
+                        gateway
+                            .delete_proforma(&found, &target_order, request.force)
+                            .await,
+                    )
                 },
             )
             .await
             .map_err(|error| {
-                about(initialization_fault(&error, "read get, then retry with a new Idempotency-Key if deletion is still intended").unwrap_or_else(|| delete_unknown(&error)))
+                target_fault(
+                    initialization_fault(&error, DELETE_RECOVERY)
+                        .unwrap_or_else(|| delete_unknown(&error)),
+                )
             })?
         };
-        delete_response(outcome, &self.config.namespace).map_err(|fault| about(fault).into())
+        delete_response(outcome, &self.config.namespace).map_err(|fault| target_fault(fault).into())
     }
 }
 
@@ -71,7 +84,8 @@ impl Execution {
 /// for (nothing under the id: deleted earlier or consumed, `get` tells which;
 /// another document under it, never touched; one with a credit entry without
 /// `force`: szamlazz.hu has no guard against deleting a paid proforma, so
-/// this is it), `Continue(found)` for the one to delete: a proforma of ours,
+/// the delete step repeats this check on a fresh query), `Continue(found)`
+/// for the pinned target: a proforma of ours,
 /// live or, were szamlazz.hu ever to report one so, reversed (a proforma
 /// cannot be stornoed; the delete is what removes it).
 ///
@@ -110,20 +124,23 @@ fn delete_guard(
     Ok(ControlFlow::Continue(found))
 }
 
-/// A lost reply or a cancelled one-shot run: the caller reconciles first.
+/// A lost/inconclusive answer or cancelled one-shot run: reconcile first.
+const DELETE_RECOVERY: &str = "read get and query the pinned number; a new invocation selects the current external-id holder, so confirm that document is the intended target; then, if deletion is still intended, retry with a new Idempotency-Key";
+
 fn delete_unknown(lost: &impl std::fmt::Display) -> Fault {
     Fault::outcome_unknown(format!(
-        "proforma deletion outcome unknown: {lost}; deletion may have landed: read get, then, if deletion is still intended, retry with a new Idempotency-Key"
+        "proforma deletion outcome unknown: {lost}; deletion may have landed: {DELETE_RECOVERY}"
     ))
 }
 
 /// The settled delete step as the response: deleted, and gone since the
 /// lookup (335), are both `deleted`; szamlazz.hu refusing is `not_deleted`
-/// with its code as the reason.
+/// with its code as the reason. Fresh guards can stop a paid/changed target.
 ///
 /// # Errors
 ///
-/// Rejected credentials (`credentials_rejected`), and a lost reply
+/// Failed fresh reads (`unavailable`), rejected credentials
+/// (`credentials_rejected`), and a lost or inconclusive answer
 /// (`outcome_unknown`: the step has no retry of its own, and the next call's
 /// lookup tells). The caller attaches the proforma's identity.
 fn delete_response(
@@ -137,10 +154,23 @@ fn delete_response(
         DeleteOutcome::Rejected(rejection) => {
             Ok(DeleteProformaResponse::not_deleted(rejection.code.into()))
         }
+        DeleteOutcome::TargetChanged => Ok(DeleteProformaResponse::not_deleted(
+            DeleteReason::TargetChanged,
+        )),
+        DeleteOutcome::Paid => Ok(DeleteProformaResponse::not_deleted(
+            DeleteReason::ProformaPaid,
+        )),
+        DeleteOutcome::Api(answer) => Err(AnsweredCode::Inconclusive(answer).into_fault(namespace)),
+        DeleteOutcome::GuardFailed(cause) => Err(Fault::unavailable(format!(
+            "could not refresh the pinned proforma before deletion: {cause}; the outcome is not known; {DELETE_RECOVERY}"
+        ))),
         DeleteOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
         DeleteOutcome::Lost(lost) => Err(delete_unknown(&lost)),
+        DeleteOutcome::Inconclusive(answer) => {
+            Err(delete_unknown(&answer).with_szamlazz_code(answer.code))
+        }
     }
 }
 

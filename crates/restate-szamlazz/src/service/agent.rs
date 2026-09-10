@@ -58,7 +58,7 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
     }
 }
 
-/// The `outcome_unknown` fault of `set_credit_entries` after a lost reply. What the
+/// The `outcome_unknown` fault after a lost or inconclusive credit-entry answer. What the
 /// caller does next depends on `additive`: a replacing call uses the current
 /// intended snapshot (an older one could overwrite newer entries); an
 /// additive one may already have appended the entries, so query first.
@@ -119,7 +119,7 @@ fn taxpayer_response(
 /// the invoice's credit entries, [`RejectionCode::Request`]) as `invalid_input`, the
 /// caller's request; szamlazz.hu refusing the entries passed through as
 /// `szamlazz_error` (422) naming the invoice; a credential code as
-/// `credentials_rejected`; a lost reply as `outcome_unknown`, conditional on
+/// `credentials_rejected`; a lost/inconclusive answer as `outcome_unknown`, conditional on
 /// `additive`.
 fn set_credit_entries_response(
     outcome: SetCreditEntriesOutcome,
@@ -148,6 +148,9 @@ fn set_credit_entries_response(
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
         SetCreditEntriesOutcome::Lost(lost) => Err(set_credit_entries_unknown(additive, &lost)),
+        SetCreditEntriesOutcome::Inconclusive(answer) => {
+            Err(set_credit_entries_unknown(additive, &answer).with_szamlazz_code(answer.code))
+        }
     }
 }
 

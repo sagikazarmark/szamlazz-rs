@@ -244,7 +244,9 @@ impl StornoResponse {
 pub struct DeleteProformaRequest {
     /// Delete even when the proforma has registered credit entries. szamlazz.hu has
     /// no guard of its own; without `force` a paid proforma is answered
-    /// `{deleted: false, reason: "proforma_paid"}`.
+    /// `{deleted: false, reason: "proforma_paid"}`. Checked again by number
+    /// inside the one-shot delete step. `force` never bypasses identity/type
+    /// checks, and the fresh query and delete are not atomic against other writers.
     pub force: bool,
 }
 
@@ -264,7 +266,7 @@ impl DeleteProformaRequest {
 pub struct DeleteProformaResponse {
     /// Whether the proforma is deleted (now or already).
     pub deleted: bool,
-    /// Why it is not deleted (`proforma_paid`, `external_id_collision`, a
+    /// Why it is not deleted (`proforma_paid`, `external_id_collision`, `target_changed`, a
     /// szamlazz.hu error code), or `absent` when there was nothing to delete
     /// (deleted earlier or consumed; `get` tells which).
     #[serde(default)]
@@ -304,7 +306,7 @@ impl DeleteProformaResponse {
 /// The `reason` of a [`DeleteProformaResponse`]: the worker's own tokens for
 /// what it decided before a send, or szamlazz.hu's code for what it refused.
 /// Serialises as the one string it always was (`absent`, `proforma_paid`,
-/// `external_id_collision`, or the code as szamlazz.hu wrote it); `#[non_exhaustive]`
+/// `external_id_collision`, `target_changed`, or the code as szamlazz.hu wrote it); `#[non_exhaustive]`
 /// and open on the way in, like every response type: a token this version
 /// does not know reads as [`DeleteReason::Szamlazz`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -319,6 +321,9 @@ pub enum DeleteReason {
     /// The proforma's external id resolves to another order's or kind's
     /// document, which the handler never touches.
     ExternalIdCollision,
+    /// The pinned number's fresh query returned a different document id,
+    /// number, order or type. `force` never bypasses this guard.
+    TargetChanged,
     /// szamlazz.hu refused the deletion with this code.
     Szamlazz(String),
 }
@@ -330,6 +335,8 @@ impl DeleteReason {
     pub const PROFORMA_PAID: &str = "proforma_paid";
     /// The wire string of [`DeleteReason::ExternalIdCollision`].
     pub const EXTERNAL_ID_COLLISION: &str = "external_id_collision";
+    /// The wire string of [`DeleteReason::TargetChanged`].
+    pub const TARGET_CHANGED: &str = "target_changed";
 
     /// The reason as its wire string.
     #[must_use]
@@ -338,6 +345,7 @@ impl DeleteReason {
             Self::Absent => Self::ABSENT,
             Self::ProformaPaid => Self::PROFORMA_PAID,
             Self::ExternalIdCollision => Self::EXTERNAL_ID_COLLISION,
+            Self::TargetChanged => Self::TARGET_CHANGED,
             Self::Szamlazz(code) => code,
         }
     }
@@ -349,7 +357,7 @@ impl fmt::Display for DeleteReason {
     }
 }
 
-/// From the wire string: the three tokens as themselves, anything else as
+/// From the wire string: the worker's tokens as themselves, anything else as
 /// szamlazz.hu's code.
 impl From<String> for DeleteReason {
     fn from(reason: String) -> Self {
@@ -357,6 +365,7 @@ impl From<String> for DeleteReason {
             Self::ABSENT => Self::Absent,
             Self::PROFORMA_PAID => Self::ProformaPaid,
             Self::EXTERNAL_ID_COLLISION => Self::ExternalIdCollision,
+            Self::TARGET_CHANGED => Self::TargetChanged,
             _ => Self::Szamlazz(reason),
         }
     }
@@ -399,7 +408,7 @@ impl schemars::JsonSchema for DeleteReason {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Why the proforma is not deleted: `proforma_paid`, `external_id_collision` or a szamlazz.hu error code; or `absent` (with `deleted: true`) when there was nothing to delete.",
+            "description": "Why the proforma is not deleted: `proforma_paid`, `external_id_collision`, `target_changed` (the pinned number's identity/order/type changed) or a szamlazz.hu error code; or `absent` (with `deleted: true`) when there was nothing to delete.",
         })
     }
 }

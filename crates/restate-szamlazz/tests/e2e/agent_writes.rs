@@ -19,6 +19,68 @@ use crate::harness::szamlazz::{
     number_query, original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
+/// Inconclusive credit-entry answers never claim refusal and never repeat the
+/// one-shot write; the same ingress key replays the stored fault in both modes.
+pub(crate) async fn inconclusive_credit_entry_answers_are_stored_unknown_outcomes(h: &Harness) {
+    use crate::common::body_error;
+    use restate_e2e_harness::Call;
+    use restate_szamlazz::contract::TerminalCode;
+    h.reset().await;
+    for additive in [false, true] {
+        for code in ["99999", "", "1", "57", "463", "3"] {
+            let number = format!("SZ-OPEN-{}-{code}", u8::from(additive));
+            credit_of(&number)
+                .respond_with(body_error(code, "vendor cause"))
+                .expect(1)
+                .mount(&h.mock)
+                .await;
+            let call = Call::service("Szamlazz.Agent", "set_credit_entries").scoped("acme");
+            let body = json!({"invoice_number": number, "entries": [{"date": "2026-09-05", "title": "transfer", "amount": "1"}], "additive": additive});
+            let key = format!("credit-{number}");
+            let reply = h.invoke(&call, Some(&body), Some(&key)).await;
+            let fault = reply.fault();
+            assert_eq!(
+                fault.szamlazz_code.as_deref(),
+                Some(if code.is_empty() { "absent" } else { code })
+            );
+            assert!(fault.message.contains("vendor cause"), "{fault:?}");
+            match code {
+                "57" | "463" => {
+                    assert_eq!(reply.status, 422);
+                    assert_eq!(fault.code, TerminalCode::SzamlazzError);
+                }
+                "3" => {
+                    assert_eq!(reply.status, 503);
+                    assert_eq!(fault.code, TerminalCode::CredentialsRejected);
+                }
+                _ => {
+                    assert_eq!(reply.status, 500);
+                    assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+                    assert!(!fault.message.contains("refused"), "{fault:?}");
+                    assert!(
+                        fault.message.contains(if additive {
+                            "send only those entries"
+                        } else {
+                            "current intended snapshot"
+                        }),
+                        "{fault:?}"
+                    );
+                }
+            }
+            let stored = h.invoke(&call, Some(&body), Some(&key)).await;
+            assert_eq!(stored.invocation_id(), reply.invocation_id());
+            assert_eq!(stored.fault(), fault);
+            assert_eq!(
+                h.requests_mentioning(&format!("<szamlaszam>{number}</szamlaszam>"))
+                    .await
+                    .len(),
+                1,
+                "one send, no query or repeat"
+            );
+        }
+    }
+}
+
 /// `Szamlazz.Agent.storno` under `acme` reverses a document carrying no order
 /// number through `verify-original-{number}`, `lookup-storno-{number}` and
 /// `storno-{number}`, the storno carrying the original's `telj` and `acme`'s
