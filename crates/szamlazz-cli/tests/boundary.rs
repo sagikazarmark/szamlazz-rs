@@ -89,6 +89,43 @@ fn invoice_reply(number: &str, gross: Option<&str>) -> String {
     )
 }
 
+async fn original_invoice(server: &MockServer, appearance: i64) {
+    Mock::given(method("POST")).and(wiremock::matchers::body_string_contains("name=\"action-szamla_agent_xml\""))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(format!(
+            "<szamla xmlns=\"http://www.szamlazz.hu/szamla\"><szallito><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Street</cim></cim></szallito>\
+            <alap><id>1</id><szamlaszam>E-2026-1</szamlaszam><tipus>SZ</tipus><eszamla>{appearance}</eszamla><telj>2026-07-15</telj></alap>\
+            <vevo><nev>Buyer</nev></vevo><tetelek/><osszegek><totalossz><netto>100</netto><afa>27</afa><brutto>127</brutto></totalossz></osszegek></szamla>"
+        ), "application/xml")).with_priority(1).mount(server).await;
+}
+
+#[tokio::test]
+async fn storno_derives_original_appearance_and_refuses_an_unknown_form() {
+    for (appearance, electronic) in [(1, Some(false)), (3, Some(true)), (9, None)] {
+        let server = MockServer::start().await;
+        respond(&server, invoice_reply("SS-1", Some("-127"))).await;
+        original_invoice(&server, appearance).await;
+        let output = invoke(&server, &["invoice", "storno", "E-2026-1"], None).await;
+        assert_eq!(output.status.success(), electronic.is_some(), "{output:?}");
+        let requests = server.received_requests().await.expect("requests");
+        let sends: Vec<_> = requests
+            .iter()
+            .filter(|request| text(&request.body).contains("name=\"action-szamla_agent_st\""))
+            .collect();
+        if let Some(electronic) = electronic {
+            assert_eq!(sends.len(), 1);
+            let body = text(&sends[0].body);
+            assert!(
+                body.contains(&format!("<eszamla>{electronic}</eszamla>")),
+                "{body}"
+            );
+            assert!(body.contains("<teljesitesDatum>2026-07-15</teljesitesDatum>"));
+        } else {
+            assert!(sends.is_empty());
+            assert!(text(&output.stderr).contains("appearance"));
+        }
+    }
+}
+
 fn receipt_reply(storno: bool) -> String {
     let (number, kind) = if storno {
         ("SN-2026-1", "SN")
@@ -298,6 +335,10 @@ async fn remote_documents_survive_local_pdf_failure_in_human_and_json_output() {
             let server = MockServer::start().await;
             respond(&server, reply).await;
             let mut args = args;
+            let invoice_storno = args[0] == "invoice" && args[1] == "storno";
+            if invoice_storno {
+                original_invoice(&server, 3).await;
+            }
             args.extend(["--pdf", target]);
             if json_output {
                 args.push("--json");
@@ -333,7 +374,10 @@ async fn remote_documents_survive_local_pdf_failure_in_human_and_json_output() {
                     "{output:?}"
                 );
             }
-            assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+            assert_eq!(
+                server.received_requests().await.expect("requests").len(),
+                if invoice_storno { 2 } else { 1 }
+            );
         }
     }
 }
@@ -350,6 +394,7 @@ async fn storno_reports_genuine_repeat_zero_noop_and_unconfirmed_honestly() {
     ] {
         let server = MockServer::start().await;
         respond(&server, invoice_reply(number, gross)).await;
+        original_invoice(&server, 3).await;
         // Repeat exactly the same call: the server echoes the existing storno.
         for json_output in [true, false, true] {
             let mut args = vec!["invoice", "storno", "E-2026-1"];
@@ -370,7 +415,7 @@ async fn storno_reports_genuine_repeat_zero_noop_and_unconfirmed_honestly() {
                 }
             }
         }
-        assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+        assert_eq!(server.received_requests().await.expect("requests").len(), 6);
     }
 }
 

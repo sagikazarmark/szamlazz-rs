@@ -42,6 +42,10 @@ omitted; open wire tokens such as payment methods and VAT codes remain accepted.
 
 ## Document results and PDF output
 
+`invoice storno` first queries the original and derives its paper/electronic appearance and fulfillment date.
+An unknown appearance, missing fulfillment date or mismatched queried number stops before the storno send;
+inspect the original in szamlazz.hu. The command does not silently default an electronic original to paper.
+
 `invoice create`, `invoice storno`, and `receipt create`, `storno`, and `get`
 report the remote result even if writing the requested PDF fails. A local write
 failure exits nonzero; it does **not** undo issuance. Use the reported document

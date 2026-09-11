@@ -290,7 +290,7 @@ async fn bank_transactions_and_receipt_batches() {
     let tx = common::bank_transaction(BANK_TRANSACTION).expect("parse");
     let _ = archiver.bank_transaction(tx).await.expect("archive tx");
 
-    // The second receipt without its number, to see the id fallback.
+    // Record ids remain the identity even when a business number is missing.
     let batch_xml = RECEIPT_BATCH.replacen(
         "<nyugtaszam>NYGTA-2026-2</nyugtaszam>",
         "<nyugtaszam></nyugtaszam>",
@@ -311,7 +311,7 @@ async fn bank_transactions_and_receipt_batches() {
     assert_eq!(receipt_xml.to_vec(), batch_xml.as_bytes());
 
     let receipt = op
-        .read("receipts/2026/07/NYGTA-2026-1.json")
+        .read("receipts/2026/07/1.json")
         .await
         .expect("read receipt");
     let receipt: serde_json::Value =
@@ -328,12 +328,38 @@ async fn bank_transactions_and_receipt_batches() {
         vec![
             "bank-transactions/2026/07/987.json".to_owned(),
             "bank-transactions/2026/07/987.xml".to_owned(),
-            // Receipt with a number uses it; the numberless one falls back to id.
+            "receipts/2026/07/1.json".to_owned(),
             "receipts/2026/07/2.json".to_owned(),
-            "receipts/2026/07/NYGTA-2026-1.json".to_owned(),
             "receipts/2026/07/batch-1-2.xml".to_owned(),
         ]
     );
+}
+
+#[tokio::test]
+async fn receipt_record_ids_prevent_business_number_and_fallback_collisions() {
+    for (first, second) in [("NY/1", "NY-1"), ("2", "")] {
+        let op = memory();
+        let archiver = Archiver::builder(op.clone()).save_xml(false).build();
+        let xml = RECEIPT_BATCH
+            .replace("NYGTA-2026-1", first)
+            .replace("NYGTA-2026-2", second);
+        let _ = archiver
+            .receipts(common::receipts(&xml).expect("batch"))
+            .await
+            .expect("Ack");
+        assert_eq!(
+            keys(&op).await,
+            ["receipts/2026/07/1.json", "receipts/2026/07/2.json"]
+        );
+        for id in [1, 2] {
+            let bytes = op
+                .read(&format!("receipts/2026/07/{id}.json"))
+                .await
+                .expect("receipt");
+            let record: serde_json::Value = serde_json::from_slice(&bytes.to_vec()).expect("JSON");
+            assert_eq!(record["info"]["id"], id);
+        }
+    }
 }
 
 // The parse no longer refuses an empty batch or a transaction without a

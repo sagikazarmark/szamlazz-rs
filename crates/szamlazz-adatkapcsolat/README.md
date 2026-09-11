@@ -95,7 +95,7 @@ One release, so a receiver pays the migration once:
 
 ## Archiving
 
-With `opendal`, `Archiver` can store the exact pushed XML, an embedded invoice PDF, and typed JSON independently; all three default to enabled, and JSON omits the PDF bytes. Paths default to `{type}/{YYYY}/{MM}/{name}`, relative to the OpenDAL operator root and dated from the document. Invoices use their Adatkapcsolat document id; receipts use their business number with an id fallback. Receipt-batch XML is stored once as `batch-{first-id}-{last-id}.xml`, while receipts retain individual JSON files.
+With `opendal`, `Archiver` can store the exact pushed XML, an embedded invoice PDF, and typed JSON independently; all three default to enabled, and JSON omits the PDF bytes. Paths default to `{type}/{YYYY}/{MM}/{name}`, relative to the OpenDAL operator root and dated from the document. Invoices and receipts use their Adatkapcsolat record id, avoiding collisions between business numbers. Receipt-batch XML is stored once as `batch-{first-id}-{last-id}.xml`, while receipts retain individual JSON files. Existing business-number receipt artifacts are not automatically migrated; consumers should switch to id paths and retain historical artifacts as needed.
 
 Storage failures become handler failures, producing a non-200 status and a later redelivery. `Redelivery::Timestamped` and `Redelivery::Both` use conditional create-only writes so concurrent receiver instances cannot overwrite a historical version; those modes require an OpenDAL service with `if_not_exists` support.
 

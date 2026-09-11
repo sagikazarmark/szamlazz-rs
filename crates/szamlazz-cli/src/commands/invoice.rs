@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use szamlazz_agent::InvoiceSelector;
 use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, CreationOutcome};
 use szamlazz_agent::ops::query_pdf::QueryInvoicePdf;
-use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
+use szamlazz_agent::ops::query_xml::{InvoiceAppearance, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 
 use crate::output;
@@ -249,13 +249,41 @@ pub async fn run(cli: &crate::Cli, command: &InvoiceCommand) -> anyhow::Result<(
             Ok(())
         }
         InvoiceCommand::Storno(args) => {
-            let request = StornoInvoice {
-                download_pdf: args.pdf.is_some(),
-                comment: args.comment.clone(),
-                ..StornoInvoice::new(args.number.as_str())
-            };
+            let original = client
+                .send(&QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(
+                    args.number.as_str().into(),
+                )))
+                .await?;
+            let request = storno_request(args, &original.info)?;
             let created = client.send(&request).await?;
             print_storno(cli, args, &request.invoice_number, &created)
         }
     }
+}
+
+fn storno_request(
+    args: &StornoArgs,
+    original: &szamlazz_agent::ops::query_xml::InvoiceInfo,
+) -> anyhow::Result<StornoInvoice> {
+    anyhow::ensure!(
+        original.invoice_number.as_str() == args.number,
+        "queried original number does not match; no storno sent"
+    );
+    let e_invoice = match original.appearance {
+        InvoiceAppearance::Paper => false,
+        InvoiceAppearance::Electronic(_) => true,
+        appearance => anyhow::bail!(
+            "cannot derive storno appearance from {appearance:?}; inspect the original in szamlazz.hu; no storno sent"
+        ),
+    };
+    let fulfillment_date = original
+        .fulfillment_date
+        .ok_or_else(|| anyhow::anyhow!("original has no fulfillment date; no storno sent"))?;
+    Ok(StornoInvoice {
+        e_invoice,
+        fulfillment_date: Some(fulfillment_date),
+        download_pdf: args.pdf.is_some(),
+        comment: args.comment.clone(),
+        ..StornoInvoice::new(args.number.as_str())
+    })
 }

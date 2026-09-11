@@ -237,10 +237,7 @@ impl Archiver {
         if !self.save_data {
             return Ok(());
         }
-        let name = match &receipt.info.receipt_number {
-            Some(number) if !number.trim().is_empty() => sanitize(number),
-            _ => receipt.info.id.to_string(),
-        };
+        let name = receipt.info.id.to_string();
         let json = serde_json::to_vec_pretty(receipt)?;
 
         self.write(
@@ -391,23 +388,6 @@ fn timestamp() -> String {
         now.strftime("%Y%m%dT%H%M%SZ"),
         now.as_nanosecond()
     )
-}
-
-/// Makes a business identifier safe as a single path segment.
-fn sanitize(name: &str) -> String {
-    let cleaned: String = name
-        .trim()
-        .chars()
-        .map(|c| if c == '/' || c == '\\' { '-' } else { c })
-        .filter(|c| !c.is_control())
-        .collect();
-    let trimmed = cleaned.trim_matches('.').trim();
-
-    if trimmed.is_empty() {
-        "unnamed".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
 }
 
 impl Handler for Archiver {
