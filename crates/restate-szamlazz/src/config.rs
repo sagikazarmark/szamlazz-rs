@@ -10,7 +10,7 @@
 //! ```toml
 //! namespace = "acct"            # the external-id prefix; permanent
 //!
-//! [issue]                       # the run retry policy of the create and storno steps
+//! [issue]                       # the run retry policy of Szamlazz.Agent.storno
 //! max_attempts = 5
 //! initial_delay = "2m"
 //! factor = 2.0
@@ -64,8 +64,10 @@ use table::Table;
 /// account-shaped and therefore does not route through the gateway.
 ///
 /// The namespace prefixes every external id the deployment issues; the issue
-/// policy is the run retry policy of the create and storno steps; the read
-/// policy is the run retry policy of every read-only step; the resolve policy
+/// policy is the run retry policy of `Szamlazz.Agent.storno`; protected Order
+/// writes send at most once and reconcile under their handler invocation policy.
+/// The read policy governs ordinary reads and operator document verification;
+/// retained Order reconciliation uses the invocation policy instead. The resolve policy
 /// is the run retry policy of the `account` step. All three policies default
 /// when absent. [`validate`](Self::validate) checks the cross-field
 /// invariants `Deserialize` cannot express and yields the
@@ -75,10 +77,11 @@ use table::Table;
 pub struct WorkerConfig {
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
     pub namespace: Namespace,
-    /// The issue policy: the run retry policy of the create and storno steps.
+    /// The run retry policy of `Szamlazz.Agent.storno`, not protected Order writes.
     #[serde(default)]
     pub issue: IssueConfig,
-    /// The read policy: the run retry policy of every read-only step.
+    /// Ordinary read and recovery-verification run policy; retained Order
+    /// reconciliation uses the handler's invocation policy instead.
     #[serde(default)]
     pub read: ReadConfig,
     /// The resolve policy: the run retry policy of the `account` step.
@@ -163,8 +166,7 @@ impl ValidatedWorkerConfig {
     ///
     /// Behind the `test-util` feature so that a deployment cannot reach it:
     /// an issue `initial_delay` below [`IssueConfig::MIN_INITIAL_DELAY`]
-    /// re-executes the create step while the cut execution's send may still
-    /// be in flight.
+    /// bypasses the deployment's minimum interval for unmanaged storno retries.
     #[cfg(feature = "test-util")]
     #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
     #[must_use]
@@ -207,9 +209,8 @@ pub enum WorkerConfigError {
     /// [`IssueConfig::MIN_INITIAL_DELAY`], which documents the rule.
     #[error(
         "issue.initial_delay ({initial:?}) must be at least {floor:?}: the Számla Agent client's \
-         {timeout:?} request timeout plus a {margin:?} margin: szamlazz.hu has been seen to stall \
-         that long and still issue, so the create and storno steps are never re-executed while \
-         their send may still be in flight",
+         {timeout:?} request timeout plus a {margin:?} operational margin for unmanaged storno; \
+         this delay does not prove that an earlier external request has stopped processing",
         timeout = szamlazz_agent::client::REQUEST_TIMEOUT,
         margin = IssueConfig::RE_CHECK_MARGIN
     )]
@@ -266,8 +267,8 @@ pub mod table {
         pub trait Sealed {}
     }
 
-    /// `[issue]`: the run retry policy of the create step and the storno
-    /// step. Defaults: five executions, `2m → 10m` doubling, bounded at `1h`.
+    /// `[issue]`: the run retry policy of `Szamlazz.Agent.storno`.
+    /// Defaults: five executions, `2m → 10m` doubling, duration threshold `1h`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Issue {}
 
@@ -328,8 +329,9 @@ pub mod table {
     }
 }
 
-/// The issue policy: the run retry policy of the create step and the storno
-/// step. Restate re-executes the step after `initial_delay`, multiplying the
+/// The issue policy: the run retry policy of unmanaged `Szamlazz.Agent.storno`.
+/// Protected Order writes use one send permit and read-only reconciliation under
+/// their handler invocation policy. Restate re-executes unmanaged storno after `initial_delay`, multiplying the
 /// delay by `factor` up to `max_delay`, until `max_attempts` executions or
 /// `max_duration` is reached on failure; these are exhaustion thresholds,
 /// with the overshoot caveats on [`RetryPolicyConfig`]. The handler reports
@@ -339,7 +341,7 @@ pub mod table {
 /// which [`WorkerConfig::validate`] enforces.
 pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 
-/// The read policy: the run retry policy of every read-only durable step of
+/// The read policy: the run retry policy of ordinary read-only durable steps of
 /// both services (the lookup step and the exclusivity, proforma-link and
 /// `get` lookups, the verifies, the order-number hint, the storno lookup,
 /// `Szamlazz.Agent.query` and the `check_account` probe). A read that
@@ -349,7 +351,8 @@ pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 /// executions or `max_duration` is reached on failure (subject to the
 /// overshoot caveats on [`RetryPolicyConfig`]); the handler reports
 /// `unavailable`. Every szamlazz.hu *answer* is data and never retried. The
-/// policy shapes no journal entry.
+/// policy shapes no journal entry. Operator document verification also uses it;
+/// retained Order reconciliation instead spends the handler invocation policy.
 ///
 /// A read may be retried freely: it writes nothing, and a re-executed
 /// closure's answer is exactly as fresh as a first answer. The defaults are
@@ -1101,9 +1104,8 @@ mod tests {
                 .expect_err("error")
                 .to_string(),
             "issue.initial_delay (5s) must be at least 90s: the Számla Agent client's 60s request \
-             timeout plus a 30s margin: szamlazz.hu has been seen to stall that long and still \
-             issue, so the create and storno steps are never re-executed while their send may \
-             still be in flight",
+             timeout plus a 30s operational margin for unmanaged storno; this delay does not prove \
+             that an earlier external request has stopped processing",
             "the error names the rule"
         );
 

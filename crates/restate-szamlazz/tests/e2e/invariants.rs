@@ -256,6 +256,9 @@ pub(crate) async fn every_handler_journals_its_tabled_steps(h: &Harness) {
     }
     let journals = h.admin().all_journals().await;
     let invocations = h.admin().all_invocations().await;
+    for journal in journals.values() {
+        crate::write_commands::check(journal);
+    }
     let walked = TABLE
         .check(&deployed, &invocations, &journals)
         .unwrap_or_else(|violations| panic!("{violations}"));

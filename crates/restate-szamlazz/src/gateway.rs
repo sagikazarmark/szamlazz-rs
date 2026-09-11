@@ -1286,6 +1286,20 @@ impl Gateway {
                 }
                 Failure::Duplicate(answer) => {
                     tracing::info!(code = %answer.code, "duplicate order number; re-querying");
+                    if protected {
+                        // This invocation has exactly one send permit. The refusal
+                        // settles it even if the optional diagnostic query fails.
+                        return Ok(match self.after_duplicate(request, answer.clone()).await {
+                            Ok(outcome @ CreateOutcome::DuplicateOrderNumber { .. }) => outcome,
+                            _ if request.kind == IssuedKind::Corrective => {
+                                CreateOutcome::Rejected(answer.into())
+                            }
+                            _ => CreateOutcome::DuplicateOrderNumber {
+                                answer,
+                                existing_number: None,
+                            },
+                        });
+                    }
                     self.after_duplicate(request, answer).await
                 }
             },
@@ -1729,13 +1743,13 @@ impl Gateway {
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
-        self.storno_send(request, false).await
+        self.storno_send(request, None).await
     }
 
     async fn storno_send(
         &self,
         request: StornoStepRequest<'_>,
-        protected: bool,
+        marker: Option<&crate::contract::recovery::UnresolvedWrite>,
     ) -> Result<StornoOutcome, Unconfirmed> {
         // Step 2: send.
         let storno = StornoInvoice {
@@ -1760,22 +1774,17 @@ impl Gateway {
                     Ok(StornoOutcome::NotStornoable)
                 }
                 StornoReplyEvidence::NeedsVerification => {
-                    if protected {
-                        if let Ok(document) = self
-                            .query_raw(InvoiceSelector::InvoiceNumber(
-                                created.invoice_number.clone(),
+                    if let Some(marker) = marker {
+                        if matches!(
+                            self.reconcile_write_checked(
+                                marker,
+                                Some(created.invoice_number.as_str())
+                            )
+                            .await,
+                            Ok(recovery::WriteResult::Storno(
+                                StornoOutcome::AlreadyReversed { .. }
                             ))
-                            .await
-                            && document.number == created.invoice_number.as_str()
-                            && document.is_storno_of(request.invoice_number)
-                            && let Ok(original) = self
-                                .query_raw(InvoiceSelector::InvoiceNumber(
-                                    request.invoice_number.into(),
-                                ))
-                                .await
-                            && original.number == request.invoice_number
-                            && original.reversed == Some(true)
-                        {
+                        ) {
                             return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
                         }
                         return Err(Unconfirmed::StornoVerification { number: created.invoice_number.to_string(), message: "numbered reply needs positive identity and original reversal evidence".to_owned() });
@@ -1801,14 +1810,14 @@ impl Gateway {
                         code: Some(answer.code),
                         message: answer.message,
                     };
-                    if protected {
+                    if marker.is_some() {
                         Err(open)
                     } else {
                         self.storno_settle_or(&request, open).await
                     }
                 }
                 Failure::Unavailable(message) => {
-                    if protected {
+                    if marker.is_some() {
                         return Err(Unconfirmed::Unavailable(message));
                     }
                     tracing::warn!("szlahu_down on the storno; re-querying");
@@ -1816,7 +1825,7 @@ impl Gateway {
                         .await
                 }
                 Failure::Transport(message) => {
-                    if protected {
+                    if marker.is_some() {
                         return Err(Unconfirmed::Transport(message));
                     }
                     tracing::warn!("transport failure; re-querying");

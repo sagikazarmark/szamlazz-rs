@@ -129,6 +129,64 @@ impl<'de> Deserialize<'de> for NonExecutionAttestation {
     }
 }
 
+/// Affirmative assertion that the exact write completed and cannot execute later.
+/// This is operator evidence, never a fact independently proved by the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "bool")]
+pub struct CompletionAttestation;
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for CompletionAttestation {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CompletionAttestation".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":"boolean", "const":true})
+    }
+}
+
+impl From<CompletionAttestation> for bool {
+    fn from(_: CompletionAttestation) -> Self {
+        true
+    }
+}
+
+impl<'de> Deserialize<'de> for CompletionAttestation {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        if bool::deserialize(de)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(
+                "must attest that the exact write completed and cannot execute later",
+            ))
+        }
+    }
+}
+
+/// The operation-specific result independently established by an operator.
+/// The audit record must tie it to the exact marker, including corrective base
+/// or reissue intent. Merely observing an absent document is insufficient.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum AttestedCompletion {
+    /// The requested document was issued, even if subsequently consumed or reversed.
+    Issued {
+        /// Issued document number, never the expected old reissue target.
+        number: crate::identity::InvoiceNumber,
+    },
+    /// The exact original was reversed by this storno document.
+    Reversed {
+        /// Storno document number, distinct from the original in the marker.
+        number: crate::identity::InvoiceNumber,
+    },
+    /// The exact pinned proforma was deleted.
+    Deleted {
+        /// Deleted proforma number; must equal the marker's target.
+        number: crate::identity::InvoiceNumber,
+    },
+}
+
 /// Evidence an authorized operator submits; no generic clearance exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -145,6 +203,17 @@ pub enum RecoveryEvidence {
         audit_reference: String,
         /// Must be explicitly true. Time elapsed is not evidence.
         did_not_execute_and_cannot_execute_later: NonExecutionAttestation,
+    },
+    /// Audited positive settlement unavailable through the vendor query surface.
+    /// Requires independent evidence of this exact write's completed effect and
+    /// that no delayed execution remains. Empty queries or elapsed time do not qualify.
+    Completed {
+        /// Reference to the durable incident record containing that evidence.
+        audit_reference: String,
+        /// Operation-specific result matching the marker's intent.
+        completion: AttestedCompletion,
+        /// Must be explicitly true; this remains an operator assertion.
+        completed_and_cannot_execute_later: CompletionAttestation,
     },
 }
 

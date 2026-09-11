@@ -170,4 +170,5 @@ async fn e2e_replay_filter_keeps_fresh_operation_logs_and_correlation() {
             assert!(events[0].contains(field), "missing {field}: {}", events[0]);
         }
     }
+    server.finish().await;
 }

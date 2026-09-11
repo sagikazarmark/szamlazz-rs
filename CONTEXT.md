@@ -237,6 +237,14 @@ and cannot execute later. A marker can conservatively describe a request that ne
 is never represented as vendor proof (ADR 0004, #205, #216).
 _Avoid_: pending invoice (existence is not known), timeout as negative settlement, kill as permission to issue
 
+**Audited positive settlement**:
+An authorized operator's evidence that the exact unresolved write completed and cannot execute later, naming
+its issued document, reversal document or deleted proforma and a durable audit reference. Distinct from both
+worker-verified document evidence and non-execution attestation: a completed deletion cannot truthfully be
+called non-execution. Absence, elapsed time, cancellation and kill alone establish none of these conclusions.
+Decision: ADR 0013.
+_Avoid_: vendor proof for operator evidence, force-clear, positive settlement as permission to reissue
+
 **Issue policy**:
 The deployment's run retry policy for the create and storno steps. Its execution-count and duration limits are *exhaustion thresholds*: both can overshoot, neither interrupts a hung closure, and neither is a hard external-send bound. The delay before re-execution allows an unanswered send time to settle; it does not establish protection after an unresolved invocation completes or is killed (#205). Distinct from the handler's invocation retry policy and per-call deadlines. Decision: ADR 0004 (#204 amendment); configuration and the delay floor are in design §9.
 _Avoid_: attempt budget, backoff (the loop is gone), retry policy without qualification (the handlers have their own), a second copy of "60 s" (derive from `szamlazz_agent::client::REQUEST_TIMEOUT`)
@@ -250,6 +258,11 @@ The one error of every read fn of the *Gateway* (`lookup`, `lookup_ours`, `verif
 _Avoid_: transport error (one cause of it), unavailable (the fault it becomes on exhaustion), Unconfirmed (the write steps' error; a write's outcome may be unknown, a read's is simply not yet had)
 
 **Lost answer**:
+The worker's unkeyed credit-entry handler also preserves uncertainty on a vendor refusal (53/57/463):
+a refusal settles the latest exchange, not an earlier execution of an interrupted open run. It returns
+`outcome_unknown` with `szamlazz_code`, while deterministic local request refusals remain `invalid_input`.
+This supersedes the older credit-entry `szamlazz_error` wording below and under *Outcome*.
+
 An inconclusive vendor code is distinct from a lost answer: a reply arrived, but it does not establish whether the one-shot write acted. Both leave the caller to reconcile before repeating; neither means refusal (#201).
 
 The third shape beside *Unconfirmed* and *Unanswered*: the answer of a **one-shot write** (`Gateway::delete_proforma`, `Gateway::set_credit_entries`) that szamlazz.hu did not give, by a transport or parse failure or `szlahu_down`. Its run has `max_attempts(1)`, no re-query or run retry (a replacing credit-entry send could apply an older snapshot over a newer one; a delete's repeat is answered 335 anyway). A crash before journaling can still re-execute the open closure. A lost answer is **data**, `DeleteOutcome::Lost(Unanswered)` / `SetCreditEntriesOutcome::Lost(Unanswered)`, journaled and answered as structured `outcome_unknown`. Cancellation mid-one-shot-write is the same operation-specific fault: the send may have landed. For deletion, read `get`, then retry with a new *Idempotency-Key* if still intended. For credit entries, query first; an additive call sends only missing entries, a replacing call the current intended snapshot if replacement is still wanted, with a new key. Best-effort read cancellation still propagates. The payload is the read-side `Unanswered` because it is exactly the two causes with their displays, and `szlahu_down` keeps `Lost(Unavailable)` rather than folding into "transport failure". `Unanswered::from_exchange` is the mapping from an unanswered `ClientError`. Decision: #184 (2), approved cleanup.

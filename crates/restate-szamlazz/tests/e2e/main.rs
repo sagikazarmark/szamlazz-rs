@@ -81,6 +81,7 @@ mod harness;
 
 mod agent_reads;
 mod agent_writes;
+mod arm_ack;
 mod cancellation;
 mod concurrency;
 mod correct_invoice;
@@ -99,6 +100,7 @@ mod privacy;
 mod prologue;
 mod storno;
 mod unresolved;
+mod write_commands;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -407,6 +409,7 @@ async fn e2e_order_protocol() {
             policies::cancelled_one_shot_deletion_is_unknown_and_get_reconciles,
             cancellation::cancelled_reads_are_structured,
             cancellation::cancelled_storno_is_uncertain,
+            write_commands::all_create_kinds_record_reconciliation_before_clear,
             get::run_retries_do_not_spend_invocation_attempts,
             faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
             invariants::plant_the_leak_positive_control,

@@ -369,7 +369,7 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
             .await;
         number_query(returned)
             .respond_with(crate::common::body_error("135", "expired verification key"))
-            .expect(sends)
+            .expect(if managed { 1..=20 } else { sends..=sends })
             .mount(&h.mock)
             .await;
 

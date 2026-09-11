@@ -93,9 +93,19 @@
 //!     // (`RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE`); it is not a secret.
 //!     .identity_key("publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f")?
 //!     .build();
-//! HttpServer::new(endpoint)
-//!     .listen_and_serve("0.0.0.0:9080".parse()?)
-//!     .await;
+//! let listener = tokio::net::TcpListener::bind("0.0.0.0:9080").await?;
+//! #[cfg(unix)]
+//! let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+//! let shutdown = async move {
+//!     #[cfg(unix)]
+//!     tokio::select! {
+//!         _ = tokio::signal::ctrl_c() => {},
+//!         _ = terminate.recv() => {},
+//!     }
+//!     #[cfg(not(unix))]
+//!     let _ = tokio::signal::ctrl_c().await;
+//! };
+//! HttpServer::new(endpoint).serve_with_cancel(listener, shutdown).await;
 //! # Ok(())
 //! # }
 //! ```
@@ -250,9 +260,19 @@
 //!     // is what keeps the scope trustworthy (see the quick start).
 //!     .identity_key("publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f")?
 //!     .build();
-//! HttpServer::new(endpoint)
-//!     .listen_and_serve("0.0.0.0:9080".parse()?)
-//!     .await;
+//! let listener = tokio::net::TcpListener::bind("0.0.0.0:9080").await?;
+//! #[cfg(unix)]
+//! let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+//! let shutdown = async move {
+//!     #[cfg(unix)]
+//!     tokio::select! {
+//!         _ = tokio::signal::ctrl_c() => {},
+//!         _ = terminate.recv() => {},
+//!     }
+//!     #[cfg(not(unix))]
+//!     let _ = tokio::signal::ctrl_c().await;
+//! };
+//! HttpServer::new(endpoint).serve_with_cancel(listener, shutdown).await;
 //! # Ok(())
 //! # }
 //! ```

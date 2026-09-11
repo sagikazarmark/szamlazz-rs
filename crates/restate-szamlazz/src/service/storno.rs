@@ -245,30 +245,22 @@ fn storno_response(
     })
 }
 
-/// The fault of a storno step whose run ended without a settled outcome: the
-/// issue policy exhausted (500, carrying the last `Unconfirmed`'s display) or
-/// the invocation cancelled (409). `outcome_unknown` either way, since a
-/// cancelled write step's send may have landed (the SDK's bare `409
-/// cancelled` would lose that); the cause names which. Nothing is
-/// recorded, and the next call's verify and lookup find whatever landed.
-/// `next` is what the caller does about it (`retry with a new
-/// Idempotency-Key`, `call storno again`) after exhaustion. Cancellation
-/// instead requires reconciliation before deliberately renewing the operation.
-fn storno_outcome_unknown(error: &TerminalError, next: &str) -> Fault {
-    if let Some(fault) = initialization_fault(
-        error,
-        "query the original invoice, then retry with a new Idempotency-Key if still intended",
-    ) {
+const STORNO_RECOVERY: &str = "query the original invoice and reconcile the earlier reversal; establish that it completed and cannot execute later, or did not execute and cannot execute later; absence and elapsed time are not settlement evidence; only after settlement, deliberately renew with a new Idempotency-Key if still intended";
+
+/// Unmanaged storno exhaustion, cancellation and initialization failure all
+/// preserve earlier-send uncertainty and require settlement before renewal.
+fn storno_outcome_unknown(error: &TerminalError) -> Fault {
+    if let Some(fault) = initialization_fault(error, STORNO_RECOVERY) {
         return fault;
     }
     if is_cancelled(error) {
         return Fault::outcome_unknown(format!(
-            "the storno step was cancelled ({}) before its outcome was confirmed; a send may have landed: query the original invoice, then retry with a new Idempotency-Key if still intended",
+            "the storno step was cancelled ({}) before its outcome was confirmed; a send may have landed: {STORNO_RECOVERY}",
             error.code()
         )).with_run_cause(error);
     }
     Fault::outcome_unknown(format!(
-        "the storno step ended without a confirmed outcome ({}): {}; {next}",
+        "the storno step ended without a confirmed outcome ({}): {}; {STORNO_RECOVERY}",
         error.code(),
         error.message()
     ))
@@ -616,7 +608,7 @@ impl Execution {
         // whatever landed.
         let outcome = storno_step(ctx, self, &intent)
             .await
-            .map_err(|error| storno_outcome_unknown(&error, "call storno again"))?;
+            .map_err(|error| storno_outcome_unknown(&error))?;
 
         // Step 4: branch on data.
         storno_response(outcome, number, namespace).map_err(Into::into)
@@ -1125,16 +1117,16 @@ mod tests {
     #[test]
     fn an_unsettled_storno_step_is_outcome_unknown_naming_the_next_step() {
         let last = TerminalError::new_with_code(500, "transport failure: connection reset");
-        let (status, body) = fault_body(storno_outcome_unknown(&last, "call storno again"));
+        let (status, body) = fault_body(storno_outcome_unknown(&last));
         assert_eq!(status, 500, "{body}");
         assert_eq!(body["code"], "outcome_unknown", "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("500"), "{message}");
         assert!(message.contains("connection reset"), "{message}");
-        assert!(message.ends_with("call storno again"), "{message}");
+        assert!(message.contains("only after settlement"), "{message}");
 
         let cancelled = TerminalError::new_with_code(409, "cancelled");
-        let (status, body) = fault_body(storno_outcome_unknown(&cancelled, "call storno again"));
+        let (status, body) = fault_body(storno_outcome_unknown(&cancelled));
         assert_eq!(status, 500, "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(

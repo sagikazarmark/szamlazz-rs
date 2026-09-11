@@ -26,6 +26,9 @@ const SERVER: ServerSpec = ServerSpec {
     ..MAIN_SERVER
 };
 
+#[path = "recovery_evidence.rs"]
+mod recovery_evidence;
+
 struct Operator;
 impl restate_szamlazz::service::RecoveryAuthorizer for Operator {
     fn authorize(
@@ -159,6 +162,7 @@ async fn e2e_unresolved_interrupted_arm_and_open_send_never_regrant_permission()
             ..SERVER
         })
         .await;
+    let mut mocks = Vec::new();
     for (index, point) in [
         WriteCheckpoint::BeforeMarker,
         WriteCheckpoint::AfterMarker,
@@ -249,6 +253,7 @@ async fn e2e_unresolved_interrupted_arm_and_open_send_never_regrant_permission()
         // resumes the same pinned code with a fresh execution-local permit.
         restate.admin().pause(submitted.invocation_id()).await;
         let journal = restate.admin().journal(submitted.invocation_id()).await;
+        crate::write_commands::check(&journal);
         if matches!(
             point,
             WriteCheckpoint::Armed
@@ -322,8 +327,10 @@ async fn e2e_unresolved_interrupted_arm_and_open_send_never_regrant_permission()
                 "{point:?}: never a second send"
             );
         }
+        mocks.push(mock);
     }
     restate.finish().await;
+    drop(mocks);
 }
 
 #[tokio::test]

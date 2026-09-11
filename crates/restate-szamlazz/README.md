@@ -57,9 +57,20 @@ async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<d
         // (see *Securing the Worker*). The server logs this public key at start-up.
         .identity_key("publickeyv1_w7YHemBctH5Ck2nQRQ47iBBqhNHy4FV7t2Usbye2A6f")?
         .build();
-    HttpServer::new(endpoint)
-        .listen_and_serve("0.0.0.0:9080".parse()?)
-        .await;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:9080").await?;
+    // Install SIGTERM handling before serving (SDK 0.12's default handles only Ctrl-C).
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let shutdown = async move {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    HttpServer::new(endpoint).serve_with_cancel(listener, shutdown).await;
     Ok(())
 }
 ```
@@ -99,7 +110,9 @@ Both configuration types only implement `Deserialize`; the host chooses the file
 (a TOML file layered with environment overrides through figment, for instance).
 
 - `WorkerConfig` is the deployment-level part: the `namespace` of the external ids and the three run retry
-  policies, `[issue]`, `[read]` and `[resolve]`. Call `validate()` after parsing.
+  policies: `[issue]` for unmanaged Agent storno, `[read]` for ordinary reads and operator document
+  verification, and `[resolve]` for account resolution. Protected Order reconciliation uses the
+  handler invocation policy below. Call `validate()` after parsing.
 - `StaticConfig` is the static resolver's configuration, in one of two mutually exclusive shapes: a single
   `[account]`, served unscoped, or a table of `[accounts.<scope>]`, each served under its scope only
   (`/restate/scope/{scope}/call/…`). `StaticResolver::try_from` validates it and implements both the account
@@ -200,9 +213,10 @@ A failed fetch is **terminal** `unavailable` after three bounded attempts, 200 m
 A Gateway-open failure is the same structured fault. The failure is recorded on the executing operation's run,
 so it cannot replace a recorded run command with a terminal output. It bypasses the operation's read/issue policy;
 best-effort storno-number reads still report the known reversal without its number. An unfinished write may have
-sent during an earlier execution: `unavailable` preserves that uncertainty and advises reconciliation via `get`
-or a new `Idempotency-Key`. Credit-entry callers query the invoice first, then send only missing additive entries
-or the current intended replacement snapshot. Neither credentials nor sensitive initialization source messages reach the journal or caller.
+sent during an earlier execution: `unavailable` preserves that uncertainty. Settle earlier external work before
+deliberately renewing a write. Missing credit entries, empty document queries and elapsed time do not establish
+non-execution. After settlement, credit-entry callers query again and submit only still-required additive entries
+or the current intended replacement. Neither credentials nor sensitive initialization source messages reach the journal or caller.
 
 **Rotation depends on the store.** A dynamic store's rotated value is picked up when the next handler execution
 needs an external operation, under the same journaled Account and Credential ref. `StaticResolver` clones startup
@@ -687,8 +701,8 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | `invalid_input` | 400 | The request is malformed: its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent. Or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_credit_entries`, a replacing `set_credit_entries` (`additive: false`) with no entries (the wire contract takes five, and an empty replace would clear the invoice's credit entries; nothing is sent), or a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
-| `szamlazz_error` | 422 | szamlazz.hu answered with an error code of its own that the handler passes through rather than concludes from: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200), `set_credit_entries` on szamlazz.hu refusing the credit entries. `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`, a refused credit entry is fixed. |
-| `outcome_unknown` | 500 | The create or storno step exhausted its issue policy or was cancelled, or a one-shot `delete_proforma` / `set_credit_entries` write lost its reply, received an inconclusive code (including no code), or was cancelled mid-send. The write may have landed. | Rule 2 for create/storno. For deletion, read `get` and query the expected number named in the fault; reconcile the earlier send, then deliberately renew with the same `expected_number` if still intended. For credit entries, query the invoice first: an additive call sends only entries still missing; a replacing call sends the current intended snapshot, never a stale retry. Use a new `Idempotency-Key`. |
+| `szamlazz_error` | 422 | szamlazz.hu answered a read with a code the handler passes through: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, or `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200). `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`. |
+| `outcome_unknown` | 500 | Write uncertainty, including cancellation or a later mutation blocked by an unresolved marker. Unmanaged Agent storno can exhaust its issue policy; protected Order writes retain read-only reconciliation and pause instead. | Settle earlier work first. Missing credit entries, empty queries, elapsed time and kill do not authorize renewal. After settlement, deliberately renew with the original expected-document intent; for credit entries, query again and submit only still-required additive entries or the current intended replacement. |
 | `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
@@ -726,10 +740,9 @@ to settle; a client deadline does not prove that szamlazz.hu has stopped process
 **An invocation attempt is spent on retained read-only reconciliation or a worker-side failure** (the worker unreachable, a rollout cutting the
 connection, the abort timeout, an undecodable journal), not on an explicitly delayed run retry: a step re-executed under `[issue]`,
 `[read]` or `[resolve]` is re-dispatched by the server without advancing the handler's attempt count (verified end
-to end against 1.7.8). So the run policies decide how long a szamlazz.hu outage is tolerated, the invocation
-policy how long a worker outage is (~24 min of back-off on the `Szamlazz.Order` writes and
-`Szamlazz.Agent.storno`, 2 min on `set_credit_entries`), and szamlazz.hu's "max 5 attempts" etiquette is the issue
-policy's business. Create/storno re-executions are query-first, but the run thresholds are not hard send limits.
+to end against 1.7.8). Run policies govern ordinary reads and unmanaged Agent storno. Order's retained
+reconciliation and infrastructure failures spend its invocation policy (~24 min of delays with defaults).
+No retry threshold is a hard send or elapsed-time bound; protected Order writes instead have one-use permission.
 
 **Unresolved writes.** Every Order mutation checks the durable marker before resolving the account or reading
 prerequisites. Before a write it records minimal recovery identity, sets the marker, awaits durable arming,
@@ -748,6 +761,21 @@ operator-only exclusive action carrying the **exact observed marker** and either
 (`{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}`).
 An attestation is the operator's assertion, never vendor proof. Recovery records evidence before clearing;
 it sends nothing. Stale markers, changed identity and unknown evidence refuse.
+
+Alternatively, independently confirmed completion can be submitted as audited positive settlement:
+
+```json
+{"type":"completed","audit_reference":"SUPPORT-301",
+ "completion":{"type":"deleted","number":"D-1"},
+ "completed_and_cannot_execute_later":true}
+```
+
+`completion.type` is `issued`, `reversed` or `deleted`, matching the marker's operation. Deletion must name
+exactly the pinned proforma; a reversal names the storno, not the original; issuance cannot name the old reissue
+target. The audit record must independently establish the exact operation, account and intent, including any
+corrective base, and that no delayed execution remains. This is useful for a confirmed deletion or consumed
+proforma whose positive evidence is no longer queryable. It is never a substitute for missing evidence.
+See the [operator recovery runbook](../../docs/operations/order-recovery.md).
 
 Access defaults to `forbidden` (403). A host enables it with `Order::with_recovery_authorizer` and its
 `service::RecoveryAuthorizer`, using authenticated operator metadata from its ingress boundary. Strip caller
@@ -805,12 +833,10 @@ re-executed after the policy's delay; a read writes nothing, so re-executing it 
 fresh as a first one. When the read policy is exhausted the handler fails with `TerminalError{unavailable}`
 naming the step, the last failure and, where the step knows it, the order, kind and external id.
 
-**The create** (`create-{kind}`) runs under the issue policy (`[issue]`: `max_attempts` executions,
-`initial_delay` growing by `factor` to `max_delay`, duration threshold `max_duration`) and every execution is
-query-first. An ordinary create sends only when the external id holds **nothing**. A reissue sends only past
-**exactly the expected document the lookup step saw reversed**, still reversed. Absence inside the create step
-stops with `outcome_unknown`: this execution may follow an earlier unconfirmed send. Before that step, absence
-is `conflict{target_changed}`:
+**The protected create** (`create-{kind}`) consumes one execution-local send permission after durable arming.
+Its fresh leading query allows an ordinary create only when the external id holds **nothing**, and reissue
+only past **exactly the expected reversed document**. An absent reissue target before the write step is
+`conflict{target_changed}`; inside the write step it remains `outcome_unknown`:
 
 - a live document an earlier execution issued is answered `issued` without sending;
 - a document reversed since the lookup is answered `reversed` without sending (a new document needs an explicit
@@ -820,16 +846,14 @@ is `conflict{target_changed}`:
   `szlahu_down`) is settled data too, with nothing sent: the handler raises the same `unavailable` the lookup
   step raises for that code, at once, rather than spending the issue policy on a read.
 
-A lost reply is re-queried once, immediately; when nothing is found the step is *unconfirmed* and Restate
-re-executes it after the delay (a re-query that fails itself leaves the step unconfirmed naming both the send's
-cause and the re-query's failure). When the policy is exhausted (or the invocation is cancelled mid-create) the
-handler fails with `TerminalError{outcome_unknown}` naming the order, kind and external id; the next invocation's
-lookup finds whatever landed. Correctives take no order-number hint, and a duplicate-order-number answer their
-re-query cannot resolve is `rejected`.
+A lost or inconclusive reply is journaled as unresolved data with a safe diagnostic. The separate
+`reconcile-write` run only reads, retaining the original cause and latest reason in its failure. Exhaustion of
+the invocation policy pauses the owner; it cannot grant another send. A conclusive 71/152 refusal remains
+settled even if the diagnostic query fails. Correctives take no duplicate-order hint and retain the refusal.
 
 **Storno** has the same shape: a read-only lookup of the storno external id (`lookup-storno-{number}`) and a
-storno step (`storno-{number}`) under the same issue policy, query-first on every execution, on both
-`Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`. The storno request is a pure function of the
+storno step (`storno-{number}`). `Szamlazz.Order.storno_invoice` uses the protected one-use protocol;
+`Szamlazz.Agent.storno` is query-first under `[issue]`. The storno request is a pure function of the
 verified original (its `telj` as `teljesitesDatum`, its `eszamla` or the account default as the e-invoice flag),
 so every execution of the step sends byte-identical bytes; a verified original without a `telj` is `unavailable`
 with nothing sent, raised after the answers that need no send. Neither the date nor the form is enforced by
@@ -838,19 +862,18 @@ derivation from the verified original is what keeps a reversal on its original's
 
 **Ambiguous storno replies (#196).** A changed number with absent or positive optional gross is now verified
 by querying that number for the storno type and reference to the original. It can return `reversed`; if that
-query is inconclusive, the gateway reconciles by the storno external id. Failure to establish reversal stays
-`Unconfirmed` under the issue policy and becomes `outcome_unknown` on exhaustion, rather than the previous
+query is inconclusive, Order retains the candidate for read-only reconciliation. Without a candidate, a missing
+storno external id permits an order hint, still verified against the original's reference, reversal and order.
+Unmanaged Agent storno stays `Unconfirmed` under its issue policy and becomes `outcome_unknown` on exhaustion, rather than the previous
 `rejected{not_stornoable}` no-op inference. Post-send credential/unavailable failures preserve the uncertainty
 and their causes. The same-number echo policy and changed-number/nonpositive-gross fast path remain; zero is
 a synthetic comparison control, and neither zero-total nor negative-total originals have been verified live.
 
 Release/journal review under [ADR 0009](../../docs/adr/0009-immutable-deployments-no-journal-compatibility-contract.md):
-verification and reconciliation run inside the existing `storno-{number}` closure. Step names, ordered paths,
-step inputs and journaled outcome shapes are unchanged; an ambiguous reply can now produce `Reversed` or a run
-failure instead of `NotStornoable`. The new `Unconfirmed::StornoVerification` is a retryable error, not a
-journaled outcome; its display carries the returned number and verification cause. Register this release as
-a new immutable deployment. A previously completed no-op result stays completed on its original invocation;
-use a new `Idempotency-Key` to reconcile it through a new invocation.
+protected writes and their diagnostic result shapes require a new immutable deployment. Keep in-flight owners
+on their pinned code. Review actual command prefixes before exceptional replay; matching step names alone do
+not establish compatibility. The persistent marker schema remains version 1; positive operator settlement adds
+an evidence variant, not permission to discard or migrate unknown marker state.
 
 A document the verify already sees reversed is `reversed` with a **best-effort** storno number:
 `Szamlazz.Order.storno_invoice` from the order-number hint, `Szamlazz.Agent.storno` from the by-number storno
@@ -917,12 +940,14 @@ create step adds the journaled `TargetChanged` outcome for an expected holder di
 mapped to `outcome_unknown` because an earlier execution may have sent;
 completed old invocations keep their original results. See [ADR 0012](../../docs/adr/0012-expected-document-mutation-intent.md).
 
-Both one-shot operations now preserve inconclusive send answers as journaled data and return
-`outcome_unknown` (500), including the vendor cause and `szamlazz_code` where supplied
-(`absent` for a failed verdict without a code). Previously these could claim deletion was
-refused or return `szamlazz_error` saying credit entries were refused. Established XML-input
-refusals 53/57 retain those settled outcomes; the observed credit-registration refusal 463,
-credential codes 3/135/136/164, and deletion 335 retain their operation-specific handling.
+Both operations preserve inconclusive send answers as journaled data. Protected Order deletion retains
+read-only reconciliation and pauses; cancellation returns `outcome_unknown` and preserves its marker.
+Unkeyed Agent credit entries return `outcome_unknown` (500), including the vendor cause and `szamlazz_code`
+where supplied (`absent` for a failed verdict without a code). Even credit-registration refusals 53/57/463
+remain `outcome_unknown`: they settle the latest exchange but cannot exclude an earlier execution of an
+interrupted open run. Local request validation stays `invalid_input`; credential codes 3/135/136/164 stay
+`credentials_rejected`. Protected deletion's single permitted send keeps settled XML-input refusals 53/57
+and its operation-specific 335 handling.
 Invoice-creation codes are not treated as evidence that these writes were refused.
 
 The evidence is the vendor's [error-handling documentation](https://docs.szamlazz.hu/agent/basics/error-handling),

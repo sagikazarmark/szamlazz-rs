@@ -17,8 +17,8 @@ use restate_sdk::serde::Json;
 use super::{Order, prologue::Execution, support::Fault};
 use crate::account::Account;
 use crate::contract::recovery::{
-    MarkerVersion, RecoveryEvidence, RecoveryRequest, RecoveryResponse, UnresolvedObservation,
-    UnresolvedWrite, WriteOperation,
+    AttestedCompletion, MarkerVersion, RecoveryEvidence, RecoveryRequest, RecoveryResponse,
+    UnresolvedObservation, UnresolvedWrite, WriteOperation,
 };
 use crate::gateway::{Gateway, recovery::WriteResult};
 use crate::identity::{ExternalId, OrderKey};
@@ -41,6 +41,12 @@ pub enum WriteCheckpoint {
     Reconciled,
     /// After recorded settlement, before clearing the marker.
     Settled,
+    /// After recorded operator authorization, before reading its marker.
+    RecoveryAuthorized,
+    /// After recorded document verification, before recording recovery.
+    RecoveryVerified,
+    /// After recorded recovery evidence, before clearing its marker.
+    RecoveryRecorded,
 }
 
 /// Test-only interruption control; a deployment must not enable `test-util`.
@@ -144,6 +150,10 @@ impl Order {
             .await
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep recovery authorization, evidence recording and state clearance in command order"
+    )]
     async fn recover_marker_inner(
         &self,
         ctx: &ObjectContext<'_>,
@@ -162,6 +172,12 @@ impl Order {
             .map_err(read_fault)?
             .0
             .ok_or_else(forbidden)?;
+        #[cfg(feature = "test-util")]
+        if let Some(observer) = &self.write_observer {
+            observer
+                .reached(ctx.key(), WriteCheckpoint::RecoveryAuthorized)
+                .await;
+        }
         let raw = ctx
             .get::<bytes::Bytes>(STATE)
             .await
@@ -177,11 +193,7 @@ impl Order {
             .into());
         }
         tracing::Span::current().record("account.id", tracing::field::display(&marker.account_id));
-        let mut account = Account::new(marker.account_id.clone(), marker.credential_ref.clone());
-        account.endpoint = marker
-            .endpoint
-            .parse()
-            .map_err(|_| Fault::invalid_input("invalid pinned endpoint"))?;
+        let account = pinned_account(&marker)?;
         let config = crate::config::WorkerConfig {
             namespace: marker.namespace.clone(),
             ..self.parts.config.clone().into_inner()
@@ -191,13 +203,19 @@ impl Order {
         match &evidence {
             RecoveryEvidence::NotExecuted {
                 audit_reference, ..
+            }
+            | RecoveryEvidence::Completed {
+                audit_reference, ..
             } if audit_reference.trim().is_empty() => {
                 return Err(Fault::invalid_input(
-                    "an audited non-execution attestation requires an audit reference",
+                    "an operator attestation requires an audit reference",
                 )
                 .into());
             }
             RecoveryEvidence::NotExecuted { .. } => {}
+            RecoveryEvidence::Completed { completion, .. } => {
+                validate_completion(&marker.operation, completion)?;
+            }
             RecoveryEvidence::Document { number } => {
                 let result = ctx
                     .run(|| async {
@@ -213,6 +231,12 @@ impl Order {
                     .retry_policy(self.parts.config.read.run_retry_policy())
                     .await
                     .map_err(read_fault)?;
+                #[cfg(feature = "test-util")]
+                if let Some(observer) = &self.write_observer {
+                    observer
+                        .reached(ctx.key(), WriteCheckpoint::RecoveryVerified)
+                        .await;
+                }
                 if let WriteResult::Answered {
                     credentials,
                     answer,
@@ -225,8 +249,8 @@ impl Order {
                     };
                     return Err(code.into_fault(&marker.namespace).into());
                 }
-                if matches!(result.0, WriteResult::Unresolved) {
-                    return Err(Fault::outcome_unknown("document evidence does not settle the exact unresolved write; marker retained").into());
+                if let WriteResult::Unresolved(diagnostic) = result.0 {
+                    return Err(Fault::outcome_unknown(format!("document evidence does not settle the exact unresolved write; marker retained: {}", diagnostic.reason)).into());
                 }
             }
         }
@@ -241,8 +265,51 @@ impl Order {
             .name("record-recovery")
             .await
             .map_err(read_fault)?;
+        #[cfg(feature = "test-util")]
+        if let Some(observer) = &self.write_observer {
+            observer
+                .reached(ctx.key(), WriteCheckpoint::RecoveryRecorded)
+                .await;
+        }
         ctx.clear(STATE);
         Ok(receipt.0)
+    }
+}
+
+fn pinned_account(marker: &UnresolvedWrite) -> Result<Account, Fault> {
+    let mut account = Account::new(marker.account_id.clone(), marker.credential_ref.clone());
+    account.endpoint = marker
+        .endpoint
+        .parse()
+        .map_err(|_| Fault::invalid_input("invalid pinned endpoint"))?;
+    Ok(account)
+}
+
+fn validate_completion(
+    operation: &WriteOperation,
+    completion: &AttestedCompletion,
+) -> Result<(), Fault> {
+    let matches = match (operation, completion) {
+        (
+            WriteOperation::Create {
+                expected_number, ..
+            },
+            AttestedCompletion::Issued { number },
+        ) => expected_number.as_deref() != Some(number.as_str()),
+        (WriteOperation::Storno { number: original }, AttestedCompletion::Reversed { number }) => {
+            original != number.as_str()
+        }
+        (WriteOperation::Delete { number: target }, AttestedCompletion::Deleted { number }) => {
+            target == number.as_str()
+        }
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(Fault::invalid_input(
+            "attested completion does not match the unresolved operation and expected document",
+        ))
     }
 }
 
@@ -252,12 +319,12 @@ fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<Unresolve
         || marker.order.as_str() != key
         || marker.token.is_empty()
         || marker.token != marker.owner_invocation
-        || marker.account_id.is_empty()
-        || marker.credential_ref.is_empty()
         || marker.endpoint.parse::<crate::account::Endpoint>().is_err()
     {
         return None;
     }
+    // AccountId and CredentialRef are resolver-owned opaque strings. Empty
+    // values are legal on Account and must remain usable in its recovery marker.
     if marker.created_at.parse::<jiff::Timestamp>().is_err() {
         return None;
     }
@@ -402,10 +469,14 @@ impl Execution {
                 let result = if permit.swap(false, Ordering::SeqCst) {
                     match self.gateway().await {
                         Ok(gateway) => write(gateway, marker.clone()).await,
-                        Err(_) => WriteResult::Unresolved,
+                        Err(_) => WriteResult::unresolved(
+                            "pinned recovery account unavailable before write execution",
+                        ),
                     }
                 } else {
-                    WriteResult::Unresolved
+                    WriteResult::unresolved(
+                        "send permission unavailable on replay; reconcile the earlier execution",
+                    )
                 };
                 #[cfg(feature = "test-util")]
                 self.checkpoint(order, WriteCheckpoint::Sent).await;
@@ -416,13 +487,13 @@ impl Execution {
             .await
             .map_err(uncertain)?
             .0;
-        let result = if matches!(result, WriteResult::Unresolved) {
+        let result = if let WriteResult::Unresolved(original) = result {
             ctx.run(|| async {
                 super::prologue::mark_fresh_work();
-                let gateway = self.gateway().await.map_err(|_| std::io::Error::other("pinned recovery account unavailable; write remains unresolved"))?;
-                let result = gateway.reconcile_write(&marker, None).await;
-                if matches!(result, WriteResult::Unresolved) {
-                    return Err(std::io::Error::other("Order write unresolved; reconciliation is read-only; absence does not authorize another send").into());
+                let gateway = self.gateway().await.map_err(|_| std::io::Error::other(format!("Order write unresolved; original: {}; latest reconciliation: pinned recovery account unavailable", original.reason)))?;
+                let result = gateway.reconcile_write(&marker, original.candidate_number.as_deref()).await;
+                if let WriteResult::Unresolved(latest) = &result {
+                    return Err(std::io::Error::other(format!("Order write unresolved; original: {}; latest reconciliation: {}; reconciliation is read-only; absence does not authorize another send", original.reason, latest.reason)).into());
                 }
                 #[cfg(feature = "test-util")]
                 self.checkpoint(order, WriteCheckpoint::Reconciled).await;

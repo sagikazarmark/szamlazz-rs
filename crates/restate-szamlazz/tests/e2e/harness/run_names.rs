@@ -105,6 +105,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
             "prepare-write",
             "arm-write",
             "create-proforma",
+            "reconcile-write",
         ],
     ),
     RunPath::new(
@@ -153,6 +154,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
             "prepare-write",
             "arm-write",
             "create-prepayment",
+            "reconcile-write",
         ],
     ),
     RunPath::new(
@@ -183,6 +185,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
             "prepare-write",
             "arm-write",
             "create-final",
+            "reconcile-write",
         ],
     ),
     RunPath::new(
@@ -197,6 +200,7 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
             "prepare-write",
             "arm-write",
             "create-corrective",
+            "reconcile-write",
         ],
     ),
     RunPath::new(

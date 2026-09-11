@@ -10,7 +10,6 @@
 //! prologue `prologue`.
 
 use std::error::Error as StdError;
-use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -141,18 +140,6 @@ impl Fault {
         Self::new(
             TerminalCode::SzamlazzError,
             format!("szamlazz.hu error {answer}"),
-        )
-        .with_szamlazz_code(answer.code)
-    }
-
-    /// [`Fault::szamlazz_error`] with what the handler was doing named before
-    /// szamlazz.hu's answer (`the credit entries on invoice SZ-1 were
-    /// refused: 259: …`), so the caller reads the subject first; the code
-    /// travels in `szamlazz_code` as on every pass-through.
-    pub(super) fn szamlazz_error_on(subject: impl fmt::Display, answer: SzamlazzAnswer) -> Self {
-        Self::new(
-            TerminalCode::SzamlazzError,
-            format!("{subject}: szamlazz.hu error {answer}"),
         )
         .with_szamlazz_code(answer.code)
     }

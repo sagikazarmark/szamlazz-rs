@@ -151,7 +151,8 @@ pub enum TerminalCode {
     /// szamlazz.hu answered the request with an error code of its own that
     /// the handler passes through rather than concludes from: on
     /// `Szamlazz.Agent.query`, `query_taxpayer` (szamlazz.hu's code or NAV's
-    /// relayed one) and `set_credit_entries` (the credit entries refused). The
+    /// relayed one). Credit-entry vendor refusals retain `outcome_unknown`
+    /// because an earlier execution may have registered the entries. The
     /// szamlazz.hu code is in the fault's `szamlazz_code`, the message is
     /// szamlazz.hu's. HTTP 422.
     SzamlazzError,

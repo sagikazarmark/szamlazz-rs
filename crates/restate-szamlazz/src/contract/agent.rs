@@ -410,10 +410,12 @@ pub struct SetCreditEntriesRequest {
     /// reaches szamlazz.hu, and the handler cannot tell a lost reply from a
     /// lost request: an `outcome_unknown` fault, or the handler's one retry
     /// after a crash, may have landed the entries already. A caller that sees
-    /// `outcome_unknown` on an additive call queries the invoice
-    /// (`Szamlazz.Agent.query`) before sending only entries still missing,
-    /// with a new `Idempotency-Key`. A replacing call likewise queries first
-    /// and sends the current intended snapshot if replacement is still wanted.
+    /// `outcome_unknown` must settle the earlier registration before renewal:
+    /// establish its completion or non-execution, and that it cannot execute later.
+    /// Missing entries and elapsed time are not such evidence. After settlement,
+    /// query the invoice and deliberately send only still-required additive entries
+    /// or the current intended replacement, with a new `Idempotency-Key`.
+    /// This unkeyed operation has no Order unresolved-write protection.
     /// Cancellation of the one-shot write is the same structured
     /// `outcome_unknown`: it cannot prove that nothing landed.
     #[serde(default)]

@@ -86,6 +86,19 @@ pub(crate) async fn diagnostics_are_safe_in_run_failures_journals_and_ingress(h:
         assert!(failure.contains("unresolved"), "{failure}");
     }
     inspect(h, reply.invocation_id(), "create-invoice", "Unresolved").await;
+    let journal = h.admin().journal(reply.invocation_id()).await;
+    assert!(
+        run_result(&journal, "create-invoice")
+            .expect("original send result")
+            .raw_contains("HTTP 502")
+    );
+    assert!(
+        observed.failures.iter().any(
+            |failure| failure.contains("HTTP 502") && failure.contains("latest reconciliation")
+        ),
+        "original and latest diagnostic: {:?}",
+        observed.failures
+    );
 
     // A failed read is still unavailable; no write was attempted.
     number_query("SZ-PRIVACY-READ")

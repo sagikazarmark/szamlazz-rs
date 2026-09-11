@@ -192,7 +192,7 @@ fn entries() -> Vec<Entry> {
     ));
     all.extend(entries_of(
         vec![
-            WriteResult::Unresolved,
+            WriteResult::unresolved("create: HTTP 502"),
             WriteResult::Answered {
                 credentials: true,
                 answer: CREDENTIALS.answer(),
@@ -201,7 +201,7 @@ fn entries() -> Vec<Entry> {
             WriteResult::Storno(StornoOutcome::Reversed(storno_document())),
             WriteResult::Delete(DeleteOutcome::Deleted),
         ],
-        &variants!(WriteResult { Create(_), Storno(_), Delete(_), Answered { .. }, Unresolved }),
+        &variants!(WriteResult { Create(_), Storno(_), Delete(_), Answered { .. }, Unresolved(_) }),
     ));
     all.extend(entries_of(vec![namespace()], &single()));
     all.extend(entries_of(

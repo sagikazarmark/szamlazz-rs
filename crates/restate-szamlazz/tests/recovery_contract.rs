@@ -49,6 +49,31 @@ fn recovery_requires_exact_marker_and_explicit_evidence() {
 }
 
 #[test]
+fn completed_write_attestation_requires_an_explicit_conclusion_and_identity() {
+    let evidence = json!({"type":"completed", "audit_reference":"INC-300",
+        "completion":{"type":"issued", "number":"HS-1"},
+        "completed_and_cannot_execute_later":true});
+    let request = json!({"marker":marker(), "evidence":evidence});
+    let parsed: RecoveryRequest =
+        serde_json::from_value(request.clone()).expect("completed attestation");
+    assert_eq!(serde_json::to_value(parsed).expect("round trip"), request);
+    for replacement in [json!(false), json!(null), json!("true")] {
+        let mut refused = request.clone();
+        refused["evidence"]["completed_and_cannot_execute_later"] = replacement;
+        assert!(serde_json::from_value::<RecoveryRequest>(refused).is_err());
+    }
+    for completion in [
+        json!({"type":"issued"}),
+        json!({"type":"issued","number":" "}),
+        json!({"type":"unknown","number":"HS-1"}),
+    ] {
+        let mut refused = request.clone();
+        refused["evidence"]["completion"] = completion;
+        assert!(serde_json::from_value::<RecoveryRequest>(refused).is_err());
+    }
+}
+
+#[test]
 fn newer_observations_remain_inspectable_without_becoming_clearance() {
     use restate_szamlazz::contract::recovery::UnresolvedObservation;
     let mut newer = marker();

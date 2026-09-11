@@ -70,4 +70,5 @@ async fn e2e_cancelled_namespace_is_a_structured_read_fault() {
     let fault: Fault = reply.fault();
     assert_eq!(fault.code, TerminalCode::Cancelled);
     assert_eq!(fault.is_cancelled(), Some(true));
+    server.finish().await;
 }

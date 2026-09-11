@@ -467,12 +467,12 @@ impl Agent {
     /// With `additive: true` this is **at-least-once**: a lost reply or
     /// cancellation of the one-shot write is the structured
     /// `outcome_unknown`, and the one retry after a crash re-sends the same
-    /// entries, each of which appends a second copy. The retry waits out the
-    /// 60 s client timeout (never the server's ~500 ms default) so that it
-    /// cannot re-send while the first send is still in flight; a caller that
-    /// sees `outcome_unknown` queries the invoice before sending only missing
-    /// entries with a new `Idempotency-Key`. A replacing call queries first
-    /// too, then sends the current intended snapshot if still wanted.
+    /// entries, each of which appends a second copy. The retry delay exceeds the
+    /// client timeout but cannot establish that vendor processing stopped.
+    /// Before deliberate renewal, settle the earlier request's execution and
+    /// exclude delayed execution. Missing entries or elapsed time are not evidence.
+    /// After settlement, query again and submit only still-required additive entries
+    /// or the current intended replacement. This operation has no Order marker.
     ///
     /// Not serialised per invoice: the service is unkeyed, so two concurrent
     /// replacing calls on one invoice race and the last send to land wins

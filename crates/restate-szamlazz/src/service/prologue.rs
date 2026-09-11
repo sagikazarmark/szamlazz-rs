@@ -1049,5 +1049,6 @@ mod tests {
                 .iter()
                 .all(|entry| !entry.raw_contains(SCRIPTED_KEY) && !entry.raw_contains(STORE_CAUSE))
         );
+        server.finish().await;
     }
 }

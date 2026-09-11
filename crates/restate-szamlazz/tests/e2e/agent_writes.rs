@@ -19,6 +19,79 @@ use crate::harness::szamlazz::{
     number_query, original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
+/// A refusal of the repeated exchange cannot settle the first exchange. The
+/// mock records acceptance before withholding its reply; pause interrupts the
+/// open run, and the invoice becomes reversed before that run executes again.
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; interrupted credit registration"]
+async fn e2e_credit_refusal_after_interruption_preserves_earlier_execution_uncertainty() {
+    use restate_e2e_harness::{Call, ReusePolicy, launcher_or_skip};
+    use restate_sdk::prelude::Endpoint;
+    use restate_szamlazz::contract::{Fault, TerminalCode};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use wiremock::{MockServer, ResponseTemplate};
+
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let server = launcher.launch(&crate::harness::MAIN_SERVER).await;
+    let mock = MockServer::start().await;
+    let (_, agent) = crate::harness::accounts::services(&mock.uri());
+    server.deploy(Endpoint::builder().bind(agent).build()).await;
+    for additive in [false, true] {
+        let number = format!("INTERRUPTED-CREDIT-{}", u8::from(additive));
+        let accepted = Arc::new(Notify::new());
+        let sends = Arc::new(AtomicUsize::new(0));
+        let count = sends.clone();
+        let reached = accepted.clone();
+        credit_of(&number)
+            .respond_with(move |_: &wiremock::Request| {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    reached.notify_one();
+                    ResponseTemplate::new(200).set_delay(Duration::from_secs(30))
+                } else {
+                    crate::common::body_error("463", "registration on a reversed invoice")
+                }
+            })
+            .expect(2)
+            .mount(&mock)
+            .await;
+        let call = Call::service("Szamlazz.Agent", "set_credit_entries");
+        let body = json!({"invoice_number":number,"entries":[{"date":"2026-09-10","title":"transfer","amount":"1"}],"additive":additive});
+        let owner = server
+            .invoke(&call.send(), Some(&body), Some(&number))
+            .await;
+        tokio::time::timeout(Duration::from_secs(30), accepted.notified())
+            .await
+            .expect("registration accepted");
+        server.admin().pause(owner.invocation_id()).await;
+        let journal = server.admin().journal(owner.invocation_id()).await;
+        assert!(
+            restate_e2e_harness::run_result(&journal, &format!("set-credit-entries-{number}"))
+                .is_none(),
+            "pause must interrupt the open registration before its answer is recorded"
+        );
+        server.admin().resume(owner.invocation_id()).await;
+        let reply = server.invoke(&call, Some(&body), Some(&number)).await;
+        let fault: Fault = reply.fault();
+        assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+        assert_eq!(fault.code.is_outcome_unknown(), Some(true));
+        assert_eq!(fault.szamlazz_code.as_deref(), Some("463"));
+        assert!(fault.message.contains("earlier execution"), "{fault:?}");
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        let retained = server.invoke(&call, Some(&body), Some(&number)).await;
+        assert_eq!(retained.fault::<Fault>(), fault);
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+    mock.verify().await;
+    server.finish().await;
+}
+
 /// Inconclusive credit-entry answers never claim refusal and never repeat the
 /// one-shot write; the same ingress key replays the stored fault in both modes.
 pub(crate) async fn inconclusive_credit_entry_answers_are_stored_unknown_outcomes(h: &Harness) {
@@ -53,8 +126,9 @@ pub(crate) async fn inconclusive_credit_entry_answers_are_stored_unknown_outcome
             );
             match code {
                 "57" | "463" => {
-                    assert_eq!(reply.status, 422);
-                    assert_eq!(fault.code, TerminalCode::SzamlazzError);
+                    assert_eq!(reply.status, 500);
+                    assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+                    assert!(fault.message.contains("earlier execution"));
                 }
                 "3" => {
                     assert_eq!(reply.status, 503);
@@ -221,11 +295,17 @@ pub(crate) async fn cancelled_credit_entries_are_unknown_with_mode_specific_guid
         let reply = crate::policies::cancel_after_send(h, call, &body, key, &received).await;
         let fault = reply.fault();
         let guidance = if additive {
-            "query the invoice before re-sending"
+            "only after settlement, send only those entries"
         } else {
             "current intended snapshot and a new Idempotency-Key"
         };
         assert!(fault.message.contains(guidance), "{fault:?}");
+        assert!(
+            fault
+                .message
+                .contains("missing entries and elapsed time are not settlement evidence"),
+            "{fault:?}"
+        );
         assert_eq!(
             h.admin().runs(reply.invocation_id()).await,
             [

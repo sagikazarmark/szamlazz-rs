@@ -155,6 +155,11 @@ pub(crate) async fn cancelled_storno_is_uncertain(h: &Harness) {
                 fault.message.contains("query the original invoice"),
                 "{fault:?}"
             );
+            assert!(fault.message.contains("only after settlement"), "{fault:?}");
+            assert!(
+                fault.message.contains("absence and elapsed time"),
+                "{fault:?}"
+            );
         } else {
             assert!(
                 fault.message.contains("unresolved marker is retained"),

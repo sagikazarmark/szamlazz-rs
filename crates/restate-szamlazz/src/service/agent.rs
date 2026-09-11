@@ -22,8 +22,7 @@ use crate::contract::{
     QueryTaxpayerRequest, QueryTaxpayerResponse, SetCreditEntriesRequest, SetCreditEntriesResponse,
 };
 use crate::gateway::{
-    ProbeOutcome, QueryOutcome, RejectionCode, SetCreditEntriesOutcome, SzamlazzAnswer,
-    TaxpayerOutcome,
+    ProbeOutcome, QueryOutcome, RejectionCode, SetCreditEntriesOutcome, TaxpayerOutcome,
 };
 use crate::identity::{ExternalId, Namespace};
 
@@ -71,9 +70,9 @@ fn set_credit_entries_unknown(additive: bool, lost: &impl std::fmt::Display) -> 
 
 fn credit_entries_recovery(additive: bool) -> &'static str {
     if additive {
-        "the entries are additive and may have landed; query the invoice before re-sending; if entries are still missing, send only those entries with a new Idempotency-Key"
+        "the entries are additive and may have landed; first settle whether the earlier registration completed and cannot execute later, or did not execute and cannot execute later; missing entries and elapsed time are not settlement evidence; then query the invoice and, only after settlement, send only those entries still required with a new Idempotency-Key"
     } else {
-        "query the invoice; if replacement is still intended, call set_credit_entries again with the current intended snapshot and a new Idempotency-Key"
+        "first settle whether the earlier registration completed and cannot execute later, or did not execute and cannot execute later; missing entries and elapsed time are not settlement evidence; then query the invoice and, only after settlement, submit any still-intended replacement using the current intended snapshot and a new Idempotency-Key"
     }
 }
 
@@ -117,8 +116,8 @@ fn taxpayer_response(
 /// success; a rejection that never reached szamlazz.hu (the wire contract
 /// takes at most five entries, and a replacing request with none would clear
 /// the invoice's credit entries, [`RejectionCode::Request`]) as `invalid_input`, the
-/// caller's request; szamlazz.hu refusing the entries passed through as
-/// `szamlazz_error` (422) naming the invoice; a credential code as
+/// caller's request; a vendor refusal as `outcome_unknown` because an earlier
+/// execution of the open run may have registered the entries; a credential code as
 /// `credentials_rejected`; a lost/inconclusive answer as `outcome_unknown`, conditional on
 /// `additive`.
 fn set_credit_entries_response(
@@ -139,10 +138,10 @@ fn set_credit_entries_response(
                 "the credit entries cannot be sent: {}; nothing was sent",
                 rejection.message
             )),
-            RejectionCode::Szamlazz(code) => Fault::szamlazz_error_on(
-                format!("the credit entries on invoice {invoice_number} were refused"),
-                SzamlazzAnswer::new(code, rejection.message),
-            ),
+            RejectionCode::Szamlazz(code) => set_credit_entries_unknown(
+                additive,
+                &format!("the latest registration on invoice {invoice_number} was refused ({code}: {}); this does not settle an earlier execution of the open run", rejection.message),
+            ).with_szamlazz_code(code),
         }),
         SetCreditEntriesOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
@@ -266,7 +265,7 @@ mod tests {
     use restate_sdk::errors::TerminalError;
 
     use super::*;
-    use crate::gateway::{Rejection, Unanswered};
+    use crate::gateway::{Rejection, SzamlazzAnswer, Unanswered};
 
     fn namespace() -> Namespace {
         "acct".parse().expect("namespace")
@@ -297,11 +296,10 @@ mod tests {
         assert!(message.contains("at most five entries"), "{message}");
     }
 
-    /// szamlazz.hu refusing the credit entries is its answer, passed through:
-    /// `szamlazz_error` (422) with the szamlazz.hu code in `szamlazz_code`
-    /// (never in `code`, which is the symbolic token), and its message.
+    /// A vendor refusal of the latest exchange cannot exclude an earlier
+    /// execution before an interruption of the open run.
     #[test]
-    fn a_refused_credit_entry_is_a_szamlazz_error_carrying_the_code() {
+    fn a_refused_credit_entry_preserves_uncertainty_and_the_code() {
         let outcome = SetCreditEntriesOutcome::Rejected(Rejection::from(SzamlazzAnswer::new(
             "259",
             "A számla nem található.",
@@ -309,8 +307,8 @@ mod tests {
         let fault = set_credit_entries_response(outcome, "SZ-1".to_owned(), false, &namespace())
             .expect_err("a fault");
         let (status, body) = fault_body(fault);
-        assert_eq!(status, 422, "{body}");
-        assert_eq!(body["code"], "szamlazz_error", "{body}");
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(body["code"], "outcome_unknown", "{body}");
         assert_eq!(body["szamlazz_code"], "259", "{body}");
         let message = body["message"].as_str().expect("message");
         assert!(message.contains("259"), "{message}");
@@ -374,7 +372,7 @@ mod tests {
     /// the invoice before re-sending; a replacing call uses the current
     /// intended snapshot, not a stale retry.
     #[test]
-    fn the_set_credit_entries_fault_tells_an_additive_caller_to_query_first() {
+    fn the_set_credit_entries_fault_requires_settlement_before_renewal() {
         let lost = Unanswered::Transport("connection reset".to_owned());
         let additive =
             TerminalError::try_from(set_credit_entries_unknown(true, &lost)).expect("known fault");
@@ -387,7 +385,7 @@ mod tests {
         assert!(
             additive
                 .message()
-                .contains("query the invoice before re-sending"),
+                .contains("missing entries and elapsed time are not settlement evidence"),
             "{}",
             additive.message()
         );
@@ -401,9 +399,7 @@ mod tests {
             TerminalError::try_from(set_credit_entries_unknown(false, &lost)).expect("known fault");
         assert_eq!(replacing.code(), 500);
         assert!(
-            replacing
-                .message()
-                .contains("call set_credit_entries again"),
+            replacing.message().contains("only after settlement"),
             "{}",
             replacing.message()
         );
