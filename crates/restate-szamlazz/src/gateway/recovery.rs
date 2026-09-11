@@ -21,7 +21,7 @@ fn matches_corrective_base(found: &FoundDocument, operation: &WriteOperation) ->
         WriteOperation::Create {
             corrected_number: Some(base),
             ..
-        } => found.referenced_invoice_number.as_ref() == Some(base),
+        } => found.is_corrective_of(base),
         _ => true,
     }
 }

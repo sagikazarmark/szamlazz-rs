@@ -103,6 +103,10 @@ A corrective found by the armed leading query must name the marker's intended ba
 base is a settled `external_id_collision` with no send. Reconciliation uses the same base predicate but
 retains uncertainty on mismatch: it cannot establish what an earlier send did. Existing-target lookup
 still answers the document previously issued under the correction id before checking new prerequisites.
+The full lookup after prerequisites also checks the resolved corrective base, so a holder first visible
+on that read is judged by the same predicate as the armed query. Invalid account defaults and seller text
+are operational configuration faults, validated after journaled resolution before document reads or arming;
+static resolver construction rejects them at load time. Caller overrides retain caller-fault attribution.
 Unresolved write results retain a safe diagnostic and a candidate storno number where available; retained
 read failures name both the original cause and latest reconciliation reason without copying vendor free text.
 
@@ -133,6 +137,8 @@ State uses one stable key and an explicitly versioned, closed schema. Unknown ve
 invalid identity and malformed encoding fail closed. No automatic state migration or backfill infers
 absence of uncertainty. Immutable invocation routing does not isolate cross-invocation state: old code
 that ignores the marker must not overlap the protected deployment on the same scope/key.
+Marker Order identity is exact: leading/trailing whitespace is rejected, even though the general
+`OrderKey` parser trims values outside the persisted-marker boundary.
 
 Resolver-owned account ids and credential references remain opaque strings, including empty values accepted
 by `Account`. Marker decoding uses the same domain as marker production; these values are not document identity.

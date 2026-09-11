@@ -4,6 +4,33 @@ use restate_szamlazz::contract::{CreateOptions, DeleteProformaRequest};
 use serde_json::json;
 
 #[test]
+fn documented_reissue_request_decodes_with_its_expected_document() {
+    let readme = include_str!("../README.md");
+    let section = readme
+        .split("### Expected-document intent")
+        .nth(1)
+        .expect("migration section");
+    let example = section
+        .split("```json\n")
+        .nth(1)
+        .expect("JSON example")
+        .split("```")
+        .next()
+        .expect("example body");
+    let request: restate_szamlazz::CreateRequest =
+        serde_json::from_str(example).expect("complete request");
+    assert_eq!(
+        request
+            .options
+            .reissue
+            .expect("replacement intent")
+            .expected_number
+            .as_str(),
+        "SZ-A"
+    );
+}
+
+#[test]
 fn deletion_requires_a_bounded_expected_number_even_when_forced() {
     for wire in [
         json!({}),

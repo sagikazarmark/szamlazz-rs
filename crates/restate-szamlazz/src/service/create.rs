@@ -974,19 +974,40 @@ impl Execution {
         let kind = intent.identity.kind;
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
+        let corrected_number = match &intent.create.kind {
+            szamlazz_agent::ops::invoice::InvoiceKind::Corrective { corrected_number } => {
+                Some(corrected_number.to_string())
+            }
+            _ => None,
+        };
         run_reading(
             ctx,
             format!("lookup-{kind}"),
             self,
             move |gateway| async move {
-                gateway
+                let outcome = gateway
                     .lookup(LookupRequest {
                         external_id: &external_id,
                         kind,
                         order: &order,
                         our_numbers: &our_numbers,
                     })
-                    .await
+                    .await?;
+                // References have been resolved. A newly visible corrective must
+                // satisfy the same intent as the armed query and reconciliation.
+                Ok(match outcome {
+                    LookupOutcome::Live(found)
+                    | LookupOutcome::Reversed {
+                        document: found, ..
+                    } if corrected_number
+                        .as_deref()
+                        .is_some_and(|base| !found.is_corrective_of(base)) =>
+                    {
+                        tracing::warn!(number = %found.number, "corrective base collision");
+                        LookupOutcome::Collision(found)
+                    }
+                    other => other,
+                })
             },
         )
         .await

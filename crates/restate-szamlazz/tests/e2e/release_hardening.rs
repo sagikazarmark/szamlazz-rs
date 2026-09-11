@@ -4,6 +4,122 @@ use crate::common::api_error;
 use restate_szamlazz::contract::{Fault, TerminalCode};
 
 #[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; account configuration fault attribution"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one account-origin matrix across both service boundaries"
+)]
+async fn e2e_release_invalid_account_configuration_is_operational() {
+    use restate_szamlazz::account::{Account, AccountResolver, Accounts, BoxFuture, ResolveError};
+    use restate_szamlazz::{Agent, Order};
+
+    struct Resolver(std::sync::Mutex<Account>);
+    impl AccountResolver for Resolver {
+        fn resolve<'a>(
+            &'a self,
+            _: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Account, ResolveError>> {
+            let account = self.0.lock().expect("account").clone();
+            Box::pin(async move { Ok(account) })
+        }
+    }
+
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let restate = launcher
+        .launch(&ServerSpec {
+            name: "account-validation",
+            ..SERVER
+        })
+        .await;
+    let mock = MockServer::start().await;
+    let config = WorkerConfig::new("acct".parse().expect("namespace"))
+        .validate()
+        .expect("config");
+    let (existing, _) = services_with_config(&mock.uri(), config.clone());
+    let valid = existing.accounts().resolve(None).await.expect("account");
+    let resolver = Arc::new(Resolver(std::sync::Mutex::new(valid.clone())));
+    // The normal credential store is still wired; all cases must fail before HTTP.
+    let store_config: restate_szamlazz::account::StaticConfig = serde_json::from_value(json!({
+        "account":{"id":"acct","agent_key":"dummy","endpoint":mock.uri()}
+    }))
+    .expect("store config");
+    let store = restate_szamlazz::account::StaticResolver::try_from(store_config).expect("store");
+    let accounts = Accounts::new(resolver.clone(), Arc::new(store));
+    restate
+        .deploy(
+            Endpoint::builder()
+                .bind(
+                    Order::from_parts(accounts.clone(), config.clone())
+                        .with_recovery_authorizer(Arc::new(Operator)),
+                )
+                .bind(Agent::from_parts(accounts, config))
+                .build(),
+        )
+        .await;
+    for field in ["language", "aggregator", "email"] {
+        let mut account = valid.clone();
+        match field {
+            "language" => account.defaults.language = "PRIVATE-LANGUAGE".into(),
+            "aggregator" => account.defaults.aggregator = Some("PRIVATE\0VALUE".into()),
+            _ => account.seller.email.body = Some("PRIVATE\0VALUE".into()),
+        }
+        *resolver.0.lock().expect("account") = account;
+        for (call, body) in [
+            (
+                Call::object("Szamlazz.Order", "BAD-CONFIG", "create_invoice"),
+                create_body(dec!(1)),
+            ),
+            (
+                Call::object("Szamlazz.Order", "BAD-CONFIG", "storno_invoice"),
+                json!({"invoice_number":"SZ-1"}),
+            ),
+            (
+                Call::service("Szamlazz.Agent", "storno"),
+                json!({"invoice_number":"SZ-1"}),
+            ),
+        ] {
+            let reply = restate.invoke(&call, Some(&body), None).await;
+            assert_eq!(reply.status, 503, "{field}: {}", reply.body);
+            let fault = reply.fault::<Fault>();
+            assert_eq!(fault.code, TerminalCode::Unavailable);
+            assert!(fault.message.contains("account configuration"), "{fault:?}");
+            assert!(!fault.message.contains("PRIVATE"), "{fault:?}");
+            assert_eq!(
+                restate.admin().runs(reply.invocation_id()).await,
+                ["namespace", "account"]
+            );
+        }
+    }
+    *resolver.0.lock().expect("account") = valid;
+    let mut body = create_body(dec!(1));
+    body["document"]["overrides"] = json!({"language":"hhu"});
+    let reply = restate
+        .invoke(
+            &Call::object("Szamlazz.Order", "BAD-OVERRIDE", "create_invoice"),
+            Some(&body),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+    assert_eq!(
+        restate
+            .invoke(
+                &Call::object("Szamlazz.Order", "BAD-CONFIG", "observe_unresolved"),
+                None,
+                None
+            )
+            .await
+            .body["state"],
+        "absent"
+    );
+    assert!(mock.received_requests().await.expect("requests").is_empty());
+    restate.finish().await;
+}
+
+#[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; corrective eligibility before arming"]
 async fn e2e_release_corrective_refuses_noninvoice_bases_before_arming() {
     let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
@@ -372,6 +488,20 @@ async fn e2e_release_get_stops_on_an_answered_fault() {
 #[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; corrective leading-query identity"]
 async fn e2e_release_corrective_leading_query_checks_the_base() {
+    corrective_lookup_checks_the_base(2).await;
+}
+
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; corrective full-lookup identity"]
+async fn e2e_release_corrective_full_lookup_checks_the_base() {
+    corrective_lookup_checks_the_base(1).await;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one evidence matrix at either corrective lookup boundary"
+)]
+async fn corrective_lookup_checks_the_base(misses: usize) {
     let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
         return;
     };
@@ -404,7 +534,7 @@ async fn e2e_release_corrective_leading_query_checks_the_base() {
         let counted = reads.clone();
         external_id_query("acct:CORRECT-BASE:corrective:correction-1")
             .respond_with(move |_: &wiremock::Request| {
-                if counted.fetch_add(1, Ordering::SeqCst) < 2 {
+                if counted.fetch_add(1, Ordering::SeqCst) < misses {
                     not_found()
                 } else {
                     Doc {
@@ -415,7 +545,7 @@ async fn e2e_release_corrective_leading_query_checks_the_base() {
                     .response()
                 }
             })
-            .expect(3)
+            .expect(u64::try_from(misses + 1).expect("query count"))
             .mount(&mock)
             .await;
         number_query("SZ-A")
@@ -440,20 +570,30 @@ async fn e2e_release_corrective_leading_query_checks_the_base() {
             .await;
         assert_eq!(reply.status, 200, "{}", reply.body);
         if base == Some("SZ-A") {
-            assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+            assert_eq!(
+                reply.body["outcome"],
+                if misses == 1 {
+                    "already_issued"
+                } else {
+                    "issued"
+                },
+                "{}",
+                reply.body
+            );
             assert_eq!(reply.body["invoice_number"], "HS-FOUND");
         } else {
             assert_eq!(reply.body["outcome"], "conflict", "{}", reply.body);
             assert_eq!(reply.body["conflict_reason"], "external_id_collision");
         }
-        assert_eq!(reads.load(Ordering::SeqCst), 3);
-        assert!(
+        assert_eq!(reads.load(Ordering::SeqCst), misses + 1);
+        assert_eq!(
             restate
                 .admin()
                 .runs(reply.invocation_id())
                 .await
                 .iter()
-                .any(|run| run == "arm-write")
+                .any(|run| run == "arm-write"),
+            misses == 2
         );
         assert_eq!(
             restate

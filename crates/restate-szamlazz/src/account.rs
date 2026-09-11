@@ -97,6 +97,65 @@ impl Account {
             credential_ref: credential_ref.into(),
         }
     }
+
+    /// Validate configuration-owned language and XML text before using the account.
+    /// Per-document requirements (including an explicit exchange rate) are checked
+    /// after caller overrides are applied. Resolver-owned ids and credential
+    /// references are opaque and are not document text.
+    ///
+    /// # Errors
+    /// Returns the invalid field and rule, never its configured value.
+    pub fn validate(&self) -> Result<(), InvalidAccount> {
+        self.defaults
+            .language
+            .parse::<szamlazz_agent::Language>()
+            .map_err(|_| InvalidAccount {
+                field: "defaults.language",
+                rule: "unknown document language",
+            })?;
+        for (field, value) in [
+            ("defaults.currency", Some(self.defaults.currency.as_str())),
+            (
+                "defaults.exchange_rate_bank",
+                Some(self.defaults.exchange_rate_bank.as_str()),
+            ),
+            ("defaults.template", self.defaults.template.as_deref()),
+            (
+                "defaults.number_prefix",
+                self.defaults.number_prefix.as_deref(),
+            ),
+            ("defaults.extra_logo", self.defaults.extra_logo.as_deref()),
+            ("defaults.aggregator", self.defaults.aggregator.as_deref()),
+            ("seller.bank", self.seller.bank.as_deref()),
+            ("seller.bank_account", self.seller.bank_account.as_deref()),
+            ("seller.signer_name", self.seller.signer_name.as_deref()),
+            (
+                "seller.email.reply_to",
+                self.seller.email.reply_to.as_deref(),
+            ),
+            ("seller.email.subject", self.seller.email.subject.as_deref()),
+            ("seller.email.body", self.seller.email.body.as_deref()),
+        ] {
+            if let Some(value) = value {
+                szamlazz_agent::wire::validate_xml_text(value).map_err(|_| InvalidAccount {
+                    field,
+                    rule: "must be XML 1.0 text",
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An invalid account configuration value, with a safe field-level diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{field}: {rule}")]
+#[non_exhaustive]
+pub struct InvalidAccount {
+    /// The configuration field, never its value.
+    pub field: &'static str,
+    /// The rule the field violates.
+    pub rule: &'static str,
 }
 
 /// Document defaults. [`DocumentOverrides`](crate::contract::DocumentOverrides)

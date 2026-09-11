@@ -85,6 +85,25 @@ fn marker_identity_round_trips_and_unknown_state_fails_closed() {
 }
 
 #[test]
+fn marker_order_identity_is_exact_even_though_general_order_parsing_trims() {
+    for order in [" ORD-1", "ORD-1 ", "\tORD-1\n", "\u{a0}ORD-1"] {
+        assert_eq!(
+            order
+                .parse::<restate_szamlazz::OrderKey>()
+                .expect("general parser")
+                .as_str(),
+            "ORD-1"
+        );
+        let mut wire = marker();
+        wire["order"] = json!(order);
+        assert!(
+            serde_json::from_value::<UnresolvedWrite>(wire).is_err(),
+            "{order:?}"
+        );
+    }
+}
+
+#[test]
 fn recovery_requires_exact_marker_and_explicit_evidence() {
     let request = json!({"marker": marker(), "evidence": {
         "type": "not_executed", "audit_reference": "INC-216",

@@ -160,6 +160,13 @@ Both configuration types only implement `Deserialize`; the host chooses the file
   `Arc::clone(&db)` inferring `Arc::<dyn AccountResolver>::clone` where `db.clone()` coerces. The checklist a
   resolver of your own must guarantee is on the `AccountResolver` and `CredentialStore` rustdoc.
 
+Account defaults and seller text are validated separately from caller documents. Static resolver construction
+rejects unknown document languages and XML-forbidden configuration text. A dynamically resolved account is
+validated after its journaled resolution, before document reads or write arming; invalid configuration produces
+`unavailable` with the field and rule, never the configured value. Correct the deployment configuration and
+use a fresh invocation; the retained invocation keeps its original account. Invalid caller overrides remain
+`invalid_input`. A non-MNB default bank is allowed when callers supply explicit exchange rates.
+
 Neither service holds a gateway or a client: every handler resolves its account and opens a `Gateway` for its own
 execution. Going from `[account]` to `[accounts.<scope>]` is a flag day: settle external uncertainty and recover
 every unresolved marker under its original scope first. Only then is no data migration needed, as scripted in
@@ -432,6 +439,8 @@ trailing whitespace is refused as `invalid_input` naming the rule (see "Identity
 service issues carries. Every composition is at most `ExternalId::MAX_LEN` = 110 bytes (the length verified
 accepted and queryable) because its parts are bounded (namespace 16, order key, correction id and invoice number
 40 each), which `const` assertions prove for the longest shape of each (109 for the corrective).
+The two storno constructors take `&InvoiceNumber` (the validated worker type), rather than `&str`.
+`ExternalId::new` wraps an arbitrary id without these composition guarantees.
 
 ### Configuration
 
@@ -980,7 +989,8 @@ The new request shapes are:
     "buyer": {"name": "Kovács Bt.", "zip": "2030", "city": "Érd", "address": "Tárnoki út 23."},
     "items": [{"name": "Consulting", "quantity": "1", "unit": "db", "unit_price": "1000", "vat_rate": "27"}],
     "fulfillment_date": "2026-09-10",
-    "due_date": "2026-09-18"
+    "due_date": "2026-09-18",
+    "payment_method": "transfer"
   },
   "options": {"reissue": {"expected_number": "SZ-A"}}
 }

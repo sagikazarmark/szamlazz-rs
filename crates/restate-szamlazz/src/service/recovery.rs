@@ -372,8 +372,8 @@ fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<Unresolve
             }
         }
         WriteOperation::Storno { number } => {
-            number.parse::<crate::identity::InvoiceNumber>().ok()?;
-            ExternalId::for_storno(&marker.namespace, &marker.order, number)
+            let number = number.parse::<crate::identity::InvoiceNumber>().ok()?;
+            ExternalId::for_storno(&marker.namespace, &marker.order, &number)
         }
         WriteOperation::Delete { number } => {
             number.parse::<crate::identity::InvoiceNumber>().ok()?;

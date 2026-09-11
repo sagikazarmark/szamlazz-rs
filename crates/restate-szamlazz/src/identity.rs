@@ -757,7 +757,8 @@ impl ExternalId {
             .any(|token| token.eq_ignore_ascii_case(value))
     }
 
-    /// Wraps an id.
+    /// Wraps an arbitrary id without validation. Use the `for_*` constructors
+    /// for worker identities with bounded, validated components.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -781,7 +782,11 @@ impl ExternalId {
     /// The id sent on the storno of `original_number`, a document of `order`:
     /// `{namespace}:{order}:storno:{original_number}`.
     #[must_use]
-    pub fn for_storno(namespace: &Namespace, order: &OrderKey, original_number: &str) -> Self {
+    pub fn for_storno(
+        namespace: &Namespace,
+        order: &OrderKey,
+        original_number: &InvoiceNumber,
+    ) -> Self {
         Self(format!(
             "{namespace}:{order}:{}:{original_number}",
             Self::STORNO
@@ -791,7 +796,7 @@ impl ExternalId {
     /// The id sent on the storno of `number`, a document no `Order` manages:
     /// `{namespace}:by-number:{number}:storno`.
     #[must_use]
-    pub fn for_unmanaged_storno(namespace: &Namespace, number: &str) -> Self {
+    pub fn for_unmanaged_storno(namespace: &Namespace, number: &InvoiceNumber) -> Self {
         Self(format!(
             "{namespace}:{}:{number}:{}",
             Self::BY_NUMBER,
@@ -1081,11 +1086,12 @@ mod tests {
             "acct:ORD-1:corrective:c-3"
         );
         assert_eq!(
-            ExternalId::for_storno(&namespace(), &order, "SZ-1").as_str(),
+            ExternalId::for_storno(&namespace(), &order, &"SZ-1".parse().expect("number")).as_str(),
             "acct:ORD-1:storno:SZ-1"
         );
         assert_eq!(
-            ExternalId::for_unmanaged_storno(&namespace(), "SZ-9").as_str(),
+            ExternalId::for_unmanaged_storno(&namespace(), &"SZ-9".parse().expect("number"))
+                .as_str(),
             "acct:by-number:SZ-9:storno"
         );
         assert_eq!(
@@ -1107,7 +1113,7 @@ mod tests {
         let namespace: Namespace = "n".repeat(Namespace::MAX_LEN).parse().expect("namespace");
         let order = OrderKey::parse(&"o".repeat(OrderKey::MAX_LEN)).expect("order");
         let correction: CorrectionId = "c".repeat(CorrectionId::MAX_LEN).parse().expect("id");
-        let number = "s".repeat(InvoiceNumber::MAX_LEN);
+        let number = "s".repeat(InvoiceNumber::MAX_LEN).parse().expect("number");
 
         let longest_kind = DocumentKind::ALL
             .into_iter()

@@ -32,9 +32,16 @@ async fn e2e_recovery_unreadable_state_blocks_every_mutation() {
                 .build(),
         )
         .await;
-    for (index, corruption) in ["encoding", "json", "version", "identity", "operation"]
-        .into_iter()
-        .enumerate()
+    for (index, corruption) in [
+        "encoding",
+        "json",
+        "version",
+        "identity",
+        "padded-order",
+        "operation",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let key = format!("UNREADABLE-{index}");
         let marker = json!({"version":1,"token":"owner","owner_invocation":"owner","created_at":"2026-09-11T12:00:00Z","scope":null,"order":key,"namespace":"acct","external_id":format!("acct:{key}:invoice"),"account_id":"acct","endpoint":mock.uri(),"credential_ref":"acct","operation":{"type":"create","kind":"invoice","expected_number":null,"corrected_number":null}});
@@ -48,6 +55,10 @@ async fn e2e_recovery_unreadable_state_blocks_every_mutation() {
             }
             "identity" => {
                 changed["external_id"] = json!("acct:ANOTHER:invoice");
+                serde_json::to_vec(&changed).expect("bytes")
+            }
+            "padded-order" => {
+                changed["order"] = json!(format!(" {key} "));
                 serde_json::to_vec(&changed).expect("bytes")
             }
             _ => {

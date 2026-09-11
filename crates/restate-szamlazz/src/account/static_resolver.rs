@@ -219,6 +219,14 @@ impl fmt::Display for AccountTable {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StaticConfigError {
+    /// A document default or seller value violates its language or XML contract.
+    #[error("{table}: {source}")]
+    InvalidAccount {
+        /// The account's table.
+        table: AccountTable,
+        /// The invalid field and rule, without its value.
+        source: super::InvalidAccount,
+    },
     /// Both `[account]` and `[accounts]` are present.
     #[error("[account] and [accounts.<scope>] are mutually exclusive; configure one shape")]
     BothShapes,
@@ -359,6 +367,12 @@ impl Entry {
         account.endpoint = endpoint;
         account.defaults = defaults;
         account.seller = seller;
+        account
+            .validate()
+            .map_err(|source| StaticConfigError::InvalidAccount {
+                table: table.clone(),
+                source,
+            })?;
         Ok(Self {
             account,
             credentials: Credentials::agent_key(agent_key.expose()),

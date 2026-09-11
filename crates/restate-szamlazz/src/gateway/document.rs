@@ -154,6 +154,12 @@ impl FoundDocument {
             && self.referenced_invoice_number.as_deref() == Some(number)
     }
 
+    /// Whether the corrective names the intended original invoice.
+    pub(crate) fn is_corrective_of(&self, number: &str) -> bool {
+        self.document_type == DocumentType::Corrective
+            && self.referenced_invoice_number.as_deref() == Some(number)
+    }
+
     /// Whether the document is a legal invoice of the kinds an order carries:
     /// `SZ`, `ES` or `VS`. What the order-number hint treats as a *Foreign
     /// document* when it is live and not ours; stornos, correctives,

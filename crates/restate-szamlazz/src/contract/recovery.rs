@@ -163,6 +163,7 @@ pub struct UnresolvedWrite {
     /// Restate scope, including unscoped as a distinct value.
     pub scope: Option<String>,
     /// Exact Order key.
+    #[serde(deserialize_with = "exact_order_key")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub order: OrderKey,
     /// Pinned deployment namespace.
@@ -178,6 +179,16 @@ pub struct UnresolvedWrite {
     pub credential_ref: String,
     /// Minimal operation-specific recovery intent.
     pub operation: WriteOperation,
+}
+
+fn exact_order_key<'de, D: Deserializer<'de>>(de: D) -> Result<OrderKey, D::Error> {
+    let value = String::deserialize(de)?;
+    if value.trim() != value {
+        return Err(serde::de::Error::custom(
+            "marker order must not have leading or trailing whitespace",
+        ));
+    }
+    value.parse().map_err(serde::de::Error::custom)
 }
 
 /// Explicit affirmative operator assertion, never vendor proof.

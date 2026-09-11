@@ -339,7 +339,14 @@ fn resolution(result: Result<Account, ResolveError>) -> Result<Resolution, Resol
 /// of this deployment, and no retry with the same request changes that.
 fn account_of(resolution: Resolution) -> Result<Account, Fault> {
     match resolution {
-        Resolution::Account(account) => Ok(*account),
+        Resolution::Account(account) => {
+            account.validate().map_err(|error| {
+                Fault::unavailable(format!(
+                    "invalid account configuration: {error}; contact the deployment operator"
+                ))
+            })?;
+            Ok(*account)
+        }
         Resolution::Unscoped => Err(Fault::unknown_account(
             "no account is reachable unscoped: this deployment serves accounts by scope, send the request under the account's scope (/restate/scope/{scope}/call/…)",
         )),

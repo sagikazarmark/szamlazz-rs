@@ -435,10 +435,10 @@ pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
 async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
-    number: &str,
+    number: &crate::identity::InvoiceNumber,
 ) -> Result<Option<String>, HandlerError> {
     let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
-    let looked_up = number.to_owned();
+    let looked_up = number.to_string();
     let Some(outcome) = run_best_effort(
         ctx,
         format!("lookup-storno-{number}"),
@@ -470,9 +470,9 @@ impl Execution {
             invoice_number: number,
             comment,
         } = request;
-        let number = String::from(number);
         let namespace = &self.config.namespace;
         let storno_id = ExternalId::for_storno(namespace, &order, &number);
+        let number = String::from(number);
 
         // Step 1: verify the document.
         let found = match self
@@ -604,7 +604,8 @@ impl Execution {
             invoice_number: number,
             comment,
         } = request;
-        let number = String::from(number);
+        let validated_number = number;
+        let number = validated_number.to_string();
         let namespace = &self.config.namespace;
 
         // Step 1: verify the document.
@@ -618,7 +619,8 @@ impl Execution {
                 // best effort: ours when a storno of ours holds the by-number
                 // storno id, unknown otherwise; a cancelled invocation
                 // propagates as such.
-                let storno_number = storno_number_of_unmanaged(ctx, self, &number).await?;
+                let storno_number =
+                    storno_number_of_unmanaged(ctx, self, &validated_number).await?;
                 return Ok(reversed_response(&number, storno_number));
             }
         }
@@ -628,7 +630,7 @@ impl Execution {
             &found,
             &self.account,
             number.clone(),
-            ExternalId::for_unmanaged_storno(namespace, &number),
+            ExternalId::for_unmanaged_storno(namespace, &validated_number),
             comment,
         )?;
 
@@ -714,7 +716,8 @@ mod tests {
 
         for reconciliation in [api_error("7", "not found"), ResponseTemplate::new(503)] {
             let server = MockServer::start().await;
-            let id = ExternalId::for_unmanaged_storno(&namespace(), "SZ-1");
+            let id =
+                ExternalId::for_unmanaged_storno(&namespace(), &"SZ-1".parse().expect("number"));
             Mock::given(body_string_contains(id.as_str()))
                 .and(body_string_contains("action-szamla_agent_xml"))
                 .respond_with(api_error("7", "not found"))
