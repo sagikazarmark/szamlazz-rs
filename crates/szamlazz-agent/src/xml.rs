@@ -421,7 +421,7 @@ fn validate_declaration(decl: &BytesDecl<'_>) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// Namespaces in XML requires NCName PI targets (no colon), with the reserved
+/// Namespaces in XML requires `NCName` PI targets (no colon), with the reserved
 /// XML target excluded. Non-ASCII name characters remain legal.
 fn valid_pi_target(value: &str) -> bool {
     let mut chars = value.chars();

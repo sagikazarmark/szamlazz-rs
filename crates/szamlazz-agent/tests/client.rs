@@ -62,6 +62,49 @@ fn sample_invoice() -> CreateInvoice {
     )
 }
 
+/// Intentional empty replacement uses the normal checked transport; leaving a
+/// registration unfinished still fails before sending anything.
+#[tokio::test]
+async fn clears_credit_entries_only_through_explicit_request() {
+    use szamlazz_agent::ops::credit_entry::{ClearCreditEntries, RegisterCreditEntry};
+    use szamlazz_agent::wire::AgentRequest;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>I-1</szamlaszam><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg></xmlszamlavalasz>"#,
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_for(server.uri());
+    assert!(matches!(
+        client.send(&RegisterCreditEntry::new("I-1")).await,
+        Err(ClientError::Request(
+            szamlazz_agent::RequestError::EmptyCreditEntryReplace
+        ))
+    ));
+    let request = ClearCreditEntries {
+        issuer_tax_number: Some("12345678-1-13".into()),
+        aggregator: Some("shop".into()),
+        ..ClearCreditEntries::new("I-1")
+    };
+    let wire = request
+        .to_wire(&Credentials::agent_key("key"))
+        .expect("checked clear");
+    let body = String::from_utf8(wire.body).expect("UTF-8");
+    assert!(body.contains("name=\"action-szamla_agent_kifiz\""));
+    assert!(body.contains("<szamlaszam>I-1</szamlaszam><adoszam>12345678-1-13</adoszam><additiv>false</additiv><aggregator>shop</aggregator><valaszVerzio>2</valaszVerzio>"));
+    assert!(!body.contains("<kifizetes>"));
+    let balance = client.send(&request).await.expect("acknowledged");
+    assert_eq!(balance.invoice_number.as_str(), "I-1");
+    assert_eq!(balance.outstanding, Some(dec!(1270)));
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body, body.as_bytes());
+}
+
 #[tokio::test]
 async fn sends_multipart_and_parses_success() {
     let server = MockServer::start().await;

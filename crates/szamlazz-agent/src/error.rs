@@ -538,12 +538,9 @@ pub enum RequestError {
     /// or by the shared order number.
     #[error("a final invoice requires a prepayment invoice number or order number")]
     MissingPrepaymentReference,
-    /// A replacing credit-entry request (`additiv = false`, the default) with
-    /// no entries would replace the invoice's payments with nothing (clear
-    /// them). The schema allows it, so the crate refuses it before the wire:
-    /// a request built with `RegisterCreditEntry::new` and never given its
-    /// entries must not wipe an invoice. Clearing an invoice's credit entries
-    /// is not offered as an operation.
+    /// An unfinished replacing registration has no entries. The schema permits
+    /// empty replacement, but it must be requested explicitly with
+    /// [`ClearCreditEntries`](crate::ops::credit_entry::ClearCreditEntries).
     #[error(
         "a replacing credit-entry request needs at least one entry: with none it would clear the invoice's payments"
     )]

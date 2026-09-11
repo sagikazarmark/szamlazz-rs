@@ -564,20 +564,17 @@ fn numbered_56_header_fallback_requires_absent_or_valid_body_identity() {
                 let raw = RawResponse::new(headers.clone(), format!(
                     r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod>{identity}{metadata}</xmlszamlavalasz>"#
                 ).into_bytes()).with_status(200);
-                match expected_number {
-                    Some(number) => {
-                        let issued = request.parse(&raw).expect("usable identity");
-                        assert_eq!(issued.invoice_number.as_str(), number);
-                        assert!(issued.notification_delivery_failed);
-                        assert_eq!(issued.gross_total, None);
-                    }
-                    None => {
-                        let error = request
-                            .parse(&raw)
-                            .expect_err("invalid identity remains uncertain");
-                        assert_eq!(error.outcome_class(), szamlazz_agent::OutcomeClass::Unknown);
-                        assert!(matches!(error, ResponseError::Parse(_)));
-                    }
+                if let Some(number) = expected_number {
+                    let issued = request.parse(&raw).expect("usable identity");
+                    assert_eq!(issued.invoice_number.as_str(), number);
+                    assert!(issued.notification_delivery_failed);
+                    assert_eq!(issued.gross_total, None);
+                } else {
+                    let error = request
+                        .parse(&raw)
+                        .expect_err("invalid identity remains uncertain");
+                    assert_eq!(error.outcome_class(), szamlazz_agent::OutcomeClass::Unknown);
+                    assert!(matches!(error, ResponseError::Parse(_)));
                 }
             }
         }

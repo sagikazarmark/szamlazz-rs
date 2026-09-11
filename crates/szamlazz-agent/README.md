@@ -12,8 +12,10 @@ The core performs no I/O: request types serialize into a ready-to-send `WireRequ
 See the shared [testing guide](../../docs/testing.md) for offline checks and
 manual `cargo live` / `cargo probes` commands. Vendor-live tests stay ignored
 even with credentials present. Core coverage is a paper invoice/credit-entry/
-storno lifecycle, verified proforma deletion, and a read-only taxpayer smoke;
-mismatching storno appearances are separately selected probes.
+storno lifecycle, verified proforma deletion, and a read-only taxpayer smoke.
+Separately selected probes cover mismatching storno appearances, explicit empty
+credit-entry replacement, and receipt lifecycle, automatic MNB and email resend.
+New probes are executable checks, not evidence of a vendor run until executed.
 
 ## Quick Start
 
@@ -353,7 +355,7 @@ The [vendor authentication guidance](https://docs.szamlazz.hu/agent/basics/authe
 |---|---|
 | Invoice, proforma, prepayment invoice, final invoice, corrective invoice, or delivery note | `ops::invoice::CreateInvoice`, with the kind selected by `InvoiceKind`; answers a `CreationOutcome` (`Issued(CreatedInvoice)` or `Preview`) |
 | Storno an invoice | `ops::storno::StornoInvoice`; answers the storno `CreatedInvoice` (check `reverses`) |
-| Register credit entries | `ops::credit_entry::RegisterCreditEntry`; answers the `InvoiceBalance` |
+| Register or explicitly clear credit entries | `ops::credit_entry::{RegisterCreditEntry, ClearCreditEntries}`; answers the `InvoiceBalance` |
 | Query invoice PDF or full XML | `ops::query_pdf::QueryInvoicePdf`, `ops::query_xml::QueryInvoiceXml`, both by an `InvoiceSelector` |
 | Delete a proforma | `ops::proforma::DeleteProforma` |
 | Create, storno, query, or send receipts | `ops::receipt::*`; the first three answer a `Receipt` |
@@ -392,13 +394,29 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
 - A body download that fails after headers arrive returns `ClientError::IncompleteResponse` with `client::IncompleteResponse { status, headers, source }`. Raw headers preserve repeated values and may contain session cookies; its `Debug` lists header names only. This error remains `OutcomeClass::Unknown`, even with number/error headers: the unread body could contradict them. Use the evidence to reconcile, never turn it into a completed response with an invented empty body.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client has no application-level retry/recovery loop. Supplied HTTP clients retain their retry policies; one `send` need not mean one POST, and transport retries do not perform reconciliation.
-- A replacing credit-entry request (`RegisterCreditEntry` with `additive: false`, the default) with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`): the schema allows it and it would clear the invoice's payments. Clearing is not offered as an operation until the server's behaviour on it is verified.
+- An unfinished replacing `RegisterCreditEntry` with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`). Use `ClearCreditEntries` for intentional empty replacement, the documented `additiv=false` / zero-`kifizetes` shape. Its exact deployed effect remains unverified until the opt-in probe is run; query the invoice afterward. A lost answer does not authorize repeating a clear over intervening credit entries.
 - `HttpStatus` and `UnexpectedBody` diagnostics quote bounded body excerpts (`error::BODY_EXCERPT_LEN`, with the total length noted). Other API/parser messages may contain full upstream text; the verbatim `ApiError.message` is not truncated. `RawResponse`'s `Debug` redacts `Set-Cookie` and prints the body length, but other headers remain visible. Apply your application's logging policy to these messages and headers.
 - A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live".
 - The vocabulary follows the domain: a `kifizetes` registered against an invoice is a *credit entry* (`CreditEntry` out, `RecordedCreditEntry` back, `InvoiceDocument::credit_entries`; its `jogcim` is the `title`, a `PaymentMethod` on both sides), a `stornozott` receipt is *reversed*, and a queried document's `eszamla` is its `appearance` (a code), while the `e_invoice` of a create or storno request is a flag.
 - Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
 
 ## Breaking Changes in 0.4
+
+`ops::credit_entry::ClearCreditEntries` adds an explicit checked empty-replacement
+request without changing existing registration defaults or the unfinished-request
+guard. Both forms use the same writer and `InvoiceBalance` parser:
+
+```rust
+use szamlazz_agent::ops::credit_entry::ClearCreditEntries;
+use szamlazz_agent::wire::AgentRequest;
+use szamlazz_agent::Credentials;
+
+let request = ClearCreditEntries::new("E-TST-2026-1");
+let wire = request.to_wire(&Credentials::agent_key("your-agent-key"))?;
+// Send once through your transport, or use client.send(&request).await.
+// Query the invoice to verify its credit entries; reconcile an uncertain answer.
+# Ok::<(), szamlazz_agent::RequestError>(())
+```
 
 Interrupted body downloads now return `ClientError::IncompleteResponse` instead
 of `Transport`, retaining received evidence and the reqwest source. Receipt

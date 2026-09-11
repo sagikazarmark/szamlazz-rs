@@ -1,5 +1,6 @@
 //! Credit-entry registration (`xmlszamlakifiz`): records credit entries
-//! against an existing invoice and answers its balance.
+//! against an existing invoice and answers its balance. [`ClearCreditEntries`]
+//! explicitly requests replacement with an empty set.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -146,9 +147,10 @@ pub enum CreditEntriesError {
 /// Registers up to five credit entries against the invoice named by
 /// [`RegisterCreditEntry::invoice_number`]. Unless
 /// [`RegisterCreditEntry::additive`] is set, the entries *replace* the
-/// invoice's existing credit entries, so a replacing request with no
-/// entries would clear them, and is refused by [`validate`](AgentRequest::validate)
-/// ([`RequestError::EmptyCreditEntryReplace`]).
+/// invoice's existing credit entries. An unfinished replacing request with no
+/// entries is refused by [`validate`](AgentRequest::validate)
+/// ([`RequestError::EmptyCreditEntryReplace`]); use [`ClearCreditEntries`] to
+/// intentionally request empty replacement.
 #[doc(alias = "xmlszamlakifiz")]
 #[doc(alias = "jóváírás")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -176,7 +178,7 @@ impl RegisterCreditEntry {
     /// A credit-entry request for the given invoice with no entries yet;
     /// existing entries are replaced (`additive` is `false`). Set
     /// [`entries`](Self::entries) before sending: a replacing request with
-    /// none is refused, since it would clear the invoice's payments.
+    /// none is refused. For intentional empty replacement use [`ClearCreditEntries`].
     pub fn new(invoice_number: impl Into<InvoiceNumber>) -> Self {
         Self {
             invoice_number: invoice_number.into(),
@@ -188,8 +190,67 @@ impl RegisterCreditEntry {
     }
 }
 
+/// Intentionally replace an invoice's credit entries with an empty set.
+///
+/// Uses the same `xmlszamlakifiz` operation as [`RegisterCreditEntry`], with
+/// `additiv=false` and no `kifizetes` elements, as permitted by the
+/// [request definition](https://docs.szamlazz.hu/agent/credit_entry/xml).
+/// This expresses clearing intent; the deployed server's zero-entry behavior
+/// has not yet been established by the repository's live evidence. Query the
+/// invoice afterward to verify the effect. An uncertain answer does not justify
+/// repeating the request: it could remove entries registered in the meantime.
+/// See [recovery](crate::error#recovery).
+///
+/// Optional issuer tax number and aggregator have the same meanings as on
+/// [`RegisterCreditEntry`]. There is deliberately no entries or additive field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearCreditEntries {
+    /// The invoice whose credit entries are to be cleared (`szamlaszam`).
+    pub invoice_number: InvoiceNumber,
+    /// Tax number of the invoice issuer (`adoszam`).
+    pub issuer_tax_number: Option<String>,
+    /// Aggregator identifier (`aggregator`).
+    pub aggregator: Option<String>,
+}
+
+impl ClearCreditEntries {
+    /// Explicit empty replacement for the given invoice.
+    #[must_use]
+    pub fn new(invoice_number: impl Into<InvoiceNumber>) -> Self {
+        Self {
+            invoice_number: invoice_number.into(),
+            issuer_tax_number: None,
+            aggregator: None,
+        }
+    }
+
+    fn registration(&self) -> RegisterCreditEntry {
+        RegisterCreditEntry {
+            issuer_tax_number: self.issuer_tax_number.clone(),
+            aggregator: self.aggregator.clone(),
+            ..RegisterCreditEntry::new(self.invoice_number.clone())
+        }
+    }
+}
+
+impl AgentRequest for ClearCreditEntries {
+    const ACTION: &'static str = RegisterCreditEntry::ACTION;
+    type Response = InvoiceBalance;
+
+    fn write_xml(&self, credentials: &Credentials) -> Vec<u8> {
+        // Share the exact operation writer, intentionally bypassing only the
+        // unfinished-registration guard. `to_wire` still checks XML characters.
+        self.registration().write_xml(credentials)
+    }
+
+    fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
+        self.registration().parse(response)
+    }
+}
+
 /// The invoice's balance after the credit entries were registered: the reply
-/// of [`RegisterCreditEntry`].
+/// of [`RegisterCreditEntry`] or [`ClearCreditEntries`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoiceBalance {

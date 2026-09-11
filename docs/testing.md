@@ -23,8 +23,8 @@ names, but retain non-ignored helper tests in the worker's `e2e` binary (includi
 the two `only_tests::e2e_only_*` filter helpers). `e2e` includes the library's
 three execution/cancellation scenarios as well as the integration binary, and
 selects actual Restate with mocked szamlazz.hu; `live` selects exactly five
-scenarios across the two `live` binaries; `probes` selects only the two
-mismatching-appearance cases. A profile does not unignore a test: the external
+scenarios across the two `live` binaries; `probes` selects seven investigative
+cases (two appearance, two clearing, and three receipt probes). A profile does not unignore a test: the external
 commands must supply `--run-ignored only`. Nextest fails empty runs by default;
 do not override that behavior.
 
@@ -116,15 +116,57 @@ Core scenarios:
 5. Read-only taxpayer lookup: valid and nonblank identity, no pinned company
    name/address. A NAV dependency failure fails this smoke explicitly.
 
-`cargo probes` runs only the two #73 mismatching storno appearance experiments
-(electronic→paper and paper→electronic). The established finding remains: storno
-takes the request's appearance, with no server correction for a mismatch. The
-matching cases now belong to the core lifecycles. Run probes for a specific
-investigation, not before every release.
+### Separately selected investigative probes
+
+Select a specific experiment rather than running the entire probe set by default:
+
+```sh
+cargo probes -E 'test(clear_credit_entries)'
+cargo probes -E 'test(electronic_original_paper_storno) | test(paper_original_electronic_storno)'
+
+# Use a configured receipt-only prefix on the intended test account.
+export SZAMLAZZ_RECEIPT_PREFIX="NYGTA"
+cargo probes -E 'test(receipt_lifecycle)'
+cargo probes -E 'test(receipt_automatic_mnb)'
+
+# The email probe deliberately requests two emails to an operator-controlled inbox.
+export SZAMLAZZ_RECEIPT_EMAIL="operator@example.com"
+cargo probes -E 'test(receipt_email_resend)'
+```
+
+- **Clearing:** independent populated/already-empty tests each create a test
+  invoice and verify its initial empty entries. The populated case registers
+  and reads back one credit entry first. Each sends `ClearCreditEntries` and
+  checks echoed number, outstanding gross and empty queried entries. Filter
+  `clear_credit_entries_already_empty` to run that case even if populated clearing fails.
+  A refusal or unchanged entries fails the hypothesis; the new probe is not a
+  recorded confirmation of clearing behavior.
+- **Receipt lifecycle:** creates one fractional-net HUF receipt with a stable
+  logged call id and unique order, queries by number and order, checks PDF,
+  identity, totals and tenders. Deliberately repeats only the completed verified
+  create, expecting 338; then reverses and queries both original and SN. Checks
+  `%PDF-` signatures for create, query and storno replies, not full PDF rendering.
+- **Automatic MNB:** creates a EUR receipt with bank MNB and no numeric rate;
+  verifies a positive stored rate, currency and total, then reverses it.
+- **Email:** supplies all four email details, then requests empty-block resend
+  only after the first acknowledgement. Both acknowledgements are checked;
+  inspect the inbox for two messages with the printed unique subject. A passing
+  protocol check alone does not prove delivery or inherited contents.
+- **Appearance:** the two #73 electronic→paper and paper→electronic storno
+  experiments retain their existing assertions. Matching cases are core journeys.
+
+Receipt prefix and inbox settings are checked before creation when needed.
+Unanswered writes defer receipt cleanup; known receipts are otherwise reversed
+by number, with SN type/original reference and original reversal verified.
+Receipt call ids, order and numbers are printed before/after writes. Keep the
+output as the recovery record; rerunning generates a new logical operation.
+These probes were added from documentation hypotheses. Record actual dated
+results separately before promoting them into verified behavior or core tests.
 
 ### Dagger secrets and execution freshness
 
-`ci.live(agentKey: Secret, runId: String, probes: Boolean = false)` is manual and
+`ci.live(agentKey: Secret, runId: String, probes: Boolean = false,
+receiptPrefix: String = "", receiptEmail: String = "")` is manual and
 has no `@check`. It injects the key with `withSecretVariable`, never a command
 literal. Give **each deliberate execution a fresh non-secret run id**:
 
@@ -141,6 +183,10 @@ JUnit timestamps to establish a second run executed. Reusing a run id with the
 same inputs may return cached evidence. Never rerun an uncertain write merely
 to obtain a new report. Reports are returned on success; failures and kept
 server logs remain in the Dagger trace.
+
+The Dagger `probes: true` mode selects all seven experiments and requires
+`receiptPrefix` and an operator-controlled `receiptEmail`. It deliberately
+requests two emails. Use the local filtered commands above for individual probes.
 
 ### Evidence and cleanup
 
@@ -163,4 +209,4 @@ best-effort, not rollback, and cannot run after a process abort.
 
 This small live suite is release evidence about persisted business facts, not
 proof of exactly-once effects under arbitrary vendor delays. Historical go-live
-probes and receipt expansion remain separately selected work.
+probes, including receipt expansion, remain separately selected work.

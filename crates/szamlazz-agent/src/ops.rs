@@ -15,10 +15,11 @@
 //! - **Always written** (`bool`): the element is a required part of the
 //!   request and the server has no default the crate would want to lean on
 //!   (`eszamla`, `szamlaLetoltes`, `pdfLetoltes`, `additiv`, `pdf`).
-//! - **Written only when `true`** (`bool`, `#[serde(default)]`): the element
-//!   is a flag whose absence is exactly `false` on the server, and a request
-//!   that does not set it should read like one that never knew of it
-//!   (`fizetve`, the `InvoiceKind` flags `dijbekero` / `elolegszamla` / …).
+//! - **Written only when `true`** (`bool`, `#[serde(default)]`): the writer
+//!   selects the flag only when enabled (`fizetve`, the `InvoiceKind` flags
+//!   `dijbekero` / `elolegszamla` / …). For `fizetve` this follows the official
+//!   PHP writer; equivalence between omission and explicit false under every
+//!   payment method/account default remains unverified.
 //! - **Tri-state** (`Option<bool>`): the server has a default the caller may
 //!   want to leave in effect, so `None` omits the element and `Some(false)`
 //!   sends an explicit `false` (`sendEmail`, `arresAfa`, `eusAfa`, `guardian`,

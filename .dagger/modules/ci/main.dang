@@ -124,8 +124,11 @@ exit "$status"
   and e-invoice support. A failed write requires reconciliation, not a rerun.
   Returns the JUnit report for archival; full output is in the Dagger trace.
   """
-  live(agentKey: Secret!, runId: String!, probes: Boolean! = false): Directory! {
+  live(agentKey: Secret!, runId: String!, probes: Boolean! = false, receiptPrefix: String! = "", receiptEmail: String! = ""): Directory! {
     if (runId == "") { raise "live requires a fresh non-empty runId" }
+    if (probes and (receiptPrefix == "" or receiptEmail == "")) {
+      raise "all probes require receiptPrefix and an operator-controlled receiptEmail"
+    }
     let profile = "live"
     if (probes) { profile = "probes" }
     self.compiled
@@ -134,6 +137,8 @@ exit "$status"
       .withEnvVariable("CI", "true")
       .withSecretVariable("SZAMLAZZ_AGENT_KEY", agentKey)
       .withEnvVariable("SZAMLAZZ_LIVE_RUN_ID", runId)
+      .withEnvVariable("SZAMLAZZ_RECEIPT_PREFIX", receiptPrefix)
+      .withEnvVariable("SZAMLAZZ_RECEIPT_EMAIL", receiptEmail)
       .withEnvVariable("NEXTEST_PROFILE", profile)
       .withExec(["sh", "-c", self.externalScript])
       .directory("/work/src/target/nextest/" + profile)

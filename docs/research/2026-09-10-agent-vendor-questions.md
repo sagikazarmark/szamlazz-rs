@@ -1,5 +1,10 @@
 # Számla Agent clarification request (draft, not sent)
 
+Updated after the 2026-09-11 review at `837dad0`. Priorities: successful credit
+echo (§3), combined preview (§1), then empty replacement (§6) and paid-state
+semantics (§7). Executable opt-in probes are described in `docs/testing.md`;
+their presence is not a vendor answer or evidence of execution.
+
 ## 1. Preview and simplified invoice image
 
 Current EN/HU inline schemas at
@@ -83,3 +88,46 @@ order and external id as alternative selectors.
 
 Current Rust follows the English/download sequence. No alternative-order live
 probe was run. This entire document remains an unsent draft.
+
+## 6. Explicit empty credit-entry replacement
+
+<https://docs.szamlazz.hu/agent/credit_entry/xml> and the downloadable request
+schema allow zero `kifizetes` elements and say `additiv=false` replaces previous
+entries. The Rust client now exposes that exact request as `ClearCreditEntries`.
+
+- Does a successful zero-entry replacement remove every previous credit entry?
+- Is the same request accepted when the invoice already has no entries?
+- If it is refused or ignored, what is the supported way to clear entries?
+- What balance/number acknowledgement and IPN follow each case?
+- Does issuer-tax-number selection change these semantics for incoming invoices?
+
+The new `clear_credit_entries_populated` and `clear_credit_entries_already_empty`
+probes check those states independently, but have not been run as part of this implementation. Clearing remains a
+documentation-derived intent, not an independently observed effect.
+
+## 7. Paid-state omission versus explicit false
+
+The invoice request schema declares optional boolean `fizetve`, with no default.
+Both Rust and official PHP 2.12.4 emit it only when true.
+
+- Are omission and explicit false equivalent for every supported document kind,
+  payment method (especially cash) and account default?
+- Can false suppress automatic paid treatment? If so, under which settings?
+- Please document the default and provide contrasting requests/results if they differ.
+
+Current Rust emission remains unchanged pending evidence; absence/false
+equivalence is not claimed as a live-tested fact.
+
+## 8. Current NAV taxpayer forwarding
+
+<https://docs.szamlazz.hu/agent/querying_taxpayer/response> shows dated NAV 2.0
+examples while delegating to the NAV 3.0 specification. Rust reads both layouts.
+
+- Which version and optional taxpayer fields does Számla Agent currently forward?
+- Can `funcCode=OK` legitimately omit `taxpayerValidity`? What does that mean?
+- Are generic NAV failure roots forwarded unchanged or wrapped as
+  `QueryTaxpayerResponse`? Please provide full root/namespace, HTTP status and
+  relevant headers for technical/authentication errors.
+
+The parser continues to require validity on OK and never invents false for an
+absent value. Direct NAV possibilities are not treated as Számla Agent guarantees.
