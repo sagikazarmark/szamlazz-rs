@@ -43,9 +43,9 @@ mod scenarios {
     async fn invoice_lifecycle() {
         let mut run = Run::new();
         let result = AssertUnwindSafe(async {
-            let created = run
-                .create(document(InvoiceKind::invoice()), "invoice")
-                .await;
+            let request = document(InvoiceKind::invoice());
+            let fulfillment_date = request.header.fulfillment_date;
+            let created = run.create(request, "invoice").await;
             let number = created.invoice_number.clone();
             assert_pdf(created.pdf.as_ref());
             assert_eq!(created.net_total, Some(dec!(2469)));
@@ -60,7 +60,7 @@ mod scenarios {
                 (dec!(2469), dec!(667), dec!(3136)),
             );
             assert_eq!(original.info.appearance, InvoiceAppearance::Paper);
-            assert_eq!(original.info.fulfillment_date, Some(previous_month()));
+            assert_eq!(original.info.fulfillment_date, Some(fulfillment_date));
             let mut query =
                 QueryInvoiceXml::new(InvoiceSelector::ExternalId(run.external_id("invoice")));
             query.include_pdf = true;
@@ -79,7 +79,7 @@ mod scenarios {
                 )))
                 .await
                 .expect("standalone invoice PDF query");
-            assert_eq!(fetched.invoice_number.as_ref(), Some(&number));
+            assert_reported_number(fetched.invoice_number.as_ref(), &number);
             assert_pdf(Some(&fetched.pdf));
 
             for (amount, additive, expected, outstanding) in [
@@ -99,7 +99,7 @@ mod scenarios {
                 let sent = run.client.send(&request).await;
                 let balance = run.answered(sent);
                 run.unresolved = None;
-                assert_eq!(balance.invoice_number.as_ref(), Some(&number));
+                assert_reported_number(balance.invoice_number.as_ref(), &number);
                 assert_eq!(balance.outstanding, Some(outstanding));
                 let stored = run.by_number(&number).await;
                 let mut amounts: Vec<_> = stored

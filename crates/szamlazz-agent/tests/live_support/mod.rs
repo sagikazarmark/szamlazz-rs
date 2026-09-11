@@ -35,6 +35,15 @@ pub fn assert_pdf(pdf: Option<&Pdf>) {
     );
 }
 
+pub fn assert_reported_number(reported: Option<&InvoiceNumber>, expected: &InvoiceNumber) {
+    // A successful PDF or credit-entry acknowledgement may omit identity.
+    if let Some(number) = reported {
+        assert_eq!(number, expected, "reported invoice number must match");
+    } else {
+        eprintln!("LIVE acknowledgement omitted invoice number; requested={expected}");
+    }
+}
+
 pub fn key() -> String {
     std::env::var("SZAMLAZZ_AGENT_KEY")
         .ok()

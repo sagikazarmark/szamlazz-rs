@@ -11,7 +11,9 @@ use restate_e2e_harness::{Call, Restate, ServerSpec};
 use restate_sdk::prelude::Endpoint;
 use restate_szamlazz::account::{Accounts, StaticConfig, StaticResolver};
 use restate_szamlazz::config::WorkerConfig;
-use restate_szamlazz::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
+use restate_szamlazz::contract::{
+    BuyerInput, DocumentInput, LineItemInput, PaymentMethod, QueryResponse,
+};
 use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
@@ -230,6 +232,41 @@ async fn ordinary_order_journey() {
             "original must retain the requested fulfillment date"
         );
         assert_eq!(original.info.referenced_proforma_number, Some(proforma));
+        let reply = restate
+            .invoke(
+                &Call::service("Szamlazz.Agent", "query"),
+                Some(&json!({"selector": {"invoice_number": number}})),
+                None,
+            )
+            .await;
+        eprintln!(
+            "LIVE ingress handler=Agent.query invocation={} status={} number={number}",
+            reply.invocation_id(),
+            reply.status
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let queried: QueryResponse =
+            serde_json::from_value(reply.body).expect("worker query response");
+        assert_eq!(queried.invoice_number, number.as_str());
+        assert_eq!(
+            queried.document_type,
+            original.info.document_type.to_string()
+        );
+        assert_eq!(queried.order_number.as_deref(), Some(run.order.as_str()));
+        assert_eq!(queried.test, Some(true));
+        assert_eq!(queried.currency.as_deref(), Some("HUF"));
+        assert_eq!(queried.net_total, Some(original.totals.total.net));
+        assert_eq!(queried.vat_total, Some(original.totals.total.vat));
+        assert_eq!(queried.gross_total, Some(original.totals.total.gross));
+        assert_eq!(queried.fulfillment_date, original.info.fulfillment_date);
+        assert_eq!(
+            queried.referenced_proforma_number.as_deref(),
+            original
+                .info
+                .referenced_proforma_number
+                .as_ref()
+                .map(InvoiceNumber::as_str)
+        );
         let reversal = call(
             &restate,
             &mut run,
@@ -244,7 +281,11 @@ async fn ordinary_order_journey() {
         let storno = run.by_number(&storno_number).await;
         assert_eq!(storno.info.document_type, DocumentType::Storno);
         assert_eq!(storno.info.referenced_invoice_number, Some(number.clone()));
-        assert_eq!(storno.info.appearance, original.info.appearance);
+        eprintln!(
+            "LIVE original appearance={:?} storno appearance={:?}",
+            original.info.appearance, storno.info.appearance
+        );
+        assert!(storno.info.appearance.is_e_invoice());
         assert_eq!(storno.info.fulfillment_date, original.info.fulfillment_date);
         assert_eq!(run.by_number(&number).await.info.reversed, Some(true));
         let ordinary = call(

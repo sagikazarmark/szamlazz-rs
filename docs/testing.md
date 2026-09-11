@@ -164,10 +164,11 @@ After a long quiet period, a quarterly manual drift check is reasonable if no
 relevant release has already supplied fresh evidence. Ordinary tests, schemas
 and actual-Restate/mocked-vendor e2e remain regular CI checks.
 
-Select the receipt lifecycle as optional acceptance when receipt functionality
-changes. Clearing, appearance mismatches, automatic MNB and email resend remain
-targeted investigations; clearing stays separate so the core still tests storno
-of a credited invoice. A corrective lifecycle is future optional work if
+Select the receipt lifecycle and populated credit-entry clearing as optional
+acceptance when those capabilities change or are relevant to consumers.
+Already-empty clearing, appearance mismatches, automatic MNB and email resend
+remain targeted investigations; clearing stays separate so the core still tests
+storno of a credited invoice. A corrective lifecycle is future optional work if
 corrections become a main use case, not part of the five-case selection.
 
 Use an intended **test-mode** account with e-invoice and EUR capabilities and
@@ -221,6 +222,7 @@ Core scenarios:
 2. Proforma create/query/delete, then absence by number and external id.
 3. Actual Restate ordinary e-invoice order: account probe, proforma consumption,
    same-key replay and fresh-invocation `already_issued`, live invoice observation,
+   one by-number `Szamlazz.Agent.query` checking public identity, totals and reference,
    storno retaining the original's explicit previous-month fulfillment and
    electronic appearance despite the account's paper default,
    ordinary `reversed`, exact-number reissue, newest external-id holder and stale
@@ -234,12 +236,19 @@ Core scenarios:
 5. Read-only taxpayer lookup: valid, matching tax-number stem and nonblank name, no pinned company
    name/address. A NAV dependency failure fails this smoke explicitly.
 
+PDF and credit-entry acknowledgements may omit the invoice number: a reported
+number must match, and an omitted echo is logged. PDF signatures, credit-entry
+read-backs and financial expectations remain strict. Electronic storno appearance
+is checked as electronic rather than pinned to the original's numeric code;
+both codes are logged. Expected fulfillment dates are retained from the requests.
+
 ### Separately selected investigative probes
 
 Select a specific experiment rather than running the entire probe set by default:
 
 ```sh
-cargo probes -E 'test(clear_credit_entries)'
+# Optional clearing acceptance; already-empty clearing is a separate investigation.
+cargo probes -E 'test(clear_credit_entries_populated)'
 cargo probes -E 'test(electronic_original_paper_storno) | test(paper_original_electronic_storno)'
 
 # Use a configured receipt-only prefix on the intended test account.
@@ -255,7 +264,7 @@ cargo probes -E 'test(receipt_email_resend)'
 - **Clearing:** independent populated/already-empty tests each create a test
   invoice and verify its initial empty entries. The populated case registers
   and reads back one credit entry first. Each sends `ClearCreditEntries` and
-  checks echoed number, outstanding gross and empty queried entries. Filter
+  checks any echoed number, outstanding gross and empty queried entries. Filter
   `clear_credit_entries_already_empty` to run that case even if populated clearing fails.
   A refusal or unchanged entries fails the hypothesis. Both cases passed on an
   operator-confirmed test account on 2026-09-11; see the

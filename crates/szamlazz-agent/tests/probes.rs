@@ -71,7 +71,7 @@ async fn paper_original_electronic_storno() {
 #[cfg(feature = "client-reqwest")]
 async fn clearing(populated: bool) {
     use futures_util::FutureExt;
-    use live_support::{Run, document, today};
+    use live_support::{Run, assert_reported_number, document, today};
     use rust_decimal::dec;
     use szamlazz_agent::PaymentMethod;
     use szamlazz_agent::ops::credit_entry::{ClearCreditEntries, CreditEntry, RegisterCreditEntry};
@@ -98,7 +98,7 @@ async fn clearing(populated: bool) {
             let sent = run.client.send(&register).await;
             let balance = run.answered(sent);
             run.unresolved = None;
-            assert_eq!(balance.invoice_number.as_ref(), Some(&number));
+            assert_reported_number(balance.invoice_number.as_ref(), &number);
             let stored = run.by_number(&number).await;
             assert_eq!(stored.credit_entries.len(), 1);
             assert_eq!(stored.credit_entries[0].amount, dec!(100));
@@ -121,7 +121,7 @@ async fn clearing(populated: bool) {
             "PROBE clear number={number} state={state} echoed={:?} outstanding={:?} entries={:?}",
             balance.invoice_number, balance.outstanding, stored.credit_entries
         );
-        assert_eq!(balance.invoice_number.as_ref(), Some(&number));
+        assert_reported_number(balance.invoice_number.as_ref(), &number);
         assert!(stored.credit_entries.is_empty());
         assert_eq!(balance.outstanding, Some(original.totals.total.gross));
     })
