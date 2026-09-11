@@ -236,22 +236,19 @@ pub(super) enum AnsweredCode {
 
 impl AnsweredCode {
     /// The fault for the code: the one mapping from a szamlazz.hu answer that
-    /// is not a document onto a fault, and the home of the warning that pages
+    /// is not a document onto a fault, and emits the shared warning that pages
     /// the operator on a credential code (tagged with the namespace and the
-    /// code, never the key), emitted here and nowhere else. The mapping is
+    /// code, never the key). Read-only reconciliation emits the same warning
+    /// without raising a terminal fault. The mapping is
     /// the side effect: calling it on a credential code pages, whether or not
-    /// the fault is then raised, and nothing else does, so the `Fault`
+    /// the fault is then raised, so the `Fault`
     /// constructors stay pure and a handler that reads a credential code
     /// pages exactly once, at the site that decides on it. The caller attaches
     /// the document identity it knows ([`Fault::about`]).
     pub(super) fn into_fault(self, namespace: &Namespace) -> Fault {
         match self {
             Self::CredentialsRejected(answer) => {
-                tracing::warn!(
-                    namespace = %namespace,
-                    code = %answer.code,
-                    "szamlazz.hu rejected the agent credentials; fix the account's agent key"
-                );
+                answer.warn_credentials_rejected(namespace);
                 Fault::credentials_rejected(answer)
             }
             Self::Inconclusive(answer) => Fault::inconclusive_answer(answer),

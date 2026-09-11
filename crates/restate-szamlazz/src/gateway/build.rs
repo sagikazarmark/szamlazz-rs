@@ -4,14 +4,26 @@
 use std::str::FromStr as _;
 
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
+use szamlazz_agent::ops::storno::StornoInvoice;
+use szamlazz_agent::wire::AgentRequest;
 use szamlazz_agent::{
     ArithmeticError, Currency, ExchangeRate, InvoiceNumber, InvoiceTemplate, Language,
 };
 
-use super::Gateway;
+use super::{Gateway, StornoStepRequest};
 use crate::account::Account;
 use crate::contract::{DocumentInput, IssuedKind};
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
+
+/// Exercise the exact send-boundary validation without fetching credentials or
+/// retaining the generated body. Dummy credentials are valid XML; the real
+/// credentials remain checked by the client inside the executing operation.
+pub(crate) fn validate_request(
+    request: &impl AgentRequest,
+) -> Result<(), szamlazz_agent::RequestError> {
+    request.to_wire(&szamlazz_agent::Credentials::agent_key("validation"))?;
+    Ok(())
+}
 
 /// The documents a create refers to, by number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -94,6 +106,19 @@ impl Gateway {
 }
 
 impl Account {
+    pub(crate) fn build_storno(&self, request: StornoStepRequest<'_>) -> StornoInvoice {
+        StornoInvoice {
+            e_invoice: request.e_invoice,
+            external_id: Some(request.external_id.as_str().to_owned()),
+            comment: request.comment.map(str::to_owned),
+            aggregator: self.defaults.aggregator.clone(),
+            guardian: self.defaults.guardian,
+            issue_date: None,
+            fulfillment_date: Some(request.fulfillment_date),
+            ..StornoInvoice::new(request.invoice_number)
+        }
+    }
+
     /// Builds a request from journaled defaults without opening a client.
     ///
     /// # Errors
@@ -227,7 +252,6 @@ mod tests {
     use jiff::civil::date;
     use rust_decimal::{Decimal, dec};
     use serde_json::json;
-    use szamlazz_agent::wire::AgentRequest as _;
     use szamlazz_agent::{Credentials, PaymentMethod};
 
     use super::*;

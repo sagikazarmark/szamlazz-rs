@@ -84,7 +84,6 @@ use szamlazz_agent::ops::credit_entry::{
 use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, CreationOutcome};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
-use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{
     ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, InvoiceSelector,
@@ -123,6 +122,16 @@ pub struct SzamlazzAnswer {
 }
 
 impl SzamlazzAnswer {
+    /// The shared alert for a credential answer, including read-only recovery
+    /// which cannot turn that answer into a terminal fault.
+    pub(crate) fn warn_credentials_rejected(&self, namespace: &crate::identity::Namespace) {
+        tracing::warn!(
+            namespace = %namespace,
+            code = %self.code,
+            "szamlazz.hu rejected the agent credentials; fix the account's agent key"
+        );
+    }
+
     /// An answer of `code` and `message`. Credential codes retain a static
     /// description instead of the supplied message, which may echo credentials.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -1755,16 +1764,7 @@ impl Gateway {
         marker: Option<&crate::contract::recovery::UnresolvedWrite>,
     ) -> Result<StornoOutcome, Unconfirmed> {
         // Step 2: send.
-        let storno = StornoInvoice {
-            e_invoice: request.e_invoice,
-            external_id: Some(request.external_id.as_str().to_owned()),
-            comment: request.comment.map(str::to_owned),
-            aggregator: self.account.defaults.aggregator.clone(),
-            guardian: self.account.defaults.guardian,
-            issue_date: None,
-            fulfillment_date: Some(request.fulfillment_date),
-            ..StornoInvoice::new(request.invoice_number)
-        };
+        let storno = self.account.build_storno(request);
 
         match self.client.send(&storno).await {
             Ok(created) => match StornoReplyEvidence::of(&created, &storno.invoice_number) {
@@ -2376,7 +2376,7 @@ mod tests {
             ("SS-1", Some("0"), Reversal),
             ("SS-1", Some("1270"), NeedsVerification),
         ];
-        let request = StornoInvoice::new("SZ-1");
+        let request = szamlazz_agent::ops::storno::StornoInvoice::new("SZ-1");
         for (number, gross, expected) in rows {
             let body = crate::test_support::numbered_reply_body(number, gross);
             let created = request.parse(&response(&body)).expect("numbered reply");

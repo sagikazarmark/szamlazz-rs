@@ -86,6 +86,10 @@ fn order_discovers_mutations_reads_and_operator_recovery() {
         assert_eq!(handler.ingress_private, None, "{name} is public");
         assert!(handler.output.is_some(), "{name} returns an output");
         if matches!(name, "observe_unresolved" | "recover") {
+            if name == "recover" {
+                assert_eq!(handler.journal_retention, Some(30 * 24 * 3_600_000));
+                assert_eq!(handler.idempotency_retention, Some(30 * 24 * 3_600_000));
+            }
             assert_eq!(
                 handler.ty,
                 if name == "observe_unresolved" {

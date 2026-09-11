@@ -4,6 +4,125 @@ use crate::common::api_error;
 use restate_szamlazz::contract::{Fault, TerminalCode};
 
 #[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; complete validation precedes write arming"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ingress validation matrix with marker and wire assertions"
+)]
+async fn e2e_release_invalid_documents_never_arm_a_write() {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let restate = launcher
+        .launch(&ServerSpec {
+            name: "release-validation",
+            ..SERVER
+        })
+        .await;
+    let mock = MockServer::start().await;
+    let config = WorkerConfig::new("acct".parse().expect("namespace"))
+        .validate()
+        .expect("config");
+    let (order, agent) = services_with_config(&mock.uri(), config);
+    restate
+        .deploy(
+            Endpoint::builder()
+                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
+                .bind(agent)
+                .build(),
+        )
+        .await;
+    for handler in [
+        "create_invoice",
+        "create_proforma",
+        "create_prepayment",
+        "create_final",
+        "correct_invoice",
+    ] {
+        for (field, value) in [
+            ("fulfillment_date", "0000-01-01"),
+            ("due_date", "-000001-01-01"),
+            ("comment", "bad\u{0}text"),
+        ] {
+            let key = format!("VALIDATE-{handler}");
+            let mut body = create_body(dec!(1000));
+            body["document"][field] = json!(value);
+            if handler == "correct_invoice" {
+                body.as_object_mut().expect("object").remove("options");
+                body["invoice_number"] = json!("SZ-BASE");
+                body["correction_id"] = json!("correction-1");
+            }
+            let reply = restate
+                .invoke(
+                    &Call::object("Szamlazz.Order", &key, handler),
+                    Some(&body),
+                    None,
+                )
+                .await;
+            assert_eq!(reply.status, 400, "{handler}/{field}: {}", reply.body);
+            assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+            assert_eq!(
+                restate.admin().runs(reply.invocation_id()).await,
+                ["namespace", "account"]
+            );
+            assert_eq!(
+                restate
+                    .invoke(
+                        &Call::object("Szamlazz.Order", &key, "observe_unresolved"),
+                        None,
+                        None
+                    )
+                    .await
+                    .body["state"],
+                "absent"
+            );
+        }
+    }
+    assert!(mock.received_requests().await.expect("requests").is_empty());
+    for managed in [true, false] {
+        let key = "VALIDATE-STORNO";
+        number_query("SZ-BASE")
+            .respond_with(Doc::of("SZ-BASE", "SZ", if managed { key } else { "" }).response())
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let call = if managed {
+            Call::object("Szamlazz.Order", key, "storno_invoice")
+        } else {
+            Call::service("Szamlazz.Agent", "storno")
+        };
+        let reply = restate
+            .invoke(
+                &call,
+                Some(&json!({"invoice_number":"SZ-BASE", "comment":"bad\u{0}text"})),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+        assert_eq!(
+            restate.admin().runs(reply.invocation_id()).await,
+            ["namespace", "account", "verify-original-SZ-BASE"]
+        );
+        assert_eq!(
+            restate
+                .invoke(
+                    &Call::object("Szamlazz.Order", key, "observe_unresolved"),
+                    None,
+                    None
+                )
+                .await
+                .body["state"],
+            "absent"
+        );
+        assert_eq!(mock.received_requests().await.expect("requests").len(), 1);
+        mock.verify().await;
+        mock.reset().await;
+    }
+    restate.finish().await;
+}
+
+#[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; XML-invalid mutation identities"]
 async fn e2e_release_invalid_identities_fail_before_the_prologue() {
     let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {

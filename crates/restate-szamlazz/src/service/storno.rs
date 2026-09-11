@@ -75,13 +75,22 @@ impl StornoIntent {
         let fulfillment_date = found
             .fulfillment_date
             .ok_or_else(|| Fault::missing_fulfillment_date(&number))?;
-        Ok(Self {
+        let intent = Self {
             e_invoice: found.e_invoice().unwrap_or(account.defaults.e_invoice),
             number,
             storno_id,
             comment,
             fulfillment_date,
-        })
+        };
+        gateway::build::validate_request(&account.build_storno(StornoStepRequest {
+            invoice_number: &intent.number,
+            external_id: &intent.storno_id,
+            comment: intent.comment.as_deref(),
+            e_invoice: intent.e_invoice,
+            fulfillment_date: intent.fulfillment_date,
+        }))
+        .map_err(|error| Fault::invalid_input(error.to_string()))?;
+        Ok(intent)
     }
 }
 
@@ -230,6 +239,9 @@ fn storno_response(
             "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
         ),
         gateway::StornoOutcome::Rejected(rejection) => {
+            if rejection.code == gateway::RejectionCode::Request {
+                return Err(Fault::invalid_input(rejection.message));
+            }
             StornoResponse::new(StornoOutcome::Rejected, number)
                 .with_code(rejection.code)
                 .with_message(rejection.message)

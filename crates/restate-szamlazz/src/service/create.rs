@@ -159,6 +159,9 @@ impl Identity {
                 response
             }
             gateway::CreateOutcome::Rejected(rejection) => {
+                if rejection.code == gateway::RejectionCode::Request {
+                    return Err(Fault::invalid_input(rejection.message));
+                }
                 self.rejected(rejection.code, rejection.message)
             }
             gateway::CreateOutcome::CredentialsRejected(answer) => {
@@ -794,9 +797,13 @@ impl Execution {
         external_id: &ExternalId,
         refs: DocumentRefs<'_>,
     ) -> Result<CreateInvoice, Fault> {
-        self.account
+        let request = self
+            .account
             .build_create(kind, document, order, external_id, refs)
-            .map_err(|error| Fault::invalid_input(error.to_string()))
+            .map_err(|error| Fault::invalid_input(error.to_string()))?;
+        gateway::build::validate_request(&request)
+            .map_err(|error| Fault::invalid_input(error.to_string()))?;
+        Ok(request)
     }
 
     // ----- step 1: exclusivity ---------------------------------------------

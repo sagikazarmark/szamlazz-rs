@@ -339,7 +339,8 @@ impl Order {
         ),
         inactivity_timeout = "4m",
         abort_timeout = "3m",
-        journal_retention = "30d"
+        journal_retention = "30d",
+        idempotency_retention = "30d"
     )]
     async fn recover(
         &self,

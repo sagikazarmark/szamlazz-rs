@@ -60,7 +60,8 @@ an observation that a document is missing or a statement that enough time has pa
 Without sufficient evidence, keep the order blocked.
 
 Recovery records the operator, token and submitted evidence before clearing the marker. Preserve its receipt;
-Restate's recovery journal retention is 30 days. A stale token, wrong target, mismatched operation or unknown
+Restate's recovery journal and idempotency retention are both 30 days, including keyed recovery calls.
+A stale token, wrong target, mismatched operation or unknown
 evidence is refused. Observe again with a fresh invocation. A subsequent business change still requires its
 ordinary checks, the originally intended expected document and a deliberate new Idempotency-Key.
 

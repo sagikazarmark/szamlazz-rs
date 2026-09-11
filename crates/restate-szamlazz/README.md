@@ -35,6 +35,10 @@ Worker query results must carry a nonblank document number; by-number results mu
 Malformed identity remains an unanswered read, never usable evidence for a mutation or marker clearance.
 Storno recovery requires a distinct reversal number and a stornoable, reversed original.
 
+Complete create/storno request validation precedes write arming: unsupported dates and XML-forbidden
+text are `invalid_input`, without creating an unresolved-write marker. Create validates before document
+reads and again after resolving references; storno validates after deriving the original's facts.
+
 ## Quick Start
 
 Bind both services to a Restate endpoint of your own, with the two things Restate's own guidance asks of an
@@ -640,7 +644,7 @@ for a caller:
    164) on some step: the deployment is misconfigured, not the request. The request that drew the code was not
    acted on, but the code may have come to a re-query after a send, and an earlier execution may have landed
     with a lost reply, so rule 2 applies: once the key is fixed, reconcile before deliberately renewing. The worker
-   logs every occurrence at `warn` with the namespace and the code, inside the execution's span
+    logs credential faults and automatic reconciliation's credential answers at `warn` with the namespace and the code, inside the execution's span
    (`execution{scope, order, restate.invocation.id, account.id}`, which every handler execution runs in), so the
    line says whose key broke and under which invocation (`restate.invocation.id` is the `x-restate-id` the caller
    got); the key itself appears in neither the log nor the fault.

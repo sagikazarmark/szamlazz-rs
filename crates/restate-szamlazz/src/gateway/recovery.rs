@@ -241,6 +241,7 @@ impl Gateway {
         candidate: Option<&str>,
     ) -> WriteResult {
         let mut checked = self.reconcile_write_checked(marker, candidate).await;
+        warn_reconciliation_credentials(&checked, marker);
         // A reply's candidate is a hint, not a restriction on automatic recovery.
         // Operator document evidence calls the checked method directly and remains
         // strict about the number the operator submitted.
@@ -249,6 +250,7 @@ impl Gateway {
             && !matches!(&checked, Ok(WriteResult::Storno(_)))
         {
             checked = self.reconcile_write_checked(marker, None).await;
+            warn_reconciliation_credentials(&checked, marker);
         }
         match checked {
             Ok(WriteResult::Answered {
@@ -366,5 +368,105 @@ impl Gateway {
                 "deletion requires independent settlement; document queries cannot establish completion",
             ),
         })
+    }
+}
+
+/// Alert before a fallback can replace the answer. This does not settle the
+/// earlier write or change the retryable reconciliation result.
+fn warn_reconciliation_credentials(
+    checked: &Result<WriteResult, Unanswered>,
+    marker: &UnresolvedWrite,
+) {
+    if let Ok(WriteResult::Answered {
+        credentials: true,
+        answer,
+    }) = checked
+    {
+        answer.warn_credentials_rejected(&marker.namespace);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::{Account, Endpoint};
+    use crate::contract::recovery::MarkerVersion;
+    use crate::identity::IssuedKind;
+    use crate::test_support::{LogCapture, api_error, open_gateway};
+    use szamlazz_agent::Credentials;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::body_string_contains};
+
+    #[tokio::test]
+    async fn reconciliation_alerts_before_fallback_and_keeps_uncertainty() {
+        let capture = LogCapture::default();
+        let _guard = capture.subscribe();
+        LogCapture::rebuild_interest();
+        for candidate in [None, Some("SS-CANDIDATE")] {
+            let server = MockServer::start().await;
+            let mut account = Account::new("account", "reference");
+            account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+            let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
+            let marker = UnresolvedWrite {
+                version: MarkerVersion,
+                token: "owner".into(),
+                owner_invocation: "owner".into(),
+                created_at: "2026-09-11T12:00:00Z".into(),
+                scope: None,
+                order: OrderKey::parse("ORD-1").expect("order"),
+                namespace: "acct".parse().expect("namespace"),
+                external_id: if candidate.is_some() {
+                    "acct:ORD-1:storno:SZ-1"
+                } else {
+                    "acct:ORD-1:invoice"
+                }
+                .into(),
+                account_id: "account".into(),
+                endpoint: server.uri(),
+                credential_ref: "reference".into(),
+                operation: if candidate.is_some() {
+                    WriteOperation::Storno {
+                        number: "SZ-1".into(),
+                    }
+                } else {
+                    WriteOperation::Create {
+                        kind: IssuedKind::Invoice,
+                        expected_number: None,
+                        corrected_number: None,
+                    }
+                },
+            };
+            Mock::given(body_string_contains(
+                candidate.unwrap_or(&marker.external_id),
+            ))
+            .respond_with(api_error("135", "PRIVATE-VENDOR-CREDENTIALS"))
+            .expect(1)
+            .mount(&server)
+            .await;
+            if candidate.is_some() {
+                Mock::given(body_string_contains(&marker.external_id))
+                    .respond_with(ResponseTemplate::new(503))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let before = capture
+                .logs()
+                .matches("fix the account's agent key")
+                .count();
+            let result = gateway.reconcile_write(&marker, candidate).await;
+            assert!(matches!(result, WriteResult::Unresolved(_)), "{result:?}");
+            let logs = capture.logs();
+            assert_eq!(
+                logs.matches("fix the account's agent key").count(),
+                before + 1,
+                "{logs}"
+            );
+            assert!(
+                logs.contains("code=135") && logs.contains("namespace=acct"),
+                "{logs}"
+            );
+            assert!(!logs.contains("PRIVATE-"), "{logs}");
+            server.verify().await;
+        }
     }
 }

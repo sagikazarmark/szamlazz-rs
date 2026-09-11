@@ -170,5 +170,124 @@ async fn e2e_replay_filter_keeps_fresh_operation_logs_and_correlation() {
             assert!(events[0].contains(field), "missing {field}: {}", events[0]);
         }
     }
+    reconciliation_alert_survives_resume(&server, &capture).await;
     server.finish().await;
+}
+
+/// A production Order loses its reply, pauses on a credential rejection, then
+/// resumes read-only. Fresh reconciliation warnings must survive replay filtering.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one production pause/resume lifecycle and its correlated log assertions"
+)]
+async fn reconciliation_alert_survives_resume(
+    server: &restate_e2e_harness::Restate,
+    capture: &LogCapture,
+) {
+    use crate::test_support::Doc;
+    use restate_sdk::service::IntoServiceDefinition as _;
+    use std::sync::atomic::AtomicBool;
+    use wiremock::{Mock, ResponseTemplate, matchers::body_string_contains};
+
+    let mock = wiremock::MockServer::start().await;
+    let sent = Arc::new(AtomicBool::new(false));
+    let visible = Arc::new(AtomicBool::new(false));
+    let sent_query = sent.clone();
+    let visible_query = visible.clone();
+    Mock::given(body_string_contains("action-szamla_agent_xml"))
+        .respond_with(move |request: &wiremock::Request| {
+            if String::from_utf8_lossy(&request.body).contains("logs:RECONCILE-LOG:invoice")
+                && sent_query.load(Ordering::SeqCst)
+            {
+                if visible_query.load(Ordering::SeqCst) {
+                    Doc::of("SZ-LOG", "SZ", "RECONCILE-LOG").response()
+                } else {
+                    api_error("135", "PRIVATE-CREDENTIAL-ANSWER")
+                }
+            } else {
+                api_error("7", "not found")
+            }
+        })
+        .mount(&mock)
+        .await;
+    Mock::given(body_string_contains("action-xmlagentxmlfile"))
+        .respond_with(move |_: &wiremock::Request| {
+            sent.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(500)
+        })
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let config: StaticConfig = serde_json::from_value(json!({"account": {
+        "id":"recovery-log-account", "agent_key":"PRIVATE-KEY", "endpoint":mock.uri()
+    }}))
+    .expect("config");
+    let order = crate::Order::from_parts(
+        Accounts::from(StaticResolver::try_from(config).expect("resolver")),
+        WorkerConfig::new("logs".parse().expect("namespace"))
+            .validate()
+            .expect("config"),
+    );
+    let options = restate_sdk::endpoint::ServiceOptions::default().handler(
+        "create_invoice",
+        restate_sdk::endpoint::HandlerOptions::default()
+            .retry_policy_max_attempts(1)
+            .retry_policy_pause_on_max_attempts(),
+    );
+    server
+        .deploy(
+            Endpoint::builder()
+                .bind(order.into_service_definition().options(options))
+                .build(),
+        )
+        .await;
+    let body = json!({"document": {
+        "buyer":{"name":"Buyer", "zip":"1000", "city":"City", "address":"Address"},
+        "items":[{"name":"Item", "quantity":"1", "unit":"db", "unit_price":"1000", "vat_rate":"27"}],
+        "fulfillment_date":"2026-09-11", "due_date":"2026-09-11", "payment_method":"transfer"
+    }});
+    let call = Call::object("Szamlazz.Order", "RECONCILE-LOG", "create_invoice");
+    let owner = server
+        .invoke(&call.send(), Some(&body), Some("reconcile-log"))
+        .await;
+    server
+        .admin()
+        .await_status(owner.invocation_id(), &["paused"])
+        .await;
+    for expected in [1, 2] {
+        if expected == 2 {
+            server.admin().resume(owner.invocation_id()).await;
+            server
+                .admin()
+                .await_status(owner.invocation_id(), &["paused"])
+                .await;
+        }
+        let logs = capture.logs();
+        let alerts: Vec<_> = logs
+            .lines()
+            .filter(|line| {
+                line.contains(owner.invocation_id()) && line.contains("fix the account's agent key")
+            })
+            .collect();
+        assert_eq!(alerts.len(), expected, "{logs}");
+        for alert in alerts {
+            for field in [
+                "code=135",
+                "namespace=logs",
+                "order=RECONCILE-LOG",
+                "account.id=recovery-log-account",
+            ] {
+                assert!(alert.contains(field), "missing {field}: {alert}");
+            }
+            assert!(!alert.contains("PRIVATE-"));
+        }
+    }
+    visible.store(true, Ordering::SeqCst);
+    server.admin().resume(owner.invocation_id()).await;
+    let completed = server
+        .invoke(&call, Some(&body), Some("reconcile-log"))
+        .await;
+    assert_eq!(completed.status, 200, "{}", completed.body);
+    assert_eq!(completed.body["outcome"], "reconciled");
+    mock.verify().await;
 }
