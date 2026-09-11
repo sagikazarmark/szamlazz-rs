@@ -111,6 +111,10 @@ async fn e2e_release_inexact_money_never_reaches_durable_work() {
             Call::service("Szamlazz.Agent", "set_credit_entries"),
             json!({"invoice_number":"SZ-1","entries":[{"date":"2026-09-11","title":"transfer","amount":"1e-29"}]}),
         ),
+        (
+            Call::service("Szamlazz.Agent", "set_credit_entries"),
+            json!({"invoice_number":"SZ-1","entries":[{"date":"2026-09-11","title":"transfer","amount":{"$serde_json::private::Number":"1"}}]}),
+        ),
     ] {
         let reply = restate.invoke(&call, Some(&body), None).await;
         assert_eq!(reply.status, 400, "{}", reply.body);

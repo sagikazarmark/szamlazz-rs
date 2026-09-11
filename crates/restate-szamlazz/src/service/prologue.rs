@@ -461,6 +461,21 @@ fn fetch_fault(account: &Account, failure: &FetchFailure) -> Fault {
 
 /// Opens the gateway for this execution over a fresh client.
 fn open(account: Account, credentials: Credentials) -> Result<Arc<Gateway>, Fault> {
+    use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
+    use szamlazz_agent::wire::AgentRequest as _;
+    // A fixed valid read checks only the execution-local credential material,
+    // through the same wire validation every operation uses. Never send it or
+    // format its error: this is initialization, not the caller's request, and
+    // an earlier execution of an interrupted write may already have acted.
+    let validation = QueryInvoiceXml::new(szamlazz_agent::InvoiceSelector::ExternalId(
+        "credential-validation".to_owned(),
+    ));
+    if validation.to_wire(&credentials).is_err() {
+        tracing::warn!("the account's credentials cannot be represented in request XML");
+        return Err(Fault::unavailable(
+            "the account's credentials cannot be represented in request XML; the outcome is not known",
+        ));
+    }
     Gateway::open(account, credentials)
         .map(Arc::new)
         .map_err(|error| {

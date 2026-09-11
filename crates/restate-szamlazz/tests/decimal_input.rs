@@ -3,6 +3,92 @@ use restate_szamlazz::contract::{CreditEntryInput, ExchangeRateInput, LineItemIn
 use restate_szamlazz::szamlazz_agent::Currency;
 
 #[test]
+fn handler_json_boundary_keeps_exact_tokens_and_refuses_number_objects() {
+    use restate_sdk::serde::{Deserialize as _, Serialize as _};
+    use restate_szamlazz::service::Body;
+    fn decode(text: &str) -> Body<LineItemInput> {
+        Body::deserialize(&mut bytes::Bytes::copy_from_slice(text.as_bytes()))
+            .expect("kept verdict")
+    }
+    for token in [
+        "1e-2",
+        "0.4999999999999999999999999999",
+        "79228162514264337593543950335",
+    ] {
+        let text = format!(
+            r#"{{"name":"$serde_json::private::Number","quantity":{token},"unit":"db","unit_price":"1","vat_rate":"AAM"}}"#
+        );
+        let body = decode(&text);
+        let input: LineItemInput =
+            serde_json::from_slice(&body.serialize().expect("valid body")).expect("decoded");
+        assert_eq!(
+            input.quantity,
+            restate_szamlazz::szamlazz_agent::parse_decimal(token).expect("exact")
+        );
+    }
+    for token in [
+        r#"{"$serde_json::private::Number":"1"}"#,
+        r#"{"\u0024serde_json::private::Number":"1"}"#,
+        "[1]",
+        "{}",
+    ] {
+        let text = format!(
+            r#"{{"name":"x","quantity":{token},"unit":"db","unit_price":"1","vat_rate":"AAM"}}"#
+        );
+        assert!(decode(&text).serialize().is_err(), "{text}");
+    }
+    for text in [
+        r#"{"name":"x","quantity":1,"quantity":2,"unit":"db","unit_price":1,"vat_rate":"AAM"}"#
+            .to_owned(),
+        format!("{}0{}", "[".repeat(130), "]".repeat(130)),
+    ] {
+        assert!(decode(&text).serialize().is_err());
+    }
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn decimal_discovery_accepts_the_runtime_string_grammar() {
+    let line = serde_json::to_value(schemars::schema_for!(LineItemInput)).expect("schema");
+    let credit = serde_json::to_value(schemars::schema_for!(CreditEntryInput)).expect("schema");
+    let exchange = serde_json::to_value(schemars::schema_for!(ExchangeRateInput)).expect("schema");
+    for schema in [
+        &line["properties"]["quantity"],
+        &line["properties"]["unit_price"],
+        &credit["properties"]["amount"],
+        &exchange["properties"]["rate"],
+    ] {
+        let pattern = regex::Regex::new(schema["pattern"].as_str().expect("input decimal pattern"))
+            .expect("valid regex");
+        let forbidden = regex::Regex::new(schema["not"]["pattern"].as_str().expect("line endings"))
+            .expect("valid regex");
+        for text in [
+            "1e-2", "1E+2", "+1", ".5", "1.", "-.5e+1", "001.20", "0", "-0",
+        ] {
+            assert!(pattern.is_match(text), "schema must accept {text}");
+            assert!(!forbidden.is_match(text));
+            let body = serde_json::json!({"bank":"MNB", "rate":text});
+            serde_json::from_value::<ExchangeRateInput>(body)
+                .expect("runtime accepts schema example");
+        }
+        for text in [
+            "", "+", ".", "1e", "1e--2", " 1", "1 ", "1\n", "NaN", "1,2", "１２",
+        ] {
+            assert!(
+                !pattern.is_match(text) || forbidden.is_match(text),
+                "schema must refuse {text:?}"
+            );
+            let body = serde_json::json!({"bank":"MNB", "rate":text});
+            assert!(serde_json::from_value::<ExchangeRateInput>(body).is_err());
+        }
+    }
+    assert_eq!(
+        exchange["properties"]["rate"]["type"],
+        serde_json::json!(["string", "number", "null"])
+    );
+}
+
+#[test]
 fn public_inputs_compose_inside_buffered_serde_wrappers() {
     #[derive(Debug, serde::Deserialize)]
     #[serde(untagged)]

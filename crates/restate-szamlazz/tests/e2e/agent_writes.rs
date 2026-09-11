@@ -19,6 +19,84 @@ use crate::harness::szamlazz::{
     number_query, original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
+/// A changed credential is execution-local, so its local refusal cannot settle
+/// the registration accepted during an earlier execution of the open run.
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; interrupted credit registration and rotation"]
+async fn e2e_credit_malformed_rotation_preserves_earlier_execution_uncertainty() {
+    use restate_e2e_harness::{Call, ReusePolicy, launcher_or_skip};
+    use restate_sdk::prelude::Endpoint;
+    use restate_szamlazz::contract::{Fault, TerminalCode};
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Notify;
+    use wiremock::{MockServer, ResponseTemplate};
+
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let server = launcher.launch(&crate::harness::MAIN_SERVER).await;
+    let mock = MockServer::start().await;
+    let (accounts, _, agent) = crate::harness::accounts::multi_account_services(&mock.uri()).await;
+    server.deploy(Endpoint::builder().bind(agent).build()).await;
+    let malformed = "rotated-credential-sentinel\0secret";
+    for additive in [false, true] {
+        accounts.rotate("acme", AGENT_KEY);
+        let before = accounts.fetches("acme");
+        let number = format!("ROTATED-CREDIT-{}", u8::from(additive));
+        let accepted = Arc::new(Notify::new());
+        let reached = accepted.clone();
+        credit_of(&number)
+            .respond_with(move |_: &wiremock::Request| {
+                reached.notify_one();
+                ResponseTemplate::new(200).set_delay(Duration::from_secs(30))
+            })
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let call = Call::service("Szamlazz.Agent", "set_credit_entries").scoped("acme");
+        let body = json!({"invoice_number":number,"entries":[{"date":"2026-09-11","title":"transfer","amount":"1"}],"additive":additive});
+        let owner = server
+            .invoke(&call.send(), Some(&body), Some(&number))
+            .await;
+        tokio::time::timeout(Duration::from_secs(30), accepted.notified())
+            .await
+            .expect("registration accepted");
+        server.admin().pause(owner.invocation_id()).await;
+        assert!(
+            restate_e2e_harness::run_result(
+                &server.admin().journal(owner.invocation_id()).await,
+                &format!("set-credit-entries-{number}")
+            )
+            .is_none()
+        );
+        accounts.rotate("acme", malformed);
+        server.admin().resume(owner.invocation_id()).await;
+        let reply = server.invoke(&call, Some(&body), Some(&number)).await;
+        let fault: Fault = reply.fault();
+        assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
+        assert_eq!(fault.code.is_outcome_unknown(), Some(true));
+        assert!(!fault.message.contains("nothing was sent"), "{fault:?}");
+        assert_eq!(accounts.fetches("acme"), before + 2);
+        let retained = server.invoke(&call, Some(&body), Some(&number)).await;
+        assert_eq!(retained.fault::<Fault>(), fault);
+        assert_eq!(accounts.fetches("acme"), before + 2);
+        let journal = server.admin().journal(owner.invocation_id()).await;
+        for diagnostic in [
+            format!("{journal:?}"),
+            format!("{fault:?}"),
+            reply.body.to_string(),
+        ] {
+            assert!(
+                !diagnostic.contains("rotated-credential-sentinel"),
+                "{diagnostic}"
+            );
+            assert!(!diagnostic.contains(AGENT_KEY), "{diagnostic}");
+        }
+    }
+    mock.verify().await;
+    server.finish().await;
+}
+
 /// A refusal of the repeated exchange cannot settle the first exchange. The
 /// mock records acceptance before withholding its reply; pause interrupts the
 /// open run, and the invoice becomes reversed before that run executes again.

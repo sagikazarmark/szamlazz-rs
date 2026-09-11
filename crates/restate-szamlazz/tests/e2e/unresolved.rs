@@ -29,6 +29,9 @@ const SERVER: ServerSpec = ServerSpec {
 #[path = "recovery_evidence.rs"]
 mod recovery_evidence;
 
+#[path = "recovery_boundaries.rs"]
+mod recovery_boundaries;
+
 #[path = "document_identity.rs"]
 mod document_identity;
 

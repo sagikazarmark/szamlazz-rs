@@ -463,6 +463,7 @@ pub struct CreditEntryInput {
     pub title: PaymentMethod,
     /// Amount in the invoice currency.
     #[serde(deserialize_with = "super::decimal::required")]
+    #[cfg_attr(feature = "schemars", schemars(schema_with = "super::decimal::schema"))]
     pub amount: Decimal,
     /// Free-text comment (`megjegyzes`).
     #[serde(default)]

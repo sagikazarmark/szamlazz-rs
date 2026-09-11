@@ -131,6 +131,9 @@ Amounts (`quantity`, `unit_price`, every total) are decimals serialised as JSON 
 input without binary-float conversion. Quantities, prices, credit-entry amounts and exchange rates must fit a
 Decimal exactly; unrepresentable input is `invalid_input` before the prologue, never implicitly rounded. Use strings
 when your caller's JSON tooling would otherwise round the number. Currency rounding happens only during calculation.
+Discovery accepts signed exponent notation and the same finite decimal string grammar as the decoder;
+exact representability is additionally checked at runtime. Handler JSON rejects object-valued amounts,
+including lookalikes of serde_json's private arbitrary-precision representation, before durable work.
 Optional response fields, a fault's included, are present as `null` when absent.
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
@@ -239,7 +242,10 @@ credentials inside a run does not persist them: only its result or failure is jo
 (the e2e suite scans every journal entry).
 
 A failed fetch is **terminal** `unavailable` after three bounded attempts, 200 ms apart (`gone` fails immediately).
-A Gateway-open failure is the same structured fault. The failure is recorded on the executing operation's run,
+A Gateway-open failure is the same structured fault. Fetched credentials are checked for XML representability
+before opening the Gateway; malformed credentials likewise produce sanitized `unavailable`, preserving
+uncertainty about any earlier execution of an interrupted write. They never become caller `invalid_input`.
+The failure is recorded on the executing operation's run,
 so it cannot replace a recorded run command with a terminal output. It bypasses the operation's read/issue policy;
 best-effort storno-number reads still report the known reversal without its number. An unfinished write may have
 sent during an earlier execution: `unavailable` preserves that uncertainty. Settle earlier external work before

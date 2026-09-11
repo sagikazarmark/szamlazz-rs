@@ -7,6 +7,28 @@ use serde::{
 };
 use std::fmt;
 
+/// The finite textual grammar, before the runtime's exact-representability
+/// check. JSON numbers are already constrained by JSON syntax. Explicitly
+/// exclude line endings because ECMAScript `$` can match before a final newline.
+#[cfg(feature = "schemars")]
+pub(super) fn schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "number"],
+        "pattern": r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$",
+        "not": {"type": "string", "pattern": r"[\r\n\u2028\u2029]"}
+    })
+}
+
+#[cfg(feature = "schemars")]
+pub(super) fn optional_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = schema(generator);
+    schema.insert(
+        "type".into(),
+        serde_json::json!(["string", "number", "null"]),
+    );
+    schema
+}
+
 fn parse<E: serde::de::Error>(text: &str) -> Result<Decimal, E> {
     szamlazz_agent::parse_decimal(text).map_err(|error| {
         E::custom(format!(

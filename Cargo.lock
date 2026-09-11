@@ -2206,6 +2206,7 @@ dependencies = [
  "futures-util",
  "http",
  "jiff",
+ "regex",
  "restate-e2e-harness",
  "restate-sdk",
  "restate-szamlazz",
