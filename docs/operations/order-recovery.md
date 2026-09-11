@@ -65,6 +65,30 @@ A stale token, wrong target, mismatched operation or unknown
 evidence is refused. Observe again with a fresh invocation. A subsequent business change still requires its
 ordinary checks, the originally intended expected document and a deliberate new Idempotency-Key.
 
+## Scope-migration inventory
+
+Before a single→multi flag day or a scope mapping change, quiesce all producers,
+including SDK calls and delayed sends. At the ingress gateway block ordinary business calls while retaining
+authorized operator access under the old mapping. Resume paused owners or deliberately stop and recover them;
+settle external uncertainty. Only then make both services private and finish draining. Service-wide privacy blocks
+operator ingress too. Run from the repository root against the canonical Restate admin URL (redirects are refused):
+
+```sh
+python3 scripts/check-order-migration.py --admin-url "$RESTATE_ADMIN_URL"
+# Optional admin bearer credential is read from RESTATE_ADMIN_TOKEN, not argv.
+```
+
+The script exits 1 for any unfinished invocation or any Order state row, across **all scopes**;
+unknown keys and unreadable values block too. Exit 2 means inspection failed and blocks the switch.
+It prints scope/order/key identifiers without exposing marker values or credentials. A completed or
+killed owner can retain state after invocation drain. Observe and recover that marker under its
+**original scope**; never delete state or move it to make the check pass. Exit 0 is only an empty
+inventory: independently settle unmarked, unkeyed and external in-flight uncertainty too. Keep producers
+quiesced through both observations and the switch; neither query is a global completion barrier.
+If the final inventory finds state, keep the old mapping and business calls blocked at the gateway. Set
+`Szamlazz.Order` to `public: true` to restore authorized operator recovery ingress; Agent can remain private.
+After recovery make Order private again and repeat drain/inventory before registering the switched mapping.
+
 ## Effective retry controls
 
 | Control | Governs |

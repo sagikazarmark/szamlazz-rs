@@ -26,6 +26,7 @@ pub(crate) async fn credential_failure_on_replay_preserves_operation_commands(h:
     use std::time::Duration;
 
     h.reset().await;
+
     h.multi().rotate("beta", KEY_B);
     let fetches = h.multi().fetches("beta");
     h.absent("E2E-INIT", &["invoice", "prepayment", "final", "proforma"])
@@ -173,6 +174,10 @@ pub(crate) async fn initialization_failure_is_journaled_at_the_operation(h: &Har
 /// nothing else, and zero szamlazz.hu requests.
 pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness) {
     h.reset().await;
+
+    // Business producers have joined. Keep operator ingress available until
+    // their scripted incidents are settled, then close all ingress and drain.
+    h.settle_scripted_markers().await;
 
     // Private: the ingress refuses the call itself; nothing reaches the
     // handler or szamlazz.hu.

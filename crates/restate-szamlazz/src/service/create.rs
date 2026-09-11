@@ -439,20 +439,31 @@ fn decide_proforma_by_number(
 /// `conflict{not_managed, existing_number}` (checked first: a reversed
 /// document of another order is still not this order's); a reversed one of
 /// ours is `conflict{base_reversed, existing_number}`; a live one of ours
-/// proceeds (`None`).
+/// proceeds (`None`) only for an ordinary, prepayment or final invoice.
+/// Other types are `invalid_input`; further corrections name the original base.
 fn decide_base(
     found: &FoundDocument,
     order: &OrderKey,
     number: &str,
     identity: &Identity,
-) -> Option<CreateResponse> {
+) -> Result<Option<CreateResponse>, Fault> {
     if !found.carries_order(order) {
-        return Some(identity.conflict_about(ConflictReason::NotManaged, number));
+        return Ok(Some(
+            identity.conflict_about(ConflictReason::NotManaged, number),
+        ));
     }
     if found.reversed == Some(true) {
-        return Some(identity.conflict_about(ConflictReason::BaseReversed, number));
+        return Ok(Some(
+            identity.conflict_about(ConflictReason::BaseReversed, number),
+        ));
     }
-    None
+    if !found.is_invoice_family() {
+        return Err(Fault::invalid_input(format!(
+            "{number} is not a supported corrective base (tipus {}); name the original invoice, prepayment or final invoice",
+            found.document_type
+        )));
+    }
+    Ok(None)
 }
 
 /// Test helper for the fault vocabulary of interrupted writes. Production
@@ -684,7 +695,7 @@ impl Execution {
             .await
             .map_err(about)?;
         let found = verified_document(found, &number, &self.config.namespace).map_err(about)?;
-        if let Some(response) = decide_base(&found, &order, &number, &identity) {
+        if let Some(response) = decide_base(&found, &order, &number, &identity).map_err(about)? {
             return Ok(response);
         }
 
@@ -2086,8 +2097,31 @@ mod tests {
         };
         let order = ord_1();
 
+        for token in ["SZ", "ES", "VS"] {
+            assert!(
+                decide_base(
+                    &Doc::of("BASE", token, "ORD-1").parse(),
+                    &order,
+                    "BASE",
+                    &identity
+                )
+                .expect("eligible base")
+                .is_none()
+            );
+        }
+        for token in ["D", "SL", "SS", "HS", "FUTURE"] {
+            let error = decide_base(
+                &Doc::of("BASE", token, "ORD-1").parse(),
+                &order,
+                "BASE",
+                &identity,
+            )
+            .expect_err("unsupported base");
+            assert_eq!(error.code, crate::contract::TerminalCode::InvalidInput);
+        }
+
         assert_eq!(
-            decide_base(&Doc::default().parse(), &order, "SZ-1", &identity),
+            decide_base(&Doc::default().parse(), &order, "SZ-1", &identity).expect("eligible"),
             None
         );
 
@@ -2116,6 +2150,7 @@ mod tests {
             ),
         ] {
             let response = decide_base(&base.parse(), &order, "SZ-1", &identity)
+                .expect("ownership outcome")
                 .unwrap_or_else(|| panic!("{label}: refused"));
             assert_eq!(response.outcome, CreateOutcome::Conflict, "{label}");
             assert_eq!(
@@ -2133,7 +2168,9 @@ mod tests {
             ..Doc::default()
         }
         .parse();
-        let response = decide_base(&reversed, &order, "SZ-1", &identity).expect("refused");
+        let response = decide_base(&reversed, &order, "SZ-1", &identity)
+            .expect("outcome")
+            .expect("refused");
         assert_eq!(response.conflict_reason, Some(ConflictReason::BaseReversed));
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
     }

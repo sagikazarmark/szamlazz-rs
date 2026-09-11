@@ -66,6 +66,30 @@ async fn logged<F: Future>(run: F) -> (F::Output, String) {
 // bare status either way.
 #[tokio::test]
 async fn tracing_feature_logs_handler_and_resolver_errors_at_warn() {
+    let ((status, body), log) = logged(async {
+        let fanout = szamlazz_adatkapcsolat::Fanout::new()
+            .with(ContextualFailure("database down"))
+            .with(ContextualFailure("archive unavailable"));
+        let app = szamlazz_adatkapcsolat::axum::router("secret-key", fanout);
+        send(
+            app,
+            request(Some("secret-key"), OUTGOING_INVOICE.as_bytes()),
+        )
+        .await
+    })
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, "handler error");
+    assert!(log.contains("2 fan-out handler(s) failed"), "{log}");
+    assert!(
+        log.contains("ContextualFailure: delivery failed: database down"),
+        "{log}"
+    );
+    assert!(
+        log.contains("ContextualFailure: delivery failed: archive unavailable"),
+        "{log}"
+    );
+
     let ((status, body), log) = logged(call(Some("secret-key"), OUTGOING_INVOICE, true)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, "handler error");
@@ -101,4 +125,41 @@ async fn tracing_feature_logs_handler_and_resolver_errors_at_warn() {
     let ((status, _), log) = logged(call(Some("not-the-key"), OUTGOING_INVOICE, false)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(log.is_empty(), "{log}");
+}
+
+struct ContextualFailure(&'static str);
+
+#[derive(Debug, thiserror::Error)]
+#[error("delivery failed")]
+struct DeliveryFailure(#[source] std::io::Error);
+
+impl szamlazz_adatkapcsolat::Handler for ContextualFailure {
+    type Error = DeliveryFailure;
+    fn outgoing_invoice(
+        &self,
+        _: szamlazz_adatkapcsolat::InvoiceDocument,
+    ) -> impl Future<Output = Result<szamlazz_adatkapcsolat::InvoiceAck, Self::Error>>
+    + szamlazz_adatkapcsolat::MaybeSend {
+        std::future::ready(Err(DeliveryFailure(std::io::Error::other(self.0))))
+    }
+    async fn incoming_invoice(
+        &self,
+        invoice: szamlazz_adatkapcsolat::InvoiceDocument,
+    ) -> Result<szamlazz_adatkapcsolat::InvoiceAck, Self::Error> {
+        self.outgoing_invoice(invoice).await
+    }
+    fn bank_transaction(
+        &self,
+        _: szamlazz_adatkapcsolat::BankTransaction,
+    ) -> impl Future<Output = Result<szamlazz_adatkapcsolat::Ack, Self::Error>>
+    + szamlazz_adatkapcsolat::MaybeSend {
+        std::future::ready(Err(DeliveryFailure(std::io::Error::other(self.0))))
+    }
+    fn receipts(
+        &self,
+        _: szamlazz_adatkapcsolat::ReceiptBatch,
+    ) -> impl Future<Output = Result<szamlazz_adatkapcsolat::Ack, Self::Error>>
+    + szamlazz_adatkapcsolat::MaybeSend {
+        std::future::ready(Err(DeliveryFailure(std::io::Error::other(self.0))))
+    }
 }

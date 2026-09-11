@@ -124,7 +124,7 @@ pub struct SzamlazzAnswer {
 impl SzamlazzAnswer {
     /// The shared alert for a credential answer, including read-only recovery
     /// which cannot turn that answer into a terminal fault.
-    pub(crate) fn warn_credentials_rejected(&self, namespace: &crate::identity::Namespace) {
+    pub(crate) fn warn_credentials_rejected(&self, namespace: &(impl fmt::Display + ?Sized)) {
         tracing::warn!(
             namespace = %namespace,
             code = %self.code,
@@ -1301,7 +1301,13 @@ impl Gateway {
                     if protected {
                         // This invocation has exactly one send permit. The refusal
                         // settles it even if the optional diagnostic query fails.
-                        return Ok(match self.after_duplicate(request, answer.clone()).await {
+                        let diagnostic = self.after_duplicate(request, answer.clone()).await;
+                        if let Ok(CreateOutcome::CredentialsRejected(credentials)) = &diagnostic {
+                            // Keep the original refusal, but not at the cost of its
+                            // diagnostic read's actionable credential signal.
+                            credentials.warn_credentials_rejected(request.external_id.namespace());
+                        }
+                        return Ok(match diagnostic {
                             Ok(outcome @ CreateOutcome::DuplicateOrderNumber { .. }) => outcome,
                             _ if request.kind == IssuedKind::Corrective => {
                                 CreateOutcome::Rejected(answer.into())
@@ -1778,12 +1784,12 @@ impl Gateway {
                 }
                 StornoReplyEvidence::NeedsVerification => {
                     if let Some(marker) = marker {
+                        let checked = self
+                            .reconcile_write_checked(marker, Some(created.invoice_number.as_str()))
+                            .await;
+                        recovery::warn_reconciliation_credentials(&checked, marker);
                         if matches!(
-                            self.reconcile_write_checked(
-                                marker,
-                                Some(created.invoice_number.as_str())
-                            )
-                            .await,
+                            checked,
                             Ok(recovery::WriteResult::Storno(
                                 StornoOutcome::AlreadyReversed { .. }
                             ))

@@ -702,6 +702,14 @@ pub enum InvalidInvoiceNumber {
 pub struct ExternalId(String);
 
 impl ExternalId {
+    /// The namespace segment of an id built by this type's constructors.
+    pub(crate) fn namespace(&self) -> &str {
+        self.as_str()
+            .split(Self::SEPARATOR)
+            .next()
+            .unwrap_or_default()
+    }
+
     /// The longest id the service composes, in bytes: 110, the length
     /// verified accepted and queryable on szamlazz.hu (behaviour notes,
     /// A2-create-long). szamlazz.hu documents no limit; a longer id might be

@@ -4,6 +4,124 @@ use crate::common::api_error;
 use restate_szamlazz::contract::{Fault, TerminalCode};
 
 #[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; corrective eligibility before arming"]
+async fn e2e_release_corrective_refuses_noninvoice_bases_before_arming() {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let restate = launcher
+        .launch(&ServerSpec {
+            name: "corrective-eligibility",
+            ..SERVER
+        })
+        .await;
+    let mock = MockServer::start().await;
+    let config = WorkerConfig::new("acct".parse().expect("namespace"))
+        .validate()
+        .expect("config");
+    let (order, _) = services_with_config(&mock.uri(), config);
+    restate
+        .deploy(
+            Endpoint::builder()
+                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
+                .build(),
+        )
+        .await;
+    for token in ["D", "SL", "SS", "HS", "FUTURE"] {
+        let key = format!("BASE-{token}");
+        external_id_query(&format!("acct:{key}:corrective:c1"))
+            .respond_with(not_found())
+            .expect(1)
+            .mount(&mock)
+            .await;
+        number_query("BASE")
+            .respond_with(Doc::of("BASE", token, &key).response())
+            .expect(1)
+            .mount(&mock)
+            .await;
+        create_for(&key)
+            .respond_with(created("UNEXPECTED", "1", "1"))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let body = json!({"invoice_number":"BASE","correction_id":"c1","document":create_body(dec!(1))["document"]});
+        let reply = restate
+            .invoke(
+                &Call::object("Szamlazz.Order", &key, "correct_invoice"),
+                Some(&body),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+        assert_eq!(
+            restate.admin().runs(reply.invocation_id()).await,
+            [
+                "namespace",
+                "account",
+                "lookup-corrective",
+                "verify-base-BASE"
+            ]
+        );
+        assert_eq!(
+            restate
+                .invoke(
+                    &Call::object("Szamlazz.Order", &key, "observe_unresolved"),
+                    None,
+                    None
+                )
+                .await
+                .body["state"],
+            "absent"
+        );
+        mock.verify().await;
+        mock.reset().await;
+    }
+    restate.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; inexact money refused before prologue"]
+async fn e2e_release_inexact_money_never_reaches_durable_work() {
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let restate = launcher
+        .launch(&ServerSpec {
+            name: "exact-money",
+            ..SERVER
+        })
+        .await;
+    let mock = MockServer::start().await;
+    let config = WorkerConfig::new("acct".parse().expect("namespace"))
+        .validate()
+        .expect("config");
+    let (order, agent) = services_with_config(&mock.uri(), config);
+    restate
+        .deploy(Endpoint::builder().bind(order).bind(agent).build())
+        .await;
+    let mut body = create_body(dec!(1));
+    body["document"]["items"][0]["unit_price"] = json!("0.49999999999999999999999999999");
+    for (call, body) in [
+        (
+            Call::object("Szamlazz.Order", "EXACT", "create_invoice"),
+            body,
+        ),
+        (
+            Call::service("Szamlazz.Agent", "set_credit_entries"),
+            json!({"invoice_number":"SZ-1","entries":[{"date":"2026-09-11","title":"transfer","amount":"1e-29"}]}),
+        ),
+    ] {
+        let reply = restate.invoke(&call, Some(&body), None).await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+        assert!(restate.admin().runs(reply.invocation_id()).await.is_empty());
+    }
+    assert!(mock.received_requests().await.expect("requests").is_empty());
+    restate.finish().await;
+}
+
+#[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; complete validation precedes write arming"]
 #[allow(
     clippy::too_many_lines,

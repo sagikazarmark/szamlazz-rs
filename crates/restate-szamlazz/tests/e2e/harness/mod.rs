@@ -188,7 +188,7 @@ impl restate_szamlazz::service::RecoveryAuthorizer for TestOperator {
         order: &str,
         _headers: &restate_sdk::context::HeaderMap,
     ) -> Option<String> {
-        (order == "E2E-RECOVERY").then(|| "test-operator".to_owned())
+        (order.starts_with("E2E-")).then(|| "test-operator".to_owned())
     }
 }
 
@@ -289,10 +289,62 @@ impl Harness {
     pub(crate) async fn switch_to_multi_account(&mut self) {
         self.set_public(false).await;
         self.restate.drain().await;
+        let state = self
+            .admin()
+            .sql_or_panic(
+                "SELECT scope, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'",
+            )
+            .await;
+        assert!(
+            state.is_empty(),
+            "scope migration blocked by retained Order state: {state:?}"
+        );
         let (mutable, order, agent) = multi_account_services(&self.mock.uri()).await;
         self.deploy(order, agent).await;
         self.multi = Some(mutable);
         self.set_public(true).await;
+    }
+
+    /// Test-only operator evidence after all scripted producers have joined.
+    /// The fake vendor has no detached processing after its requests finish;
+    /// this explicitly simulates independently audited positive settlement.
+    /// It is not a production method for inferring evidence from an inventory.
+    pub(crate) async fn settle_scripted_markers(&self) {
+        let rows = self
+            .admin()
+            .sql_or_panic(
+                "SELECT scope, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'",
+            )
+            .await;
+        for row in rows {
+            assert!(row["scope"].is_null(), "phase 1 is unscoped");
+            assert_eq!(row["key"], "unresolved-write");
+            let key = row["service_key"].as_str().expect("order key");
+            let observed = self
+                .invoke(
+                    &Call::object("Szamlazz.Order", key, "observe_unresolved"),
+                    None,
+                    None,
+                )
+                .await;
+            assert_eq!(observed.status, 200, "{}", observed.body);
+            let marker = &observed.body["marker"];
+            let completion = match marker["operation"]["type"].as_str().expect("operation") {
+                "create" => json!({"type":"issued","number":format!("MOCK-SETTLED-{key}")}),
+                "storno" => json!({"type":"reversed","number":format!("MOCK-REVERSAL-{key}")}),
+                "delete" => json!({"type":"deleted","number":marker["operation"]["number"]}),
+                other => panic!("unexpected operation {other}"),
+            };
+            let body = json!({"marker":marker,"evidence":{"type":"completed","audit_reference":format!("TEST-ONLY-SCRIPTED-SETTLEMENT-{key}"),"completion":completion,"completed_and_cannot_execute_later":true}});
+            let reply = self
+                .invoke(
+                    &Call::object("Szamlazz.Order", key, "recover"),
+                    Some(&body),
+                    None,
+                )
+                .await;
+            assert_eq!(reply.status, 200, "{}", reply.body);
+        }
     }
 
     /// The multi-account phase's resolver and store.

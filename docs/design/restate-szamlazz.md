@@ -476,7 +476,10 @@ Agent's final invoice can carry `dijbekeroSzamlaszam` too, but the order's `D` w
 `rendelesszam ≠ key` → `conflict{not_managed}`; ext id `…:corrective:{correction_id}`; the same lookup and create
 steps with the corrective exemption (verified): no order-number hint (the live base invoice under the order is
 expected), and a 71/152 the re-query cannot resolve is `rejected`, not a conflict; a new `correction_id` issues a new
-corrective by contract.
+corrective by contract. The supported base types are ordinary, prepayment and final invoices (`SZ`/`ES`/`VS`).
+After ownership/reversal checks, another type is `invalid_input` before marker preparation. Further corrections
+name the original base. Corrective-on-corrective support was not established by the vendor document-types page
+(reviewed 2026-09-11); this worker contract deliberately does not infer it from a shared invoice XML shape.
 
 ### Unresolved Order writes (#205)
 
@@ -949,12 +952,22 @@ The policy is evaluated after closure failure; it cannot interrupt a hung closur
 Even `max_attempts(1)` can re-execute after a crash before completion is recorded. Keep the 60 s Számla Agent
 request timeout and ten-second resolver/store deadlines independently of these thresholds (ADR 0004, #204).
 
-**Single → multi flag day** (no data migration; the namespace stays, so the first scoped create for an
+**Single → multi flag day** (no data migration only after uncertainty state is cleared; the namespace stays, so the first scoped create for an
 already-invoiced order finds it under the unchanged external id): first quiesce internal producers and pending
 delayed sends. Service privacy does **not** block internal SDK calls. Drain delayed sends under the old mapping,
-or deliberately cancel and reconcile them; stopping their originator does not remove detached sends. Then make both services private
-(`PATCH /services/{name} {"public": false}`; the ingress refuses new calls without creating invocations), poll
-`sys_invocation` until no row has `status <> 'completed'`, register the new revision with the switched configuration
+or deliberately cancel and reconcile them; stopping their originator does not remove detached sends. At the ingress
+gateway, block ordinary business calls while retaining authorized operator access under the old mapping. Resume
+paused owners or deliberately stop and recover them; independently settle external uncertainty. Service-wide privacy
+also blocks operator ingress, so recover markers **before** making both services private
+(`PATCH /services/{name} {"public": false}`). Then poll
+`sys_invocation` until no row has `status <> 'completed'` and run
+`python3 scripts/check-order-migration.py --admin-url "$RESTATE_ADMIN_URL"`: any Order state in any scope blocks
+the switch, including unreadable markers belonging to completed/killed owners. Recover under the original scope;
+never clear state manually or copy a marker into the new identity. The read-only inventory checks both services'
+unfinished invocations and every Order state key, without decoding marker values. Exit 0 is only a clean inventory,
+not vendor settlement. If this final check finds state, retain the old mapping, keep business calls blocked at
+the gateway, and set `Szamlazz.Order` to `public: true` so authorized operator recovery can reach it; Agent can
+remain private. After recovery make Order private again and repeat drain/inventory. Register the new revision with the switched configuration
 (a new deployment URI), point all callers at scoped paths, make the services public and resume producers. Keep
 producers quiesced throughout the drain and switch. The drain is what keeps one
 szamlazz.hu account from being reachable unscoped and under its scope at the same time. The same drain–switch–resume

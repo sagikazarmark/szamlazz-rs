@@ -136,6 +136,12 @@ pub(crate) fn numeric(value: &str) -> Option<Result<Decimal, rust_decimal::Error
     })())
 }
 
-pub(crate) fn parse(value: &str) -> Result<Decimal, rust_decimal::Error> {
+/// Parses a finite decimal, including exponent notation, without rounding.
+/// Redundant leading/trailing zeroes are accepted; whitespace and grouping are not.
+///
+/// # Errors
+/// Returns an error for malformed text or a value not exactly representable by
+/// [`Decimal`]. Exponents never cause unbounded expansion.
+pub fn parse(value: &str) -> Result<Decimal, rust_decimal::Error> {
     numeric(value).unwrap_or_else(|| Err("expected a finite decimal number".into()))
 }

@@ -462,6 +462,7 @@ pub struct CreditEntryInput {
     /// The entry's title (`jogcim`): the payment method it was settled by.
     pub title: PaymentMethod,
     /// Amount in the invoice currency.
+    #[serde(deserialize_with = "super::decimal::required")]
     pub amount: Decimal,
     /// Free-text comment (`megjegyzes`).
     #[serde(default)]

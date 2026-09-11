@@ -373,7 +373,7 @@ impl Gateway {
 
 /// Alert before a fallback can replace the answer. This does not settle the
 /// earlier write or change the retryable reconciliation result.
-fn warn_reconciliation_credentials(
+pub(super) fn warn_reconciliation_credentials(
     checked: &Result<WriteResult, Unanswered>,
     marker: &UnresolvedWrite,
 ) {
@@ -395,6 +395,99 @@ mod tests {
     use crate::test_support::{LogCapture, api_error, open_gateway};
     use szamlazz_agent::Credentials;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::body_string_contains};
+
+    #[tokio::test]
+    async fn protected_duplicate_diagnostics_alert_without_changing_refusal() {
+        use crate::gateway::CreateStepRequest;
+        use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
+        let capture = LogCapture::default();
+        let _guard = capture.subscribe();
+        LogCapture::rebuild_interest();
+        for hint in [false, true] {
+            let server = MockServer::start().await;
+            let mut account = Account::new("account", "reference");
+            account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+            let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
+            let external_id = ExternalId::new("acct:ORD-1:invoice");
+            let order = OrderKey::parse("ORD-1").expect("order");
+            let header = InvoiceHeader::new(
+                jiff::civil::date(2026, 9, 11),
+                jiff::civil::date(2026, 9, 11),
+                szamlazz_agent::PaymentMethod::Transfer,
+                szamlazz_agent::Currency::HUF,
+                szamlazz_agent::Language::Hungarian,
+            );
+            let mut create = CreateInvoice::new(
+                InvoiceKind::invoice(),
+                header,
+                Buyer::new("Buyer", "1000", "City", "Street"),
+                vec![
+                    szamlazz_agent::LineItem::try_calculated(
+                        "item",
+                        rust_decimal::dec!(1),
+                        "db",
+                        rust_decimal::dec!(1),
+                        szamlazz_agent::VatRate::Aam,
+                        szamlazz_agent::Rounding::Exact,
+                    )
+                    .expect("item"),
+                ],
+            );
+            create.header.order_number = Some("ORD-1".into());
+            Mock::given(body_string_contains("action-xmlagentxmlfile"))
+                .respond_with(api_error("152", "duplicate"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(body_string_contains(
+                "<szamlaKulsoAzon>acct:ORD-1:invoice</szamlaKulsoAzon>",
+            ))
+            .respond_with(if hint {
+                api_error("7", "absent")
+            } else {
+                api_error("135", "PRIVATE-DIAGNOSTIC")
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+            if hint {
+                Mock::given(body_string_contains("<rendelesSzam>ORD-1</rendelesSzam>"))
+                    .respond_with(api_error("135", "PRIVATE-DIAGNOSTIC"))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let before = capture
+                .logs()
+                .matches("fix the account's agent key")
+                .count();
+            let result = gateway
+                .create_send(
+                    &CreateStepRequest {
+                        external_id: &external_id,
+                        kind: IssuedKind::Invoice,
+                        order: &order,
+                        create: &create,
+                        reversed: None,
+                    },
+                    true,
+                )
+                .await
+                .expect("settled refusal");
+            assert!(
+                matches!(result, CreateOutcome::DuplicateOrderNumber { .. }),
+                "{result:?}"
+            );
+            let logs = capture.logs();
+            assert_eq!(
+                logs.matches("fix the account's agent key").count(),
+                before + 1,
+                "{logs}"
+            );
+            assert!(!logs.contains("PRIVATE-"), "{logs}");
+            server.verify().await;
+        }
+    }
 
     #[tokio::test]
     async fn reconciliation_alerts_before_fallback_and_keeps_uncertainty() {
@@ -468,5 +561,76 @@ mod tests {
             assert!(!logs.contains("PRIVATE-"), "{logs}");
             server.verify().await;
         }
+    }
+
+    #[tokio::test]
+    async fn immediate_storno_verification_alerts_and_retains_candidate() {
+        use crate::gateway::StornoStepRequest;
+        let capture = LogCapture::default();
+        let _guard = capture.subscribe();
+        LogCapture::rebuild_interest();
+        let server = MockServer::start().await;
+        let mut account = Account::new("account", "reference");
+        account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+        let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
+        let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
+        let marker = UnresolvedWrite {
+            version: MarkerVersion,
+            token: "owner".into(),
+            owner_invocation: "owner".into(),
+            created_at: "2026-09-11T12:00:00Z".into(),
+            scope: None,
+            order: OrderKey::parse("ORD-1").expect("order"),
+            namespace: "acct".parse().expect("namespace"),
+            external_id: external_id.to_string(),
+            account_id: "account".into(),
+            endpoint: server.uri(),
+            credential_ref: "reference".into(),
+            operation: WriteOperation::Storno {
+                number: "SZ-1".into(),
+            },
+        };
+        Mock::given(body_string_contains("action-szamla_agent_st"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                crate::test_support::numbered_reply_body("SS-CANDIDATE", None),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(body_string_contains(
+            "<szamlaszam>SS-CANDIDATE</szamlaszam>",
+        ))
+        .respond_with(api_error("135", "PRIVATE-DIAGNOSTIC"))
+        .expect(1)
+        .mount(&server)
+        .await;
+        let result = gateway
+            .storno_send(
+                StornoStepRequest {
+                    invoice_number: "SZ-1",
+                    external_id: &external_id,
+                    comment: None,
+                    e_invoice: false,
+                    fulfillment_date: jiff::civil::date(2026, 9, 11),
+                },
+                Some(&marker),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(super::super::Unconfirmed::StornoVerification { ref number, .. }) if number == "SS-CANDIDATE"),
+            "{result:?}"
+        );
+        let logs = capture.logs();
+        assert_eq!(
+            logs.matches("fix the account's agent key").count(),
+            1,
+            "{logs}"
+        );
+        assert!(
+            logs.contains("code=135") && logs.contains("namespace=acct"),
+            "{logs}"
+        );
+        assert!(!logs.contains("PRIVATE-"), "{logs}");
+        server.verify().await;
     }
 }

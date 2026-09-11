@@ -531,6 +531,19 @@ async fn e2e_unresolved_kill_preserves_marker_and_recovery_requires_evidence() {
     }
     assert_eq!(pending.sends.load(Ordering::SeqCst), 1);
     let recover = Call::object("Szamlazz.Order", key, "recover");
+    // A completed/killed owner satisfies invocation drain but must still block
+    // a scope switch. Exercise the operator's executable inventory, not a copy.
+    restate
+        .admin()
+        .await_status(first.invocation_id(), &["completed"])
+        .await;
+    let blocked = migration_inventory(&restate).await;
+    assert_eq!(blocked.status.code(), Some(1), "{blocked:?}");
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&blocked.stdout).expect("inventory JSON");
+    assert_eq!(inventory["unfinished_invocations"], json!([]));
+    assert_eq!(inventory["order_state"][0]["service_key"], key);
+    assert!(inventory["order_state"][0]["scope"].is_null());
     let mut request = json!({"marker":marker, "evidence":{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}});
     request["marker"]["token"] = json!("stale");
     assert_eq!(
@@ -575,7 +588,33 @@ async fn e2e_unresolved_kill_preserves_marker_and_recovery_requires_evidence() {
         "absent"
     );
     assert_eq!(pending.sends.load(Ordering::SeqCst), 1);
+    let clean = migration_inventory(&restate).await;
+    assert!(clean.status.success(), "{clean:?}");
+    // Only after operator recovery do we close all ingress for the final gate.
+    restate.set_public("Szamlazz.Order", false).await;
+    restate.set_public("Szamlazz.Agent", false).await;
+    restate.drain().await;
+    assert_ne!(restate.invoke(&observation, None, None).await.status, 200);
+    assert!(migration_inventory(&restate).await.status.success());
     restate.finish().await;
+}
+
+async fn migration_inventory(restate: &Restate) -> std::process::Output {
+    let admin = restate.admin_url().to_owned();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/check-order-migration.py"
+            ))
+            .arg("--admin-url")
+            .arg(admin)
+            .env_remove("RESTATE_ADMIN_TOKEN")
+            .output()
+            .expect("migration inventory process")
+    })
+    .await
+    .expect("inventory task")
 }
 
 /// The first send is accepted into the script's pending work, but its reply is

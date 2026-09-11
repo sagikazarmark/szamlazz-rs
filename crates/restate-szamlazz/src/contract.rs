@@ -52,7 +52,8 @@
 //! (`set_payments` became `set_credit_entries` in one, 2026-09-09; `CONTEXT.md`,
 //! *Credit entry*). **JSON**: fields `snake_case`; requests closed
 //! (`deny_unknown_fields`), responses open (`#[non_exhaustive]`); decimals
-//! as strings (a number accepted on input), dates as ISO `YYYY-MM-DD`; an
+//! as strings (a number accepted exactly on input; unrepresentable quantities,
+//! prices, credit-entry amounts and exchange rates are refused), dates as ISO `YYYY-MM-DD`; an
 //! absent optional response field is `null`, a fault's included.
 
 use std::fmt;
@@ -62,6 +63,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod create;
+mod decimal;
 pub mod document;
 pub mod recovery;
 pub mod storno;

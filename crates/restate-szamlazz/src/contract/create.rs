@@ -98,7 +98,9 @@ pub enum ProformaLink {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CorrectRequest {
-    /// The invoice being corrected; must carry this order's number.
+    /// The live ordinary, prepayment or final invoice being corrected; must
+    /// carry this order's number. Further corrections name this original base,
+    /// not a previous corrective.
     pub invoice_number: InvoiceNumber,
     /// The identity of this corrective. A new id issues a new corrective by
     /// contract; the same id finds the one it issued.

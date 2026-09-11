@@ -444,8 +444,9 @@ mapping or deliberately cancel and reconcile them before switching. They are det
 stopping or killing that originator does not remove the send
 ([invocation management](https://docs.restate.dev/services/invocation/managing-invocations)).
 
-Make both services private, drain outstanding invocations under the old mapping, register the new immutable
-deployment, update **all** callers' scope routing, then reopen ingress and resume producers. Privacy alone is
+Follow design §9's complete recovery → privacy → drain → inventory → switch procedure. Keep authorized operator
+ingress reachable under the old mapping until uncertain writes are settled. Service-wide privacy blocks recovery
+ingress too. Then update **all** callers' scope routing before reopening and resuming producers. Privacy alone is
 not a global producer stop, and an empty drain observed while internal producers can still admit work is not a
 mapping boundary. Design §9 is the procedure; [#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) owns
 the broader operational SQL, alerting and per-fault runbook.
@@ -454,8 +455,11 @@ the broader operational SQL, alerting and per-fault runbook.
 
 - Single-account deployments are unchanged for callers: the static resolver's `[account]` is served
   unscoped, `resolve(None)` is the account, any scope is unknown.
-- Single → multi is a **flag day** with no data migration: quiesce producers as amended above, make both
-  services private (the ingress refuses new calls without creating invocations), drain `sys_invocation`, register the revision with
+- Single → multi is a **flag day** with no data migration only after uncertainty is settled: quiesce business
+  producers while retaining authorized operator ingress under the old mapping, settle external uncertainty and
+  recover markers. Then make both services private, drain `sys_invocation` and verify no Order state remains in either identity. A completed/killed owner may
+  retain a marker: recover it under the original scope before proceeding. Use the read-only
+  `scripts/check-order-migration.py` inventory; unreadable state blocks too. Then register the revision with
   `[accounts.<scope>]` keeping the namespace, point callers at scoped paths, make the services public, probe
   every scope. The first scoped create for an already-invoiced order finds it under the unchanged external
   id (verified: `flag_day_keeps_the_documents_and_refuses_unscoped_calls`). The same drain–switch–resume

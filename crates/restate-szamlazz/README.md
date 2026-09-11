@@ -128,7 +128,10 @@ until an SDK fix is released. See the [reproduction, candidate upstream patch an
 removal condition](../../docs/research/2026-09-10-replay-logging.md).
 
 Amounts (`quantity`, `unit_price`, every total) are decimals serialised as JSON **strings**; a number is accepted on
-input. Optional response fields, a fault's included, are present as `null` when absent.
+input without binary-float conversion. Quantities, prices, credit-entry amounts and exchange rates must fit a
+Decimal exactly; unrepresentable input is `invalid_input` before the prologue, never implicitly rounded. Use strings
+when your caller's JSON tooling would otherwise round the number. Currency rounding happens only during calculation.
+Optional response fields, a fault's included, are present as `null` when absent.
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (a TOML file layered with environment overrides through figment, for instance).
@@ -150,7 +153,8 @@ Both configuration types only implement `Deserialize`; the host chooses the file
   resolver of your own must guarantee is on the `AccountResolver` and `CredentialStore` rustdoc.
 
 Neither service holds a gateway or a client: every handler resolves its account and opens a `Gateway` for its own
-execution. Going from `[account]` to `[accounts.<scope>]` is a flag day with no data migration, scripted in
+execution. Going from `[account]` to `[accounts.<scope>]` is a flag day: settle external uncertainty and recover
+every unresolved marker under its original scope first. Only then is no data migration needed, as scripted in
 [ADR 0006](../../docs/adr/0006-account-selection-via-restate-scopes.md) and the
 [design document](../../docs/design/restate-szamlazz.md).
 
@@ -310,7 +314,9 @@ request carries the `DocumentInput` (buyer, line items, dates, payment method, p
 (`kind`, `external_id`), the numbers and totals, and `warnings`. `customer_account_url` is set only on the
 execution that actually issued (a fresh `issued`), never on `already_issued`, `reconciled` or `get`.
 `CorrectRequest` (`invoice_number`, `correction_id`, `document`) is the input of `correct_invoice` and shares the
-response.
+response. Its base must be this order's live ordinary, prepayment or final invoice. Further corrections name
+that original base, not a previous corrective. Other types are `invalid_input` before a write is armed;
+an already-issued target is still returned before checking new prerequisites.
 
 Every request type, and every object it nests, is closed (`#[serde(deny_unknown_fields)]`,
 `additionalProperties: false` in the schema): a field the contract does not know is refused as `invalid_input`
@@ -1310,7 +1316,14 @@ reconcile external effects before deliberately choosing a new invocation.
 calls still work. Before the [single → multi procedure](../../docs/design/restate-szamlazz.md#9-configuration-deployment-constant-never-in-payloads),
 stop internal producers and account for pending delayed sends (drain them under the old mapping or deliberately
 cancel and reconcile them); stopping their originator alone does not remove detached sends. Keep producers stopped
-through drain and switch, update their scope routing, then reopen. The e2e procedure assumes ingress-only producers.
+through drain and switch. Retain authorized operator ingress under the old mapping while blocking business calls
+at the gateway; recover markers before making the services private, which blocks recovery ingress too.
+Invocation drain is insufficient: recover every retained marker under its original scope
+and independently settle external uncertainty. Run `python3 scripts/check-order-migration.py --admin-url "$RESTATE_ADMIN_URL"`
+from the repository root; every Order state row (including unreadable state) blocks switching. Its empty result
+is an inventory check, not vendor proof. Then update scope routing and reopen. See the
+[recovery runbook](../../docs/operations/order-recovery.md#scope-migration-inventory).
+The e2e procedure assumes ingress-only producers.
 
 Related guarantees have their own work: [#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) owns broader
 alerting/runbooks; [#50](https://github.com/sagikazarmark/szamlazz-rs/issues/50) proposes concurrent `get` reads

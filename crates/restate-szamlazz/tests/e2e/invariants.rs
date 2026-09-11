@@ -163,7 +163,8 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
     );
     let state = h.admin().sql_or_panic("SELECT service_name, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'")
         .await;
-    assert!(!state.is_empty(), "cancelled writes retain markers");
+    // Phase-1 markers were recovered before the scope switch. Phase 2 may
+    // retain new uncertainty; any remaining state must be protection state.
     assert!(
         state.iter().all(|row| row["key"] == "unresolved-write"),
         "only uncertainty state: {state:?}"

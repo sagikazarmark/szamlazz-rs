@@ -78,6 +78,7 @@ pub mod credentials;
 pub mod error;
 pub mod item;
 mod number;
+pub use number::parse as parse_decimal;
 pub mod ops;
 pub mod types;
 pub mod wire;

@@ -188,7 +188,9 @@ impl Order {
     }
 
     /// Issues a corrective invoice (`helyesbítő számla`) for an invoice of
-    /// this order. A new `correction_id` issues a new corrective.
+    /// this order. The base is an ordinary, prepayment or final invoice;
+    /// further corrections name the original base. A new `correction_id`
+    /// issues a new corrective.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",

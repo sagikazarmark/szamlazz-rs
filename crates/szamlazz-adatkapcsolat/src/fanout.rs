@@ -154,6 +154,11 @@ impl std::fmt::Display for FanoutError {
                 write!(f, "; ")?;
             }
             write!(f, "{}: {}", failure.handler, failure.error)?;
+            let mut source = failure.error.source();
+            while let Some(cause) = source {
+                write!(f, ": {cause}")?;
+                source = cause.source();
+            }
         }
 
         Ok(())

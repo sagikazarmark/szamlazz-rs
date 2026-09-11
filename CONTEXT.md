@@ -64,6 +64,9 @@ _Avoid_: a final invoice "netted by the server", a prepayment invoice as unable 
 
 **Corrective invoice (helyesbítő számla)**:
 An invoice that corrects a previously issued one, referencing its number.
+The Order's supported corrective base is an ordinary, prepayment or final invoice;
+further corrections name that original base, not a previous corrective. This is the
+worker's supported contract, not a claim that the vendor forbids every other relationship.
 
 **Storno invoice (sztornó)**:
 The reversal of an issued invoice. A distinct Agent operation, not an invoice flag. Idempotent on the server: repeating the storno of an already reversed invoice echoes the existing storno number as success, with no error code and no second document. Sent on a proforma or delivery note it is a success-shaped no-op that echoes the requested number unchanged. Its fulfillment date (`teljesitesDatum`) must equal the original's `telj` (NAV allows a storno no other date), so the worker's storno handlers (`Szamlazz.Order.storno_invoice`, `Szamlazz.Agent.storno`) always send the verified original's `telj` explicitly, never a caller's date (`StornoRequest` has none; ADR 0007); szamlazz.hu defaults to that date when the element is omitted and accepts any other date silently, so the explicit send is what fails loudly. A verified original without a `telj` (szamlazz.hu's schema has it mandatory) is the `unavailable` fault with nothing sent, raised after the answers that need no send (not managed, account mismatch, already reversed, not stornoable). Never `keltDatum` (352).

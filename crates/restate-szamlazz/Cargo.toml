@@ -28,7 +28,7 @@ restate-sdk = { workspace = true }
 rust_decimal = { workspace = true }
 schemars = { workspace = true, optional = true, features = ["jiff02", "rust_decimal1"] }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }

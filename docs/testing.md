@@ -36,6 +36,7 @@ cargo test --doc --workspace --all-features --locked
 cargo hack check --workspace --feature-powerset --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+python3 scripts/test-order-migration.py
 dagger check
 ```
 

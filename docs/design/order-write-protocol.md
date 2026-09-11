@@ -145,3 +145,7 @@ rotation; changed scope configuration cannot redirect a marker's queries.
 Monitor marker age, paused owners, orphaned markers and queued mutations; #45 owns runnable operational
 SQL and broader alerting. State deletion, incompatible old code, scope remapping, unkeyed Agent writes
 and vendor UI writes remain outside the protection boundary.
+
+Scope migration additionally requires no Order state under either identity, not merely completed invocations.
+Use `scripts/check-order-migration.py`; it inventories all scopes and blocks on undecodable state without reading
+its value. Recover under the old scope and independently settle external uncertainty before switching.
