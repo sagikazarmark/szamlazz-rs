@@ -258,6 +258,52 @@ async fn delete_proforma_outcomes() {
 }
 
 #[tokio::test]
+async fn credit_registration_requires_reported_identity_to_match_when_present() {
+    for reported in [Some("SZ-EXPECTED"), None, Some("PRIVATE-OTHER-INVOICE")] {
+        let h = Harness::start().await;
+        let identity = reported.map_or_else(String::new, |number| {
+            format!("<szamlaszam>{number}</szamlaszam>")
+        });
+        credit()
+            .and(body_string_contains("<szamlaszam>SZ-EXPECTED</szamlaszam>"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres>{identity}<szamlabrutto>1270</szamlabrutto><kintlevoseg>270</kintlevoseg></xmlszamlavalasz>"#
+            )))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        let entry = CreditEntryInput {
+            date: date(2026, 9, 11),
+            title: PaymentMethod::Transfer,
+            amount: dec!(1000),
+            comment: None,
+        };
+        let outcome = h
+            .gateway
+            .set_credit_entries("SZ-EXPECTED", &[entry], true)
+            .await;
+        if reported == Some("PRIVATE-OTHER-INVOICE") {
+            assert!(
+                matches!(&outcome, SetCreditEntriesOutcome::Lost(Unanswered::Transport(reason))
+                if reason == "set-credit-entries: reported invoice number differs from the requested number"),
+                "{outcome:?}"
+            );
+            assert!(!format!("{outcome:?}").contains("PRIVATE-"));
+        } else {
+            assert_eq!(
+                outcome,
+                SetCreditEntriesOutcome::Done {
+                    outstanding: Some(dec!(270)),
+                    gross: Some(dec!(1270)),
+                }
+            );
+        }
+        assert_eq!(h.bodies().await.len(), 1, "no query or repeat registration");
+        h.server.verify().await;
+    }
+}
+
+#[tokio::test]
 async fn set_credit_entries_outcomes() {
     let h = Harness::start().await;
     credit()

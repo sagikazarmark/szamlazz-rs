@@ -502,6 +502,8 @@ pub struct CreateResponse {
     #[serde(default)]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlévőség`).
+    /// When derived from a queried document, absent if gross is unknown or the
+    /// credit-entry sum or subtraction cannot fit exactly in a decimal.
     #[serde(default)]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account URL (`vevői fiók URL`). szamlazz.hu returns it

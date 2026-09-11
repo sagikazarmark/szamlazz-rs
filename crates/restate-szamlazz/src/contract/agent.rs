@@ -167,6 +167,8 @@ pub struct QueryResponse {
     #[serde(default)]
     pub credit_entries: Vec<CreditEntryRecord>,
     /// Outstanding amount: gross total minus the sum of credit entries.
+    /// Absent when gross is unknown or any intermediate sum or final subtraction
+    /// cannot be represented exactly as a decimal.
     #[serde(default)]
     pub outstanding: Option<Decimal>,
     /// Issued from a test account (`teszt`), as szamlazz.hu reported it:

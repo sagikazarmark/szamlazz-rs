@@ -948,17 +948,20 @@ pub enum SetCreditEntriesOutcome {
     /// The send's code (or its absence) does not establish refusal. Preserve
     /// the cause as data and reconcile before any caller-driven repeat.
     Inconclusive(SzamlazzAnswer),
-    /// The *Lost answer*: the entries were sent and szamlazz.hu did not
-    /// answer (a transport or parse failure, or `szlahu_down`), so whether
-    /// they landed is not known. Data, not an error: the step runs once
-    /// without a run retry and the handler answers `outcome_unknown`. Query
-    /// first: an additive caller sends only missing entries; a replacing
-    /// caller sends the current intended snapshot if replacement is still wanted.
+    /// The *Lost answer*: no usable acknowledgement (a transport or parse failure,
+    /// `szlahu_down`, or a reported invoice number different from the target), so
+    /// whether the entries landed is not known. Data, not a run retry: the handler
+    /// answers `outcome_unknown`. First settle the earlier registration and exclude
+    /// delayed execution; missing entries and elapsed time are not settlement.
+    /// Only then query again and deliberately renew with still-required additive
+    /// entries or the current intended replacement. See the crate README's
+    /// *Unresolved writes* and the repository's `docs/operations/order-recovery.md`.
     Lost(Unanswered),
 }
 
-/// A successful registration: [`SetCreditEntriesOutcome::Done`] with the reported
-/// totals.
+/// Projects a successful acknowledgement's reported totals. This conversion has
+/// no requested target to compare: [`Gateway::set_credit_entries`] checks any
+/// reported invoice number before using it.
 impl From<InvoiceBalance> for SetCreditEntriesOutcome {
     fn from(balance: InvoiceBalance) -> Self {
         Self::Done {
@@ -2056,6 +2059,9 @@ impl Gateway {
 
     /// Registers `entries` on invoice `number`, replacing the existing entries
     /// unless `additive`.
+    /// An acknowledgement may omit its invoice number; if it reports one, it must
+    /// match `number` exactly. A mismatch is a sanitized lost answer, never success
+    /// attributed to the requested invoice or permission to repeat the send.
     pub async fn set_credit_entries(
         &self,
         number: &str,
@@ -2077,6 +2083,17 @@ impl Gateway {
         };
 
         match self.client.send(&request).await {
+            Ok(result)
+                if result
+                    .invoice_number
+                    .as_ref()
+                    .is_some_and(|reported| reported.as_str() != number) =>
+            {
+                SetCreditEntriesOutcome::Lost(Unanswered::Transport(
+                    "set-credit-entries: reported invoice number differs from the requested number"
+                        .to_owned(),
+                ))
+            }
             Ok(result) => {
                 tracing::info!(number = %number, additive, "credit entries registered");
                 SetCreditEntriesOutcome::from(result)

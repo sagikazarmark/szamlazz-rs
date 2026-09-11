@@ -500,14 +500,16 @@ impl Fault {
 }
 
 /// `gross − Σ credit entries`, when the gross total is known and the arithmetic
-/// fits a decimal. The one definition of the outstanding amount both
-/// `create_*` and `query` report. Checked: the amounts are szamlazz.hu's, but
-/// a panic would run on the SDK's connection task.
+/// fits a decimal exactly, including each intermediate sum. The one definition
+/// of the outstanding amount both `create_*` and `query` report. Checked: the
+/// amounts are szamlazz.hu's, but a panic would run on the SDK's connection task.
 pub(crate) fn outstanding(gross: Option<Decimal>, credit_entries: &[Decimal]) -> Option<Decimal> {
     let paid = credit_entries
         .iter()
-        .try_fold(Decimal::ZERO, |sum, amount| sum.checked_add(*amount))?;
-    gross?.checked_sub(paid)
+        .try_fold(Decimal::ZERO, |sum, amount| {
+            decimal::exact_add(sum, *amount)
+        })?;
+    decimal::exact_add(gross?, -paid)
 }
 
 #[cfg(test)]
@@ -535,6 +537,36 @@ mod tests {
             None
         );
         assert_eq!(outstanding(Some(Decimal::MAX), &[Decimal::MIN]), None);
+    }
+
+    #[test]
+    fn outstanding_rejects_precision_loss_in_the_sum_and_subtraction() {
+        let boundary = dec!(7922816251426433759354395033.5);
+        assert_eq!(outstanding(Some(boundary), &[dec!(-0.1)]), None);
+        assert_eq!(outstanding(Some(-boundary), &[dec!(0.1)]), None);
+        assert_eq!(outstanding(Some(boundary), &[boundary, dec!(0.1)]), None);
+        // A later cancellation does not make an inexact intermediate acceptable.
+        assert_eq!(
+            outstanding(Some(boundary), &[boundary, dec!(0.1), dec!(-0.1)]),
+            None
+        );
+    }
+
+    #[test]
+    fn outstanding_keeps_exact_boundary_results_and_cancellation() {
+        let boundary = dec!(7922816251426433759354395033.5);
+        assert_eq!(
+            outstanding(Some(boundary), &[dec!(0.5)]),
+            Some(dec!(7922816251426433759354395033))
+        );
+        assert_eq!(
+            outstanding(Some(Decimal::MAX), &[Decimal::MAX, Decimal::MIN]),
+            Some(Decimal::MAX)
+        );
+        assert_eq!(
+            outstanding(Some(dec!(0.0000000000000000000000000001)), &[]),
+            Some(dec!(0.0000000000000000000000000001))
+        );
     }
 
     /// The bound reaches every request that names a document by number, and

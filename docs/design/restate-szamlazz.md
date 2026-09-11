@@ -185,7 +185,10 @@ pinned namespace), and nothing of it (gateway, client, credentials) outlives the
    credential reference, no response names the account (§7), and a store's reference may be internal topology (a
    secret path); the operator's `warn` carries both (#65). Completed operations replay without fetching.
    An unfinished write may have sent on an earlier execution: the fault says the outcome is not known, never
-   that nothing was sent; `get` or a new `Idempotency-Key` reconciles it. Best-effort storno-number reads retain
+   that nothing was sent. Retain the key while unfinished; resume an Order owner for read-only reconciliation.
+   An empty `get` or query does not settle a write, and a new `Idempotency-Key` is not a reconciliation probe.
+   Deliberate renewal requires settlement of the earlier request and exclusion of delayed execution, following
+   the [operator runbook](../operations/order-recovery.md). Best-effort storno-number reads retain
    their known reversal without a number on initialization failure. Only results/failures are persisted;
    credentials inside a closure are not journaled. Their type has no serde implementation.
 4. **Open**: `Gateway::open(account, credentials)` over a fresh Számla Agent client (the default `reqwest::Client`
@@ -748,8 +751,9 @@ under, `Szamlazz.Agent` carries none (a by-number fault). Not the answer to a mi
 
 `szamlazz_error`: szamlazz.hu answered with an error code of its own that the handler **passes through** rather than
 concludes from; `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, `query_taxpayer` on any
-`funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed `errorCode`), `set_credit_entries` on szamlazz.hu refusing the credit
-entries. A 422 whose `code` is the symbolic token and whose `szamlazz_code` is szamlazz.hu's (a caller branching on
+`funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed `errorCode`). A vendor refusal on `set_credit_entries` instead
+produces `outcome_unknown` with `szamlazz_code`: it cannot settle an earlier execution of the interrupted run.
+`szamlazz_error` is a 422 whose `code` is the symbolic token and whose `szamlazz_code` is szamlazz.hu's (a caller branching on
 `code` never meets a numeric code there) with szamlazz.hu's message. An answer, so it is journaled and never retried
 by a read policy; settled from the worker's side, although a NAV outage relayed through `query_taxpayer` is one the
 caller retries with a new `Idempotency-Key`. The handlers that *can* conclude from a szamlazz.hu code do not use it:
@@ -806,11 +810,14 @@ rules below, which are also the rules for an embedder. The rules:
    handler's invocation retry policy allows: **keep the key** (a retry with it attaches to the in-flight invocation) or
    read `get`. A killed invocation is a fault whose envelope `message` is the last retryable error's text, not `{code, message}`;
    preserve the native/raw error without inventing a fault code; a write may have landed, so reconcile first.
-   Another exception to "retry with a new key" is `Szamlazz.Agent.set_credit_entries` with
-   `additive: true`, which has nothing to reconcile by: every send that reached szamlazz.hu appended the entries, so
-   query the invoice before re-sending (the fault's message says so). The other faults are settled (§7): nothing
-   landed: `invalid_input`, `unknown_account` and `not_found` are raised before anything is sent, and
-   `szamlazz_error` is szamlazz.hu answering with an error (to a read, or refusing the credit entries it was sent).
+   Both modes of `Szamlazz.Agent.set_credit_entries` require settlement of the earlier registration and exclusion
+   of delayed execution before renewal. Only then query again and deliberately submit still-required additive
+   entries or the current intended replacement with a new key. Missing entries, elapsed time and a fresh key
+   cannot establish settlement. Vendor credit-entry refusals remain `outcome_unknown`: they settle the latest
+   exchange, not an earlier execution of the interrupted run. Follow the
+   [operator runbook](../operations/order-recovery.md#effective-retry-controls).
+   The settled faults (§7) are `invalid_input`, `unknown_account` and `not_found`, raised before anything is sent,
+   and `szamlazz_error`, szamlazz.hu answering a read with an error.
    Retrying as is repeats the answer: the caller fixes the request, the number, the scope or the account, or, for a
    `szamlazz_error` relaying a NAV outage, retries later with a new key.
 3. After a storno (by this service, the UI or anyone) a create returns `outcome: reversed`. Send

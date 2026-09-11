@@ -19,6 +19,56 @@ use crate::harness::szamlazz::{
     number_query, original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
+/// Contradictory identity is a retained fault, never success attributed to the
+/// requested invoice or permission to repeat either registration mode.
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; credit registration reply identity"]
+async fn e2e_credit_identity_mismatch_retains_uncertainty_without_resending() {
+    use restate_e2e_harness::{Call, ReusePolicy, launcher_or_skip};
+    use restate_sdk::prelude::Endpoint;
+    use restate_szamlazz::contract::{Fault, TerminalCode};
+    use wiremock::MockServer;
+
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let server = launcher.launch(&crate::harness::MAIN_SERVER).await;
+    let mock = MockServer::start().await;
+    let (_, agent) = crate::harness::accounts::services(&mock.uri());
+    server.deploy(Endpoint::builder().bind(agent).build()).await;
+    for additive in [false, true] {
+        let number = format!("CREDIT-IDENTITY-{}", u8::from(additive));
+        credit_of(&number)
+            .respond_with(created("PRIVATE-OTHER-INVOICE", "1000", "1270"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let call = Call::service("Szamlazz.Agent", "set_credit_entries");
+        let body = json!({"invoice_number":number,"entries":[{"date":"2026-09-11","title":"transfer","amount":"1"}],"additive":additive});
+        let reply = server.invoke(&call, Some(&body), Some(&number)).await;
+        let fault: Fault = reply.fault();
+        assert_eq!(reply.status, 500);
+        assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
+        assert_eq!(fault.szamlazz_code, None);
+        assert!(fault.message.contains("reported invoice number differs"));
+        assert!(fault.message.contains("only after settlement"));
+        let retained = server.invoke(&call, Some(&body), Some(&number)).await;
+        assert_eq!(retained.invocation_id(), reply.invocation_id());
+        assert_eq!(retained.fault::<Fault>(), fault);
+        let journal = server.admin().journal(reply.invocation_id()).await;
+        let result =
+            restate_e2e_harness::run_result(&journal, &format!("set-credit-entries-{number}"))
+                .expect("registration uncertainty is journaled");
+        assert!(result.raw_contains("reported invoice number differs"));
+        assert!(result.raw_contains("Lost"));
+        assert!(!format!("{fault:?}").contains("PRIVATE-"));
+        assert!(journal.iter().all(|entry| !entry.raw_contains("PRIVATE-")));
+    }
+    assert_eq!(mock.received_requests().await.expect("requests").len(), 2);
+    mock.verify().await;
+    server.finish().await;
+}
+
 /// A changed credential is execution-local, so its local refusal cannot settle
 /// the registration accepted during an earlier execution of the open run.
 #[tokio::test]

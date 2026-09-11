@@ -60,7 +60,8 @@ pub(super) fn credentials_check(outcome: ProbeOutcome) -> CredentialsCheck {
 /// The `outcome_unknown` fault after a lost or inconclusive credit-entry answer. What the
 /// caller does next depends on `additive`: a replacing call uses the current
 /// intended snapshot (an older one could overwrite newer entries); an
-/// additive one may already have appended the entries, so query first.
+/// additive one may already have appended the entries. Settle the earlier request
+/// and exclude delayed execution before querying and deliberately renewing it.
 fn set_credit_entries_unknown(additive: bool, lost: &impl std::fmt::Display) -> Fault {
     let next = credit_entries_recovery(additive);
     Fault::outcome_unknown(format!(

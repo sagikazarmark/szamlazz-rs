@@ -107,3 +107,6 @@ admin policy patch. Execution counts/durations are exhaustion thresholds, not ha
 Unkeyed Agent credit entries do not use Order's marker. Before renewal, independently settle earlier registration
 and exclude delayed execution, then query again and submit only still-required entries or the current replacement.
 A per-invoice caller lock alone cannot stop a request already processing at the vendor.
+Credit registration also returns `outcome_unknown` when an otherwise successful acknowledgement explicitly
+names a different invoice. The worker keeps a sanitized mismatch diagnostic and does not repeat the send;
+neither that contradiction nor a later empty query establishes non-execution on the requested invoice.

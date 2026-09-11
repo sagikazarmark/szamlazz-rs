@@ -1,11 +1,36 @@
-//! Exact input numbers. JSON preserves the token through `arbitrary_precision`;
-//! buffered Serde wrappers also support strings and exact integers.
+//! Exact input numbers and balance arithmetic. JSON preserves the token through
+//! `arbitrary_precision`; buffered Serde wrappers also support strings and exact integers.
 use rust_decimal::Decimal;
 use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
 };
 use std::fmt;
+
+/// Decimal's checked addition may round on success. Align integer coefficients
+/// instead, as the Számla Agent's derived line-item arithmetic does. With two
+/// 96-bit coefficients, alignment exceeding i128 cannot cancel back into Decimal:
+/// the operand already at the common scale still has at most 96 bits.
+pub(super) fn exact_add(left: Decimal, right: Decimal) -> Option<Decimal> {
+    let result = left.checked_add(right)?;
+    let left = left.normalize();
+    let right = right.normalize();
+    let mut scale = left.scale().max(right.scale());
+    let a = left
+        .mantissa()
+        .checked_mul(10i128.pow(scale - left.scale()))?;
+    let b = right
+        .mantissa()
+        .checked_mul(10i128.pow(scale - right.scale()))?;
+    let mut coefficient = a.checked_add(b)?;
+    while scale > 0 && coefficient % 10 == 0 {
+        coefficient /= 10;
+        scale -= 1;
+    }
+    let exact = Decimal::try_from_i128_with_scale(coefficient, scale).ok()?;
+    // Keep the existing result's display/serde scale, but only if it is exact.
+    (result == exact).then_some(result)
+}
 
 /// The finite textual grammar, before the runtime's exact-representability
 /// check. JSON numbers are already constrained by JSON syntax. Explicitly

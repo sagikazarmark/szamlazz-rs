@@ -34,6 +34,9 @@ are computed, domain outcomes are returned as data.
 Worker query results must carry a nonblank document number; by-number results must echo the requested number.
 Malformed identity remains an unanswered read, never usable evidence for a mutation or marker clearance.
 Storno recovery requires a distinct reversal number and a stornoable, reversed original.
+Credit-registration acknowledgements may omit reported identity. A reported invoice number must match the
+requested target exactly; a mismatch is `outcome_unknown`, with no registration retry or contradictory number
+copied into the journal or caller fault.
 
 Complete create/storno request validation precedes write arming: unsupported dates and XML-forbidden
 text are `invalid_input`, without creating an unresolved-write marker. Create validates before document
@@ -135,6 +138,8 @@ Discovery accepts signed exponent notation and the same finite decimal string gr
 exact representability is additionally checked at runtime. Handler JSON rejects object-valued amounts,
 including lookalikes of serde_json's private arbitrary-precision representation, before durable work.
 Optional response fields, a fault's included, are present as `null` when absent.
+Outstanding amounts derived from queried documents are `null` if gross is unknown or any intermediate
+credit-entry sum or final subtraction cannot fit Decimal exactly; they are never silently rounded.
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (a TOML file layered with environment overrides through figment, for instance).
