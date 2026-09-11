@@ -761,14 +761,17 @@ mod responses {
         assert_eq!(info.currency, Some(Currency::HUF));
         assert_eq!(info.exchange_rate, Some(dec!(0)));
         assert_eq!(info.comment, None, "an empty <megjegyzes> is none");
-        assert!(!info.cash_accounting);
-        assert!(info.kata);
+        assert_eq!(info.cash_payment, None);
+        assert_eq!(info.cash_accounting, Some(false));
+        assert_eq!(info.kata, Some(true));
+        assert_eq!(info.kata_ledger, None);
         assert_eq!(info.email.as_deref(), Some(MASKED_EMAIL));
         assert_eq!(info.test, Some(false));
         assert_eq!(info.reversed, None);
         assert_eq!(info.order_number, None);
 
         let buyer = &document.buyer;
+        assert_eq!(buyer.private_person, None);
         assert_eq!(buyer.id, Some(221_216));
         assert_eq!(buyer.name, "Customer name");
         let address = buyer.address.as_ref().expect("buyer address");

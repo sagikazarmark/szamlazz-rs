@@ -969,8 +969,9 @@ impl ExchangeRate {
     /// and custom-data receipt example comments in [official PHP 2.12.4](https://docs.szamlazz.hu/assets/files/PHPApiAgent-2.12.4-33e323cd64c5ba9601bec272b218f2d1.zip),
     /// despite general XML pages asking for bank and rate. That example supplies
     /// a rate: its comments are documentation evidence, not an omitted-rate
-    /// execution. Local tests prove emission only; no receipt account probe
-    /// establishes server execution of the omitted-rate request.
+    /// execution. A separate test-account probe on 2026-09-11 omitted the rate
+    /// on a EUR receipt and queried back bank `MNB`, rate `363.9`. That observation
+    /// establishes this account/request, not every currency or date.
     #[must_use]
     pub fn automatic_mnb() -> Self {
         Self {

@@ -1,14 +1,14 @@
-# Számla Agent: credit acknowledgement and effective schemas
+# Számla Agent: successful response identity and effective schemas
 
 **Status:** send-ready Hungarian draft, not sent; no vendor answer received.
-Prepared 2026-09-11 after the [whole-crate review](../review/2026-09-11-agent-api-61c334f.md).
+Updated 2026-09-11 after the [whole-crate review](../review/2026-09-11-agent-api-eec57fc.md), including the PDF-query success guarantee.
 This is the current message for these two topics, superseding the corresponding
 questions in the [earlier question list](2026-09-10-agent-vendor-questions.md)
 and [credit-success brief](2026-09-10-credit-entry-success-question.md).
 
 ## Küldendő üzenet
 
-**Tárgy: Számla Agent – sikeres befizetés-válasz számlaszáma és az irányadó XSD-k**
+**Tárgy: Számla Agent – sikeres befizetés/PDF-válasz számlaszáma és az irányadó XSD-k**
 
 Tisztelt Számlázz.hu Ügyfélszolgálat!
 
@@ -49,6 +49,16 @@ ellenőriztük: a meglévő befizetés eltűnt, az üres számla üres maradt, �
 válaszban megkaptuk a várt számlaszámot és a teljes bruttó összegnek megfelelő
 kintlévőséget. Ezért elsősorban az általános válaszgarancia pontosítását kérjük.
 
+**1/b. Számlaszám a sikeres PDF-lekérdezés válaszában**
+
+Ugyanez a garancia érvényes-e az `action-szamla_agent_pdf` művelet sikeres
+`valaszVerzio=2` válaszaira, akár számlaszám, rendelésszám vagy külső azonosító
+alapján kérdezünk? A [PDF-válasz dokumentációja](https://docs.szamlazz.hu/hu/agent/querying_pdf/response)
+itt is opcionális `szamlaszam` elemet és esetlegesen érkező fejléceket ír le.
+Lehet-e sikeres válasz érvényes, base64-kódolt PDF-fel, de nem üres számlaszám
+nélkül mindkét csatornán? Kérjük, a sikeres PDF-válaszokra vonatkozó feltételt
+is rögzítsék, külön a sikeres és sikertelen válaszokat egyaránt leíró XSD-től.
+
 **2. Az éles feldolgozó által elfogadott elemsorrend és az irányadó sémák**
 
 A számlakérés [magyar](https://docs.szamlazz.hu/hu/agent/generating_invoice/xml)
@@ -77,6 +87,25 @@ fedi le egyszerre a másikban szereplő mezőket és sorrendet.
 Köszönjük a segítséget!
 
 ## Internal context and next evidence
+
+### What API calls can establish
+
+An actual call can establish acceptance and returned fields for that account,
+request and date, or disprove a universal claim with a counterexample. A series
+of numbered successes cannot prove an always-numbered success contract; an
+accepted request does not identify an authoritative published XSD. Those two
+guarantees still need a vendor answer. A combined-preview experiment must also
+verify non-issuance rather than assuming the preview flag was honored.
+
+Receipt lifecycle, omitted-rate MNB and email-resend probes can establish bounded
+observations. Email acknowledgements alone do not establish inbox delivery.
+The operator confirmed the intended locally configured test account and supplied
+an inbox. No existing receipt prefix was available. The new prefix `RSPRB` was
+accepted without UI registration after a seven-character candidate was refused
+with code 337 (at most five characters). The [dated receipt record](2026-09-11-receipts-live.md)
+captures lifecycle/MNB success, the code-153 immediate-resend refusal and delayed
+exact-number recovery with verified cleanup. The operator subsequently confirmed
+both emails arrived; exact content/attachment equality was not separately checked.
 
 The linked public pages/downloads were retrieved again on 2026-09-11: the
 ordering conflict and omitted declarations remain. This is documentation

@@ -32,6 +32,16 @@ operator-confirmed test account on **2026-09-11**. Both queried originals carrie
 Their run labels, document numbers, captured output and cleanup results are in
 [the clearing evidence](research/2026-09-11-credit-clearing-live.md).
 
+**Receipt evidence (2026-09-11):** [the dated receipt record](research/2026-09-11-receipts-live.md)
+captures the first executed receipt lifecycle and automatic-MNB probes, plus
+email first-send and delayed empty-block resend acknowledgements. Prefix 337
+specified at most five uppercase letters/digits; new `RSPRB` was accepted without
+UI registration. Immediate resend returned 153 requiring 15-second notification
+spacing. All three issued originals were verified reversed. These receipt
+observations are separate from the invoice observations below. The operator
+confirmed both emails arrived; exact content/attachment equality and NAV
+reporting were not verified.
+
 Treat these as facts about *that* account. Some may depend on account settings (e-invoice, cash
 accounting), and szamlazz.hu may change any of them without notice; the go-live checklist at the end
 is the minimum to re-establish them on the target account.

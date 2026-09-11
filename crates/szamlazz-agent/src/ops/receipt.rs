@@ -121,6 +121,10 @@ pub struct CreateReceipt {
     #[doc(alias = "hivasAzonosito")]
     pub call_id: Option<String>,
     /// Receipt number prefix (`elotag`), e.g. `NYGTA` → `NYGTA-2026-111`.
+    ///
+    /// On the test account (2026-09-11), code 337 also required at most five
+    /// uppercase letters/digits; a new five-letter prefix was accepted without
+    /// prior UI registration.
     #[doc(alias = "előtag")]
     pub prefix: String,
     /// Payment method (`fizmod`).

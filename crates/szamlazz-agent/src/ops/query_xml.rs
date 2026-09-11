@@ -269,7 +269,8 @@ pub struct InvoiceInfo {
     /// (`fizmodunified`).
     pub unified_payment_method: Option<String>,
     /// Whether the payment method is cash (`keszpenz`).
-    pub cash_payment: bool,
+    /// Absent or empty means unreported, not false.
+    pub cash_payment: Option<bool>,
     /// Order number (`rendelesszam`).
     pub order_number: Option<String>,
     /// Document language (`nyelv`).
@@ -287,12 +288,15 @@ pub struct InvoiceInfo {
     /// Invoice-level VAT category (`afatipus`).
     pub vat_type: Option<String>,
     /// Issued under cash accounting (`penzforg`).
+    /// Absent or empty means unreported, not false.
     #[doc(alias = "pénzforgalmi elszámolás")]
-    pub cash_accounting: bool,
+    pub cash_accounting: Option<bool>,
     /// Issued under KATA taxation (`kata`).
-    pub kata: bool,
+    /// Absent or empty means unreported, not false.
+    pub kata: Option<bool>,
     /// Whether KATA ledger handling applies (`katafokonyv`).
-    pub kata_ledger: bool,
+    /// Absent or empty means unreported, not false.
+    pub kata_ledger: Option<bool>,
     /// Buyer email the document was sent to (`email`).
     pub email: Option<String>,
     /// Issued from a test account (`teszt`).
@@ -392,7 +396,8 @@ pub struct BuyerInfo {
     /// outside the EU, or `-1` unknown.
     pub location: Option<i64>,
     /// NAV private-person indicator (`privatePersonIndicator`).
-    pub private_person: bool,
+    /// Absent or empty means unreported, not false.
+    pub private_person: Option<bool>,
     /// Buyer ledger metadata (`fokonyv`).
     pub ledger: Option<BuyerLedgerInfo>,
 }
@@ -734,8 +739,8 @@ struct AlapXml {
     fizmod: Option<PaymentMethod>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     fizmodunified: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
-    keszpenz: bool,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    keszpenz: Option<bool>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     rendelesszam: Option<String>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
@@ -750,12 +755,12 @@ struct AlapXml {
     megjegyzes: Option<String>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     afatipus: Option<String>,
-    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
-    penzforg: bool,
-    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
-    kata: bool,
-    #[serde(default, deserialize_with = "xml::de::flexible_bool")]
-    katafokonyv: bool,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    penzforg: Option<bool>,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    kata: Option<bool>,
+    #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
+    katafokonyv: Option<bool>,
     #[serde(default, deserialize_with = "xml::de::business_text")]
     email: Option<String>,
     #[serde(default, deserialize_with = "xml::de::optional_flexible_bool")]
@@ -886,9 +891,9 @@ struct VevoXml {
     #[serde(
         rename(deserialize = "privatePersonIndicator"),
         default,
-        deserialize_with = "xml::de::flexible_bool"
+        deserialize_with = "xml::de::optional_flexible_bool"
     )]
-    private_person_indicator: bool,
+    private_person_indicator: Option<bool>,
     #[serde(default)]
     fokonyv: Option<VevoFokonyvXml>,
 }
@@ -1251,8 +1256,8 @@ mod tests {
         );
         assert_eq!(document.info.exchange_rate, Some(dec!(0)));
         assert_eq!(document.info.comment, None);
-        assert!(!document.info.cash_accounting);
-        assert!(document.info.kata);
+        assert_eq!(document.info.cash_accounting, Some(false));
+        assert_eq!(document.info.kata, Some(true));
         assert_eq!(document.info.test, Some(false));
         assert_eq!(document.info.reversed, None);
 
@@ -1501,11 +1506,11 @@ mod tests {
                 .map(InvoiceNumber::as_str),
             Some("PRO-1")
         );
-        assert!(!document.info.cash_payment);
+        assert_eq!(document.info.cash_payment, Some(false));
         assert_eq!(document.info.order_number.as_deref(), Some("ORDER-1"));
         assert_eq!(document.info.exchange_bank.as_deref(), Some("MNB"));
         assert_eq!(document.info.vat_type.as_deref(), Some("EUT"));
-        assert!(document.info.kata_ledger);
+        assert_eq!(document.info.kata_ledger, Some(true));
         assert_eq!(document.info.reversed, Some(true));
         assert_eq!(document.buyer.identifier.as_deref(), Some("BUY-1"));
         assert_eq!(
@@ -1519,7 +1524,7 @@ mod tests {
         assert_eq!(document.buyer.group_id.as_deref(), Some("GROUP-B"));
         assert_eq!(document.buyer.eu_tax_number.as_deref(), Some("HU876"));
         assert_eq!(document.buyer.location, Some(7));
-        assert!(document.buyer.private_person);
+        assert_eq!(document.buyer.private_person, Some(true));
         assert_eq!(
             document
                 .buyer

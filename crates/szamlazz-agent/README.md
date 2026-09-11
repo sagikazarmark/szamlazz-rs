@@ -16,6 +16,10 @@ storno lifecycle, verified proforma deletion, and a read-only taxpayer smoke.
 Separately selected probes cover mismatching storno appearances, explicit empty
 credit-entry replacement, and receipt lifecycle, automatic MNB and email resend.
 New probes are executable checks, not evidence of a vendor run until executed.
+The [September 11 receipt record](../../docs/research/2026-09-11-receipts-live.md)
+confirms the lifecycle and automatic MNB probes, and first-send/resend
+acknowledgements after recovering a notification-spacing refusal. The operator
+confirmed both emails arrived; the original immediate-resend probe failed.
 
 ## Quick Start
 
@@ -246,6 +250,17 @@ years do not satisfy XSD 1.0. Dates are never shifted or normalized. The low-lev
 
 ## Response parsing
 
+The required envelope `sikeres` verdict accepts `true`, `false`, `1` or `0`,
+with XML whitespace padding. Missing, empty or invalid body verdicts are parse
+failures (`OutcomeClass::Unknown`), even alongside a readable body error code.
+The existing down/error-header precedence still applies.
+
+Queried-invoice `cash_payment`, `cash_accounting`, `kata`, `kata_ledger` and
+`buyer.private_person` preserve unreported values: absent/empty is `None`,
+explicit false/0 is `Some(false)`, true/1 is `Some(true)`, and other nonblank
+tokens fail parsing. The official sparse query example omits three of these
+indicators; accepting that omission does not establish a negative fact.
+
 Invoice and receipt dates retain the printed **civil date**, without UTC conversion.
 Alongside the existing finite date-domain spellings, hyphenated dates accept XML
 padding and `Z` or `±hh:mm` timezone suffixes (up to `±14:00`). Invalid calendar
@@ -386,9 +401,9 @@ szamlazz.hu verifies every row's arithmetic server-side (net = unit price × qua
 
 `LineItem` is plain data like every request type: set the optional fields with functional update (`LineItem { comment: Some(..), ..item }`). A receipt row carries fewer fields than an invoice row; a `CreateReceipt` whose item sets `margin_vat_base` or the ledger's economic-event or settlement fields is refused before the wire (`RequestError::UnsupportedOnReceipt`) rather than sent without them.
 
-For HUF/Ft **receipts**, [documented item rules](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/item-amounts) require whole gross, net/VAT with at most two decimals, and exact net + VAT = gross. The `787.40 / 212.60 / 1000` example above is valid under those rules. `Scale(2)` alone does not ensure whole gross; minor-unit HUF rounding produces whole net and VAT as a stricter local choice. `LineItem::new` and `Exact` remain available; the caller supplies amounts appropriate to the document. These receipt rules were not live-probed here.
+For HUF/Ft **receipts**, [documented item rules](https://docs.szamlazz.hu/agent/generating_receipt/settings_and_rules/item-amounts) require whole gross, net/VAT with at most two decimals, and exact net + VAT = gross. The `787.40 / 212.60 / 1000` example above is valid under those rules and was accepted and preserved by the September 11 receipt lifecycle probe. Rejection boundaries and general rounding behavior remain unverified. `Scale(2)` alone does not ensure whole gross; minor-unit HUF rounding produces whole net and VAT as a stricter local choice. `LineItem::new` and `Exact` remain available; the caller supplies amounts appropriate to the document.
 
-Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted numeric rate). General XML pages ask for bank and rate; the receipt-specific `ReceiptHeader` and custom-data receipt example comments in official PHP **2.12.4** document automatic MNB lookup. The example supplies an explicit rate, so this is documentation evidence, not an omitted-rate execution; local tests prove emission only.
+Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted numeric rate). General XML pages ask for bank and rate; the receipt-specific `ReceiptHeader` and custom-data receipt example comments in official PHP **2.12.4** document automatic MNB lookup. The PHP example supplies an explicit rate. A separate [September 11 test-account execution](../../docs/research/2026-09-11-receipts-live.md) omitted the numeric rate and queried EUR bank `MNB`, rate `363.9`; this is bounded receipt evidence, not a guarantee for every currency/date.
 
 `VatRate::Percent` renders its wire token normalised: `27.00`, `27.0` and `27` all go out as `27`, `5.50` as `5.5`. szamlazz.hu accepts `27.00` and `27.0` as well (test account), so this is hygiene: the integer form is the one every fixture shows, and a queried rate comes back as a double (`27.0`) that round-trips to `27` this way.
 
@@ -410,6 +425,15 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
 
 ## Breaking Changes in 0.4
+
+`InvoiceInfo::{cash_payment, cash_accounting, kata, kata_ledger}` and
+`BuyerInfo::private_person` are now `Option<bool>`. Match `Some(true)` or
+`Some(false)` when a reported fact is needed; use `unwrap_or(false)` only when
+that is your application's explicit fallback. JSON emits `null` for an
+unreported value; existing boolean JSON still decodes as `Some`, and missing
+or null values decode as `None`. The CLI's full invoice JSON exposes the same
+change. Empty `sikeres` no longer becomes a false verdict/API refusal: it is
+an unreadable response with an unknown outcome.
 
 `ops::credit_entry::ClearCreditEntries` adds an explicit checked empty-replacement
 request without changing existing registration defaults or the unfinished-request

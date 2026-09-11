@@ -287,13 +287,17 @@ async fn receipt_email_resend() {
             }),
             ..SendReceipt::new(receipt.receipt_number.clone())
         };
-        for (stage, request) in [
-            ("first", first),
+        // Observed code 153 requires at least 15 seconds between notifications.
+        // Space the two intended sends; never retry an unanswered email.
+        for (stage, request, delay) in [
+            ("first", first, std::time::Duration::ZERO),
             (
                 "empty-block resend",
                 SendReceipt::new(receipt.receipt_number.clone()),
+                std::time::Duration::from_secs(16),
             ),
         ] {
+            tokio::time::sleep(delay).await;
             run.run.sending(format!(
                 "receipt email {stage} number={}",
                 receipt.receipt_number

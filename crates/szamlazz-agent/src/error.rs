@@ -155,6 +155,7 @@ pub enum ErrorCode {
     /// 336: the receipt prefix is already used for invoices.
     ReceiptPrefixUsedForInvoices,
     /// 337: invalid receipt prefix; only capital letters and numbers are allowed.
+    /// A test-account reply on 2026-09-11 additionally specified at most five characters.
     InvalidReceiptPrefix,
     /// 338: a receipt call identifier has already been used; no duplicate
     /// receipt is issued and the prior success is not replayed.

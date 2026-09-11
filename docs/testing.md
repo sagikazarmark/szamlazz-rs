@@ -249,7 +249,10 @@ cargo probes -E 'test(receipt_email_resend)'
 - **Automatic MNB:** creates a EUR receipt with bank MNB and no numeric rate;
   verifies a positive stored rate, currency and total, then reverses it.
 - **Email:** supplies all four email details, then requests empty-block resend
-  only after the first acknowledgement. Both acknowledgements are checked;
+  after the first acknowledgement and a 16-second delay. A September 11 run
+  received code 153 for immediate resend, requiring at least 15 seconds;
+  the delay spaces intended sends and never retries an unanswered one.
+  Both acknowledgements are checked;
   inspect the inbox for two messages with the printed unique subject. A passing
   protocol check alone does not prove delivery or inherited contents.
 - **Appearance:** the two #73 electronic→paper and paper→electronic storno
@@ -262,6 +265,12 @@ Receipt call ids, order and numbers are printed before/after writes. Keep the
 output as the recovery record; rerunning generates a new logical operation.
 These probes were added from documentation hypotheses. Record actual dated
 results separately before promoting them into verified behavior or core tests.
+The [September 11 receipt record](research/2026-09-11-receipts-live.md) captures
+passing lifecycle/MNB probes, the immediate-email-resend refusal and exact-number
+recovery with verified cleanup. Use a receipt-only prefix of at most five
+uppercase letters/digits (the observed code-337 limit); `RSPRB` was accepted
+without prior UI registration. The fixed delayed email probe has not yet been
+run as a complete scenario; its recovery resend was acknowledged separately.
 
 ### Dagger secrets and execution freshness
 

@@ -478,7 +478,7 @@ impl Verdict {
     pub(crate) fn parse(text: &str) -> Result<Self, ParseError> {
         #[derive(serde::Deserialize)]
         struct Facts {
-            #[serde(deserialize_with = "de::flexible_bool")]
+            #[serde(deserialize_with = "de::required_bool")]
             sikeres: bool,
             #[serde(default, deserialize_with = "de::empty_as_none")]
             hibakod: Option<String>,
@@ -763,19 +763,6 @@ pub(crate) mod de {
     {
         let value = String::deserialize(deserializer)?;
         boolean_token(value.trim_matches(super::is_xml_space))
-    }
-
-    /// Deserializes a bool that may be spelled `true`/`false` or `0`/`1`.
-    pub fn flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-
-        match value.trim() {
-            "" => Ok(false),
-            value => boolean_token(value),
-        }
     }
 
     /// Deserializes an optional bool with XML Schema's boolean lexical forms;
