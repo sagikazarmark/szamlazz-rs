@@ -84,6 +84,10 @@ before any ownership or mutation decision. Storno evidence must name a reversal 
 the queried original must be stornoable and reversed. Missing or contradictory identity retains uncertainty.
 These are worker evidence requirements, not restrictions on the Agent crate's permissive wire model or the
 length of vendor-reported document numbers. XML-invalid caller query selectors are `invalid_input` before the prologue.
+Recovery's candidate, issued and reversal numbers use `contract::recovery::EvidenceNumber`: nonblank XML 1.0
+text, preserved exactly with no mutation-input length bound or exclusion of whitespace and `:`. A deleted number
+retains the bounded mutation-input type and must equal the marker's pinned target. No evidence number grants
+permission for a subsequent mutation outside that mutation's ordinary input contract.
 Protected create retains a conclusive 71/152 refusal even when its optional diagnostic query fails.
 Unresolved write results retain a safe diagnostic and a candidate storno number where available; retained
 read failures name both the original cause and latest reconciliation reason without copying vendor free text.

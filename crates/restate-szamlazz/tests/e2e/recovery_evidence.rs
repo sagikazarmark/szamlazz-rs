@@ -2,6 +2,11 @@
 use super::*;
 use crate::common::{delete_of, storno_of_number};
 
+// Vendor evidence deliberately exceeds mutation-input bounds and includes XML metacharacters.
+const VENDOR_NUMBER: &str = "VENDOR:document-number-outside-the-40-byte-bound & 1";
+// Doc and number_query accept literal XML text in these fixtures.
+const VENDOR_NUMBER_XML: &str = "VENDOR:document-number-outside-the-40-byte-bound &amp; 1";
+
 #[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; interrupted storno and deletion adapters"]
 #[allow(
@@ -232,7 +237,7 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
         external_id_query(&format!("acct:{key}:invoice"))
             .respond_with(move |_: &wiremock::Request| {
                 if state.load(Ordering::SeqCst) {
-                    Doc::of("RECOVERED", "SZ", &order_key).response()
+                    Doc::of(VENDOR_NUMBER_XML, "SZ", &order_key).response()
                 } else {
                     not_found()
                 }
@@ -278,7 +283,7 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
             .await
             .expect("marker");
         visible.store(true, Ordering::SeqCst);
-        let body = json!({"marker":observed["marker"],"evidence":{"type":"document","number":"RECOVERED"}});
+        let body = json!({"marker":observed["marker"],"evidence":{"type":"document","number":VENDOR_NUMBER}});
         let call = Call::object("Szamlazz.Order", &key, "recover");
         let submitted: serde_json::Value = http
             .post(format!("{}{}", restate.ingress_url(), call.send().path()))
@@ -311,6 +316,7 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
         let result = restate.invoke(&call, Some(&body), Some(&key)).await;
         assert_eq!(result.status, 200, "{}", result.body);
         assert_eq!(result.body["operator"], "authenticated-operator");
+        assert_eq!(result.body["evidence"], body["evidence"]);
         let revoked = http
             .post(format!("{}{}", restate.ingress_url(), call.path()))
             .header("x-operator-assertion", "admitted")
@@ -737,7 +743,7 @@ async fn e2e_unresolved_attestation_excludes_old_reissue_and_original_storno_num
             restate.invoke(&observe, None, None).await.body["state"],
             "unresolved"
         );
-        request["evidence"]["completion"]["number"] = json!("NEW-DOCUMENT");
+        request["evidence"]["completion"]["number"] = json!(VENDOR_NUMBER);
         let result = restate.invoke(&recover, Some(&request), None).await;
         assert_eq!(result.status, 200, "{}", result.body);
         assert_eq!(result.body["evidence"], request["evidence"]);
@@ -1141,11 +1147,11 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
             assert_eq!(restate.invoke(&recover, Some(&json!({"marker":marker, "evidence":{"type":"document", "number":number}})), None).await.status, 500);
             correct
         } else {
-            number_query("SS-1")
+            number_query(VENDOR_NUMBER_XML)
                 .respond_with(
                     Doc {
                         referenced_invoice: Some(number),
-                        ..Doc::of("SS-1", "SS", key)
+                        ..Doc::of(VENDOR_NUMBER_XML, "SS", key)
                     }
                     .response(),
                 )
@@ -1162,7 +1168,7 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
                 .mount(&mock)
                 .await;
             assert_eq!(restate.invoke(&recover, Some(&json!({"marker":marker, "evidence":{"type":"document", "number":"SS-WRONG"}})), None).await.status, 500);
-            json!({"type":"document", "number":"SS-1"})
+            json!({"type":"document", "number":VENDOR_NUMBER})
         };
         let request = json!({"marker":marker, "evidence":evidence});
         let settled = restate.invoke(&recover, Some(&request), None).await;
@@ -1182,7 +1188,11 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
         let receipt = restate_e2e_harness::run_result(&journal, "record-recovery")
             .expect("recorded evidence");
         assert!(receipt.raw_contains("test-operator"));
-        assert!(receipt.raw_contains(if deleting { "SUPPORT-301" } else { "SS-1" }));
+        assert!(receipt.raw_contains(if deleting {
+            "SUPPORT-301"
+        } else {
+            VENDOR_NUMBER
+        }));
     }
     mock.verify().await;
     restate.finish().await;

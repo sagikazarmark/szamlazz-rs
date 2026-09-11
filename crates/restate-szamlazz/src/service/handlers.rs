@@ -479,8 +479,9 @@ impl Agent {
     ///
     /// Not serialised per invoice: the service is unkeyed, so two concurrent
     /// replacing calls on one invoice race and the last send to land wins
-    /// (see [`Agent`]). The caller serialises per invoice, or sends
-    /// `additive: true` and lets szamlazz.hu sum.
+    /// (see [`Agent`]). The caller serialises replacing calls per invoice.
+    /// Additive registration avoids replacement ordering but can duplicate entries
+    /// after interruption; neither mode fences delayed vendor execution.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",

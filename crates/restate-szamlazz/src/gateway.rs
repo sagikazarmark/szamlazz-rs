@@ -1009,16 +1009,19 @@ impl Gateway {
     }
 
     /// Opens the gateway as [`Gateway::open`] does, over the caller's own
-    /// [`reqwest::Client`] instead of a default one: the embedder's hook for a
-    /// proxy or a custom TLS setup. The Számla Agent crate's
+    /// [`reqwest::Client`] instead of a default one: a direct Gateway consumer's
+    /// hook for a proxy or custom TLS. The supplied [`Order`](crate::Order) and
+    /// [`Agent`](crate::Agent) services always use [`Gateway::open`] and expose
+    /// no transport injection hook. The Számla Agent crate's
     /// [`ClientBuilder::http_client`](szamlazz_agent::client::ClientBuilder::http_client)
     /// is the same hook one level down, and what the default client sets is
     /// then the caller's to set: `.cookie_store(true)` so the `JSESSIONID`
     /// session is reused, a timeout (the default client's
     /// [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT) is not
     /// applied to a supplied client), and `redirect(Policy::none())`, since
-    /// following a redirect would turn the multipart POST into a body-less
-    /// GET.
+    /// redirects can change the method or forward its credential-bearing body.
+    /// Disable transport retries with `.retry(reqwest::retry::never())` as well:
+    /// one send permission must not become several possibly effective exchanges.
     ///
     /// The fresh-client-per-execution boundary of [`Gateway::open`] becomes
     /// the caller's to keep: two gateways of two accounts opened over one

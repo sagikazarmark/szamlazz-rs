@@ -37,6 +37,10 @@ Kill releases its lock, not its external effects or marker. Submit a new recover
 
 Evidence choices:
 
+Copy candidate, issued and reversal numbers exactly as the vendor reports them. These recovery evidence numbers
+accept nonblank XML 1.0 text without the mutation-input length bound, including whitespace and `:`; they are not
+trimmed or normalized. A deleted number remains the bounded mutation target and must match the marker exactly.
+
 - **Document:** the worker queries the pinned account and verifies the precise intent. Create evidence must hold
   the external id and match order/kind, corrective base and reissue constraints. Storno evidence can be verified
   directly by number, with its original reference and the original's reversal and order. Deletion cannot be

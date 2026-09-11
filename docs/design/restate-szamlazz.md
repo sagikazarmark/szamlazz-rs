@@ -243,11 +243,11 @@ by-number writes on one invoice the way `Szamlazz.Order`'s per-key lock orders e
 state, under reordered webhook deliveries of one payment stream, the older snapshot; two `storno`s of one invoice
 both pass their leading query and both send, and szamlazz.hu's storno being idempotent per original (a repeat echoes
 the existing `SS`; verified for a sequential repeat, B4; two sends in the same instant are unverified) answers the
-repeat with the existing storno number. **Decision (J4, #115):** a keyed `Szamlazz.Document` Virtual Object per
-invoice number (the shape that would serialise these) was judged over-engineering for two writes whose only hazard
-is a replace. The remedy is the caller's, stated in both READMEs: serialise
-`set_credit_entries` per invoice on its side, or send `additive: true` and let szamlazz.hu sum, which no ordering can
-corrupt.
+repeat with the existing storno number. A protected per-invoice write protocol is not provided. Callers serialise
+replacing `set_credit_entries` per invoice. Additive registration avoids replacement ordering but can append the
+same entries again after an interrupted run. Both modes lack Order's one-use send permission, and a caller lock
+cannot fence delayed vendor processing. The earlier J4/#115 rationale that replacement ordering was the only
+hazard is superseded by this interrupted-run boundary.
 
 | Handler | Input → Output | Notes |
 |---|---|---|
@@ -993,10 +993,13 @@ own). What a host is responsible for, and what the library cannot do for it:
   `StaticResolver::try_from` before building the services. Nothing about the account but its id and endpoint should
   reach a log; the agent key never.
 - **Shutdown.** Serve through the SDK's `serve_with_cancel` on `SIGTERM` as well as `SIGINT` (the SDK's own `serve`
-  waits for `SIGINT` alone, and an unhandled `SIGTERM` ends PID 1 on the spot): accepting stops, open connections get
-  the SDK's 10 s connection drain, the process exits 0. An invocation the drain cuts resumes on Restate's next dispatch
-  after the handler's retry interval, query-first (ADR 0004), on the **same deployment**, so the process must come
-  back under the same URI (a restart), never be replaced there by other code.
+  waits for `SIGINT` alone). SDK 0.12 stops accepting and waits up to 10 s for connection drain; it does not abort
+  and join remaining connection/handler tasks. The simple hosting examples assume process/runtime termination
+  after return. A larger application that keeps the runtime alive must not treat return as a completion barrier:
+  component-level shutdown requires owning serving tasks, draining, cancelling and joining them before dependency
+  teardown. External effects remain outside that barrier. Interrupted protected Order writes resume with read-only
+  reconciliation after completed arming (ADR 0004), on the **same deployment**, so a restarted process comes back
+  under the same URI, never replaced there by other code.
 - **Releases.** A release is a new Restate deployment (ADR 0009): registered under a URI of its own, with the
   previous release kept running until `restate deployment describe <id> --extra` reports it drained, then removed.
   Restate routes new invocations to the latest deployment and pins in-flight ones to theirs, so the worker carries no

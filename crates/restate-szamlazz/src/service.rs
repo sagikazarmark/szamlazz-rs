@@ -182,9 +182,11 @@ impl Order {
 /// snapshot; two `storno`s both send, and szamlazz.hu's idempotent storno
 /// answers the repeat with the existing storno number (verified for a
 /// sequential repeat; two sends in the same instant are unverified). A keyed
-/// `Szamlazz.Document` object per invoice number was judged over-engineering
-/// for two writes whose only hazard is a replace: the caller serialises per
-/// invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
+/// per-invoice write protocol is not provided here. The caller serialises
+/// replacing calls per invoice. Additive registration avoids replacement
+/// ordering but can append duplicate entries after an interrupted run; neither
+/// mode has Order's send-permission protection. A caller lock cannot fence
+/// delayed vendor execution.
 #[derive(Debug, Clone)]
 pub struct Agent {
     parts: Parts,

@@ -110,6 +110,13 @@
 //! # }
 //! ```
 //!
+//! These serving examples assume process/runtime termination after serving returns.
+//! SDK 0.12 waits up to ten seconds for connection drain but does not abort and join
+//! remaining connection/handler tasks. In an embedded host that keeps its runtime
+//! alive, return is not a task-completion barrier. Component-level shutdown requires
+//! owning, draining, cancelling and joining serving tasks before dependency teardown;
+//! external effects still require reconciliation.
+//!
 //! SDK 0.12.0 can suppress fresh events when replay finishes under a child span.
 //! These services retain the SDK endpoint span and clear its replay flag only
 //! when a run closure actually executes; the execution span still supplies scope,

@@ -15,6 +15,61 @@ fn marker() -> serde_json::Value {
 }
 
 #[test]
+fn recovery_preserves_vendor_numbers_outside_mutation_input_bounds() {
+    for number in ["X".repeat(41), " SZ:árvíz / 1 ".into()] {
+        for evidence in [
+            json!({"type":"document", "number":number}),
+            json!({"type":"completed", "audit_reference":"INC-301",
+                "completion":{"type":"issued", "number":number},
+                "completed_and_cannot_execute_later":true}),
+            json!({"type":"completed", "audit_reference":"INC-302",
+                "completion":{"type":"reversed", "number":number},
+                "completed_and_cannot_execute_later":true}),
+        ] {
+            let wire = json!({"marker":marker(), "evidence":evidence});
+            let parsed: RecoveryRequest =
+                serde_json::from_value(wire.clone()).expect("vendor evidence number");
+            assert_eq!(serde_json::to_value(parsed).expect("round trip"), wire);
+        }
+    }
+}
+
+#[test]
+fn recovery_refuses_blank_or_xml_invalid_evidence_and_keeps_deletion_bounded() {
+    use restate_szamlazz::contract::recovery::EvidenceNumber;
+
+    for number in ["", " \t\n", "\u{85}\u{2003}", "SZ\0", "SZ\u{ffff}"] {
+        assert!(number.parse::<EvidenceNumber>().is_err(), "{number:?}");
+        let wire = json!({"marker":marker(), "evidence":{"type":"document", "number":number}});
+        assert!(serde_json::from_value::<RecoveryRequest>(wire).is_err());
+    }
+    let number = "\tSZ:1\n"
+        .parse::<EvidenceNumber>()
+        .expect("XML whitespace");
+    assert_eq!(number.as_str(), "\tSZ:1\n");
+    assert_eq!(number.to_string(), "\tSZ:1\n");
+    let owned: String = number.into();
+    assert_eq!(owned, "\tSZ:1\n");
+
+    let wire = json!({"marker":marker(), "evidence":{"type":"completed",
+        "audit_reference":"INC-303", "completion":{"type":"deleted", "number":"X".repeat(41)},
+        "completed_and_cannot_execute_later":true}});
+    assert!(serde_json::from_value::<RecoveryRequest>(wire).is_err());
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn evidence_discovery_does_not_impose_mutation_number_bounds() {
+    use restate_szamlazz::contract::recovery::EvidenceNumber;
+    let schema = serde_json::to_value(schemars::schema_for!(EvidenceNumber)).expect("schema");
+    assert_eq!(schema["type"], "string");
+    assert!(schema.get("maxLength").is_none());
+    assert_eq!(schema["minLength"], 1);
+    assert!(schema["pattern"].is_string());
+    assert!(schema["not"]["pattern"].is_string());
+}
+
+#[test]
 fn marker_identity_round_trips_and_unknown_state_fails_closed() {
     let wire = marker();
     let parsed: UnresolvedWrite = serde_json::from_value(wire.clone()).expect("known marker");

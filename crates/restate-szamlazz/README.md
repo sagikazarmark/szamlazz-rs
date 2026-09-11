@@ -16,7 +16,9 @@ documents), the NAV taxpayer lookup (`query_taxpayer`) and the read-only `check_
 gateway module. It is **unkeyed**: its invocations run concurrently, so two by-number writes on one invoice are
 not serialised by the worker the way an order's handlers are. Two replacing `set_credit_entries` (`additive: false`)
 race and the last send to land wins, which under reordered webhook deliveries may be the older snapshot. The
-caller serialises per invoice on its side, or sends `additive: true` and lets szamlazz.hu sum.
+caller serialises replacing calls per invoice on its side. Additive registration avoids replacement ordering
+but an interrupted run can append the same entries again. Neither mode has Order's send-permission protection;
+a caller lock cannot fence a request still processing at szamlazz.hu.
 
 Both services are projections of the Számla Agent model: deployment constants live in configuration, line totals
 are computed, domain outcomes are returned as data.
@@ -86,6 +88,12 @@ async fn serve(accounts: StaticConfig, worker: WorkerConfig) -> Result<(), Box<d
     Ok(())
 }
 ```
+
+This simple hosting example assumes the process/runtime terminates after serving returns. SDK 0.12's
+shutdown stops accepting and waits up to ten seconds for connections, but does not abort and join remaining
+connection/handler tasks. Return is not a task-completion barrier in a larger application that keeps its
+runtime alive. An embedded host requiring component-level shutdown must own its serving tasks, drain them,
+then cancel and join remaining tasks before tearing down dependencies. External effects still need reconciliation.
 
 Register the endpoint and call a handler through the ingress (Restate's URL grammar: `/{service}/{key}/{handler}`
 for a Virtual Object, `/{service}/{handler}` for a service, `/restate/scope/{scope}/call/…` under a scope):
@@ -477,13 +485,14 @@ expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may
 
 It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
 configuration by the services uses the journaled `Account` directly; a gateway is opened lazily inside the first
-executing operation run (`Gateway::open`) and never outlives that execution. `Gateway::open_with_http` opens one over a caller-built
-`reqwest::Client` (re-exported as `szamlazz_agent::reqwest`): the embedder's hook for a proxy or a custom TLS
-setup, and what this crate's unit and wiremock tests open their gateways with, over a client that loads no root
-certificates, so that none of them parses the system CA store for a plain-`http://` mock; a fresh client per
-gateway is then the caller's to keep, since two gateways over one client share its cookie jar. `Szamlazz.Order`
-calls it inside `ctx.run`; the `Szamlazz.Agent` Restate service is a thin facade over the same module. No Restate
-service calls another.
+executing operation run (`Gateway::open`) and never outlives that execution. The supplied `Order` and `Agent`
+services always use that default transport; they expose no transport factory or injected-client option.
+`Gateway::open_with_http` is available to **direct Gateway consumers** for a caller-built `reqwest::Client`
+(re-exported as `szamlazz_agent::reqwest`), including custom TLS or proxy configuration. It does not configure
+the supplied Restate services. Direct consumers must preserve a fresh cookie jar per execution, the request
+deadline, and disabled retries and redirects. Two clients sharing a cookie provider still share a session.
+The unit and wiremock tests use this hook to avoid loading root certificates for plain-HTTP mocks.
+No Restate service calls another.
 
 #### Diagnostic privacy
 
@@ -597,17 +606,20 @@ for a caller:
      operation after the uncertainty is settled (see **Unresolved writes** below). Check cancellation first: `cancelled` (409) or `cause: "cancelled"`
      does **not** authorize automatic retry. For a cancelled write, reconcile through `get` or a
      by-number query, then deliberately renew the operation with a new key only if still intended.
-   - **No answer** (your client timed out, or the ingress answered with a 5xx whose source is *not*
-     `invocation`) means the invocation is still in flight: it runs on once the key frees, and under a worker
-     outage Restate re-dispatches it for up to ~24 min on `Szamlazz.Order` (five attempts, 2 m → 10 m). **Keep
-     the key** and retry with it (the retry attaches to the in-flight invocation and receives its outcome) or
-     read `get`; a new key here would start a second invocation that queues behind the first.
-   - **A killed invocation** (attempts exhausted) is a fault whose envelope `message` is the last retryable
-      error's **text**, not the worker's `{code, message}` JSON. Preserve that native/raw error without
-      inventing a fault code. For a write, assume its external effect may have landed and reconcile first.
+    - **No answer** (your client timed out, or the ingress answered with a 5xx whose source is *not*
+      `invocation`) does not establish completion. **Keep the key** and retry with it to attach to the
+      invocation or retrieve its retained outcome; a new key can start a second invocation queued behind it.
+      With the default policy, Order mutations **pause after five attempts**, retaining their invocation and
+      exclusive lock. The roughly 24 minutes of configured delays is not a completion deadline. A paused
+      owner needs operator attention; resume it for read-only reconciliation. `get` remains an observation.
+    - **A killed invocation** (manual kill, or exhaustion of a handler configured to kill, such as Agent
+      storno) can return native error **text** in the envelope `message`, not the worker's `{code, message}`
+      JSON. Preserve that native/raw error without inventing a fault code. Kill releases the lock but does
+      not settle external effects or clear an Order marker. Order mutation exhaustion pauses rather than kills.
    - **The other known faults are settled**, nothing landed: `invalid_input`, `unknown_account` and `not_found` are
-     raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering with an error (to a read, or
-     refusing the credit entries it was sent). Retrying as is repeats the answer: fix the request, the number,
+      raised before anything is sent, and `szamlazz_error` is szamlazz.hu answering a read with an error.
+      A vendor credit-entry refusal is `outcome_unknown`: it cannot settle an earlier execution of the open run.
+      Retrying as is repeats the answer: fix the request, the number,
      the scope or the account, or, for a `szamlazz_error` relaying a NAV outage, retry later with a new key.
 3. After a storno (by this service, the UI or anyone) a create returns `outcome: reversed`. Send
    `options.reissue: {"expected_number": "SZ-A"}` (with a new key) when replacing that reversed invoice is
@@ -773,6 +785,11 @@ operator-only exclusive action carrying the **exact observed marker** and either
 (`{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}`).
 An attestation is the operator's assertion, never vendor proof. Recovery records evidence before clearing;
 it sends nothing. Stale markers, changed identity and unknown evidence refuse.
+
+Candidate document and issued/reversal attestation numbers use `contract::recovery::EvidenceNumber`:
+nonblank XML 1.0 text, preserving the exact vendor spelling without the mutation input's 40-byte bound or
+restrictions on whitespace and `:`. Deleted numbers remain bounded mutation targets and must equal the
+marker’s pinned number. Recovery never authorizes using an evidence number as a new mutation target.
 
 Alternatively, independently confirmed completion can be submitted as audited positive settlement:
 

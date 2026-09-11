@@ -4,6 +4,90 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::identity::{IssuedKind, Namespace, OrderKey};
 
+/// A vendor-reported document number submitted as recovery evidence.
+///
+/// Preserves the exact spelling, including whitespace and `:`, with no mutation-input
+/// length bound. The number must be nonblank and representable in XML 1.0 so it can
+/// be queried. It never becomes an external-id segment or permission for a new write.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct EvidenceNumber(String);
+
+impl EvidenceNumber {
+    /// The vendor's exact number; nothing is trimmed or normalized.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for EvidenceNumber {
+    type Error = InvalidEvidenceNumber;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() {
+            return Err(InvalidEvidenceNumber::Blank);
+        }
+        szamlazz_agent::wire::validate_xml_text(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl std::str::FromStr for EvidenceNumber {
+    type Err = InvalidEvidenceNumber;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.to_owned().try_into()
+    }
+}
+
+impl From<EvidenceNumber> for String {
+    fn from(number: EvidenceNumber) -> Self {
+        number.0
+    }
+}
+
+impl AsRef<str> for EvidenceNumber {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for EvidenceNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A recovery number that cannot identify a queryable document.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum InvalidEvidenceNumber {
+    /// Empty or entirely Unicode whitespace.
+    #[error("recovery evidence number must not be blank")]
+    Blank,
+    /// A character cannot be represented in XML 1.0.
+    #[error(transparent)]
+    Xml(#[from] szamlazz_agent::RequestError),
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for EvidenceNumber {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "EvidenceNumber".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Exact vendor document number: nonblank XML 1.0 text, no mutation-input length bound or normalization.",
+            "minLength": 1,
+            "pattern": r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]",
+            "not": {"pattern": r"[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]"}
+        })
+    }
+}
+
 /// Recovery intent without buyer data, line items, XML or credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -173,12 +257,12 @@ pub enum AttestedCompletion {
     /// The requested document was issued, even if subsequently consumed or reversed.
     Issued {
         /// Issued document number, never the expected old reissue target.
-        number: crate::identity::InvoiceNumber,
+        number: EvidenceNumber,
     },
     /// The exact original was reversed by this storno document.
     Reversed {
         /// Storno document number, distinct from the original in the marker.
-        number: crate::identity::InvoiceNumber,
+        number: EvidenceNumber,
     },
     /// The exact pinned proforma was deleted.
     Deleted {
@@ -195,7 +279,7 @@ pub enum RecoveryEvidence {
     /// Independently query and validate the document on the pinned account.
     Document {
         /// Candidate issued document or storno number.
-        number: crate::identity::InvoiceNumber,
+        number: EvidenceNumber,
     },
     /// Audited operator assertion that the exact request cannot have an effect.
     NotExecuted {
