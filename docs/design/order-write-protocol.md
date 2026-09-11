@@ -79,6 +79,11 @@ Recovery names the exact marker token, scope, account id, endpoint, namespace an
 Storno document evidence may be verified directly by number: idempotent repeat storno does not attach the
 request's external id. Automatic reconciliation may obtain a candidate from the order hint when that id is
 absent, and still validates candidate identity, order, original reference and the original's reversal.
+Every worker query requires a nonblank document number, and a by-number query must return that exact number
+before any ownership or mutation decision. Storno evidence must name a reversal distinct from its original;
+the queried original must be stornoable and reversed. Missing or contradictory identity retains uncertainty.
+These are worker evidence requirements, not restrictions on the Agent crate's permissive wire model or the
+length of vendor-reported document numbers. XML-invalid caller query selectors are `invalid_input` before the prologue.
 Protected create retains a conclusive 71/152 refusal even when its optional diagnostic query fails.
 Unresolved write results retain a safe diagnostic and a candidate storno number where available; retained
 read failures name both the original cause and latest reconciliation reason without copying vendor free text.

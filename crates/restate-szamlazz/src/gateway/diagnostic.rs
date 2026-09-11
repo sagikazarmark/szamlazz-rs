@@ -23,6 +23,7 @@ pub(super) fn exchange(operation: &str, error: &ClientError) -> Unanswered {
         ClientError::HttpStatus { status, .. } => {
             return Unanswered::Transport(format!("{operation}: HTTP {status}"));
         }
+        ClientError::Request(_) => "local request validation failed",
         ClientError::Parse(parse) => match parse {
             ParseError::Xml(_) => "parse: invalid XML",
             ParseError::Missing(_) => "parse: missing response field",
@@ -55,7 +56,7 @@ pub(super) fn exchange(operation: &str, error: &ClientError) -> Unanswered {
                 .unwrap_or_default();
             return Unanswered::Transport(format!("{operation}: transport: {category}{status}"));
         }
-        // Answers and request refusals are split off by callers. Future client
+        // Answers are split off by callers. Future client
         // variants retain uncertainty without opting their Display into storage.
         _ => "unclassified exchange failure",
     };

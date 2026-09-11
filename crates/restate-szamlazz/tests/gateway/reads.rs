@@ -11,6 +11,40 @@ use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
 #[tokio::test]
+async fn document_reads_refuse_missing_and_mismatched_identity() {
+    let h = Harness::start().await;
+    for number in ["", " \t\n", "SZ-OTHER"] {
+        h.server.reset().await;
+        number_query("SZ-1")
+            .respond_with(Doc::new(number, "SZ").response())
+            .mount(&h.server)
+            .await;
+        assert!(
+            matches!(
+                h.gateway.verify("SZ-1").await,
+                Err(Unanswered::Transport(_))
+            ),
+            "cannot verify SZ-1 with {number:?}"
+        );
+    }
+    h.server.reset().await;
+    super::common::external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::new("", "SZ").response())
+        .mount(&h.server)
+        .await;
+    assert!(matches!(
+        h.gateway
+            .lookup_ours(
+                &external_id(),
+                &order(),
+                restate_szamlazz::identity::IssuedKind::Invoice
+            )
+            .await,
+        Err(Unanswered::Transport(_))
+    ));
+}
+
+#[tokio::test]
 async fn verify_query_and_hint() {
     let h = Harness::start().await;
     number_query("SZ-1")

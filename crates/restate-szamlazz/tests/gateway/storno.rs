@@ -338,7 +338,7 @@ async fn inconclusive_storno_identity_uses_external_id_reconciliation() {
                 ..matching.clone()
             }
             .response(),
-            "SS-9",
+            "document number differs from the requested number",
         ),
         ("not found", not_found(), "code 7"),
         (

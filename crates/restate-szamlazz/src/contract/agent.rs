@@ -52,6 +52,22 @@ pub enum Selector {
     ExternalId(String),
 }
 
+impl Selector {
+    /// Check that the selector can be sent as XML. Order numbers and external
+    /// ids may name documents created outside the worker and retain their spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first character XML 1.0 cannot represent.
+    pub fn validate(&self) -> Result<(), szamlazz_agent::RequestError> {
+        let text = match self {
+            Self::InvoiceNumber(number) => number.as_str(),
+            Self::OrderNumber(text) | Self::ExternalId(text) => text,
+        };
+        szamlazz_agent::wire::validate_xml_text(text)
+    }
+}
+
 /// One registered credit entry as szamlazz.hu reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

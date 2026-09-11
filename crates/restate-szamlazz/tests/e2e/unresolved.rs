@@ -29,6 +29,12 @@ const SERVER: ServerSpec = ServerSpec {
 #[path = "recovery_evidence.rs"]
 mod recovery_evidence;
 
+#[path = "document_identity.rs"]
+mod document_identity;
+
+#[path = "protected_storno_evidence.rs"]
+mod protected_storno_evidence;
+
 struct Operator;
 impl restate_szamlazz::service::RecoveryAuthorizer for Operator {
     fn authorize(

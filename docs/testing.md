@@ -87,6 +87,14 @@ cargo test -p szamlazz-agent --all-features --test live -- --ignored --test-thre
 cargo test -p restate-szamlazz --all-features --test live -- --ignored --test-threads=1 --nocapture
 ```
 
+On Linux, a build without Jiff's zoneinfo support can fail to load `Europe/Budapest`
+even when the system timezone database is installed. Enable it explicitly for the
+acceptance run (requires system tzdata):
+
+```sh
+cargo nextest run --workspace --all-features --features jiff/tzdb-zoneinfo --locked --profile live --run-ignored only
+```
+
 Missing/empty credentials or a missing required Restate source fail selected
 tests. Credentials alone never enable them. Every lifecycle is a single test;
 tests share no process state or execution-order assumptions. Live/probes run

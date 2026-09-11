@@ -126,6 +126,19 @@ pub struct RecordedCreditEntry {
 }
 
 impl FoundDocument {
+    /// Validate identity before a queried document can become worker evidence.
+    /// Vendor numbers retain their full spelling and are not subject to caller
+    /// input bounds. Diagnostics never copy response text into the journal.
+    pub(super) fn validate_identity(&self, expected: Option<&str>) -> Result<(), &'static str> {
+        if self.number.trim().is_empty() {
+            return Err("query: missing document number");
+        }
+        if expected.is_some_and(|number| number != self.number) {
+            return Err("query: document number differs from the requested number");
+        }
+        Ok(())
+    }
+
     /// Whether the document is live: `reversed != Some(true)`.
     #[must_use]
     pub fn is_live(&self) -> bool {
@@ -135,7 +148,9 @@ impl FoundDocument {
     /// Whether the document is the storno invoice (`SS`) reversing `number`.
     #[must_use]
     pub fn is_storno_of(&self, number: &str) -> bool {
-        self.document_type == DocumentType::Storno
+        !self.number.trim().is_empty()
+            && self.number != number
+            && self.document_type == DocumentType::Storno
             && self.referenced_invoice_number.as_deref() == Some(number)
     }
 

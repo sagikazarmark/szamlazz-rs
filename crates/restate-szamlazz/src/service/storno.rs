@@ -475,7 +475,21 @@ impl Execution {
         .map_err(about)?;
 
         // Step 2: lookup: a storno of ours already under the id.
-        let looked_up = lookup_storno(ctx, self, &intent).await.map_err(about)?;
+        let external_id = intent.storno_id.clone();
+        let original = number.clone();
+        let expected_order = order.clone();
+        let looked_up = run_reading(
+            ctx,
+            format!("lookup-storno-{number}"),
+            self,
+            move |gateway| async move {
+                gateway
+                    .lookup_order_storno(&external_id, &expected_order, &original)
+                    .await
+            },
+        )
+        .await
+        .map_err(about)?;
         if let ControlFlow::Break(response) =
             after_storno_lookup(looked_up, &number, namespace).map_err(about)?
         {

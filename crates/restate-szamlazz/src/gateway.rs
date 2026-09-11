@@ -2054,8 +2054,19 @@ impl Gateway {
     /// [`FoundDocument`] at this boundary: nothing past it holds the agent
     /// crate's document.
     async fn query_raw(&self, selector: InvoiceSelector) -> Result<FoundDocument, QueryError> {
-        match self.client.send(&QueryInvoiceXml::new(selector)).await {
-            Ok(document) => Ok(FoundDocument::from(document)),
+        let request = QueryInvoiceXml::new(selector);
+        match self.client.send(&request).await {
+            Ok(document) => {
+                let found = FoundDocument::from(document);
+                let expected = match &request.selector {
+                    InvoiceSelector::InvoiceNumber(number) => Some(number.as_str()),
+                    _ => None,
+                };
+                found
+                    .validate_identity(expected)
+                    .map_err(|message| QueryError::Transport(message.to_owned()))?;
+                Ok(found)
+            }
             Err(ClientError::Api(api)) if api.code == ErrorCode::MissingData => {
                 Err(QueryError::NotFound)
             }

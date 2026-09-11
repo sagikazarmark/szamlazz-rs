@@ -2,9 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{CreateOutcome, DeleteOutcome, Gateway, QueryOutcome, StornoOutcome};
+use super::{
+    CreateOutcome, DeleteOutcome, FoundDocument, Gateway, QueryError, QueryOutcome,
+    StornoLookupOutcome, StornoOutcome, Unanswered,
+};
 use crate::contract::Selector;
 use crate::contract::recovery::{UnresolvedWrite, WriteOperation};
+use crate::identity::{ExternalId, OrderKey};
+
+enum StornoEvidence {
+    Verified(String),
+    Inconclusive(&'static str),
+}
 
 /// A protected write result; uncertainty is journaled data, never a send retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +87,71 @@ impl WriteResult {
 }
 
 impl Gateway {
+    /// The protected Order lookup: only absence permits a send. A holder that
+    /// cannot establish this order's reversal is an unanswered evidence read.
+    /// The fresh original check stays inside the same durable lookup operation.
+    pub(crate) async fn lookup_order_storno(
+        &self,
+        external_id: &ExternalId,
+        order: &OrderKey,
+        number: &str,
+    ) -> Result<StornoLookupOutcome, Unanswered> {
+        let result = match self
+            .query_raw(szamlazz_agent::InvoiceSelector::ExternalId(
+                external_id.as_str().to_owned(),
+            ))
+            .await
+        {
+            Ok(found) => self.verify_order_storno(&found, order, number).await,
+            Err(QueryError::NotFound) => return Ok(StornoLookupOutcome::Absent),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(StornoEvidence::Verified(storno_number)) => {
+                Ok(StornoLookupOutcome::AlreadyReversed { storno_number })
+            }
+            Ok(StornoEvidence::Inconclusive(reason)) => Err(Unanswered::Transport(reason.into())),
+            Err(error) => match error.answered()? {
+                super::Answer::CredentialsRejected(answer) => {
+                    Ok(StornoLookupOutcome::CredentialsRejected(answer))
+                }
+                super::Answer::Api(answer) => Ok(StornoLookupOutcome::Api(answer)),
+                super::Answer::NotFound => Err(Unanswered::Transport(
+                    "original absent; reversal is not established".into(),
+                )),
+            },
+        }
+    }
+
+    /// One evidence rule for protected lookup, leading query and recovery.
+    /// A candidate never establishes reversal without a fresh, matching original.
+    async fn verify_order_storno(
+        &self,
+        found: &FoundDocument,
+        order: &OrderKey,
+        number: &str,
+    ) -> Result<StornoEvidence, QueryError> {
+        if !found.is_storno_of(number) || !found.carries_order(order) {
+            return Ok(StornoEvidence::Inconclusive(
+                "candidate is not the original's storno of this order",
+            ));
+        }
+        let original = self
+            .query_raw(szamlazz_agent::InvoiceSelector::InvoiceNumber(
+                szamlazz_agent::InvoiceNumber::new(number),
+            ))
+            .await?;
+        if !original.is_stornoable()
+            || !original.carries_order(order)
+            || original.reversed != Some(true)
+        {
+            return Ok(StornoEvidence::Inconclusive(
+                "original reversal and order identity are not established",
+            ));
+        }
+        Ok(StornoEvidence::Verified(found.number.clone()))
+    }
+
     pub(crate) async fn protected_create(
         &self,
         request: super::CreateStepRequest<'_>,
@@ -109,19 +183,24 @@ impl Gateway {
         request: super::StornoStepRequest<'_>,
         marker: &UnresolvedWrite,
     ) -> WriteResult {
-        match self.storno_settled_by_query(&request).await {
-            Ok(Some(outcome)) => return WriteResult::Storno(outcome),
-            Ok(None) | Err(super::QueryError::NotFound) => {}
-            Err(super::QueryError::Api(answer)) => {
+        match self
+            .lookup_order_storno(request.external_id, &marker.order, request.invoice_number)
+            .await
+        {
+            Ok(StornoLookupOutcome::AlreadyReversed { storno_number }) => {
+                return WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number });
+            }
+            Ok(StornoLookupOutcome::Absent) => {}
+            Ok(StornoLookupOutcome::Api(answer)) => {
                 return WriteResult::Storno(StornoOutcome::Api(answer));
             }
-            Err(super::QueryError::CredentialsRejected(answer)) => {
+            Ok(StornoLookupOutcome::CredentialsRejected(answer)) => {
                 return WriteResult::Storno(StornoOutcome::CredentialsRejected(answer));
             }
-            Err(super::QueryError::Unavailable(message)) => {
+            Err(Unanswered::Unavailable(message)) => {
                 return WriteResult::Storno(StornoOutcome::Unavailable { message });
             }
-            Err(super::QueryError::Transport(message)) => return WriteResult::unresolved(message),
+            Err(cause) => return WriteResult::unresolved(cause.to_string()),
         }
         match self.storno_send(request, Some(marker)).await {
             Ok(
@@ -242,32 +321,27 @@ impl Gateway {
                 })
             }
             WriteOperation::Storno { number } => {
-                if !found.is_storno_of(number) || !found.carries_order(&marker.order) {
-                    return Ok(WriteResult::unresolved(
-                        "candidate is not the original's storno of this order",
-                    ));
-                }
-                match self.verify(number).await? {
-                    QueryOutcome::Found(original)
-                        if original.number == *number
-                            && original.carries_order(&marker.order)
-                            && original.reversed == Some(true) =>
-                    {
-                        WriteResult::Storno(StornoOutcome::AlreadyReversed {
-                            storno_number: found.number,
-                        })
+                match self
+                    .verify_order_storno(&found, &marker.order, number)
+                    .await
+                {
+                    Ok(StornoEvidence::Verified(storno_number)) => {
+                        WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number })
                     }
-                    QueryOutcome::CredentialsRejected(answer) => WriteResult::Answered {
-                        credentials: true,
-                        answer,
+                    Ok(StornoEvidence::Inconclusive(reason)) => WriteResult::unresolved(reason),
+                    Err(error) => match error.answered()? {
+                        super::Answer::CredentialsRejected(answer) => WriteResult::Answered {
+                            credentials: true,
+                            answer,
+                        },
+                        super::Answer::Api(answer) => WriteResult::Answered {
+                            credentials: false,
+                            answer,
+                        },
+                        super::Answer::NotFound => {
+                            WriteResult::unresolved("original absent; reversal is not established")
+                        }
                     },
-                    QueryOutcome::Api(answer) => WriteResult::Answered {
-                        credentials: false,
-                        answer,
-                    },
-                    _ => WriteResult::unresolved(
-                        "original reversal and order identity are not established",
-                    ),
                 }
             }
             // A query cannot distinguish a deletion from consumption or hiding.

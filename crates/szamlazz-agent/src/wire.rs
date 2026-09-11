@@ -411,8 +411,17 @@ pub trait AgentRequest {
 
 fn validate_xml_10(xml: &[u8]) -> Result<(), RequestError> {
     let xml = std::str::from_utf8(xml).map_err(|_| RequestError::InvalidXmlEncoding)?;
+    validate_xml_text(xml)
+}
 
-    if let Some(character) = xml
+/// Check that text can be represented in XML 1.0, before building a request.
+/// This checks characters only; escaping markup remains the writer's job.
+///
+/// # Errors
+///
+/// [`RequestError::InvalidXmlCharacter`] for the first forbidden code point.
+pub fn validate_xml_text(text: &str) -> Result<(), RequestError> {
+    if let Some(character) = text
         .chars()
         .find(|&character| !is_xml_10_character(character))
     {

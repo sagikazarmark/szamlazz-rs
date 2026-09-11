@@ -18,7 +18,7 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
     // `fresh: None` means the number query agrees and the write is reached.
     // Labels only name fixtures; guard/send behavior and expected faults are explicit.
     for (suffix, fresh, send, status, reason, terminal, code) in [
-        ("CHANGED", Some(Doc::new("D-OTHER", "SZ").response()), proforma_deleted(), 200, "target_changed", None, None),
+        ("CHANGED", Some(Doc::new("D-OTHER", "SZ").response()), proforma_deleted(), 503, "", Some(TerminalCode::Unavailable), None),
         ("GONE", Some(not_found()), proforma_deleted(), 200, "", None, None),
         ("READ", Some(ResponseTemplate::new(500)), proforma_deleted(), 503, "", Some(TerminalCode::Unavailable), None),
         ("READCODE", Some(api_error("57", "query cause")), proforma_deleted(), 503, "", Some(TerminalCode::Unavailable), Some("57")),

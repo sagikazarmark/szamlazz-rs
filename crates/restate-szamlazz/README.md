@@ -21,6 +21,18 @@ caller serialises per invoice on its side, or sends `additive: true` and lets sz
 Both services are projections of the Számla Agent model: deployment constants live in configuration, line totals
 are computed, domain outcomes are returned as data.
 
+### Protection by operation
+
+| Operation | Protection and recovery |
+|---|---|
+| Order mutations | Serialized per scope/order. One acknowledged send permit; interrupted or unanswered writes retain a marker that blocks later mutations. Resume reconciles read-only; authorized recovery requires exact-marker evidence. |
+| Unmanaged Agent storno | Query-first execution relies on szamlazz.hu's storno idempotence. No Order marker or per-invoice lock; reconcile uncertainty before deliberately renewing. |
+| Agent credit-entry registration | An interrupted open run may repeat an additive entry or an older replacement. No Order marker; settle the earlier execution and exclude delayed execution before renewal. A caller lock alone cannot fence vendor processing. |
+
+Worker query results must carry a nonblank document number; by-number results must echo the requested number.
+Malformed identity remains an unanswered read, never usable evidence for a mutation or marker clearance.
+Storno recovery requires a distinct reversal number and a stornoable, reversed original.
+
 ## Quick Start
 
 Bind both services to a Restate endpoint of your own, with the two things Restate's own guidance asks of an
@@ -311,7 +323,7 @@ reasons:
 | `live` | The expected reissue document is still live. |
 | `target_changed` | The expected reissue document is absent or a different owned holder is newest (`existing_number` when known). No send; never automatically substitute that number. |
 | `foreign` | A live invoice under the order number that is under none of the order's external ids (another channel's). |
-| `duplicate_order_number` | szamlazz.hu refused the order number (71/152) and the external-id re-query found nothing of ours live. |
+| `duplicate_order_number` | szamlazz.hu refused the protected create's sole permitted send (71/152). An optional diagnostic query may supply `existing_number`; its result does not replace the original refusal. |
 | `external_id_collision` | The external id's holder does not carry this order's number and kind. |
 | `proforma_live`, `proforma_missing` | `options.proforma` and the order's proforma disagree. |
 | `prepayment_missing`, `prepayment_reversed` | `create_final` without a live prepayment invoice. |

@@ -417,6 +417,9 @@ impl Agent {
         request: Body<QueryRequest>,
     ) -> HandlerResult<Json<QueryResponse>> {
         let request = request.into_request()?;
+        request.selector.validate().map_err(|error| {
+            super::support::Fault::invalid_input(format!("invalid query selector: {error}"))
+        })?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             execution.query_request(ctx, request).await

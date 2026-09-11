@@ -53,7 +53,9 @@ async fn deletion_never_reselects_a_replacement_or_bypasses_identity_with_force(
         for (response, expected) in [
             (
                 Doc::new("D-OTHER", "D").response(),
-                DeleteOutcome::TargetChanged,
+                DeleteOutcome::GuardFailed(Unanswered::Transport(
+                    "query: document number differs from the requested number".to_owned(),
+                )),
             ),
             (
                 Doc::of("D-PINNED", "D", "ORD-OTHER").response(),
