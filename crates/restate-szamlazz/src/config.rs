@@ -17,7 +17,7 @@
 //! max_delay = "10m"
 //! max_duration = "1h"
 //!
-//! [read]                        # the run retry policy of every read-only step
+//! [read]                        # ordinary reads and operator document verification
 //! max_attempts = 5
 //! initial_delay = "5s"
 //! factor = 2.0
@@ -30,6 +30,10 @@
 //! max_delay = "10s"
 //! max_duration = "1m"
 //! ```
+//!
+//! Protected Order writes use one acknowledged send permit. Their read-only
+//! reconciliation uses the handler invocation policy (pause on exhaustion),
+//! configured through SDK handler options, not these run policies.
 //!
 //! The types implement `Deserialize` only and are **closed**
 //! (`#[serde(deny_unknown_fields)]`): a misspelt table or key is a parse
@@ -272,7 +276,7 @@ pub mod table {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Issue {}
 
-    /// `[read]`: the run retry policy of every read-only step. Defaults:
+    /// `[read]`: ordinary reads and operator document verification. Defaults:
     /// five executions, `5s → 60s` doubling, bounded at `5m`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Read {}
@@ -878,7 +882,7 @@ mod tests {
         assert_eq!(parsed.max_attempts, None, "default kept");
     }
 
-    /// The issue policy is the run retry policy of the create and storno
+    /// The issue policy is the run retry policy of unmanaged Agent storno
     /// steps, every field set: `RunRetryPolicy::new()` has factor 1.0 and no
     /// caps, and `default()` caps at 2 s / 50 s; neither is what the policy
     /// says.
@@ -904,7 +908,7 @@ mod tests {
         );
     }
 
-    /// The read policy is the run retry policy of every read-only step
+    /// The read policy is the run retry policy of ordinary read-only steps
     /// (the lookups, verifies, hints, `get`'s queries, `Szamlazz.Agent.query`
     /// and the probe), every field set, like the issue policy.
     #[test]

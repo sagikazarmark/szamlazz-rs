@@ -175,7 +175,8 @@ is Rust 1.92.
   a target **ownership lookup** settles an existing document before prerequisites for a new send. An absent
   target, or an explicit reissue, proceeds through prerequisites, the full **lookup**, then a **create** step whose every
   execution queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it
-  creates, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
+  creates. A durable marker and acknowledged one-use permit prevent another send after interruption;
+  an invisible result remains unresolved until read-only reconciliation or authorized recovery settles it.
 - **Correctives** are issued under a caller-supplied `correction_id`: the same id finds the corrective it
   issued, a new id issues a new one.
 - **Storno** (`storno_invoice`) and **proforma deletion** are idempotent. A document reversed by anyone (the UI,
@@ -420,16 +421,25 @@ accepted and queryable) because its parts are bounded (namespace 16, order key, 
 - `[issue]`, `[read]`, `[resolve]`: the three run retry policies, one `RetryPolicyConfig` each with the table's
   defaults (`IssueConfig`, `ReadConfig`, `ResolveConfig` are the three instantiations): `max_attempts` (optional; the
   duration is the sole exhaustion threshold when unset), `initial_delay`, `factor`, `max_delay`, `max_duration`.
-  The issue policy runs the create and storno steps, with default thresholds of `5` executions / `1h` and delays
-  `2m` → `10m`; the read policy runs every read-only step, `5` / `5m`, `5s` → `60s`; the resolve policy runs the
-  `account` step, with no attempt cap, a `1m` duration threshold and `1s` → `10s` delays.
+  The issue policy runs unmanaged `Szamlazz.Agent.storno`, with default thresholds of `5` executions / `1h`
+  and delays `2m` → `10m`; the read policy runs ordinary reads and operator document verification,
+  `5` / `5m`, `5s` → `60s`; the resolve policy runs the `account` step, with no attempt cap, a `1m`
+  duration threshold and `1s` → `10s` delays.
+
+Protected Order writes consume one acknowledged send permit. Their read-only `reconcile-write` run uses
+the **Order mutation invocation policy**, not `[issue]` or `[read]`: by default five executions with
+`2m` → `10m` doubling delays, then pause. Resume never grants another send. The host can override each
+handler's invocation policy through SDK `ServiceOptions` / `HandlerOptions`; retain pause-on-exhaustion
+and inspect effective discovery settings after registration. See the
+[effective retry controls](../../docs/operations/order-recovery.md#effective-retry-controls).
 
 **Run limits are exhaustion thresholds, not deadlines or external-send caps.**
 [Rust SDK 0.12.0](https://docs.rs/restate-sdk/0.12.0/restate_sdk/context/struct.RunRetryPolicy.html)
 allows both actual execution count and duration to exceed the configured values. Shared core 7.0.3 evaluates
 limits after a closure fails; `max_duration` does not interrupt a hung closure. A crash after an external effect
-but before its result is journaled can re-execute the closure, even with `max_attempts(1)`. The one-shot writes
-disable policy-driven retries; they do not guarantee at-most-once external execution across crashes. Keep the
+but before its result is journaled can re-execute the closure, even with `max_attempts(1)`. Unkeyed Agent
+credit entries disable policy-driven retries but may repeat across crashes. Protected Order writes additionally
+require the execution-local permit, which completed-arm replay cannot grant. Keep the
 per-call deadlines and execution timeouts described under *Retry policy*.
 
 Durations are written the way Restate's own handler attributes write them (jiff's friendly format: `"90s"`, `"2m"`,
@@ -442,7 +452,7 @@ are *run* retry policies.
 Each policy's `run_retry_policy()` is the `RunRetryPolicy` its steps run under. `validate()` checks the
 cross-field invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay`, a finite `factor ≥ 1`) and one floor:
 `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported `REQUEST_TIMEOUT`
-(60 s) plus a 30 s margin (90 s), because a create or storno step re-executed sooner would re-check while its send
+(60 s) plus a 30 s margin (90 s), because unmanaged Agent storno re-executed sooner would re-check while its send
 may still be in flight; the error names the rule. It yields the `ValidatedWorkerConfig` that `Order::from_parts`
 and `Agent::from_parts` take, so a deployment cannot run on a policy below the floor (the `test-util` feature's
 `ValidatedWorkerConfig::unchecked` is for test harnesses whose szamlazz.hu is a mock).
@@ -853,7 +863,7 @@ ours is `already_issued` (or `conflict{live}` with `reissue`), a reversed one is
 `reissue`), an invalid holder is `conflict{external_id_collision}`, a live invoice under the order that is not
 ours is `conflict{foreign}`.
 
-Like every read-only step of both services (the exclusivity and proforma-link lookups before it, the verifies,
+Like the ordinary read-only steps of both services (the exclusivity and proforma-link lookups before it, the verifies,
 the order-number hint, the storno lookup, `get`'s four queries, `Szamlazz.Agent.query`, `query_taxpayer`'s one
 step `lookup-taxpayer-{prefix}`, the `check_account` probe) it runs under the **read policy** (`[read]`: `5` executions
 `5s` → `60s`, duration threshold `5m` by default). Every szamlazz.hu *answer* is journaled data, and a query szamlazz.hu
@@ -861,6 +871,8 @@ did not answer (a transport or parse failure, `szlahu_down`) is the step's retry
 re-executed after the policy's delay; a read writes nothing, so re-executing it is safe and its answer is as
 fresh as a first one. When the read policy is exhausted the handler fails with `TerminalError{unavailable}`
 naming the step, the last failure and, where the step knows it, the order, kind and external id.
+`get` stops immediately on a credential or inconclusive vendor answer, preserving that fault and its warning.
+Protected `reconcile-write` instead uses the mutation's invocation policy described above.
 
 **The protected create** (`create-{kind}`) consumes one execution-local send permission after durable arming.
 Its fresh leading query allows an ordinary create only when the external id holds **nothing**, and reissue
@@ -871,9 +883,12 @@ only past **exactly the expected reversed document**. An absent reissue target b
 - a document reversed since the lookup is answered `reversed` without sending (a new document needs an explicit
   `reissue`);
 - the lookup's reversed document reported live is `conflict{live}`;
+- a corrective first found in the armed leading query must reference the intended base; a missing or
+  different base is `conflict{external_id_collision}`, with no send. Read-only reconciliation applies the
+  same base check but retains uncertainty because an earlier send may have landed;
 - an *answer* to the leading query that is neither 7 nor a credential code (another szamlazz.hu code, or
   `szlahu_down`) is settled data too, with nothing sent: the handler raises the same `unavailable` the lookup
-  step raises for that code, at once, rather than spending the issue policy on a read.
+   step raises for that code, at once, without entering retained reconciliation.
 
 A lost or inconclusive reply is journaled as unresolved data with a safe diagnostic. The separate
 `reconcile-write` run only reads, retaining the original cause and latest reason in its failure. Exhaustion of
@@ -1081,7 +1096,7 @@ for szamlazz.hu, in two phases on one server. It is two things and nothing else:
   `account` entry replayed across a re-execution while the account changes and while the key rotates; an order
   Restate has no memory of after a purge; a stuck invocation killed off the key; the wire faults (a malformed body
   and an untrimmed key as the structured `invalid_input`, a szamlazz.hu code inside the ingress envelope); the
-  protocol-v7 canary; and, over the whole run, the object keeping no state, no agent key in any journal entry
+  protocol-v7 canary; and, over the completed journeys, cleared unresolved markers, no agent key in any journal entry
   (the hex-decoded `raw`) with a planted positive control found, and the step-name table check.
 
 **Phase 1** registers the single-account deployment (the static resolver's `[account]`) and runs its

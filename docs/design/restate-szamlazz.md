@@ -255,7 +255,7 @@ hazard is superseded by this interrupted-run boundary.
 | `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling `QueryOutcome` with the worker's `FoundDocument` projection, never the agent crate's `InvoiceDocument` (#127). `QueryResponse` deliberately omits the seller block; `test` is as reported, compared with nothing (`null` when `teszt` is absent, never an invented `false`, #70). The seller check therefore uses the direct Számla Agent example (§10). 7 → `TerminalError{not_found}` (404); another code → `TerminalError{szamlazz_error}` (422), the code in `szamlazz_code`; 3/135/136/164 → `credentials_rejected`; an exhausted read → `unavailable`. `max_attempts = 3, kill`; `journal_retention = "1d"`; `inactivity_timeout = 2m, abort_timeout = 2m` (one read; #114) |
 | `query_taxpayer` | `QueryTaxpayerRequest { tax_number }` → `QueryTaxpayerResponse { valid, name?, tax_number?, vat_code?, addresses[] }` | the NAV taxpayer lookup (`xmltaxpayer`) on the account the scope resolves to, so an embedder needs no second credential path for this one read. `tax_number` is the bare eight-digit stem (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`), nothing else, no whitespace, no other separator; the handler derives the prefix, and a number in neither form is `TerminalError{invalid_input}` naming the input and the accepted forms, refused **before the prologue** like a malformed body (nothing journaled, nothing sent). Then the prologue as every handler and one step, `lookup-taxpayer-{prefix}` (the prefix, not the number as sent, so the stem and the full number name the same entry) under the read policy (§9), journaling the crate-owned projection (`TaxpayerOutcome::Found(QueryTaxpayerResponse)`), never the agent crate's `TaxpayerInfo`. **Every answer is data**: `valid: false` (NAV knows no taxpayer under the prefix) is a normal 200; 3/135/136/164 → `credentials_rejected`; any other `funcCode ≠ OK` (szamlazz.hu's own code or NAV's relayed `errorCode`) is an *answer*, passed through as `TerminalError{szamlazz_error}` (422, the code in `szamlazz_code`) like `query`'s and never retried, so a NAV outage surfaces as a terminal 422 the caller may retry with a new `Idempotency-Key`; an exchange that produced no answer is the read's `Unanswered`, re-executed, `unavailable` on exhaustion. Finds no document (a taxpayer record is NAV's, not the account's). No caching in the worker (ADR 0005: nothing to store that szamlazz.hu does not answer); the caller caches, with a TTL on the order of a day. `max_attempts = 3, kill`; `journal_retention = "1d"`; `inactivity_timeout = 2m, abort_timeout = 2m` (one read; #114) |
 | `set_credit_entries` | `SetCreditEntriesRequest { invoice_number, entries[≤5], additive }` → `SetCreditEntriesResponse` | `RegisterCreditEntry` without a preceding query; run `max_attempts(1)`, no deliberate run retry. Lost/inconclusive answers, cancellation and vendor refusals (including 53/57/463) → `outcome_unknown`, preserving the vendor code: a refusal settles the latest exchange, not a possible earlier execution of the open run. A sixth entry or empty replacement is `invalid_input` before the wire; 3/135/136/164 → `credentials_rejected`. **Additive is at-least-once**: every landed send appends. Settle earlier execution and exclude delayed execution before renewal; then query and send only still-required additive entries or the current intended replacement. Invocation retry policy: `initial_interval = 2m, max_attempts = 2, kill`; delay is not negative-settlement evidence. `inactivity_timeout = 2m, abort_timeout = 2m`. Unkeyed, not serialised per invoice. |
-| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-original-{number}`, read policy; 7 → `not_found`, 404). A document carrying a supported order number → `managed_by_order` with `order_key`; an unsupported one → `unsupported_order_number` (below), both without sending. An unmanaged document already reversed → `reversed{storno_number?}`, from a **best-effort** `lookup-storno-{number}` under the read policy (exhaustion leaves the number absent, cancellation propagates). Then an original without `telj` → `unavailable`, nothing sent (ADR 0007); otherwise the lookup and storno steps of §6 under `"{namespace}:by-number:{number}:storno"`, repeating the original's `telj`. No document-type pre-check: the echo tells. 3/135/136/164 → `credentials_rejected`. The same storno closure as `Szamlazz.Order`, so the same policies: read policy for lookup, issue policy for storno; invocation `initial_interval = 2m, factor = 2.0, max_interval = 10m, max_attempts = 5, kill`; `inactivity_timeout = 4m, abort_timeout = 3m`, sized for query, send and re-query at 60 s each (ADR 0004, #87). |
+| `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-original-{number}`, read policy; 7 → `not_found`, 404). A document carrying a supported order number → `managed_by_order` with `order_key`; an unsupported one → `unsupported_order_number` (below), both without sending. An unmanaged document already reversed → `reversed{storno_number?}`, from a **best-effort** `lookup-storno-{number}` under the read policy (exhaustion leaves the number absent, cancellation propagates). Then an original without `telj` → `unavailable`, nothing sent (ADR 0007); otherwise the unkeyed lookup and storno of §6 under `"{namespace}:by-number:{number}:storno"`, repeating the original's `telj`. No document-type pre-check: the echo tells. 3/135/136/164 → `credentials_rejected`. Read policy for lookup, issue policy for storno; no Order marker or send permit. Invocation `initial_interval = 2m, factor = 2.0, max_interval = 10m, max_attempts = 5, kill`; `inactivity_timeout = 4m, abort_timeout = 3m`, sized for query, send and re-query at 60 s each (ADR 0004, #87). |
 
 For `Szamlazz.Agent.storno`, an order-bearing document redirects only when its reported order number is a
 supported `OrderKey`. Otherwise the answer is `UnsupportedOrderNumber` (`unsupported_order_number`), with the
@@ -302,10 +302,13 @@ rows; a handler that answers early (a conflict, a refusal, `unknown_account`) jo
 | `Szamlazz.Agent` | `set_credit_entries` | `namespace`, `account`, `set-credit-entries-{number}` |
 | `Szamlazz.Agent` | `storno` | `namespace`, `account`, `verify-original-{number}`, `lookup-storno-{number}`, `storno-{number}` |
 
-Which policy runs each: `namespace` is pure (`max_attempts(1)`); `account` runs under the resolve policy; every
-`lookup-*`, `verify-*`, `hint-storno-*`, `probe` and `query` step is a read under the read policy (§9); `create-*` and `storno-*` run
-under the issue policy; `delete-proforma-*` and `set-credit-entries-*` are one-shot writes (`max_attempts(1)`) whose lost
-reply or cancellation mid-send is structured `outcome_unknown`. The best-effort storno-number reads do not fault
+Which policy runs each: `namespace` is pure (`max_attempts(1)`); `account` runs under the resolve policy;
+`lookup-*`, `verify-*`, `hint-storno-*`, `probe` and `query` use the read policy (§9). Order mutations add
+`prepare-write` and `arm-write` before their named one-use write, then `reconcile-write` on uncertainty;
+that read uses the mutation invocation policy and pauses on exhaustion. Only unmanaged Agent storno uses
+the issue policy. Agent `set-credit-entries-*` is one-shot (`max_attempts(1)`) but may repeat after a crash;
+its lost reply or cancellation is structured `outcome_unknown`. `get` stops on its first answered fault.
+The best-effort storno-number reads do not fault
 on exhaustion: `hint-storno-{number}` after a reversed target or verify (§6 step 1) and `Szamlazz.Agent.storno`'s
 `lookup-storno-{number}` on that path (§4, its row; the same entry name the storno protocol's lookup step writes,
 which the reversed path never reaches). The parametrized names are read by their prefix (`verify-original-…` is
@@ -318,10 +321,10 @@ misread would be the test's, not the worker's: the names themselves are unambigu
 The target lookup and the reads of steps 1–3 are `ctx.run`s under the **read policy** (§9): every szamlazz.hu *answer* is data, and a query
 szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`) is the closure's retryable error
 `Unanswered`, re-executed by the policy and `TerminalError{unavailable}` when it is exhausted (a read writes nothing,
-so a re-executed closure's answer is exactly as fresh as a first one). The create step is the `ctx.run` under the
-**issue policy** (§9) because it is the one step whose outcome can be *unknown*. The storno step (§6) is the other
-write step and runs under the same policy. Every step runs on the account the prologue resolved (§4), through the
-gateway opened for this execution.
+so a re-executed closure obtains a new observation). Create and Order storno use the
+[protected write protocol](order-write-protocol.md): one acknowledged permit, then retained read-only
+reconciliation under the invocation policy. Every step runs on the account the prologue resolved (§4),
+through the gateway opened for this execution.
 
 0. **Validate, then resolve the target.** Pure validation: order key from `ctx.key()`, buyer, items (≥ 1), dates. Normalise `buyer.name`.
    Compute line totals with `LineItem::try_calculated` rounded to the currency's minor unit
@@ -394,13 +397,11 @@ gateway opened for this execution.
    repeats the expected-number check: a different owned holder or absence is `target_changed` (#206).
    The run's own `Err`, the read policy exhausted (500, the last `Unanswered`) or a cancel (409),
    is `TerminalError{unavailable, json{order, kind, external_id}}` on exhaustion or `cancelled` (409) on cancellation, naming the step.
-4. **Create**: one durable step under the issue policy, `ctx.run("create-{kind}", || gateway.create(CreateStepRequest{
-   external_id, kind, order, create, reversed }))` with `RunRetryPolicy::new().initial_delay(2m)
-   .exponentiation_factor(2.0).max_delay(10m).max_attempts(5).max_duration(1h)` (§9). **Every execution is
-   query-first, inside the closure**, a separate journaled pre-query would replay its stale "nothing" on the retry
-   and re-send. The gateway returns settled-vs-unconfirmed: every szamlazz.hu answer is `Ok(CreateOutcome)`, and
-   `Err(Unconfirmed)` (a plain `std::error::Error`, retryable to the SDK) is the one thing the policy re-executes. The
-   closure never returns a `TerminalError` itself.
+4. **Protected create**: `prepare-write` records the exact intent and pinned account, state stores the marker,
+   and acknowledged `arm-write` grants an execution-local one-use permit. The named `create-{kind}` run
+   consumes it before calling `Gateway::protected_create`. Without permission, replay records uncertainty
+   and proceeds directly to read-only reconciliation. With permission the leading query is fresh, inside
+   the closure; the write run has `max_attempts(1)` and journals settlement or uncertainty as data.
    - Leading query `QueryInvoiceXml(ExternalId)` → a validated live document that is not `reversed` → `Found(doc)`
      (an earlier execution created it; **nothing is sent**); a validated **reversed** document that is not `reversed`
      → `Reversed(doc)` (issued by an earlier execution and reversed since: a reversal the caller has not
@@ -412,10 +413,10 @@ gateway opened for this execution.
      message})` (settled, nothing sent); **another code → `Ok(Api{code, message})` and `szlahu_down` →
      `Ok(Unavailable{message})`**; answers, settled with nothing sent (#63): the handler raises
      `TerminalError{unavailable}` at once, for a code, the same fault the lookup step raises for it; for
-     `szlahu_down`, without the read policy's retries the lookup step gives it, since the issue policy this step runs
-     under is sized for the post-send window and would otherwise be spent on a read, ending `outcome_unknown` ~39
-     minutes later although nothing was ever sent; only a transport failure of the leading query → `Err(Transport)`
-     (never create when the check itself failed, an exchange without an answer). **The rule (ADR 0003, #36): the step sends only when the
+      `szlahu_down`, without the read policy's retries the lookup step gives it. A transport failure of the
+      leading query is unresolved data and enters read-only reconciliation (never create when the check itself
+      failed). A corrective's found holder must also reference the marker's intended base; missing or wrong
+      base is a collision before sending. **The rule (ADR 0003, #36): the step sends only when the
       external id holds nothing for ordinary creation, or exactly the expected document the lookup step saw
       reversed for reissue (ADR 0012, #206).**
    - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
@@ -424,29 +425,20 @@ gateway opened for this execution.
    - Transport failure, an open code (1, 55, 56 without a number, a code the agent crate does not know,
      `szamlazz_agent::OutcomeClass::Unknown`, because it may be a refusal or a new "issued, but…" code like 55/56,
      and `rejected` would assert that no document exists (#13), or a success without a document number) or
-     `szlahu_down`: re-query the external id once,
-     immediately (read-your-writes lag ≈ 0) → found live → `Found(doc)`; found reversed (reversed between the send
-     and the re-query) → `Reversed(doc)`; collision → `Collision`; nothing → `Err(Transport | Open | Unavailable)`;
-     **the re-query itself failed** (lost reply, another code, `szlahu_down`) → `Err(ReQueryFailed{sent, re_query})`,
-     naming how the send ended *and* how the re-query failed, the re-query's failure never hides that a send
-     happened (#63). Each variant's display names its own cause: `Open` without a code is the success without a
-     document number, never `szlahu_down` (#63). The run policy then re-executes the whole handler after the delay:
-     the journal replays to the create step and the leading query runs again, the re-check ADR 0002 sizes the
-     2-minute gap for.
-   - 71/152: re-query the external id → live and ours → `Reconciled(doc)`; not ours → `Collision(doc)`; reversed and
-     ours but not `reversed` → `Reversed(doc)`; `reversed` still reversed, or absent → the duplicate is not ours; the
-     re-query itself failed → `Err(ReQueryFailed{sent: "duplicate order number …", re_query})` (whether the duplicate
-     is ours is what it was to settle). For correctives that is `Rejected{code, message}` (exempt from the
-     order-number check, verified; no order-number query). Otherwise `QueryInvoiceXml(OrderNumber)` names it:
-     the newest document under the order is a live document of our kind → `DuplicateOrderNumber{code, message,
-     existing_number}`, another kind or reversed → without `existing_number`, a failed naming query → without it;
-     7 (nothing under the order, yet 71/152) → a contradiction, logged at `warn` and **settled** without
-     `existing_number` all the same: the refusal is an answer szamlazz.hu already gave, and re-sending the create
-     for it (up to five times, as the pre-#41 `Err(Contradiction)` did) would only repeat it.
-   Any `Err` from the run, exhaustion (`TerminalError` 500 carrying the last `Unconfirmed`) or cancellation (409),
-   is mapped by the handler to `TerminalError{outcome_unknown, json{order, kind, external_id}}`; a cancel
-   mid-create therefore reports `outcome_unknown`. No cross-invocation marker is recorded: the next invocation's
-   lookup can miss an earlier send still processing. #205's approved recovery direction below addresses this gap.
+      `szlahu_down`: journal unresolved data with a safe diagnostic. The separate `reconcile-write` run
+      queries positive evidence for the exact marker: ownership, expected-number exclusion and corrective
+      base. A matching live document is `Reconciled`, a matching reversed document is `Reversed`; absence,
+      collision or failed queries remain retryable read failures. The mutation invocation policy pauses on
+      exhaustion. Completed arming replay never grants another send.
+   - 71/152: retain the original conclusive refusal. The diagnostic duplicate query may supply
+     `DuplicateOrderNumber{existing_number}`; every other diagnostic result (including a found holder,
+     collision or failed query) maps to `Rejected` for correctives, or `DuplicateOrderNumber` without a
+     number for ordinary kinds. A diagnostic holder never promotes this protected refusal into success.
+     Correctives take no order-number hint. Nothing is re-sent for a conclusive refusal.
+   Settlement is journaled before clearing the marker. Cancellation at a write await returns
+   `outcome_unknown` with `cause: cancelled` and retains the marker; kill cannot clear it either.
+   Later mutations refuse a present marker before the prologue. Operator recovery requires exact-marker
+   evidence; an empty query or elapsed time never authorizes renewal.
 5. **Branch on data.** `Issued(r)` → `outcome: issued` (+ `warnings: [notification_delivery_failed]`); `Found(doc)`
    → `outcome: issued{number, totals}` (the caller asked for this document and has it; ADR 0003); `Reversed(doc)` →
    `outcome: reversed{number}` (no storno number: the next call's lookup reports it); `LiveAgain(doc)` →
@@ -461,11 +453,9 @@ gateway opened for this execution.
    acted on, but the code may have come to a post-send re-query and an earlier execution may have landed with a lost
    reply, which is why this is a fault and never `rejected`; its message says the outcome is not known, never that
    "this attempt issued nothing" (#63).
-6. **Crash path.** A crash mid-closure leaves no journal entry; Restate re-dispatches after the handler's
-   `initial_interval` (2 m > 60 s client timeout + observed stalls) with the journal; completed runs replay; the open
-   `create-…` closure re-executes and begins with the external-id query, so a landed create is `Found`, not
-   re-issued. Second guard: with the toggle ON, a byte-identical resend while the first document is live is answered
-   with the same number.
+6. **Crash path.** Completed arming replays without granting permission. An open create run therefore cannot
+   send again and proceeds to read-only reconciliation. A crash before arming may conservatively retain a
+   marker for a request that never sent. The marker survives owner cancellation/kill and guards queued work.
 
 Kind specifics (after the target ownership lookup): `create_proforma`, kind `D`; exclusivity against `…:invoice`, `…:prepayment` and `…:final` (a live
 one → `conflict{order_invoiced, existing_number}`, never `foreign`); `proforma` option not applicable.
@@ -493,26 +483,26 @@ corrective by contract.
 #216 implements the [protected Order command protocol](order-write-protocol.md): the marker is the
 Order's sole cross-invocation state, arming replay grants no send permission, and uncertainty is retained
 for read-only reconciliation and pause. Operator recovery uses the pinned account and exact marker.
-This supersedes older no-state, repeated-create and terminal-exhaustion descriptions below.
+The command ordering and evidence rules are maintained in that protocol document.
 
-The protocol above describes current production behavior. A real-server scripted investigation demonstrated
+Before protection was implemented, a real-server scripted investigation demonstrated
 that terminal exhaustion releases the lock and a queued invocation can send while the earlier write remains
 invisible, including same-correction-ID and invoice→prepayment cases. The delay floor is not a cross-invocation
 guard, and an empty query after any delay is not proof of negative settlement.
 
-The owner selected **retain the original invocation for read-only reconciliation/pause, plus a durable pre-send
-unresolved-write marker**. Implementation is pending. [The bounded brief](unresolved-order-writes.md) specifies
-the event/lock matrix, permissible evidence, candidate execution-local one-use send permit (needed because an
-entry marker check itself replays), marker/recovery scope, cancellation, operator procedure, command-sequence
-and migration implications, and acceptance scenarios. This narrowly amends ADR 0005's no-state rule without
-introducing a document ledger. Until implemented, recovery must quiesce producers and account for queued writes;
-kill/timeout/absence is never permission to renew an unresolved operation.
+The implemented response is **retain the original invocation for read-only reconciliation/pause, plus a durable
+pre-send unresolved-write marker**. [The decision brief](unresolved-order-writes.md) records the rationale;
+[the command protocol](order-write-protocol.md) specifies current permission and evidence rules. This narrowly
+amends ADR 0005's no-state rule without introducing a document ledger. Follow the
+[operator procedure](../operations/order-recovery.md): prefer read-only owner resume; exclusive recovery
+requires quiescing producers, accounting for queued writes and stopping the owner before submitting evidence.
+Kill, timeout and absence never authorize renewal.
 
 ## 6. Storno protocol (`Szamlazz.Order.storno_invoice`)
 
 Storno is natively idempotent on the server (a repeat echoes the existing storno, verified) and an external id on
 the storno request attaches to the storno document (verified). It has the shape of issuing (§5): a read-only lookup
-step and one write step under the issue policy, query-first on every execution, on the account the prologue
+step and one protected write with read-only reconciliation, on the account the prologue
 resolved for this invocation; a storno request under the wrong scope finds nothing under the number (what szamlazz.hu
 answers when one account names another's invoice number is unverified, behaviour notes).
 
@@ -530,25 +520,24 @@ answers when one account names another's invoice number is unverified, behaviour
    answer above so that a `telj`-less document that is already reversed, not managed or not stornoable still gets
    that answer.
 2. **Lookup**: one read-only durable step under the read policy, `ctx.run("lookup-storno-{number}", ||
-   gateway.lookup_storno(external_id, number))` with `external_id = "{namespace}:{order}:storno:{number}"`: query by the
-   storno ext id → `SS` with `hivszamlaszam == number` → `AlreadyReversed{storno_number}` → `outcome:
-   reversed{storno_number}`; 7 or another holder → `Absent` → proceed (a storno is idempotent server-side, so a stray
-   holder is not a stop); 3/135/136/164 → `TerminalError{credentials_rejected}`; another code (`Api`) →
+   gateway.lookup_order_storno(external_id, order, number))` with `external_id = "{namespace}:{order}:storno:{number}"`:
+   query by the storno ext id → a distinct `SS` with matching order and `hivszamlaszam == number`, plus a fresh
+   by-number read of the stornoable, reversed original carrying this order → `AlreadyReversed{storno_number}`.
+   Only 7 on the external-id query → `Absent` → proceed. Another holder or contradictory original is
+   unanswered evidence, never permission to send. 3/135/136/164 → `TerminalError{credentials_rejected}`; another code (`Api`) →
    `TerminalError{unavailable}`; no answer → `Err(Unanswered)`, retried by the read policy, exhaustion →
    `TerminalError{unavailable, json{order, kind, external_id}}`.
-3. **Storno**, one durable step under the issue policy (§9), `ctx.run("storno-{number}", || gateway.storno(StornoStepRequest{
+3. **Protected storno**, marker and acknowledged arm followed by `storno-{number}` calling `gateway.protected_storno(StornoStepRequest{
    number, external_id, comment, e_invoice, fulfillment_date }))`, built from the *storno intent*, `{ number,
    storno_id, comment?, e_invoice, fulfillment_date }`, one pure function of the verified document and the resolved
    account (`StornoIntent::from_verified`) that both storno handlers share; the step rebuilds the request from it
-   on every execution, so every send is byte-identical, and nothing beyond the verify's result is journaled.
-   **Every execution is query-first, inside the closure** (the rule of §5
-   step 4): the gateway returns `Ok(StornoOutcome)` for every known answer and `Err(Unconfirmed)` (retryable to the
-   SDK) only when szamlazz.hu's answer is not known; the closure never returns a `TerminalError` itself.
-   (a) leading query by the storno ext id → the matching `SS` → `AlreadyReversed{storno_number}` (an earlier
+   on its permitted execution. The marker records intent and the write run records settlement or uncertainty.
+   **One permit authorizes one write**: an execution replaying completed arming cannot send again.
+   (a) leading query applies the same fresh two-document evidence rule as lookup → `AlreadyReversed{storno_number}` (an earlier
    execution sent it; **nothing is sent**); 3/135/136/164 → `Ok(CredentialsRejected)`; another code →
    `Ok(Api{code, message})` and `szlahu_down` → `Ok(Unavailable{message})`: answers, settled with nothing sent, the
-   twins of §5 step 4's (#63); only a transport failure → `Err(Transport)` (never send when the check itself
-   failed);
+   twins of §5 step 4's (#63); a transport failure or inconclusive evidence retains uncertainty and enters
+   read-only reconciliation (never send when the check itself failed);
    (b) send `xmlszamlast{szamlaszam, szamlaKulsoAzon, teljesitesDatum}`; `teljesitesDatum` = the verified
    original's `telj`, which NAV requires the storno to repeat (ADR 0007; szamlazz.hu defaults to it when the element
    is omitted and accepts any date silently when it is not, verified, so the explicit date is what fails loudly),
@@ -557,22 +546,20 @@ answers when one account names another's invoice number is unverified, behaviour
    `Reversed` (`CreatedInvoice::reverses`, a reply-only heuristic; zero is an intentional comparison policy,
    tested synthetically, not live zero-original acceptance); echo of the requested number → `NotStornoable`;
    changed number with absent/positive gross → query that number **inside this same step**. The queried number
-   must match and `FoundDocument::is_storno_of(original)` must establish the storno type and original reference
-   → `Reversed` carrying the send reply's optional metadata. Wrong type/reference/number, not-found or any query
-   failure → immediate storno-external-id reconciliation: matching `SS` → `AlreadyReversed`; nothing conclusive →
-   `Err(StornoVerification{number, message})`; reconciliation failure → `Err(ReQueryFailed{sent, re_query})`,
-   preserving the numbered send and verification cause. A post-send credential/unavailable answer does not
+   must match and the full two-document rule must establish the distinct storno's type, original reference
+   and order, plus the freshly queried stornoable, reversed original's number and order → `Reversed` carrying
+   the send reply's optional metadata. Wrong identity, not-found or any query
+   failure → journal uncertainty with the candidate number. Retained reconciliation checks the candidate,
+   then the storno external id or order hint, using the same two-document evidence rule. A post-send credential/unavailable answer does not
    prove that the send was refused. Positive-original negative stornos and same-number proforma/delivery-note
    echoes are the live evidence; negative-original, zero-original and missing-gross compound cases remain
    unverified on the server. API errors of the send → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
    `221` = has a corrective; typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 →
     `CredentialsRejected{code, message}`; a transport failure, an open code (1, 55, 56, a code the agent crate
-    does not know) or `szlahu_down` → re-query
-   the storno ext id once, immediately → the matching `SS` → `AlreadyReversed{storno_number}` (what was sent landed);
-   nothing → `Err(Transport | Open | Unavailable)`; the re-query itself failed → `Err(ReQueryFailed{sent, re_query})`
-   naming both (#63), credential failures included (#196); and the run policy re-executes the step after its delay, beginning again at (a).
-   Any `Err` from the run, exhaustion (500) or cancellation (409), is mapped to `TerminalError{outcome_unknown,
-   json{order, kind, external_id}}`; nothing is recorded, the next call's steps 1–2 find the storno if it landed.
+    does not know) or `szlahu_down` → journal uncertainty and reconcile read-only.
+   Inconclusive reconciliation spends the mutation invocation policy and pauses on exhaustion; cancellation
+   returns `outcome_unknown` with `cause: cancelled`. The marker remains until journaled settlement or
+   authorized recovery. A replay cannot begin another send at (b).
 4. **Branch on data.** `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `NotStornoable` →
    `rejected{not_stornoable}`; `Rejected` → `outcome: rejected{code, message}`; `Api{code, message}` →
    `TerminalError{unavailable, szamlazz_code}` and `Unavailable{message}` → `TerminalError{unavailable}` (the leading
@@ -589,7 +576,8 @@ fact of the document (ADR 0007). No post-storno read verifies the `SS`'s `telj` 
 cannot be stornoed, so a mismatch found afterwards is un-actionable); the go-live checklist verifies it once per
 account.
 
-`Szamlazz.Agent.storno` runs the same lookup and storno steps under `"{namespace}:by-number:{number}:storno"` after its
+`Szamlazz.Agent.storno` uses the unkeyed Gateway lookup and query-first storno under `[issue]`, relying on vendor
+storno idempotence, with `"{namespace}:by-number:{number}:storno"` after its
 own verify (§4): an order-bearing document is answered `managed_by_order` when its order number is a supported
 key, otherwise `unsupported_order_number`, with nothing sent. An unmanaged document builds the same storno intent from
 what it found, so its storno carries the original's `telj` too and a `telj`-less original is the same `unavailable`,
@@ -605,7 +593,8 @@ delivery note reaching it is `unavailable` rather than `rejected{not_stornoable}
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
 different owned number → `{deleted: false, reason: target_changed}`, even with `force`;
 matching `D` with credit entries ∧ `!force` → `{deleted: false, reason: proforma_paid}` (the server has no guard, verified);
-The lookup pins the document number and id. Inside `delete-proforma-{number}` (`max_attempts(1)`),
+The lookup pins the document number and id. After marker recording and acknowledged arming,
+`delete-proforma-{number}` (`max_attempts(1)`) consumes its one-use permit and then:
 query that number again, never the external id: changed id/number/order/type →
 `{deleted: false, reason: target_changed}` even with `force`; current credit entries ∧ `!force` →
 `{deleted: false, reason: proforma_paid}`; query 7 → `{deleted: true}`; failed/inconclusive fresh
@@ -613,10 +602,10 @@ read → `unavailable`, credential code → `credentials_rejected`, with no dele
 Only then send: success | 335 → `{deleted: true}`; 3/135/136/164 →
 `TerminalError{credentials_rejected}`; established XML-input refusal 53/57 →
 `{deleted: false, reason: <code>}`; other/absent code → `Inconclusive(SzamlazzAnswer)` →
-`outcome_unknown` with cause/code; no answer (transport/parse failure or `szlahu_down`) →
-`Lost(Unanswered)` → `outcome_unknown`. All are data, never policy retries. A crash before
-journaling can re-execute the closure, which repeats the guard; query/delete is not atomic
-against other writers (#201).
+unresolved data; no answer (transport/parse failure or `szlahu_down`) → `Lost(Unanswered)` → unresolved data.
+Read-only reconciliation cannot establish deletion from absence, so independent operator evidence is needed.
+Invocation-policy exhaustion pauses; cancellation returns `outcome_unknown` and retains the marker.
+A crash before journaling cannot re-grant the consumed permit. Query/delete is not atomic against other writers.
 The response is `DeleteProformaResponse { deleted, reason? }` throughout, never a `rejected` outcome.
 Cancellation of the one-shot write is likewise the structured `outcome_unknown`, since deletion may have landed.
 Read `get` and query the expected number named in the fault. Reconcile the earlier send before deliberately
@@ -860,14 +849,14 @@ directly from the journaled Account). A host reads the two side by side from one
 ```toml
 namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every external id; permanent
 
-[issue]      # the issue policy: the run retry policy of the create (§5 step 4) and storno (§6 step 3) steps; shapes no journal entry
+[issue]      # unmanaged Szamlazz.Agent.storno run policy; protected Order writes do not use it
 max_attempts = 5              # execution-count exhaustion threshold, including the first; can overshoot
 initial_delay = "2m"          # before the first re-execution; > client timeout + the longest observed server stall
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # duration exhaustion threshold, not a deadline (ADR 0004)
 
-[read]       # the read policy: the run retry policy of every read-only step (lookups, verifies, hints, `get`, `Szamlazz.Agent.query`, `query_taxpayer`, the probe); shapes no journal entry
+[read]       # ordinary reads and operator document verification; excludes retained reconcile-write
 max_attempts = 5              # execution-count exhaustion threshold, including the first; can overshoot
 initial_delay = "5s"
 factor = 2.0
@@ -889,12 +878,17 @@ endpoint = "https://www.szamlazz.hu/szamla/"   # optional (wiremock in tests)
 [account.seller]     # as v1
 ```
 
-All three policies are set explicitly on the runs because the SDK's default run policy sends no retry delay and the
+Protected Order reconciliation deliberately omits a run policy and uses the mutation invocation policy:
+five executions, `2m` → `10m` doubling delays, then pause. SDK `ServiceOptions` / `HandlerOptions` allow
+host overrides; retain pause-on-exhaustion and verify effective discovery settings. See
+[effective controls](../operations/order-recovery.md#effective-retry-controls).
+
+The three configured run policies are set explicitly because the SDK's default run policy sends no retry delay and the
 server would spend the handler's `invocation_retry_policy` instead. Durations are `"90s"`, `"2m"`, `"1h"` or a bare
 non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
 invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and a finite `factor ≥ 1` on all
 three) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
-`REQUEST_TIMEOUT` (60 s) plus a 30 s margin, a create or storno step re-executed sooner would query for the cut execution's
+`REQUEST_TIMEOUT` (60 s) plus a 30 s margin, unmanaged Agent storno re-executed sooner would query for the cut execution's
 send while it may still be in flight (the ~90 s rule of ADR 0002 and the behaviour notes, in code since #61; the read
 and resolve policies have no floor, and the e2e suite's 1 s policies are built with
 `ValidatedWorkerConfig::unchecked` behind the `test-util` feature and never pass through `validate`; `validate` is the

@@ -3,8 +3,9 @@
 //! number, decide on it ([`StornoVerdict`]), build the intent from what the
 //! verify found ([`StornoIntent`]: the storno repeats the original's `telj`
 //! and lifts its `eszamla`, never a caller's), look the storno external id
-//! up, send the storno query-first under the issue policy, and answer from
-//! data.
+//! up, and answer from data. Order uses acknowledged one-use send permission
+//! and retained read-only reconciliation; unmanaged Agent storno is query-first
+//! under the issue policy, relying on the vendor's storno idempotence.
 //!
 //! The two handlers differ in their verdict (the order's handler acts on
 //! nothing but its own documents and refuses what szamlazz.hu cannot reverse
@@ -13,7 +14,7 @@
 //! (`{namespace}:{order}:storno:{number}` or
 //! `{namespace}:by-number:{number}:storno`) and in the best-effort read that
 //! names an existing storno (the order-number hint, or the by-number storno
-//! lookup). Everything else is the one protocol below; the two `Execution`
+//! lookup), and in their protected versus unkeyed write execution. The two `Execution`
 //! methods at the end are its shells.
 
 use std::ops::ControlFlow;
@@ -496,10 +497,9 @@ impl Execution {
             return Ok(response);
         }
 
-        // Step 3: the storno step, under the issue policy. Any `Err` from the
-        // run (exhaustion (500) or cancellation (409)) is `outcome_unknown`
-        // about this storno: nothing is recorded, the next invocation's
-        // verify and lookup find whatever landed.
+        // Step 3: marker, acknowledged arm and one-use send permission.
+        // Uncertainty reconciles read-only under the invocation policy;
+        // cancellation or kill retains the marker for later recovery.
         let operation = crate::contract::recovery::WriteOperation::Storno {
             number: number.clone(),
         };

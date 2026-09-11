@@ -84,11 +84,18 @@ before any ownership or mutation decision. Storno evidence must name a reversal 
 the queried original must be stornoable and reversed. Missing or contradictory identity retains uncertainty.
 These are worker evidence requirements, not restrictions on the Agent crate's permissive wire model or the
 length of vendor-reported document numbers. XML-invalid caller query selectors are `invalid_input` before the prologue.
+The mutation `InvoiceNumber` and `OrderKey` validators enforce XML 1.0 representability too, including
+U+FFFE/U+FFFF, which Rust does not classify as control characters. `get` classifies each answered ownership
+fault before beginning another read, so later failures cannot hide a credential rejection or its warning.
 Recovery's candidate, issued and reversal numbers use `contract::recovery::EvidenceNumber`: nonblank XML 1.0
 text, preserved exactly with no mutation-input length bound or exclusion of whitespace and `:`. A deleted number
 retains the bounded mutation-input type and must equal the marker's pinned target. No evidence number grants
 permission for a subsequent mutation outside that mutation's ordinary input contract.
 Protected create retains a conclusive 71/152 refusal even when its optional diagnostic query fails.
+A corrective found by the armed leading query must name the marker's intended base. A missing or different
+base is a settled `external_id_collision` with no send. Reconciliation uses the same base predicate but
+retains uncertainty on mismatch: it cannot establish what an earlier send did. Existing-target lookup
+still answers the document previously issued under the correction id before checking new prerequisites.
 Unresolved write results retain a safe diagnostic and a candidate storno number where available; retained
 read failures name both the original cause and latest reconciliation reason without copying vendor free text.
 

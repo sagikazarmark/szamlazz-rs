@@ -249,10 +249,11 @@ impl Order {
     }
 
     /// Deletes the order's expected proforma; a replacement is never selected.
-    /// A lost answer or cancellation of the one-shot write is structured
-    /// `outcome_unknown`: reconcile using `get` and the expected number, then
-    /// deliberately renew with a new `Idempotency-Key` and the same expected
-    /// number if still intended. The deletion may already have landed.
+    /// A lost answer retains the unresolved marker and reconciles read-only,
+    /// pausing on invocation-policy exhaustion. Cancellation is structured
+    /// `outcome_unknown` and retains the marker too. Deletion absence is not
+    /// settlement: authorized recovery needs independent evidence before a
+    /// new operation with the same expected number can proceed.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -434,8 +435,8 @@ impl Agent {
     /// no second credential path for this one read. Read-only, one step
     /// under the read policy; `valid: false` is data. Not cached here: the
     /// caller caches, with a TTL on the order of a day. The journal is
-    /// retained a day so that it can be inspected; there is nothing to
-    /// replay. The timeouts are the reads' 2m / 2m: one 60 s round
+    /// retained a day so that it can be inspected; completed reads replay
+    /// their recorded answer. The timeouts are the reads' 2m / 2m: one 60 s round
     /// trip plus the margin a stalling szamlazz.hu needs.
     #[handler(
         invocation_retry_policy(
@@ -507,15 +508,12 @@ impl Agent {
         .map(Json)
     }
 
-    /// Reverses an invoice that no `Order` manages. The storno step is the
-    /// same closure `Szamlazz.Order` runs (query, send, re-query at 60 s
-    /// each), so the retry policy and the timeouts are `Szamlazz.Order`'s:
-    /// invocation attempts are spent only on worker-side failures
-    /// (a crash, a rollout cutting the connection), and every re-dispatch is
-    /// query-first, so nothing about an unmanaged storno justifies a shorter
-    /// budget; the retry interval waits out the 60 s client timeout (never
-    /// the server's ~500 ms default), so that the leading query cannot look
-    /// before a cut send has landed.
+    /// Reverses an invoice that no `Order` manages. The unkeyed Gateway step
+    /// is query-first under the issue run policy, relying on vendor storno
+    /// idempotence. It has no Order marker or one-use permit. The timeouts
+    /// accommodate query, send and re-query at 60 s each. Delayed re-dispatch
+    /// allows time for visibility but cannot prove a cut send has landed;
+    /// reconcile uncertainty before deliberately renewing the operation.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",

@@ -35,6 +35,9 @@ mod document_identity;
 #[path = "protected_storno_evidence.rs"]
 mod protected_storno_evidence;
 
+#[path = "release_hardening.rs"]
+mod release_hardening;
+
 struct Operator;
 impl restate_szamlazz::service::RecoveryAuthorizer for Operator {
     fn authorize(

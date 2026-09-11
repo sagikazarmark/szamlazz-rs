@@ -115,9 +115,10 @@ pub enum TerminalCode {
     /// Intentional cancellation during a read or account resolution. HTTP 409.
     /// No write was sent; cancellation does not authorize automatic retry.
     Cancelled,
-    /// The create or storno step ran out of the issue policy while a document
-    /// may or may not have been issued; the next call's external-id query
-    /// finds whatever landed. HTTP 500.
+    /// An external write remains uncertain, or an unresolved marker blocks a
+    /// later Order mutation. Also covers write cancellation and unmanaged Agent
+    /// storno exhausting its issue policy. Settle earlier work before renewal;
+    /// an empty query does not authorize another send. HTTP 500.
     OutcomeUnknown,
     /// szamlazz.hu did not answer a read-only step through every execution
     /// the read policy allows (or answered it with a code nothing can be

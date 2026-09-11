@@ -151,7 +151,7 @@ pub enum InvalidNamespace {
 /// The alphabet is strict where the server's behaviour is unverified (ADR
 /// 0002): 1–[`MAX_LEN`](Self::MAX_LEN) bytes after trimming, no control
 /// character, no internal whitespace of any kind, no `:` (the external-id
-/// separator) and Unicode NFC. Nothing is case-folded or normalised: a key
+/// separator), XML 1.0 text and Unicode NFC. Nothing is case-folded or normalised: a key
 /// outside the alphabet is refused, never rewritten, because a `rendelesszam`
 /// the server stored differently from the key would strand the order behind
 /// `conflict{external_id_collision}`.
@@ -176,7 +176,7 @@ impl OrderKey {
     ///
     /// Returns an error when the trimmed value is empty or longer than
     /// [`Self::MAX_LEN`] bytes, contains a control character, contains
-    /// whitespace, contains `:`, or is not in Unicode NFC.
+    /// whitespace, contains `:`, is not in Unicode NFC, or is not XML 1.0 text.
     pub fn parse(value: &str) -> Result<Self, InvalidOrderKey> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -197,6 +197,8 @@ impl OrderKey {
         if !is_nfc(trimmed) {
             return Err(InvalidOrderKey::NotNfc);
         }
+        szamlazz_agent::wire::validate_xml_text(trimmed)
+            .map_err(InvalidOrderKey::InvalidXmlText)?;
         Ok(Self(trimmed.to_owned()))
     }
 
@@ -266,6 +268,9 @@ pub enum InvalidOrderKey {
     /// the order.
     #[error("order number must be in Unicode NFC (normalise it before calling)")]
     NotNfc,
+    /// Contains text that XML 1.0 cannot represent.
+    #[error("order number must be XML 1.0 text: {0}")]
+    InvalidXmlText(#[source] szamlazz_agent::RequestError),
 }
 
 /// A document kind of which an order carries at most one live document, each
@@ -552,7 +557,7 @@ pub enum InvalidCorrectionId {
 /// Bounded because it flows into step names and into the storno external ids
 /// (`{namespace}:{order}:storno:{number}`, `{namespace}:by-number:{number}:storno`):
 /// 1–[`MAX_LEN`](Self::MAX_LEN) bytes, no whitespace, no control character,
-/// no `:`. Nothing is trimmed: a padded number is refused, never sent, since
+/// no `:`, representable as XML 1.0 text. Nothing is trimmed: a padded number is refused, never sent, since
 /// szamlazz.hu would answer 7 (`not_found`) to it and the rule is the better
 /// diagnosis. szamlazz.hu's own numbers (`E-TST-2026-123`) are far inside the
 /// bound; NAV's `invoiceNumber` allows 50 characters, and the longest composed
@@ -590,6 +595,8 @@ impl InvoiceNumber {
         if value.contains(ExternalId::SEPARATOR) {
             return Err(InvalidInvoiceNumber::Separator);
         }
+        szamlazz_agent::wire::validate_xml_text(value)
+            .map_err(InvalidInvoiceNumber::InvalidXmlText)?;
         Ok(())
     }
 }
@@ -642,10 +649,10 @@ impl schemars::JsonSchema for InvoiceNumber {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "An invoice number (számlaszám) as the caller names it: 1–40 bytes, no whitespace, no control character, no ':'.",
+            "description": "An invoice number (számlaszám) as the caller names it: XML 1.0 text, 1–40 bytes, no whitespace, no control character, no ':'.",
             "minLength": 1,
             "maxLength": InvoiceNumber::MAX_LEN,
-            "pattern": "^[^\\s\\x00-\\x1F\\x7F:]+$",
+            "pattern": "^[^\\s\\x00-\\x1F\\x7F\\uFFFE\\uFFFF:]+$",
         })
     }
 }
@@ -669,6 +676,9 @@ pub enum InvalidInvoiceNumber {
     /// Contains `:`, the separator of the external id's segments.
     #[error("invoice number must not contain ':' (the external-id separator)")]
     Separator,
+    /// Contains text that XML 1.0 cannot represent.
+    #[error("invoice number must be XML 1.0 text: {0}")]
+    InvalidXmlText(#[source] szamlazz_agent::RequestError),
 }
 
 /// The external id (`szamlaKulsoAzon`) the service sends or queries.
@@ -1002,6 +1012,18 @@ mod tests {
             ("a\tb", InvalidOrderKey::ControlChar('\t')),
             ("a\nb", InvalidOrderKey::ControlChar('\n')),
             ("a\u{7f}b", InvalidOrderKey::ControlChar('\u{7f}')),
+            (
+                "a\u{fffe}b",
+                InvalidOrderKey::InvalidXmlText(szamlazz_agent::RequestError::InvalidXmlCharacter(
+                    0xfffe,
+                )),
+            ),
+            (
+                "a\u{ffff}b",
+                InvalidOrderKey::InvalidXmlText(szamlazz_agent::RequestError::InvalidXmlCharacter(
+                    0xffff,
+                )),
+            ),
             ("ORD:1", InvalidOrderKey::Separator),
             (":", InvalidOrderKey::Separator),
             ("ORD-1:invoice", InvalidOrderKey::Separator),
@@ -1279,6 +1301,18 @@ mod tests {
             ("SZ\u{a0}1", InvalidInvoiceNumber::Whitespace('\u{a0}')),
             ("SZ\t1", InvalidInvoiceNumber::ControlChar('\t')),
             ("SZ\u{7f}1", InvalidInvoiceNumber::ControlChar('\u{7f}')),
+            (
+                "SZ\u{fffe}1",
+                InvalidInvoiceNumber::InvalidXmlText(
+                    szamlazz_agent::RequestError::InvalidXmlCharacter(0xfffe),
+                ),
+            ),
+            (
+                "SZ\u{ffff}1",
+                InvalidInvoiceNumber::InvalidXmlText(
+                    szamlazz_agent::RequestError::InvalidXmlCharacter(0xffff),
+                ),
+            ),
             ("SZ:1", InvalidInvoiceNumber::Separator),
             (
                 too_long.as_str(),
@@ -1337,7 +1371,7 @@ mod tests {
 
     /// The schema carries the bound the type enforces: the length as
     /// `maxLength`, and a pattern that refuses whitespace, ASCII control
-    /// characters and the separator, in the ECMA-262 subset JSON Schema
+    /// characters, XML-forbidden U+FFFE/U+FFFF and the separator, in the ECMA-262 subset JSON Schema
     /// guarantees, so no `\p{…}` class.
     #[cfg(feature = "schemars")]
     #[test]
@@ -1346,7 +1380,7 @@ mod tests {
         let json = serde_json::to_value(&schema).expect("serialize");
         assert_eq!(json["maxLength"], InvoiceNumber::MAX_LEN);
         assert_eq!(json["minLength"], 1);
-        assert_eq!(json["pattern"], "^[^\\s\\x00-\\x1F\\x7F:]+$");
+        assert_eq!(json["pattern"], "^[^\\s\\x00-\\x1F\\x7F\\uFFFE\\uFFFF:]+$");
     }
 
     /// Every issued kind names the `tipus` its documents carry, and reads

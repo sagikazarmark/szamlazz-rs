@@ -1,16 +1,14 @@
 //! The create protocol for the four document kinds and for correctives, in
 //! the order the steps run.
 //!
-//! The handlers keep no state. After validation, an ownership lookup settles
-//! an existing target before prerequisites for a new send are checked.
-//! After those reference checks, issuing is two durable steps: a
-//! read-only **lookup** (`lookup-{kind}`) under the read policy that settles
-//! every case needing no create, and a **create** (`create-{kind}`) under the
-//! issue policy's run retry policy, query-first on every execution; the
-//! external-id query inside the create closure is what finds a document an
-//! earlier execution issued. Domain outcomes are data and faults are
-//! `TerminalError`s; a read that szamlazz.hu never answered is `unavailable`,
-//! a create step that ends without a settled outcome is `outcome_unknown`.
+//! An unresolved-write marker guards every mutation before the prologue.
+//! An ownership lookup settles an existing target before prerequisites for a
+//! new send are checked. The full read-only lookup runs under the read policy.
+//! A create then consumes one execution-local permit after durable arming and
+//! queries its external id before sending. Uncertainty is journaled data;
+//! read-only reconciliation uses the invocation policy and pauses on exhaustion.
+//! Completed arming replay cannot grant another send. Domain outcomes are data;
+//! cancellation retains the marker and returns structured write uncertainty.
 
 use std::ops::ControlFlow;
 
@@ -454,16 +452,9 @@ fn decide_base(
     None
 }
 
-/// The fault of a create step whose run ended without a settled outcome:
-/// the issue policy exhausted (500, carrying the last `Unconfirmed`'s
-/// display) or the invocation cancelled (409). `outcome_unknown` about the
-/// document being created either way, because a cancelled write step is
-/// exactly that: its send may have landed (the e2e cancels one mid-send and
-/// the document exists), so the SDK's bare `409 cancelled` would lose what
-/// the caller needs, the document's identity and that it may exist. The
-/// message tells the two apart: an exhausted step is retried with a new
-/// `Idempotency-Key`, a cancelled one is reconciled by `get` first. Nothing
-/// is recorded, and the next invocation's lookup finds whatever landed.
+/// Test helper for the fault vocabulary of interrupted writes. Production
+/// protected writes attach identity and retain their marker in `protected_write`.
+/// Neither exhaustion nor cancellation authorizes renewal before settlement.
 #[cfg(test)]
 fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Identity) -> Fault {
     if let Some(fault) = initialization_fault(error, "reconcile before deliberately renewing") {
@@ -917,8 +908,8 @@ impl Execution {
     // ----- steps 3–5: lookup, create, branch on data -----------------------
 
     /// Issues `intent`: the lookup step settles every case that needs no
-    /// create; the create step, under the issue policy, sends it; the result
-    /// is branched on as data.
+    /// create; the protected create step consumes its one permit; the result
+    /// is branched on as data after settlement.
     async fn issue(
         &self,
         ctx: &ObjectContext<'_>,
@@ -983,13 +974,11 @@ impl Execution {
         .await
     }
 
-    /// Step 4: one durable step under the issue policy's run retry policy,
-    /// query-first on every execution (the query is inside the closure: a
-    /// separate journaled pre-query would replay its stale "nothing" on the
-    /// retry and re-send). Any `Err` from the run (exhaustion (500) or
-    /// cancellation (409)) is `outcome_unknown` about this document
-    /// ([`create_outcome_unknown`]): nothing is recorded, the next
-    /// invocation's lookup finds whatever landed.
+    /// Step 4: record the marker, await durable arming, then consume one send
+    /// permit inside the named create run. Its leading query is fresh, never a
+    /// replayed pre-query. An interrupted open run cannot re-arm; unresolved
+    /// results enter read-only reconciliation under the invocation policy.
+    /// Settlement is journaled before marker clearance; cancellation retains it.
     async fn create_step(
         &self,
         ctx: &ObjectContext<'_>,

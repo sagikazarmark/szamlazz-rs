@@ -15,14 +15,14 @@ use crate::identity::{ExternalId, Namespace, OrderKey};
 impl Execution {
     /// Observe the order's four external ids with separately journaled,
     /// sequential read-only steps under the read policy, on the
-    /// `order` the handler parsed from its key, then [`order_status`] on
-    /// what they found.
+    /// `order` the handler parsed from its key. Answered faults stop the reads
+    /// immediately; successful observations determine proforma consumption.
     pub(super) async fn status(
         &self,
         ctx: &SharedObjectContext<'_>,
         order: OrderKey,
     ) -> Result<OrderStatus, HandlerError> {
-        let mut found = Vec::new();
+        let mut status = OrderStatus::default();
         for kind in DocumentKind::ALL {
             let external_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
             let looked_up = lookup(
@@ -34,9 +34,9 @@ impl Execution {
                 kind.into(),
             )
             .await?;
-            found.push((kind, looked_up));
+            record_observation(&mut status, kind, looked_up, &self.config.namespace)?;
         }
-        order_status(found, &self.config.namespace).map_err(HandlerError::from)
+        Ok(with_consumed_proforma(status))
     }
 }
 
@@ -54,25 +54,41 @@ impl Execution {
 /// (`unavailable`, nothing may be concluded) or a credential code
 /// (`credentials_rejected`). `get` names no document in them: which of the
 /// four reads drew the code is in the message.
+#[cfg(test)]
 fn order_status(
     found: impl IntoIterator<Item = (DocumentKind, OwnershipOutcome)>,
     namespace: &Namespace,
 ) -> Result<OrderStatus, Fault> {
     let mut status = OrderStatus::default();
     for (kind, looked_up) in found {
-        match looked_up {
-            OwnershipOutcome::Live(found) | OwnershipOutcome::Reversed(found) => {
-                status.set(kind, Some(document_status(&found)));
-            }
-            OwnershipOutcome::Absent | OwnershipOutcome::Collision(_) => {}
-            OwnershipOutcome::Api(answer) => {
-                return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
-            }
-            OwnershipOutcome::CredentialsRejected(answer) => {
-                return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
-            }
+        record_observation(&mut status, kind, looked_up, namespace)?;
+    }
+    Ok(with_consumed_proforma(status))
+}
+
+/// Classify a read before starting the next one, preserving its fault and warning.
+fn record_observation(
+    status: &mut OrderStatus,
+    kind: DocumentKind,
+    looked_up: OwnershipOutcome,
+    namespace: &Namespace,
+) -> Result<(), Fault> {
+    match looked_up {
+        OwnershipOutcome::Live(found) | OwnershipOutcome::Reversed(found) => {
+            status.set(kind, Some(document_status(&found)));
+        }
+        OwnershipOutcome::Absent | OwnershipOutcome::Collision(_) => {}
+        OwnershipOutcome::Api(answer) => {
+            return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
+        }
+        OwnershipOutcome::CredentialsRejected(answer) => {
+            return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     }
+    Ok(())
+}
+
+fn with_consumed_proforma(mut status: OrderStatus) -> OrderStatus {
     if status.proforma.is_none()
         && let Some(consumer) = [&status.invoice, &status.prepayment]
             .into_iter()
@@ -87,7 +103,7 @@ fn order_status(
             },
         ));
     }
-    Ok(status)
+    status
 }
 
 /// The `get` projection of a document of ours.

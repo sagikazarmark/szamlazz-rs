@@ -15,6 +15,17 @@ enum StornoEvidence {
     Inconclusive(&'static str),
 }
 
+/// The corrective base is part of issuance intent, beyond external-id ownership.
+fn matches_corrective_base(found: &FoundDocument, operation: &WriteOperation) -> bool {
+    match operation {
+        WriteOperation::Create {
+            corrected_number: Some(base),
+            ..
+        } => found.referenced_invoice_number.as_ref() == Some(base),
+        _ => true,
+    }
+}
+
 /// A protected write result; uncertainty is journaled data, never a send retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WriteResult {
@@ -155,9 +166,17 @@ impl Gateway {
     pub(crate) async fn protected_create(
         &self,
         request: super::CreateStepRequest<'_>,
-        _marker: &UnresolvedWrite,
+        marker: &UnresolvedWrite,
     ) -> WriteResult {
         match self.settled_by_query(&request, true).await {
+            Ok(Some(CreateOutcome::Found(found) | CreateOutcome::Reversed(found)))
+                if !matches_corrective_base(&found, &marker.operation) =>
+            {
+                // This execution has not sent. A wrong-base holder is a
+                // collision, not completion of the requested correction.
+                tracing::warn!(number = %found.number, "corrective base collision");
+                return WriteResult::Create(CreateOutcome::Collision(found));
+            }
             Ok(Some(outcome)) => return WriteResult::Create(outcome),
             Ok(None) | Err(super::QueryError::NotFound) => {}
             Err(super::QueryError::Api(answer)) => {
@@ -302,13 +321,11 @@ impl Gateway {
             WriteOperation::Create {
                 kind,
                 expected_number,
-                corrected_number,
+                ..
             } => {
                 if !found.is_ours(&marker.order, *kind)
                     || expected_number.as_deref() == Some(found.number.as_str())
-                    || corrected_number
-                        .as_ref()
-                        .is_some_and(|base| found.referenced_invoice_number.as_ref() != Some(base))
+                    || !matches_corrective_base(&found, &marker.operation)
                 {
                     return Ok(WriteResult::unresolved(
                         "document does not match order, kind or expected issuance intent",
