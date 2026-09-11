@@ -43,7 +43,7 @@ fn a_create_invoice_extends_its_constructor_with_functional_update() {
         e_invoice: true,
         header: InvoiceHeader {
             order_number: Some("ORD-1".to_owned()),
-            paid: true,
+            paid: Some(true),
             ..header.clone()
         },
         seller: Seller {
@@ -81,7 +81,7 @@ fn a_create_invoice_extends_its_constructor_with_functional_update() {
     assigned.external_id = Some("shop:ORD-1:invoice".to_owned());
     assigned.e_invoice = true;
     assigned.header.order_number = Some("ORD-1".to_owned());
-    assigned.header.paid = true;
+    assigned.header.paid = Some(true);
     assigned.seller.bank = Some("Bank".to_owned());
     let mut email = SellerEmail::default();
     email.subject = Some("Your invoice".to_owned());

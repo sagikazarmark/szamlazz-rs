@@ -507,7 +507,9 @@ expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may
 - the read fns (`lookup`, `lookup_ours`, `verify`, `query`, `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return
   `Err(Unanswered)` when szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`);
 - `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known. An answer to their leading
-  query (another code, `szlahu_down`) is data: nothing was sent.
+  query (another code, `szlahu_down`) is data: nothing was sent. An unnumbered unmanaged storno acknowledgement
+  is the exception: inconclusive reconciliation returns journaled `StornoOutcome::Unnumbered` data, so this
+  reply ends the run rather than entering mutation retry.
 
 It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
 configuration by the services uses the journaled `Account` directly; a gateway is opened lazily inside the first
@@ -919,6 +921,15 @@ so every execution of the step sends byte-identical bytes; a verified original w
 with nothing sent, raised after the answers that need no send. Neither the date nor the form is enforced by
 szamlazz.hu (it issues the storno with whatever `teljesitesDatum` and `eszamla` the request carries), so the
 derivation from the verified original is what keeps a reversal on its original's date and in its original's form.
+
+**Unnumbered storno acknowledgements.** For unmanaged `Szamlazz.Agent.storno`, a successful reply without a
+reported number permits one read-only reconciliation. Positive reversal evidence can settle it; absence or
+a failed reconciliation instead completes the run with journaled `StornoOutcome::Unnumbered` data and returns
+`outcome_unknown` outside the issue-policy retry loop. This reply cannot trigger a policy-driven resend.
+The retained same `Idempotency-Key` repeats that completed fault; settle the earlier reversal before deliberately
+renewing. As with other unkeyed writes, a crash before recording the run completion can still re-execute an open
+run. Order storno retains its existing unresolved-write marker and read-only reconciliation protection.
+Acknowledgement metadata and PDF are excluded from the worker journal.
 
 **Ambiguous storno replies (#196).** A changed number with absent or positive optional gross is now verified
 by querying that number for the storno type and reference to the original. It can return `reversed`; if that

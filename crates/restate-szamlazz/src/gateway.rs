@@ -821,12 +821,20 @@ impl StornoReplyEvidence {
     }
 }
 
-/// The settled result of the storno step: szamlazz.hu's answer is known.
-/// What is *not* settled is an [`Unconfirmed`] error, which the run retry
-/// policy re-executes.
+/// The journaled result of the storno step, including an unnumbered
+/// acknowledgement whose reversal remains unknown but must not invite a run
+/// retry. Other [`Unconfirmed`] errors retain their run retry behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum StornoOutcome {
+    /// Success without a reported number, still inconclusive after one
+    /// read-only reconciliation. Journaled data, mapped to `outcome_unknown`
+    /// after the run completes; never a policy-driven mutation retry.
+    Unnumbered {
+        /// Safe cause including reconciliation failure, without acknowledgement
+        /// metadata or PDF.
+        message: String,
+    },
     /// The invoice is reversed by the storno invoice szamlazz.hu issued (now,
     /// or echoed by an idempotent repeat), established by the reply heuristic
     /// [`CreatedInvoice::reverses`](szamlazz_agent::ops::invoice::CreatedInvoice::reverses)
@@ -1625,7 +1633,8 @@ impl Gateway {
     /// # Errors
     ///
     /// [`Unanswered`] when the exchange produced no answer (transport, parse,
-    /// `szlahu_down`); the caller's read policy re-executes the step.
+    /// `szlahu_down`), or omitted taxpayer validity; the caller's read policy
+    /// re-executes the step without projecting an absent verdict as false.
     pub async fn query_taxpayer(
         &self,
         prefix: &TaxpayerPrefix,
@@ -1634,8 +1643,10 @@ impl Gateway {
         let request = QueryTaxpayer::from(prefix.clone());
         match self.client.send(&request).instrument(span).await {
             Ok(info) => {
-                tracing::debug!(prefix = %prefix.as_str(), valid = info.valid, "taxpayer answered");
-                Ok(TaxpayerOutcome::Found(QueryTaxpayerResponse::from(info)))
+                let taxpayer = QueryTaxpayerResponse::try_from(info)
+                    .map_err(|error| Unanswered::Transport(error.to_string()))?;
+                tracing::debug!(prefix = %prefix.as_str(), valid = taxpayer.valid, "taxpayer answered");
+                Ok(TaxpayerOutcome::Found(taxpayer))
             }
             Err(ClientError::Api(api)) if api.code.is_credential_error() => {
                 Ok(TaxpayerOutcome::CredentialsRejected(api.into()))
@@ -1712,8 +1723,12 @@ impl Gateway {
     ///    or [`Unconfirmed::ReQueryFailed`] if reconciliation itself failed.
     ///    An echo of the requested number is [`StornoOutcome::NotStornoable`], a
     ///    refusal [`StornoOutcome::Rejected`], rejected credentials
-    ///    [`StornoOutcome::CredentialsRejected`]. A lost reply, an open code
-    ///    or `szlahu_down` is re-queried once, immediately: a landed storno
+    ///    [`StornoOutcome::CredentialsRejected`]. An unnumbered acknowledgement
+    ///    is reconciled once, read-only: positive evidence settles it, otherwise
+    ///    [`StornoOutcome::Unnumbered`] completes the run as data so the issue
+    ///    policy cannot resend for this reply, even if reconciliation failed.
+    ///    A lost reply, an open code or `szlahu_down` is re-queried once,
+    ///    immediately: a landed storno
     ///    settles the step as [`StornoOutcome::AlreadyReversed`], nothing is
     ///    [`Unconfirmed`], and a re-query that fails itself is
     ///    [`Unconfirmed::ReQueryFailed`] naming both.
@@ -1773,34 +1788,58 @@ impl Gateway {
         let storno = self.account.build_storno(request);
 
         match self.client.send(&storno).await {
-            Ok(created) => match StornoReplyEvidence::of(&created, &storno.invoice_number) {
-                StornoReplyEvidence::Reversal => {
-                    tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
-                    Ok(StornoOutcome::Reversed(IssuedDocument::from(created)))
-                }
-                StornoReplyEvidence::SameNumberEcho => {
-                    tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
-                    Ok(StornoOutcome::NotStornoable)
-                }
-                StornoReplyEvidence::NeedsVerification => {
-                    if let Some(marker) = marker {
-                        let checked = self
-                            .reconcile_write_checked(marker, Some(created.invoice_number.as_str()))
-                            .await;
-                        recovery::warn_reconciliation_credentials(&checked, marker);
-                        if matches!(
-                            checked,
-                            Ok(recovery::WriteResult::Storno(
-                                StornoOutcome::AlreadyReversed { .. }
-                            ))
-                        ) {
-                            return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
-                        }
-                        return Err(Unconfirmed::StornoVerification { number: created.invoice_number.to_string(), message: "numbered reply needs positive identity and original reversal evidence".to_owned() });
+            Ok(response) => {
+                let Ok(created) = response.into_numbered() else {
+                    // Acknowledgement metadata is not document evidence and
+                    // must not enter the worker journal (in particular PDF).
+                    let open = Unconfirmed::Open {
+                        code: None,
+                        message: "storno acknowledged without a document number".to_owned(),
+                    };
+                    if marker.is_some() {
+                        return Err(open);
                     }
-                    self.verify_storno_reply(&request, created).await
+                    // Unmanaged storno uses a mutation retry policy. Complete
+                    // its run even if reconciliation is empty or fails: this
+                    // acknowledgement must not authorize another send.
+                    return Ok(self.storno_settle_or(&request, open).await.unwrap_or_else(
+                        |cause| StornoOutcome::Unnumbered {
+                            message: cause.to_string(),
+                        },
+                    ));
+                };
+                match StornoReplyEvidence::of(&created, &storno.invoice_number) {
+                    StornoReplyEvidence::Reversal => {
+                        tracing::info!(storno_number = %created.invoice_number, "invoice reversed");
+                        Ok(StornoOutcome::Reversed(IssuedDocument::from(created)))
+                    }
+                    StornoReplyEvidence::SameNumberEcho => {
+                        tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
+                        Ok(StornoOutcome::NotStornoable)
+                    }
+                    StornoReplyEvidence::NeedsVerification => {
+                        if let Some(marker) = marker {
+                            let checked = self
+                                .reconcile_write_checked(
+                                    marker,
+                                    Some(created.invoice_number.as_str()),
+                                )
+                                .await;
+                            recovery::warn_reconciliation_credentials(&checked, marker);
+                            if matches!(
+                                checked,
+                                Ok(recovery::WriteResult::Storno(
+                                    StornoOutcome::AlreadyReversed { .. }
+                                ))
+                            ) {
+                                return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+                            }
+                            return Err(Unconfirmed::StornoVerification { number: created.invoice_number.to_string(), message: "numbered reply needs positive identity and original reversal evidence".to_owned() });
+                        }
+                        self.verify_storno_reply(&request, created).await
+                    }
                 }
-            },
+            }
             Err(error) => match classify_failure("storno", error) {
                 Failure::Rejected(rejection) => {
                     tracing::info!(code = %rejection.code, "storno rejected");
@@ -2385,7 +2424,11 @@ mod tests {
         let request = szamlazz_agent::ops::storno::StornoInvoice::new("SZ-1");
         for (number, gross, expected) in rows {
             let body = crate::test_support::numbered_reply_body(number, gross);
-            let created = request.parse(&response(&body)).expect("numbered reply");
+            let created = request
+                .parse(&response(&body))
+                .expect("storno reply")
+                .into_numbered()
+                .expect("numbered reply");
             assert_eq!(
                 StornoReplyEvidence::of(&created, &request.invoice_number),
                 expected,

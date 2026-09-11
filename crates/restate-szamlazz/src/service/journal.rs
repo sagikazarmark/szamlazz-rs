@@ -272,6 +272,7 @@ fn entries() -> Vec<Entry> {
         ], &variants!(StornoLookupOutcome { Absent, AlreadyReversed { .. }, CredentialsRejected(_), Api(_) })));
     all.extend(entries_of(vec![
             StornoOutcome::Reversed(storno_document()),
+            StornoOutcome::Unnumbered { message: "storno acknowledged without a document number".to_owned() },
             StornoOutcome::AlreadyReversed {
                 storno_number: "SS-1".to_owned(),
             },
@@ -285,7 +286,7 @@ fn entries() -> Vec<Entry> {
             StornoOutcome::Unavailable {
                 message: DOWN.to_owned(),
             },
-        ], &variants!(StornoOutcome { Reversed(_), AlreadyReversed { .. }, NotStornoable, Rejected(_), CredentialsRejected(_), Api(_), Unavailable { .. } })));
+        ], &variants!(StornoOutcome { Unnumbered { .. }, Reversed(_), AlreadyReversed { .. }, NotStornoable, Rejected(_), CredentialsRejected(_), Api(_), Unavailable { .. } })));
     all.extend(entries_of(vec![
             DeleteOutcome::Deleted,
             DeleteOutcome::AlreadyGone,
@@ -417,6 +418,8 @@ fn storno_document() -> IssuedDocument {
     StornoInvoice::new("SZ-1")
         .parse(&reply("SS-1", "-10000", "-12700", "0"))
         .expect("xmlszamlavalasz parses")
+        .into_numbered()
+        .expect("numbered reply")
         .into()
 }
 
@@ -446,7 +449,8 @@ fn taxpayer() -> QueryTaxpayerResponse {
     QueryTaxpayer::from(prefix)
         .parse(&RawResponse::new::<&str, &str>([], xml.as_bytes().to_vec()))
         .expect("xmltaxpayer parses")
-        .into()
+        .try_into()
+        .expect("explicit taxpayer validity")
 }
 
 /// A successful `xmlszamlavalasz` reply with the `szlahu_id` header and a PDF.

@@ -8,6 +8,37 @@ use super::harness::*;
 use restate_szamlazz::gateway::{SzamlazzAnswer, TaxpayerOutcome, Unanswered};
 use wiremock::ResponseTemplate;
 
+#[tokio::test]
+async fn taxpayer_missing_validity_is_inconclusive_without_journaling_metadata() {
+    let h = Harness::start().await;
+    taxpayer_query("12345678")
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api">
+                <header><requestId>PRIVATE-REQUEST</requestId></header>
+                <result><funcCode>OK</funcCode><message>PRIVATE-DIAGNOSTIC</message></result>
+                <taxpayerData><taxpayerName>PRIVATE-TAXPAYER</taxpayerName></taxpayerData>
+            </QueryTaxpayerResponse>"#,
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    let result = h.gateway.query_taxpayer(&prefix()).await;
+    assert_eq!(
+        result,
+        Err(Unanswered::Transport(
+            "taxpayer reply omitted taxpayerValidity".to_owned()
+        ))
+    );
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("serialize")
+            .contains("PRIVATE-")
+    );
+    assert_eq!(h.bodies().await.len(), 1);
+}
+
 /// A known taxpayer is `Found` with NAV's registered data projected onto the
 /// crate-owned response: one `xmltaxpayer` request of the prefix, carrying
 /// the account's agent key.

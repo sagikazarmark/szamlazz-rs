@@ -16,6 +16,66 @@ use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
 #[tokio::test]
+async fn numberless_storno_acknowledgement_requires_positive_reconciliation() {
+    for landed in [false, true] {
+        let h = Harness::start().await;
+        let id = storno_id();
+        external_id_query(id.as_str())
+            .respond_with(not_found())
+            .up_to_n_times(1)
+            .expect(1)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        external_id_query(id.as_str())
+            .respond_with(if landed {
+                Doc {
+                    referenced_invoice: Some("SZ-1"),
+                    ..Doc::new("SS-1", "SS")
+                }
+                .response()
+            } else {
+                not_found()
+            })
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlabrutto>-1270</szamlabrutto><vevoifiokurl>PRIVATE-URL</vevoifiokurl><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#,
+                "application/xml",
+            ))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        let result = h.gateway.storno(storno_request(&id)).await;
+        if landed {
+            assert_eq!(
+                result,
+                Ok(StornoOutcome::AlreadyReversed {
+                    storno_number: "SS-1".into()
+                })
+            );
+        } else {
+            assert!(
+                matches!(&result, Ok(StornoOutcome::Unnumbered { .. })),
+                "{result:?}"
+            );
+        }
+        let journal = match &result {
+            Ok(outcome) => serde_json::to_string(outcome).expect("serialize"),
+            Err(cause) => cause.to_string(),
+        };
+        assert!(!journal.contains("PRIVATE-URL") && !journal.contains("JVBERi0="));
+        assert_eq!(
+            h.bodies().await.len(),
+            3,
+            "query, one send, reconciliation only"
+        );
+    }
+}
+
+#[tokio::test]
 async fn storno_lookup_finds_our_storno_under_the_id() {
     let h = Harness::start().await;
     let storno_id = storno_id();

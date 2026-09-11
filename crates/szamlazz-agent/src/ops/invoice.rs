@@ -175,9 +175,18 @@ pub struct InvoiceHeader {
     pub number_prefix: Option<String>,
     /// Adjustment to the payable total (`fizetendoKorrekcio`).
     pub payable_adjustment: Option<Decimal>,
-    /// Marks the invoice as already paid (`fizetve`). False omits the element.
+    /// Per-document paid control (`fizetve`). `None` omits the element,
+    /// leaving szamlazz.hu's payment-method/account defaults in effect;
+    /// `Some(false)` and `Some(true)` send explicit false and true respectively.
+    /// Omission and explicit false are not assumed to be equivalent.
+    ///
+    /// Migrating from the former `bool`: the constructor still omits the
+    /// element, and missing or null JSON decodes as `None`. Existing serialized
+    /// booleans decode as the corresponding `Some`: an old `"paid": false`
+    /// now sends explicit false, whereas it previously omitted `fizetve`.
+    /// Use `None` (missing or null in JSON) to retain that omission behavior.
     #[serde(default)]
-    pub paid: bool,
+    pub paid: Option<bool>,
     /// Apply margin-scheme VAT (`arresAfa`).
     pub margin_vat: Option<bool>,
     /// Indicates that the invoice contains no Hungarian VAT (`eusAfa`).
@@ -226,8 +235,8 @@ pub struct InvoiceHeader {
 }
 
 impl InvoiceHeader {
-    /// A header with the required fields. `Option` fields default to `None`
-    /// and `paid` to false; the writer omits `fizetve` when `paid` is false.
+    /// A header with the required fields. `Option` fields default to `None`,
+    /// including `paid`, so the writer omits `fizetve` by default.
     #[must_use]
     pub fn new(
         fulfillment_date: Date,
@@ -249,7 +258,7 @@ impl InvoiceHeader {
             extra_logo: None,
             number_prefix: None,
             payable_adjustment: None,
-            paid: false,
+            paid: None,
             margin_vat: None,
             eu_vat: None,
             template: None,
@@ -820,8 +829,8 @@ impl AgentRequest for CreateInvoice {
                 if let Some(adjustment) = h.payable_adjustment {
                     f.decimal("fizetendoKorrekcio", adjustment);
                 }
-                if h.paid {
-                    f.bool("fizetve", true);
+                if let Some(paid) = h.paid {
+                    f.bool("fizetve", paid);
                 }
                 if let Some(enabled) = h.margin_vat {
                     f.bool("arresAfa", enabled);
@@ -948,11 +957,11 @@ impl AgentRequest for CreateInvoice {
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
         match envelope::parse_reply(response)? {
             Reply::Issued(created) => Ok(CreationOutcome::Issued(created)),
-            Reply::Unnumbered { pdf } if self.header.preview_pdf == Some(true) => {
-                let pdf = pdf.ok_or(ParseError::Missing("pdf"))?;
+            Reply::Unnumbered(reply) if self.header.preview_pdf == Some(true) => {
+                let pdf = reply.pdf.ok_or(ParseError::Missing("pdf"))?;
                 Ok(CreationOutcome::Preview(InvoicePreview { pdf }))
             }
-            Reply::Unnumbered { .. } => Err(ParseError::Missing("szamlaszam").into()),
+            Reply::Unnumbered(_) => Err(ParseError::Missing("szamlaszam").into()),
         }
     }
 
@@ -1023,6 +1032,51 @@ mod tests {
         let xml = sample().write_xml(&Credentials::agent_key("key"));
         let expected = include_str!("../../tests/golden/xmlszamla.xml").trim_end();
         assert_eq!(String::from_utf8(xml).expect("utf-8"), expected);
+    }
+
+    #[test]
+    fn paid_json_preserves_omission_and_explicit_boolean_wire_intent() {
+        use serde_json::{Value, json};
+
+        for method in [PaymentMethod::Transfer, PaymentMethod::Cash] {
+            let mut invoice = sample();
+            invoice.header.payment_method = method;
+            assert_eq!(invoice.header.paid, None);
+            let omitted = String::from_utf8(invoice.write_xml(&Credentials::agent_key("key")))
+                .expect("utf-8");
+            assert!(!omitted.contains("fizetve"));
+            let mut header = serde_json::to_value(&invoice.header).expect("serialize header");
+            header
+                .as_object_mut()
+                .expect("header object")
+                .remove("paid");
+
+            for (input, paid, element) in [
+                (None, None, ""),
+                (Some(Value::Null), None, ""),
+                (Some(json!(false)), Some(false), "<fizetve>false</fizetve>"),
+                (Some(json!(true)), Some(true), "<fizetve>true</fizetve>"),
+            ] {
+                let mut value = header.clone();
+                if let Some(input) = input {
+                    value["paid"] = input;
+                }
+                invoice.header = serde_json::from_value(value).expect("deserialize header");
+                assert_eq!(invoice.header.paid, paid);
+                let serialized = serde_json::to_value(&invoice.header).expect("serialize header");
+                assert_eq!(serialized["paid"], json!(paid));
+                assert_eq!(
+                    serde_json::from_value::<InvoiceHeader>(serialized).expect("round-trip header"),
+                    invoice.header
+                );
+                let xml = String::from_utf8(invoice.write_xml(&Credentials::agent_key("key")))
+                    .expect("utf-8");
+                assert_eq!(
+                    xml,
+                    omitted.replace("</fejlec>", &format!("{element}</fejlec>"))
+                );
+            }
+        }
     }
 
     #[test]
@@ -1179,6 +1233,7 @@ mod tests {
         invoice.item_identifiers_on_invoice = Some(false);
         invoice.header.extra_logo = Some("LOGO".into());
         invoice.header.payable_adjustment = Some(dec!(1.5));
+        invoice.header.paid = Some(false);
         invoice.header.margin_vat = Some(true);
         invoice.header.eu_vat = Some(false);
         invoice.header.template = Some(InvoiceTemplate::NoEnvelope);
@@ -1243,7 +1298,7 @@ mod tests {
         let xml =
             String::from_utf8(invoice.write_xml(&Credentials::agent_key("key"))).expect("utf-8");
         assert!(xml.contains("<szamlaLetoltes>true</szamlaLetoltes><szamlaLetoltesPld>2</szamlaLetoltesPld><valaszVerzio>2</valaszVerzio><aggregator>AGG</aggregator><guardian>true</guardian><cikkazoninvoice>false</cikkazoninvoice>"));
-        assert!(xml.contains("<logoExtra>LOGO</logoExtra><fizetendoKorrekcio>1.5</fizetendoKorrekcio><arresAfa>true</arresAfa><eusAfa>false</eusAfa><szamlaSablon>SzlaNoEnv</szamlaSablon><elonezetpdf>true</elonezetpdf>"));
+        assert!(xml.contains("<logoExtra>LOGO</logoExtra><fizetendoKorrekcio>1.5</fizetendoKorrekcio><fizetve>false</fizetve><arresAfa>true</arresAfa><eusAfa>false</eusAfa><szamlaSablon>SzlaNoEnv</szamlaSablon><elonezetpdf>true</elonezetpdf>"));
         assert!(!xml.contains("<email></email>"));
         assert!(xml.contains("<sendEmail>false</sendEmail>"));
         assert!(xml.contains("<csoportazonosito>GROUP-1</csoportazonosito>"));

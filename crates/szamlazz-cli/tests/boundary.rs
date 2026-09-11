@@ -383,6 +383,66 @@ async fn remote_documents_survive_local_pdf_failure_in_human_and_json_output() {
 }
 
 #[tokio::test]
+async fn numberless_storno_preserves_acknowledgement_and_pdf_without_claiming_reversal() {
+    for json_output in [false, true] {
+        let server = MockServer::start().await;
+        respond(&server, invoice_reply("", Some("-127"))).await;
+        original_invoice(&server, 3).await;
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("acknowledgement.pdf");
+        let mut args = vec![
+            "invoice",
+            "storno",
+            "E-2026-1",
+            "--pdf",
+            path.to_str().expect("path"),
+        ];
+        if json_output {
+            args.push("--json");
+        }
+        let output = invoke(&server, &args, None).await;
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(std::fs::read(&path).expect("saved PDF"), PDF);
+        if json_output {
+            let value = report(&output);
+            assert_eq!(value["remote"]["outcome"], "unconfirmed");
+            assert!(value["remote"]["document"].is_null());
+            assert_eq!(value["remote"]["acknowledgement"]["gross_total"], "-127");
+            assert!(value["remote"]["acknowledgement"]["pdf"].is_string());
+            assert_eq!(value["pdf_output"]["status"], "written");
+        } else {
+            assert!(text(&output.stdout).contains("unnumbered acknowledgement"));
+            assert!(text(&output.stdout).contains("-127"));
+        }
+        assert!(text(&output.stderr).contains("reconcile the original before retrying"));
+        assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn taxpayer_missing_validity_is_reported_as_absent_including_metadata() {
+    let server = MockServer::start().await;
+    respond(
+        &server,
+        r#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api">
+        <header><requestId>NAV-REQUEST</requestId></header>
+        <result><funcCode>OK</funcCode><message>advisory</message></result>
+        </QueryTaxpayerResponse>"#
+            .to_owned(),
+    )
+    .await;
+    let output = invoke(&server, &["taxpayer", "12345678", "--json"], None).await;
+    assert!(output.status.success(), "{output:?}");
+    let value = report(&output);
+    assert!(value["valid"].is_null());
+    assert_eq!(value["header"]["request_id"], "NAV-REQUEST");
+    assert_eq!(value["diagnostics"]["message"], "advisory");
+    let output = invoke(&server, &["taxpayer", "12345678"], None).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(text(&output.stdout).contains("not reported"));
+}
+
+#[tokio::test]
 async fn storno_reports_genuine_repeat_zero_noop_and_unconfirmed_honestly() {
     for (number, gross, outcome, success) in [
         ("E-2026-2", Some("-12700"), "reversed", true),

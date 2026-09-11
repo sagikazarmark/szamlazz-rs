@@ -156,7 +156,9 @@ fn correct_aliases_and_foreign_extensions_preserve_envelope_content() {
     let body = r#"<a:xmlszamlavalasz xmlns:a="http://www.szamlazz.hu/xmlszamlavalasz" xmlns:x="urn:extension"><x:sikeres>false</x:sikeres><a:sikeres>true</a:sikeres><a:szamlaszam>I-1</a:szamlaszam><x:szamlabrutto>999</x:szamlabrutto><a:szamlabrutto>127</a:szamlabrutto><a:vevoifiokurl>https://example.test/?a=1&amp;b=2</a:vevoifiokurl></a:xmlszamlavalasz>"#;
     let doc = StornoInvoice::new("I")
         .parse(&raw(body.into()))
-        .expect("protocol fields");
+        .expect("protocol fields")
+        .into_numbered()
+        .expect("numbered");
     assert_eq!(doc.gross_total, Some(rust_decimal::dec!(127)));
     assert_eq!(
         doc.customer_account_url.as_deref(),
@@ -230,7 +232,7 @@ fn namespace_reserved_names_are_checked_even_in_ignored_extensions() {
             let parsed = taxpayer.parse(&raw(body));
             assert_eq!(parsed.is_ok(), valid, "{namespace}: {extension}");
             if let Ok(info) = parsed {
-                assert!(info.valid);
+                assert_eq!(info.valid, Some(true));
             }
         }
     }
@@ -248,12 +250,13 @@ fn escaped_namespace_uris_have_the_same_identity() {
     let body = include_str!("synthetic/taxpayer.xml")
         .replace("/api", "/&#97;pi")
         .replace("/data", "/d&#97;ta");
-    assert!(
+    assert_eq!(
         QueryTaxpayer::new("12345678")
             .expect("prefix")
             .parse(&raw(body))
             .expect("NAV namespaces")
-            .valid
+            .valid,
+        Some(true)
     );
 }
 
@@ -351,7 +354,9 @@ fn legal_attribute_quoting_survives_protocol_projection() {
         );
         let doc = StornoInvoice::new("I")
             .parse(&raw(body))
-            .expect("legal attribute");
+            .expect("legal attribute")
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(doc.invoice_number.as_str(), "I-1");
     }
 }

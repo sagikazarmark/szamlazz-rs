@@ -221,6 +221,8 @@ fn after_storno_lookup(
 /// The faults a settled step can still be: rejected credentials (the
 /// warning tagged with `namespace`), and the leading query answered with
 /// another code or `szlahu_down` (`unavailable` at once; nothing was sent).
+/// An unnumbered acknowledgement left inconclusive by reconciliation is
+/// `outcome_unknown`, raised here after the run completed as data.
 /// The caller attaches the identity it knows.
 fn storno_response(
     outcome: gateway::StornoOutcome,
@@ -228,6 +230,11 @@ fn storno_response(
     namespace: &Namespace,
 ) -> Result<StornoResponse, Fault> {
     Ok(match outcome {
+        gateway::StornoOutcome::Unnumbered { message } => {
+            return Err(Fault::outcome_unknown(format!(
+                "{message}; {STORNO_RECOVERY}"
+            )));
+        }
         gateway::StornoOutcome::Reversed(storno) => {
             StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno.number)
         }
@@ -351,6 +358,9 @@ async fn lookup_storno<'ctx, C: RunCtx<'ctx>>(
 /// separate journaled query would replay its stale "nothing" on the retry and
 /// re-send). The request is rebuilt from the intent on every execution (the
 /// date included), so every send is byte-identical.
+/// An unnumbered acknowledgement completes the run as journaled data after
+/// one read-only reconciliation; `storno_response` raises `outcome_unknown`
+/// outside the retry loop. A retained same-key completion repeats that fault.
 ///
 /// # Errors
 ///
@@ -649,6 +659,128 @@ mod tests {
     use crate::contract::IssuedKind;
     use crate::gateway::SzamlazzAnswer;
     use crate::test_support::{Doc, ORIGINAL_TELJ};
+
+    /// Captures the actual `run_operating` closure's result before SDK retry
+    /// classification. Any Err would let the issue policy retry and fails this
+    /// test. A completed entry replays through serde without executing it again.
+    #[derive(Default)]
+    struct CompletedRun(std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>);
+
+    impl<'ctx> RunCtx<'ctx> for CompletedRun {
+        fn scope(&self) -> Option<&str> {
+            None
+        }
+        fn key(&self) -> Option<&str> {
+            None
+        }
+        fn invocation_id(&self) -> &'static str {
+            "numberless-storno"
+        }
+
+        fn run<T, F, Fut>(
+            &self,
+            name: String,
+            _policy: restate_sdk::prelude::RunRetryPolicy,
+            f: F,
+        ) -> crate::account::BoxFuture<'ctx, Result<T, TerminalError>>
+        where
+            T: super::super::support::Journaled + Send + 'static,
+            F: FnOnce() -> Fut + Send + 'ctx,
+            Fut: std::future::Future<Output = Result<T, HandlerError>> + Send + 'ctx,
+        {
+            assert_eq!(name, "storno-SZ-1");
+            let saved = self.0.clone();
+            Box::pin(async move {
+                let replay = saved.lock().expect("journal").clone();
+                if let Some(value) = replay {
+                    return Ok(serde_json::from_value(value).expect("replay"));
+                }
+                let value = f().await.unwrap_or_else(|error| {
+                    panic!("must complete the run, not enter retry classification: {error:?}")
+                });
+                *saved.lock().expect("journal") =
+                    Some(serde_json::to_value(&value).expect("journal"));
+                Ok(value)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn numberless_unmanaged_storno_completes_run_and_replays_uncertain_fault() {
+        use crate::account::{Accounts, Endpoint, StaticConfig, StaticResolver};
+        use crate::config::WorkerConfig;
+        use crate::test_support::api_error;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::body_string_contains};
+
+        for reconciliation in [api_error("7", "not found"), ResponseTemplate::new(503)] {
+            let server = MockServer::start().await;
+            let id = ExternalId::for_unmanaged_storno(&namespace(), "SZ-1");
+            Mock::given(body_string_contains(id.as_str()))
+                .and(body_string_contains("action-szamla_agent_xml"))
+                .respond_with(api_error("7", "not found"))
+                .with_priority(1)
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(body_string_contains("action-szamla_agent_xml"))
+                .respond_with(reconciliation)
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(body_string_contains("action-szamla_agent_st"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><pdf>JVBERi0=</pdf><vevoifiokurl>PRIVATE-URL</vevoifiokurl></xmlszamlavalasz>"#,
+                )).expect(1).mount(&server).await;
+            let config: StaticConfig = serde_json::from_value(serde_json::json!({
+                "account": {"id":"acct", "agent_key":"key"}
+            }))
+            .expect("config");
+            let store = std::sync::Arc::new(StaticResolver::try_from(config).expect("resolver"));
+            let mut account = Account::new("acct", "acct");
+            account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+            let exec = Execution::new(
+                account,
+                Accounts::new(store.clone(), store),
+                WorkerConfig::new(namespace()),
+            );
+            let intent = StornoIntent {
+                number: "SZ-1".into(),
+                storno_id: id,
+                comment: None,
+                e_invoice: false,
+                fulfillment_date: ORIGINAL_TELJ,
+            };
+            let ctx = CompletedRun::default();
+            let mut previous = None;
+            for _ in 0..2 {
+                let outcome = storno_step(&ctx, &exec, &intent)
+                    .await
+                    .expect("completed run");
+                assert!(matches!(outcome, gateway::StornoOutcome::Unnumbered { .. }));
+                let fault = storno_response(outcome, intent.number.clone(), &namespace())
+                    .expect_err("uncertain, not reversed");
+                let (status, body) = fault_body(fault);
+                assert_eq!(status, 500);
+                assert_eq!(body["code"], "outcome_unknown");
+                assert!(
+                    body["message"]
+                        .as_str()
+                        .expect("message")
+                        .contains(STORNO_RECOVERY)
+                );
+                assert!(
+                    !body.to_string().contains("PRIVATE-")
+                        && !body.to_string().contains("JVBERi0=")
+                );
+                if let Some(previous) = previous.replace(body.clone()) {
+                    assert_eq!(previous, body, "replayed completion retains the same fault");
+                }
+            }
+            assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+            server.verify().await;
+        }
+    }
 
     fn ord_1() -> OrderKey {
         OrderKey::parse("ORD-1").expect("order")

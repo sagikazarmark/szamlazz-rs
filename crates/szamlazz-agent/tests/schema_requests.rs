@@ -169,7 +169,7 @@ fn full_invoice() -> CreateInvoice {
         extra_logo: text(),
         number_prefix: text(),
         payable_adjustment: Some(dec!(-0.5)),
-        paid: true,
+        paid: Some(true),
         margin_vat: Some(true),
         eu_vat: Some(true),
         template: Some(InvoiceTemplate::Default),
@@ -364,7 +364,7 @@ fn invoices(m: &mut Matrix) {
     r.header.margin_vat = Some(false);
     r.header.eu_vat = Some(false);
     r.header.preview_pdf = Some(false);
-    r.header.paid = false;
+    r.header.paid = Some(false);
     m.add(root, "explicit-false-options", &r);
     r = base.clone();
     r.buyer.ledger = Some(BuyerLedger::default());

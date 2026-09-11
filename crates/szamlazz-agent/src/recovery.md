@@ -45,8 +45,15 @@ and its reconciliation queries.
   access may be transient; certificate expiry requires remediation. The code
   stays `Unknown` with a potentially transient retry hint.
 - **First-party PHP source:** 2.12.4 corroborates code 56 as issuance with a
-  notification warning **only with a document number**. Without one it remains
-  `Unknown`. The account probes did not trigger 55 or 56.
+  notification warning in its numbered issuance handling, not a universal
+  numbered-success rule. Invoice creation and storno expose
+  `notification_delivery_failed` only for accepted issuance-envelope cases;
+  a number does not override other response failures. Credit-entry registration
+  and clearing retain 56 as an error even with a number. The PDF query tolerates
+  the accepted numbered-56 envelope but still requires a PDF and exposes no
+  notification flag. Any surfaced 56 remains `Unknown`; a reported invoice
+  number alone does not establish a credit-entry mutation's effect. The recorded
+  account probes did not trigger 55 or 56.
 - **Observed:** the detailed A4d-2/A4d-q account record reports a ≥57-second
   stalled create and no issuance found by its order query. The project's broader
   delayed-issuance assertion has no linked probe establishing that outcome.
@@ -57,6 +64,15 @@ and its reconciliation queries.
 The receipt and simplified-image codes added in #195 are sourced from the
 [receipt supplement](https://docs.szamlazz.hu/agent/generating_receipt/response),
 [general errors](https://docs.szamlazz.hu/agent/basics/error-handling) and
-[simplified-image rules](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/travel-agency),
-not live-account observations. Offline parser tests establish classification
-and message preservation, not vendor execution semantics.
+[simplified-image rules](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/travel-agency).
+Subsequently, on an operator-confirmed test account on **2026-09-11**, code **337**
+refused a seven-character receipt prefix and specified a five-character maximum.
+It is the only one of those thirteen additions with recorded execution evidence;
+the other twelve remain unobserved. Separately, repeating a **completed, verified**
+receipt create returned **338**, and a further query found the same original.
+Code 338 predates the thirteen additions. These are transcribed execution
+observations, not archived raw HTTP captures; continuity with the historical
+invoice-probe account is not established. They do not establish concurrent
+deduplication, call-id retention or recovery after an unknown answer. Offline
+parser tests establish classification and message preservation, not vendor
+execution semantics.

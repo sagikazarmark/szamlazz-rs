@@ -32,7 +32,7 @@ mod scenarios {
             .send(&QueryTaxpayer::new("13421739").expect("prefix"))
             .await
             .expect("NAV taxpayer dependency failed");
-        assert!(info.valid);
+        assert_eq!(info.valid, Some(true));
         assert!(info.name.is_some_and(|name| !name.trim().is_empty()));
         assert_eq!(info.tax_number.as_deref(), Some("13421739"));
     }
@@ -79,7 +79,7 @@ mod scenarios {
                 )))
                 .await
                 .expect("standalone invoice PDF query");
-            assert_eq!(fetched.invoice_number, number);
+            assert_eq!(fetched.invoice_number.as_ref(), Some(&number));
             assert_pdf(Some(&fetched.pdf));
 
             for (amount, additive, expected, outstanding) in [
@@ -99,7 +99,7 @@ mod scenarios {
                 let sent = run.client.send(&request).await;
                 let balance = run.answered(sent);
                 run.unresolved = None;
-                assert_eq!(balance.invoice_number, number);
+                assert_eq!(balance.invoice_number.as_ref(), Some(&number));
                 assert_eq!(balance.outstanding, Some(outstanding));
                 let stored = run.by_number(&number).await;
                 let mut amounts: Vec<_> = stored

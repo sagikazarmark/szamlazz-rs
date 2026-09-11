@@ -483,7 +483,9 @@ mod responses {
         let repaired = with_pdf_in_place(&escaped, &text[start..end], "pdf");
         let created = request
             .parse(&delivered(&repaired))
-            .expect("repaired example");
+            .expect("repaired example")
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(created.invoice_number.as_str(), "XXX-2012-3");
         assert_eq!(created.net_total, Some(dec!(30000)));
         assert_eq!(created.gross_total, Some(dec!(38100)));
@@ -501,7 +503,13 @@ mod responses {
         let balance = request
             .parse(&delivered(&escape_example_url(body)))
             .expect("URL-escaped example");
-        assert_eq!(balance.invoice_number.as_str(), "XXX-2012-3");
+        assert_eq!(
+            balance
+                .invoice_number
+                .as_ref()
+                .map(szamlazz_agent::InvoiceNumber::as_str),
+            Some("XXX-2012-3")
+        );
         assert_eq!(balance.net_total, Some(dec!(30000)));
         assert_eq!(balance.gross_total, Some(dec!(38100)));
         assert_eq!(balance.outstanding, Some(dec!(0)));
@@ -693,7 +701,13 @@ mod responses {
         let fetched = request
             .parse(&delivered(&without_abbreviation(body)))
             .expect("the unabbreviated example parses");
-        assert_eq!(fetched.invoice_number.as_str(), "XXX-2012-3");
+        assert_eq!(
+            fetched
+                .invoice_number
+                .as_ref()
+                .map(szamlazz_agent::InvoiceNumber::as_str),
+            Some("XXX-2012-3")
+        );
         assert_eq!(fetched.net_total, Some(dec!(30000)));
         assert_eq!(fetched.gross_total, Some(dec!(38100)));
         assert_is_the_docs_pdf(&fetched.pdf);
@@ -971,7 +985,7 @@ mod responses {
             .parse(&delivered(body))
             .expect("the success example parses");
 
-        assert!(taxpayer.valid);
+        assert_eq!(taxpayer.valid, Some(true));
         assert_eq!(
             taxpayer.name.as_deref(),
             Some("KBOSS.HU KERESKEDELMI ÉS SZOLGÁLTATÓ KORLÁTOLT FELELŐSSÉGŰ TÁRSASÁG")
@@ -1001,7 +1015,7 @@ mod responses {
             .parse(&delivered(body))
             .expect("an unknown taxpayer is an answer");
 
-        assert!(!taxpayer.valid);
+        assert_eq!(taxpayer.valid, Some(false));
         assert_eq!(taxpayer.name, None);
         assert_eq!(taxpayer.tax_number, None);
         assert_eq!(taxpayer.vat_code, None);

@@ -15,15 +15,15 @@
 //! - **Always written** (`bool`): the element is a required part of the
 //!   request and the server has no default the crate would want to lean on
 //!   (`eszamla`, `szamlaLetoltes`, `pdfLetoltes`, `additiv`, `pdf`).
-//! - **Written only when `true`** (`bool`, `#[serde(default)]`): the writer
-//!   selects the flag only when enabled (`fizetve`, the `InvoiceKind` flags
-//!   `dijbekero` / `elolegszamla` / …). For `fizetve` this follows the official
-//!   PHP writer; equivalence between omission and explicit false under every
-//!   payment method/account default remains unverified.
+//! - **Written only when `true`**: the writer selects the `InvoiceKind` flags
+//!   only when enabled (`dijbekero` / `elolegszamla` / …).
 //! - **Tri-state** (`Option<bool>`): the server has a default the caller may
 //!   want to leave in effect, so `None` omits the element and `Some(false)`
-//!   sends an explicit `false` (`sendEmail`, `arresAfa`, `eusAfa`, `guardian`,
-//!   `cikkazoninvoice`, `elonezetpdf`, `folyamatosTelj`).
+//!   sends an explicit `false`, while `Some(true)` sends `true` (`fizetve`,
+//!   `sendEmail`, `arresAfa`, `eusAfa`, `guardian`, `cikkazoninvoice`,
+//!   `elonezetpdf`, `folyamatosTelj`). Omission and explicit false are not
+//!   assumed to be equivalent. See [`invoice::InvoiceHeader::paid`] for the
+//!   migration from its former boolean shape.
 
 /// The *Response version* (`valaszVerzio`) every operation that has one
 /// requests: `2`, the structured `xmlszamlavalasz` XML with a base64 PDF

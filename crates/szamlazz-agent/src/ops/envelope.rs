@@ -4,7 +4,7 @@
 //! document it names.
 //!
 //! Crate-private: the issuing operations read it through [`parse_reply`] and
-//! [`parse_issued`], the credit-entry registration through its [`Body`] under
+//! the operation's own interpretation, the credit-entry registration through its [`Body`] under
 //! the shared verdict (`xml::valasz`); the public face is [`CreatedInvoice`],
 //! re-exported from [`ops::invoice`](crate::ops::invoice).
 
@@ -20,8 +20,8 @@ pub(crate) const ROOT: &str = "xmlszamlavalasz";
 /// The envelope's namespace.
 pub(crate) const NAMESPACE: &str = "http://www.szamlazz.hu/xmlszamlavalasz";
 
-/// A successfully issued numbered invoice: the answer to a create, a storno,
-/// and (with the PDF) a PDF query.
+/// A numbered invoice reported by creation or storno. A storno reply can echo
+/// an existing reversal or an unchanged document; see [`Self::reverses`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CreatedInvoice {
@@ -87,14 +87,37 @@ impl CreatedInvoice {
     }
 }
 
+/// A successful invoice envelope without reported invoice-number identity.
+///
+/// This preserves the acknowledgement and any reported metadata. It does not
+/// establish issuance or reversal, and is a preview only when the create request
+/// asked for one. A numberless storno needs reconciliation, never automatic resend.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct InvoiceAcknowledgement {
+    /// Auxiliary document id from the header, if supplied.
+    pub document_id: Option<i64>,
+    /// Reported net total.
+    pub net_total: Option<Decimal>,
+    /// Reported gross total.
+    pub gross_total: Option<Decimal>,
+    /// Reported outstanding amount.
+    pub outstanding: Option<Decimal>,
+    /// Buyer-facing account URL.
+    pub customer_account_url: Option<String>,
+    /// Reported payment method.
+    pub payment_method: Option<PaymentMethod>,
+    /// Decoded PDF, if supplied.
+    pub pdf: Option<Pdf>,
+}
+
 /// What a successful `xmlszamlavalasz` reply names.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Reply {
     /// A numbered document.
     Issued(CreatedInvoice),
-    /// A success without a document number: a PDF preview (`elonezetpdf`),
-    /// which issues nothing; the PDF it carries, if any.
-    Unnumbered { pdf: Option<Pdf> },
+    /// A successful envelope whose operation must interpret the missing number.
+    Unnumbered(InvoiceAcknowledgement),
 }
 
 /// The payload of the `xmlszamlavalasz` envelope after the verdict, every
@@ -208,20 +231,19 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
     // 56; a remaining identity failure must not become header-only success.
     let body = payload_result?;
 
-    let Some(invoice_number) = body.invoice_number(response) else {
-        // 56 without a number: an error after all.
-        if let Some(error) = header_error.or(body_error) {
-            return Err(error.into());
-        }
-        return Ok(Reply::Unnumbered { pdf: body.pdf()? });
-    };
+    let invoice_number = body.invoice_number(response);
+    // A notification failure establishes issuance only with usable identity.
+    if invoice_number.is_none()
+        && let Some(error) = header_error.or(body_error)
+    {
+        return Err(error.into());
+    }
 
     // Issued with a failed notification: the document is what matters, so
     // a malformed optional value is dropped rather than reported.
     let read = |value| lenient(notification_delivery_failed, value);
 
-    Ok(Reply::Issued(CreatedInvoice {
-        invoice_number,
+    let acknowledgement = InvoiceAcknowledgement {
         document_id: parse_document_id_header(response),
         net_total: read(decimal_body_or_header(
             body.szamlanetto.as_deref(),
@@ -244,8 +266,21 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
         customer_account_url: body.customer_account_url(response),
         payment_method: header_payment_method(response),
         pdf: lenient(notification_delivery_failed, body.pdf())?,
-        notification_delivery_failed,
-    }))
+    };
+    Ok(match invoice_number {
+        Some(invoice_number) => Reply::Issued(CreatedInvoice {
+            invoice_number,
+            document_id: acknowledgement.document_id,
+            net_total: acknowledgement.net_total,
+            gross_total: acknowledgement.gross_total,
+            outstanding: acknowledgement.outstanding,
+            customer_account_url: acknowledgement.customer_account_url,
+            payment_method: acknowledgement.payment_method,
+            pdf: acknowledgement.pdf,
+            notification_delivery_failed,
+        }),
+        None => Reply::Unnumbered(acknowledgement),
+    })
 }
 
 fn plain_notification_body(body: &[u8]) -> bool {
@@ -265,17 +300,17 @@ fn lenient<T>(
     }
 }
 
-/// Parses an operation that must issue a numbered document (a storno, a PDF
-/// query).
+/// Test helper for the numbered branch of the shared envelope.
 ///
 /// # Errors
 ///
 /// Everything [`parse_reply`] refuses, and a success without a number
 /// (`ParseError::Missing("szamlaszam")`).
-pub(crate) fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, ResponseError> {
+#[cfg(test)]
+fn parse_issued(response: &RawResponse) -> Result<CreatedInvoice, ResponseError> {
     match parse_reply(response)? {
         Reply::Issued(created) => Ok(created),
-        Reply::Unnumbered { .. } => Err(ParseError::Missing("szamlaszam").into()),
+        Reply::Unnumbered(_) => Err(ParseError::Missing("szamlaszam").into()),
     }
 }
 
@@ -618,14 +653,13 @@ mod tests {
         let preview =
             RawResponse::new::<&str, &str>([], xml("<sikeres>true</sikeres><pdf>JVBERi0=</pdf>"));
         match parse_reply(&preview).expect("reply") {
-            Reply::Unnumbered { pdf } => assert_eq!(pdf.expect("pdf").as_bytes(), b"%PDF-"),
+            Reply::Unnumbered(reply) => assert_eq!(reply.pdf.expect("pdf").as_bytes(), b"%PDF-"),
             other @ Reply::Issued(_) => panic!("expected an unnumbered reply, got {other:?}"),
         }
 
         let bare = RawResponse::new::<&str, &str>([], xml("<sikeres>true</sikeres>"));
-        assert_eq!(
-            parse_reply(&bare).expect("reply"),
-            Reply::Unnumbered { pdf: None }
+        assert!(
+            matches!(parse_reply(&bare).expect("reply"), Reply::Unnumbered(reply) if reply.pdf.is_none())
         );
 
         // A malformed PDF on a plain success is a parse failure, as on an

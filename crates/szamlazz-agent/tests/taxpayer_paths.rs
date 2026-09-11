@@ -28,7 +28,7 @@ fn info_date_is_advisory_source_text_not_a_datetime() {
         (" \t\r\n ", None),
     ] {
         let info = parse(&format!("<result><funcCode>OK</funcCode></result><infoDate>{source}</infoDate><taxpayerValidity>true</taxpayerValidity>")).expect("useful lookup");
-        assert!(info.valid);
+        assert_eq!(info.valid, Some(true));
         assert_eq!(info.info_date.as_deref(), expected, "{source}");
     }
 }
@@ -153,7 +153,7 @@ fn unknown_or_foreign_paths_cannot_supply_a_verdict_or_business_data() {
         );
     }
     let info = parse("<result><funcCode> OK </funcCode></result><taxpayerValidity> 1 </taxpayerValidity><taxpayerName>root</taxpayerName><foreign><taxpayerData><taxpayerName>hidden</taxpayerName></taxpayerData></foreign><taxpayerData><f:taxpayerName>foreign</f:taxpayerName><taxNumberDetail><taxpayerId>wrong namespace</taxpayerId></taxNumberDetail></taxpayerData><taxpayerAddressItem/>").expect("sparse success");
-    assert!(info.valid);
+    assert_eq!(info.valid, Some(true));
     assert_eq!(info.name, None);
     assert_eq!(info.tax_number, None);
     assert!(info.addresses.is_empty());
@@ -184,7 +184,7 @@ fn sparse_errors_and_empty_content_keep_their_meaning() {
     assert!(
         matches!(parse("<result><funcCode>ERROR</funcCode></result>"), Err(ResponseError::Api(api)) if api.code == ErrorCode::Absent)
     );
-    assert!(!parse("<result><funcCode>OK</funcCode></result><taxpayerValidity>false</taxpayerValidity><taxpayerData/>").expect("not valid").valid);
+    assert_eq!(parse("<result><funcCode>OK</funcCode></result><taxpayerValidity>false</taxpayerValidity><taxpayerData/>").expect("not valid").valid, Some(false));
     assert!(parse("<result><funcCode>OK</funcCode></result><taxpayerValidity/>").is_err());
 }
 
@@ -229,7 +229,7 @@ fn nav_3_uses_common_result_and_base_components_with_arbitrary_prefixes() {
             body.as_bytes().to_vec(),
         ))
         .expect("NAV 3");
-    assert!(info.valid);
+    assert_eq!(info.valid, Some(true));
     assert_eq!(info.name.as_deref(), Some("SYNTHETIC SOFTWARE KFT."));
     assert_eq!(info.tax_number.as_deref(), Some("12345678"));
     assert_eq!(info.short_name.as_deref(), Some("SYNTHETIC KFT."));

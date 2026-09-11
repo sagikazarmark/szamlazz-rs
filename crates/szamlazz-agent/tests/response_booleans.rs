@@ -142,8 +142,9 @@ fn valid_verdicts_and_authoritative_headers_keep_their_meaning() {
                     .parse(&raw)
                     .expect("success")
                     .invoice_number
-                    .as_str(),
-                "I-1"
+                    .as_ref()
+                    .map(szamlazz_agent::InvoiceNumber::as_str),
+                Some("I-1")
             );
         } else {
             let error = request.parse(&raw).expect_err("refusal");

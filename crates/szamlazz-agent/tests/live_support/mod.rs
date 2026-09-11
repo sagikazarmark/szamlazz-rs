@@ -171,7 +171,7 @@ impl Run {
         request.external_id = Some(external_id.clone());
         self.sending(format!("storno {number} external_id={external_id}"));
         let sent = self.client.send(&request).await;
-        let result = self.answered(sent);
+        let result = self.answered(sent).into_numbered().expect("numbered");
         eprintln!("LIVE reversal={} original={number}", result.invoice_number);
         verify_reversal(&self.client, number, &result)
             .await
@@ -238,7 +238,12 @@ impl Run {
                     request.e_invoice = doc.info.appearance.is_e_invoice();
                     request.fulfillment_date = doc.info.fulfillment_date;
                     match self.client.send(&request).await {
-                        Ok(reversal) if reversal.invoice_number != number => {
+                        Ok(response)
+                            if response
+                                .numbered()
+                                .is_some_and(|r| r.invoice_number != number) =>
+                        {
+                            let reversal = response.into_numbered().expect("numbered");
                             eprintln!(
                                 "LIVE cleanup reversal={} original={number}",
                                 reversal.invoice_number

@@ -69,9 +69,13 @@ pub enum ErrorCode {
     /// access may recover later; an expired certificate needs operator remediation.
     EInvoiceSigningFailed,
     /// 56: the invoice was issued, but its notification could not be
-    /// delivered, when accompanied by its number. Invoice-issuing operations
-    /// expose that as a non-fatal flag; without a number the outcome is unknown.
-    /// Corroborated by first-party PHP 2.12.4 source, not observed on the test account.
+    /// delivered, when accompanied by its number in an accepted issuance reply.
+    /// Invoice creation and storno expose that as a non-fatal flag only when
+    /// their issuance-envelope parser accepts the response and its identity.
+    /// A number alone does not override other response failures. Credit-entry
+    /// registration and clearing retain 56 as an error even with a number.
+    /// The issuance exception is corroborated by first-party PHP 2.12.4 source;
+    /// code 56 has not been observed in the recorded account probes.
     InvoiceNotificationDeliveryFailed,
     /// 57: malformed request XML.
     MalformedXml,
@@ -159,6 +163,9 @@ pub enum ErrorCode {
     InvalidReceiptPrefix,
     /// 338: a receipt call identifier has already been used; no duplicate
     /// receipt is issued and the prior success is not replayed.
+    /// Repeating a completed, verified create on an operator-confirmed test
+    /// account on 2026-09-11 returned 338; a further query found the same original.
+    /// This does not establish concurrent deduplication or retention duration.
     DuplicateReceiptCallId,
     /// 339: the referenced receipt number does not exist.
     ReceiptNotFound,
@@ -357,7 +364,7 @@ impl ErrorCode {
     /// per class and the [operation recovery table](crate::error#recovery).
     ///
     /// The table combines documented codes, first-party PHP source (56), and
-    /// test-account observations (only the variants explicitly marked observed):
+    /// test-account observations identified in the variant documentation:
     ///
     /// | Class | Codes |
     /// |---|---|
@@ -366,12 +373,23 @@ impl ErrorCode {
     /// | [`NotFound`](OutcomeClass::NotFound) | 7 (operation-dependent missing data), 339 (receipt not found) |
     /// | [`Rejected`](OutcomeClass::Rejected) | everything else, the credential codes 3, 135, 136 and 164 included |
     ///
-    /// 56 surfaces as an error only when the response carries no document
-    /// number (with one, the parsers report success with
-    /// `notification_delivery_failed` set), so as an error it always leaves
-    /// the outcome open. An unknown code is classified conservatively: it may
-    /// be a refusal, or a new "issued, but…" code like numbered 56. Neither 55
-    /// nor the thirteen receipt/simplified-image additions were observed on the account.
+    /// Invoice creation and storno report `notification_delivery_failed` for
+    /// numbered 56 only in accepted issuance-envelope cases. Credit-entry
+    /// registration and clearing still report 56 as an error with a number;
+    /// invoice existence does not establish the mutation's effect. The PDF
+    /// query also tolerates the accepted numbered-56 envelope, but requires a
+    /// PDF and exposes no notification flag. Whenever 56 surfaces as an error,
+    /// its class is `Unknown`. A number alone is not a universal success rule.
+    /// An unknown code is classified conservatively: it may be a refusal, or a
+    /// new "issued, but…" code like 56 in an accepted issuance reply.
+    ///
+    /// Neither 55 nor 56 has been observed in the recorded account probes.
+    /// Of the thirteen receipt/simplified-image additions in #195, only 337
+    /// was observed on the operator-confirmed test account on 2026-09-11; the
+    /// other twelve remain documentation-derived without execution evidence.
+    /// Completed-create repetition yielding 338 was separately observed that
+    /// day; 338 predates those additions. Continuity with the historical
+    /// invoice-probe account is not established.
     #[must_use]
     pub fn outcome_class(&self) -> OutcomeClass {
         match self {
@@ -941,9 +959,10 @@ mod tests {
     }
 
     /// The original catalogue's classes, from documentation and observations:
-    /// after which a document may exist are 1, 55 and 56 (the latter surfaces
-    /// as an error only without a number); 71/152 name an existing document;
-    /// 7 is "not on the query surface"; every other code refuses before acting.
+    /// after which a document may exist are 1, 55 and any surfaced 56 (the
+    /// numbered-success exception is operation-specific); 71/152 name an
+    /// existing document; 7 is "not on the query surface"; every other code
+    /// refuses before acting.
     #[test]
     fn original_catalogue_has_an_outcome_class() {
         let table: [(ErrorCode, OutcomeClass); 30] = [

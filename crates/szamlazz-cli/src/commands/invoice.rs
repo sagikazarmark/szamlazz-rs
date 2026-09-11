@@ -7,7 +7,7 @@ use szamlazz_agent::InvoiceSelector;
 use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, CreationOutcome};
 use szamlazz_agent::ops::query_pdf::QueryInvoicePdf;
 use szamlazz_agent::ops::query_xml::{InvoiceAppearance, QueryInvoiceXml};
-use szamlazz_agent::ops::storno::StornoInvoice;
+use szamlazz_agent::ops::storno::{StornoInvoice, StornoResponse};
 
 use crate::output;
 
@@ -125,8 +125,42 @@ fn print_storno(
     cli: &crate::Cli,
     args: &StornoArgs,
     original: &szamlazz_agent::InvoiceNumber,
-    created: &CreatedInvoice,
+    response: StornoResponse,
 ) -> anyhow::Result<()> {
+    let created = match response.into_numbered() {
+        Ok(created) => created,
+        Err(acknowledgement) => {
+            let explanation = "unnumbered acknowledgement; reversal is not confirmed";
+            let remote = serde_json::json!({
+                "outcome": "unconfirmed",
+                "message": explanation,
+                "original_number": original,
+                "document": null,
+                "acknowledgement": acknowledgement,
+            });
+            output::document(
+                cli.json,
+                &remote,
+                acknowledgement.pdf.as_ref(),
+                args.pdf.as_deref(),
+                |out| {
+                    out.field_required("Outcome", &"unconfirmed");
+                    out.field_required("Storno", &explanation);
+                    out.field_required("Original number", original);
+                    out.field("Document id", acknowledgement.document_id.as_ref());
+                    out.field("Net total", acknowledgement.net_total.as_ref());
+                    out.field("Gross total", acknowledgement.gross_total.as_ref());
+                    out.field("Outstanding", acknowledgement.outstanding.as_ref());
+                    out.field("Payment method", acknowledgement.payment_method.as_ref());
+                    out.field(
+                        "Customer account URL",
+                        acknowledgement.customer_account_url.as_ref(),
+                    );
+                },
+            )?;
+            anyhow::bail!("{explanation}; reconcile the original before retrying");
+        }
+    };
     let (outcome, explanation) = if created.reverses(original) {
         ("reversed", "reversal confirmed (may be an existing storno)")
     } else if created.invoice_number == *original {
@@ -157,7 +191,7 @@ fn print_storno(
             out.field_required("Outcome", &outcome);
             out.field_required("Storno", &explanation);
             out.field_required("Original number", original);
-            print_created(out, created);
+            print_created(out, &created);
         },
     )?;
     anyhow::ensure!(
@@ -255,8 +289,8 @@ pub async fn run(cli: &crate::Cli, command: &InvoiceCommand) -> anyhow::Result<(
                 )))
                 .await?;
             let request = storno_request(args, &original.info)?;
-            let created = client.send(&request).await?;
-            print_storno(cli, args, &request.invoice_number, &created)
+            let response = client.send(&request).await?;
+            print_storno(cli, args, &request.invoice_number, response)
         }
     }
 }

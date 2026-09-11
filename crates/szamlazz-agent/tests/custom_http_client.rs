@@ -63,7 +63,7 @@ async fn a_blocking_client_drives_the_sans_io_core_end_to_end() {
 
     assert_eq!(raw.status(), Some(200));
     let taxpayer = request.parse(&raw).expect("parse");
-    assert!(taxpayer.valid);
+    assert_eq!(taxpayer.valid, Some(true));
     assert_eq!(taxpayer.name.as_deref(), Some("SYNTHETIC SOFTWARE KFT."));
     assert_eq!(taxpayer.tax_number.as_deref(), Some("12345678"));
     assert_eq!(

@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 
 use super::envelope::{self, decimal_body_or_header};
 use crate::credentials::Credentials;
-use crate::error::{ParseError, RequestError, ResponseError};
+use crate::error::{RequestError, ResponseError};
 use crate::types::{InvoiceNumber, PaymentMethod};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
@@ -254,8 +254,9 @@ impl AgentRequest for ClearCreditEntries {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoiceBalance {
-    /// The invoice the credit entries were registered on (`szamlaszam`).
-    pub invoice_number: InvoiceNumber,
+    /// Reported invoice number (`szamlaszam`), when present. Absence does not
+    /// erase the acknowledgement; the request's target is not a vendor echo.
+    pub invoice_number: Option<InvoiceNumber>,
     /// Net total of the invoice (`szamlanetto` / `szlahu_nettovegosszeg`).
     pub net_total: Option<Decimal>,
     /// Gross total of the invoice (`szamlabrutto` / `szlahu_bruttovegosszeg`).
@@ -317,9 +318,7 @@ impl AgentRequest for RegisterCreditEntry {
         let body: envelope::Body = xml::valasz(response, envelope::ROOT, envelope::NAMESPACE)?;
 
         Ok(InvoiceBalance {
-            invoice_number: body
-                .invoice_number(response)
-                .ok_or(ParseError::Missing("szamlaszam"))?,
+            invoice_number: body.invoice_number(response),
             net_total: decimal_body_or_header(
                 body.szamlanetto.as_deref(),
                 "szamlanetto",
@@ -346,6 +345,7 @@ impl AgentRequest for RegisterCreditEntry {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::ParseError;
     use jiff::civil::date;
     use rust_decimal::dec;
 
@@ -391,7 +391,10 @@ mod tests {
         let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let result = sample().parse(&response).expect("success");
-        assert_eq!(result.invoice_number.as_str(), "E-TST-2026-3");
+        assert_eq!(
+            result.invoice_number.as_ref().map(InvoiceNumber::as_str),
+            Some("E-TST-2026-3")
+        );
         assert_eq!(result.net_total, Some(dec!(30000)));
         assert_eq!(result.gross_total, Some(dec!(38100)));
         assert_eq!(result.outstanding, None);
@@ -443,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_invoice_number_everywhere_is_an_error() {
+    fn non_xml_response_is_an_error() {
         let response = RawResponse::new::<&str, &str>([], b"not xml".to_vec());
         let error = sample().parse(&response).expect_err("error");
         match error {

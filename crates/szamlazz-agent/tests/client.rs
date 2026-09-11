@@ -98,7 +98,13 @@ async fn clears_credit_entries_only_through_explicit_request() {
     assert!(body.contains("<szamlaszam>I-1</szamlaszam><adoszam>12345678-1-13</adoszam><additiv>false</additiv><aggregator>shop</aggregator><valaszVerzio>2</valaszVerzio>"));
     assert!(!body.contains("<kifizetes>"));
     let balance = client.send(&request).await.expect("acknowledged");
-    assert_eq!(balance.invoice_number.as_str(), "I-1");
+    assert_eq!(
+        balance
+            .invoice_number
+            .as_ref()
+            .map(szamlazz_agent::InvoiceNumber::as_str),
+        Some("I-1")
+    );
     assert_eq!(balance.outstanding, Some(dec!(1270)));
     let requests = server.received_requests().await.expect("requests");
     assert_eq!(requests.len(), 1);

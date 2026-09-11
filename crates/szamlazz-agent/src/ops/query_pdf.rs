@@ -3,7 +3,7 @@
 
 use rust_decimal::Decimal;
 
-use super::envelope::parse_issued;
+use super::envelope::{Reply, parse_reply};
 use crate::credentials::Credentials;
 use crate::error::{ParseError, ResponseError};
 use crate::types::{InvoiceNumber, InvoiceSelector, Pdf};
@@ -37,8 +37,9 @@ impl QueryInvoicePdf {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct InvoicePdf {
-    /// The invoice number (`szamlaszam`).
-    pub invoice_number: InvoiceNumber,
+    /// Reported invoice number (`szamlaszam`), if supplied. The request selector
+    /// is not substituted for an absent vendor echo.
+    pub invoice_number: Option<InvoiceNumber>,
     /// Net total (`szamlanetto`).
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
@@ -81,15 +82,23 @@ impl AgentRequest for QueryInvoicePdf {
     }
 
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        let created = parse_issued(response)?;
-
-        Ok(InvoicePdf {
-            invoice_number: created.invoice_number,
-            net_total: created.net_total,
-            gross_total: created.gross_total,
-            outstanding: created.outstanding,
-            customer_account_url: created.customer_account_url,
-            pdf: created.pdf.ok_or(ParseError::Missing("pdf"))?,
+        Ok(match parse_reply(response)? {
+            Reply::Issued(created) => InvoicePdf {
+                invoice_number: Some(created.invoice_number),
+                net_total: created.net_total,
+                gross_total: created.gross_total,
+                outstanding: created.outstanding,
+                customer_account_url: created.customer_account_url,
+                pdf: created.pdf.ok_or(ParseError::Missing("pdf"))?,
+            },
+            Reply::Unnumbered(reply) => InvoicePdf {
+                invoice_number: None,
+                net_total: reply.net_total,
+                gross_total: reply.gross_total,
+                outstanding: reply.outstanding,
+                customer_account_url: reply.customer_account_url,
+                pdf: reply.pdf.ok_or(ParseError::Missing("pdf"))?,
+            },
         })
     }
 }
@@ -139,7 +148,10 @@ mod tests {
         let body = include_bytes!("../../tests/synthetic/querying_pdf_xmlszamlavalasz.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let fetched = sample().parse(&response).expect("success");
-        assert_eq!(fetched.invoice_number.as_str(), "E-TST-2026-3");
+        assert_eq!(
+            fetched.invoice_number.as_ref().map(InvoiceNumber::as_str),
+            Some("E-TST-2026-3")
+        );
         assert_eq!(fetched.net_total, Some(dec!(30000)));
         assert_eq!(fetched.gross_total, Some(dec!(38100)));
         assert_eq!(fetched.pdf.as_bytes(), b"%PDF-");

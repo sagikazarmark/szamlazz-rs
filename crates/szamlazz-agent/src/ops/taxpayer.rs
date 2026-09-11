@@ -78,7 +78,8 @@ pub struct TaxpayerPrefixError;
 /// Asks NAV (via szamlazz.hu) whether a tax number belongs to a valid
 /// taxpayer and returns the registered name and addresses. A well-formed but
 /// nonexistent tax number is a *successful* query with
-/// [`TaxpayerInfo::valid`] set to `false`.
+/// [`TaxpayerInfo::valid`] set to `Some(false)`. An omitted NAV validity is
+/// `None`, not a negative or affirmative verdict.
 #[doc(alias = "xmltaxpayer")]
 #[doc(alias = "adószám")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -187,7 +188,21 @@ impl<'de> serde::Deserialize<'de> for Incorporation {
 #[non_exhaustive]
 pub struct TaxpayerInfo {
     /// Whether NAV says this is a valid taxpayer (`taxpayerValidity`).
-    pub valid: bool,
+    /// `None` means NAV did not report validity, not that the taxpayer is invalid.
+    /// A present blank or malformed XML boolean is a parse error.
+    #[serde(default)]
+    pub valid: Option<bool>,
+    /// NAV exchange correlation and versions, when the `header` is present.
+    #[serde(default)]
+    pub header: Option<TaxpayerHeader>,
+    /// Reporting software metadata, when the `software` block is present.
+    #[serde(default)]
+    pub software: Option<TaxpayerSoftware>,
+    /// Successful NAV result diagnostics. Present on parsed responses; optional
+    /// so older serialized taxpayer records can still be read. Non-OK results
+    /// retain the existing [`ApiError`] code/message behavior instead.
+    #[serde(default)]
+    pub diagnostics: Option<TaxpayerDiagnostics>,
     /// Registered name (`taxpayerName`), when valid.
     pub name: Option<String>,
     /// Registered short name (`taxpayerData/taxpayerShortName`).
@@ -222,6 +237,78 @@ pub struct TaxpayerInfo {
     pub vat_code: Option<String>,
     /// Registered addresses (`taxpayerAddressItem` entries).
     pub addresses: Vec<TaxpayerAddress>,
+}
+
+/// NAV response `header`. Nonblank decoded text is preserved without date or
+/// version validation; absent or XML-blank fields are `None`. The XML root's
+/// namespace, not `request_version`, selects the response layout.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct TaxpayerHeader {
+    /// `requestId`, for correlation with the NAV exchange.
+    pub request_id: Option<String>,
+    /// `timestamp`, as source text, not a validated datetime.
+    pub timestamp: Option<String>,
+    /// `requestVersion`.
+    pub request_version: Option<String>,
+    /// `headerVersion`.
+    pub header_version: Option<String>,
+}
+
+/// NAV response `software`, distinct from the taxpayer's registered data.
+/// Fields retain nonblank decoded text; absent or XML-blank fields are `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct TaxpayerSoftware {
+    /// `softwareId`.
+    pub id: Option<String>,
+    /// `softwareName`.
+    pub name: Option<String>,
+    /// `softwareOperation`, preserved as an open wire token.
+    pub operation: Option<String>,
+    /// `softwareMainVersion`.
+    pub main_version: Option<String>,
+    /// `softwareDevName`.
+    pub developer_name: Option<String>,
+    /// `softwareDevContact`.
+    pub developer_contact: Option<String>,
+    /// `softwareDevCountryCode`.
+    pub developer_country_code: Option<String>,
+    /// `softwareDevTaxNumber`.
+    pub developer_tax_number: Option<String>,
+}
+
+/// NAV `result` diagnostics. Codes retain their trimmed wire tokens, without
+/// interpreting a successful result's `errorCode` as a failure. A parsed success
+/// has `func_code = Some("OK")`; omitted serde fields default for older records.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct TaxpayerDiagnostics {
+    /// `funcCode`.
+    pub func_code: Option<String>,
+    /// `errorCode`, including unknown symbolic codes and leading zeroes.
+    pub error_code: Option<String>,
+    /// `message`, preserving nonblank decoded text.
+    pub message: Option<String>,
+    /// `notifications/notification` entries in wire order, independently read.
+    /// Declared in NAV 3.0; tolerated as an extension in NAV 2.0. Absence and an
+    /// empty wrapper both yield an empty list. These do not change the verdict.
+    pub notifications: Vec<TaxpayerNotification>,
+}
+
+/// One NAV informational notification. Sparse entries are retained, including
+/// empty entries; absent or XML-blank fields are `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct TaxpayerNotification {
+    /// `notificationCode`, as nonblank decoded source text (an open token).
+    pub code: Option<String>,
+    /// `notificationText`, as nonblank decoded source text.
+    pub text: Option<String>,
 }
 
 /// A registered address of a taxpayer (`taxpayerAddressItem`).
@@ -288,9 +375,9 @@ impl AgentRequest for QueryTaxpayer {
 /// fields this crate surfaces.
 #[derive(Debug, Default)]
 struct TaxpayerResponse {
-    func_code: Option<String>,
-    error_code: Option<String>,
-    message: Option<String>,
+    header: Option<TaxpayerHeader>,
+    software: Option<TaxpayerSoftware>,
+    diagnostics: TaxpayerDiagnostics,
     validity: Option<bool>,
     name: Option<String>,
     short_name: Option<String>,
@@ -339,13 +426,40 @@ impl Layout {
 
     fn child(&self, parent: &str, namespace: Option<&str>, name: &str) -> (&'static str, bool) {
         let (ns, containers, leaves): (&str, &[&'static str], &[&'static str]) = match parent {
-            "QueryTaxpayerResponse" if name == "result" => (self.result, &["result"], &[]),
+            "QueryTaxpayerResponse" if matches!(name, "header" | "result") => {
+                (self.result, &["header", "result"], &[])
+            }
             "QueryTaxpayerResponse" => (
                 self.api,
-                &["taxpayerData"],
+                &["taxpayerData", "software"],
                 &["taxpayerValidity", "infoDate"],
             ),
-            "result" => (self.result, &[], &["funcCode", "errorCode", "message"]),
+            "header" => (
+                self.result,
+                &[],
+                &["requestId", "timestamp", "requestVersion", "headerVersion"],
+            ),
+            "software" => (
+                self.api,
+                &[],
+                &[
+                    "softwareId",
+                    "softwareName",
+                    "softwareOperation",
+                    "softwareMainVersion",
+                    "softwareDevName",
+                    "softwareDevContact",
+                    "softwareDevCountryCode",
+                    "softwareDevTaxNumber",
+                ],
+            ),
+            "result" => (
+                self.result,
+                &["notifications"],
+                &["funcCode", "errorCode", "message"],
+            ),
+            "notifications" => (self.result, &["notification"], &[]),
+            "notification" => (self.result, &[], &["notificationCode", "notificationText"]),
             "taxpayerData" => (
                 self.api,
                 &["taxNumberDetail", "taxpayerAddressList"],
@@ -438,7 +552,7 @@ impl TaxpayerResponse {
                             start.local_name().as_ref(),
                         );
                         if !name.is_empty()
-                            && name != "taxpayerAddressItem"
+                            && !matches!(name, "taxpayerAddressItem" | "notification")
                             && !parent.seen.insert(name)
                         {
                             return Err(ParseError::Invalid {
@@ -454,8 +568,15 @@ impl TaxpayerResponse {
                     } else {
                         ("QueryTaxpayerResponse", false, false)
                     };
-                    if name == "taxpayerAddressItem" {
-                        parsed.addresses.push(TaxpayerAddress::default());
+                    match name {
+                        "header" => parsed.header = Some(TaxpayerHeader::default()),
+                        "software" => parsed.software = Some(TaxpayerSoftware::default()),
+                        "notification" => parsed
+                            .diagnostics
+                            .notifications
+                            .push(TaxpayerNotification::default()),
+                        "taxpayerAddressItem" => parsed.addresses.push(TaxpayerAddress::default()),
+                        _ => {}
                     }
                     let frame = Frame {
                         name,
@@ -518,12 +639,14 @@ impl TaxpayerResponse {
 
     fn finish(&mut self, frame: &Frame) -> Result<(), ParseError> {
         if frame.scalar {
-            let value = if matches!(frame.name, "funcCode" | "errorCode" | "taxpayerValidity") {
+            let value = if frame.name == "taxpayerValidity" {
+                frame.text.trim_matches(xml::is_xml_space)
+            } else if matches!(frame.name, "funcCode" | "errorCode") {
                 frame.text.trim()
             } else {
                 &frame.text
             };
-            if !value.chars().all(xml::is_xml_space) {
+            if frame.name == "taxpayerValidity" || !value.chars().all(xml::is_xml_space) {
                 self.set(frame.name, value, frame.address)?;
             }
         }
@@ -561,9 +684,47 @@ impl TaxpayerResponse {
             return Ok(());
         }
         match element {
-            "funcCode" => self.func_code = Some(value.to_owned()),
-            "errorCode" => self.error_code = Some(value.to_owned()),
-            "message" => self.message = Some(value.to_owned()),
+            "funcCode" => self.diagnostics.func_code = Some(value.to_owned()),
+            "errorCode" => self.diagnostics.error_code = Some(value.to_owned()),
+            "message" => self.diagnostics.message = Some(value.to_owned()),
+            "requestId" => self.header.get_or_insert_default().request_id = Some(value.to_owned()),
+            "timestamp" => self.header.get_or_insert_default().timestamp = Some(value.to_owned()),
+            "requestVersion" => {
+                self.header.get_or_insert_default().request_version = Some(value.to_owned());
+            }
+            "headerVersion" => {
+                self.header.get_or_insert_default().header_version = Some(value.to_owned());
+            }
+            "softwareId" => self.software.get_or_insert_default().id = Some(value.to_owned()),
+            "softwareName" => self.software.get_or_insert_default().name = Some(value.to_owned()),
+            "softwareOperation" => {
+                self.software.get_or_insert_default().operation = Some(value.to_owned());
+            }
+            "softwareMainVersion" => {
+                self.software.get_or_insert_default().main_version = Some(value.to_owned());
+            }
+            "softwareDevName" => {
+                self.software.get_or_insert_default().developer_name = Some(value.to_owned());
+            }
+            "softwareDevContact" => {
+                self.software.get_or_insert_default().developer_contact = Some(value.to_owned());
+            }
+            "softwareDevCountryCode" => {
+                self.software.get_or_insert_default().developer_country_code =
+                    Some(value.to_owned());
+            }
+            "softwareDevTaxNumber" => {
+                self.software.get_or_insert_default().developer_tax_number = Some(value.to_owned());
+            }
+            "notificationCode" | "notificationText" => {
+                if let Some(notification) = self.diagnostics.notifications.last_mut() {
+                    if element == "notificationCode" {
+                        notification.code = Some(value.to_owned());
+                    } else {
+                        notification.text = Some(value.to_owned());
+                    }
+                }
+            }
             "taxpayerValidity" => {
                 self.validity = Some(match value {
                     "true" | "1" => true,
@@ -591,13 +752,18 @@ impl TaxpayerResponse {
 
     /// Converts a `funcCode` other than `OK` into the reported [`ApiError`].
     fn into_info(self) -> Result<TaxpayerInfo, ResponseError> {
-        let func_code = self.func_code.ok_or(ParseError::Missing("funcCode"))?;
+        let func_code = self
+            .diagnostics
+            .func_code
+            .as_deref()
+            .ok_or(ParseError::Missing("funcCode"))?;
 
         if func_code == "OK" {
             return Ok(TaxpayerInfo {
-                valid: self
-                    .validity
-                    .ok_or(ParseError::Missing("taxpayerValidity"))?,
+                valid: self.validity,
+                header: self.header,
+                software: self.software,
+                diagnostics: Some(self.diagnostics),
                 name: self.name,
                 short_name: self.short_name,
                 county_code: self.county_code,
@@ -610,10 +776,11 @@ impl TaxpayerResponse {
             });
         }
         let code = self
+            .diagnostics
             .error_code
             .as_deref()
             .map_or(ErrorCode::Absent, ErrorCode::from);
-        let message = match (self.error_code, self.message) {
+        let message = match (self.diagnostics.error_code, self.diagnostics.message) {
             (_, Some(message)) => message,
             (Some(raw_code), None) => raw_code,
             (None, None) => format!("NAV funcCode {func_code}"),
@@ -645,7 +812,7 @@ mod tests {
         let body = include_bytes!("../../tests/synthetic/taxpayer.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let info = sample().parse(&response).expect("success");
-        assert!(info.valid);
+        assert_eq!(info.valid, Some(true));
         assert_eq!(info.name.as_deref(), Some("SYNTHETIC SOFTWARE KFT."));
         assert_eq!(info.tax_number.as_deref(), Some("12345678"));
         assert_eq!(info.vat_code.as_deref(), Some("2"));
@@ -665,7 +832,7 @@ mod tests {
         let body = include_bytes!("../../tests/synthetic/taxpayer_v3.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let info = sample().parse(&response).expect("success");
-        assert!(info.valid);
+        assert_eq!(info.valid, Some(true));
         assert_eq!(info.tax_number.as_deref(), Some("12345678"));
     }
 
@@ -708,7 +875,7 @@ mod tests {
         let body = include_bytes!("../../tests/synthetic/taxpayer_invalid_taxnumber.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         let info = sample().parse(&response).expect("success");
-        assert!(!info.valid);
+        assert_eq!(info.valid, Some(false));
         assert!(info.name.is_none());
         assert!(info.tax_number.is_none());
         assert!(info.addresses.is_empty());
@@ -757,7 +924,10 @@ mod tests {
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
             <taxpayerValidity>1</taxpayerValidity></QueryTaxpayerResponse>"#;
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
-        assert!(sample().parse(&response).expect("success").valid);
+        assert_eq!(
+            sample().parse(&response).expect("success").valid,
+            Some(true)
+        );
 
         let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
             <taxpayerValidity>invalid</taxpayerValidity></QueryTaxpayerResponse>"#;

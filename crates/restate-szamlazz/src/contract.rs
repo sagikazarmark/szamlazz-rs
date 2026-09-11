@@ -70,8 +70,9 @@ pub mod storno;
 
 pub use agent::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, CreditEntryInput, CreditEntryRecord,
-    InvalidTaxNumber, QueryRequest, QueryResponse, QueryTaxpayerRequest, QueryTaxpayerResponse,
-    Selector, SetCreditEntriesRequest, SetCreditEntriesResponse, TaxpayerAddress,
+    InvalidTaxNumber, MissingTaxpayerValidity, QueryRequest, QueryResponse, QueryTaxpayerRequest,
+    QueryTaxpayerResponse, Selector, SetCreditEntriesRequest, SetCreditEntriesResponse,
+    TaxpayerAddress,
 };
 pub use create::{
     ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,

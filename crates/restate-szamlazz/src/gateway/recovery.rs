@@ -564,6 +564,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn numberless_protected_storno_stays_unresolved_and_reconciliation_never_resends() {
+        let server = MockServer::start().await;
+        let mut account = Account::new("account", "reference");
+        account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+        let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
+        let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
+        let marker = UnresolvedWrite {
+            version: MarkerVersion,
+            token: "owner".into(),
+            owner_invocation: "owner".into(),
+            created_at: "2026-09-11T12:00:00Z".into(),
+            scope: None,
+            order: OrderKey::parse("ORD-1").expect("order"),
+            namespace: "acct".parse().expect("namespace"),
+            external_id: external_id.to_string(),
+            account_id: "account".into(),
+            endpoint: server.uri(),
+            credential_ref: "reference".into(),
+            operation: WriteOperation::Storno {
+                number: "SZ-1".into(),
+            },
+        };
+        Mock::given(body_string_contains("action-szamla_agent_xml"))
+            .respond_with(api_error("7", "not found"))
+            .expect(5)
+            .mount(&server)
+            .await;
+        Mock::given(body_string_contains("action-szamla_agent_st"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlabrutto>-1270</szamlabrutto><vevoifiokurl>PRIVATE-URL</vevoifiokurl><pdf>JVBERi0=</pdf></xmlszamlavalasz>"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = gateway
+            .protected_storno(
+                crate::gateway::StornoStepRequest {
+                    invoice_number: "SZ-1",
+                    external_id: &external_id,
+                    comment: None,
+                    e_invoice: false,
+                    fulfillment_date: jiff::civil::date(2026, 9, 11),
+                },
+                &marker,
+            )
+            .await;
+        assert!(matches!(&result, WriteResult::Unresolved(_)), "{result:?}");
+        let journal = serde_json::to_string(&result).expect("serialize");
+        assert!(journal.contains("without a document number"));
+        assert!(!journal.contains("PRIVATE-") && !journal.contains("JVBERi0="));
+        // This is the continuation used after an uncertain protected send:
+        // repeated absence retains the marker, never authorizes another send.
+        for _ in 0..2 {
+            let result = gateway.reconcile_write(&marker, None).await;
+            assert!(matches!(result, WriteResult::Unresolved(_)), "{result:?}");
+        }
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn immediate_storno_verification_alerts_and_retains_candidate() {
         use crate::gateway::StornoStepRequest;
         let capture = LogCapture::default();

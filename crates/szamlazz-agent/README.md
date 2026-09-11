@@ -250,6 +250,20 @@ years do not satisfy XSD 1.0. Dates are never shifted or normalized. The low-lev
 
 ## Response parsing
 
+Successful credit registration/clearing and PDF queries preserve an optional
+**reported** invoice number (`InvoiceBalance::invoice_number` and
+`InvoicePdf::invoice_number`). A complete successful envelope without that field
+is still an acknowledgement; PDF queries still require a decoded PDF. The
+request's target is never substituted for an absent vendor echo.
+
+Storno returns `StornoResponse::Numbered(CreatedInvoice)` or
+`StornoResponse::Unnumbered(InvoiceAcknowledgement)`. Both retain optional metadata
+and PDF. A numberless acknowledgement establishes no reversal identity; reconcile
+the original and matching reversal before deliberately repeating the operation.
+Even a numbered reply can echo an existing reversal or unchanged original.
+`CreatedInvoice` itself remains numbered. These representations follow published
+optionality; successful numberless replies have not been observed live.
+
 The required envelope `sikeres` verdict accepts `true`, `false`, `1` or `0`,
 with XML whitespace padding. Missing, empty or invalid body verdicts are parse
 failures (`OutcomeClass::Unknown`), even alongside a readable body error code.
@@ -312,8 +326,15 @@ Taxpayer extraction follows
 NAV 2.0/3.0 expanded names and recognized parent paths: foreign or unknown subtrees
 cannot supply a verdict or business data. Duplicate recognized singleton fields
 or containers, children inside scalar values and undefined entities are refused.
-Sparse records, unknown tokens and `taxpayerValidity=false` remain data; an `OK`
-verdict still requires validity. Header/down/status precedence remains in effect.
+Sparse records, unknown tokens and `taxpayerValidity=false` remain data. An `OK`
+verdict with omitted validity yields `TaxpayerInfo::valid = None`, distinct from
+`Some(false)`; present blank or malformed validity is refused. Header/down/status
+precedence remains in effect. Successful taxpayer results also retain optional
+`header`, `software` and `diagnostics` (result code/message and ordered
+notifications). These are exchange metadata, not taxpayer business facts. Error
+results keep the existing `ApiError` code/message projection; their extra metadata
+is not exposed. The Restate worker requires definite validity before journaling
+its business-only projection; missing validity remains an unanswered read.
 Numbered-header-56 fallback permits empty or plain-text notification bodies only;
 malformed XML must not conceal a refusal and become issued success.
 An unusable optional `hibauzenet` (nested content or duplicate elements) is read
@@ -346,7 +367,7 @@ fn look_up_taxpayer() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(name, value)| (name.as_str(), String::from_utf8_lossy(value.as_bytes())));
 
     let taxpayer = request.parse(&RawResponse::new(headers, body).with_status(status))?;
-    println!("valid: {}", taxpayer.valid);
+    println!("reported validity: {:?}", taxpayer.valid);
     Ok(())
 }
 ```
@@ -378,7 +399,7 @@ The [vendor authentication guidance](https://docs.szamlazz.hu/agent/basics/authe
 | Operation | Type |
 |---|---|
 | Invoice, proforma, prepayment invoice, final invoice, corrective invoice, or delivery note | `ops::invoice::CreateInvoice`, with the kind selected by `InvoiceKind`; answers a `CreationOutcome` (`Issued(CreatedInvoice)` or `Preview`) |
-| Storno an invoice | `ops::storno::StornoInvoice`; answers the storno `CreatedInvoice` (check `reverses`) |
+| Storno an invoice | `ops::storno::StornoInvoice`; answers `StornoResponse::Numbered(CreatedInvoice)` or `Unnumbered(InvoiceAcknowledgement)` |
 | Register or explicitly clear credit entries | `ops::credit_entry::{RegisterCreditEntry, ClearCreditEntries}`; answers the `InvoiceBalance` |
 | Query invoice PDF or full XML | `ops::query_pdf::QueryInvoicePdf`, `ops::query_xml::QueryInvoiceXml`, both by an `InvoiceSelector` |
 | Delete a proforma | `ops::proforma::DeleteProforma` |
@@ -386,6 +407,10 @@ The [vendor authentication guidance](https://docs.szamlazz.hu/agent/basics/authe
 | Look up a taxpayer through NAV | `ops::taxpayer::QueryTaxpayer` |
 
 The shared request vocabulary (`ExchangeRate`, `InvoiceTemplate`, `SellerEmail`, `InvoiceSelector`) and the document codes (`DocumentType` for a queried invoice's `tipus`, `ReceiptType` for a receipt's) live in `types` and are re-exported at the crate root. Every code set is open: a token the crate does not know is kept in an `Other(String)` variant, a numeric code in an `Unknown(n)`.
+
+This covers the eleven mainstream Számla Agent actions. The separately documented
+delegated company-account creation/join action (`action-agent_ceg_mb`) belongs to
+third-party invoicing and is outside this crate's built-in operation scope.
 
 ## Line Items
 
@@ -411,8 +436,8 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 
 - Identifiers are English; Rustdoc search also finds types by Hungarian names such as `díjbekérő` and `kintlévőség` through doc aliases.
 - Errors are typed as `ErrorCode` values while preserving the verbatim Hungarian message. A failure szamlazz.hu reports without any code (`sikeres=false` and no `hibakod`) is `ErrorCode::Absent`, never an invented `0`.
-- `ErrorCode::is_retryable()` is a potentially transient hint (1 and 55), never permission to repeat a write. `outcome_class()` (also on `ResponseError` and `ClientError`) answers `Rejected` (this exchange refused), `Unknown` (1, 55, unnumbered 56, unanswered exchanges and open codes), `DuplicateOrderNumber` (71/152) or `NotFound` (7, operation-dependent missing data; 339, receipt not found). Use the operation recovery table above.
-- Agent code 56 **with a number** means issuance succeeded but notification failed. It sets `notification_delivery_failed = true`; do not retry that issued document. Without a number it remains unknown.
+- `ErrorCode::is_retryable()` is a potentially transient hint (1 and 55), never permission to repeat a write. `outcome_class()` (also on `ResponseError` and `ClientError`) answers `Rejected` (this exchange refused), `Unknown` (1, 55, surfaced 56, unanswered exchanges and open codes), `DuplicateOrderNumber` (71/152) or `NotFound` (7, operation-dependent missing data; 339, receipt not found). Use the operation recovery table above.
+- The issuing-envelope parser recognizes numbered code 56 as issuance with failed notification on its supported response shapes, setting `notification_delivery_failed = true`; do not issue that document again. Credit/clear and receipt parsers retain 56 as an error even with a number. PDF retrieval reuses the issuing-envelope interpretation but still requires its artifact and exposes no notification flag. Any surfaced 56 remains `Unknown`; malformed identity or an HTTP-status failure is not rescued merely by number text. This exception is corroborated by official PHP source, not a recorded live 56 trigger.
 - An invoice, a prepayment invoice and a final invoice can each name the proforma they consume (the `proforma_number` field of `InvoiceKind::Invoice`, `InvoiceKind::Prepayment` and `InvoiceKind::Final`, written as `dijbekeroSzamlaszam`; `InvoiceKind::proforma_number()` reads it on any kind). szamlazz.hu also consumes a proforma that shares the document's order number when the reference is absent (verified for an invoice and a prepayment invoice); the reference makes the link explicit rather than leaving it to the order number. A reference to a deleted or already consumed proforma is not refused (it is silently ignored), so read the issued document's `hivdijbekszam` to see which link landed.
 - **A final invoice (`végszámla`) is not netted by szamlazz.hu.** The server links the prepayment invoice (by `elolegSzamlaszam` or by the shared order number), but issues the final invoice for exactly the lines it is sent: a final invoice listing only the full performance bills the buyer the prepayment twice. List the full performance and deduct the prepayment as a **negative line item at the same VAT rate**; the crate does not add that line. Verified on the test account.
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
@@ -425,6 +450,29 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Every integer of a queried document (`alap/id`, `gazdEsemAzon`, `forras`, the parties' `id` and `lokacio`, `sztetordering`, `afalevon`, `banktranzid`, the `eszamla` code) is an `i64`, and so is the `szlahu_id` header of a create reply: one width, whatever the schema declares, shared with `szamlazz-adatkapcsolat`, which models the same `<szamla>` (ADR 0010). `InvoiceAppearance` serialises as its integer code.
 
 ## Breaking Changes in 0.4
+
+### Optional request and response facts
+
+- `InvoiceHeader::paid` is now `Option<bool>`: `None` omits `fizetve`,
+  `Some(false)` emits false and `Some(true)` emits true. Constructor defaults and
+  missing/null JSON retain omission. **Migrate old `false` values to `None` to
+  preserve their former wire behavior**, including persisted JSON: an explicit
+  `"paid": false` now intentionally emits false. Equivalence with omission is
+  still unverified across account defaults/payment methods. The worker's existing
+  boolean `paid` contract preserves false-as-omission and true-as-true.
+- `InvoiceBalance::invoice_number` and `InvoicePdf::invoice_number` are optional.
+  Match or display the reported number if present; retain request provenance
+  separately. Existing numbered JSON still decodes as `Some`.
+- `StornoInvoice` now returns `StornoResponse`. Match `Numbered`/`Unnumbered`, or
+  use `into_numbered()` to retain an unnumbered acknowledgement in the `Err` branch
+  (not a vendor refusal). Only the numbered branch contains a `CreatedInvoice`.
+  Storno result JSON is tagged as `{"state":"numbered","response":{...}}` or
+  `{"state":"unnumbered","response":{...}}`.
+- `TaxpayerInfo::valid` is optional: use `Some(true)` or `Some(false)` for an
+  explicit fact, never silently map `None` to an invalid taxpayer. Metadata fields
+  `header`, `software` and `diagnostics` default to absent when decoding older JSON.
+  The worker's taxpayer response remains a definite boolean: it treats omission
+  as an inconclusive read and does not journal the new diagnostics.
 
 `InvoiceInfo::{cash_payment, cash_accounting, kata, kata_ledger}` and
 `BuyerInfo::private_person` are now `Option<bool>`. Match `Some(true)` or

@@ -85,6 +85,14 @@ A non-financial document listing delivered goods; an invoice-operation flag.
 
 ### Agent concepts
 
+**Invoice acknowledgement (Számla Agent)**:
+A successful invoice-operation envelope, distinct from a reported document number or proof of a reversal. An unnumbered storno acknowledgement retains uncertainty about the exact reversal; a credit acknowledgement or fetched PDF can omit reported identity without substituting the request's target as a vendor echo.
+_Avoid_: Ack (reserved for Adatkapcsolat), verified reversal for a bare success, preview for every unnumbered acknowledgement
+
+**Reported taxpayer validity**:
+The true or false fact NAV supplies about a taxpayer, when supplied; an omitted verdict is unreported, never an invalid taxpayer. Exchange correlation, software metadata and informational diagnostics are distinct from the taxpayer's business data.
+_Avoid_: false for unreported validity, successful lookup as proof of taxpayer validity
+
 **Agent key (számlaagentkulcs)**:
 API-only credential passed inside the request XML. Preferred over username/password.
 

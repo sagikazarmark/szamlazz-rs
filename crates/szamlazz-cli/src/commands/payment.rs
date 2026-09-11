@@ -74,7 +74,7 @@ pub async fn run(cli: &crate::Cli, command: &PaymentCommand) -> anyhow::Result<(
     if cli.json {
         return output::json(&result);
     }
-    output::field_required("Invoice number", &result.invoice_number);
+    output::field("Invoice number", result.invoice_number.as_ref());
     output::field("Gross total", result.gross_total.as_ref());
     output::field("Outstanding", result.outstanding.as_ref());
     output::field("Payment method", result.payment_method.as_ref());

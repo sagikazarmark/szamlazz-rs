@@ -333,15 +333,24 @@ pub struct QueryTaxpayerResponse {
     pub addresses: Vec<TaxpayerAddress>,
 }
 
-impl From<TaxpayerInfo> for QueryTaxpayerResponse {
-    fn from(info: TaxpayerInfo) -> Self {
-        Self {
-            valid: info.valid,
+/// NAV omitted its taxpayer validity verdict. Contains no upstream content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("taxpayer reply omitted taxpayerValidity")]
+pub struct MissingTaxpayerValidity;
+
+/// Missing validity is inconclusive, never a negative taxpayer verdict. Only
+/// the projection enters the journal; Agent diagnostics and metadata do not.
+impl TryFrom<TaxpayerInfo> for QueryTaxpayerResponse {
+    type Error = MissingTaxpayerValidity;
+
+    fn try_from(info: TaxpayerInfo) -> Result<Self, Self::Error> {
+        Ok(Self {
+            valid: info.valid.ok_or(MissingTaxpayerValidity)?,
             name: info.name,
             tax_number: info.tax_number,
             vat_code: info.vat_code,
             addresses: info.addresses.into_iter().map(Into::into).collect(),
-        }
+        })
     }
 }
 
@@ -1083,14 +1092,17 @@ mod tests {
     }
 
     /// The taxpayer response is a projection of the agent crate's
-    /// `TaxpayerInfo`, field for field, and every field but `valid` defaults:
+    /// `TaxpayerInfo`'s needed fields, excluding diagnostics and metadata.
+    /// Every field but `valid` defaults:
     /// NAV's `valid: false` (no taxpayer data) and an address NAV gives no
     /// detail for decode as they come.
     #[test]
     fn query_taxpayer_response_projects_the_agent_info_and_defaults_what_nav_omits() {
         use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
 
-        let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode></result>
+        let body = br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api">
+            <header><requestId>PRIVATE-REQUEST</requestId></header>
+            <result><funcCode>OK</funcCode><message>PRIVATE-DIAGNOSTIC</message></result>
             <taxpayerValidity>true</taxpayerValidity><taxpayerData><taxpayerName>SYNTHETIC SOFTWARE KFT.</taxpayerName>
             <api:taxNumberDetail xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data"><taxpayerId>12345678</taxpayerId><vatCode>2</vatCode></api:taxNumberDetail>
             <taxpayerAddressList><taxpayerAddressItem><taxpayerAddressType>SITE</taxpayerAddressType><api:taxpayerAddress xmlns:api="http://schemas.nav.gov.hu/OSA/2.0/api" xmlns="http://schemas.nav.gov.hu/OSA/2.0/data">
@@ -1104,7 +1116,7 @@ mod tests {
             .expect("prefix")
             .parse(&RawResponse::new::<&str, &str>([], body.to_vec()))
             .expect("parse");
-        let response = QueryTaxpayerResponse::from(info);
+        let response = QueryTaxpayerResponse::try_from(info).expect("explicit validity");
 
         let json = round_trip(&response);
         assert_eq!(
@@ -1142,5 +1154,21 @@ mod tests {
         let bare_address: QueryTaxpayerResponse =
             serde_json::from_value(json!({"valid": true, "addresses": [{}]})).expect("deserialize");
         assert_eq!(bare_address.addresses, [TaxpayerAddress::default()]);
+    }
+
+    #[test]
+    fn missing_taxpayer_validity_is_a_typed_privacy_safe_error() {
+        use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
+        let info = QueryTaxpayer::new("12345678").expect("prefix")
+            .parse(&RawResponse::new::<&str, &str>([], br#"<QueryTaxpayerResponse xmlns="http://schemas.nav.gov.hu/OSA/2.0/api"><result><funcCode>OK</funcCode><message>PRIVATE-DIAGNOSTIC</message></result></QueryTaxpayerResponse>"#.to_vec()))
+            .expect("reply");
+        let error: crate::contract::MissingTaxpayerValidity =
+            QueryTaxpayerResponse::try_from(info).expect_err("missing validity");
+        let source: &dyn std::error::Error = &error;
+        assert_eq!(
+            source.to_string(),
+            "taxpayer reply omitted taxpayerValidity"
+        );
+        assert!(source.source().is_none());
     }
 }

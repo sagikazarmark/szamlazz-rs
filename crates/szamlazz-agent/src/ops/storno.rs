@@ -3,7 +3,8 @@
 
 use jiff::civil::Date;
 
-use super::envelope::{CreatedInvoice, parse_issued};
+pub use super::envelope::InvoiceAcknowledgement;
+use super::envelope::{CreatedInvoice, Reply, parse_reply};
 use crate::credentials::Credentials;
 use crate::error::{RequestError, ResponseError};
 use crate::types::{InvoiceNumber, InvoiceTemplate, SellerEmail};
@@ -13,11 +14,9 @@ use crate::xml;
 /// The invoice-reversal operation (`xmlszamlast`, `action-szamla_agent_st`).
 ///
 /// Reverses the invoice named by [`StornoInvoice::invoice_number`]. The storno
-/// invoice is itself a newly issued document, so the response is a
-/// [`CreatedInvoice`] (the same type a create's
-/// [`CreationOutcome::Issued`](crate::ops::invoice::CreationOutcome::Issued)
-/// carries); its PDF, when [`StornoInvoice::download_pdf`] is set, arrives
-/// decoded in [`CreatedInvoice::pdf`].
+/// reply is [`StornoResponse`]: a numbered document or a successful envelope
+/// without reported number identity. Neither alone guarantees a new reversal.
+/// Optional metadata and PDF are preserved in either case.
 ///
 /// # Server behaviour
 ///
@@ -32,8 +31,8 @@ use crate::xml;
 ///   same negative totals, same [`document_id`](CreatedInvoice::document_id).
 ///   No second storno invoice is issued and no error code is raised, so
 ///   "created now" and "already existed" are indistinguishable from the
-///   response. Re-sending a storno after a transport failure is therefore
-///   safe.
+///   response. Reconcile the exact original after an uncertain answer before
+///   deliberately repeating the operation.
 /// - **Storno of a storno invoice** is rejected with
 ///   [`ErrorCode::StornoOfReversalInvoice`](crate::ErrorCode::StornoOfReversalInvoice)
 ///   (14).
@@ -135,6 +134,42 @@ pub struct StornoInvoice {
     pub buyer_eu_tax_number: Option<String>,
 }
 
+/// A storno acknowledgement, distinct from proof that the original was reversed.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "response", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StornoResponse {
+    /// A reported number, possibly an existing reversal or unchanged original.
+    Numbered(CreatedInvoice),
+    /// A success without a reported number. Reconcile the original; no new
+    /// document identity or permission to resend is implied.
+    Unnumbered(InvoiceAcknowledgement),
+}
+
+impl StornoResponse {
+    /// The reported numbered document, when available.
+    #[must_use]
+    pub fn numbered(&self) -> Option<&CreatedInvoice> {
+        match self {
+            Self::Numbered(document) => Some(document),
+            Self::Unnumbered(_) => None,
+        }
+    }
+
+    /// Separates numbered evidence from an unnumbered acknowledgement without
+    /// discarding either. `Err` here is not a vendor refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unnumbered acknowledgement, boxed to keep the result small.
+    pub fn into_numbered(self) -> Result<CreatedInvoice, Box<InvoiceAcknowledgement>> {
+        match self {
+            Self::Numbered(document) => Ok(document),
+            Self::Unnumbered(acknowledgement) => Err(Box::new(acknowledgement)),
+        }
+    }
+}
+
 impl StornoInvoice {
     /// A reversal of the given invoice; every optional field defaults to
     /// absent and no PDF is requested.
@@ -161,7 +196,7 @@ impl StornoInvoice {
 
 impl AgentRequest for StornoInvoice {
     const ACTION: &'static str = "action-szamla_agent_st";
-    type Response = CreatedInvoice;
+    type Response = StornoResponse;
 
     fn validate(&self) -> Result<(), RequestError> {
         xml::validate_dates([
@@ -216,7 +251,10 @@ impl AgentRequest for StornoInvoice {
     }
 
     fn parse(&self, response: &RawResponse) -> Result<Self::Response, ResponseError> {
-        parse_issued(response)
+        Ok(match parse_reply(response)? {
+            Reply::Issued(document) => StornoResponse::Numbered(document),
+            Reply::Unnumbered(acknowledgement) => StornoResponse::Unnumbered(acknowledgement),
+        })
     }
 }
 
@@ -282,7 +320,11 @@ mod tests {
     fn parses_success_response() {
         let body = include_bytes!("../../tests/synthetic/xmlszamlavalasz.xml");
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
-        let created = sample().parse(&response).expect("success");
+        let created = sample()
+            .parse(&response)
+            .expect("success")
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(created.invoice_number.as_str(), "E-TST-2026-3");
         assert_eq!(created.document_id, None);
         assert_eq!(created.net_total, Some(dec!(30000)));
@@ -304,7 +346,11 @@ mod tests {
             body.to_vec(),
         );
         let request = StornoInvoice::new("CTEST-2026-40");
-        let created = request.parse(&response).expect("success");
+        let created = request
+            .parse(&response)
+            .expect("success")
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(created.invoice_number.as_str(), "CTEST-2026-42");
         assert_eq!(created.document_id, Some(924_307_747));
         assert_eq!(created.gross_total, Some(dec!(-1270)));
@@ -319,7 +365,9 @@ mod tests {
         let response = RawResponse::new([("szlahu_id", "924307747")], body.to_vec());
         let created = StornoInvoice::new("CTEST-2026-40")
             .parse(&response)
-            .expect("success");
+            .expect("success")
+            .into_numbered()
+            .expect("numbered");
 
         let json = serde_json::to_value(&created).expect("serialize");
         assert_eq!(json["invoice_number"], "CTEST-2026-42");
@@ -338,7 +386,11 @@ mod tests {
         let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres><szamlaszam>D-CTEST-14</szamlaszam><szamlanetto>1000</szamlanetto><szamlabrutto>1270</szamlabrutto><kintlevoseg>1270</kintlevoseg></xmlszamlavalasz>"#;
         let response = RawResponse::new([("szlahu_id", "924309236")], body.to_vec());
         let request = StornoInvoice::new("D-CTEST-14");
-        let created = request.parse(&response).expect("wire success");
+        let created = request
+            .parse(&response)
+            .expect("wire success")
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(created.invoice_number, request.invoice_number);
         assert!(!created.reverses(&request.invoice_number));
     }
@@ -365,14 +417,12 @@ mod tests {
     }
 
     #[test]
-    fn successful_storno_requires_invoice_number() {
+    fn successful_storno_can_acknowledge_without_invoice_number() {
         let body = br#"<?xml version="1.0" encoding="UTF-8"?><xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>"#;
         let response = RawResponse::new::<&str, &str>([], body.to_vec());
         assert!(matches!(
             sample().parse(&response),
-            Err(ResponseError::Parse(crate::ParseError::Missing(
-                "szamlaszam"
-            )))
+            Ok(StornoResponse::Unnumbered(_))
         ));
     }
 

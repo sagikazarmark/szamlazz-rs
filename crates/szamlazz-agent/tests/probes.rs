@@ -98,7 +98,7 @@ async fn clearing(populated: bool) {
             let sent = run.client.send(&register).await;
             let balance = run.answered(sent);
             run.unresolved = None;
-            assert_eq!(balance.invoice_number, number);
+            assert_eq!(balance.invoice_number.as_ref(), Some(&number));
             let stored = run.by_number(&number).await;
             assert_eq!(stored.credit_entries.len(), 1);
             assert_eq!(stored.credit_entries[0].amount, dec!(100));
@@ -118,10 +118,10 @@ async fn clearing(populated: bool) {
         run.unresolved = None;
         let stored = run.by_number(&number).await;
         eprintln!(
-            "PROBE clear number={number} state={state} echoed={} outstanding={:?} entries={:?}",
+            "PROBE clear number={number} state={state} echoed={:?} outstanding={:?} entries={:?}",
             balance.invoice_number, balance.outstanding, stored.credit_entries
         );
-        assert_eq!(balance.invoice_number, number);
+        assert_eq!(balance.invoice_number.as_ref(), Some(&number));
         assert!(stored.credit_entries.is_empty());
         assert_eq!(balance.outstanding, Some(original.totals.total.gross));
     })

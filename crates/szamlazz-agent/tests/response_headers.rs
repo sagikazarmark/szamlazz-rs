@@ -18,7 +18,9 @@ fn malformed_optional_diagnostics_preserve_verdict_and_numbered_evidence() {
         let raw = RawResponse::new::<&str, &str>([], body.into_bytes());
         let issued = StornoInvoice::new("I-1")
             .parse(&raw)
-            .expect("number retained");
+            .expect("number retained")
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(issued.invoice_number.as_str(), "I-2");
         assert!(issued.notification_delivery_failed);
 
@@ -80,7 +82,11 @@ fn create_storno_and_credit_entry_share_encoded_payment_method_headers() {
             .expect("create")
             .into_issued()
             .expect("numbered");
-        let storno = StornoInvoice::new("I-0").parse(&raw).expect("storno");
+        let storno = StornoInvoice::new("I-0")
+            .parse(&raw)
+            .expect("storno")
+            .into_numbered()
+            .expect("numbered");
         let credit = RegisterCreditEntry::new("I-1")
             .parse(&raw)
             .expect("credit entry");
@@ -209,7 +215,10 @@ fn header_56_at_non_2xx_is_judged_by_the_operation() {
         let raw = RawResponse::new(headers, b"notification failed".to_vec()).with_status(500);
         let issued = StornoInvoice::new("I-1").parse(&raw);
         if let Some(number) = number {
-            let issued = issued.expect("numbered 56");
+            let issued = issued
+                .expect("numbered 56")
+                .into_numbered()
+                .expect("numbered");
             assert_eq!(issued.invoice_number.as_str(), number);
             assert!(issued.notification_delivery_failed);
         } else {
@@ -239,7 +248,11 @@ fn textual_headers_decode_once_but_codes_numbers_and_xml_urls_stay_raw() {
         raw.szlahu("szlahu_szamlaszam").as_deref(),
         Some("I+1 suffix")
     );
-    let issued = StornoInvoice::new("I-1").parse(&raw).expect("headers");
+    let issued = StornoInvoice::new("I-1")
+        .parse(&raw)
+        .expect("headers")
+        .into_numbered()
+        .expect("numbered");
     assert_eq!(issued.invoice_number.as_str(), "I+1 suffix");
     assert_eq!(issued.net_total, Some(dec!(1.5)));
     assert_eq!(issued.document_id, Some(42));
@@ -269,6 +282,8 @@ fn textual_headers_decode_once_but_codes_numbers_and_xml_urls_stay_raw() {
         StornoInvoice::new("I-1")
             .parse(&raw)
             .expect("invoice")
+            .into_numbered()
+            .expect("numbered")
             .customer_account_url,
         RegisterCreditEntry::new("I-1")
             .parse(&raw)
@@ -314,7 +329,9 @@ fn monetary_headers_are_ungrouped_decimals_across_operations() {
         let raw = response(Some(value), "");
         let issued = StornoInvoice::new("I-1")
             .parse(&raw)
-            .unwrap_or_else(|e| panic!("{value:?}: {e}"));
+            .unwrap_or_else(|e| panic!("{value:?}: {e}"))
+            .into_numbered()
+            .expect("numbered");
         assert_eq!(
             (issued.net_total, issued.gross_total, issued.outstanding),
             (Some(expected), Some(expected), Some(expected))
@@ -391,7 +408,7 @@ fn pdf_balance_and_opaque_url_prefer_body_then_headers_and_default_to_none() {
     )
     .expect("old JSON");
     assert_eq!((old.outstanding, old.customer_account_url), (None, None));
-    for body in ["<pdf>JVBERi0=</pdf>", "<szamlaszam>I-1</szamlaszam>"] {
+    for body in ["", "<szamlaszam>I-1</szamlaszam>"] {
         let body = format!(
             r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres>{body}</xmlszamlavalasz>"#
         );
@@ -410,6 +427,8 @@ fn malformed_headers_and_body_precedence() {
         request
             .parse(&response(None, ""))
             .expect("absent")
+            .into_numbered()
+            .expect("numbered")
             .gross_total,
         None
     );
@@ -437,6 +456,8 @@ fn malformed_headers_and_body_precedence() {
             request
                 .parse(&response(Some(value), body))
                 .expect("body wins")
+                .into_numbered()
+                .expect("numbered")
                 .gross_total,
             Some(dec!(3))
         );
@@ -446,6 +467,8 @@ fn malformed_headers_and_body_precedence() {
             request
                 .parse(&response(Some("1,25"), body))
                 .expect("header fallback")
+                .into_numbered()
+                .expect("numbered")
                 .gross_total,
             Some(dec!(1.25))
         );
@@ -516,7 +539,9 @@ fn numbered_56_preserves_unique_body_identity_despite_bad_optional_structure() {
             ).into_bytes());
             let issued = StornoInvoice::new("I-1")
                 .parse(&raw)
-                .expect("numbered warning");
+                .expect("numbered warning")
+                .into_numbered()
+                .expect("numbered");
             assert_eq!(issued.invoice_number.as_str(), "I-2");
             assert!(issued.notification_delivery_failed);
             assert_eq!(issued.gross_total, None);
@@ -565,7 +590,11 @@ fn numbered_56_header_fallback_requires_absent_or_valid_body_identity() {
                     r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod>{identity}{metadata}</xmlszamlavalasz>"#
                 ).into_bytes()).with_status(200);
                 if let Some(number) = expected_number {
-                    let issued = request.parse(&raw).expect("usable identity");
+                    let issued = request
+                        .parse(&raw)
+                        .expect("usable identity")
+                        .into_numbered()
+                        .expect("numbered");
                     assert_eq!(issued.invoice_number.as_str(), number);
                     assert!(issued.notification_delivery_failed);
                     assert_eq!(issued.gross_total, None);
@@ -593,7 +622,11 @@ fn numbered_56_retains_comma_metadata_and_drops_malformed_metadata() {
         ],
         b"notification failed".to_vec(),
     );
-    let issued = StornoInvoice::new("I-1").parse(&raw).expect("issued");
+    let issued = StornoInvoice::new("I-1")
+        .parse(&raw)
+        .expect("issued")
+        .into_numbered()
+        .expect("numbered");
     assert!(issued.notification_delivery_failed);
     assert_eq!(
         (issued.net_total, issued.gross_total, issued.outstanding),

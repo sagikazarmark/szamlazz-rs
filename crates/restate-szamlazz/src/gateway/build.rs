@@ -189,7 +189,8 @@ impl Account {
                 .number_prefix
                 .clone()
                 .or_else(|| defaults.number_prefix.clone()),
-            paid: document.paid,
+            // Preserve the worker's wire contract: false omits `fizetve`.
+            paid: document.paid.then_some(true),
             template: overrides
                 .template
                 .as_deref()
@@ -346,7 +347,7 @@ mod tests {
         assert_eq!(create.header.exchange_rate, None);
         assert_eq!(create.header.extra_logo.as_deref(), Some("logo"));
         assert_eq!(create.header.number_prefix.as_deref(), Some("WEB"));
-        assert!(create.header.paid);
+        assert_eq!(create.header.paid, Some(true));
         assert_eq!(create.header.template, Some(InvoiceTemplate::Most));
         assert_eq!(create.buyer.name, "Kovács Bt.", "trimmed and NFC");
         assert_eq!(create.buyer.send_email, Some(false));
@@ -367,6 +368,28 @@ mod tests {
         create
             .to_wire(&Credentials::agent_key("key"))
             .expect("valid request");
+    }
+
+    #[test]
+    fn paid_boolean_preserves_omission_or_true_on_the_wire() {
+        let gateway = gateway(&json!({}));
+        for paid in [false, true] {
+            let mut document = sample_document();
+            document.paid = paid;
+            let create = gateway
+                .build_create(
+                    IssuedKind::Invoice,
+                    &document,
+                    &order(),
+                    &external_id(),
+                    DocumentRefs::default(),
+                )
+                .expect("build");
+            let xml =
+                String::from_utf8(create.write_xml(&Credentials::agent_key("key"))).expect("UTF-8");
+            assert_eq!(xml.contains("<fizetve>true</fizetve>"), paid);
+            assert!(!xml.contains("<fizetve>false</fizetve>"));
+        }
     }
 
     #[test]

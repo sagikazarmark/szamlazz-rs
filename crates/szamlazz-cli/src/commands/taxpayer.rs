@@ -22,7 +22,10 @@ pub async fn run(cli: &crate::Cli, args: &TaxpayerArgs) -> anyhow::Result<()> {
     if cli.json {
         return output::json(&info);
     }
-    output::field_required("Valid", &info.valid);
+    match info.valid {
+        Some(valid) => output::field_required("Valid", &valid),
+        None => output::field_required("Valid", &"not reported"),
+    }
     output::field("Name", info.name.as_ref());
     output::field("Tax number", info.tax_number.as_ref());
     output::field("VAT code", info.vat_code.as_ref());
