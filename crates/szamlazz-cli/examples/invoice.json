@@ -11,8 +11,7 @@
     "comment": "Példa számla",
     "exchange_rate": null,
     "order_number": "ORDER-123",
-    "number_prefix": null,
-    "paid": false
+    "number_prefix": null
   },
   "seller": {
     "bank": "OTP",

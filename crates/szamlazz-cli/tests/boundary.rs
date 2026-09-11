@@ -89,6 +89,135 @@ fn invoice_reply(number: &str, gross: Option<&str>) -> String {
     )
 }
 
+#[tokio::test]
+async fn monetary_json_and_flags_send_exact_values() {
+    let server = MockServer::start().await;
+    respond(&server, invoice_reply("E-2026-1", Some("127"))).await;
+    let mut sent = 0;
+    for (token, expected) in [
+        ("12.34", "12.34"),
+        ("1e-2", "0.01"),
+        ("1E+2", "100"),
+        (
+            "0.1234567890123456789012345678",
+            "0.1234567890123456789012345678",
+        ),
+        ("9007199254740993.5", "9007199254740993.5"),
+        (
+            "79228162514264337593543950335",
+            "79228162514264337593543950335",
+        ),
+        (
+            "1.0000000000000000000000000000000",
+            "1.0000000000000000000000000000",
+        ),
+    ] {
+        for json_token in [token.to_owned(), format!("\"{token}\"")] {
+            // Raw source, deliberately not json! or a pre-parsed Value: those
+            // would hide source precision/shape loss before the executable.
+            let input =
+                format!(r#"[{{"date":"2026-09-11","title":"átutalás","amount":{json_token}}}]"#);
+            let output = run(
+                &mut command(&server, &["payment", "register", "E-2026-1", "-f", "-"]),
+                Some(&input),
+            )
+            .await;
+            assert!(output.status.success(), "{input}: {output:?}");
+            sent += 1;
+            let requests = server.received_requests().await.expect("requests");
+            assert_eq!(requests.len(), sent);
+            assert!(
+                text(&requests[sent - 1].body).contains(&format!("<osszeg>{expected}</osszeg>")),
+                "{input}: {}",
+                text(&requests[sent - 1].body)
+            );
+        }
+        let output = run(
+            &mut command(
+                &server,
+                &[
+                    "payment",
+                    "register",
+                    "E-2026-1",
+                    "--date",
+                    "2026-09-11",
+                    "--method",
+                    "cash",
+                    "--amount",
+                    token,
+                ],
+            ),
+            None,
+        )
+        .await;
+        assert!(output.status.success(), "{token}: {output:?}");
+        sent += 1;
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), sent);
+        assert!(text(&requests[sent - 1].body).contains(&format!("<osszeg>{expected}</osszeg>")));
+    }
+}
+
+#[tokio::test]
+async fn monetary_json_and_flags_refuse_loss_and_lookalikes_before_http() {
+    let server = MockServer::start().await;
+    let mut invalid = Vec::new();
+    for token in [
+        "0.49999999999999999999999999999",
+        "1e-29",
+        "79228162514264337593543950336",
+        "1e999999999999999999999",
+    ] {
+        invalid.extend([token.to_owned(), format!("\"{token}\"")]);
+        let output = run(
+            &mut command(
+                &server,
+                &[
+                    "payment",
+                    "register",
+                    "E-2026-1",
+                    "--date",
+                    "2026-09-11",
+                    "--method",
+                    "cash",
+                    "--amount",
+                    token,
+                ],
+            ),
+            None,
+        )
+        .await;
+        assert!(!output.status.success(), "{token}: {output:?}");
+    }
+    for token in [
+        r#"{"$serde_json::private::Number":"1"}"#,
+        r#"{"\u0024serde_json::private::Number":"1"}"#,
+        r#"{"$serde_json::private::RawValue":"1"}"#,
+        "{}",
+        "[]",
+        "true",
+        "null",
+    ] {
+        invalid.push(token.to_owned());
+    }
+    for token in invalid {
+        let input = format!(r#"[{{"date":"2026-09-11","title":"cash","amount":{token}}}]"#);
+        let output = run(
+            &mut command(&server, &["payment", "register", "E-2026-1", "-f", "-"]),
+            Some(&input),
+        )
+        .await;
+        assert!(!output.status.success(), "{input}: {output:?}");
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+}
+
 async fn original_invoice(server: &MockServer, appearance: i64) {
     Mock::given(method("POST")).and(wiremock::matchers::body_string_contains("name=\"action-szamla_agent_xml\""))
         .respond_with(ResponseTemplate::new(200).set_body_raw(format!(

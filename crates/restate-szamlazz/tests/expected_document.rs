@@ -104,3 +104,59 @@ fn discovery_schemas_require_closed_bounded_intent() {
     assert_eq!(correct["additionalProperties"], false);
     assert!(correct["properties"].get("reissue").is_none());
 }
+
+#[cfg(feature = "schemars")]
+#[test]
+fn expected_number_schemas_and_runtime_refuse_controls_and_allow_unicode() {
+    use restate_szamlazz::contract::Reissue;
+
+    for schema in [
+        schemars::schema_for!(Reissue),
+        schemars::schema_for!(DeleteProformaRequest),
+    ] {
+        let schema = serde_json::to_value(schema).expect("schema");
+        let number_schema = &schema["$defs"]["InvoiceNumber"];
+        let forbidden =
+            regex::Regex::new(number_schema["not"]["pattern"].as_str().expect("pattern"))
+                .expect("schema regex");
+        for control in (0..=0x1f).chain(0x7f..=0x9f) {
+            let character = char::from_u32(control).expect("control");
+            for number in [
+                format!("{character}SZ-1"),
+                format!("SZ{character}1"),
+                format!("SZ-1{character}"),
+            ] {
+                let wire = json!({"expected_number": number});
+                assert!(
+                    forbidden.is_match(&number),
+                    "schema accepts U+{control:04X}"
+                );
+                assert!(serde_json::from_value::<Reissue>(wire.clone()).is_err());
+                assert!(serde_json::from_value::<DeleteProformaRequest>(wire).is_err());
+            }
+        }
+        for number in ["É-2026-1".to_owned(), "é".repeat(20), "é".repeat(21)] {
+            assert!(!forbidden.is_match(&number));
+            assert!(
+                number.chars().count() as u64
+                    <= number_schema["maxLength"].as_u64().expect("bound")
+            );
+            let wire = json!({"expected_number": number});
+            let within_byte_limit = number.len() <= 40;
+            assert_eq!(
+                serde_json::from_value::<Reissue>(wire.clone()).is_ok(),
+                within_byte_limit
+            );
+            assert_eq!(
+                serde_json::from_value::<DeleteProformaRequest>(wire).is_ok(),
+                within_byte_limit
+            );
+            assert!(
+                number_schema["description"]
+                    .as_str()
+                    .expect("description")
+                    .contains("40 UTF-8 bytes")
+            );
+        }
+    }
+}

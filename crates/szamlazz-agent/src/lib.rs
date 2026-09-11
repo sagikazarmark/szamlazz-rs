@@ -42,6 +42,24 @@
 //! Every wire code set is open: a token the crate does not know is kept in
 //! an `Other(String)`, a numeric code in an `Unknown(n)` (see [`types`]).
 //!
+//! # Monetary Serde input
+//!
+//! Public decimal fields accept decimal strings and JSON number tokens, including
+//! exponents, through [`parse_decimal`]: values must fit exactly, without rounding.
+//! Optional fields also accept null or omission. Serialization keeps Decimal's
+//! usual string representation. Decode JSON directly from text, bytes or a reader
+//! to preserve both numeric precision and the distinction between numbers and objects.
+//!
+//! Serde's buffered adapters (such as untagged or internally tagged enums and
+//! flattened fields) erase that distinction for arbitrary-precision numbers.
+//! Such ambiguous maps are refused; use decimal strings or integers within the
+//! JSON deserializer's i64/u64 range in those wrappers. A prebuilt JSON `Value`
+//! may already have interpreted a private-number
+//! lookalike object as a number; decoding cannot reconstruct its original shape.
+//! Other self-describing formats accept strings and integers, and interpret floats
+//! by their shortest decimal spelling; precision lost before decoding is unrecoverable.
+//! Non-human-readable formats use Decimal's default string encoding.
+//!
 //! # Features
 //!
 //! Default features are empty and provide the I/O-free request/response core.

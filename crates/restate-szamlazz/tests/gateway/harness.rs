@@ -11,8 +11,8 @@ use restate_szamlazz::contract::{
     BuyerInput, DocumentInput, IssuedKind, LineItemInput, PaymentMethod,
 };
 use restate_szamlazz::gateway::{
-    CreateOutcome, CreateStepRequest, DocumentRefs, Gateway, LookupOutcome, LookupRequest,
-    StornoStepRequest, Unanswered, Unconfirmed,
+    CreateOutcome, CreatePermission, CreateStepRequest, DocumentRefs, Gateway, LookupOutcome,
+    LookupRequest, OwnershipOutcome, StornoStepRequest, Unanswered, Unconfirmed,
 };
 use restate_szamlazz::{ExternalId, OrderKey};
 use rust_decimal::dec;
@@ -112,8 +112,9 @@ impl Harness {
             .expect("szamlazz.hu answered")
     }
 
-    /// The create step for an invoice of `ORD-1`; `reversed` is the number
-    /// the lookup step saw reversed under the id.
+    /// Authorize one isolated test create for `ORD-1`; `reversed` is the
+    /// expected reversed holder. Tests must use reads after uncertainty, not
+    /// call this helper again to manufacture another permission.
     pub async fn create(&self, reversed: Option<&str>) -> Result<CreateOutcome, Unconfirmed> {
         self.create_kind(IssuedKind::Invoice, &external_id(), reversed)
             .await
@@ -152,13 +153,23 @@ impl Harness {
             .build_create(kind, &document(), &order, external_id, refs)
             .expect("build");
         self.gateway
-            .create(CreateStepRequest {
-                external_id,
-                kind,
-                order: &order,
-                create: &create,
-                reversed,
-            })
+            .create_once(
+                CreateStepRequest {
+                    external_id,
+                    kind,
+                    order: &order,
+                    create: &create,
+                    reversed,
+                },
+                CreatePermission::grant(),
+            )
+            .await
+    }
+
+    /// Observe the invoice holder without granting permission for a mutation.
+    pub async fn observe_create(&self) -> Result<OwnershipOutcome, Unanswered> {
+        self.gateway
+            .lookup_ours(&external_id(), &order(), IssuedKind::Invoice)
             .await
     }
 

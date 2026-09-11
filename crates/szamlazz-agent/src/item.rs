@@ -93,20 +93,26 @@ pub struct LineItem {
     /// Account-side item identifier (`azonosito`).
     pub id: Option<String>,
     /// Quantity (`mennyiseg`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub quantity: Decimal,
     /// Unit of measure (`mennyisegiEgyseg`), e.g. `db`.
     pub unit: String,
     /// Net unit price (`nettoEgysegar`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub unit_price: Decimal,
     /// VAT rate (`afakulcs`).
     pub vat_rate: VatRate,
     /// Invoice-only margin-scheme VAT base (`arresAfaAlap`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub margin_vat_base: Option<Decimal>,
     /// Net value (`nettoErtek`): unit price × quantity, subject to rounding.
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub net_value: Decimal,
     /// VAT value (`afaErtek`): net × rate / 100, subject to rounding.
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub vat_value: Decimal,
     /// Gross value (`bruttoErtek`); must equal net + VAT.
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub gross_value: Decimal,
     /// Free-text comment for the row (`megjegyzes`).
     pub comment: Option<String>,

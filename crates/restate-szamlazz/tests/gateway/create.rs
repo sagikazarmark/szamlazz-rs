@@ -1,6 +1,5 @@
-//! The *Create step*: query-first inside the closure, the send only past
-//! nothing or the lookup's reversed document, the post-send re-query after
-//! an open answer, and what is `Unconfirmed` (and how it displays).
+//! The public one-send create contract: an explicit consumed permission, the
+//! leading holder check, and read-only reconciliation after uncertainty.
 
 use super::common::{
     Doc, api_error, body_error, create, created, created_but_notification_failed,
@@ -10,11 +9,49 @@ use super::harness::*;
 use restate_szamlazz::ExternalId;
 use restate_szamlazz::contract::IssuedKind;
 use restate_szamlazz::gateway::{
-    CreateOutcome, DocumentRefs, LookupOutcome, Rejection, SzamlazzAnswer, Unconfirmed,
+    CreateOutcome, CreatePermission, DocumentRefs, LookupOutcome, OwnershipOutcome, Rejection,
+    SzamlazzAnswer, Unconfirmed,
 };
 use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
+
+static_assertions::assert_not_impl_any!(CreatePermission: Clone, Copy, serde::Serialize, serde::de::DeserializeOwned);
+
+#[tokio::test]
+async fn an_uncertain_create_stays_one_send_through_empty_reads_until_it_lands() {
+    let h = Harness::start().await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(not_found())
+        .up_to_n_times(4)
+        .expect(4)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:invoice")
+        .respond_with(Doc::new("SZ-1", "SZ").response())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert!(matches!(
+        h.create(None).await,
+        Err(Unconfirmed::Transport(_))
+    ));
+    // Neither the immediate re-query nor further empty reads renew permission.
+    for _ in 0..2 {
+        assert_eq!(h.observe_create().await, Ok(OwnershipOutcome::Absent));
+    }
+    match h.observe_create().await {
+        Ok(OwnershipOutcome::Live(found)) => assert_eq!(found.number, "SZ-1"),
+        other => panic!("expected late document evidence, got {other:?}"),
+    }
+    assert_eq!(h.bodies().await.len(), 6, "five reads and exactly one send");
+}
 
 #[tokio::test]
 async fn a_missing_expected_reissue_target_never_becomes_an_ordinary_create() {
@@ -56,10 +93,7 @@ async fn a_lost_reissue_followed_by_absence_stops_without_another_send() {
         h.create(Some("SZ-1")).await,
         Err(Unconfirmed::Transport(_))
     ));
-    assert_eq!(
-        h.create(Some("SZ-1")).await,
-        Ok(CreateOutcome::TargetChanged)
-    );
+    assert_eq!(h.observe_create().await, Ok(OwnershipOutcome::Absent));
     assert_eq!(h.bodies().await.len(), 4);
 }
 
@@ -182,12 +216,10 @@ async fn prepayment_consuming_a_proforma_sends_the_reference() {
 }
 
 #[tokio::test]
-async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_nothing() {
-    // The step, driven twice: the first execution's reply is lost (500), its
-    // immediate re-query still sees nothing, so it is unconfirmed; the second
-    // execution's leading query finds the document that landed and sends no
-    // create, also when the lookup step had seen a reversed document
-    // (`reissue: true`) that this live one is not.
+async fn read_only_reconciliation_after_a_lost_create_finds_the_document() {
+    // One permission: the reply is lost (500) and the immediate re-query sees
+    // nothing. A later read finds the document, without any fresh permission,
+    // including when the original call was an expected-document reissue.
     for (label, reversed) in [("plain", None), ("reissue", Some("SZ-0"))] {
         let h = Harness::start().await;
         if let Some(number) = reversed {
@@ -216,9 +248,9 @@ async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_noth
             matches!(h.create(reversed).await, Err(Unconfirmed::Transport(_))),
             "{label}: first execution"
         );
-        match h.create(reversed).await {
-            Ok(CreateOutcome::Found(found)) => assert_eq!(found.number, "SZ-1", "{label}"),
-            other => panic!("{label}: expected Found, got {other:?}"),
+        match h.observe_create().await {
+            Ok(OwnershipOutcome::Live(found)) => assert_eq!(found.number, "SZ-1", "{label}"),
+            other => panic!("{label}: expected Live, got {other:?}"),
         }
         assert_eq!(
             h.bodies().await.len(),
@@ -232,8 +264,7 @@ async fn create_re_executed_after_a_lost_reply_finds_the_document_and_sends_noth
 async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_settled() {
     // The send lands, its reply is lost, and the document is reversed before
     // the immediate re-query sees it. The re-query settles the step as
-    // `Reversed`, not `Unconfirmed`, which would re-execute the step into a
-    // second send.
+    // `Reversed`, not `Unconfirmed`. Neither grants another send permission.
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")
         .respond_with(not_found())
@@ -260,10 +291,9 @@ async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_
         "the leading query, the create, the re-query"
     );
 
-    // Re-executed anyway (the run policy re-dispatching a step whose result
-    // was not journaled): the leading query settles it again, nothing sent.
-    match h.create(None).await {
-        Ok(CreateOutcome::Reversed(found)) => assert_eq!(found.number, "SZ-1"),
+    // A later observation uses only the read surface, never another create.
+    match h.observe_create().await {
+        Ok(OwnershipOutcome::Reversed(found)) => assert_eq!(found.number, "SZ-1"),
         other => panic!("expected Reversed, got {other:?}"),
     }
 }

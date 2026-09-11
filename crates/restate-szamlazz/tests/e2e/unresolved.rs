@@ -41,6 +41,9 @@ mod protected_storno_evidence;
 #[path = "release_hardening.rs"]
 mod release_hardening;
 
+#[path = "contradictory_replies.rs"]
+mod contradictory_replies;
+
 struct Operator;
 impl restate_szamlazz::service::RecoveryAuthorizer for Operator {
     fn authorize(

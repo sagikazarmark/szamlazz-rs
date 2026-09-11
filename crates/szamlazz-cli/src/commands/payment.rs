@@ -31,8 +31,8 @@ pub struct RegisterArgs {
     /// Payment method, e.g. "átutalás".
     #[arg(long)]
     method: Option<String>,
-    /// Amount paid.
-    #[arg(long)]
+    /// Amount paid, exactly representable as a decimal (exponents accepted).
+    #[arg(long, value_parser = szamlazz_agent::parse_decimal)]
     amount: Option<Decimal>,
     /// Free-text description of the payment (single-entry form only; entries
     /// in a JSON file carry their own descriptions).

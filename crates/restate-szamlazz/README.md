@@ -34,13 +34,20 @@ are computed, domain outcomes are returned as data.
 Worker query results must carry a nonblank document number; by-number results must echo the requested number.
 Malformed identity remains an unanswered read, never usable evidence for a mutation or marker clearance.
 Storno recovery requires a distinct reversal number and a stornoable, reversed original.
+After a protected storno send, an echo of the verified original's number retains the
+marker and enters read-only reconciliation: it proves neither reversal nor non-execution.
+Unkeyed Gateway storno deliberately keeps the observed proforma/delivery-note echo
+classification as `NotStornoable`; that policy is not evidence about an echo after
+the Order handler verified a stornoable invoice.
 Credit-registration acknowledgements may omit reported identity. A reported invoice number must match the
 requested target exactly; a mismatch is `outcome_unknown`, with no registration retry or contradictory number
 copied into the journal or caller fault.
 
-Complete create/storno request validation precedes write arming: unsupported dates and XML-forbidden
-text are `invalid_input`, without creating an unresolved-write marker. Create validates before document
-reads and again after resolving references; storno validates after deriving the original's facts.
+Complete create/storno request validation precedes write arming. Unsupported caller dates and
+XML-forbidden caller text (including a storno comment) are `invalid_input`. A verified original's
+missing or unusable fulfillment date is instead `unavailable`, with no send or new marker:
+the caller cannot choose that date. Create validates before document reads and again after resolving
+references; storno validates after deriving the original's facts.
 
 ## Quick Start
 
@@ -196,8 +203,8 @@ is Rust 1.92.
 - **Exactly one live document per kind per order** (proforma, invoice, prepayment, final) under caller retries,
   process crashes and concurrent callers. Same-key handlers run one at a time. After validation and the prologue,
   a target **ownership lookup** settles an existing document before prerequisites for a new send. An absent
-  target, or an explicit reissue, proceeds through prerequisites, the full **lookup**, then a **create** step whose every
-  execution queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it
+  target, or an explicit reissue, proceeds through prerequisites, the full **lookup**, then a **create** step whose
+  permitted execution queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it
   creates. A durable marker and acknowledged one-use permit prevent another send after interruption;
   an invisible result remains unresolved until read-only reconciliation or authorized recovery settles it.
 - **Correctives** are issued under a caller-supplied `correction_id`: the same id finds the corrective it
@@ -219,7 +226,7 @@ ON.** It is the server-side guard against a second live document of the same kin
 live. Running without it is unsupported.
 
 **Deterministic external ids**, derived from the order key alone, so that a re-executed closure or a new
-invocation can ask "is there already one?" without state.
+invocation can discover documents without a document ledger. Unresolved-write state guards permission to mutate.
 
 **Validation of every found document**: order number and `tipus`, because external ids are not unique
 server-side and a query returns the newest holder. Nothing about the account: the worker holds **no account
@@ -375,6 +382,8 @@ token. Unknown codes acquire neither an inferred status nor retry advice; read t
 The known codes are:
 
 - `invalid_input` (400)
+- `cancelled` (409): intentional read cancellation
+- `forbidden` (403): operator recovery access denied
 - `unknown_account` (400): the request names no account of this deployment
 - `not_found` (404): the document the request names by number is not known to szamlazz.hu (code 7)
 - `szamlazz_error` (422): szamlazz.hu answered with an error code of its own that the handler passes through,
@@ -427,6 +436,9 @@ external id.
 `CorrectRequest`, `SetCreditEntriesRequest`, `Selector::InvoiceNumber`, `ProformaLink::Number`): 1–40 bytes, no
 whitespace, no control character, no `:`. Refused by its `Deserialize`, so a bad number is a malformed body
 (`invalid_input` before the prologue). It flows into step names and the storno external ids, hence the bound.
+The text must also be XML 1.0 representable. Discovery excludes C0/C1 controls, whitespace, `:` and
+U+FFFE/U+FFFF, but JSON Schema length counts characters: the **40 UTF-8 byte** cap is an additional
+runtime rule, so a multibyte value within the schema's character limit can still be refused.
 Distinct from `szamlazz_agent::InvoiceNumber`, the unvalidated wire type; responses echo numbers as plain strings.
 
 `OrderKey` is the `Order` key: the order number trimmed of leading and trailing whitespace, case preserved,
@@ -514,13 +526,22 @@ and `Accounts::from` bundles it as resolver and store.
 ### Gateway and services
 
 `gateway::Gateway` is the module that speaks to szamlazz.hu on behalf of one account, over
-`szamlazz_agent::Client`: one plain async fn per `ctx.run` (`lookup`, `lookup_ours`, `create`, `verify`, `query`,
-`hint`, `lookup_storno`, `storno`, `delete_proforma`, `set_credit_entries`, `query_taxpayer`, `probe`), each returning every
-expected szamlazz.hu outcome as data. Two `Err`s say what a run retry policy may re-execute:
+`szamlazz_agent::Client`. Reads and writes return expected szamlazz.hu outcomes as data, with
+different uncertainty contracts:
 
 - the read fns (`lookup`, `lookup_ours`, `verify`, `query`, `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return
   `Err(Unanswered)` when szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`);
-- `create` and `storno` return `Err(Unconfirmed)` for an outcome that is *not* known. An answer to their leading
+- `create_once(request, CreatePermission::grant())` consumes a non-`Clone`, non-serializable permission
+  for at most one create send, even when the leading query avoids sending. It replaces `Gateway::create`.
+  A direct consumer owns exclusive admission, durable uncertainty retention across crashes, and read-only
+  reconciliation. Grant permission only after establishing that no earlier unresolved write can still act;
+  after uncertainty, independently settle that exact request and make a fresh business decision. An empty
+  query, elapsed time, cancellation or kill cannot justify a new grant. Never grant inside an automatic
+  write retry/replay closure. `Unconfirmed` requires retaining uncertainty; use `lookup_ours` or `query`
+  to gather evidence without another send. The supplied Order service owns its separate durable
+  marker/arm protocol internally.
+- `create_once` and unmanaged `storno` return `Err(Unconfirmed)` for an outcome that is *not* known.
+  This error is not permission to retry a create. An answer to their leading
   query (another code, `szlahu_down`) is data: nothing was sent. An unnumbered unmanaged storno acknowledgement
   is the exception: inconclusive reconciliation returns journaled `StornoOutcome::Unnumbered` data, so this
   reply ends the run rather than entering mutation retry.
@@ -593,9 +614,9 @@ limit), because its parts are bounded: the namespace at 16, the order key, the `
 invoice number at 40 each (a dashed UUID fits every one). `:` is the separator and is excluded from every part; a
 `correction_id` equal to one of the tokens (`invoice`, `storno`, `check-account`, …) is refused.
 
-The id is queried first by the target ownership lookup, again by the full lookup after prerequisites, and by
-every execution of the create step, inside the create's own
-`ctx.run` closure, so a request that landed before a crash, a timeout or a lost reply is found, not re-issued.
+The id is queried first by the target ownership lookup, again by the full lookup after prerequisites,
+and inside the permitted create execution. After interruption, completed arming grants no permission;
+read-only reconciliation queries evidence without reissuing even when the earlier send remains invisible.
 There is **no generation counter**: external ids are not unique server-side and a query returns the newest
 holder, which is exactly the question asked ("what is the newest document of this kind we issued for this
 order?"). A reissued invoice becomes the newest holder of the same id; the stornoed original stays reachable by
@@ -769,7 +790,7 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
 | `szamlazz_error` | 422 | szamlazz.hu answered a read with a code the handler passes through: `Szamlazz.Agent.query` on a code that is neither 7 nor a credential code, or `query_taxpayer` on any `funcCode ≠ OK` (szamlazz.hu's own or NAV's relayed one; `valid: false` is a 200). `szamlazz_code` carries the code, `message` szamlazz.hu's text. | Read `szamlazz_code`; a NAV outage on `query_taxpayer` is retried with a new `Idempotency-Key`. |
 | `outcome_unknown` | 500 | Write uncertainty, including cancellation or a later mutation blocked by an unresolved marker. Unmanaged Agent storno can exhaust its issue policy; protected Order writes retain read-only reconciliation and pause instead. | Settle earlier work first. Missing credit entries, empty queries, elapsed time and kill do not authorize renewal. After settlement, deliberately renew with the original expected-document intent; for credit entries, query again and submit only still-required additive entries or the current intended replacement. |
-| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
+| `unavailable` | 503 | szamlazz.hu did not answer a read-only step through every execution of the read policy (the message names the step and the last failure; the order, kind and external id when the step knows them), or answered it with a code nothing can be concluded from (`szamlazz_code` carries it), or returned a storno's original without a usable fulfillment date (`telj`), the date the storno must repeat, so it is not sent; or the account resolver or credential store could not answer (reporting so, or silent past the worker's ten-second bound on the call). Nothing was sent by the execution that raised it. | Rule 2, later. |
 | `credentials_rejected` | 503 | szamlazz.hu refused the worker's agent key (rule 4; `szamlazz_code` carries the code). | Page the operator; then rule 2. |
 
 A 5xx whose `x-restate-error-source` is `invocation` is an invocation failure, including native kill errors,
@@ -926,12 +947,16 @@ A lost or inconclusive reply is journaled as unresolved data with a safe diagnos
 `reconcile-write` run only reads, retaining the original cause and latest reason in its failure. Exhaustion of
 the invocation policy pauses the owner; it cannot grant another send. A conclusive 71/152 refusal remains
 settled even if the diagnostic query fails. Correctives take no duplicate-order hint and retain the refusal.
+A reissue reply naming the expected old document is also inconclusive: a number alone does not establish
+the replacement. The marker remains, and read-only reconciliation must find matching issuance evidence
+whose number differs from that old target.
 
 **Storno** has the same shape: a read-only lookup of the storno external id (`lookup-storno-{number}`) and a
 storno step (`storno-{number}`). `Szamlazz.Order.storno_invoice` uses the protected one-use protocol;
 `Szamlazz.Agent.storno` is query-first under `[issue]`. The storno request is a pure function of the
 verified original (its `telj` as `teljesitesDatum`, its `eszamla` or the account default as the e-invoice flag),
-so every execution of the step sends byte-identical bytes; a verified original without a `telj` is `unavailable`
+so rebuilding the intent preserves those facts. Only the permitted Order execution may send; replay
+reconciles read-only. A verified original without a usable `telj` is `unavailable`
 with nothing sent, raised after the answers that need no send. Neither the date nor the form is enforced by
 szamlazz.hu (it issues the storno with whatever `teljesitesDatum` and `eszamla` the request carries), so the
 derivation from the verified original is what keeps a reversal on its original's date and in its original's form.
@@ -951,8 +976,10 @@ query is inconclusive, Order retains the candidate for read-only reconciliation.
 storno external id permits an order hint, still verified against the original's reference, reversal and order.
 Unmanaged Agent storno stays `Unconfirmed` under its issue policy and becomes `outcome_unknown` on exhaustion, rather than the previous
 `rejected{not_stornoable}` no-op inference. Post-send credential/unavailable failures preserve the uncertainty
-and their causes. The same-number echo policy and changed-number/nonpositive-gross fast path remain; zero is
-a synthetic comparison control, and neither zero-total nor negative-total originals have been verified live.
+and their causes. A same-number echo retains uncertainty on protected Order writes; unkeyed Gateway storno
+keeps its observed no-op policy. The changed-number/nonpositive-gross fast path remains; zero is a synthetic
+comparison control, and neither zero-total nor negative-total originals have been verified live. See
+[ADR 0007's policy amendment](../../docs/adr/0007-storno-repeats-the-originals-fulfillment-date.md).
 
 Release/journal review under [ADR 0009](../../docs/adr/0009-immutable-deployments-no-journal-compatibility-contract.md):
 protected writes and their diagnostic result shapes require a new immutable deployment. Keep in-flight owners

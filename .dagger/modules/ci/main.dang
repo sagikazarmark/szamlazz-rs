@@ -83,6 +83,7 @@ type Ci {
   endToEnd: Directory! @check {
     self
       .compiled
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends python3"])
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
       .withEnvVariable("CI", "true")

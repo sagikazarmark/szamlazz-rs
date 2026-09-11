@@ -2,13 +2,24 @@
 //! async fn per `ctx.run`, over the [`szamlazz_agent::Client`], returning
 //! every expected szamlazz.hu outcome **as data**; a rejection, a duplicate
 //! order number, a not-found or a no-op storno is a value, never an `Err`.
-//! The `Err`s are deliberate and say what a run retry policy may re-execute:
-//! the read-only steps return [`Unanswered`] when szamlazz.hu did not answer
-//! (a transport or parse failure, `szlahu_down`), and the create and storno
-//! steps return [`Unconfirmed`] when szamlazz.hu's answer is *not* known; an
+//! Read-only steps return [`Unanswered`] when szamlazz.hu did not answer
+//! (a transport or parse failure, `szlahu_down`) and may be retried. Create
+//! and storno exchanges return [`Unconfirmed`] when the outcome is *not*
+//! established; this is uncertainty, never permission to send again. An
 //! answer to a write step's leading query is data too ([`CreateOutcome::Api`],
 //! [`CreateOutcome::Unavailable`] and the storno twins): nothing was sent, so
 //! nothing is unconfirmed.
+//!
+//! Protected Order writes retain an unresolved-write marker before sending;
+//! after uncertainty they reconcile read-only and retain the marker until
+//! matching evidence or audited operator settlement resolves it. An empty
+//! query, elapsed time, cancellation or kill does not authorize another send.
+//! Direct consumers use [`Gateway::create_once`] with a consumed
+//! [`CreatePermission`] and own durable exclusion, uncertainty retention and
+//! read-only reconciliation. The public [`Gateway::storno`] and unmanaged
+//! `Szamlazz.Agent` storno path do not have the Order's marker protection;
+//! their query-first behavior and vendor reversal idempotence do not provide
+//! a general unresolved-write guard across invocations.
 //!
 //! [`Gateway`] owns the client and the [`Account`] it speaks for; it is not a
 //! second client: the Számla Agent `Client` is the transport it wraps.
@@ -396,9 +407,44 @@ pub struct CreateStepRequest<'a> {
     pub reversed: Option<&'a str>,
 }
 
+/// Caller-owned authorization for at most one create send through
+/// [`Gateway::create_once`]. Consumed even when its leading query avoids a send.
+/// It is neither `Clone` nor serializable: replay must not recreate permission
+/// automatically.
+///
+/// This makes the caller's decision explicit, not its evidence verifiable.
+/// The gateway has no durable memory of earlier calls and cannot establish
+/// whether the caller is entitled to grant permission.
+#[derive(Debug)]
+#[must_use]
+pub struct CreatePermission {
+    _private: (),
+}
+
+impl CreatePermission {
+    /// Grant one fresh send after establishing that no earlier unresolved
+    /// write can still act. For an initial create, the caller must own exclusive
+    /// admission of that business operation. After an uncertain send, renewal
+    /// requires independent settlement of that exact request, such as matching
+    /// positive evidence or an audited assertion that it did not execute and
+    /// cannot execute later, followed by a deliberate new business decision.
+    /// Positive settlement does not itself authorize a duplicate or reissue.
+    ///
+    /// [`Unconfirmed`], an empty query, elapsed time, cancellation and kill are
+    /// not settlement. Do not call this constructor from an automatic write
+    /// retry or replay closure. The caller must durably retain uncertainty and
+    /// exclude competing mutations, including across process restarts.
+    ///
+    /// The constructor cannot check these facts; it records the caller's
+    /// assertion only in the type system for this call, not in durable storage.
+    pub fn grant() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// The settled result of the create step: szamlazz.hu's answer is known.
-/// What is *not* settled is an [`Unconfirmed`] error, which the run retry
-/// policy re-executes.
+/// An [`Unconfirmed`] error instead requires read-only reconciliation, never
+/// automatic renewal of send permission.
 ///
 /// Documents are boxed: a [`FoundDocument`] is large next to the
 /// code-and-message variants.
@@ -476,25 +522,38 @@ pub enum CreateOutcome {
     },
 }
 
-/// The create or storno step ended without a settled outcome: the run retry
-/// policy re-executes the step, whose leading query then finds whatever
-/// landed.
+/// A create or storno exchange ended without a settled outcome. This does not
+/// authorize a mutation retry: an empty query cannot establish that the earlier
+/// send did not execute or cannot execute later.
+///
+/// Protected Order writes retain their unresolved-write marker and use
+/// read-only reconciliation after this result. A direct [`Gateway::create_once`]
+/// consumer must retain its own uncertainty and reconcile through reads such
+/// as [`Gateway::lookup_ours`] or [`Gateway::query`]. Granting a new
+/// [`CreatePermission`] requires independent settlement and a fresh decision,
+/// never this error alone. Unmanaged storno has no Order marker; its caller
+/// cannot infer cross-invocation protection from this error or a leading query.
 ///
 /// Reserved for exchanges whose outcome is not established. An *answer* to the
 /// leading query (another code, `szlahu_down`) is settled data
 /// ([`CreateOutcome::Api`], [`CreateOutcome::Unavailable`] and the storno
-/// twins), never this. Every variant but [`Unconfirmed::Transport`] on the
-/// leading query follows an immediate external-id re-query: one that found no
-/// live document of ours,
-/// or one that failed itself ([`Unconfirmed::ReQueryFailed`], which names
-/// both causes).
+/// twins), never this. The public one-send create path and unmanaged storno
+/// can make an immediate read-only reconciliation after a send; failure of
+/// that read is [`Unconfirmed::ReQueryFailed`], naming both causes. Protected
+/// writes instead carry the uncertainty into their marker-based reconciliation.
+/// [`Unconfirmed::Transport`] can also describe a failed leading query, before
+/// any send; the variant alone does not establish that nothing was sent.
 ///
-/// The display is what the run journals as its last failure and what the
-/// `outcome_unknown` fault repeats on exhaustion: each variant names the
-/// cause it stands for.
+/// Each display names its cause. Protected writes project safe diagnostics
+/// into their journaled unresolved result; the error itself is not a send
+/// permission or a durable uncertainty record.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Unconfirmed {
+    /// A numbered reissue acknowledgement names the expected old document,
+    /// establishing neither replacement nor non-execution.
+    #[error("reissue acknowledgement names the old document; replacement is not established")]
+    ReissueEcho,
     /// The HTTP exchange or the response parse failed, on the leading query
     /// (nothing was sent) or on the create or storno.
     #[error("transport failure: {0}")]
@@ -1170,7 +1229,18 @@ impl Gateway {
         })
     }
 
-    /// The create step, query-first on every execution.
+    /// Check the current holder, then send at most one create using the caller's
+    /// consumed permission. This method never retries a create send.
+    ///
+    /// The caller owns exclusive admission, durable uncertainty retention and
+    /// read-only reconciliation; see [`CreatePermission::grant`]. Do not wrap
+    /// this call and a fresh permission in an automatic retry or replay closure.
+    /// A lost reply may still land after any number of empty queries. Once a
+    /// call starts, cancellation or a process crash also leaves its permission
+    /// spent and its possible external effect for the caller to reconcile.
+    /// Use [`Gateway::lookup_ours`] or [`Gateway::query`] to observe evidence
+    /// without authorizing another send. Supplied HTTP clients must disable
+    /// transport retries and redirects as specified by [`Gateway::open_with_http`].
     ///
     /// 1. Query by external id: a validated live hit that is not
     ///    `request.reversed` is [`CreateOutcome::Found`] (an earlier
@@ -1184,8 +1254,10 @@ impl Gateway {
     ///    [`CreateOutcome::Api`] and `szlahu_down` [`CreateOutcome::Unavailable`]
     ///    (answers, settled with nothing sent); only a transport failure
     ///    is [`Unconfirmed::Transport`]: never create when the check itself
-    ///    failed. The rule: the step sends only when the external id holds
-    ///    nothing, or exactly the document the lookup step saw reversed.
+    ///    failed. A missing expected reissue holder is
+    ///    [`CreateOutcome::TargetChanged`]. The call sends only when the id
+    ///    holds nothing for an initial create, or exactly the expected reversed
+    ///    document for a reissue, and consumes permission either way.
     /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
     ///    a refusal [`CreateOutcome::Rejected`], rejected credentials
     ///    [`CreateOutcome::CredentialsRejected`]. A lost reply, an open code
@@ -1197,14 +1269,36 @@ impl Gateway {
     ///
     /// # Errors
     ///
-    /// [`Unconfirmed`] when the outcome is not settled; the caller's run retry
-    /// policy re-executes the step.
-    pub async fn create(
+    /// [`Unconfirmed`] when the outcome is not settled. Retain uncertainty and
+    /// reconcile read-only; neither this error nor absence grants permission
+    /// to call again. The same applies when the future is interrupted.
+    ///
+    /// A permission cannot be reused:
+    ///
+    /// ```compile_fail,E0382
+    /// # use restate_szamlazz::gateway::{Gateway, CreatePermission, CreateStepRequest};
+    /// # async fn reuse(gateway: &Gateway, request: CreateStepRequest<'_>) {
+    /// let permission = CreatePermission::grant();
+    /// let _ = gateway.create_once(request.clone(), permission).await;
+    /// let _ = gateway.create_once(request, permission).await;
+    /// # }
+    /// ```
+    ///
+    /// The legacy retry-shaped entry point is unavailable:
+    ///
+    /// ```compile_fail,E0599
+    /// # use restate_szamlazz::gateway::{Gateway, CreateStepRequest};
+    /// # async fn legacy(gateway: &Gateway, request: CreateStepRequest<'_>) {
+    /// let _ = gateway.create(request).await;
+    /// # }
+    /// ```
+    pub async fn create_once(
         &self,
         request: CreateStepRequest<'_>,
+        _permission: CreatePermission,
     ) -> Result<CreateOutcome, Unconfirmed> {
         let span = tracing::info_span!(
-            "gateway.create",
+            "gateway.create_once",
             external_id = %request.external_id,
             kind = %request.kind,
             reversed = request.reversed,
@@ -1212,6 +1306,8 @@ impl Gateway {
         self.create_inner(&request).instrument(span).await
     }
 
+    /// Query-first checks for one authorized call; no branch renews permission
+    /// or repeats a send. Post-send reconciliation is read-only.
     async fn create_inner(
         &self,
         request: &CreateStepRequest<'_>,
@@ -1253,6 +1349,14 @@ impl Gateway {
         // Step 2: create.
         match self.client.send(request.create).await {
             Ok(CreationOutcome::Issued(created)) => {
+                if request.reversed == Some(created.invoice_number.as_str()) {
+                    let open = Unconfirmed::ReissueEcho;
+                    return if protected {
+                        Err(open)
+                    } else {
+                        self.settle_or(request, open).await
+                    };
+                }
                 let issued = IssuedDocument::from(created);
                 tracing::info!(number = %issued.number, "document issued");
                 Ok(CreateOutcome::Issued(issued))
@@ -1817,6 +1921,12 @@ impl Gateway {
                         Ok(StornoOutcome::Reversed(IssuedDocument::from(created)))
                     }
                     StornoReplyEvidence::SameNumberEcho => {
+                        if marker.is_some() {
+                            return Err(Unconfirmed::StornoVerification {
+                                number: created.invoice_number.to_string(),
+                                message: "storno acknowledgement names the verified original; neither reversal nor non-execution is established".to_owned(),
+                            });
+                        }
                         tracing::info!(echoed = %created.invoice_number, "storno was a no-op");
                         Ok(StornoOutcome::NotStornoable)
                     }

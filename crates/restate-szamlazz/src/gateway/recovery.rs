@@ -58,6 +58,9 @@ impl WriteDiagnostic {
 
     fn unconfirmed(cause: super::Unconfirmed) -> Self {
         match cause {
+            super::Unconfirmed::ReissueEcho => {
+                Self::new(super::Unconfirmed::ReissueEcho.to_string())
+            }
             super::Unconfirmed::Open { code, .. } => Self::new(match code {
                 Some(code) => format!("open vendor code {code}"),
                 None => "success without a document number".into(),
@@ -225,7 +228,6 @@ impl Gateway {
             Ok(
                 outcome @ (StornoOutcome::Reversed(_)
                 | StornoOutcome::Rejected(_)
-                | StornoOutcome::NotStornoable
                 | StornoOutcome::CredentialsRejected(_)),
             ) => WriteResult::Storno(outcome),
             Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
@@ -388,6 +390,16 @@ pub(super) fn warn_reconciliation_credentials(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn contradictory_reissue_keeps_its_cause_in_the_journal() {
+        let result = super::WriteResult::Unresolved(super::WriteDiagnostic::unconfirmed(
+            super::super::Unconfirmed::ReissueEcho,
+        ));
+        let journal = serde_json::to_string(&result).expect("journal");
+        assert!(journal.contains("reissue acknowledgement names the old document"));
+        assert!(!journal.contains("without a document number"));
+    }
+
     use super::*;
     use crate::account::{Account, Endpoint};
     use crate::contract::recovery::MarkerVersion;

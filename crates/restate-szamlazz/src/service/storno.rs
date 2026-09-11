@@ -63,8 +63,9 @@ impl StornoIntent {
     ///
     /// # Errors
     ///
-    /// [`Fault::missing_fulfillment_date`] when the document carries no
-    /// `telj`; the callers raise it after every answer that needs no send.
+    /// `unavailable` when the document carries no `telj` or its year cannot
+    /// be sent; `invalid_input` for caller-owned outbound defects. The callers
+    /// raise these after every answer that needs no send.
     fn from_verified(
         found: &FoundDocument,
         account: &Account,
@@ -89,7 +90,16 @@ impl StornoIntent {
             e_invoice: intent.e_invoice,
             fulfillment_date: intent.fulfillment_date,
         }))
-        .map_err(|error| Fault::invalid_input(error.to_string()))?;
+        .map_err(|error| match error {
+            szamlazz_agent::RequestError::InvalidDateYear {
+                field: "fulfillment_date",
+                ..
+            } => Fault::unavailable(format!(
+                "szamlazz.hu returned invoice {} with an unusable fulfillment date (telj), which the storno must repeat; nothing was sent; query the invoice and reconcile any earlier write before deliberately renewing the operation",
+                intent.number
+            )),
+            error => Fault::invalid_input(error.to_string()),
+        })?;
         Ok(intent)
     }
 }
@@ -1110,6 +1120,72 @@ mod tests {
         assert_eq!(body["order"], "ORD-1");
         assert_eq!(body["kind"], "invoice");
         assert_eq!(body["external_id"], "acct:ORD-1:storno:SZ-1");
+    }
+
+    #[test]
+    fn the_storno_intent_attributes_unusable_dates_to_the_verified_document() {
+        let account = Account::new("acct", "acct");
+        for year in [0, -1] {
+            let date = jiff::civil::date(year, 1, 1);
+            let found = Doc {
+                fulfillment_date: Some(date),
+                alap_extra: "<private>PRIVATE-VENDOR-CONTENT</private>",
+                ..Doc::default()
+            }
+            .parse();
+            assert_eq!(found.fulfillment_date, Some(date), "read from vendor XML");
+            let fault = StornoIntent::from_verified(
+                &found,
+                &account,
+                "SZ-1".to_owned(),
+                ExternalId::new("acct:ORD-1:storno:SZ-1"),
+                Some("PRIVATE-CALLER-COMMENT".to_owned()),
+            )
+            .expect_err("the original's date cannot be sent");
+            let (status, body) = fault_body(fault);
+            assert_eq!(status, 503);
+            assert_eq!(body["code"], "unavailable");
+            let message = body["message"].as_str().expect("message");
+            assert!(message.contains("invoice SZ-1"), "{message}");
+            assert!(message.contains("fulfillment date (telj)"), "{message}");
+            assert!(message.contains("nothing was sent"), "{message}");
+            assert!(!body.to_string().contains("PRIVATE-"));
+        }
+        for year in [1, 9999] {
+            let date = jiff::civil::date(year, 1, 1);
+            let intent = StornoIntent::from_verified(
+                &Doc {
+                    fulfillment_date: Some(date),
+                    ..Doc::default()
+                }
+                .parse(),
+                &account,
+                "SZ-1".to_owned(),
+                ExternalId::new("acct:ORD-1:storno:SZ-1"),
+                None,
+            )
+            .expect("supported boundary year");
+            assert_eq!(intent.fulfillment_date, date);
+        }
+    }
+
+    #[test]
+    fn the_storno_intent_keeps_invalid_caller_comments_as_invalid_input() {
+        for forbidden in ['\0', '\u{fffe}', '\u{ffff}'] {
+            let fault = StornoIntent::from_verified(
+                &Doc::default().parse(),
+                &Account::new("acct", "acct"),
+                "SZ-1".to_owned(),
+                ExternalId::new("acct:ORD-1:storno:SZ-1"),
+                Some(format!("PRIVATE-CALLER-COMMENT{forbidden}")),
+            )
+            .expect_err("caller text cannot be sent");
+            let (status, body) = fault_body(fault);
+            assert_eq!(status, 400);
+            assert_eq!(body["code"], "invalid_input");
+            assert!(body["message"].as_str().expect("message").contains("XML"));
+            assert!(!body.to_string().contains("PRIVATE-"));
+        }
     }
 
     /// The storno's `eszamla` is the verified original's appearance, and the

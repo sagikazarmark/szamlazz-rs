@@ -15,7 +15,7 @@ default = []
 ## axum extractor for PaymentNotification.
 axum = ["dep:axum", "dep:http"]
 ## serde implementations on the notification types.
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -24,6 +24,7 @@ http = { workspace = true, optional = true }
 jiff = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "raw_value"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

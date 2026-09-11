@@ -649,10 +649,12 @@ impl schemars::JsonSchema for InvoiceNumber {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "An invoice number (számlaszám) as the caller names it: XML 1.0 text, 1–40 bytes, no whitespace, no control character, no ':'.",
+            "description": "An invoice number (számlaszám) as the caller names it: XML 1.0 text, no whitespace, no control character, no ':'. JSON Schema length limits count Unicode characters; runtime additionally enforces a maximum of 40 UTF-8 bytes. Non-ASCII numbers are accepted within that byte limit.",
             "minLength": 1,
             "maxLength": InvoiceNumber::MAX_LEN,
-            "pattern": "^[^\\s\\x00-\\x1F\\x7F\\uFFFE\\uFFFF:]+$",
+            "not": {
+                "pattern": "[\\u0000-\\u0020\\u007F-\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFFFE\\uFFFF:]",
+            },
         })
     }
 }
@@ -1383,10 +1385,11 @@ mod tests {
         assert_eq!(json["pattern"], "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$");
     }
 
-    /// The schema carries the bound the type enforces: the length as
-    /// `maxLength`, and a pattern that refuses whitespace, ASCII control
-    /// characters, XML-forbidden U+FFFE/U+FFFF and the separator, in the ECMA-262 subset JSON Schema
-    /// guarantees, so no `\p{…}` class.
+    /// The schema's character bound is supplemented by the runtime byte bound.
+    /// Explicit ranges keep whitespace/control matching independent of a regex
+    /// engine's `\s` semantics, using the ECMA-262 subset JSON Schema supports.
+    /// An unanchored forbidden-character pattern under `not` also avoids `$`
+    /// accepting a final line terminator in ECMA-262.
     #[cfg(feature = "schemars")]
     #[test]
     fn invoice_number_schema_carries_the_bound() {
@@ -1394,7 +1397,34 @@ mod tests {
         let json = serde_json::to_value(&schema).expect("serialize");
         assert_eq!(json["maxLength"], InvoiceNumber::MAX_LEN);
         assert_eq!(json["minLength"], 1);
-        assert_eq!(json["pattern"], "^[^\\s\\x00-\\x1F\\x7F\\uFFFE\\uFFFF:]+$");
+        let description = json["description"].as_str().expect("description");
+        assert!(description.contains("Unicode characters"));
+        assert!(description.contains("runtime additionally enforces a maximum of 40 UTF-8 bytes"));
+        let forbidden = regex::Regex::new(json["not"]["pattern"].as_str().expect("pattern"))
+            .expect("portable schema pattern");
+        for code in 0..=0xffff {
+            let Some(character) = char::from_u32(code) else {
+                continue;
+            };
+            let number = format!("SZ{character}1");
+            assert_eq!(
+                !forbidden.is_match(&number),
+                number.parse::<InvoiceNumber>().is_ok(),
+                "schema/runtime character rules for U+{code:04X}"
+            );
+        }
+        for number in ["É-2026-1", "🧾-1", &"é".repeat(20)] {
+            assert!(!forbidden.is_match(number), "{number}");
+            assert!(number.parse::<InvoiceNumber>().is_ok(), "{number}");
+        }
+        let over_byte_limit = "é".repeat(21);
+        assert!(!forbidden.is_match(&over_byte_limit));
+        assert!(over_byte_limit.chars().count() <= InvoiceNumber::MAX_LEN);
+        assert_eq!(
+            over_byte_limit.parse::<InvoiceNumber>(),
+            Err(InvalidInvoiceNumber::TooLong(42)),
+            "the documented runtime restriction is stricter than maxLength"
+        );
     }
 
     /// Every issued kind names the `tipus` its documents carry, and reads

@@ -135,7 +135,7 @@ pub struct StornoInvoice {
 }
 
 /// A storno acknowledgement, distinct from proof that the original was reversed.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "state", content = "response", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StornoResponse {
@@ -144,6 +144,14 @@ pub enum StornoResponse {
     /// A success without a reported number. Reconcile the original; no new
     /// document identity or permission to resend is implied.
     Unnumbered(InvoiceAcknowledgement),
+}
+
+mod de;
+
+impl<'de> serde::Deserialize<'de> for StornoResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        de::response(de)
+    }
 }
 
 impl StornoResponse {

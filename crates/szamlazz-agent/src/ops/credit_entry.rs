@@ -28,6 +28,7 @@ pub struct CreditEntry {
     pub title: PaymentMethod,
     /// Amount credited (`osszeg`).
     #[doc(alias = "összeg")]
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub amount: Decimal,
     /// Free-text description (`leiras`).
     pub description: Option<String>,
@@ -258,11 +259,14 @@ pub struct InvoiceBalance {
     /// erase the acknowledgement; the request's target is not a vendor echo.
     pub invoice_number: Option<InvoiceNumber>,
     /// Net total of the invoice (`szamlanetto` / `szlahu_nettovegosszeg`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub net_total: Option<Decimal>,
     /// Gross total of the invoice (`szamlabrutto` / `szlahu_bruttovegosszeg`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlevoseg` / `szlahu_kintlevoseg`).
     #[doc(alias = "kintlévőség")]
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub outstanding: Option<Decimal>,
     /// Payment method of the invoice (`szlahu_fizetesmod`).
     pub payment_method: Option<PaymentMethod>,

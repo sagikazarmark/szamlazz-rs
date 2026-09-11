@@ -8,9 +8,11 @@ use crate::{IpnParseError, PaymentNotification};
 /// Rejection returned when a request is not a valid IPN message.
 ///
 /// Responds with `400 Bad Request` (or forwards the body-extraction status,
-/// e.g. `413`). szamlazz.hu will retry the delivery, so a malformed message
-/// shows up in your logs up to 10 times, which is the desired signal for a
-/// misconfigured integration. Implements [`Error`](std::error::Error), and
+/// e.g. `413`). Only malformed form encoding or missing document identity is
+/// refused by the parser; unreadable or missing content is accepted. szamlazz.hu
+/// retries non-200 answers up to 10 times and then discards the notification.
+/// This extractor does not log or durably accept it on the application's behalf.
+/// Implements [`Error`](std::error::Error), and
 /// [`IpnRejection::parse_error`] exposes the underlying [`IpnParseError`] when
 /// the body parsed as bytes but not as an IPN message.
 #[derive(Debug)]
@@ -110,6 +112,48 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn accepts_unknown_content_with_raw_text_intact() {
+        let app = Router::new().route(
+            "/ipn",
+            post(async |ipn: PaymentNotification| {
+                assert_eq!(ipn.document_number, "E-2026-123");
+                assert_eq!(ipn.gross_total, None);
+                assert_eq!(ipn.paid_gross, None);
+                assert_eq!(ipn.payment_method, None);
+                assert_eq!(ipn.payment_date, None);
+                assert_eq!(ipn.raw_gross_total.as_deref(), Some(""));
+                assert_eq!(ipn.raw_paid_gross.as_deref(), Some("bad"));
+                assert_eq!(ipn.raw_payment_method, None);
+                assert_eq!(ipn.raw_payment_date.as_deref(), Some("2026-07-04T12:30:00"));
+                assert_eq!(ipn.is_fully_paid(), None);
+                StatusCode::OK
+            }),
+        );
+        let request = Request::post("/ipn")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(
+                "szlahu_szamlaszam=E-2026-123&szlahu_bruttovegosszeg=&\
+                 szlahu_kifizetettbrutto=bad&szlahu_kifizdat=2026-07-04T12%3A30%3A00",
+            ))
+            .expect("request");
+        assert_eq!(
+            app.oneshot(request).await.expect("response").status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_identity_without_content() {
+        let request = Request::post("/ipn")
+            .body(axum::body::Body::from("szlahu_szamlaszam=E-2026-123"))
+            .expect("request");
+        assert_eq!(
+            app().oneshot(request).await.expect("response").status(),
+            StatusCode::OK
+        );
+    }
+
     #[test]
     fn rejection_exposes_parse_error_and_source() {
         let error = PaymentNotification::from_form_bytes(b"nonsense=1").expect_err("error");
@@ -126,11 +170,18 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_notification() {
-        let request = Request::post("/ipn")
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(axum::body::Body::from("nonsense=1"))
-            .expect("request");
-        let response = app().oneshot(request).await.expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        for body in [
+            "nonsense=1",
+            "szlahu_szamlaszam=+",
+            "szlahu_szamlaszam=E-2026-123&future=%GG",
+            "szlahu_szamlaszam=E-2026-123&future=%FF",
+        ] {
+            let request = Request::post("/ipn")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(body))
+                .expect("request");
+            let response = app().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
     }
 }

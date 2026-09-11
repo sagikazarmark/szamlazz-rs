@@ -72,6 +72,7 @@ pub struct ReceiptPayment {
     #[doc(alias = "fizetőeszköz")]
     pub method: String,
     /// Amount paid with this tender (`osszeg`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub amount: Decimal,
     /// Free-text description of the tender (`leiras`).
     pub description: Option<String>,
@@ -572,6 +573,7 @@ pub struct Receipt {
     /// Quoting bank for foreign-currency receipts (`devizabank`).
     pub exchange_bank: Option<String>,
     /// Exchange rate for foreign-currency receipts (`devizaarf`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub exchange_rate: Option<Decimal>,
     /// Free-text comment (`megjegyzes`).
     pub comment: Option<String>,
@@ -615,10 +617,12 @@ pub struct ReceiptItem {
     /// Item identifier (`azonosito`).
     pub id: Option<String>,
     /// Quantity (`mennyiseg`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub quantity: Decimal,
     /// Unit of measure (`mennyisegiEgyseg`), e.g. `db`.
     pub unit: String,
     /// Net unit price (`nettoEgysegar`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub unit_price: Decimal,
     /// VAT category code (`afatipus`), set when a special code (AAM, EUT, …)
     /// applies.
@@ -628,10 +632,13 @@ pub struct ReceiptItem {
     #[doc(alias = "áfakulcs")]
     pub vat_rate_code: String,
     /// Net value (`netto`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub net_value: Decimal,
     /// VAT value (`afa`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub vat_value: Decimal,
     /// Gross value (`brutto`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub gross_value: Decimal,
     /// General-ledger metadata (`fokonyv`).
     pub ledger: Option<ReceiptItemLedger>,

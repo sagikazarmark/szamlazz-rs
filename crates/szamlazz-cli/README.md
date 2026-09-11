@@ -40,6 +40,12 @@ attachments. The error names the ignored field's path. Wrong types, missing
 required fields and trailing JSON are also rejected. Optional fields may be
 omitted; open wire tokens such as payment methods and VAT codes remain accepted.
 
+Invoice `header.paid` is tri-state: omitted or `null` leaves `fizetve` out of
+the request (the former default), `true` sends an explicit paid instruction,
+and `false` sends an explicit unpaid instruction. An old JSON file containing
+`"paid": false` now explicitly sends false; omit it to retain the former
+omission behavior. The invoice example does so.
+
 ## Document results and PDF output
 
 `invoice storno` first queries the original and derives its paper/electronic appearance and fulfillment date.
@@ -68,7 +74,10 @@ The `remote` value above is abbreviated: invoice creation returns either
 `{"issued": {...}}` or `{"preview": {...}}` (a preview issues nothing).
 Receipt commands return the receipt, including its number and type. Invoice
 storno returns `{outcome, message, original_number, document}`, with the returned
-document and one of these outcomes:
+document and one of these outcomes. An unnumbered acknowledgement instead has
+`document: null` and an `acknowledgement` object preserving the reported optional
+metadata and PDF; it is `unconfirmed`, exits nonzero, and requires reconciliation
+of the original before another write.
 
 - `reversed`: a different number and a non-positive gross total confirm a
   reversal. A repeated storno returns the existing reversal and the same outcome;
@@ -76,9 +85,15 @@ document and one of these outcomes:
   also qualify.
 - `noop`: the reply echoes the requested number; nothing was reversed (as happens
   for a proforma or delivery note). Exits nonzero.
-- `unconfirmed`: a different number with a missing or positive gross total does
-  not confirm a reversal. Exits nonzero; inspect the returned document before
-  retrying.
+- `unconfirmed`: an unnumbered acknowledgement, or a different number with a
+  missing or positive gross total, does not confirm a reversal. Exits nonzero;
+  reconcile the original and any returned document before another write.
+
+Credit-entry registration and PDF download can also succeed without a reported
+invoice number. Their JSON preserves that absence as `null`; human registration
+output prints only a reported number when present. A missing
+number is not filled with the request's target. Registration totals, balance and
+payment method are optional reported facts too.
 
 `pdf_output.status` is `not_requested`, `written`, `missing`, or `failed`.
 `written`, `missing`, and `failed` include `target`; `failed` also includes the

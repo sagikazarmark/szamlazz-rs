@@ -951,6 +951,7 @@ pub struct ExchangeRate {
     pub bank: String,
     /// The rate (`arfolyam` / `devizaarf`). May be omitted only for automatic
     /// current-rate MNB lookup.
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub rate: Option<Decimal>,
 }
 
@@ -1078,10 +1079,13 @@ pub struct VatTotal {
     #[doc(alias = "áfakulcs")]
     pub vat_rate_code: String,
     /// Net subtotal (`netto`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub net: Decimal,
     /// VAT subtotal (`afa`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub vat: Decimal,
     /// Gross subtotal (`brutto`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub gross: Decimal,
 }
 
@@ -1100,10 +1104,13 @@ impl VatTotal {
 #[non_exhaustive]
 pub struct GrandTotal {
     /// Net total (`netto`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub net: Decimal,
     /// VAT total (`afa`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub vat: Decimal,
     /// Gross total (`brutto`).
+    #[serde(deserialize_with = "crate::number::de::required")]
     pub gross: Decimal,
 }
 

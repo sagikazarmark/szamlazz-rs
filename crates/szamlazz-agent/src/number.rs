@@ -1,6 +1,8 @@
 //! Exact conversion of finite wire numbers, independent of their spelling.
 use rust_decimal::Decimal;
 
+pub(crate) mod de;
+
 /// Checked Decimal operations may round on success. Work with integer
 /// coefficients instead, refusing any intermediate that cannot fit exactly.
 pub(crate) fn exact_mul(left: Decimal, right: Decimal) -> Option<Decimal> {

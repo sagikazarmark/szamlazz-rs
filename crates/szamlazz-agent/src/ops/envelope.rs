@@ -37,11 +37,14 @@ pub struct CreatedInvoice {
     /// when the header is absent or not a number.
     pub document_id: Option<i64>,
     /// Net total (`szamlanetto`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlevoseg`).
     #[doc(alias = "kintlévőség")]
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account/payment URL (`vevoifiokurl`).
     #[doc(alias = "vevoifiokurl")]
@@ -98,10 +101,13 @@ pub struct InvoiceAcknowledgement {
     /// Auxiliary document id from the header, if supplied.
     pub document_id: Option<i64>,
     /// Reported net total.
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub net_total: Option<Decimal>,
     /// Reported gross total.
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub gross_total: Option<Decimal>,
     /// Reported outstanding amount.
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account URL.
     pub customer_account_url: Option<String>,

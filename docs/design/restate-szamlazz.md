@@ -1,12 +1,12 @@
 # restate-szamlazz, design and implementation spec
 
-Status: accepted for implementation. Supersedes v1 (the ledger design; see ADR 0005 for why). Decisions are recorded
-as ADRs 0001–0009, the verified szamlazz.hu behaviour it relies on in [`szamlazz-hu-behaviour.md`](../szamlazz-hu-behaviour.md).
+Status: implemented. Supersedes v1 (the ledger design; see ADR 0005 for why). Decisions are recorded
+in [the ADRs](../adr/), the verified szamlazz.hu behaviour it relies on in [`szamlazz-hu-behaviour.md`](../szamlazz-hu-behaviour.md).
 Since #20 one deployment serves any number of szamlazz.hu accounts, selected per request by the Restate scope
 ([ADR 0006](../adr/0006-account-selection-via-restate-scopes.md)).
 
-**Current write protocol:** [Protected Order writes](order-write-protocol.md) supersedes the older
-query-and-retry Order write descriptions in §§5–6 and the former state-free assumption. Order keeps only
+**Current write protocol:** [Protected Order writes](order-write-protocol.md) specifies command ordering,
+send permission and recovery evidence for the paths in §§5–6. Order keeps only
 the versioned unresolved-write marker. Its writes consume one permission and reconcile read-only under the
 handler invocation policy, pausing on exhaustion; `[issue]` now governs unmanaged Agent storno only.
 [ADR 0013](../adr/0013-audited-positive-write-settlement.md) adds audited positive settlement. The
@@ -50,6 +50,13 @@ deployment-level settings (the namespace of the external ids; the issue, read an
 prologue (§4) resolves its account; its first executing operation opens an execution-local gateway. No Restate service calls another; no
 `Order` handler calls a handler on its own key.
 
+Direct Gateway creation uses `create_once(request, CreatePermission::grant())`, replacing `create`.
+The non-`Clone`, non-serializable permission is consumed even when the leading query avoids sending;
+it does not provide durable protection itself. Direct consumers own exclusive admission, durable uncertainty
+retention and read-only settlement across interruption. A new grant requires independently settling any
+earlier unresolved request and a fresh business decision; never construct one in an automatic write
+retry/replay closure. See the [public Gateway contract](../../crates/restate-szamlazz/README.md#gateway-and-services).
+
 ## 3. Principle: szamlazz.hu is the source of truth (ADR 0005)
 
 `Szamlazz.Order` keeps only **unresolved-write uncertainty**, never a ledger of documents. The Virtual Object supplies its per-key lock: at most one exclusive handler
@@ -78,8 +85,10 @@ through deterministic external ids:
   - storno: `"{namespace}:{order}:storno:{original_number}"`
   - Bounded at **110 bytes** (`ExternalId::MAX_LEN`, the length verified accepted and queryable) by bounding the
     parts: namespace 16, order key 40, correction id 40, the caller's invoice number 40 (`contract::InvoiceNumber`:
-    no whitespace, no control character, no `:`), so the longest shape, the corrective, is 109; proven at compile
+    XML 1.0 text with no whitespace, no C0/C1 control character, no `:`), so the longest shape, the corrective, is 109; proven at compile
     time in `identity.rs` (#64).
+    `InvoiceNumber` discovery excludes those characters and U+FFFE/U+FFFF, but the schema's length counts
+    characters; the 40 UTF-8 byte limit is an additional runtime rule for multibyte values.
   - Ext ids are not unique server-side; a query returns the **newest** holder (verified). That is exactly the
     question we ask ("what is the newest document of this kind we issued for this order?"), and it is why a reissue
     after a storno needs no generation counter: the new document becomes the newest holder, the old one stays
@@ -118,10 +127,10 @@ through deterministic external ids:
 | `delete_proforma` | exclusive | `DeleteProformaRequest { expected_number, force }` → `DeleteProformaResponse` |
 | `get` | shared | `()` → `OrderStatus` (non-atomic external observation) |
 
-Attributes on every handler that calls szamlazz.hu (ADR 0004):
+Default attributes on the exclusive Order mutation handlers (ADR 0004):
 
 ```
-invocation_retry_policy(initial_interval = "2m", factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "kill")
+invocation_retry_policy(initial_interval = "2m", factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "pause")
 inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   idempotency_retention = "30d"
 ```
 
@@ -158,7 +167,8 @@ execution. Progress between steps matters to inactivity timeout; the read policy
 After decoding its body (`service::Body<T>`: a malformed one is `TerminalError{invalid_input}` here, before anything
 is journaled; §7) and parsing its key, every handler pins the namespace and resolves its account before its operation; the handler body
 then runs on the resulting *execution* (the journaled account, lazy gateway and deployment settings with the
-pinned namespace), and nothing of it (gateway, client, credentials) outlives the execution. No Virtual Object state.
+pinned namespace), and nothing of it (gateway, client, credentials) outlives the execution. The prologue
+does not store these in Virtual Object state; Order state holds only unresolved-write uncertainty.
 
 1. **Pin**: `ctx.run("namespace", || namespace)`, a pure durable step: an in-place redeploy with a changed namespace
    cannot make a running invocation issue under a new id.
@@ -268,11 +278,12 @@ order guard. This precedes the already-reversed check just as `managed_by_order`
 
 ### Durable step names
 
-Every `ctx.run` of both services, per handler path, in the order the handler journals them. **The authority is the
+**The authority for every `ctx.run` path is the
 step-name table**: `RUN_NAMES` in the e2e harness (`tests/e2e/harness/run_names.rs`), verified against a live
-`sys_journal` whenever the suite runs (§11; CI, on every pull request), and this table follows it: a step added,
-renamed or reordered in the code fails the check first, and the table is then brought to match, never the other way
-round. Under immutable deployments (ADR 0009) the table is a regression signal for exceptional replay: a
+`sys_journal` whenever the suite runs (§11; CI, on every pull request). The outline below shows the domain
+operations; Order mutations additionally journal `prepare-write`, `arm-write`, and on uncertainty
+`reconcile-write`, as specified in [the protected command protocol](order-write-protocol.md).
+Under immutable deployments (ADR 0009) the executable table is a regression signal for exceptional replay: a
 deployment-changing resume or retained-prefix restart. Allowed path patterns do not prove that an old invocation
 takes the same branch; review its actual prefix, branch logic, exact commands, serialization and inputs (§10).
 The names are what the Restate UI shows, what a `sys_invocation.last_failure_related_command_name` names, and
@@ -281,6 +292,8 @@ what an `unavailable` fault's message means by "the step". `{kind}` is the docum
 invoice number, the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
 (`delete_proforma` requires the expected number); `{prefix}` the eight-digit taxpayer prefix. A handler with two shapes has two
 rows; a handler that answers early (a conflict, a refusal, `unknown_account`) journals a prefix of its row.
+Operator `observe_unresolved` journals `authorize-recovery`; `recover` adds `verify-recovery` for document
+evidence and `record-recovery` before clearance. Marker reads/set/clear are state commands, not run names.
 
 | Service | Handler | Path |
 |---|---|---|
@@ -333,7 +346,7 @@ through the gateway opened for this execution.
    Compute line totals with `LineItem::try_calculated` rounded to the currency's minor unit
    (`Rounding::minor_unit`: whole forints for HUF, cents for EUR); a value that overflows is `invalid_input`. Build
    `CreateInvoice` from input + the account's
-   defaults and seller block (read through the gateway) + per-call overrides,
+   defaults and seller block (read from the journaled Account) + per-call overrides,
    `external_id = "{namespace}:{order}:invoice"`, `download_pdf = false`.
 
    **Target ownership first.** After validation and the prologue, before any prerequisite,
@@ -422,7 +435,10 @@ through the gateway opened for this execution.
       base is a collision before sending. **The rule (ADR 0003, #36): the step sends only when the
       external id holds nothing for ordinary creation, or exactly the expected document the lookup step saw
       reversed for reissue (ADR 0012, #206).**
-   - `CreateInvoice` → success with a number → `Issued(r)`; an API rejection → `Rejected{code, message}`; 3/135/136/164
+   - `CreateInvoice` → success with a number distinct from any expected old reissue target → `Issued(r)`;
+     a reply naming that old target → `Unconfirmed`, journaled as unresolved data with the marker retained.
+     Read-only reconciliation must establish the replacement, excluding the old number; no second send.
+     An API rejection → `Rejected{code, message}`; 3/135/136/164
      → `CredentialsRejected{code, message}`: settled data, **not** `Unconfirmed`: re-executing with the same key would
      only repeat the answer, so the run policy is not spent on it.
    - Transport failure, an open code (1, 55, 56 without a number, a code the agent crate does not know,
@@ -506,8 +522,8 @@ Kill, timeout and absence never authorize renewal.
 
 ## 6. Storno protocol (`Szamlazz.Order.storno_invoice`)
 
-Storno is natively idempotent on the server (a repeat echoes the existing storno, verified) and an external id on
-the storno request attaches to the storno document (verified). It has the shape of issuing (§5): a read-only lookup
+Repeat storno has been observed to return the existing reversal. An external id on a new storno request
+attaches to that document; a repeat does not attach a new external id. Protected Order storno has the shape of issuing (§5): a read-only lookup
 step and one protected write with read-only reconciliation, on the account the prologue
 resolved for this invocation; a storno request under the wrong scope finds nothing under the number (what szamlazz.hu
 answers when one account names another's invoice number is unverified, behaviour notes).
@@ -519,12 +535,14 @@ answers when one account names another's invoice number is unverified, behaviour
    number, after a `warn` naming the step, rather than failing a handler whose answer is already known; a
    **cancellation** of the hint is never swallowed; a structured `cancelled` (409) propagates, so a cancelled invocation does not
    complete as `reversed` (J13, #65; `support::best_effort`)); `tipus ∉ {SZ, ES, VS, HS}` →
-   `rejected{not_stornoable}`. **Then, last**, a document without a `telj` → `TerminalError{unavailable,
+   `rejected{not_stornoable}`. **Then, last**, a document without a usable `telj` → `TerminalError{unavailable,
    json{order, kind, external_id}}` naming the invoice (ADR 0007): the storno must repeat that date and no default
    can be right (szamlazz.hu's query schema has `telj` mandatory, so an absent one is szamlazz.hu breaking its
    schema, the same class as an `Api` answer a read cannot conclude from), and nothing is sent. It comes after every
    answer above so that a `telj`-less document that is already reversed, not managed or not stornoable still gets
-   that answer.
+   that answer. An original date whose year cannot be sent is likewise `unavailable`, before marker
+   preparation or a send. XML-forbidden caller comment text remains `invalid_input`; the caller owns the
+   comment, not the verified date.
 2. **Lookup**: one read-only durable step under the read policy, `ctx.run("lookup-storno-{number}", ||
    gateway.lookup_order_storno(external_id, order, number))` with `external_id = "{namespace}:{order}:storno:{number}"`:
    query by the storno ext id → a distinct `SS` with matching order and `hivszamlaszam == number`, plus a fresh
@@ -548,9 +566,12 @@ answers when one account names another's invoice number is unverified, behaviour
    original's `telj`, which NAV requires the storno to repeat (ADR 0007; szamlazz.hu defaults to it when the element
    is omitted and accepts any date silently when it is not, verified, so the explicit date is what fails loudly),
    **without `keltDatum`** (352 otherwise; verified);
-   (c) read the numbered reply as three-way evidence (#196): `invoice_number ≠ requested ∧ gross ≤ 0` →
+   (c) an unnumbered acknowledgement retains uncertainty and goes to marker-based read-only reconciliation.
+   Read a numbered reply as three-way evidence (#196; ADR 0007's 2026-09-11 amendment): `invoice_number ≠ requested ∧ gross ≤ 0` →
    `Reversed` (`CreatedInvoice::reverses`, a reply-only heuristic; zero is an intentional comparison policy,
-   tested synthetically, not live zero-original acceptance); echo of the requested number → `NotStornoable`;
+   tested synthetically, not live zero-original acceptance); echo of the verified original's number →
+   `Unconfirmed`, retaining the marker and entering read-only reconciliation, since neither reversal nor
+   non-execution is established;
    changed number with absent/positive gross → query that number **inside this same step**. The queried number
    must match and the full two-document rule must establish the distinct storno's type, original reference
    and order, plus the freshly queried stornoable, reversed original's number and order → `Reversed` carrying
@@ -558,7 +579,8 @@ answers when one account names another's invoice number is unverified, behaviour
    failure → journal uncertainty with the candidate number. Retained reconciliation checks the candidate,
    then the storno external id or order hint, using the same two-document evidence rule. A post-send credential/unavailable answer does not
    prove that the send was refused. Positive-original negative stornos and same-number proforma/delivery-note
-   echoes are the live evidence; negative-original, zero-original and missing-gross compound cases remain
+   echoes are the live evidence; the latter do not establish a no-op rule for a verified stornoable invoice.
+   Negative-original, zero-original and missing-gross compound cases remain
    unverified on the server. API errors of the send → `Rejected{code, message}` with the raw szamlazz.hu code (`14` = storno of a storno,
    `221` = has a corrective; typed in `szamlazz_agent::ErrorCode`, surfaced as the code string); 3/135/136/164 →
     `CredentialsRejected{code, message}`; a transport failure, an open code (1, 55, 56, a code the agent crate
@@ -566,8 +588,8 @@ answers when one account names another's invoice number is unverified, behaviour
    Inconclusive reconciliation spends the mutation invocation policy and pauses on exhaustion; cancellation
    returns `outcome_unknown` with `cause: cancelled`. The marker remains until journaled settlement or
    authorized recovery. A replay cannot begin another send at (b).
-4. **Branch on data.** `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`; `NotStornoable` →
-   `rejected{not_stornoable}`; `Rejected` → `outcome: rejected{code, message}`; `Api{code, message}` →
+4. **Branch on data.** `Reversed | AlreadyReversed` → `outcome: reversed{storno_number}`;
+   `Rejected` → `outcome: rejected{code, message}`; `Api{code, message}` →
    `TerminalError{unavailable, szamlazz_code}` and `Unavailable{message}` → `TerminalError{unavailable}` (the leading
    query's answers, nothing sent; #63); `CredentialsRejected` →
    `TerminalError{credentials_rejected}` (the request that drew the code was not acted on; the outcome is not known).
@@ -586,14 +608,15 @@ account.
 storno idempotence, with `"{namespace}:by-number:{number}:storno"` after its
 own verify (§4): an order-bearing document is answered `managed_by_order` when its order number is a supported
 key, otherwise `unsupported_order_number`, with nothing sent. An unmanaged document builds the same storno intent from
-what it found, so its storno carries the original's `telj` too and a `telj`-less original is the same `unavailable`,
+what it found, so its storno carries the original's `telj` too and a missing or unusable original date is the same `unavailable`,
 without an order identity. **It checks no document type before sending** (J9: deliberate, stated in the code beside
 the intent: "the echo tells"): `Szamlazz.Order.storno_invoice` refuses `tipus ∉ {SZ, ES, VS, HS}` up front because it
-knows what the order issued, while an unmanaged document is whatever the caller named, and szamlazz.hu's echo of the
-requested number on a proforma or delivery note is the verified, success-shaped answer that becomes
-`rejected{not_stornoable}` at no cost but one send that changes nothing. The one consequence: a `telj`-less proforma or
-delivery note reaching it is `unavailable` rather than `rejected{not_stornoable}`, accepted, twice theoretical (ADR
-0007).
+knows what the order issued. Unkeyed `Gateway::storno` deliberately retains `NotStornoable` for a same-number
+echo, surfaced as `rejected{not_stornoable}`, based on observed proforma/delivery-note no-ops. This is a distinct
+policy from the protected verified-invoice path, not a universal vendor guarantee. An unnumbered unmanaged
+acknowledgement instead takes immediate read-only reconciliation; inconclusive evidence becomes journaled
+`StornoOutcome::Unnumbered` and terminal `outcome_unknown`, rather than another mutation retry. A proforma or
+delivery note without a usable `telj` stops earlier as `unavailable` (ADR 0007).
 
 `delete_proforma({expected_number, force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed,
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
@@ -768,7 +791,7 @@ not answer a read through every execution the policy allows) naming the
 step and the last failure, about the document when the step knows one; a szamlazz.hu code a read cannot conclude
 from (`Api`) is the same fault without a retry, so is the same code, or `szlahu_down`, answered to a write step's
 *leading* query (§5 step 4, §6 step 3: settled data, nothing sent, never `Unconfirmed`, #63), and so is a verified
-storno original **without a `telj`** (§6 step 1,
+storno original **without a usable `telj`** (§6 step 1,
 ADR 0007: szamlazz.hu breaking its own schema on a date the storno must repeat; nothing is sent; the message names
 the invoice, and `Szamlazz.Order.storno_invoice` attaches the order, kind and storno external id). It also covers the
 prologue's exhausted resolve policy and operation-local initialization faults: Gateway build failure or the
@@ -835,7 +858,7 @@ rules below, which are also the rules for an embedder. The rules:
    `ingress` or absent.
 6. From a webhook handler: a client timeout of about 90 s (longer than szamlazz.hu's 60 s request timeout); on
    timeout, re-send with the **same** key or poll `get`, a create can legitimately take minutes while szamlazz.hu is
-   flaky (the read and issue policies, §9). Each new `get` observation needs a fresh invocation/key. For the original
+   flaky (ordinary reads and retained reconciliation, §9). Each new `get` observation needs a fresh invocation/key. For the original
    invocation's completion use attach/output with its returned id; this also retrieves a `/restate/send/…` result.
    `get` is not that completion result and absence does not rule out a later create. Always acknowledge
    the webhook and own the retry queue: a provider retries with the *same* notification id, which after a fault
@@ -1295,8 +1318,9 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   executions of a create step (the first loses its reply) → both executions carry the journaled bank account and
   only a new invocation sees the change; `beta`'s key rotated between two executions → the second carries the new
   key while the `account` entry read in flight and after completion is byte-identical; **last**, over the whole
-  run: the `state` table holding no row for `Szamlazz.Order` after the run's invocations on both deployments (the
-  object keeps no state); over every `sys_journal` row of every invocation the server holds (hex-decoded `raw`)
+  run: settled scenarios leave no unresolved-write marker; uncertainty scenarios retain the marker until
+  settlement or authorized recovery. Privacy checks cover marker state as well as every `sys_journal` row
+  of every invocation the server holds (hex-decoded `raw`)
   plus every `sys_invocation.completion_failure`, none of the three agent keys of the run, while the same scan
   finds the positive control's sentinel; and the **step-name table check**: for every invocation the server
   holds, the `ctx.run` names in journal order are a prefix of one of its handler's paths in the table `RUN_NAMES`
@@ -1367,11 +1391,16 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
 
 ## 12. What v2 gives up relative to v1 (deliberately)
 
+Historical transition from the document ledger; current recovery state and expected-document intent are
+specified by the protected protocol and ADR 0012.
+
 `request_id` retry identity (→ `Idempotency-Key`), `conflict{payload_mismatch}` (a different payload for a live
-document is `already_issued`), flag-free reissue after a service-side storno (→ `reissue: true` after any reversal),
+document is `already_issued`), flag-free reissue after a service-side storno (initially a boolean opt-in;
+now `reissue: {expected_number}` under ADR 0012),
 `recorded_document_missing` (a document szamlazz.hu no longer knows is simply absent; live accounts cannot delete
 invoices), `payments_before` capture on storno (query before stornoing), the ledger snapshot (`get` is 4 live
-queries), operator handlers `record_reversal`/`forget` (nothing to repair), the account fingerprint learned into
+queries), the old document-ledger operator handlers `record_reversal`/`forget`, the account fingerprint learned into
 state, and, since ADR 0006's account-pin amendment, any account pin at all (0.3's `mode` against `teszt` and
-optional `supplier_id` against the undocumented `szallito/id`: both dropped), schema versioning and state
-migrations.
+optional `supplier_id` against the undocumented `szallito/id`: both dropped), and document-ledger schema
+versioning and migrations. Current Order state is the versioned unresolved-write marker, with operator
+observation and evidence-based recovery; it is not a restored document ledger.

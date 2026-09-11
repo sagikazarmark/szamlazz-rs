@@ -41,12 +41,14 @@ pub struct InvoicePdf {
     /// is not substituted for an absent vendor echo.
     pub invoice_number: Option<InvoiceNumber>,
     /// Net total (`szamlanetto`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlevoseg`), body before header; absent is not zero.
     #[doc(alias = "kintlevoseg")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::number::de::optional")]
     pub outstanding: Option<Decimal>,
     /// Opaque buyer-facing URL (`vevoifiokurl`), body before the decoded header.
     #[doc(alias = "vevoifiokurl")]

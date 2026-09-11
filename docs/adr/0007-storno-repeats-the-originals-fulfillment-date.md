@@ -4,7 +4,7 @@ Status: accepted (#48).
 
 `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno` send `xmlszamlast` with `teljesitesDatum` equal
 to the `telj` of the invoice they are reversing (the value the verify step already holds) on every
-execution. `StornoRequest` carries no fulfillment date. A verified original without a `telj` is the
+permitted send. `StornoRequest` carries no fulfillment date. A verified original without a usable `telj` is the
 `unavailable` fault, raised after the ownership, reversed and not-stornoable answers, and nothing is sent.
 
 ## Context
@@ -26,7 +26,7 @@ pattern "storno `telj` == storno `kelt` ≠ original `telj`"; a third date passe
 Observed on the test account on 2026-09-06 (`docs/szamlazz-hu-behaviour.md`, storno semantics):
 
 1. With `teljesitesDatum` **omitted**, szamlazz.hu sets the storno's `telj` to the original's `telj`
-   (original `telj` in July, `kelt` today → storno `telj` in July). Today's worker is therefore compliant
+   (original `telj` in July, `kelt` today → storno `telj` in July). The worker at that time was therefore compliant
    by an undocumented server default.
 2. An explicit `teljesitesDatum` equal to the original's is accepted silently.
 3. An explicit date in **another calendar month**, and one **in the future**, are accepted silently, no
@@ -67,8 +67,8 @@ Send the original's `telj` explicitly, always, and do not let the caller choose 
   account instead. This is about the date: #196 adds a post-send **identity** query inside the storno step
   for a changed-number reply whose optional gross does not establish reversal by the reply heuristic.
 
-The date is a pure function of the journaled verify result, so every re-execution of the storno step
-rebuilds the same request and sends byte-identical bytes; nothing new is journaled.
+The date is a pure function of the journaled verify result, so rebuilding the intent preserves that date.
+Protected Order execution consumes one acknowledged send permission; subsequent execution reconciles read-only.
 
 ## Considered options
 
@@ -101,3 +101,31 @@ rebuilds the same request and sends byte-identical bytes; nothing new is journal
   storno a dated invoice on the target account, query the storno, assert its `telj` equals the original's.
 - The test fixtures' documents carry a `telj`, so every verify-based test exercises the happy path; the
   fault path is a fixture without one.
+
+## Amendment — acknowledgement evidence and unusable original dates (2026-09-11)
+
+The consolidated review distinguishes two deliberate storno policies:
+
+- **Protected Order:** after verifying a live, stornoable invoice of this order, a send reply that echoes
+  the original number establishes neither reversal nor non-execution. Treat it as `Unconfirmed`, retain
+  the unresolved-write marker and reconcile read-only. Positive document evidence must name a distinct
+  storno with the intended original reference and order, and verify the original as stornoable and reversed.
+- **Unkeyed Gateway / `Szamlazz.Agent.storno`:** retain the existing same-number echo classification
+  `NotStornoable` (the service's `rejected{not_stornoable}`), based on observed proforma/delivery-note
+  no-ops. This path does not perform Order's stornoable-type admission check. It retains its query-first
+  issue policy and has no Order marker.
+
+The observed no-ops do not establish a vendor guarantee that an echo after a verified stornoable-invoice
+send proves non-execution. Applying the unkeyed classification there would clear protected uncertainty
+without settlement. Conversely, this amendment does not invent broader vendor behavior or change the
+unkeyed echo policy. A changed number with non-positive gross remains the reply-only reversal heuristic;
+zero is an intentional comparison policy, not live evidence of zero-original acceptance. A changed number
+with missing/positive gross requires identity verification. An unnumbered acknowledgement remains
+uncertain: Order retains its marker, while inconclusive unkeyed reconciliation completes as
+`StornoOutcome::Unnumbered` and `outcome_unknown`, without a mutation retry for that acknowledgement.
+
+The date refusal also covers a verified `telj` whose year cannot be sent: `unavailable`, before marker
+preparation or sending, because the caller cannot repair the vendor fact by choosing another date.
+An XML-invalid caller comment remains `invalid_input`. The existing verdicts that need no send still
+precede date derivation. These are worker evidence and attribution rules, not new claims about vendor
+acceptance. [The protected protocol](../design/order-write-protocol.md) owns command ordering and recovery.
