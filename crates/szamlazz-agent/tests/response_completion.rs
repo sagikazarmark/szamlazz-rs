@@ -19,7 +19,7 @@ fn check(request: &impl AgentRequest, body: &str) {
             "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!--before--><?before ok?>{body} \t\r\n<!--after--><?after ok?>"
         ),
         format!(
-            "<?xml version = '1.0'\tencoding = 'UTF-8'\nstandalone = 'yes' ?><?árvíz?>{body}<?ns:ok a='b'?>"
+            "<?xml version = '1.0'\tencoding = 'UTF-8'\nstandalone = 'yes' ?><?árvíz?>{body}<?ns-ok a='b'?>"
         ),
     ] {
         assert!(
@@ -38,6 +38,8 @@ fn check(request: &impl AgentRequest, body: &str) {
         "<??>",
         "<? ?>",
         "<?1bad?>",
+        "<?ns:ok a='b'?>",
+        "<?:target?>",
         "<",
         "</wrong>",
         "<?xml version=\"1.0\"?>",
@@ -59,6 +61,7 @@ fn check(request: &impl AgentRequest, body: &str) {
         "<![CDATA[ ]]>",
         " <?xml version=\"1.0\"?>",
         "<?xml?>",
+        "<?ns:target?>",
         "<?xml version=\"1.0\"encoding=\"UTF-8\"?>",
         "<?xml version='1.0' encoding='UTF-8'standalone='yes'?>",
     ] {

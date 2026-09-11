@@ -55,6 +55,8 @@ pub enum Credentials {
     AgentKey(AgentKey),
     /// Authenticate with a szamlazz.hu user (legacy; needed for third-party
     /// invoicing setups). The user must have access to exactly one account.
+    /// The vendor also accepts the same agent key in both fields. `Debug`
+    /// therefore redacts both the username and password.
     #[doc(alias = "felhasználó")]
     UserPassword {
         /// The szamlazz.hu username (`felhasznalo`).
@@ -89,9 +91,9 @@ impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AgentKey(_) => f.write_str("Credentials::AgentKey(…)"),
-            Self::UserPassword { username, .. } => f
+            Self::UserPassword { .. } => f
                 .debug_struct("Credentials::UserPassword")
-                .field("username", username)
+                .field("username", &"…")
                 .field("password", &"…")
                 .finish(),
         }
@@ -109,8 +111,10 @@ mod tests {
         assert!(!debug.contains("secret"), "{debug}");
         let debug = format!("{:?}", Credentials::agent_key("secret"));
         assert!(!debug.contains("secret"), "{debug}");
-        let debug = format!("{:?}", Credentials::user_password("user", "hunter2"));
-        assert!(debug.contains("user"), "{debug}");
-        assert!(!debug.contains("hunter2"), "{debug}");
+        for (username, password) in [("login-name", "hunter2"), ("legacy-key", "legacy-key")] {
+            let debug = format!("{:?}", Credentials::user_password(username, password));
+            assert!(!debug.contains(username), "{debug}");
+            assert!(!debug.contains(password), "{debug}");
+        }
     }
 }

@@ -293,9 +293,9 @@ pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(
 /// On native targets the client keeps the `JSESSIONID` session cookie via
 /// reqwest's cookie store, skipping re-authentication (sessions expire after
 /// 90 minutes of inactivity), bounds each request to [`REQUEST_TIMEOUT`] so a stalled server
-/// cannot hang the call forever, and does not follow redirects: the endpoint
-/// never redirects, and following one would silently convert the multipart
-/// POST into a body-less GET. On wasm the browser/runtime owns cookies and
+/// cannot hang the call forever, and does not follow redirects: some redirect
+/// statuses convert POST to GET, while others can forward the credential-bearing
+/// body to a different target. On wasm the browser/runtime owns cookies and
 /// redirect handling.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -409,6 +409,15 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_agent_key_is_redacted_in_client_diagnostics() {
+        let key = "legacy-agent-key-secret";
+        let builder = Client::builder().credentials(Credentials::user_password(key, key));
+        assert!(!format!("{builder:?}").contains(key));
+        let client = builder.build().expect("client without sending");
+        assert!(!format!("{client:?}").contains(key));
+    }
 
     /// A malformed endpoint is refused when the client is built, not on
     /// every send as a transport error.

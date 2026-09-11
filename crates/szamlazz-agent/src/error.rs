@@ -1,9 +1,10 @@
 //! Error types.
 //!
-//! szamlazz.hu signals errors in-band (numeric codes plus Hungarian messages
-//! in `szlahu_*` response headers or the response XML), never via HTTP status
-//! codes. [`ErrorCode`] gives the documented codes typed names with English
-//! documentation; the Hungarian message is kept verbatim in [`ApiError`].
+//! szamlazz.hu reports domain errors in-band (numeric codes plus Hungarian
+//! messages in `szlahu_*` response headers or the response XML). HTTP failures
+//! remain possible and are handled separately. [`ErrorCode`] gives the
+//! documented codes typed names with English documentation; the Hungarian
+//! message is kept verbatim in [`ApiError`].
 //!
 //! Two questions are answered per error, and they are different questions:
 //! [`ErrorCode::is_retryable`] (can the same *query* succeed later), and
@@ -332,12 +333,13 @@ impl ErrorCode {
 
     /// Whether the code is about the agent credentials rather than the
     /// request: 3 (invalid credentials), 135 (a browser session is active),
-    /// 136 (login blocked) or 164 (multiple accounts). szamlazz.hu answers
-    /// these before it looks at the request (its documentation; unverified
-    /// on the test account), so the request that draws one was not acted on,
-    /// and the same request succeeds once the account is fixed. A subset of
-    /// [`OutcomeClass::Rejected`]: what an integration pages an operator on
-    /// rather than reports as a refusal of the document.
+    /// 136 (login blocked) or 164 (multiple accounts). Their documented meanings
+    /// are authentication/access refusals, which this crate interprets as a
+    /// subset of [`OutcomeClass::Rejected`] for this exchange. Exact server
+    /// processing order has not been established; a refusal does not settle an
+    /// earlier lost send. Fixing access permits another evaluation of the
+    /// request, not guaranteed success. An integration pages an operator on
+    /// these codes rather than reporting a refusal of the document.
     #[must_use]
     pub fn is_credential_error(&self) -> bool {
         matches!(

@@ -203,13 +203,10 @@ pub(crate) fn parse_reply(response: &RawResponse) -> Result<Reply, ResponseError
     }
 
     let notification_delivery_failed = header_error.is_some() || body_error.is_some();
-    // A payload failure cannot erase the verdict read above. Only after its
-    // refusal has been considered may numbered-56 metadata be read leniently.
-    let body = match payload_result {
-        Ok(body) => body,
-        Err(_) if notification_delivery_failed => Body::default(),
-        Err(error) => return Err(error.into()),
-    };
+    // A payload failure cannot erase the verdict read above. The envelope
+    // already salvages valid identity from malformed optional metadata under
+    // 56; a remaining identity failure must not become header-only success.
+    let body = payload_result?;
 
     let Some(invoice_number) = body.invoice_number(response) else {
         // 56 without a number: an error after all.

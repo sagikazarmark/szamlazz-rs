@@ -536,6 +536,55 @@ fn numbered_56_preserves_unique_body_identity_despite_bad_optional_structure() {
 }
 
 #[test]
+fn numbered_56_header_fallback_requires_absent_or_valid_body_identity() {
+    let request = StornoInvoice::new("I-1");
+    for header_code in [false, true] {
+        let mut headers = vec![("szlahu_szamlaszam", "I-4")];
+        if header_code {
+            headers.push(("szlahu_error_code", "56"));
+        }
+        for (identity, expected_number) in [
+            ("", Some("I-4")),
+            ("<szamlaszam>I-2</szamlaszam>", Some("I-2")),
+            (
+                "<szamlaszam xmlns='urn:foreign'>I-2</szamlaszam>",
+                Some("I-4"),
+            ),
+            (
+                "<szamlaszam>I-2</szamlaszam><szamlaszam>I-3</szamlaszam>",
+                None,
+            ),
+            (
+                "<szamlaszam>I-2</szamlaszam><szamlaszam>I-2</szamlaszam>",
+                None,
+            ),
+            ("<szamlaszam><bad/></szamlaszam>", None),
+        ] {
+            for metadata in ["", "<szamlabrutto><bad/></szamlabrutto>"] {
+                let raw = RawResponse::new(headers.clone(), format!(
+                    r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod>{identity}{metadata}</xmlszamlavalasz>"#
+                ).into_bytes()).with_status(200);
+                match expected_number {
+                    Some(number) => {
+                        let issued = request.parse(&raw).expect("usable identity");
+                        assert_eq!(issued.invoice_number.as_str(), number);
+                        assert!(issued.notification_delivery_failed);
+                        assert_eq!(issued.gross_total, None);
+                    }
+                    None => {
+                        let error = request
+                            .parse(&raw)
+                            .expect_err("invalid identity remains uncertain");
+                        assert_eq!(error.outcome_class(), szamlazz_agent::OutcomeClass::Unknown);
+                        assert!(matches!(error, ResponseError::Parse(_)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn numbered_56_retains_comma_metadata_and_drops_malformed_metadata() {
     let raw = RawResponse::new(
         [

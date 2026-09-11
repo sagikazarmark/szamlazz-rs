@@ -192,6 +192,51 @@ fn undeclared_prefixes_are_refused_even_in_unknown_subtrees() {
 }
 
 #[test]
+fn namespace_reserved_names_are_checked_even_in_ignored_extensions() {
+    let query = QueryInvoiceXml::new(InvoiceSelector::OrderNumber("O".into()));
+    let taxpayer = QueryTaxpayer::new("12345678").expect("prefix");
+    for (extension, valid) in [
+        ("<xmlns:extension/>", false),
+        ("<xmlns:extension></xmlns:extension>", false),
+        ("<extension><xmlns:child/></extension>", false),
+        ("<?p:target data?>", false),
+        ("<?é data?>", true),
+        ("<xml:extension/>", true),
+        (
+            r#"<xmlFuture:extension xmlns:xmlFuture="urn:future"/>"#,
+            true,
+        ),
+        (
+            r#"<xmlnsFuture:extension xmlns:xmlnsFuture="urn:future"/>"#,
+            true,
+        ),
+    ] {
+        let invoice = include_str!("synthetic/szamla_query.xml")
+            .replace("</szamla>", &format!("{extension}</szamla>"));
+        assert_eq!(query.parse(&raw(invoice)).is_ok(), valid, "{extension}");
+        for (namespace, result) in [
+            (
+                "http://schemas.nav.gov.hu/OSA/2.0/api",
+                "<result><funcCode>OK</funcCode></result>",
+            ),
+            (
+                "http://schemas.nav.gov.hu/OSA/3.0/api",
+                r#"<result xmlns="http://schemas.nav.gov.hu/NTCA/1.0/common"><funcCode>OK</funcCode></result>"#,
+            ),
+        ] {
+            let body = format!(
+                r#"<QueryTaxpayerResponse xmlns="{namespace}">{result}<taxpayerValidity>true</taxpayerValidity>{extension}</QueryTaxpayerResponse>"#
+            );
+            let parsed = taxpayer.parse(&raw(body));
+            assert_eq!(parsed.is_ok(), valid, "{namespace}: {extension}");
+            if let Ok(info) = parsed {
+                assert!(info.valid);
+            }
+        }
+    }
+}
+
+#[test]
 fn escaped_namespace_uris_have_the_same_identity() {
     let original = include_str!("synthetic/szamla_query.xml");
     let body = original.replace("http://www.szamlazz.hu/szamla", "http://www.szamlazz.hu/sz&#97;mla")

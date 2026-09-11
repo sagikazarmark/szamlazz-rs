@@ -154,6 +154,15 @@ The detailed A4d stalled-send observation found no issuance; a broader project a
 
 ## Receipts
 
+**NAV reporting setup (2026-09-11):** the [current vendor guidance](https://tudastar.szamlazz.hu/gyik/nyugtaadat-szolgaltatas-kotelezettseg)
+requires a NAV connection and the technical-user permission **“Hozzáférés a
+nyugtaadat-szolgáltatási interfészhez”** for automatic receipt reporting; see
+[connection guide, step 13](https://www.szamlazz.hu/nav-online-szamlazas-regisztracios-segedlet/#lepesek).
+The vendor describes reporting from September 10, retrospectively for receipts
+issued after September 1; the Agent settings page still carries older rollout
+wording. Follow the current setup instructions. Successful receipt issuance is
+not confirmation of NAV reporting: the receipt response exposes no reporting status.
+
 Persist a unique creation call id **before the first send** and keep it for the logical issuance. Error 338 prevents another receipt but does not return the original number or PDF. Query a known number or a deliberately managed order, then verify call id, order, number, document type and reversal data. Unresolved recovery does not justify a fresh call id.
 
 ```rust
@@ -234,7 +243,8 @@ a malformed nonblank XML amount fails rather than falling back to a header.
 A missing header is absent; a present blank header is malformed. Numbered code-56
 replies retain readable metadata and drop malformed optional metadata. A unique
 body-only invoice number survives a structural failure in optional totals/PDF;
-malformed or duplicate body identity is never selected as a usable number.
+malformed or duplicate body identity is refused even when a number header is
+present; a genuinely absent body number may still fall back to the header.
 
 Receipt reversal state requires `true`, `false`, `1` or `0`: an empty
 `stornozott` is refused rather than interpreted as an unreversed receipt. Missing,
@@ -258,8 +268,10 @@ names/attributes, forbidden character-data delimiters and undefined references
 are refused even in ignored extensions. This is XML checking, not XSD business
 validation; sparse content and well-formed unknown extensions remain supported.
 Namespace declarations are normalized before checking reserved bindings and
-attribute expanded-name uniqueness (Namespaces in XML 1.0). Repeated invoice and
-receipt rows may use different prefixes for the same namespace or have ignored
+attribute expanded-name uniqueness (Namespaces in XML 1.0). Structured replies
+reject the reserved `xmlns` element prefix and colons in processing-instruction
+targets. Repeated invoice and receipt rows may use different prefixes for the
+same namespace or have ignored
 extensions between them; row order is retained. Duplicate singleton fields and
 children inside scalar values remain refused.
 Taxpayer extraction follows

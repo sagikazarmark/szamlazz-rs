@@ -74,6 +74,13 @@ impl<'a> NamespaceReader<'a> {
         use quick_xml::name::{Namespace, PrefixDeclaration, ResolveResult};
         const XML: &str = "http://www.w3.org/XML/1998/namespace";
         const XMLNS: &str = "http://www.w3.org/2000/xmlns/";
+        // The resolver knows the reserved binding, but Namespaces in XML
+        // forbids its use as an element prefix, even in ignored extensions.
+        if start.name().as_ref().starts_with("xmlns:") {
+            return Err(ParseError::UnexpectedBody(
+                "reserved xmlns prefix on XML element".into(),
+            ));
+        }
         // Begin a scope without installing the unnormalized declarations.
         self.resolver
             .push(&BytesStart::new("scope"))
@@ -414,17 +421,17 @@ fn validate_declaration(decl: &BytesDecl<'_>) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// XML 1.0 Name, with the reserved PI target excluded. Prefixes have no
-/// namespace meaning on a PI, and non-ASCII Name characters are legal.
+/// Namespaces in XML requires NCName PI targets (no colon), with the reserved
+/// XML target excluded. Non-ASCII name characters remain legal.
 fn valid_pi_target(value: &str) -> bool {
     let mut chars = value.chars();
     !value.eq_ignore_ascii_case("xml")
-        && chars.next().is_some_and(xml_name_start)
-        && chars.all(|ch| xml_name_start(ch) || matches!(ch, '-' | '.' | '0'..='9' | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}'))
+        && chars.next().is_some_and(xml_ncname_start)
+        && chars.all(|ch| xml_ncname_start(ch) || matches!(ch, '-' | '.' | '0'..='9' | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}'))
 }
 
-fn xml_name_start(ch: char) -> bool {
-    matches!(ch, ':' | '_' | 'A'..='Z' | 'a'..='z' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
+fn xml_ncname_start(ch: char) -> bool {
+    matches!(ch, '_' | 'A'..='Z' | 'a'..='z' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
 }
 
 fn valid_encoding_name(value: &str) -> bool {
