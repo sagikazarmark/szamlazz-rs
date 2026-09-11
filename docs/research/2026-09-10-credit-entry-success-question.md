@@ -1,29 +1,8 @@
 # Vendor clarification: identity on successful credit registration
 
-**Status:** prepared for submission; no vendor answer received.
-
-## Question to send
-
-For Számla Agent credit-entry registration (`action-szamla_agent_kifiz`) with
-`valaszVerzio=2`, does **every successful registration** return a nonempty invoice
-number in at least one of these channels?
-
-- XML `xmlszamlavalasz/szamlaszam`
-- HTTP header `szlahu_szamlaszam`
-
-Can a successful registration instead return HTTP 200 with no number header and
-the following body (possibly including totals but omitting `szamlaszam`)?
-
-```xml
-<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
-  <sikeres>true</sikeres>
-</xmlszamlavalasz>
-```
-
-If a number is guaranteed, please clarify that guarantee specifically for
-successful version-2 responses. If omission is supported, please confirm whether
-`sikeres=true` alone establishes completion of the requested registration, for
-both additive and replacing calls.
+**Status:** background brief; no vendor answer received. Updated 2026-09-11:
+the [combined Hungarian clarification](2026-09-11-agent-vendor-clarification.md)
+is now the send-ready message, covering registration and explicit clearing.
 
 ## Why clarification is needed
 
@@ -32,10 +11,11 @@ and [Hungarian response documentation](https://docs.szamlazz.hu/hu/agent/credit_
 say optional elements may be omitted and additional headers may arrive. Their
 schema makes `szamlaszam` optional, but covers success and failure together. The
 successful examples include a number; that does not establish a universal
-success-path guarantee. The bare envelope above passes the shared XSD.
+success-path guarantee. A bare `xmlszamlavalasz` containing only `sikeres=true`
+passes the shared XSD.
 
 At reviewed revision `f83e5fd`, `RegisterCreditEntry::parse` requires a reported
-number and returns `ParseError::Missing("szamlaszam")` for that body without the
+number and returns `ParseError::Missing("szamlaszam")` for that bare body without the
 header. Recorded successful observations include the number; no live numberless
 success has been captured. See the [independent adjudication](../review/2026-09-10-agent-api-f83e5fd-adjudication.md#6-numberless-credit-success-genuine-contract-ambiguity-not-dismissed-or-promoted).
 

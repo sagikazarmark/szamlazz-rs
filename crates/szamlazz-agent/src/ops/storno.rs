@@ -5,7 +5,7 @@ use jiff::civil::Date;
 
 use super::envelope::{CreatedInvoice, parse_issued};
 use crate::credentials::Credentials;
-use crate::error::ResponseError;
+use crate::error::{RequestError, ResponseError};
 use crate::types::{InvoiceNumber, InvoiceTemplate, SellerEmail};
 use crate::wire::{AgentRequest, RawResponse};
 use crate::xml;
@@ -162,6 +162,13 @@ impl StornoInvoice {
 impl AgentRequest for StornoInvoice {
     const ACTION: &'static str = "action-szamla_agent_st";
     type Response = CreatedInvoice;
+
+    fn validate(&self) -> Result<(), RequestError> {
+        xml::validate_dates([
+            ("issue_date", self.issue_date),
+            ("fulfillment_date", self.fulfillment_date),
+        ])
+    }
 
     fn write_xml(&self, credentials: &Credentials) -> Vec<u8> {
         xml::document(

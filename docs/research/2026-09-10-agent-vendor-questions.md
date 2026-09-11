@@ -1,4 +1,8 @@
-# Számla Agent clarification request (draft, not sent)
+# Számla Agent clarification questions (backlog, not sent)
+
+**2026-09-11 follow-up:** the current send-ready message for credit acknowledgement
+and effective schema questions is the [Hungarian clarification](2026-09-11-agent-vendor-clarification.md).
+The remaining topics below are a backlog, not additional questions to append to it.
 
 Updated after the 2026-09-11 review at `837dad0`. Priorities: successful credit
 echo (§3), combined preview (§1), then empty replacement (§6) and paid-state
@@ -14,12 +18,9 @@ before `elonezetpdf`. The downloadable schema
 <https://www.szamlazz.hu/szamla/docs/xsds/agent/xmlszamla.xsd> and PHP 2.12.4's
 `InvoiceHeader::buildXmlData` put preview first.
 
-- Which order(s) does the deployed Számla Agent accept when both are present?
-- Are explicit false values supported for each field in that combination?
-- Does `elonezetpdf=true` together with `simpleItems=true` always remain a
-  preview, without issuing a document?
-- Please align the inline schema, download and PHP writer, or document which
-  source defines the deployed contract.
+The current message's §2 asks for the accepted combined-field order, explicit
+false handling, preview-only guarantee and authoritative, complete schemas,
+including the missing invoice/receipt fields.
 
 Current Rust policy follows download/PHP. No live combined-option probe was run.
 
@@ -47,12 +48,8 @@ The version-2 response schema at
 mandatory. It says `minOccurs="0"` elements may be absent, and that headers may
 also arrive. Successful examples nevertheless include `szamlaszam`.
 
-- Does every successful version-2 registration echo a nonblank invoice number
-  in either `szamlaszam` or `szlahu_szamlaszam`?
-- Can `<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>true</sikeres></xmlszamlavalasz>`
-  be the complete successful body, with no number header?
-- If so, are net/gross/outstanding amounts likewise optional on success, and is
-  the true verdict alone a definitive registration acknowledgement?
+The current message's §1 asks for a success-specific nonblank-number guarantee
+and the meaning of a numberless acknowledgement, including explicit clearing.
 
 Current Rust requires an echoed number for `InvoiceBalance`. No successful
 numberless registration has been observed. We will not substitute the requested
@@ -95,15 +92,18 @@ probe was run. This entire document remains an unsent draft.
 schema allow zero `kifizetes` elements and say `additiv=false` replaces previous
 entries. The Rust client now exposes that exact request as `ClearCreditEntries`.
 
-- Does a successful zero-entry replacement remove every previous credit entry?
-- Is the same request accepted when the invoice already has no entries?
+The current message's §1 includes the clearing effect and successful
+acknowledgement on populated and already-empty invoices. Further backlog:
+
 - If it is refused or ignored, what is the supported way to clear entries?
-- What balance/number acknowledgement and IPN follow each case?
+- What IPN follows each case?
 - Does issuer-tax-number selection change these semantics for incoming invoices?
 
-The new `clear_credit_entries_populated` and `clear_credit_entries_already_empty`
-probes check those states independently, but have not been run as part of this implementation. Clearing remains a
-documentation-derived intent, not an independently observed effect.
+Both `clear_credit_entries_populated` and `clear_credit_entries_already_empty`
+passed on an operator-confirmed test account on 2026-09-11, with the expected
+number and full outstanding gross returned. See the [dated evidence](2026-09-11-credit-clearing-live.md).
+The universal acknowledgement guarantee, IPN and other-account behavior remain
+questions; those two observations do not establish them.
 
 ## 7. Paid-state omission versus explicit false
 

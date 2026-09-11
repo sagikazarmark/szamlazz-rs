@@ -680,6 +680,27 @@ impl AgentRequest for CreateInvoice {
     type Response = CreationOutcome;
 
     fn validate(&self) -> Result<(), RequestError> {
+        xml::validate_dates([
+            ("header.issue_date", self.header.issue_date),
+            (
+                "header.fulfillment_date",
+                Some(self.header.fulfillment_date),
+            ),
+            ("header.due_date", Some(self.header.due_date)),
+        ])?;
+        if let Some(ledger) = &self.buyer.ledger {
+            xml::validate_dates([
+                ("buyer.ledger.accounting_date", ledger.accounting_date),
+                ("buyer.ledger.settlement_from", ledger.settlement_from),
+                ("buyer.ledger.settlement_to", ledger.settlement_to),
+            ])?;
+        }
+        for ledger in self.items.iter().filter_map(|item| item.ledger.as_ref()) {
+            xml::validate_dates([
+                ("items.ledger.settlement_from", ledger.settlement_from),
+                ("items.ledger.settlement_to", ledger.settlement_to),
+            ])?;
+        }
         if self.items.is_empty() {
             return Err(RequestError::MissingLineItems);
         }

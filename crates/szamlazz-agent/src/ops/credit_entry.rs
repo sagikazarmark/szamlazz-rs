@@ -195,9 +195,9 @@ impl RegisterCreditEntry {
 /// Uses the same `xmlszamlakifiz` operation as [`RegisterCreditEntry`], with
 /// `additiv=false` and no `kifizetes` elements, as permitted by the
 /// [request definition](https://docs.szamlazz.hu/agent/credit_entry/xml).
-/// This expresses clearing intent; the deployed server's zero-entry behavior
-/// has not yet been established by the repository's live evidence. Query the
-/// invoice afterward to verify the effect. An uncertain answer does not justify
+/// Observed on a test account (2026-09-11): clears populated entries and succeeds
+/// on an already-empty invoice, returning its number and full outstanding gross.
+/// Query afterward to verify the effect. An uncertain answer does not justify
 /// repeating the request: it could remove entries registered in the meantime.
 /// See [recovery](crate::error#recovery).
 ///
@@ -276,6 +276,11 @@ impl AgentRequest for RegisterCreditEntry {
     type Response = InvoiceBalance;
 
     fn validate(&self) -> Result<(), RequestError> {
+        xml::validate_dates(
+            self.entries
+                .iter()
+                .map(|entry| ("entries.date", Some(entry.date))),
+        )?;
         if !self.additive && self.entries.is_empty() {
             return Err(RequestError::EmptyCreditEntryReplace);
         }

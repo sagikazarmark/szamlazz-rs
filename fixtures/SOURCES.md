@@ -264,6 +264,50 @@ test-account observations in [the behavior notes](../docs/szamlazz-hu-behaviour.
 not universal account/master-data rules. No live TAHK/OSS, buyer-ID collision,
 portal access, erasure or carrier-rendering result is established by this sweep.
 
+## 2026-09-11 — separate request-XSD validation sources
+
+`upstream/agent/request-xsd-2026-09-11/` contains **22 complete, independently
+acquired schemas**: English inline definitions and downloads for all 11
+operations. Acquisition used public,
+unauthenticated GETs on **2026-09-11**; every final URL equalled its requested URL.
+The site displayed `v202608271632`, which is not a schema revision identifier.
+
+[`sources.json`](upstream/agent/request-xsd-2026-09-11/sources.json) records each
+exact URL, SHA-256 of the HTTP response bytes (`response_sha256`) and SHA-256 of
+the stored UTF-8 file (`sha256`). For inline sources, the response hash is of
+HTML, not XSD. Extraction concatenated HTML-decoded text nodes inside the one
+`pre` containing `<schema ` and mapped its `<br>` elements to LF. For both source
+forms, CRLF was normalized to LF and a final LF added only if absent. No other
+reindentation, comment, element, attribute, order or schema-content change was
+made. The stored bytes were compared with a second acquisition using that same
+extraction. HTML response hashes can differ across acquisitions even when the
+extracted schema is identical; the recorded hashes are from that comparison.
+
+The deletion download was added after reviewing the mutations report's D4:
+https://www.szamlazz.hu/szamla/docs/xsds/dijbekerodel/xmlszamladbkdel.xsd returned
+**HTTP 200 on 2026-09-11**, with the response checksum
+`076b4d98c3cf599a5b5ab30e5e9ff3e522d9c0642d806fb502e8a560ace08641`.
+The earlier claim in this section that no working download existed was incorrect;
+the historical July broken-link record above is not evidence against this URL.
+Its stored file uses the same LF normalization described above and was compared
+with a second GET. Its declarations agree with EN inline; comments differ.
+
+These are separate source snapshots, **not a merged or repaired schema**. The
+historical `agent/xsd/` files, including the project-modified invoice XSD and
+receipt acquisition uncertainty, remain historical evidence. Do not replace
+them with these files, or modify these snapshots to make a writer pass. A source
+refresh gets a new dated directory and explicit expectation review. The same
+workspace-only/no-publication policy at the top of this file applies: the corpus
+is read at runtime by `scripts/check-agent-schemas.py`, never embedded in a Rust
+binary or Cargo package.
+
+The required check verifies stored checksums, validates generated XML with
+`xmllint`, and labels known source disagreements explicitly. Its coverage and
+bounded EN/download source policy (including the malformed HU PDF definition)
+are documented in [Testing](../docs/testing.md#offline-request-xsd-validation).
+Passing this matrix establishes conformance to the individually named schemas,
+not vendor acceptance or a precedence rule between conflicting sources.
+
 ## adatkapcsolat/
 
 Examples extracted verbatim from docs pages:

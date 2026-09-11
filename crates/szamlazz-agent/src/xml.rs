@@ -11,10 +11,28 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use rust_decimal::Decimal;
 
 use crate::credentials::Credentials;
-use crate::error::{ApiError, ErrorCode, ParseError, ResponseError, body_excerpt};
+use crate::error::{ApiError, ErrorCode, ParseError, RequestError, ResponseError, body_excerpt};
 use crate::wire::RawResponse;
 
 const WRITE_EXPECT: &str = "writing XML to an in-memory buffer cannot fail";
+
+/// Restrict outbound dates to the positive-year subset shared by Jiff and XSD
+/// 1.0. Response parsing deliberately keeps its separate, lenient date domain.
+pub(crate) fn validate_dates(
+    dates: impl IntoIterator<Item = (&'static str, Option<Date>)>,
+) -> Result<(), RequestError> {
+    for (field, date) in dates {
+        if let Some(date) = date
+            && date.year() <= 0
+        {
+            return Err(RequestError::InvalidDateYear {
+                field,
+                year: date.year(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Namespace-aware UTF-8 reader with XML 1.0 binding rules. quick-xml's
 /// `NsReader` installs raw attribute values before callers can normalize them;

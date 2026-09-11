@@ -367,9 +367,12 @@ pub trait AgentRequest {
     /// Serializes the request document, injecting `credentials` at the
     /// operation's required location: the root for invoice XML/PDF queries,
     /// `beallitasok` for the other built-in operations.
+    ///
+    /// This is the unchecked writer. Use [`Self::to_wire`] to validate dates,
+    /// operation requirements and XML characters before sending.
     fn write_xml(&self, credentials: &Credentials) -> Vec<u8>;
 
-    /// Checks cross-field requirements that the XML schema cannot express.
+    /// Checks operation requirements and supported outbound value domains.
     ///
     /// # Errors
     ///

@@ -63,6 +63,96 @@ changes which endpoint new invocations reach. Mocked-vendor tests retain their
 controlled failure, concurrency, cancellation, recovery and journal/privacy
 coverage in regular CI.
 
+## Offline request XSD validation
+
+Run the **required standalone schema check**, in addition to normal Rust tests:
+
+```sh
+python3 scripts/check-agent-schemas.py
+# Targeted runner regression checks (also required in ci.schemas):
+python3 scripts/test-agent-schema-runner.py
+# Outside devenv, with Nix:
+nix shell nixpkgs#libxml2 --command python3 scripts/check-agent-schemas.py
+# The dedicated CI check (also part of dagger check):
+dagger -c 'ci | schemas'
+```
+
+Requires Python 3.9+ (stdlib only) and `xmllint` with XML Schemas support.
+`devenv.nix` supplies both; Dagger installs Debian's `libxml2-utils` and `python3`.
+Dagger explicitly provisions locked Cargo dependencies with `cargo fetch --locked`
+before running these offline checks, so a cold cache is supported. Local offline
+runs likewise require dependencies already provisioned.
+`xmllint --schema` uses libxml2's **XSD 1.0 validator**, covering sequences,
+required/empty containers, cardinality, lexical types and facets. Python's XML
+parser only inventories coverage. Python `lxml` would add a binding to the same
+engine; a Rust libxml binding would add native build/linking requirements; an
+XSD 1.1/JVM validator is unnecessary here. No production dependency is added.
+
+The runner invokes `cargo test -p szamlazz-agent --locked --offline --test
+schema_requests -- --ignored --exact emit_request_matrix` to export freshly
+generated **`to_wire` multipart XML**, then validates each source independently.
+The ignored Rust test is an input exporter, **not a successful schema check**;
+ordinary Cargo runs do not claim this coverage. Missing tools, corpus, checksums,
+schema compilation, empty/missing operation coverage and unexpected results fail
+the standalone invocation. No schema or Cargo dependency is fetched during it.
+`--nonet`, disabled catalogs, and a self-contained-schema/entity-declaration
+check prevent external XML resolution. Dummy credentials are literal test data;
+no client is constructed or live request made.
+
+The matrix includes:
+
+| Operation | Variations |
+|---|---|
+| Invoice create | Minimal; every XML option populated; independently populated settings and blocks; all six kinds and proforma/prepayment references; all four carrier blocks; empty optional containers; false/true options; all nine absent/false/true preview × simple-items combinations; group id and erasure counts separately; all 15 languages, six templates plus an open token, five taxpayer statuses; EUR explicit/automatic MNB; multiple signed rows and five attachments (XML part only) |
+| Invoice storno | Minimal, every optional field, each top-level option independently, false guardian and empty seller email |
+| Credit entries / explicit clear | One/five entries × additive/replacing; optional issuer/aggregator/descriptions; empty additive and both clearing forms |
+| Invoice PDF / XML query | All three selectors; XML PDF false/true |
+| Proforma deletion | Both number and order selectors |
+| Receipt create | Minimal/full/common options; individual header options; item ledger/erasure, empty ledger, multiple rows/tenders; all four templates; EUR explicit/automatic MNB |
+| Receipt storno / query | Template absent/all four values × PDF false/true × call id absent/present; both query selectors |
+| Receipt send | Default resend; all 16 email-child presence combinations, with populated and empty strings |
+| Taxpayer | Eight-digit stem including a leading-zero control; no optional business fields |
+
+**Every case uses both credential forms.** Every declared element path of each
+source must appear in at least one **fully valid** generated request for that
+source; known-invalid rows earn no coverage. This prevents the full invoice's
+first source conflict from hiding untested later blocks. Negative controls also
+require actual rejection of wrong booleans/money, a negative erasure count,
+missing required seller, a bad taxpayer pattern, a duplicate PDF flag and
+reordered PDF-query fields. This is a representative optional-field matrix,
+not the Cartesian product of all possible business values or account rules.
+
+Sources are the separately retained 2026-09-11 **EN inline** definitions and
+**downloads**, with precise extraction/checksums in
+[`fixtures/SOURCES.md`](../fixtures/SOURCES.md#2026-09-11--separate-request-xsd-validation-sources).
+Each verdict names its source, case and credentials. `EXPECTED-SOURCE-CONFLICT`
+is reported with the validator diagnostic, distinct from `VALID`:
+
+| Source | Required conflicting result |
+|---|---|
+| EN inline invoice | Combined preview/simple-items fails at `simpleItems`: inline requires simple-items before preview; the writer follows download/PHP's inverse order |
+| Download invoice | Buyer `csoportazonosito` and item `torloKod` fail because those declarations are absent |
+| Download receipt create | `torloKod` fails because its declaration is absent |
+| Download receipt query | Order selector `rendelesSzam` fails because its declaration is absent |
+
+Expectations come from the requested options, not the emitted XML. Expected
+invalidity must be exit code 3 with exactly the named unexpected-element
+diagnostics; unrelated validation errors, schema-load failures and unexpected
+success fail the check. Originals are never patched or combined to obtain a
+green result.
+
+Both sources cover all 11 operations, including the working deletion download at
+[`dijbekerodel/xmlszamladbkdel.xsd`](https://www.szamlazz.hu/szamla/docs/xsds/dijbekerodel/xmlszamladbkdel.xsd).
+**Source gaps:** the HU PDF inline source is outside the
+executable matrix: its untouched definition has a missing attribute separator,
+requires `szamlaszam`, and moves `rendelesSzam` after `valaszVerzio`, conflicting
+with EN/download and the documented alternative selectors. See
+[Q-S1](review/2026-09-11-agent-api-61c334f-queries.md#q-s1--p3--hungarian-pdf-request-schema-cannot-be-a-common-conformance-target).
+No synthetic repair is substituted. HU sources generally, response schemas,
+rendered artifacts, business rules and actual server acceptance remain outside
+this check. Ordinary contemporary dates exercise `xs:date`; outbound date-domain
+boundary tests are maintained separately.
+
 ## Manual vendor-live acceptance
 
 Use an intended **test-mode** account with e-invoice and EUR capabilities and
@@ -147,8 +237,10 @@ cargo probes -E 'test(receipt_email_resend)'
   and reads back one credit entry first. Each sends `ClearCreditEntries` and
   checks echoed number, outstanding gross and empty queried entries. Filter
   `clear_credit_entries_already_empty` to run that case even if populated clearing fails.
-  A refusal or unchanged entries fails the hypothesis; the new probe is not a
-  recorded confirmation of clearing behavior.
+  A refusal or unchanged entries fails the hypothesis. Both cases passed on an
+  operator-confirmed test account on 2026-09-11; see the
+  [dated execution record](research/2026-09-11-credit-clearing-live.md). A probe's
+  source alone is not execution evidence or a universal server guarantee.
 - **Receipt lifecycle:** creates one fractional-net HUF receipt with a stable
   logged call id and unique order, queries by number and order, checks PDF,
   identity, totals and tenders. Deliberately repeats only the completed verified

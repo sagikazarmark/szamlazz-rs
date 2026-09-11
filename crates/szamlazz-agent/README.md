@@ -235,6 +235,15 @@ let resend = SendReceipt::new("NYGTA-2026-1");
 
 The resend writes a **present empty `emailKuldes` block**, requesting the previous email details. Within `ReceiptEmail`, `None` omits a child while `Some("")` emits an empty child; independent partial-field merging and comma-separated recipients are not established by the source. After a lost acknowledgement, receipt existence does not prove email delivery; another send may duplicate the email.
 
+## Request dates
+
+Checked requests (`AgentRequest::validate` / `to_wire`, including `Client::send`)
+support civil years **1–9999** in every invoice header/ledger, storno and
+credit-entry date. Year zero and negative years return
+`RequestError::InvalidDateYear` with the field path: Jiff's spellings for those
+years do not satisfy XSD 1.0. Dates are never shifted or normalized. The low-level
+`write_xml` method is unchecked; use `to_wire` before sending.
+
 ## Response parsing
 
 Invoice and receipt dates retain the printed **civil date**, without UTC conversion.
@@ -394,7 +403,7 @@ Foreign receipts retain `ExchangeRate::automatic_mnb()` (bank `MNB`, omitted num
 - Response version 2 carries requested PDFs as base64 inside XML. The crate decodes them and exposes raw bytes through `Pdf`.
 - A body download that fails after headers arrive returns `ClientError::IncompleteResponse` with `client::IncompleteResponse { status, headers, source }`. Raw headers preserve repeated values and may contain session cookies; its `Debug` lists header names only. This error remains `OutcomeClass::Unknown`, even with number/error headers: the unread body could contradict them. Use the evidence to reconcile, never turn it into a completed response with an invented empty body.
 - Invoice creation has no idempotency key. Receipt call IDs prevent duplicate issuance by returning error 338 when reused, but do not replay the original success. The client has no application-level retry/recovery loop. Supplied HTTP clients retain their retry policies; one `send` need not mean one POST, and transport retries do not perform reconciliation.
-- An unfinished replacing `RegisterCreditEntry` with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`). Use `ClearCreditEntries` for intentional empty replacement, the documented `additiv=false` / zero-`kifizetes` shape. Its exact deployed effect remains unverified until the opt-in probe is run; query the invoice afterward. A lost answer does not authorize repeating a clear over intervening credit entries.
+- An unfinished replacing `RegisterCreditEntry` with no entries is refused before the wire (`RequestError::EmptyCreditEntryReplace`). Use `ClearCreditEntries` for intentional empty replacement, the documented `additiv=false` / zero-`kifizetes` shape. Test-account probes on 2026-09-11 confirmed clearing populated entries and success on an already-empty invoice, with the expected number and full outstanding gross returned. Query the invoice afterward; this observation is not a universal response guarantee. A lost answer does not authorize repeating a clear over intervening credit entries.
 - `HttpStatus` and `UnexpectedBody` diagnostics quote bounded body excerpts (`error::BODY_EXCERPT_LEN`, with the total length noted). Other API/parser messages may contain full upstream text; the verbatim `ApiError.message` is not truncated. `RawResponse`'s `Debug` redacts `Set-Cookie` and prints the body length, but other headers remain visible. Apply your application's logging policy to these messages and headers.
 - A queried document's `test` flag (`teszt`) is an `Option<bool>`: the schema has the element mandatory, so a document without one reports `None` rather than an invented "live".
 - The vocabulary follows the domain: a `kifizetes` registered against an invoice is a *credit entry* (`CreditEntry` out, `RecordedCreditEntry` back, `InvoiceDocument::credit_entries`; its `jogcim` is the `title`, a `PaymentMethod` on both sides), a `stornozott` receipt is *reversed*, and a queried document's `eszamla` is its `appearance` (a code), while the `e_invoice` of a create or storno request is a flag.

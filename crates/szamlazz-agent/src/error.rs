@@ -571,6 +571,15 @@ pub enum RequestError {
     /// A waybill parcel count exceeds the nonnegative XML Schema `int` range.
     #[error("waybill parcel count {0} exceeds {max}", max = i32::MAX)]
     ParcelCountOutOfRange(u32),
+    /// An outbound date has a nonpositive year. Requests support years 1–9999:
+    /// year zero and Jiff's negative-year spelling are not XSD 1.0 dates.
+    #[error("request date `{field}` has year {year}; supported years are 1–9999")]
+    InvalidDateYear {
+        /// Request field path, independent of its value.
+        field: &'static str,
+        /// The unsupported civil year.
+        year: i16,
+    },
     /// A receipt line item carries a field the receipt row has no element
     /// for: `margin_vat_base`, or the ledger's `economic_event`,
     /// `vat_economic_event`, `settlement_from` or `settlement_to`, which are

@@ -44,6 +44,20 @@ type Ci {
   }
 
   """
+  Source-labelled, offline XSD 1.0 validation of generated Agent requests.
+  Required independently of Cargo's ignored input-export test. The tool and
+  fixtures must exist; expected vendor-source conflicts are reported explicitly.
+  """
+  schemas: String! @check {
+    self.container
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends libxml2-utils python3"])
+      .withExec(["cargo", "fetch", "--locked"])
+      .withExec(["python3", "scripts/test-agent-schema-runner.py"])
+      .withExec(["python3", "scripts/check-agent-schemas.py"])
+      .combinedOutput
+  }
+
+  """
   End to end: the ignored `e2e_` tests of the workspace against
   `restate-server` processes the harness spawns in this container from the
   binary of the Restate image (`RESTATE_SERVER_BIN`; there is no docker here).

@@ -1,0 +1,114 @@
+{
+  "en-inline/xmlszamla.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/generating_invoice/xml",
+    "response_sha256": "32aafed13f8ed7d999bdbe2c9b0894972f77f46577b95e357b494f7c80d32817",
+    "sha256": "f18f3bb442ba319bf2613c8bdd3e38a1a77a54e0470ce29c4a4f3dbcd5b3a2d3"
+  },
+  "download/xmlszamla.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/agent/xmlszamla.xsd",
+    "response_sha256": "90af7504bab00e92bcf84971ed3088d9b7c67dd70219148dabe454e32a3b5498",
+    "sha256": "9afda06c7946f14d553a58e8e845c5f27f4804e9dd3bad5bf20f1a878064d862"
+  },
+  "en-inline/xmlszamlast.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/reversing_invoice/xml",
+    "response_sha256": "b42453bcd4faa7f0bf2515da9d44b8578de848c74eeb88b0021f8d39d93c8ee3",
+    "sha256": "148d0c30316f9b6a27440db54d2f4a81a34580850c42d6ec6a7c6266e08e4a24"
+  },
+  "download/xmlszamlast.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/agentst/xmlszamlast.xsd",
+    "response_sha256": "6f9d5beb6efd205f0509e7413e15fb96660ee89c9f169d27c4972d3b24127a3a",
+    "sha256": "69999ba09be8a653f2a6d43a5d86724f1430025dff61f07b5d8ff8d56d516531"
+  },
+  "en-inline/xmlszamlakifiz.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/credit_entry/xml",
+    "response_sha256": "bdd9364ff9a90ff611e4949951c81516b7fc39524b79bc1f5cf252cee6696ed3",
+    "sha256": "736aa801e987c5184c001015e30786982d00d69b6db6a91fa41ca24ab30a9b7b"
+  },
+  "download/xmlszamlakifiz.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/agentkifiz/xmlszamlakifiz.xsd",
+    "response_sha256": "9637a242df2f55f87ecfff1b07dd74ef0b09bdaff47e39bb4d9890d4748a73de",
+    "sha256": "0e7dcfc2ea6df43b70b90f9f4432a92e3d2c53c121e175b35dfe6c29c7909875"
+  },
+  "en-inline/xmlszamlapdf.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/querying_pdf/xml",
+    "response_sha256": "bc1f0711108ab37ec15f58003b6e53789e3d27874ce3de5197e581c2391df666",
+    "sha256": "d3b5ba198b299b2616eadc21549a7955dcec9d3d79497c15a1a2ea4ba4d85366"
+  },
+  "download/xmlszamlapdf.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/agentpdf/xmlszamlapdf.xsd",
+    "response_sha256": "b9b161d1356bcd10791605f74c390a0b2b347fdc19a4cf074f76f8a91fe3cfdf",
+    "sha256": "4af58b6be02645bbf01911a1c283552f984e9fc7364f79539b4b97c52630722e"
+  },
+  "en-inline/xmlszamlaxml.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/querying_xml/xml",
+    "response_sha256": "dd0619827e25249eb60f81e7f16cc916b5f813b01060150e1ba43559df568735",
+    "sha256": "d9a4e43c458536bfb454e6392baae670c7756fe1b172b2498a63b6350f0c9995"
+  },
+  "download/xmlszamlaxml.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/agentxml/xmlszamlaxml.xsd",
+    "response_sha256": "06cd34ce07ca8f3c0919cf7c4e6505bbda66ddf6b72d60736c849e695f7e19f3",
+    "sha256": "82f99078b13049b4f2039492ede25544de6de908542e978ac8935217e5617323"
+  },
+  "download/xmlszamladbkdel.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/dijbekerodel/xmlszamladbkdel.xsd",
+    "acquired": "2026-09-11",
+    "http_status": 200,
+    "response_sha256": "076b4d98c3cf599a5b5ab30e5e9ff3e522d9c0642d806fb502e8a560ace08641",
+    "sha256": "2ba4be4d8ec9943a156b3d8b49f3dca72edfbbc3fed22b39ee95472ffce84efb"
+  },
+  "en-inline/xmlszamladbkdel.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/deleting_pro_forma_invoice/xml",
+    "response_sha256": "9adbe433ca3992f260ddd2d4525e947d2080d6723608157b574d3ead1376079e",
+    "sha256": "53f13bb342e2eab40c72f854815a5299f76d41912c66383fcc159831308772d4"
+  },
+  "en-inline/xmlnyugtacreate.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/generating_receipt/xml",
+    "response_sha256": "1e58f1e24e3ff2c10d4c0b13755af2ebc0c6d199e504b70d4bc1e563a1718962",
+    "sha256": "46061d68c9b998bc63ef12f6652a28b3125bc2a4593dd4ad179ce776f6717b7c"
+  },
+  "download/xmlnyugtacreate.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/nyugtacreate/xmlnyugtacreate.xsd",
+    "response_sha256": "2c6fcda8bd9d48998df77c97413272f033ee381067fe7dd85694156a4b260a6f",
+    "sha256": "2c6fcda8bd9d48998df77c97413272f033ee381067fe7dd85694156a4b260a6f"
+  },
+  "en-inline/xmlnyugtast.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/reversing_receipt/xml",
+    "response_sha256": "d3cdcf46023e6c8c65c278fe13da518500126390b3342a0b574f1f7bd73575c6",
+    "sha256": "46f5537863cf5bd271397af745a6615382bc99a13519601ae9178767f7065c69"
+  },
+  "download/xmlnyugtast.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/nyugtast/xmlnyugtast.xsd",
+    "response_sha256": "59c7e8564875da3c675a4ef8d1eba543d19b766551c7b3e2959bcea08d3aebcb",
+    "sha256": "59c7e8564875da3c675a4ef8d1eba543d19b766551c7b3e2959bcea08d3aebcb"
+  },
+  "en-inline/xmlnyugtaget.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/querying_receipt/xml",
+    "response_sha256": "10df4af10c41f9e7127bbab4a329f2f82b798fca2d27e5d656f6d1befa6c085d",
+    "sha256": "c870b854422069edb25db267a31de2026a949c4034bf0ec189ef875ac05e1313"
+  },
+  "download/xmlnyugtaget.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/nyugtaget/xmlnyugtaget.xsd",
+    "response_sha256": "b7c04396435b5da9bfaa4193834c13136e3a412821f3cc7373cf66b0774b69ec",
+    "sha256": "f74d8f7a54c5cba603c6462df91ef585b7255d967f7cbe4533607331c1af52ac"
+  },
+  "en-inline/xmlnyugtasend.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/sending_receipt/xml",
+    "response_sha256": "65d281365807b4d87c5196b4248088cb94b19c23560b88988b4daf331bc7d421",
+    "sha256": "f032c43d6190074d4760a24770e13cff51d5a98abc41ed3fd830735b5ebea10c"
+  },
+  "download/xmlnyugtasend.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/nyugtasend/xmlnyugtasend.xsd",
+    "response_sha256": "6ba13dda3b59b4fbfd472dd8b19e2a0827c9dc5adf7bbf3a2abdc35ae03a2a07",
+    "sha256": "6ba13dda3b59b4fbfd472dd8b19e2a0827c9dc5adf7bbf3a2abdc35ae03a2a07"
+  },
+  "en-inline/xmltaxpayer.xsd": {
+    "source": "https://docs.szamlazz.hu/agent/querying_taxpayer/xml",
+    "response_sha256": "ef7fd867a0e43201cdf5a6b9ac5066abf489e3be056cedd7473f2f0efeac8ec7",
+    "sha256": "69203a118cb816e3a6d0a41d23bb1ec6c4394e74801efd92284ab696883a4175"
+  },
+  "download/xmltaxpayer.xsd": {
+    "source": "https://www.szamlazz.hu/szamla/docs/xsds/taxpayer/xmltaxpayer.xsd",
+    "response_sha256": "51fe8565301b0f3a67199b3b3d666fd6abb5acebd5db4cd81c3a479cae816ed7",
+    "sha256": "82cd9871740a68737fb33b06a78e1f0cbb91c592d09eb1bef5a5389c6210e669"
+  }
+}

@@ -19,9 +19,18 @@ the `szamlazz-agent` crate, outside the repository); `P73-EE`, `P73-EP`, `P73-PE
 probe of issue #73 (2026-09-07, same account; the letters are the original's and the storno request's form,
 **E**-invoice or **P**aper: `E-CTEST-2026-9` → `E-CTEST-2026-10`, `E-CTEST-2026-11` → `CTEST-2026-112`,
 `CTEST-2026-113` → `E-CTEST-2026-12`, `CTEST-2026-114` → `CTEST-2026-115`; reproduced the same day by two more runs,
-`E-CTEST-2026-13`…`20` and `CTEST-2026-116`…`123`; the `eszamla_semantics` test of
-`crates/szamlazz-agent/tests/live.rs`, which runs the same four cases on demand, asserts the observed answers and
-prints them as a table). Restate runtime facts live in ADRs 0001, 0002, 0004 and 0005, not here.
+`E-CTEST-2026-13`…`20` and `CTEST-2026-116`…`123`). Current source navigation (2026-09-11):
+`scenarios::invoice_lifecycle` in [`tests/live.rs`](../crates/szamlazz-agent/tests/live.rs)
+covers matching paper appearance; `electronic_original_paper_storno` and
+`paper_original_electronic_storno` in [`tests/probes.rs`](../crates/szamlazz-agent/tests/probes.rs)
+cover the two mismatches. These are not a four-case P73 rerun or new execution evidence.
+Restate runtime facts live in ADRs 0001, 0002, 0004 and 0005, not here.
+
+**Later evidence:** `CLEAR-populated` and `CLEAR-empty` below were run on an
+operator-confirmed test account on **2026-09-11**. Both queried originals carried
+`teszt=true`; continuity with the historical account above was not established.
+Their run labels, document numbers, captured output and cleanup results are in
+[the clearing evidence](research/2026-09-11-credit-clearing-live.md).
 
 Treat these as facts about *that* account. Some may depend on account settings (e-invoice, cash
 accounting), and szamlazz.hu may change any of them without notice; the go-live checklist at the end
@@ -130,7 +139,8 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
-| **Replace** semantics by default: 100 then 200 leaves `[200]`; `additiv=true` appends (`[200, 50]`, outstanding 1020). `szlahu_kintlevoseg` header and `<kintlevoseg>` body agree and equal gross − Σ. A replace with *zero* entries was not probed. | D7 | `set_credit_entries` default is replace; a replace with no entries is refused by the crate before the wire (it would clear the payments; #70); never auto-retried by the run (`max_attempts(1)`). `additive: true` is **at-least-once**: a lost reply is `outcome_unknown` telling the caller to query the invoice before re-sending, and the handler's one crash retry waits `initial_interval = 2m` (past the 60 s client timeout) so it cannot re-send while the first send is in flight. |
+| **Replace** semantics by default: 100 then 200 leaves `[200]`; `additiv=true` appends (`[200, 50]`, outstanding 1020). `szlahu_kintlevoseg` header and `<kintlevoseg>` body agree and equal gross − Σ. A replace with *zero* entries was not part of D7. | D7 | `set_credit_entries` defaults to replace and refuses an empty replacement through `RegisterCreditEntry` (`RequestError::EmptyCreditEntryReplace`, #70). The Számla Agent client separately offers `ClearCreditEntries` for explicit empty replacement (later evidence below). The worker run uses `max_attempts(1)`, suppressing deliberate run retries, not crash-driven re-execution before journaling. An uncertain additive/replace/clear answer requires reconciliation before repeating; a delay alone does not settle an earlier send. |
+| **Explicit empty replacement** (`additiv=false`, zero `kifizetes`) clears a queried 100 HUF entry and succeeds on a separately created already-empty invoice. Both acknowledgements returned the expected invoice number and outstanding `3136`, equal to original gross; both post-clear queries returned `[]`. Originals and cleanup stornos were verified. | CLEAR-populated / CLEAR-empty, 2026-09-11: `CTEST-2026-13` → `CTEST-2026-14`, `CTEST-2026-15` → `CTEST-2026-16`; [full evidence](research/2026-09-11-credit-clearing-live.md) | `ClearCreditEntries` has execution evidence on this test account. No raw response channels were captured and no universal number-echo guarantee follows. An uncertain clear is still reconciled before any deliberate repeat. |
 | Five entries accepted; the query returns them in **non-submission order** (`20,40,10,30,50`). A sixth is refused by the crate before sending (server code unknown). | D7-credit-5amounts | `<kifizetesek>` order is not meaningful. |
 | Credit on a **reversed** invoice → 463 "Sztornózó vagy sztornózott számlához nem tartozhat kifizetettségi információ.", body only, no headers. | D8-credit-on-reversed | Type 463; the wording implies the same code for a credit on the `SS` (untested). |
 
@@ -208,11 +218,12 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 - Whether "last" in `query --order` is by id or by `kelt` (indistinguishable while kelt must be
   today). Low: the hint is secondary.
 - Server code for a sixth credit entry; credit on the `SS` itself (463 expected). Low.
-- **A replacing credit-entry request with zero entries** (`additiv=false`, no `kifizetes`): the schema allows it
-  (`xmlszamlakifiz.xsd` has `kifizetes` `minOccurs="0"`) and the replace semantics of D7 imply it clears the
-  invoice's payments, but the call was never sent. Low: the crate refuses it before the wire
-  (`RequestError::EmptyCreditEntryReplace`, #70), so "clear all credit entries" is not offered until a probe
-  says what the server does.
+- **A universal credit-entry acknowledgement guarantee:** CLEAR-populated/CLEAR-empty now establish
+  successful empty replacement on both states for the tested account. Whether every successful v2
+  registration/clear guarantees a nonblank reported invoice number remains unresolved; the schema
+  makes it optional across successes and failures. See the
+  [vendor clarification](research/2026-09-11-agent-vendor-clarification.md). These probes do not settle
+  concurrent-write behavior or permit repeating a clear after an uncertain answer.
 - **A foreign-currency document without an exchange rate** (`penznem` ≠ HUF, no `arfolyamBank` / `arfolyam`):
   the schema has both optional (`xmlszamla.xsd` lines 118–119; the comment ties them to the automatic MNB rate)
   and the docs tie the rate to VAT display, so an `AAM` invoice, a proforma or a delivery note in EUR may not need
@@ -301,7 +312,7 @@ before starting.
 | 12 | P60-H1/E1, one HUF line whose rounded net differs from `nettoEgysegar × mennyiseg` by 0.5 (`2 × 1234.25`, `nettoErtek=2469`); one EUR line sent via `LineItem::new` with a three-decimal net (`1 × 100.005`, `afaErtek=27.00135`, `bruttoErtek=127.00635`); query both by number | Both `sikeres=true`; the HUF line stored as sent; the EUR line stored as `netto 100.01`, `afa 27`, `brutto 127.01` with `nettoegysegar 100.005` | The 259 tolerance covers the worker's half-minor-unit discrepancy on this account (a 259 here means unit prices must be whole units); szamlazz.hu rounds each value to two decimals independently, so the worker's per-step `Rounding::minor_unit` is what keeps the stored document consistent |
 | 13 | P60-V1: create with `<afakulcs>27.00</afakulcs>` (via `VatRate::Other("27.00")`; the crate's `Percent` renders `27`) | `sikeres=true`; the query returns `afakulcs 27.0` | `VatRate::as_wire`'s normalisation stays a nicety on this account; a rejection here means a caller sending `Other("27.00")` is `rejected` with nothing issued |
 | 14 | `D` → `ES` with the reference: create a `D` under a fresh order, then an `ES` under the same order **with** `dijbekeroSzamlaszam` = the `D` (`InvoiceKind::Prepayment { proforma_number }`); query the `ES` by number and the `D` by number | `sikeres=true`; the `ES` shows `<hivdijbekszam>` = the `D`; the `D` is 7 | What `create_prepayment` sends under `auto` for a live proforma of ours (#69) is accepted on this account; a refusal here (record the code) blocks the `D` → `ES` flow (`none` is `conflict{proforma_live}`) until the proforma is deleted first |
-| 15 | P73-EE / P73-PP, create one `SZ` with `<eszamla>true</eszamla>` and one with `false`; query both by number; storno each with `eszamla` **matching** the original's; query both `SS` by number (`eszamla_semantics` in `crates/szamlazz-agent/tests/live.rs` runs all four P73 cases, the two mismatching stornos too, and prints the table; on an account without the e-invoice feature it fails on the first create with the account's code, record it) | The e-invoice is `<eszamla>3</eszamla>` (or `2`), the paper one `1`; each `SS` carries its original's code; no 352 | `InvoiceAppearance` and the worker's storno `eszamla` derivation (`Paper` → `false`, `Electronic` → `true`) hold on this account, so a reversal is issued in its original's form; a `1` on the e-invoice or a `3` on the paper one means the code set differs here, stop and revisit the enum before any storno |
+| 15 | P73-EE / P73-PP, create one `SZ` with `<eszamla>true</eszamla>` and one with `false`; query both by number; storno each with `eszamla` **matching** the original's; query both `SS` by number. Current `scenarios::invoice_lifecycle` in [`tests/live.rs`](../crates/szamlazz-agent/tests/live.rs) covers the paper case only; matching e-invoice coverage still needs a separate run. The two mismatches are separate investigations in [`tests/probes.rs`](../crates/szamlazz-agent/tests/probes.rs): `electronic_original_paper_storno` and `paper_original_electronic_storno`. Record any account code refusing an e-invoice create. | The e-invoice is `<eszamla>3</eszamla>` (or `2`), the paper one `1`; each `SS` carries its original's code; no 352 | `InvoiceAppearance` and the worker's storno `eszamla` derivation (`Paper` → `false`, `Electronic` → `true`) hold on this account, so a reversal is issued in its original's form; a `1` on the e-invoice or a `3` on the paper one means the code set differs here, stop and revisit the enum before any storno |
 
 Record the seller name and tax number, `teszt`, the step-15 `eszamla` codes, the observed error headers per operation, the step-9 `telj`, the
 step-10/11 answers, the step-12 stored EUR values and the step-14 answer in the deployment notes; if any expectation fails, stop and
