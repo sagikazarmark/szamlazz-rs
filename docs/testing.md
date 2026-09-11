@@ -156,6 +156,20 @@ boundary tests are maintained separately.
 
 ## Manual vendor-live acceptance
 
+Keep the five core scenarios as a rarely executed acceptance suite. Run them
+manually before releases that materially change transport, XML, arithmetic,
+document conversion or the worker write protocol, and after relevant vendor
+changes. Documentation-only and unrelated changes do not need a fresh live run.
+After a long quiet period, a quarterly manual drift check is reasonable if no
+relevant release has already supplied fresh evidence. Ordinary tests, schemas
+and actual-Restate/mocked-vendor e2e remain regular CI checks.
+
+Select the receipt lifecycle as optional acceptance when receipt functionality
+changes. Clearing, appearance mismatches, automatic MNB and email resend remain
+targeted investigations; clearing stays separate so the core still tests storno
+of a credited invoice. A corrective lifecycle is future optional work if
+corrections become a main use case, not part of the five-case selection.
+
 Use an intended **test-mode** account with e-invoice and EUR capabilities and
 the worker's documented order-number uniqueness setting. Configure it before
 running: the response `teszt` assertion detects a wrong account only after the
@@ -197,22 +211,27 @@ reconciliation as any unanswered write.
 
 Core scenarios:
 
-1. Paper HUF invoice: half-forint rounding, create and queried PDF, persisted
+1. Paper HUF invoice: half-forint rounding, create, XML-query and standalone-query
+   PDFs (signature checks, not rendering), persisted
    identity/type/order/currency/totals, replacement `[100]` → `[200]` then additive
    `[50]` credit entries (unordered comparison and returned outstanding amounts),
    previous-month fulfillment, matching storno appearance and relationships,
-   own storno external id and repeated storno returning the existing reversal.
+   removal of the original's credit entries on storno, own storno external id
+   and repeated storno returning the existing reversal.
 2. Proforma create/query/delete, then absence by number and external id.
 3. Actual Restate ordinary e-invoice order: account probe, proforma consumption,
-   same-key replay and fresh-invocation `already_issued`, observation, storno,
+   same-key replay and fresh-invocation `already_issued`, live invoice observation,
+   storno retaining the original's explicit previous-month fulfillment and
+   electronic appearance despite the account's paper default,
    ordinary `reversed`, exact-number reissue, newest external-id holder and stale
    expected-number `target_changed`.
 4. Actual Restate EUR proforma/prepayment/final: explicit proforma reference and
    caller-supplied negative prepayment line at the same VAT rate, exchange rate
-   400, fractional price, persisted references/totals/consumption and completed
+   400, fractional price, persisted references/line totals/consumption, live
+   prepayment/final observations and completed
    operation repetition. Full performance is 49.38 + 13.33; deduction is
    −24.69 − 6.67; final gross is 31.35. The vendor does not deduct automatically.
-5. Read-only taxpayer lookup: valid and nonblank identity, no pinned company
+5. Read-only taxpayer lookup: valid, matching tax-number stem and nonblank name, no pinned company
    name/address. A NAV dependency failure fails this smoke explicitly.
 
 ### Separately selected investigative probes
@@ -276,7 +295,7 @@ run as a complete scenario; its recovery resend was acknowledged separately.
 ### Dagger secrets and execution freshness
 
 `ci.live(agentKey: Secret, runId: String, probes: Boolean = false,
-receiptPrefix: String = "", receiptEmail: String = "")` is manual and
+receiptPrefix: String = "", receiptEmail: String = "", filter: String = "")` is manual and
 has no `@check`. It injects the key with `withSecretVariable`, never a command
 literal. Give **each deliberate execution a fresh non-secret run id**:
 
@@ -294,9 +313,24 @@ same inputs may return cached evidence. Never rerun an uncertain write merely
 to obtain a new report. Reports are returned on success; failures and kept
 server logs remain in the Dagger trace.
 
-The Dagger `probes: true` mode selects all seven experiments and requires
-`receiptPrefix` and an operator-controlled `receiptEmail`. It deliberately
-requests two emails. Use the local filtered commands above for individual probes.
+Use `--filter` with a nextest expression to select individual scenarios within
+the chosen profile. It cannot expand the selection beyond that profile, and an
+invalid expression or empty selection fails. The expression is passed as one
+argument, not evaluated as shell code. For example:
+
+```sh
+# Only clearing; no receipt prefix or email needed.
+dagger -c 'ci | live env://SZAMLAZZ_AGENT_KEY clearing-20260911-1 --probes --filter "test(clear_credit_entries_populated)" | export ./clearing-report'
+# Optional receipt acceptance, without sending email.
+dagger -c 'ci | live env://SZAMLAZZ_AGENT_KEY receipt-20260911-1 --probes --filter "test(receipt_lifecycle)" --receipt-prefix NYGTA | export ./receipt-report'
+# A read-only core selection also works.
+dagger -c 'ci | live env://SZAMLAZZ_AGENT_KEY taxpayer-20260911-1 --filter "test(taxpayer_query)" | export ./taxpayer-report'
+```
+
+Selected receipt scenarios require `receiptPrefix`; only email resend needs
+`receiptEmail`. Those tests check their settings before creating a receipt.
+Unfiltered `--probes` retains the explicit all-seven mode and requires both
+settings; it deliberately requests two emails. Prefer a filtered investigation.
 
 ### Evidence and cleanup
 

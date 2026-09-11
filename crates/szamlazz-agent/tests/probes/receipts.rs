@@ -1,5 +1,5 @@
 //! Separately selected receipt experiments, with known-number cleanup.
-use super::live_support::Run;
+use super::live_support::{Run, assert_pdf};
 use futures_util::FutureExt;
 use rust_decimal::dec;
 use std::any::Any;
@@ -9,16 +9,9 @@ use szamlazz_agent::ops::receipt::{
     SendReceipt, StornoReceipt,
 };
 use szamlazz_agent::{
-    ClientError, Currency, ErrorCode, ExchangeRate, LineItem, PaymentMethod, Pdf, ReceiptNumber,
+    ClientError, Currency, ErrorCode, ExchangeRate, LineItem, PaymentMethod, ReceiptNumber,
     ReceiptType, VatRate,
 };
-
-fn assert_pdf(pdf: Option<&Pdf>) {
-    assert!(
-        pdf.expect("requested PDF").as_bytes().starts_with(b"%PDF-"),
-        "artifact must have a PDF signature (not a full rendering check)"
-    );
-}
 
 fn setting(name: &str) -> String {
     std::env::var(name)

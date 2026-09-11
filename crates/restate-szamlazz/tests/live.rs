@@ -16,7 +16,7 @@ use restate_szamlazz::{Agent, Order};
 use rust_decimal::{Decimal, dec};
 use serde_json::{Value, json};
 use std::{panic::AssertUnwindSafe, sync::Arc};
-use szamlazz_agent::{Currency, DocumentType, InvoiceNumber, InvoiceSelector};
+use szamlazz_agent::{Currency, DocumentType, InvoiceNumber, InvoiceSelector, VatRate};
 
 const SERVER: ServerSpec = ServerSpec {
     name: "vendor-live",
@@ -33,7 +33,7 @@ async fn start() -> Restate {
     let launcher = launcher_or_skip(ReusePolicy::Allowed).expect("selected live journey requires RESTATE_SERVER_BIN or RESTATE_ADMIN_URL and RESTATE_INGRESS_URL");
     let restate = launcher.launch(&SERVER).await;
     let config: StaticConfig = serde_json::from_value(json!({"account": {
-        "id": "live", "agent_key": key, "defaults": {"e_invoice": true}
+        "id": "live", "agent_key": key, "defaults": {"e_invoice": false}
     }}))
     .expect("static account");
     let resolver = Arc::new(StaticResolver::try_from(config).expect("resolver"));
@@ -67,6 +67,9 @@ fn document(price: Decimal, currency: &str) -> Value {
         PaymentMethod::Transfer,
     );
     doc.overrides.currency = Some(currency.into());
+    // Opposite to the account default: storno must derive appearance from the
+    // verified original, rather than accidentally succeeding with the default.
+    doc.overrides.e_invoice = Some(true);
     if currency == "EUR" {
         doc.overrides.exchange_rate = Some(restate_szamlazz::contract::ExchangeRateInput {
             bank: "MNB".into(),
@@ -145,11 +148,12 @@ async fn consumed(
     number: &InvoiceNumber,
     by: &InvoiceNumber,
     identity: &str,
-) {
+) -> Value {
     let state = call(restate, run, "get", None, identity).await;
     assert_eq!(state["proforma"]["state"], "consumed", "{state}");
     assert_eq!(state["proforma"]["number"], number.as_str());
     assert_eq!(state["proforma"]["by"], by.as_str());
+    state
 }
 
 async fn repeated(
@@ -207,7 +211,9 @@ async fn ordinary_order_journey() {
             &first,
         )
         .await;
-        consumed(&restate, &mut run, &proforma, &number, "observe-consumed").await;
+        let state = consumed(&restate, &mut run, &proforma, &number, "observe-consumed").await;
+        assert_eq!(state["invoice"]["state"], "live", "{state}");
+        assert_eq!(state["invoice"]["number"], number.as_str(), "{state}");
         let original = run.by_number(&number).await;
         assert_document(
             &original,
@@ -218,6 +224,11 @@ async fn ordinary_order_journey() {
             (dec!(2469), dec!(667), dec!(3136)),
         );
         assert!(original.info.appearance.is_e_invoice());
+        assert_eq!(
+            json!(original.info.fulfillment_date),
+            body["document"]["fulfillment_date"],
+            "original must retain the requested fulfillment date"
+        );
         assert_eq!(original.info.referenced_proforma_number, Some(proforma));
         let reversal = call(
             &restate,
@@ -269,7 +280,7 @@ async fn ordinary_order_journey() {
             Currency::HUF,
             (dec!(2469), dec!(667), dec!(3136)),
         );
-        let stale = call(
+        let stale_intent = call(
             &restate,
             &mut run,
             "create_invoice",
@@ -277,8 +288,8 @@ async fn ordinary_order_journey() {
             "stale-intent",
         )
         .await;
-        assert_eq!(stale["outcome"], "conflict");
-        assert_eq!(stale["conflict_reason"], "target_changed");
+        assert_eq!(stale_intent["outcome"], "conflict");
+        assert_eq!(stale_intent["conflict_reason"], "target_changed");
     })
     .catch_unwind()
     .await;
@@ -339,7 +350,7 @@ async fn prepayment_final_journey() {
             Some(proforma.clone())
         );
         assert_eq!(stored.info.exchange_rate, Some(dec!(400)));
-        consumed(
+        let state = consumed(
             &restate,
             &mut run,
             &proforma,
@@ -347,6 +358,12 @@ async fn prepayment_final_journey() {
             "observe-prepayment",
         )
         .await;
+        assert_eq!(state["prepayment"]["state"], "live", "{state}");
+        assert_eq!(
+            state["prepayment"]["number"],
+            prepayment.as_str(),
+            "{state}"
+        );
         let mut final_body = document(dec!(24.69), "EUR");
         final_body["document"]["items"]
             .as_array_mut()
@@ -386,17 +403,37 @@ async fn prepayment_final_journey() {
             Currency::EUR,
             (dec!(24.69), dec!(6.66), dec!(31.35)),
         );
-        assert_eq!(stored.info.referenced_invoice_number, Some(prepayment));
+        assert_eq!(
+            stored.info.referenced_invoice_number.as_ref(),
+            Some(&prepayment)
+        );
         assert_eq!(stored.items.len(), 2);
+        for (item, (quantity, net, vat, gross)) in stored.items.iter().zip([
+            (dec!(2), dec!(49.38), dec!(13.33), dec!(62.71)),
+            (dec!(-1), dec!(-24.69), dec!(-6.67), dec!(-31.36)),
+        ]) {
+            assert_eq!(
+                (
+                    item.quantity,
+                    item.net_value,
+                    item.vat_value,
+                    item.gross_value
+                ),
+                (quantity, net, vat, gross),
+                "stored performance and prepayment deduction"
+            );
+            assert_eq!(item.vat_rate(), VatRate::percent(27));
+        }
         assert_eq!(stored.info.exchange_rate, Some(dec!(400)));
-        consumed(
-            &restate,
-            &mut run,
-            &proforma,
-            &InvoiceNumber::new(first["invoice_number"].as_str().expect("prepayment")),
-            "observe-final",
-        )
-        .await;
+        let state = consumed(&restate, &mut run, &proforma, &prepayment, "observe-final").await;
+        assert_eq!(state["prepayment"]["state"], "live", "{state}");
+        assert_eq!(
+            state["prepayment"]["number"],
+            prepayment.as_str(),
+            "{state}"
+        );
+        assert_eq!(state["final"]["state"], "live", "{state}");
+        assert_eq!(state["final"]["number"], final_number.as_str(), "{state}");
     })
     .catch_unwind()
     .await;

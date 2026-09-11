@@ -18,6 +18,7 @@ mod scenarios {
     use std::panic::AssertUnwindSafe;
     use szamlazz_agent::ops::credit_entry::{CreditEntry, RegisterCreditEntry};
     use szamlazz_agent::ops::invoice::InvoiceKind;
+    use szamlazz_agent::ops::query_pdf::QueryInvoicePdf;
     use szamlazz_agent::ops::query_xml::{InvoiceAppearance, QueryInvoiceXml};
     use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
     use szamlazz_agent::{Currency, DocumentType, InvoiceSelector, PaymentMethod};
@@ -33,14 +34,12 @@ mod scenarios {
             .expect("NAV taxpayer dependency failed");
         assert!(info.valid);
         assert!(info.name.is_some_and(|name| !name.trim().is_empty()));
-        assert!(
-            info.tax_number
-                .is_some_and(|number| !number.trim().is_empty())
-        );
+        assert_eq!(info.tax_number.as_deref(), Some("13421739"));
     }
 
     #[tokio::test]
     #[ignore = "requires SZAMLAZZ_AGENT_KEY; issues and reverses a test invoice"]
+    #[allow(clippy::too_many_lines)] // One ordered business lifecycle, including cleanup.
     async fn invoice_lifecycle() {
         let mut run = Run::new();
         let result = AssertUnwindSafe(async {
@@ -48,7 +47,7 @@ mod scenarios {
                 .create(document(InvoiceKind::invoice()), "invoice")
                 .await;
             let number = created.invoice_number.clone();
-            assert!(created.pdf.is_some());
+            assert_pdf(created.pdf.as_ref());
             assert_eq!(created.net_total, Some(dec!(2469)));
             assert_eq!(created.gross_total, Some(dec!(3136)));
             let original = run.by_number(&number).await;
@@ -72,7 +71,16 @@ mod scenarios {
                 .expect("query external id with PDF");
             assert_eq!(by_id.info.id, original.info.id);
             assert_eq!(by_id.info.invoice_number, number);
-            assert!(by_id.pdf.is_some());
+            assert_pdf(by_id.pdf.as_ref());
+            let fetched = run
+                .client
+                .send(&QueryInvoicePdf::new(InvoiceSelector::InvoiceNumber(
+                    number.clone(),
+                )))
+                .await
+                .expect("standalone invoice PDF query");
+            assert_eq!(fetched.invoice_number, number);
+            assert_pdf(Some(&fetched.pdf));
 
             for (amount, additive, expected, outstanding) in [
                 (dec!(100), false, vec![dec!(100)], dec!(3036)),
@@ -106,6 +114,10 @@ mod scenarios {
             assert_ne!(reversal.invoice_number, number);
             let reversed = run.by_number(&number).await;
             assert_eq!(reversed.info.reversed, Some(true));
+            assert!(
+                reversed.credit_entries.is_empty(),
+                "storno removes the original's registered credit entries"
+            );
             let storno = run.by_number(&reversal.invoice_number).await;
             assert_document(
                 &storno,

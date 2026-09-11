@@ -12,7 +12,7 @@ use szamlazz_agent::ops::query_xml::{InvoiceDocument, QueryInvoiceXml};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::{
     Client, ClientError, Credentials, Currency, DocumentType, InvoiceNumber, InvoiceSelector,
-    Language, LineItem, OutcomeClass, PaymentMethod, Rounding, VatRate,
+    Language, LineItem, OutcomeClass, PaymentMethod, Pdf, Rounding, VatRate,
 };
 
 pub fn today() -> Date {
@@ -26,6 +26,13 @@ pub fn previous_month() -> Date {
         .first_of_month()
         .checked_sub(jiff::Span::new().days(1))
         .expect("previous month")
+}
+
+pub fn assert_pdf(pdf: Option<&Pdf>) {
+    assert!(
+        pdf.expect("requested PDF").as_bytes().starts_with(b"%PDF-"),
+        "artifact must have a PDF signature (not a full rendering check)"
+    );
 }
 
 pub fn key() -> String {

@@ -93,9 +93,10 @@ type Ci {
 
   """
   An external run, then its JUnit and kept server logs on failure, preserving
-  the run's exit status. NEXTEST_PROFILE is selected by the calling function.
+  the run's exit status. NEXTEST_PROFILE is selected by the calling function;
+  optional nextest arguments are passed as shell positional arguments.
   """
-  let externalScript: String! = """cargo nextest run --workspace --all-features --locked --run-ignored only
+  let externalScript: String! = """cargo nextest run --workspace --all-features --locked --run-ignored only "$@"
 status=$?
 if [ "$status" -ne 0 ]; then
   report="target/nextest/$NEXTEST_PROFILE/junit.xml"
@@ -137,14 +138,20 @@ exit "$status"
   the run's UUID order identities. The account must be in test mode with EUR
   and e-invoice support. A failed write requires reconciliation, not a rerun.
   Returns the JUnit report for archival; full output is in the Dagger trace.
+  filter is a nextest expression intersected with the live/probes profile.
+  Select receipt_lifecycle for optional receipt acceptance; other probes answer
+  specific vendor questions. Selected receipt tests check their settings before
+  creating a receipt. An empty selection fails without executing any scenario.
   """
-  live(agentKey: Secret!, runId: String!, probes: Boolean! = false, receiptPrefix: String! = "", receiptEmail: String! = ""): Directory! {
+  live(agentKey: Secret!, runId: String!, probes: Boolean! = false, receiptPrefix: String! = "", receiptEmail: String! = "", filter: String! = ""): Directory! {
     if (runId == "") { raise "live requires a fresh non-empty runId" }
-    if (probes and (receiptPrefix == "" or receiptEmail == "")) {
+    if (probes and filter == "" and (receiptPrefix == "" or receiptEmail == "")) {
       raise "all probes require receiptPrefix and an operator-controlled receiptEmail"
     }
     let profile = "live"
     if (probes) { profile = "probes" }
+    let command = ["sh", "-c", self.externalScript, "nextest"]
+    if (filter != "") { command = ["sh", "-c", self.externalScript, "nextest", "-E", filter] }
     self.compiled
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
@@ -154,7 +161,7 @@ exit "$status"
       .withEnvVariable("SZAMLAZZ_RECEIPT_PREFIX", receiptPrefix)
       .withEnvVariable("SZAMLAZZ_RECEIPT_EMAIL", receiptEmail)
       .withEnvVariable("NEXTEST_PROFILE", profile)
-      .withExec(["sh", "-c", self.externalScript])
+      .withExec(command)
       .directory("/work/src/target/nextest/" + profile)
   }
 
