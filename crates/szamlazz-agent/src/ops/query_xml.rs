@@ -578,7 +578,7 @@ impl AgentRequest for QueryInvoiceXml {
             },
         )?;
         if root == 1 {
-            let verdict: xml::Verdict = quick_xml::de::from_str(&text).map_err(ParseError::from)?;
+            let verdict = xml::Verdict::parse(&text)?;
             verdict.check()?;
             return Err(ParseError::UnexpectedBody(
                 "successful xmlszamlavalasz for an XML query".to_owned(),

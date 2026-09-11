@@ -20,7 +20,7 @@ client-reqwest = ["dep:reqwest"]
 base64 = { workspace = true }
 jiff = { workspace = true }
 percent-encoding = "2.3.2"
-quick-xml = { workspace = true }
+quick-xml = { workspace = true, features = ["overlapped-lists"] }
 # reqwest 0.13.2 introduced the current `rustls` platform-verifier feature.
 reqwest = { version = "0.13.2", default-features = false, optional = true, features = ["cookies", "rustls"] }
 rust_decimal = { workspace = true }

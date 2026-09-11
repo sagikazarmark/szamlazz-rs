@@ -257,6 +257,11 @@ tokenizer complements the structural reader: illegal XML characters, malformed
 names/attributes, forbidden character-data delimiters and undefined references
 are refused even in ignored extensions. This is XML checking, not XSD business
 validation; sparse content and well-formed unknown extensions remain supported.
+Namespace declarations are normalized before checking reserved bindings and
+attribute expanded-name uniqueness (Namespaces in XML 1.0). Repeated invoice and
+receipt rows may use different prefixes for the same namespace or have ignored
+extensions between them; row order is retained. Duplicate singleton fields and
+children inside scalar values remain refused.
 Taxpayer extraction follows
 NAV 2.0/3.0 expanded names and recognized parent paths: foreign or unknown subtrees
 cannot supply a verdict or business data. Duplicate recognized singleton fields
@@ -265,6 +270,10 @@ Sparse records, unknown tokens and `taxpayerValidity=false` remain data; an `OK`
 verdict still requires validity. Header/down/status precedence remains in effect.
 Numbered-header-56 fallback permits empty or plain-text notification bodies only;
 malformed XML must not conceal a refusal and become issued success.
+An unusable optional `hibauzenet` (nested content or duplicate elements) is read
+as an absent diagnostic, independently of the unique scalar verdict and code.
+It cannot erase a readable refusal or numbered-56 evidence; malformed verdicts,
+codes and ambiguous body identity remain subject to the existing checks.
 
 ## Bring Your Own HTTP Client
 

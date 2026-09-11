@@ -3,7 +3,7 @@ use szamlazz_agent::InvoiceSelector;
 use szamlazz_agent::ops::{
     proforma::{DeleteProforma, ProformaSelector},
     query_xml::QueryInvoiceXml,
-    receipt::SendReceipt,
+    receipt::{CreateReceipt, QueryReceipt, ReceiptSelector, SendReceipt, StornoReceipt},
     storno::StornoInvoice,
     taxpayer::QueryTaxpayer,
 };
@@ -11,6 +11,95 @@ use szamlazz_agent::wire::{AgentRequest, RawResponse};
 
 fn raw(body: String) -> RawResponse {
     RawResponse::new::<&str, &str>([], body.into_bytes())
+}
+
+/// Duplicate a complete row without changing its business content. Namespace
+/// aliases and ignored container children must not change list membership.
+fn repeated_row(body: &str, row: &str, namespace: &str, between: &str) -> String {
+    let start = body.find(&format!("<{row}>")).expect("row start");
+    let end = start + body[start..].find(&format!("</{row}>")).expect("row end") + row.len() + 3;
+    let original = &body[start..end];
+    let alias = original
+        .replacen(
+            &format!("<{row}>"),
+            &format!(r#"<p:{row} xmlns:p="{namespace}">"#),
+            1,
+        )
+        .replace(&format!("</{row}>"), &format!("</p:{row}>"));
+    format!(
+        "{}{original}{between}{alias}{}",
+        &body[..start],
+        &body[end..]
+    )
+}
+
+#[test]
+fn repeated_invoice_and_receipt_rows_use_expanded_names() {
+    let query = QueryInvoiceXml::new(InvoiceSelector::OrderNumber("O".into()));
+    let invoice = include_str!("synthetic/szamla_query.xml").replace("</szamla>",
+        "<qutetek><qutet><nev>Ledger row</nev><afakulcs>20</afakulcs><netto>10</netto><afa>2</afa><brutto>12</brutto><afalevon>1</afalevon></qutet></qutetek></szamla>");
+    let receipt = include_str!("synthetic/xmlnyugtavalasz.xml");
+    let get = QueryReceipt::new(ReceiptSelector::ReceiptNumber("R".into()));
+    for between in ["", "<extension/>", r#"<x:extension xmlns:x="urn:future"/>"#] {
+        for row in ["tetel", "kifizetes", "afakulcsossz", "qutet"] {
+            let doc = query
+                .parse(&raw(repeated_row(
+                    &invoice,
+                    row,
+                    "http://www.szamlazz.hu/szamla",
+                    between,
+                )))
+                .expect("invoice rows");
+            assert_eq!(doc.items.len(), if row == "tetel" { 2 } else { 1 });
+            assert_eq!(
+                doc.credit_entries.len(),
+                if row == "kifizetes" { 2 } else { 1 }
+            );
+            assert_eq!(
+                doc.totals.by_vat_rate.len(),
+                if row == "afakulcsossz" { 2 } else { 1 }
+            );
+            assert_eq!(doc.items[0].name, "Synthetic service");
+            assert_eq!(
+                doc.financial_items.len(),
+                if row == "qutet" { 2 } else { 1 }
+            );
+            if row == "qutet" {
+                continue;
+            }
+            let response = raw(repeated_row(
+                receipt,
+                row,
+                "http://www.szamlazz.hu/xmlnyugtavalasz",
+                between,
+            ));
+            let doc = get.parse(&response).expect("receipt rows");
+            assert_eq!(doc.items.len(), if row == "tetel" { 3 } else { 2 });
+            assert_eq!(doc.payments.len(), if row == "kifizetes" { 3 } else { 2 });
+            assert_eq!(
+                doc.totals.by_vat_rate.len(),
+                if row == "afakulcsossz" { 2 } else { 1 }
+            );
+            assert_eq!(doc.items.last().expect("last row").name, "Synthetic item B");
+            assert_eq!(
+                StornoReceipt::new("R")
+                    .parse(&response)
+                    .expect("storno rows"),
+                doc
+            );
+            assert_eq!(
+                CreateReceipt::new(
+                    "R",
+                    szamlazz_agent::PaymentMethod::Cash,
+                    szamlazz_agent::Currency::HUF,
+                    vec![]
+                )
+                .parse(&response)
+                .expect("create rows"),
+                doc
+            );
+        }
+    }
 }
 
 #[test]
@@ -141,5 +230,83 @@ fn ignoring_foreign_children_cannot_manufacture_scalar_values() {
             &format!("<{name}>{text}</{name}>"),
         );
         assert!(StornoInvoice::new("I").parse(&raw(body)).is_err(), "{name}");
+    }
+}
+
+#[test]
+fn namespace_checks_normalize_bindings_and_check_expanded_attributes() {
+    let query = QueryInvoiceXml::new(InvoiceSelector::OrderNumber("O".into()));
+    let taxpayer = QueryTaxpayer::new("12345678").expect("prefix");
+    for (attributes, valid) in [
+        (
+            r#"xmlns:xml="http://www.w3.org/XML/1998/n&#97;mespace""#,
+            true,
+        ),
+        (r#"xmlns:a="urn:a" xmlns:b="urn:b" a:x="1" b:x="2""#, true),
+        (
+            r#"xmlns:a="urn:same" xmlns:b="urn:s&#97;me" a:x="1" b:x="2""#,
+            false,
+        ),
+        (
+            r#"xmlns:x="http://www.w3.org/XML/1998/n&#97;mespace""#,
+            false,
+        ),
+        (r#"xmlns="http://www.w3.org/XML/1998/namespace""#, false),
+        (r#"xmlns="http://www.w3.org/2000/xmlns/""#, false),
+        (r#"xmlns:x="""#, false),
+        (r#"xmlns:xml="urn:wrong""#, false),
+        // XML attribute normalization precedes comparison, but references
+        // producing whitespace are not normalized again.
+        (
+            "xmlns:a=\"urn:a\nb\" xmlns:b=\"urn:a b\" a:x=\"1\" b:x=\"2\"",
+            false,
+        ),
+        (
+            r#"xmlns:a="urn:a&#10;b" xmlns:b="urn:a b" a:x="1" b:x="2""#,
+            true,
+        ),
+        (
+            r#"xmlns:a="urn:a&amp;b" xmlns:b="urn:a&#38;b" a:x="1" b:x="2""#,
+            false,
+        ),
+        (
+            r#"xmlns:a="urn:a&amp;amp;b" xmlns:b="urn:a&amp;b" a:x="1" b:x="2""#,
+            true,
+        ),
+    ] {
+        let extension = format!("<extension {attributes}/>");
+        let invoice = include_str!("synthetic/szamla_query.xml")
+            .replace("</szamla>", &format!("{extension}</szamla>"));
+        assert_eq!(query.parse(&raw(invoice)).is_ok(), valid, "{attributes}");
+        let nav = include_str!("synthetic/taxpayer.xml")
+            .replace("<result>", &format!("{extension}<result>"));
+        assert_eq!(taxpayer.parse(&raw(nav)).is_ok(), valid, "{attributes}");
+    }
+}
+
+#[test]
+fn aliases_and_interleaved_extensions_do_not_weaken_singleton_checks() {
+    for contents in [
+        "<sikeres>true</sikeres><extension/><p:sikeres>true</p:sikeres><szamlaszam>I</szamlaszam>",
+        "<sikeres>true</sikeres><szamlaszam>I</szamlaszam><extension/><p:szamlaszam>J</p:szamlaszam>",
+        "<sikeres>false</sikeres><hibakod>56</hibakod><extension/><p:hibakod>3</p:hibakod><szamlaszam>I</szamlaszam>",
+    ] {
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz" xmlns:p="http://www.szamlazz.hu/xmlszamlavalasz">{contents}</xmlszamlavalasz>"#
+        );
+        assert!(StornoInvoice::new("I").parse(&raw(body)).is_err());
+    }
+}
+
+#[test]
+fn legal_attribute_quoting_survives_protocol_projection() {
+    for attributes in [r#"note='a"b'"#, "note='a&quot;b &amp; c'", r#"note="a'b""#] {
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz" {attributes}><sikeres>true</sikeres><extension {attributes}/><szamlaszam>I-1</szamlaszam></xmlszamlavalasz>"#
+        );
+        let doc = StornoInvoice::new("I")
+            .parse(&raw(body))
+            .expect("legal attribute");
+        assert_eq!(doc.invoice_number.as_str(), "I-1");
     }
 }

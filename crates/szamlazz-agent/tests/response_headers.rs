@@ -7,6 +7,40 @@ use szamlazz_agent::wire::{AgentRequest, RawResponse};
 use szamlazz_agent::{ErrorCode, InvoiceSelector, ResponseError};
 
 #[test]
+fn malformed_optional_diagnostics_preserve_verdict_and_numbered_evidence() {
+    for diagnostic in [
+        "<hibauzenet><bad/></hibauzenet>",
+        "<hibauzenet>one</hibauzenet><hibauzenet>two</hibauzenet>",
+    ] {
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>56</hibakod>{diagnostic}<szamlaszam>I-2</szamlaszam></xmlszamlavalasz>"#
+        );
+        let raw = RawResponse::new::<&str, &str>([], body.into_bytes());
+        let issued = StornoInvoice::new("I-1")
+            .parse(&raw)
+            .expect("number retained");
+        assert_eq!(issued.invoice_number.as_str(), "I-2");
+        assert!(issued.notification_delivery_failed);
+
+        let body = format!(
+            r#"<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz"><sikeres>false</sikeres><hibakod>463</hibakod>{diagnostic}</xmlszamlavalasz>"#
+        );
+        let raw = RawResponse::new::<&str, &str>([], body.into_bytes());
+        let ResponseError::Api(error) = RegisterCreditEntry::new("I-1")
+            .parse(&raw)
+            .expect_err("refusal")
+        else {
+            panic!("diagnostic must not erase the refusal");
+        };
+        assert_eq!(error.code, ErrorCode::from("463"));
+        assert!(
+            error.message.is_empty(),
+            "do not choose an ambiguous diagnostic"
+        );
+    }
+}
+
+#[test]
 fn create_storno_and_credit_entry_share_encoded_payment_method_headers() {
     use szamlazz_agent::ops::invoice::{
         Buyer, CreateInvoice, CreatedInvoice, InvoiceHeader, InvoiceKind,

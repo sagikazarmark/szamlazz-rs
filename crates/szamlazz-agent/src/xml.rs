@@ -16,6 +16,119 @@ use crate::wire::RawResponse;
 
 const WRITE_EXPECT: &str = "writing XML to an in-memory buffer cannot fail";
 
+/// Namespace-aware UTF-8 reader with XML 1.0 binding rules. quick-xml's
+/// `NsReader` installs raw attribute values before callers can normalize them;
+/// use its resolver directly so reserved-name checks see normalized values.
+pub(crate) struct NamespaceReader<'a> {
+    reader: quick_xml::Reader<&'a [u8]>,
+    resolver: quick_xml::name::NamespaceResolver,
+    pending_pop: bool,
+}
+
+impl<'a> NamespaceReader<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        let mut reader = quick_xml::Reader::from_str(text);
+        reader.config_mut().check_comments = true;
+        Self {
+            reader,
+            resolver: quick_xml::name::NamespaceResolver::default(),
+            pending_pop: false,
+        }
+    }
+
+    pub(crate) fn read_resolved_event(
+        &mut self,
+    ) -> Result<(quick_xml::name::ResolveResult<'_>, Event<'a>), ParseError> {
+        use quick_xml::name::ResolveResult;
+        if self.pending_pop {
+            // End/empty events must resolve in their own scope. Remove it only
+            // when advancing to the next event, as quick-xml's NsReader does.
+            self.resolver.pop();
+            self.pending_pop = false;
+        }
+        let event = self.reader.read_event().map_err(quick_xml::DeError::from)?;
+        match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                self.push(start)?;
+                self.pending_pop = matches!(event, Event::Empty(_));
+            }
+            Event::End(_) => self.pending_pop = true,
+            _ => {}
+        }
+        let namespace = match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                self.resolver.resolve_element(start.name()).0
+            }
+            Event::End(end) => self.resolver.resolve_element(end.name()).0,
+            _ => ResolveResult::Unbound,
+        };
+        if matches!(namespace, ResolveResult::Unknown(_)) {
+            return Err(ParseError::UnexpectedBody(
+                "undeclared XML element prefix".into(),
+            ));
+        }
+        Ok((namespace, event))
+    }
+
+    fn push(&mut self, start: &BytesStart<'_>) -> Result<(), ParseError> {
+        use quick_xml::name::{Namespace, PrefixDeclaration, ResolveResult};
+        const XML: &str = "http://www.w3.org/XML/1998/namespace";
+        const XMLNS: &str = "http://www.w3.org/2000/xmlns/";
+        // Begin a scope without installing the unnormalized declarations.
+        self.resolver
+            .push(&BytesStart::new("scope"))
+            .map_err(quick_xml::Error::from)
+            .map_err(quick_xml::DeError::from)?;
+        for attribute in start.attributes() {
+            let attribute = attribute
+                .map_err(quick_xml::Error::from)
+                .map_err(quick_xml::DeError::from)?;
+            if let Some(prefix) = attribute.key.as_namespace_binding() {
+                let value = attribute
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .map_err(quick_xml::DeError::from)?;
+                if matches!(prefix, PrefixDeclaration::Default)
+                    && matches!(value.as_ref(), XML | XMLNS)
+                    || matches!(prefix, PrefixDeclaration::Named(_)) && value.is_empty()
+                {
+                    return Err(ParseError::UnexpectedBody(
+                        "invalid XML namespace binding".into(),
+                    ));
+                }
+                self.resolver
+                    .add(prefix, Namespace(&value))
+                    .map_err(quick_xml::Error::from)
+                    .map_err(quick_xml::DeError::from)?;
+            }
+        }
+        let mut attributes = std::collections::HashSet::new();
+        for attribute in start.attributes() {
+            let attribute = attribute
+                .map_err(quick_xml::Error::from)
+                .map_err(quick_xml::DeError::from)?;
+            if attribute.key.as_namespace_binding().is_some() {
+                continue;
+            }
+            let (namespace, local) = self.resolver.resolve_attribute(attribute.key);
+            let namespace = match namespace {
+                ResolveResult::Bound(namespace) => Some(namespace.0),
+                ResolveResult::Unbound => None,
+                ResolveResult::Unknown(_) => {
+                    return Err(ParseError::UnexpectedBody(
+                        "undeclared XML attribute prefix".into(),
+                    ));
+                }
+            };
+            if !attributes.insert((namespace, local)) {
+                return Err(ParseError::UnexpectedBody(
+                    "duplicate expanded XML attribute name".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Builds a complete UTF-8 XML document with the given root element and
 /// default namespace.
 pub(crate) fn document(
@@ -64,50 +177,19 @@ pub(crate) fn response_root<'a>(
     body: &'a [u8],
     expected: &[(&str, &str)],
 ) -> Result<(usize, &'a str), ParseError> {
-    use quick_xml::name::ResolveResult;
-
     let text = std::str::from_utf8(body).map_err(|error| ParseError::Invalid {
         field: "response body",
         message: error.to_string(),
     })?;
-    let mut reader = quick_xml::reader::NsReader::from_str(text);
-    reader.config_mut().check_comments = true;
+    let mut reader = NamespaceReader::new(text);
     let mut depth = 0usize;
     let mut matched = None;
     let mut first = true;
     let invalid = || ParseError::UnexpectedBody(body_excerpt(body));
 
     loop {
-        let event = reader.read_event().map_err(quick_xml::DeError::from)?;
-        let namespace = match &event {
-            Event::Start(start) | Event::Empty(start) => {
-                reader.resolver().resolve_element(start.name()).0
-            }
-            Event::End(end) => reader.resolver().resolve_element(end.name()).0,
-            _ => ResolveResult::Unbound,
-        };
-
-        if matches!(namespace, ResolveResult::Unknown(_)) {
-            return Err(ParseError::UnexpectedBody(
-                "undeclared XML element prefix".into(),
-            ));
-        }
+        let (namespace, event) = reader.read_resolved_event()?;
         let namespace_uri = namespace_uri(&namespace)?;
-        if let Event::Start(start) | Event::Empty(start) = &event {
-            for attribute in start.attributes() {
-                let attribute = attribute
-                    .map_err(quick_xml::Error::from)
-                    .map_err(quick_xml::DeError::from)?;
-                if matches!(
-                    reader.resolver().resolve_attribute(attribute.key).0,
-                    ResolveResult::Unknown(_)
-                ) {
-                    return Err(ParseError::UnexpectedBody(
-                        "undeclared XML attribute prefix".into(),
-                    ));
-                }
-            }
-        }
 
         let empty = matches!(event, Event::Empty(_));
         match event {
@@ -196,76 +278,88 @@ fn validate_lexical(text: &str) -> Result<(), ParseError> {
 /// Present only the protocol namespace to serde, which matches local names.
 /// Entire foreign subtrees are ignored, including descendants that re-enter
 /// the protocol namespace. Serde then owns parent-path and field recognition.
-/// Slice the original text rather than reserializing it: business whitespace,
-/// entity references, CDATA and namespace aliases retain their exact spelling.
+/// Canonicalize protocol element names for serde's raw-QName list grouping.
+/// Copy text events without decoding/re-escaping: business whitespace, entity
+/// references and CDATA retain their spelling. Overlapped-list deserialization
+/// lets ignored children separate rows without weakening scalar validation.
 pub(crate) fn protocol_text<'a>(
     text: &'a str,
     namespace: &str,
 ) -> Result<std::borrow::Cow<'a, str>, ParseError> {
-    let mut reader = quick_xml::reader::NsReader::from_str(text);
+    let mut reader = NamespaceReader::new(text);
     let mut skipped_depth = 0usize;
-    let mut kept_until = 0usize;
-    let mut output = None::<String>;
+    let mut output = Writer::new(Vec::new());
     loop {
-        let before = usize::try_from(reader.buffer_position()).expect("position within input str");
-        let (resolved, event) = reader
-            .read_resolved_event()
-            .map_err(quick_xml::DeError::from)?;
+        let (resolved, event) = reader.read_resolved_event()?;
         let foreign = namespace_uri(&resolved)?.as_deref() != Some(namespace);
         let empty = matches!(event, Event::Empty(_));
         match event {
-            Event::Start(_) | Event::Empty(_) => {
+            Event::Start(start) | Event::Empty(start) => {
                 if skipped_depth == 0 && foreign {
-                    output
-                        .get_or_insert_with(String::new)
-                        .push_str(&text[kept_until..before]);
                     // Keep an unknown child in the projected shape: deleting
                     // it entirely could turn `tr<foreign/>ue` into `true`.
                     output
-                        .as_mut()
-                        .expect("initialized")
-                        .push_str("<__szamlazz_foreign/>");
-                    if empty {
-                        kept_until = usize::try_from(reader.buffer_position())
-                            .expect("position within input str");
-                    } else {
+                        .write_event(Event::Empty(BytesStart::new("__szamlazz_foreign")))
+                        .expect(WRITE_EXPECT);
+                    if !empty {
                         skipped_depth = 1;
                     }
                 } else if skipped_depth > 0 && !empty {
                     skipped_depth += 1;
+                } else if skipped_depth == 0 {
+                    let local = start.local_name();
+                    let mut canonical = BytesStart::new(local.as_ref());
+                    // Namespace identity was resolved above. Do not feed raw
+                    // declarations back into serde's namespace reader.
+                    for attribute in start.attributes() {
+                        let mut attribute = attribute
+                            .map_err(quick_xml::Error::from)
+                            .map_err(quick_xml::DeError::from)?;
+                        if attribute.key.as_namespace_binding().is_none() {
+                            // push_attribute writes double quotes but retains
+                            // the raw escaped value. Escape literal quotes from
+                            // single-quoted input without re-escaping references.
+                            if attribute.value.contains('"') {
+                                attribute.value = attribute.value.replace('"', "&quot;").into();
+                            }
+                            canonical.push_attribute(attribute);
+                        }
+                    }
+                    output
+                        .write_event(if empty {
+                            Event::Empty(canonical)
+                        } else {
+                            Event::Start(canonical)
+                        })
+                        .expect(WRITE_EXPECT);
                 }
             }
             Event::End(_) if skipped_depth > 0 => {
                 skipped_depth -= 1;
-                if skipped_depth == 0 {
-                    kept_until = usize::try_from(reader.buffer_position())
-                        .expect("position within input str");
-                }
+            }
+            Event::End(end) => {
+                output
+                    .write_event(Event::End(BytesEnd::new(end.local_name().as_ref())))
+                    .expect(WRITE_EXPECT);
             }
             Event::Eof => break,
+            event if skipped_depth == 0 => output.write_event(event).expect(WRITE_EXPECT),
             _ => {}
         }
     }
-    Ok(match output {
-        None => std::borrow::Cow::Borrowed(text),
-        Some(mut output) => {
-            output.push_str(&text[kept_until..]);
-            std::borrow::Cow::Owned(output)
-        }
-    })
+    Ok(std::borrow::Cow::Owned(
+        String::from_utf8(output.into_inner()).expect("XML events originate in UTF-8 text"),
+    ))
 }
 
-/// Namespace declaration values are XML attributes: character references
-/// participate in URI identity just as they do in ordinary attribute values.
+/// Bindings returned by `NamespaceReader` are already normalized XML attribute
+/// values. Never unescape a second time (a literal ampersand may be in the URI).
 pub(crate) fn namespace_uri<'a>(
     resolved: &quick_xml::name::ResolveResult<'a>,
 ) -> Result<Option<std::borrow::Cow<'a, str>>, ParseError> {
     match resolved {
         quick_xml::name::ResolveResult::Bound(namespace) => {
-            quick_xml::escape::unescape(namespace.0)
-                .map(Some)
-                .map_err(quick_xml::DeError::from)
-                .map_err(ParseError::from)
+            Ok(Some(std::borrow::Cow::Borrowed(namespace.0)))
         }
         quick_xml::name::ResolveResult::Unbound => Ok(None),
         quick_xml::name::ResolveResult::Unknown(_) => {
@@ -344,17 +438,42 @@ fn valid_encoding_name(value: &str) -> bool {
 /// `xmlszamlavalasz`, `xmlszamladbkdelvalasz`, `xmlnyugtavalasz` and
 /// `xmlnyugtasendvalasz` envelopes; the payload that follows it is each
 /// operation's own and is read from the same text.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Verdict {
-    #[serde(deserialize_with = "de::flexible_bool")]
     pub(crate) sikeres: bool,
-    #[serde(default, deserialize_with = "de::empty_as_none")]
     pub(crate) hibakod: Option<String>,
-    #[serde(default)]
     pub(crate) hibauzenet: Option<String>,
 }
 
 impl Verdict {
+    /// Read unique scalar facts independently of the optional diagnostic.
+    /// The caller has already checked complete XML and filtered namespaces.
+    /// A nested/duplicate diagnostic is unavailable, never grounds for losing
+    /// a readable refusal or numbered notification-failure result.
+    pub(crate) fn parse(text: &str) -> Result<Self, ParseError> {
+        #[derive(serde::Deserialize)]
+        struct Facts {
+            #[serde(deserialize_with = "de::flexible_bool")]
+            sikeres: bool,
+            #[serde(default, deserialize_with = "de::empty_as_none")]
+            hibakod: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Diagnostic {
+            #[serde(default)]
+            hibauzenet: Option<String>,
+        }
+        let facts: Facts = quick_xml::de::from_str(text)?;
+        let diagnostic = quick_xml::de::from_str::<Diagnostic>(text)
+            .ok()
+            .and_then(|value| value.hibauzenet);
+        Ok(Self {
+            sikeres: facts.sikeres,
+            hibakod: facts.hibakod,
+            hibauzenet: diagnostic,
+        })
+    }
+
     /// The error a `sikeres=false` verdict reports; `None` on success.
     ///
     /// A failure without a `hibakod` (or with an empty one) is
@@ -389,7 +508,7 @@ fn verdict_text<'a>(
     response.check()?;
     let text = response_text(response.body(), root, namespace)?;
     let text = protocol_text(text, namespace)?;
-    let verdict: Verdict = quick_xml::de::from_str(&text).map_err(ParseError::from)?;
+    let verdict = Verdict::parse(&text)?;
     verdict.check()?;
 
     Ok(text)
@@ -902,7 +1021,7 @@ mod tests {
         for (inner, expected) in cases {
             let response = envelope(inner);
             let text = response_text(response.body(), ROOT, NS).expect("envelope");
-            let parsed: Verdict = quick_xml::de::from_str(text).expect("verdict parses");
+            let parsed = Verdict::parse(text).expect("verdict parses");
             assert_eq!(parsed.check(), expected, "{inner}");
             assert_eq!(parsed.api_error(), expected.clone().err(), "{inner}");
             match (verdict(&response, ROOT, NS), expected) {

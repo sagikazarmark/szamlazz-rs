@@ -6,7 +6,6 @@ use std::str::FromStr;
 use std::collections::HashSet;
 
 use quick_xml::events::Event;
-use quick_xml::reader::NsReader;
 
 use crate::credentials::Credentials;
 use crate::error::{ApiError, ErrorCode, ParseError, ResponseError};
@@ -416,14 +415,12 @@ impl TaxpayerResponse {
             ],
         )?;
         let layout = Layout::for_root_index(root_index);
-        let mut reader = NsReader::from_str(text);
+        let mut reader = xml::NamespaceReader::new(text);
         let mut parsed = Self::default();
         let mut stack: Vec<Frame> = Vec::new();
 
         loop {
-            let (namespace, event) = reader
-                .read_resolved_event()
-                .map_err(quick_xml::DeError::from)?;
+            let (namespace, event) = reader.read_resolved_event()?;
             let namespace = xml::namespace_uri(&namespace)?;
             let empty = matches!(event, Event::Empty(_));
             match event {

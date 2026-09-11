@@ -291,7 +291,7 @@ fn parse_envelope(
 ) -> Result<(xml::Verdict, Result<Body, ParseError>), ParseError> {
     let text = xml::response_text(body, ROOT, NAMESPACE)?;
     let text = xml::protocol_text(text, NAMESPACE)?;
-    let verdict: xml::Verdict = quick_xml::de::from_str(&text)?;
+    let verdict = xml::Verdict::parse(&text)?;
     let notification_failed = verdict.api_error().map_or(notification_header, |error| {
         error.code == ErrorCode::InvoiceNotificationDeliveryFailed
     });
