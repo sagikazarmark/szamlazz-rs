@@ -968,6 +968,12 @@ old key; a new invocation performs the new checks.
 
 ## Testing
 
+The shared [testing guide](../../docs/testing.md) lists nextest profiles and
+commands. `cargo live` adds two ignored actual-Restate → actual-szamlazz.hu
+journeys: ordinary e-invoice consumption/reversal/reissue and EUR
+proforma → prepayment → final with an explicit deduction line. These use
+validated worker policies. The mocked-vendor suites below remain regular CI.
+
 ### Unit and wiremock tests
 
 `cargo test -p restate-szamlazz` runs:

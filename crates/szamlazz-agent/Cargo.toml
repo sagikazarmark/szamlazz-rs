@@ -30,6 +30,8 @@ thiserror = { workspace = true }
 xmlparser = "0.13.6"
 
 [dev-dependencies]
+futures-util = "0.3.32"
+uuid = { version = "1", features = ["v4"] }
 jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

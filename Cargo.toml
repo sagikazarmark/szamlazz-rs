@@ -56,6 +56,12 @@ shared-version = true
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
 
+# Feature enumeration is offline only. The manual live runner bypasses this
+# wrapper and runs each scenario once with the intended transport features.
+[[workspace.metadata.dagger.modules]]
+name = "rust"
+hack.check = ["--feature-powerset"]
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

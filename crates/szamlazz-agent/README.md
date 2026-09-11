@@ -7,6 +7,14 @@
 
 The core performs no I/O: request types serialize into a ready-to-send `WireRequest`, and typed responses parse from raw headers and body bytes. Any HTTP client can drive it on native Rust or `wasm32-unknown-unknown`, including Cloudflare Workers.
 
+## Testing
+
+See the shared [testing guide](../../docs/testing.md) for offline checks and
+manual `cargo live` / `cargo probes` commands. Vendor-live tests stay ignored
+even with credentials present. Core coverage is a paper invoice/credit-entry/
+storno lifecycle, verified proforma deletion, and a read-only taxpayer smoke;
+mismatching storno appearances are separately selected probes.
+
 ## Quick Start
 
 Enable `client-reqwest` to use the ready-made async client. The happy path of an integration: issue an invoice under an order number and an external id, find it again by that id, and fetch its PDF.

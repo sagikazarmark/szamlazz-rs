@@ -1,0 +1,43 @@
+# Profiles select tests; external suites additionally require --run-ignored only.
+[store]
+dir = "target/nextest"
+
+[profile.default]
+default-filter = 'not ((package(szamlazz-agent) | package(restate-szamlazz)) & (binary(=live) | binary(=probes))) & not (package(restate-szamlazz) & (kind(lib) | binary(=e2e)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/))'
+slow-timeout = { period = "10s" }
+
+[profile.ci]
+[profile.ci.junit]
+path = "junit.xml"
+
+[profile.e2e]
+default-filter = 'package(restate-szamlazz) & (kind(lib) | binary(=e2e)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/)'
+test-threads = 1
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 20 }
+[profile.e2e.junit]
+path = "junit.xml"
+
+[profile.live]
+default-filter = '(package(szamlazz-agent) | package(restate-szamlazz)) & binary(=live)'
+test-threads = 1
+retries = 0
+fail-fast = true
+slow-timeout = { period = "60s" }
+success-output = "immediate"
+failure-output = "immediate"
+[profile.live.junit]
+path = "junit.xml"
+store-success-output = true
+
+[profile.probes]
+default-filter = 'package(szamlazz-agent) & binary(=probes)'
+test-threads = 1
+retries = 0
+fail-fast = true
+slow-timeout = { period = "60s" }
+success-output = "immediate"
+failure-output = "immediate"
+[profile.probes.junit]
+path = "junit.xml"
+store-success-output = true

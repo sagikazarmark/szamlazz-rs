@@ -48,6 +48,18 @@ The Hungarian-to-English vocabulary is documented in [CONTEXT.md](CONTEXT.md).
 
 ## Development
 
+See [Testing](docs/testing.md) for prerequisites, suite selection, live-run
+diagnostics and secret injection. Nextest never runs doctests; Cargo does.
+
+| Suite | Command | Cadence |
+|---|---|---|
+| Offline unit / wiremock | `cargo t` | Development, pre-push, PR |
+| Doctests | `cargo test --doc --workspace --all-features --locked` | Pre-push, PR |
+| Feature combinations (offline) | `cargo hack check --workspace --feature-powerset --locked` | PR |
+| Actual Restate / mocked szamlazz.hu | `cargo e2e` | PR; locally with a server source |
+| Focused vendor-live journeys | `cargo live` | Manual, before relevant releases or after vendor changes |
+| Investigative vendor probes | `cargo probes` | Manual, for a specific investigation |
+
 The workspace MSRV is Rust 1.92. Run the canonical Dagger check with:
 
 ```bash

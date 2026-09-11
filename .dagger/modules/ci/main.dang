@@ -31,16 +31,16 @@ type Ci {
   }
 
   """
-  `cargo test` with every feature of every crate. Plain `cargo test` compiles
+  Nextest with every feature of every crate. Plain `cargo test` compiles
   the `szamlazz-adatkapcsolat` archiver tests (behind `opendal`) and the
   `schemars` contract tests of `restate-szamlazz` to nothing; this runs them.
   Doctests included (`--all-targets` would drop them).
   """
   test: String! @check {
-    self
-      .compiled
-      .withExec(["cargo", "test", "--workspace", "--all-features", "--locked"])
-      .combinedOutput
+    let tests = self.compiled
+      .withExec(["cargo", "nextest", "run", "--workspace", "--all-features", "--locked", "--profile", "ci"])
+    let docs = tests.withExec(["cargo", "test", "--workspace", "--all-features", "--locked", "--doc"])
+    tests.combinedOutput + docs.combinedOutput
   }
 
   """
@@ -66,23 +66,26 @@ type Ci {
   `restate-server` the harness kept (a failing test keeps the server's base
   dir) follows the output, since the container is discarded with the check.
   """
-  endToEnd: String! @check {
+  endToEnd: Directory! @check {
     self
       .compiled
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
       .withEnvVariable("CI", "true")
-      .withExec(["sh", "-c", self.endToEndScript])
-      .combinedOutput
+      .withEnvVariable("NEXTEST_PROFILE", "e2e")
+      .withExec(["sh", "-c", self.externalScript])
+      .directory("/work/src/target/nextest/e2e")
   }
 
   """
-  The e2e run, then its kept server logs when it failed, exiting with the
-  run's status.
+  An external run, then its JUnit and kept server logs on failure, preserving
+  the run's exit status. NEXTEST_PROFILE is selected by the calling function.
   """
-  let endToEndScript: String! = """cargo test --workspace --all-features --locked --tests -- --ignored e2e_
+  let externalScript: String! = """cargo nextest run --workspace --all-features --locked --run-ignored only
 status=$?
 if [ "$status" -ne 0 ]; then
+  report="target/nextest/$NEXTEST_PROFILE/junit.xml"
+  if [ -f "$report" ]; then cat "$report"; fi
   for log in "${TMPDIR:-/tmp}"/restate-e2e-*/restate-server.log; do
     [ -f "$log" ] || continue
     echo
@@ -100,7 +103,40 @@ exit "$status"
   let compiled: Container! {
     self
       .container
+      .withFile("/usr/local/bin/cargo-nextest", self.nextestBinary)
       .withExec(["cargo", "test", "--workspace", "--all-features", "--locked", "--no-run"])
+  }
+
+  """
+  The exported Rust base container does not install nextest. Use the same
+  pinned upstream release as the Rust module's test command.
+  """
+  let nextestBinary: File! {
+    Dagger.container.from("debian:trixie-slim")
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y curl ca-certificates && curl -fsSL https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-$(uname -m)-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin"])
+      .file("/usr/local/bin/cargo-nextest")
+  }
+
+  """
+  Manual vendor-live execution (never an automatic check). Give every deliberate
+  run a fresh, non-secret runId; it invalidates the execution cache and labels
+  the run's UUID order identities. The account must be in test mode with EUR
+  and e-invoice support. A failed write requires reconciliation, not a rerun.
+  Returns the JUnit report for archival; full output is in the Dagger trace.
+  """
+  live(agentKey: Secret!, runId: String!, probes: Boolean! = false): Directory! {
+    if (runId == "") { raise "live requires a fresh non-empty runId" }
+    let profile = "live"
+    if (probes) { profile = "probes" }
+    self.compiled
+      .withFile("/usr/local/bin/restate-server", self.restateServer)
+      .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
+      .withEnvVariable("CI", "true")
+      .withSecretVariable("SZAMLAZZ_AGENT_KEY", agentKey)
+      .withEnvVariable("SZAMLAZZ_LIVE_RUN_ID", runId)
+      .withEnvVariable("NEXTEST_PROFILE", profile)
+      .withExec(["sh", "-c", self.externalScript])
+      .directory("/work/src/target/nextest/" + profile)
   }
 
   """

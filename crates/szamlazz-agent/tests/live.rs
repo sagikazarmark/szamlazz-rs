@@ -1,275 +1,170 @@
-//! Live tests against a real szamlazz.hu **test-mode** account.
-//!
-//! Ignored by default: they need `SZAMLAZZ_AGENT_KEY` set to an agent key of
-//! an account switched into test mode, and
-//! they create real (test) documents. Run explicitly:
-//!
-//! ```sh
-//! SZAMLAZZ_AGENT_KEY=... cargo test -p szamlazz-agent --features client-reqwest --test live -- --ignored
-//! ```
-//!
-//! Implemented scenarios: taxpayer lookup; a HUF invoice create/storno with
-//! whole-forint `Rounding::minor_unit` totals; proforma create/delete; and
-//! paper/e-invoice appearance with matching and mismatching storno flags.
-//! The [vendor error guidance](https://docs.szamlazz.hu/agent/basics/error-handling)
-//! documents 500 invoices per 10 minutes (checked 2026-09-10).
+//! Focused vendor-live regression tests. See docs/testing.md for opt-in commands.
+#[cfg(feature = "client-reqwest")]
+mod live_support;
 
-#![cfg(feature = "client-reqwest")]
-
-use jiff::civil::Date;
-use rust_decimal::dec;
-use szamlazz_agent::InvoiceSelector;
-use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
-use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
-use szamlazz_agent::ops::query_xml::{InvoiceAppearance, InvoiceDocument, QueryInvoiceXml};
-use szamlazz_agent::ops::storno::StornoInvoice;
-use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
-use szamlazz_agent::{
-    Client, Credentials, Currency, InvoiceNumber, Language, LineItem, PaymentMethod, Rounding,
-    VatRate,
-};
-
-/// A client for the test-mode account `SZAMLAZZ_AGENT_KEY` names.
-fn client() -> Client {
-    let key = std::env::var("SZAMLAZZ_AGENT_KEY")
-        .expect("SZAMLAZZ_AGENT_KEY must point at a test-mode account");
-    Client::new(Credentials::agent_key(key)).expect("client")
+// A selected target without its transport must fail, not pass with zero tests.
+#[cfg(not(feature = "client-reqwest"))]
+#[test]
+#[ignore = "live suite requires client-reqwest and SZAMLAZZ_AGENT_KEY"]
+fn missing_transport() {
+    panic!("select --all-features or --features client-reqwest");
 }
 
-/// Today's date, for `keltDatum` and `teljesitesDatum`.
-fn today() -> Date {
-    // Live tests run on real infrastructure; wall clock is fine here.
-    jiff::Zoned::now().date()
-}
+#[cfg(feature = "client-reqwest")]
+mod scenarios {
+    use super::live_support::*;
+    use futures_util::FutureExt;
+    use rust_decimal::dec;
+    use std::panic::AssertUnwindSafe;
+    use szamlazz_agent::ops::credit_entry::{CreditEntry, RegisterCreditEntry};
+    use szamlazz_agent::ops::invoice::InvoiceKind;
+    use szamlazz_agent::ops::query_xml::{InvoiceAppearance, QueryInvoiceXml};
+    use szamlazz_agent::ops::taxpayer::QueryTaxpayer;
+    use szamlazz_agent::{Currency, DocumentType, InvoiceSelector, PaymentMethod};
 
-/// A one-line HUF document of `kind`: the same buyer, dates and line item on
-/// every live test, so the documents an account accumulates are recognisable.
-fn document(kind: InvoiceKind) -> CreateInvoice {
-    let mut invoice = CreateInvoice::new(
-        kind,
-        InvoiceHeader::new(
-            today(),
-            today(),
-            PaymentMethod::Transfer,
-            Currency::HUF,
-            Language::Hungarian,
-        ),
-        Buyer::new("Teszt Vevő Kft.", "1010", "Budapest", "Teszt utca 1."),
-        vec![
-            // The worst case of minor-unit rounding: 2 × 1234.25 = 2468.5 →
-            // 2469, a net half a forint off `price × qty`, inside the 259
-            // tolerance szamlazz.hu was observed to have (P60: 2 accepted, 5
-            // refused).
-            LineItem::try_calculated(
-                "Integrációs teszt tétel",
-                dec!(2),
-                "db",
-                dec!(1234.25),
-                VatRate::percent(27),
-                Rounding::minor_unit(&Currency::HUF),
-            )
-            .expect("fits"),
-        ],
-    );
-    invoice.download_pdf = true;
-    invoice
-}
-
-#[tokio::test]
-#[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
-async fn taxpayer_query() {
-    // KBOSS.HU Kft., the operator of szamlazz.hu itself.
-    let info = client()
-        .send(&QueryTaxpayer::new("13421739").expect("valid prefix"))
-        .await
-        .expect("query");
-    assert!(info.valid);
-    assert!(info.name.is_some());
-}
-
-#[tokio::test]
-#[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
-async fn invoice_lifecycle() {
-    let client = client();
-
-    let created = client
-        .send(&document(InvoiceKind::invoice()))
-        .await
-        .expect("create")
-        .into_issued()
-        .expect("an issued document");
-    assert!(created.pdf.is_some(), "requested PDF must be present");
-    // HUF totals round to whole forints at each monetary step:
-    // 2 × 1234.25 = 2468.5 → 2469; VAT 27% = 666.63 → 667; gross 3136.
-    assert_eq!(created.net_total, Some(dec!(2469)));
-    assert_eq!(created.gross_total, Some(dec!(3136)));
-
-    let created_number = created.invoice_number.clone();
-    let storno = client
-        .send(&StornoInvoice::new(created_number.clone()))
-        .await
-        .expect("storno");
-    assert_ne!(storno.invoice_number, created_number);
-}
-
-#[tokio::test]
-#[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
-async fn proforma_lifecycle() {
-    let client = client();
-
-    let created = client
-        .send(&document(InvoiceKind::Proforma))
-        .await
-        .expect("create proforma")
-        .into_issued()
-        .expect("an issued proforma");
-
-    client
-        .send(&DeleteProforma::new(ProformaSelector::InvoiceNumber(
-            created.invoice_number,
-        )))
-        .await
-        .expect("delete proforma");
-}
-
-// ----- `eszamla` semantics (issue #73)
-
-/// A `<eszamla>` code as szamlazz.hu reports it, for the probe table.
-fn appearance_cell(document: &InvoiceDocument) -> String {
-    let appearance = document.info.appearance;
-    format!("{} ({appearance:?})", appearance.code())
-}
-
-/// One line of a case for an assertion message.
-fn case_label(create_e_invoice: bool, storno_e_invoice: bool) -> String {
-    format!("created eszamla={create_e_invoice}, storno eszamla={storno_e_invoice}")
-}
-
-/// The document as szamlazz.hu holds it now, fetched by number.
-async fn query_by_number(client: &Client, number: &InvoiceNumber) -> InvoiceDocument {
-    client
-        .send(&QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(
-            number.clone(),
-        )))
-        .await
-        .expect("query by number")
-}
-
-/// What `<eszamla>` means in a queried document, and whether a storno's
-/// `eszamla` must match its original's, settled live: an invoice created with
-/// `<eszamla>true</eszamla>` and one with `false`, each queried back, then
-/// stornoed with a matching and a mismatching `eszamla` (four originals, since
-/// a repeat storno only echoes the existing storno). Asserts what was
-/// observed (the mapping the crate publishes as [`InvoiceAppearance`] (`1`
-/// paper, `2`/`3` e-invoice), and that every storno is accepted and issued in
-/// the *request's* form) and prints the four cases as a table
-/// (`--nocapture`). A create refused by the account (no e-invoice feature)
-/// fails the test with the code.
-///
-/// Every document is stornoed by the probe itself; nothing is left to clean up.
-#[tokio::test]
-#[ignore = "requires SZAMLAZZ_AGENT_KEY for a test-mode account"]
-async fn eszamla_semantics() {
-    let client = client();
-    // The order numbers and external ids of a run must not repeat an earlier
-    // run's: a repeated order number would meet the duplicate-order-number
-    // check, a repeated external id would make the earlier run's documents
-    // holders of this run's ids. Whole seconds since the epoch plus the
-    // process id are unique across runs on one machine and keep the order
-    // number well inside 40 bytes.
-    let tag = format!(
-        "{}-{}",
-        jiff::Timestamp::now().as_second(),
-        std::process::id()
-    );
-
-    // (created as e-invoice?, storno as e-invoice?)
-    let cases = [(true, true), (true, false), (false, true), (false, false)];
-
-    println!("\nrun tag: {tag}");
-    println!(
-        "| Created `eszamla` | Original `<eszamla>` | Storno `eszamla` | Storno result | `SS` `<eszamla>` |"
-    );
-    println!("|---|---|---|---|---|");
-
-    for (index, (create_e_invoice, storno_e_invoice)) in cases.into_iter().enumerate() {
-        let label = case_label(create_e_invoice, storno_e_invoice);
-        let order = format!("ESZ-{tag}-{index}");
-        let mut invoice = document(InvoiceKind::invoice());
-        invoice.header.order_number = Some(order.clone());
-        invoice.external_id = Some(format!("esz-{tag}:{index}"));
-        invoice.e_invoice = create_e_invoice;
-        invoice.download_pdf = false;
-
-        let created = client
-            .send(&invoice)
+    #[tokio::test]
+    #[ignore = "requires SZAMLAZZ_AGENT_KEY; read-only NAV smoke"]
+    async fn taxpayer_query() {
+        let run = Run::new();
+        let info = run
+            .client
+            .send(&QueryTaxpayer::new("13421739").expect("prefix"))
             .await
-            .unwrap_or_else(|error| panic!("{label}: create refused: {error}"))
-            .into_issued()
-            .expect("an issued document");
-        let number = created.invoice_number.clone();
-        let original = query_by_number(&client, &number).await;
-        assert_eq!(
-            original.info.document_type,
-            szamlazz_agent::DocumentType::Invoice,
-            "{label}"
-        );
-        assert_eq!(
-            original.info.order_number.as_deref(),
-            Some(order.as_str()),
-            "{label}"
-        );
-
-        let mut storno = StornoInvoice::new(number.clone());
-        storno.e_invoice = storno_e_invoice;
-        storno.fulfillment_date = original.info.fulfillment_date;
-        storno.external_id = Some(format!("esz-{tag}:{index}:storno"));
-        let reversal = client
-            .send(&storno)
-            .await
-            .unwrap_or_else(|error| panic!("{label}: storno of {number} refused: {error}"));
+            .expect("NAV taxpayer dependency failed");
+        assert!(info.valid);
+        assert!(info.name.is_some_and(|name| !name.trim().is_empty()));
         assert!(
-            reversal.reverses(&number),
-            "{label}: storno of {number} did not satisfy the reply-only reversal heuristic"
+            info.tax_number
+                .is_some_and(|number| !number.trim().is_empty())
         );
-        let storno_document = query_by_number(&client, &reversal.invoice_number).await;
-        assert_eq!(
-            storno_document.info.document_type,
-            szamlazz_agent::DocumentType::Storno,
-            "{label}"
-        );
+    }
 
-        println!(
-            "| `{create_e_invoice}` | `{number}`: {} | `{storno_e_invoice}` | `sikeres=true`, `{}` | {} |",
-            appearance_cell(&original),
-            reversal.invoice_number,
-            appearance_cell(&storno_document),
-        );
-
-        // The mapping the crate publishes: a document created as an e-invoice
-        // reports an e-invoice code, a paper one reports `1`.
-        assert_eq!(
-            original.info.appearance.is_e_invoice(),
-            create_e_invoice,
-            "{label}: {number} queried as {:?}",
-            original.info.appearance
-        );
-        if !create_e_invoice {
-            assert_eq!(
-                original.info.appearance,
-                InvoiceAppearance::Paper,
-                "{label}"
+    #[tokio::test]
+    #[ignore = "requires SZAMLAZZ_AGENT_KEY; issues and reverses a test invoice"]
+    async fn invoice_lifecycle() {
+        let mut run = Run::new();
+        let result = AssertUnwindSafe(async {
+            let created = run
+                .create(document(InvoiceKind::invoice()), "invoice")
+                .await;
+            let number = created.invoice_number.clone();
+            assert!(created.pdf.is_some());
+            assert_eq!(created.net_total, Some(dec!(2469)));
+            assert_eq!(created.gross_total, Some(dec!(3136)));
+            let original = run.by_number(&number).await;
+            assert_document(
+                &original,
+                &number,
+                &run.order,
+                DocumentType::Invoice,
+                Currency::HUF,
+                (dec!(2469), dec!(667), dec!(3136)),
             );
-        }
-        // The storno takes the request's form, whatever the original's: a
-        // mismatch is neither refused nor corrected, so a caller that wants
-        // the reversal in its original's form must derive the flag itself.
-        assert_eq!(
-            storno_document.info.appearance.is_e_invoice(),
-            storno_e_invoice,
-            "{label}: storno {} queried as {:?}",
-            reversal.invoice_number,
-            storno_document.info.appearance
-        );
+            assert_eq!(original.info.appearance, InvoiceAppearance::Paper);
+            assert_eq!(original.info.fulfillment_date, Some(previous_month()));
+            let mut query =
+                QueryInvoiceXml::new(InvoiceSelector::ExternalId(run.external_id("invoice")));
+            query.include_pdf = true;
+            let by_id = run
+                .client
+                .send(&query)
+                .await
+                .expect("query external id with PDF");
+            assert_eq!(by_id.info.id, original.info.id);
+            assert_eq!(by_id.info.invoice_number, number);
+            assert!(by_id.pdf.is_some());
+
+            for (amount, additive, expected, outstanding) in [
+                (dec!(100), false, vec![dec!(100)], dec!(3036)),
+                (dec!(200), false, vec![dec!(200)], dec!(2936)),
+                (dec!(50), true, vec![dec!(50), dec!(200)], dec!(2886)),
+            ] {
+                let mut request = RegisterCreditEntry::new(number.clone());
+                request.additive = additive;
+                request
+                    .entries
+                    .push(CreditEntry::new(today(), PaymentMethod::Transfer, amount))
+                    .expect("one entry");
+                run.sending(format!(
+                    "credit entries {number} amount={amount} additive={additive}"
+                ));
+                let sent = run.client.send(&request).await;
+                let balance = run.answered(sent);
+                run.unresolved = None;
+                assert_eq!(balance.invoice_number, number);
+                assert_eq!(balance.outstanding, Some(outstanding));
+                let stored = run.by_number(&number).await;
+                let mut amounts: Vec<_> = stored
+                    .credit_entries
+                    .iter()
+                    .map(|entry| entry.amount)
+                    .collect();
+                amounts.sort();
+                assert_eq!(amounts, expected);
+            }
+            let reversal = run.reverse(&number, false, run.external_id("storno")).await;
+            assert_ne!(reversal.invoice_number, number);
+            let reversed = run.by_number(&number).await;
+            assert_eq!(reversed.info.reversed, Some(true));
+            let storno = run.by_number(&reversal.invoice_number).await;
+            assert_document(
+                &storno,
+                &reversal.invoice_number,
+                &run.order,
+                DocumentType::Storno,
+                Currency::HUF,
+                (dec!(-2469), dec!(-667), dec!(-3136)),
+            );
+            assert_eq!(storno.info.referenced_invoice_number, Some(number.clone()));
+            assert_eq!(storno.info.fulfillment_date, original.info.fulfillment_date);
+            assert_eq!(storno.info.appearance, original.info.appearance);
+            assert_eq!(
+                run.query(InvoiceSelector::ExternalId(run.external_id("storno")))
+                    .await
+                    .info
+                    .id,
+                storno.info.id
+            );
+            let repeated = run.reverse(&number, false, run.external_id("storno")).await;
+            assert_eq!(repeated.invoice_number, reversal.invoice_number);
+        })
+        .catch_unwind()
+        .await;
+        run.finish(result).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SZAMLAZZ_AGENT_KEY; creates and deletes a test proforma"]
+    async fn proforma_lifecycle() {
+        let mut run = Run::new();
+        let result = AssertUnwindSafe(async {
+            let created = run
+                .create(document(InvoiceKind::Proforma), "proforma")
+                .await;
+            let number = created.invoice_number;
+            let stored = run.by_number(&number).await;
+            assert_document(
+                &stored,
+                &number,
+                &run.order,
+                DocumentType::Proforma,
+                Currency::HUF,
+                (dec!(2469), dec!(667), dec!(3136)),
+            );
+            assert_eq!(
+                run.query(InvoiceSelector::ExternalId(run.external_id("proforma")))
+                    .await
+                    .info
+                    .id,
+                stored.info.id
+            );
+            run.delete(&number).await;
+            run.absent(InvoiceSelector::InvoiceNumber(number)).await;
+            run.absent(InvoiceSelector::ExternalId(run.external_id("proforma")))
+                .await;
+        })
+        .catch_unwind()
+        .await;
+        run.finish(result).await;
     }
 }

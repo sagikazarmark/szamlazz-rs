@@ -2203,6 +2203,7 @@ name = "restate-szamlazz"
 version = "0.3.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "http",
  "jiff",
  "restate-e2e-harness",
@@ -2220,6 +2221,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "url",
+ "uuid",
  "wiremock",
 ]
 
@@ -2827,6 +2829,7 @@ name = "szamlazz-agent"
 version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
+ "futures-util",
  "jiff",
  "percent-encoding",
  "quick-xml 0.42.0",
@@ -2837,6 +2840,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "ureq",
+ "uuid",
  "wiremock",
  "xmlparser",
 ]
