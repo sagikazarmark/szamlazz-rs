@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "restate-szamlazz"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "szamlazz-adatkapcsolat"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "szamlazz-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "szamlazz-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "szamlazz-ipn"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "form_urlencoded",
@@ -3788,7 +3788,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
