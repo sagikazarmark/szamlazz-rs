@@ -133,6 +133,7 @@ impl Account {
             e_invoice: request.e_invoice,
             external_id: Some(request.external_id.as_str().to_owned()),
             comment: request.comment.map(str::to_owned),
+            buyer_email: request.buyer_email.map(str::to_owned),
             aggregator: self.defaults.aggregator.clone(),
             guardian: self.defaults.guardian,
             issue_date: None,

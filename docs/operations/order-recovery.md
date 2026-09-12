@@ -4,6 +4,15 @@ Use the deployed `Szamlazz.Order` operator endpoints through the authenticated i
 `RecoveryAuthorizer`; access defaults to 403. Keep the original scope, Order key and invocation identity.
 Recovery is not permission to reissue. Empty queries, elapsed time, cancellation and kill do not settle a write.
 
+## Storno notification recovery
+
+A known reversal with `warnings: ["notification_delivery_failed"]` remains
+reversed. Never repeat storno to retry notification or change its recipient.
+Settle reversal uncertainty through the read-only or audited recovery procedure,
+then use szamlazz.hu's notification action for the existing document. Queries and
+recovery cannot reconstruct notification history; an empty warning list is not
+mailbox-delivery evidence. See the [recipient contract](../../crates/restate-szamlazz/README.md#storno-notification-recipient).
+
 ## Observe
 
 Call the shared `observe_unresolved` with a fresh invocation/key. It returns `absent`, `unresolved` with the

@@ -286,7 +286,7 @@ impl Run {
     }
 }
 
-async fn verify_reversal(
+pub async fn verify_reversal(
     client: &Client,
     original: &InvoiceNumber,
     reply: &CreatedInvoice,

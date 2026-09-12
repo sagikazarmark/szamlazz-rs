@@ -125,7 +125,12 @@ pub struct StornoInvoice {
     /// Settings for the notification email szamlazz.hu sends to the buyer
     /// (`elado` block).
     pub seller_email: Option<SellerEmail>,
-    /// Buyer email address (`vevo`/`email`) the storno invoice is sent to.
+    /// Requested notification recipient (`vevo`/`email`), supported for paper
+    /// and electronic stornos. Omission has no documented original-recipient
+    /// inheritance guarantee. Provider settings apply; current vendor guidance
+    /// says test-account notifications go to the account email instead.
+    /// A numbered acknowledgement, including one without a notification-failure
+    /// warning, is not delivery evidence. Do not repeat storno to retry email.
     pub buyer_email: Option<String>,
     /// Buyer's Hungarian tax number (`vevo`/`adoszam`).
     #[doc(alias = "adószám")]

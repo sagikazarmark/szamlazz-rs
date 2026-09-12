@@ -24,6 +24,11 @@ pub struct StornoRequest {
     /// Comment placed on the storno invoice.
     #[serde(default)]
     pub comment: Option<String>,
+    /// Requested notification recipient, forwarded as `vevo/email`. Omission
+    /// supplies no recipient and promises neither inheritance nor suppression.
+    /// Retain this value across retries; a reversal never proves email delivery.
+    #[serde(default)]
+    pub buyer_email: Option<StornoRecipient>,
 }
 
 impl StornoRequest {
@@ -33,7 +38,93 @@ impl StornoRequest {
         Self {
             invoice_number,
             comment: None,
+            buyer_email: None,
         }
+    }
+}
+
+/// One ASCII mailbox for a storno notification, preserved without trimming.
+/// Supports an unquoted dot-atom local part (at most 64 bytes) and DNS labels
+/// (1–63 bytes each), at most 254 bytes overall. Lists, display names, quoted
+/// local parts, address literals and internationalized addresses are outside
+/// this worker contract. Validation establishes syntax, never deliverability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct StornoRecipient(String);
+
+/// An unsupported storno recipient; the error never echoes the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "buyer_email must be one ASCII mailbox with an unquoted local part (1–64 bytes), DNS labels (1–63 bytes), and at most 254 bytes overall"
+)]
+pub struct InvalidStornoRecipient;
+
+impl StornoRecipient {
+    /// The exact caller-supplied address.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for StornoRecipient {
+    type Error = InvalidStornoRecipient;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let (local, domain) = value.split_once('@').ok_or(InvalidStornoRecipient)?;
+        let atom =
+            |byte: u8| byte.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~".contains(&byte);
+        if value.len() > 254
+            || local.len() > 64
+            || !local
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(atom))
+            || !domain.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return Err(InvalidStornoRecipient);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl std::str::FromStr for StornoRecipient {
+    type Err = InvalidStornoRecipient;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.to_owned().try_into()
+    }
+}
+
+impl From<StornoRecipient> for String {
+    fn from(value: StornoRecipient) -> Self {
+        value.0
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for StornoRecipient {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "StornoRecipient".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 254,
+            "not": {"pattern": "[^\\u0021-\\u007e]"},
+            "pattern": "^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(\\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$",
+            "allOf": [{"pattern": "^[^@]{1,64}@"}],
+            "description": "One ASCII mailbox, preserved without trimming; no lists, display names, quoted local parts or address literals. Syntax validation is not delivery evidence."
+        })
     }
 }
 
@@ -168,6 +259,11 @@ pub struct StornoResponse {
     /// szamlazz.hu error message on `rejected`.
     #[serde(default)]
     pub message: Option<String>,
+    /// Reported notification failures accompanying known issuance. Empty means
+    /// no retained warning, not successful delivery. Read-only reconciliation
+    /// and already-reversed results cannot reconstruct notification history.
+    #[serde(default)]
+    pub warnings: Vec<super::Warning>,
 }
 
 impl StornoResponse {
@@ -182,6 +278,7 @@ impl StornoResponse {
             order_key: None,
             code: None,
             message: None,
+            warnings: Vec::new(),
         }
     }
 

@@ -187,10 +187,10 @@ exit "$status"
   specific vendor questions. Selected receipt tests check their settings before
   creating a receipt. An empty selection fails without executing any scenario.
   """
-  live(agentKey: Secret!, runId: String!, probes: Boolean! = false, receiptPrefix: String! = "", receiptEmail: String! = "", filter: String! = ""): Directory! {
+  live(agentKey: Secret!, runId: String!, probes: Boolean! = false, receiptPrefix: String! = "", receiptEmail: String! = "", stornoEmail: String! = "", filter: String! = ""): Directory! {
     if (runId == "") { raise "live requires a fresh non-empty runId" }
-    if (probes and filter == "" and (receiptPrefix == "" or receiptEmail == "")) {
-      raise "all probes require receiptPrefix and an operator-controlled receiptEmail"
+    if (probes and filter == "" and (receiptPrefix == "" or receiptEmail == "" or stornoEmail == "")) {
+      raise "all probes require receiptPrefix and operator-controlled receiptEmail and stornoEmail"
     }
     let profile = "live"
     if (probes) { profile = "probes" }
@@ -204,6 +204,7 @@ exit "$status"
       .withEnvVariable("SZAMLAZZ_LIVE_RUN_ID", runId)
       .withEnvVariable("SZAMLAZZ_RECEIPT_PREFIX", receiptPrefix)
       .withEnvVariable("SZAMLAZZ_RECEIPT_EMAIL", receiptEmail)
+      .withEnvVariable("SZAMLAZZ_STORNO_EMAIL", stornoEmail)
       .withEnvVariable("NEXTEST_PROFILE", profile)
       .withExec(command)
       .directory("/work/src/target/nextest/" + profile)

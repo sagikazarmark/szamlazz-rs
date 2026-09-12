@@ -4,6 +4,9 @@ mod live_support;
 #[cfg(feature = "client-reqwest")]
 #[path = "probes/receipts.rs"]
 mod receipts;
+#[cfg(feature = "client-reqwest")]
+#[path = "probes/storno_email.rs"]
+mod storno_email;
 
 #[cfg(not(feature = "client-reqwest"))]
 #[test]

@@ -84,7 +84,8 @@ pub use document::{
 };
 pub use storno::{
     DeleteMode, DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentState,
-    DocumentStatus, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
+    DocumentStatus, InvalidStornoRecipient, OrderStatus, StornoOutcome, StornoRecipient,
+    StornoRequest, StornoResponse,
 };
 
 /// The caller-supplied identities the requests carry, defined in

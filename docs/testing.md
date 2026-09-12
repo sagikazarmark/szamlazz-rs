@@ -23,8 +23,8 @@ names, but retain non-ignored helper tests in the worker's `e2e` binary (includi
 the two `only_tests::e2e_only_*` filter helpers). `e2e` includes the library's
 three execution/cancellation scenarios as well as the integration binary, and
 selects actual Restate with mocked szamlazz.hu; `live` selects exactly five
-scenarios across the two `live` binaries; `probes` selects seven investigative
-cases (two appearance, two clearing, and three receipt probes). A profile does not unignore a test: the external
+scenarios across the two `live` binaries; `probes` selects eleven investigative
+cases (two appearance, two clearing, three receipt probes, plus four storno-email cases). A profile does not unignore a test: the external
 commands must supply `--run-ignored only`. Nextest fails empty runs by default;
 do not override that behavior.
 
@@ -339,6 +339,10 @@ cargo probes -E 'test(receipt_automatic_mnb)'
 # The email probe deliberately requests two emails to an operator-controlled inbox.
 export SZAMLAZZ_RECEIPT_EMAIL="operator@example.com"
 cargo probes -E 'test(receipt_email_resend)'
+
+# Four fresh originals/reversals; independently observe the correlated inbox messages.
+export SZAMLAZZ_STORNO_EMAIL="operator@example.com"
+cargo probes -E 'test(storno_email::)'
 ```
 
 - **Clearing:** independent populated/already-empty tests each create a test
@@ -366,6 +370,14 @@ cargo probes -E 'test(receipt_email_resend)'
   protocol check alone does not prove delivery or inherited contents.
 - **Appearance:** the two #73 electronic→paper and paper→electronic storno
   experiments retain their existing assertions. Matching cases are core journeys.
+- **Storno email (#223):** four individually selectable paper/electronic ×
+  omitted/explicit cases, each with a fresh original containing the controlled
+  recipient and `sendEmail=false`. The storno repeats verified appearance/date
+  and sets a unique subject. Acknowledgement and queried reversal are checked;
+  actual mailbox receipt and provider send-history need independent observation.
+  Current docs redirect test-account notifications to the account email. The
+  [dated record](research/2026-09-12-storno-email-delivery.md#controlled-live-execution-2026-09-12)
+  reports mailbox receipt for both explicit cases only, with configuration limits.
 
 Receipt prefix and inbox settings are checked before creation when needed.
 Unanswered writes defer receipt cleanup; known receipts are otherwise reversed
@@ -384,7 +396,7 @@ run as a complete scenario; its recovery resend was acknowledged separately.
 ### Dagger secrets and execution freshness
 
 `ci.live(agentKey: Secret, runId: String, probes: Boolean = false,
-receiptPrefix: String = "", receiptEmail: String = "", filter: String = "")` is manual and
+receiptPrefix: String = "", receiptEmail: String = "", stornoEmail: String = "", filter: String = "")` is manual and
 has no `@check`. It injects the key with `withSecretVariable`, never a command
 literal. Give **each deliberate execution a fresh non-secret run id**:
 
@@ -418,8 +430,10 @@ dagger -c 'ci | live env://SZAMLAZZ_AGENT_KEY taxpayer-20260911-1 --filter "test
 
 Selected receipt scenarios require `receiptPrefix`; only email resend needs
 `receiptEmail`. Those tests check their settings before creating a receipt.
-Unfiltered `--probes` retains the explicit all-seven mode and requires both
-settings; it deliberately requests two emails. Prefer a filtered investigation.
+Unfiltered `--probes` selects all eleven cases and requires receipt prefix,
+receipt email and storno email settings; it deliberately requests notifications.
+The storno email filter requires `stornoEmail`; each selected test checks it
+before creating anything. Prefer a filtered investigation.
 
 ### Evidence and cleanup
 

@@ -16,6 +16,98 @@ use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
 #[tokio::test]
+async fn immediate_reconciliation_preserves_a_reported_warning_for_the_same_storno() {
+    let h = Harness::start().await;
+    let id = storno_id();
+    external_id_query(id.as_str())
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    external_id_query(id.as_str())
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new("SS-1", "SS")
+            }
+            .response(),
+        )
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    storno()
+        .respond_with(
+            created_without_totals("SS-1")
+                .insert_header("szlahu_error_code", "56")
+                .insert_header("szlahu_error", "notification failed"),
+        )
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    number_query("SS-1")
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    let result = h
+        .gateway
+        .storno(storno_request(&id))
+        .await
+        .expect("reconciled");
+    let StornoOutcome::Reversed(issued) = result else {
+        panic!("retain acknowledgement once its identity is established: {result:?}")
+    };
+    assert_eq!(issued.number, "SS-1");
+    assert!(issued.notification_delivery_failed);
+    assert_eq!(h.bodies().await.len(), 4, "no notification retry");
+}
+
+#[tokio::test]
+async fn storno_forwards_only_the_explicit_recipient_and_retains_notification_failure() {
+    for recipient in [None, Some("a&b@example.com")] {
+        let h = Harness::start().await;
+        let id = storno_id();
+        external_id_query(id.as_str())
+            .respond_with(not_found())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(
+                created("SS-1", "-1000", "-1270")
+                    .insert_header("szlahu_error_code", "56")
+                    .insert_header("szlahu_error", "notification failed"),
+            )
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        let outcome = h
+            .gateway
+            .storno(StornoStepRequest {
+                buyer_email: recipient,
+                ..storno_request(&id)
+            })
+            .await
+            .expect("settled reversal");
+        let StornoOutcome::Reversed(issued) = outcome else {
+            panic!("known issuance retained")
+        };
+        assert_eq!(issued.number, "SS-1");
+        assert!(issued.notification_delivery_failed);
+        let bodies = h.bodies().await;
+        assert_eq!(bodies.len(), 2, "one lookup and one send, no email retry");
+        assert_eq!(
+            bodies[1].contains("<email>a&amp;b@example.com</email>"),
+            recipient.is_some()
+        );
+        assert_eq!(bodies[1].contains("<email>"), recipient.is_some());
+        assert!(bodies[1].contains(&original_telj_tag()));
+    }
+}
+
+#[tokio::test]
 async fn numberless_storno_acknowledgement_requires_positive_reconciliation() {
     for landed in [false, true] {
         let h = Harness::start().await;

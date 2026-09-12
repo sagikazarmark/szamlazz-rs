@@ -858,6 +858,9 @@ pub struct StornoStepRequest<'a> {
     pub external_id: &'a ExternalId,
     /// Comment placed on the storno invoice.
     pub comment: Option<&'a str>,
+    /// Explicit notification recipient; omission supplies no recipient. Retain
+    /// with the original intent. This is not a delivery guarantee or retry control.
+    pub buyer_email: Option<&'a str>,
     /// Issue the storno as an e-invoice.
     pub e_invoice: bool,
     /// The storno's `teljesitesDatum`: the verified original's `telj`, which
@@ -2048,7 +2051,17 @@ impl Gateway {
             number: created.invoice_number.to_string(),
             message,
         };
-        self.storno_settle_or(request, unconfirmed).await
+        let settled = self.storno_settle_or(request, unconfirmed).await?;
+        if created.notification_delivery_failed
+            && matches!(&settled, StornoOutcome::AlreadyReversed { storno_number }
+            if storno_number == created.invoice_number.as_str())
+        {
+            // The fallback established this exact acknowledged document. Keep
+            // its already-reported notification warning; queries alone cannot
+            // reconstruct it, nor attribute it to a different reversal.
+            return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+        }
+        Ok(settled)
     }
 
     /// The immediate re-query after a storno whose reply was lost, open or ambiguous:

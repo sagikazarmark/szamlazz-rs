@@ -1161,6 +1161,57 @@ There is no state migration. Keep original invocations on their immutable deploy
 replay against its exact journal and input. See [ADR 0015](../../docs/adr/0015-named-target-proforma-deletion.md)
 for provider evidence and the marker decision.
 
+### Storno notification recipient
+
+Both `Szamlazz.Order.storno_invoice` and unmanaged `Szamlazz.Agent.storno` accept:
+
+```json
+{
+  "invoice_number": "SZ-1",
+  "comment": "Wrong buyer",
+  "buyer_email": "buyer@example.com"
+}
+```
+
+`buyer_email` is optional (omitted/null means no recipient supplied). It forwards
+the exact address as `vevo/email`, for paper and electronic stornos. It promises
+neither original-recipient inheritance on omission nor notification suppression.
+`StornoRecipient` supports one ASCII mailbox: unquoted dot-atom local part up to
+64 bytes, DNS labels up to 63 bytes each, 254 bytes overall; no trimming, lists,
+display names, quoted local parts or internationalized addresses. Unsupported
+input is `invalid_input` before the prologue. Syntax is not deliverability.
+In Rust, assign `request.buyer_email = Some("buyer@example.com".parse()?);`.
+
+Provider account settings apply. The create operation's `defaults.send_email`
+does not control storno. Current vendor guidance redirects test-account mail to
+the account email. The [controlled probe and primary sources](../../docs/research/2026-09-12-storno-email-delivery.md)
+support explicit forwarding, not guaranteed production recipient selection or delivery.
+
+Storno responses now carry `warnings`, using the same open strings as create
+responses. A known reversal with provider code 56 remains `outcome: reversed`
+with its `storno_number` and `warnings: ["notification_delivery_failed"]`.
+An empty list means no retained warning, **not delivered**. Queries, recovery and
+already-reversed results cannot reconstruct notification history; an uncertain
+acknowledgement still follows the existing reversal-evidence policy.
+
+Retain the recipient with the original logical request and `Idempotency-Key`.
+Completed replay retains the result; Order uncertainty resumes read-only and
+cannot change the recipient by sending again. Agent storno retains its distinct
+query-first issue policy and offers no exactly-once email guarantee. Managed
+documents still return `managed_by_order` there. Never repeat storno to retry an
+email: use the provider's notification action for the existing document after
+settling reversal uncertainty. Fulfillment date and appearance still come from
+the verified original, not the caller.
+
+**Deployment/migration:** send the new field only to a deployment that supports it;
+older closed request schemas reject it. Existing JSON requests keep omission.
+Rust `StornoRequest` and `StornoStepRequest` literals need `buyer_email: None`;
+`StornoRequest::new` supplies it. Decode older responses with an empty default
+warning list and tolerate new warning tokens. Keep unfinished invocations on
+their original immutable deployment; exceptional replay needs its normal review.
+The unresolved marker format stays unchanged: recovery needs reversal identity,
+not buyer data, and never reissues a storno ([ADR 0017](../../docs/adr/0017-explicit-storno-notification-recipient.md)).
+
 ### Expected-document intent (0.4 breaking release notes, #206)
 
 The new request shapes are:

@@ -38,6 +38,9 @@ mod document_identity;
 #[path = "protected_storno_evidence.rs"]
 mod protected_storno_evidence;
 
+#[path = "storno_email.rs"]
+mod storno_email;
+
 #[path = "release_hardening.rs"]
 mod release_hardening;
 

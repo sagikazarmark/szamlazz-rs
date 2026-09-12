@@ -93,6 +93,14 @@ A non-financial document listing delivered goods; an invoice-operation flag.
 A successful invoice-operation envelope, distinct from a reported document number or proof of a reversal. An unnumbered storno acknowledgement retains uncertainty about the exact reversal; a credit acknowledgement or fetched PDF can omit reported identity without substituting the request's target as a vendor echo.
 _Avoid_: Ack (reserved for Adatkapcsolat), verified reversal for a bare success, preview for every unnumbered acknowledgement
 
+**Storno notification recipient**:
+The caller's explicit email destination requested with a reversal, distinct from
+the original invoice's recipient and from the provider's effective mail routing.
+Omission promises neither inheritance nor suppression. A known reversal and an
+unreported notification failure do not establish delivery; notification recovery
+acts on the existing document, never by repeating its reversal. #223.
+_Avoid_: recipient as delivery proof, reversal retry as notification retry
+
 **Reported taxpayer validity**:
 The true or false fact NAV supplies about a taxpayer, when supplied; an omitted verdict is unreported, never an invalid taxpayer. Exchange correlation, software metadata and informational diagnostics are distinct from the taxpayer's business data.
 _Avoid_: false for unreported validity, successful lookup as proof of taxpayer validity

@@ -212,6 +212,7 @@ pub fn storno_request(external_id: &ExternalId) -> StornoStepRequest<'_> {
         invoice_number: "SZ-1",
         external_id,
         comment: Some("wrong buyer"),
+        buyer_email: None,
         e_invoice: true,
         fulfillment_date: ORIGINAL_TELJ,
     }

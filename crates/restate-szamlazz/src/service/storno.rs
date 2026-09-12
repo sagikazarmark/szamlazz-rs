@@ -44,6 +44,7 @@ struct StornoIntent {
     /// `{namespace}:by-number:{number}:storno`.
     storno_id: ExternalId,
     comment: Option<String>,
+    buyer_email: Option<crate::contract::StornoRecipient>,
     /// The verified document's `eszamla` when known, else the account
     /// default: an open code set for which the account's own default is a
     /// legitimate choice.
@@ -55,6 +56,21 @@ struct StornoIntent {
 }
 
 impl StornoIntent {
+    /// The same projection is validated before arming and sent by both shells.
+    fn as_step_request(&self) -> StornoStepRequest<'_> {
+        StornoStepRequest {
+            invoice_number: &self.number,
+            external_id: &self.storno_id,
+            comment: self.comment.as_deref(),
+            buyer_email: self
+                .buyer_email
+                .as_ref()
+                .map(crate::contract::StornoRecipient::as_str),
+            e_invoice: self.e_invoice,
+            fulfillment_date: self.fulfillment_date,
+        }
+    }
+
     /// The intent for reversing the verified `found` (`number`, as the
     /// caller named it) under `storno_id`: `e_invoice` lifted from the
     /// document with `account`'s default as fallback, `fulfillment_date` the
@@ -72,6 +88,7 @@ impl StornoIntent {
         number: String,
         storno_id: ExternalId,
         comment: Option<String>,
+        buyer_email: Option<crate::contract::StornoRecipient>,
     ) -> Result<Self, Fault> {
         let fulfillment_date = found
             .fulfillment_date
@@ -81,15 +98,10 @@ impl StornoIntent {
             number,
             storno_id,
             comment,
+            buyer_email,
             fulfillment_date,
         };
-        gateway::build::validate_request(&account.build_storno(StornoStepRequest {
-            invoice_number: &intent.number,
-            external_id: &intent.storno_id,
-            comment: intent.comment.as_deref(),
-            e_invoice: intent.e_invoice,
-            fulfillment_date: intent.fulfillment_date,
-        }))
+        gateway::build::validate_request(&account.build_storno(intent.as_step_request()))
         .map_err(|error| match error {
             szamlazz_agent::RequestError::InvalidDateYear {
                 field: "fulfillment_date",
@@ -246,7 +258,14 @@ fn storno_response(
             )));
         }
         gateway::StornoOutcome::Reversed(storno) => {
-            StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno.number)
+            let mut response = StornoResponse::new(StornoOutcome::Reversed, number)
+                .with_storno_number(storno.number);
+            if storno.notification_delivery_failed {
+                response
+                    .warnings
+                    .push(crate::contract::Warning::NotificationDeliveryFailed);
+            }
+            response
         }
         gateway::StornoOutcome::AlreadyReversed { storno_number } => {
             StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno_number)
@@ -382,27 +401,13 @@ async fn storno_step<'ctx, C: RunCtx<'ctx>>(
     exec: &Execution,
     intent: &StornoIntent,
 ) -> Result<gateway::StornoOutcome, TerminalError> {
-    let number = intent.number.clone();
-    let external_id = intent.storno_id.clone();
-    let comment = intent.comment.clone();
-    let e_invoice = intent.e_invoice;
-    let fulfillment_date = intent.fulfillment_date;
+    let intent = intent.clone();
     run_operating(
         ctx,
         format!("storno-{}", intent.number),
         exec.config.issue.run_retry_policy(),
         exec,
-        move |gateway| async move {
-            gateway
-                .storno(StornoStepRequest {
-                    invoice_number: &number,
-                    external_id: &external_id,
-                    comment: comment.as_deref(),
-                    e_invoice,
-                    fulfillment_date,
-                })
-                .await
-        },
+        move |gateway| async move { gateway.storno(intent.as_step_request()).await },
     )
     .await
 }
@@ -479,6 +484,7 @@ impl Execution {
         let StornoRequest {
             invoice_number: number,
             comment,
+            buyer_email,
         } = request;
         let namespace = &self.config.namespace;
         let storno_id = ExternalId::for_storno(namespace, &order, &number);
@@ -504,6 +510,7 @@ impl Execution {
             number.clone(),
             storno_id.clone(),
             comment,
+            buyer_email,
         )
         .map_err(about)?;
 
@@ -544,16 +551,7 @@ impl Execution {
                 format!("storno-{number}"),
                 move |gateway, marker| async move {
                     gateway
-                        .protected_storno(
-                            StornoStepRequest {
-                                invoice_number: &intent.number,
-                                external_id: &intent.storno_id,
-                                comment: intent.comment.as_deref(),
-                                e_invoice: intent.e_invoice,
-                                fulfillment_date: intent.fulfillment_date,
-                            },
-                            &marker,
-                        )
+                        .protected_storno(intent.as_step_request(), &marker)
                         .await
                 },
             )
@@ -613,6 +611,7 @@ impl Execution {
         let StornoRequest {
             invoice_number: number,
             comment,
+            buyer_email,
         } = request;
         let validated_number = number;
         let number = validated_number.to_string();
@@ -642,6 +641,7 @@ impl Execution {
             number.clone(),
             ExternalId::for_unmanaged_storno(namespace, &validated_number),
             comment,
+            buyer_email,
         )?;
 
         // Step 2: lookup: a storno of ours already under the id.
@@ -761,6 +761,7 @@ mod tests {
                 number: "SZ-1".into(),
                 storno_id: id,
                 comment: None,
+                buyer_email: None,
                 e_invoice: false,
                 fulfillment_date: ORIGINAL_TELJ,
             };
@@ -1077,6 +1078,7 @@ mod tests {
             "SZ-1".to_owned(),
             storno_id(),
             Some("wrong buyer".to_owned()),
+            None,
         )
         .expect("an intent");
         assert_eq!(intent.fulfillment_date, ORIGINAL_TELJ);
@@ -1098,6 +1100,7 @@ mod tests {
             &account,
             "SZ-1".to_owned(),
             storno_id(),
+            None,
             None,
         )
         .expect_err("a fault");
@@ -1140,6 +1143,7 @@ mod tests {
                 "SZ-1".to_owned(),
                 ExternalId::new("acct:ORD-1:storno:SZ-1"),
                 Some("PRIVATE-CALLER-COMMENT".to_owned()),
+                None,
             )
             .expect_err("the original's date cannot be sent");
             let (status, body) = fault_body(fault);
@@ -1163,6 +1167,7 @@ mod tests {
                 "SZ-1".to_owned(),
                 ExternalId::new("acct:ORD-1:storno:SZ-1"),
                 None,
+                None,
             )
             .expect("supported boundary year");
             assert_eq!(intent.fulfillment_date, date);
@@ -1178,6 +1183,7 @@ mod tests {
                 "SZ-1".to_owned(),
                 ExternalId::new("acct:ORD-1:storno:SZ-1"),
                 Some(format!("PRIVATE-CALLER-COMMENT{forbidden}")),
+                None,
             )
             .expect_err("caller text cannot be sent");
             let (status, body) = fault_body(fault);
@@ -1210,6 +1216,7 @@ mod tests {
                 account,
                 "SZ-1".to_owned(),
                 ExternalId::new("acct:ORD-1:storno:SZ-1"),
+                None,
                 None,
             )
             .expect("an intent")
