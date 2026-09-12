@@ -458,12 +458,20 @@ async fn e2e_release_get_stops_on_an_answered_fault() {
         ("57", TerminalCode::Unavailable),
     ] {
         let key = format!("GET-{code}");
-        external_id_query(&format!("acct:{key}:proforma"))
+        for kind in ["proforma", "invoice"] {
+            external_id_query(&format!("acct:{key}:{kind}"))
+                .respond_with(api_error("7", "not found"))
+                .expect(1)
+                .mount(&mock)
+                .await;
+        }
+        let external_id = format!("acct:{key}:prepayment");
+        external_id_query(&external_id)
             .respond_with(api_error(code, "vendor answer"))
             .expect(1)
             .mount(&mock)
             .await;
-        external_id_query(&format!("acct:{key}:invoice"))
+        external_id_query(&format!("acct:{key}:final"))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
             .mount(&mock)
@@ -475,9 +483,21 @@ async fn e2e_release_get_stops_on_an_answered_fault() {
         let fault = reply.fault::<Fault>();
         assert_eq!(fault.code, expected);
         assert_eq!(fault.szamlazz_code.as_deref(), Some(code));
+        assert_eq!(fault.order.as_deref(), Some(key.as_str()));
+        assert_eq!(
+            fault.kind,
+            Some(restate_szamlazz::identity::IssuedKind::Prepayment)
+        );
+        assert_eq!(fault.external_id.as_deref(), Some(external_id.as_str()));
         assert_eq!(
             restate.admin().runs(reply.invocation_id()).await,
-            ["namespace", "account", "lookup-proforma"]
+            [
+                "namespace",
+                "account",
+                "lookup-proforma",
+                "lookup-invoice",
+                "lookup-prepayment"
+            ]
         );
         mock.verify().await;
         mock.reset().await;

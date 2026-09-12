@@ -34,7 +34,8 @@ impl Execution {
                 kind.into(),
             )
             .await?;
-            record_observation(&mut status, kind, looked_up, &self.config.namespace)?;
+            record_observation(&mut status, kind, looked_up, &self.config.namespace)
+                .map_err(|fault| fault.about(&order, Some(kind.into()), &external_id))?;
         }
         Ok(with_consumed_proforma(status))
     }
@@ -52,8 +53,8 @@ impl Execution {
 ///
 /// The faults an answered read can be: another szamlazz.hu code
 /// (`unavailable`, nothing may be concluded) or a credential code
-/// (`credentials_rejected`). `get` names no document in them: which of the
-/// four reads drew the code is in the message.
+/// (`credentials_rejected`). The handler attaches the order, kind and external
+/// id of the read that drew the code.
 #[cfg(test)]
 fn order_status(
     found: impl IntoIterator<Item = (DocumentKind, OwnershipOutcome)>,

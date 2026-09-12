@@ -134,11 +134,14 @@ pub enum CreateOutcome {
     /// A live document of this kind already exists under our external id;
     /// nothing new was issued.
     AlreadyIssued,
-    /// szamlazz.hu refused the order number as a duplicate (71/152) and the
-    /// external-id re-query found our live document: an earlier execution's
-    /// send had landed.
+    /// Read-only reconciliation found a live document matching the retained
+    /// issuance intent, settling write uncertainty. This does not imply a
+    /// duplicate-order-number reply (71/152); a conclusive protected duplicate
+    /// refusal is a conflict instead.
     Reconciled,
-    /// The document of this kind was reversed; nothing new was issued. Pass
+    /// The document of this kind is reported reversed. It may have been issued
+    /// by this invocation and subsequently reversed before reconciliation;
+    /// this outcome does not establish that nothing was issued. Pass
     /// `options.reissue: {"expected_number": "…"}` (with a new
     /// `Idempotency-Key`) to replace that document on an ordinary create.
     /// Correctives have no reissue option.
@@ -153,8 +156,7 @@ pub enum CreateOutcome {
 }
 
 impl CreateOutcome {
-    /// Known outcomes, in the order the crate README lists them (`issued`
-    /// first, then the answers that issue nothing).
+    /// Known outcomes, in the order the crate README lists them.
     pub const KNOWN: [Self; 6] = [
         Self::Issued,
         Self::AlreadyIssued,
