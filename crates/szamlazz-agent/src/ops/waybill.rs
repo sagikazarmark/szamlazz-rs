@@ -65,6 +65,7 @@ pub struct Mpl {
     pub extra_services: Option<String>,
     /// Declared value (`erteknyilvanitas`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub declared_value: Option<Decimal>,
 }
 

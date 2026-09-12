@@ -7,6 +7,101 @@ fn credit(token: &str) -> String {
 }
 
 #[test]
+fn ignored_wrapper_preserves_raw_json_only_over_a_direct_parser() {
+    fn decode<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(de: D) -> Result<T, D::Error> {
+        serde_ignored::deserialize(de, |_| {})
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Buffered {
+        Credit(#[serde(deserialize_with = "decode")] CreditEntry),
+    }
+    for token in ["9007199254740993.5", "1e-28", r#""12.34""#] {
+        let body = credit(token);
+        let expected: CreditEntry = serde_json::from_str(&body).expect("direct JSON");
+        assert_eq!(
+            decode::<CreditEntry, _>(&mut serde_json::Deserializer::from_str(&body))
+                .expect("wrapped text"),
+            expected
+        );
+        assert_eq!(
+            decode::<CreditEntry, _>(&mut serde_json::Deserializer::from_slice(body.as_bytes()))
+                .expect("wrapped bytes"),
+            expected
+        );
+        assert_eq!(
+            decode::<CreditEntry, _>(&mut serde_json::Deserializer::from_reader(body.as_bytes()))
+                .expect("wrapped reader"),
+            expected
+        );
+    }
+    for token in [
+        "12.34",
+        r#"{"$serde_json::private::Number":"12.34"}"#,
+        r#"{"$serde_json::private::RawValue":"12.34"}"#,
+    ] {
+        let body = credit(token);
+        assert!(serde_json::from_str::<Buffered>(&body).is_err(), "{body}");
+        if token.starts_with('{') {
+            assert!(
+                decode::<CreditEntry, _>(&mut serde_json::Deserializer::from_str(&body)).is_err(),
+                "{body}"
+            );
+        }
+    }
+    let Buffered::Credit(entry) =
+        serde_json::from_str(&credit(r#""12.34""#)).expect("buffered string");
+    assert_eq!(entry.amount, parse_decimal("12.34").expect("amount"));
+    let mut ron =
+        ron::Deserializer::from_str("GrandTotal(net:12.34,vat:0,gross:12.34)").expect("RON");
+    let total: szamlazz_agent::GrandTotal = decode(&mut ron).expect("wrapped RON scalar path");
+    assert_eq!(total.net, entry.amount);
+}
+
+#[test]
+fn ron_direct_round_trips_preserve_struct_names_options_and_enum_content() {
+    fn round_trip<
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    >(
+        value: &T,
+    ) {
+        for config in [
+            ron::ser::PrettyConfig::default(),
+            ron::ser::PrettyConfig::default().struct_names(true),
+        ] {
+            let text = ron::ser::to_string_pretty(value, config).expect("serialize RON");
+            assert_eq!(&ron::from_str::<T>(&text).expect(&text), value);
+        }
+    }
+    use szamlazz_agent::{
+        GrandTotal,
+        ops::{invoice::CreationOutcome, storno::StornoResponse},
+    };
+    round_trip(
+        &serde_json::from_str::<GrandTotal>(
+            r#"{"net":"9007199254740993.5","vat":"0","gross":"9007199254740993.5"}"#,
+        )
+        .expect("totals fixture"),
+    );
+    round_trip(&ExchangeRate::new(
+        "MNB",
+        parse_decimal("12.34").expect("exact amount"),
+    ));
+    round_trip(&serde_json::from_str::<ExchangeRate>(r#"{"bank":"MNB"}"#).expect("rate fixture"));
+    for state in ["numbered", "unnumbered"] {
+        for value in ["null", r#""9007199254740993.5""#] {
+            round_trip(
+                &serde_json::from_str::<StornoResponse>(
+                    &storno_bodies(state, "net_total", value)[0],
+                )
+                .expect("storno fixture"),
+            );
+        }
+    }
+    round_trip(&serde_json::from_str::<CreationOutcome>(r#"{"issued":{"invoice_number":"SZ-1","notification_delivery_failed":false,"net_total":"12.34"}}"#).expect("creation fixture"));
+}
+
+#[test]
 fn built_in_storno_response_is_independent_of_member_order() {
     use szamlazz_agent::ops::storno::StornoResponse;
     for state in ["numbered", "unnumbered"] {
@@ -178,6 +273,15 @@ fn storno_envelope_shape_and_caller_wrapper_behavior_are_preserved() {
             "12.34"
         );
     }
+    for token in [
+        "12.34",
+        r#"{"$serde_json::private::Number":"12.34"}"#,
+        r#"{"$serde_json::private::RawValue":"12.34"}"#,
+    ] {
+        for body in storno_bodies("unnumbered", "net_total", token) {
+            assert!(serde_json::from_str::<Wrapper>(&body).is_err(), "{body}");
+        }
+    }
     let decoded: StornoResponse =
         serde_json::from_str(r#"{"extra":true,"response":{},"state":"unnumbered"}"#)
             .expect("unknown fields remain ignored");
@@ -212,6 +316,13 @@ fn direct_json_preserves_exact_strings_numbers_and_exponents() {
             )
             .expect("prebuilt value");
             assert_eq!(entry.amount, expected);
+            let buffered: serde_json::Value = serde_json::from_str(&body).expect("value");
+            assert_eq!(
+                CreditEntry::deserialize(&buffered)
+                    .expect("borrowed Value")
+                    .amount,
+                expected
+            );
             let rate: ExchangeRate =
                 serde_json::from_str(&format!(r#"{{"bank":"MNB","rate":{value}}}"#))
                     .expect("optional input");
@@ -347,6 +458,24 @@ fn other_self_describing_formats_keep_scalar_behavior() {
             [("net", "1e-29"), ("vat", "0"), ("gross", "0")].into_iter(),
         ))
         .is_err()
+    );
+}
+
+#[test]
+fn vat_percentage_serialization_is_feature_independent() {
+    let value = szamlazz_agent::VatRate::Percent(
+        parse_decimal("9007199254740993.5").expect("exact percentage"),
+    );
+    assert_eq!(
+        serde_json::to_string(&value).expect("serialize percentage"),
+        r#""9007199254740993.5""#
+    );
+    assert_eq!(
+        serde_json::from_str::<szamlazz_agent::VatRate>(
+            &serde_json::to_string(&value).expect("serialize percentage")
+        )
+        .expect("deserialize percentage"),
+        value
     );
 }
 

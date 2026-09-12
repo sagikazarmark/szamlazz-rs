@@ -402,7 +402,7 @@ async fn e2e_order_protocol() {
             storno::storno_answers_from_the_hint_or_re_executes_a_lost_send,
             storno::ambiguous_storno_retries_and_exhaustion_preserve_the_send,
             delete_proforma::proforma_is_deleted_by_the_orders_handler,
-            delete_proforma::replay_refreshes_the_pinned_proformas_credit_entries,
+            delete_proforma::interrupted_deletion_reconciles_without_requerying_or_resending,
             delete_proforma::deletion_answers_preserve_guard_failures_and_send_uncertainty,
             policies::run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault,
             policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,

@@ -80,6 +80,8 @@ pub struct CreditEntryRecord {
     #[serde(default)]
     pub title: Option<String>,
     /// Amount in the invoice currency.
+    #[serde(deserialize_with = "super::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// Free-text comment.
     #[serde(default)]
@@ -155,13 +157,16 @@ pub struct QueryResponse {
     #[serde(default)]
     pub currency: Option<String>,
     /// Net total.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// VAT total.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_total: Option<Decimal>,
     /// Gross total.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// Registered credit entries.
     #[serde(default)]
@@ -169,7 +174,8 @@ pub struct QueryResponse {
     /// Outstanding amount: gross total minus the sum of credit entries.
     /// Absent when gross is unknown or any intermediate sum or final subtraction
     /// cannot be represented exactly as a decimal.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Issued from a test account (`teszt`), as szamlazz.hu reported it:
     /// compared with nothing by the worker. This projection omits the seller
@@ -475,6 +481,7 @@ pub struct CreditEntryInput {
     /// Amount in the invoice currency.
     #[serde(deserialize_with = "super::decimal::required")]
     #[cfg_attr(feature = "schemars", schemars(schema_with = "super::decimal::schema"))]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// Free-text comment (`megjegyzes`).
     #[serde(default)]
@@ -510,10 +517,12 @@ pub struct SetCreditEntriesResponse {
     /// The invoice the entries were registered on.
     pub invoice_number: String,
     /// Outstanding amount after the update (`kintlévőség`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Gross total of the invoice.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
 }
 

@@ -16,7 +16,7 @@
 //! query, elapsed time, cancellation or kill does not authorize another send.
 //! Direct consumers use [`Gateway::create_once`] with a consumed
 //! [`CreatePermission`] and own durable exclusion, uncertainty retention and
-//! read-only reconciliation. The public [`Gateway::storno`] and unmanaged
+//! read-only reconciliation through [`Gateway::reconcile`]. The public [`Gateway::storno`] and unmanaged
 //! `Szamlazz.Agent` storno path do not have the Order's marker protection;
 //! their query-first behavior and vendor reversal idempotence do not provide
 //! a general unresolved-write guard across invocations.
@@ -111,10 +111,11 @@ use crate::identity::{ExternalId, OrderKey};
 pub mod build;
 mod diagnostic;
 pub mod document;
-pub(crate) mod recovery;
+pub mod recovery;
 
 pub use build::{DocumentRefs, InputError};
 pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
+pub use recovery::{ReconciliationOutcome, ReconciliationRequest};
 
 /// What szamlazz.hu answered with when the answer is a code rather than a
 /// document: the code (numeric for szamlazz.hu's own, `OPERATION_FAILED`-like
@@ -150,17 +151,6 @@ impl SzamlazzAnswer {
         let message =
             diagnostic::credential_message(&code).map_or_else(|| message.into(), str::to_owned);
         Self { code, message }
-    }
-
-    /// Preserve the already-projected send cause when a create's re-query
-    /// returns a credential code. This remains a credential fault, not a new
-    /// run retry; only the diagnostic gains the earlier send's context.
-    fn after_send(mut self, sent: impl fmt::Display) -> Self {
-        self.message = format!(
-            "{sent}; the re-query that would have settled it failed: {}",
-            self.message
-        );
-        self
     }
 }
 
@@ -407,6 +397,24 @@ pub struct CreateStepRequest<'a> {
     pub reversed: Option<&'a str>,
 }
 
+impl CreateStepRequest<'_> {
+    /// Minimal intent to retain before sending and supply to [`Gateway::reconcile`]
+    /// afterwards. Keep it with this request's external id, order and account.
+    #[must_use]
+    pub fn operation(&self) -> recovery::WriteOperation {
+        recovery::WriteOperation::Create {
+            kind: self.kind,
+            expected_number: self.reversed.map(str::to_owned),
+            corrected_number: match &self.create.kind {
+                szamlazz_agent::ops::invoice::InvoiceKind::Corrective { corrected_number } => {
+                    Some(corrected_number.to_string())
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
 /// Caller-owned authorization for at most one create send through
 /// [`Gateway::create_once`]. Consumed even when its leading query avoids a send.
 /// It is neither `Clone` nor serializable: replay must not recreate permission
@@ -461,24 +469,23 @@ pub enum CreateOutcome {
     /// leading query (an earlier execution of this step created it) or by the
     /// re-query after a lost reply. Nothing was sent, or what was sent landed.
     Found(Box<FoundDocument>),
-    /// A **reversed** document of ours that the lookup step did not see is
-    /// under the external id: an earlier execution of this step (or anyone)
-    /// issued it and it was reversed since. Nothing was sent: a reversal
-    /// the lookup did not see must be answered as `reversed`, never issued
-    /// past (a new document needs an explicit `reissue`).
+    /// A **reversed** document matching issuance intent, distinct from the old
+    /// reissue target. Found before sending, or positive post-send evidence of
+    /// issuance followed by reversal. A new document needs explicit reissue.
     Reversed(Box<FoundDocument>),
     /// The document the lookup step saw **reversed** is reported **live**
-    /// by the leading query or the re-query: the server contradicts itself.
-    /// Nothing was sent: sending is the least safe answer to an
-    /// inconsistency; the caller sees `conflict{live}` as the lookup would
-    /// have reported.
+    /// by the leading query, or observed after a conclusive duplicate refusal.
+    /// No create acted in this call. This is never settlement of an uncertain
+    /// send; the old target cannot establish replacement.
     LiveAgain(Box<FoundDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found a live document of ours: an earlier send
     /// had landed.
     Reconciled(Box<FoundDocument>),
     /// The external id resolves to a document that fails validation (another
-    /// order or kind). Nothing was created.
+    /// order, kind or corrective base). Nothing was created in this call:
+    /// observed before sending or after a conclusive duplicate refusal, never
+    /// as settlement of an uncertain send.
     Collision(Box<FoundDocument>),
     /// szamlazz.hu refused the order number as a duplicate (71/152) and the
     /// external-id re-query found no live document of ours: the duplicate is
@@ -500,9 +507,10 @@ pub enum CreateOutcome {
     /// szamlazz.hu refused the document; nothing was created.
     Rejected(Rejection),
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164) on the
-    /// leading query, the create or a re-query; this execution issued
-    /// nothing. Settled data, not [`Unconfirmed`]: re-executing with the same
-    /// key would only repeat the answer. See [`ErrorCode::is_credential_error`].
+    /// leading query or the create itself; this call issued nothing. A credential
+    /// failure after an uncertain send is instead [`Unconfirmed`]. After a
+    /// duplicate refusal it is logged without replacing that refusal.
+    /// See [`ErrorCode::is_credential_error`].
     CredentialsRejected(SzamlazzAnswer),
     /// szamlazz.hu answered the **leading** query with another code (neither
     /// 7 nor a credential code): an answer the step cannot conclude from, so
@@ -528,8 +536,8 @@ pub enum CreateOutcome {
 ///
 /// Protected Order writes retain their unresolved-write marker and use
 /// read-only reconciliation after this result. A direct [`Gateway::create_once`]
-/// consumer must retain its own uncertainty and reconcile through reads such
-/// as [`Gateway::lookup_ours`] or [`Gateway::query`]. Granting a new
+/// consumer must retain its own uncertainty and reconcile through
+/// [`Gateway::reconcile`] with the original issuance or reversal intent. Granting a new
 /// [`CreatePermission`] requires independent settlement and a fresh decision,
 /// never this error alone. Unmanaged storno has no Order marker; its caller
 /// cannot infer cross-invocation protection from this error or a leading query.
@@ -590,8 +598,7 @@ pub enum Unconfirmed {
     #[error("{sent}; the re-query that would have settled it failed: {re_query}")]
     ReQueryFailed {
         /// How the send ended: the display of the [`Unconfirmed`] it would
-        /// have been had the re-query found nothing, or the duplicate-order-
-        /// number answer (71/152) the re-query was to resolve.
+        /// have been had the re-query found nothing.
         sent: String,
         /// The re-query's failure: a transport failure, another code, or
         /// `szlahu_down`.
@@ -611,7 +618,7 @@ fn open_display(code: Option<&str>, message: &str) -> String {
 impl Unconfirmed {
     /// This send-side cause, composed with the failure of the re-query that
     /// would have settled it: [`Unconfirmed::ReQueryFailed`] naming both.
-    fn re_query_failed(self, re_query: &QueryError) -> Self {
+    fn re_query_failed(self, re_query: &impl fmt::Display) -> Self {
         Self::ReQueryFailed {
             sent: self.to_string(),
             re_query: re_query.to_string(),
@@ -632,8 +639,10 @@ impl Unconfirmed {
 ///
 /// The one-shot writes ([`delete_proforma`], [`set_credit_entries`]) carry the same
 /// two shapes as data, [`DeleteOutcome::Lost`] / [`SetCreditEntriesOutcome::Lost`]
-/// (the *Lost answer*): their step runs once and re-executes nothing, so the
-/// send that drew no answer is journaled and answered as `outcome_unknown`.
+/// (the *Lost answer*): a recorded lost answer is replayed as `outcome_unknown`
+/// without a policy-driven send retry. An interrupted, unrecorded execution
+/// can still re-execute; unkeyed credit-entry registration has no durable send
+/// guard. Protected Order deletion retains its separate marker protection.
 /// Serialisable for that one use; never journaled on its own.
 ///
 /// [`lookup`]: Gateway::lookup
@@ -995,8 +1004,12 @@ pub enum SetCreditEntriesOutcome {
     /// The entries are registered.
     Done {
         /// Outstanding amount after the update.
+        #[serde(default, deserialize_with = "crate::contract::decimal::optional")]
+        #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
         outstanding: Option<Decimal>,
         /// Gross total of the invoice.
+        #[serde(default, deserialize_with = "crate::contract::decimal::optional")]
+        #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
         gross: Option<Decimal>,
     },
     /// szamlazz.hu (or the wire contract: more than five entries) refused.
@@ -1238,8 +1251,9 @@ impl Gateway {
     /// A lost reply may still land after any number of empty queries. Once a
     /// call starts, cancellation or a process crash also leaves its permission
     /// spent and its possible external effect for the caller to reconcile.
-    /// Use [`Gateway::lookup_ours`] or [`Gateway::query`] to observe evidence
-    /// without authorizing another send. Supplied HTTP clients must disable
+    /// Retain [`CreateStepRequest::operation`] before sending, then use
+    /// [`Gateway::reconcile`] to check intent-aware evidence without authorizing
+    /// another send. Supplied HTTP clients must disable
     /// transport retries and redirects as specified by [`Gateway::open_with_http`].
     ///
     /// 1. Query by external id: a validated live hit that is not
@@ -1261,11 +1275,11 @@ impl Gateway {
     /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
     ///    a refusal [`CreateOutcome::Rejected`], rejected credentials
     ///    [`CreateOutcome::CredentialsRejected`]. A lost reply, an open code
-    ///    or `szlahu_down` is re-queried once, immediately: what landed
-    ///    settles the step, nothing is [`Unconfirmed`], and a re-query that
-    ///    fails itself is [`Unconfirmed::ReQueryFailed`] naming both. 71/152
-    ///    is re-queried the same way and then named through the order-number
-    ///    query.
+    ///    or `szlahu_down` is re-queried once, immediately: only matching positive
+    ///    issuance evidence settles the send. Absence, collisions and the old
+    ///    reissue target retain [`Unconfirmed`]; a failed read is
+    ///    [`Unconfirmed::ReQueryFailed`] naming both causes. A 71/152 refusal
+    ///    remains settled even when optional diagnostic reads fail.
     ///
     /// # Errors
     ///
@@ -1413,47 +1427,47 @@ impl Gateway {
                 }
                 Failure::Duplicate(answer) => {
                     tracing::info!(code = %answer.code, "duplicate order number; re-querying");
-                    if protected {
-                        // This invocation has exactly one send permit. The refusal
-                        // settles it even if the optional diagnostic query fails.
-                        let diagnostic = self.after_duplicate(request, answer.clone()).await;
-                        if let Ok(CreateOutcome::CredentialsRejected(credentials)) = &diagnostic {
-                            // Keep the original refusal, but not at the cost of its
-                            // diagnostic read's actionable credential signal.
-                            credentials.warn_credentials_rejected(request.external_id.namespace());
-                        }
-                        return Ok(match diagnostic {
-                            Ok(outcome @ CreateOutcome::DuplicateOrderNumber { .. }) => outcome,
-                            _ if request.kind == IssuedKind::Corrective => {
-                                CreateOutcome::Rejected(answer.into())
-                            }
-                            _ => CreateOutcome::DuplicateOrderNumber {
-                                answer,
-                                existing_number: None,
-                            },
-                        });
-                    }
-                    self.after_duplicate(request, answer).await
+                    let diagnostic = self.after_duplicate(request, answer.clone()).await;
+                    Ok(match diagnostic {
+                        outcome @ CreateOutcome::DuplicateOrderNumber { .. } => outcome,
+                        outcome if !protected => outcome,
+                        _ => duplicate_refusal(request.kind, answer),
+                    })
                 }
             },
         }
     }
 
-    /// The immediate re-query after a create whose reply was lost or open:
-    /// what landed settles the step; nothing is `unconfirmed`, and a re-query
-    /// that fails itself is unconfirmed naming both causes.
+    /// The immediate read after an uncertain send uses the same intent-aware
+    /// positive evidence as later Order and external-orchestrator recovery.
     async fn settle_or(
         &self,
         request: &CreateStepRequest<'_>,
         unconfirmed: Unconfirmed,
     ) -> Result<CreateOutcome, Unconfirmed> {
-        match self.settled_by_query(request, false).await {
-            Ok(Some(CreateOutcome::CredentialsRejected(answer))) => Ok(
-                CreateOutcome::CredentialsRejected(answer.after_send(unconfirmed)),
-            ),
-            Ok(Some(settled)) => Ok(settled),
-            Ok(None) => Err(unconfirmed),
+        match self
+            .reconcile(ReconciliationRequest {
+                external_id: request.external_id.as_str(),
+                order: request.order,
+                operation: &request.operation(),
+                candidate: None,
+            })
+            .await
+        {
+            Ok(ReconciliationOutcome::Created(found)) => Ok(if found.is_live() {
+                CreateOutcome::Found(found)
+            } else {
+                CreateOutcome::Reversed(found)
+            }),
+            Ok(ReconciliationOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                Err(unconfirmed.re_query_failed(&answer))
+            }
+            Ok(ReconciliationOutcome::Api(answer)) => Err(unconfirmed.re_query_failed(&answer)),
             Err(error) => Err(unconfirmed.re_query_failed(&error)),
+            // Absent, colliding or old holders do not settle a possibly effective
+            // send. Preserve the original cause, including an old-number echo.
+            Ok(_) => Err(unconfirmed),
         }
     }
 
@@ -1467,7 +1481,8 @@ impl Gateway {
     /// a contradiction (szamlazz.hu refused the order number yet knows nothing
     /// under it), logged at `warn` and settled all the same: the refusal is
     /// an answer szamlazz.hu already gave, and re-sending would only repeat
-    /// it.
+    /// it. A diagnostic failure is logged separately and never replaces the
+    /// conclusive refusal with uncertainty or a credential outcome.
     ///
     /// Correctives are exempt from the order-number check, so their
     /// unresolved 71/152 is an ordinary [`CreateOutcome::Rejected`], without
@@ -1476,32 +1491,27 @@ impl Gateway {
         &self,
         request: &CreateStepRequest<'_>,
         answer: SzamlazzAnswer,
-    ) -> Result<CreateOutcome, Unconfirmed> {
+    ) -> CreateOutcome {
         match self.settled_by_query(request, false).await {
             Ok(Some(CreateOutcome::Found(found))) => {
                 tracing::info!(number = %found.number, "reconciled after duplicate");
-                return Ok(CreateOutcome::Reconciled(found));
+                return CreateOutcome::Reconciled(found);
             }
             Ok(Some(CreateOutcome::CredentialsRejected(credentials))) => {
-                return Ok(CreateOutcome::CredentialsRejected(
-                    credentials.after_send(format!("duplicate order number {answer}")),
-                ));
+                credentials.warn_credentials_rejected(request.external_id.namespace());
+                return duplicate_refusal(request.kind, answer);
             }
-            Ok(Some(settled)) => return Ok(settled),
+            Ok(Some(settled)) => return settled,
             Ok(None) => {}
-            // Whether the duplicate is ours is what the re-query was to
-            // settle; unconfirmed, naming the refusal it was resolving.
             Err(error) => {
-                return Err(Unconfirmed::ReQueryFailed {
-                    sent: format!("duplicate order number {answer}"),
-                    re_query: error.to_string(),
-                });
+                tracing::warn!(error = %error, "duplicate refused; diagnostic query failed");
+                return duplicate_refusal(request.kind, answer);
             }
         }
 
         if request.kind == IssuedKind::Corrective {
             tracing::info!(code = %answer.code, "duplicate order number on a corrective: rejected");
-            return Ok(CreateOutcome::Rejected(answer.into()));
+            return CreateOutcome::Rejected(answer.into());
         }
 
         let existing_number = match self.hint_raw(request.order).await {
@@ -1523,17 +1533,18 @@ impl Gateway {
                 None
             }
             Err(QueryError::CredentialsRejected(answer)) => {
-                return Ok(CreateOutcome::CredentialsRejected(answer));
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                None
             }
             Err(error) => {
                 tracing::warn!(error = %error, "could not name the duplicate");
                 None
             }
         };
-        Ok(CreateOutcome::DuplicateOrderNumber {
+        CreateOutcome::DuplicateOrderNumber {
             answer,
             existing_number,
-        })
+        }
     }
 
     /// The external-id query of the create step, decided by
@@ -1547,16 +1558,22 @@ impl Gateway {
     ///
     /// The query's own failure, for the caller to place: on the leading query
     /// an answer (another code, `szlahu_down`) is settled data and only a
-    /// transport failure is [`Unconfirmed`]; after a send every failure
-    /// leaves the step unconfirmed.
+    /// transport failure is [`Unconfirmed`]. After a conclusive duplicate
+    /// refusal it is only a diagnostic failure. Uncertain sends use `reconcile`.
     async fn settled_by_query(
         &self,
         request: &CreateStepRequest<'_>,
         before_send: bool,
     ) -> Result<Option<CreateOutcome>, QueryError> {
-        let seen = self
+        let mut seen = self
             .seen(request.external_id, request.order, request.kind)
             .await;
+        if let Ok(Seen::Live(found) | Seen::Reversed(found)) = &seen
+            && !recovery::matches_corrective_base(found, &request.operation())
+        {
+            tracing::warn!(number = %found.number, "corrective base collision");
+            seen = Ok(Seen::Collision(found.clone()));
+        }
         if before_send && request.reversed.is_some() && matches!(&seen, Ok(Seen::Absent)) {
             return Ok(Some(CreateOutcome::TargetChanged));
         }
@@ -2358,8 +2375,8 @@ fn outcome(result: Result<FoundDocument, QueryError>) -> Result<QueryOutcome, Un
 ///
 /// Every other failure of the query, unchanged, for the caller to place: on
 /// the leading query an answer (another code, `szlahu_down`) is settled data
-/// and only a transport failure is [`Unconfirmed`]; after a send every
-/// failure leaves the step unconfirmed.
+/// and only a transport failure is [`Unconfirmed`]. This classifier is not
+/// positive settlement evidence after an uncertain send.
 fn settle_create(
     seen: Result<Seen, QueryError>,
     reversed: Option<&str>,
@@ -2384,6 +2401,18 @@ fn settle_create(
             Ok(Some(CreateOutcome::CredentialsRejected(answer)))
         }
         Err(error) => Err(error),
+    }
+}
+
+/// One admitted send was conclusively refused, regardless of diagnostic reads.
+fn duplicate_refusal(kind: IssuedKind, answer: SzamlazzAnswer) -> CreateOutcome {
+    if kind == IssuedKind::Corrective {
+        CreateOutcome::Rejected(answer.into())
+    } else {
+        CreateOutcome::DuplicateOrderNumber {
+            answer,
+            existing_number: None,
+        }
     }
 }
 

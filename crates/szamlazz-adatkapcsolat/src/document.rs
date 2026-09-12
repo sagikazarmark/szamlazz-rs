@@ -16,12 +16,12 @@ use std::sync::Arc;
 use jiff::civil::Date;
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use quick_xml::name::{Namespace, ResolveResult};
-use quick_xml::reader::NsReader;
 use rust_decimal::Decimal;
 
 use crate::ack::InvoiceDirection;
 use crate::error::{ParseError, ValidationError};
+
+mod xml;
 
 /// One pushed document, identified by the XML root element.
 ///
@@ -179,12 +179,14 @@ impl Document {
         root_kind(text)
     }
 
-    /// The full parse of an identified body: every element's namespace, then
-    /// typed deserialization (including embedded payloads such as PDFs).
+    /// The full parse of an identified body: complete XML shape and every
+    /// element's normalized namespace, then lenient typed deserialization
+    /// (including embedded payloads such as PDFs).
     pub(crate) fn parse_identified(body: &[u8], root: RootKind) -> Result<Self, ParseError> {
         let text = std::str::from_utf8(body)?;
-        validate_element_namespaces(text, root)?;
+        let normalized = xml::validate(text, root)?;
         let raw_xml: Arc<str> = Arc::from(text);
+        let text = normalized.as_ref();
 
         match root {
             RootKind::OutgoingInvoice => {
@@ -207,39 +209,6 @@ impl Document {
                 batch.raw_xml = Some(raw_xml);
                 Ok(Self::Receipts(batch))
             }
-        }
-    }
-}
-
-fn validate_element_namespaces(text: &str, kind: RootKind) -> Result<(), ParseError> {
-    let mut reader = NsReader::from_str(text);
-
-    loop {
-        let (namespace, event) = reader
-            .read_resolved_event()
-            .map_err(quick_xml::DeError::from)?;
-
-        match event {
-            Event::Start(element) | Event::Empty(element) => {
-                let expected = Namespace(kind.namespace());
-
-                if namespace != ResolveResult::Bound(expected) {
-                    let actual = match namespace {
-                        ResolveResult::Bound(namespace) => namespace.as_ref().to_owned(),
-                        ResolveResult::Unbound => String::new(),
-                        ResolveResult::Unknown(prefix) => {
-                            format!("unbound prefix {prefix}")
-                        }
-                    };
-                    return Err(ParseError::WrongNamespace {
-                        root: element.local_name().as_ref().to_owned(),
-                        expected: kind.namespace(),
-                        actual,
-                    });
-                }
-            }
-            Event::Eof => return Ok(()),
-            _ => {}
         }
     }
 }
@@ -355,7 +324,12 @@ fn root_kind(text: &str) -> Result<RootKind, ParseError> {
                 for attribute in start.attributes().with_checks(false) {
                     let attribute = attribute.map_err(quick_xml::DeError::from)?;
                     if attribute.key.as_ref() == namespace_attribute {
-                        namespace = Some(attribute.value.as_ref().to_owned());
+                        namespace = Some(
+                            attribute
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .map_err(quick_xml::DeError::from)?
+                                .into_owned(),
+                        );
                         break;
                     }
                 }
@@ -768,6 +742,7 @@ pub struct InvoiceInfo {
         rename(deserialize = "devizaarf"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub exchange_rate: Option<Decimal>,
     /// Comment (`megjegyzes`).
     #[serde(default, rename(deserialize = "megjegyzes"))]
@@ -837,6 +812,7 @@ pub struct InvoiceItem {
         rename(deserialize = "mennyiseg"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub quantity: Option<Decimal>,
     /// Unit of measure (`mennyisegiegyseg`).
     #[serde(default, rename(deserialize = "mennyisegiegyseg"))]
@@ -847,6 +823,7 @@ pub struct InvoiceItem {
         rename(deserialize = "nettoegysegar"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub unit_price: Option<Decimal>,
     /// Optional NAV special VAT category (`afatipus`).
     #[serde(default, rename(deserialize = "afatipus"))]
@@ -858,6 +835,7 @@ pub struct InvoiceItem {
         rename(deserialize = "afakulcs"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_rate: Option<Decimal>,
     /// Net value (`netto`).
     #[serde(
@@ -865,6 +843,7 @@ pub struct InvoiceItem {
         rename(deserialize = "netto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_value: Option<Decimal>,
     /// Margin-scheme VAT base (`arresafaalap`).
     #[serde(
@@ -872,6 +851,7 @@ pub struct InvoiceItem {
         rename(deserialize = "arresafaalap"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub margin_vat_base: Option<Decimal>,
     /// VAT value (`afa`).
     #[serde(
@@ -879,6 +859,7 @@ pub struct InvoiceItem {
         rename(deserialize = "afa"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_value: Option<Decimal>,
     /// Gross value (`brutto`).
     #[serde(
@@ -886,6 +867,7 @@ pub struct InvoiceItem {
         rename(deserialize = "brutto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_value: Option<Decimal>,
     /// Comment (`megjegyzes`).
     #[serde(default, rename(deserialize = "megjegyzes"))]
@@ -956,6 +938,7 @@ pub struct VatTotal {
         rename(deserialize = "afakulcs"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_rate: Option<Decimal>,
     /// Net total (`netto`).
     #[serde(
@@ -963,6 +946,7 @@ pub struct VatTotal {
         rename(deserialize = "netto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net: Option<Decimal>,
     /// VAT total (`afa`).
     #[serde(
@@ -970,6 +954,7 @@ pub struct VatTotal {
         rename(deserialize = "afa"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat: Option<Decimal>,
     /// Gross total (`brutto`).
     #[serde(
@@ -977,6 +962,7 @@ pub struct VatTotal {
         rename(deserialize = "brutto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross: Option<Decimal>,
 }
 
@@ -1028,6 +1014,7 @@ pub struct RecordedCreditEntry {
         rename(deserialize = "osszeg"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub amount: Option<Decimal>,
     /// Comment (`megjegyzes`).
     #[serde(default, rename(deserialize = "megjegyzes"))]
@@ -1048,6 +1035,7 @@ pub struct RecordedCreditEntry {
         rename(deserialize = "devizaarf"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub exchange_rate: Option<Decimal>,
 }
 
@@ -1067,6 +1055,7 @@ pub struct FinancialItem {
         rename(deserialize = "afakulcs"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_rate: Option<Decimal>,
     /// Net value (`netto`).
     #[serde(
@@ -1074,6 +1063,7 @@ pub struct FinancialItem {
         rename(deserialize = "netto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net: Option<Decimal>,
     /// VAT value (`afa`).
     #[serde(
@@ -1081,6 +1071,7 @@ pub struct FinancialItem {
         rename(deserialize = "afa"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat: Option<Decimal>,
     /// Gross value (`brutto`).
     #[serde(
@@ -1088,6 +1079,7 @@ pub struct FinancialItem {
         rename(deserialize = "brutto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross: Option<Decimal>,
     /// Settlement period start (`elszdattol`).
     #[serde(
@@ -1445,6 +1437,7 @@ pub struct BankTransaction {
         rename(deserialize = "osszeg"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub amount: Option<Decimal>,
     /// Currency (`devizanem`).
     #[serde(default, rename(deserialize = "devizanem"))]
@@ -1544,6 +1537,7 @@ pub struct ReceiptInfo {
         rename(deserialize = "devizaarf"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub exchange_rate: Option<Decimal>,
     /// Comment (`megjegyzes`).
     #[serde(default, rename(deserialize = "megjegyzes"))]
@@ -1583,6 +1577,7 @@ pub struct ReceiptItem {
         rename(deserialize = "nettoEgysegar"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub unit_price: Option<Decimal>,
     /// Quantity (`mennyiseg`).
     #[serde(
@@ -1590,6 +1585,7 @@ pub struct ReceiptItem {
         rename(deserialize = "mennyiseg"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub quantity: Option<Decimal>,
     /// Unit of measure (`mennyisegiEgyseg`).
     #[serde(default, rename(deserialize = "mennyisegiEgyseg"))]
@@ -1600,6 +1596,7 @@ pub struct ReceiptItem {
         rename(deserialize = "netto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_value: Option<Decimal>,
     /// Optional NAV special VAT category (`afatipus`).
     #[serde(default, rename(deserialize = "afatipus"))]
@@ -1610,6 +1607,7 @@ pub struct ReceiptItem {
         rename(deserialize = "afakulcs"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_rate: Option<Decimal>,
     /// VAT value (`afa`).
     #[serde(
@@ -1617,6 +1615,7 @@ pub struct ReceiptItem {
         rename(deserialize = "afa"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub vat_value: Option<Decimal>,
     /// Gross value (`brutto`).
     #[serde(
@@ -1624,6 +1623,7 @@ pub struct ReceiptItem {
         rename(deserialize = "brutto"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_value: Option<Decimal>,
     /// Item accounting data (`fokonyv`).
     #[serde(default, rename(deserialize = "fokonyv"))]
@@ -1667,6 +1667,7 @@ pub struct ReceiptPayment {
         rename(deserialize = "osszeg"),
         deserialize_with = "de::empty_as_none"
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub amount: Option<Decimal>,
     /// Description (`leiras`).
     #[serde(default, rename(deserialize = "leiras"))]

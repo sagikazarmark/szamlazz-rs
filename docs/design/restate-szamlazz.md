@@ -40,7 +40,7 @@ the deploy checklist and the flag-day script, now folded into the library README
 `restate-sdk` is an unconditional dependency; the features are `schemars` and `test-util` (the unchecked configuration
 constructor the e2e harness builds its sub-floor policies with; never enabled by a deployment).
 
-Layering (ADR 0001): the `gateway` is a Rust module that speaks to szamlazz.hu on behalf of one account; it owns the
+Layering (ADRs 0001 and 0014): the `gateway` is a Rust module that speaks to szamlazz.hu on behalf of one account; it owns the
 `szamlazz_agent::Client` (the transport it wraps; it is not a second client) and the account, and exposes one plain
 async fn per durable step with outcome-as-data. `Szamlazz.Order` calls it inside `ctx.run`; `Szamlazz.Agent` is a thin
 stateless facade over it for by-number operations. Every read of account configuration by the services (the
@@ -56,6 +56,17 @@ it does not provide durable protection itself. Direct consumers own exclusive ad
 retention and read-only settlement across interruption. A new grant requires independently settling any
 earlier unresolved request and a fresh business decision; never construct one in an automatic write
 retry/replay closure. See the [public Gateway contract](../../crates/restate-szamlazz/README.md#gateway-and-services).
+
+Custom expert orchestrator support was explicitly approved on 2026-09-12
+([ADR 0014](../adr/0014-gateway-as-an-expert-orchestration-interface.md)); the shared module is original,
+but an existing downstream durable orchestrator was not established by that history. We accept an
+expert interface whose permission assertion cannot verify the caller's durable obligations. Ordinary
+applications use Order. Direct consumers retain `CreateStepRequest::operation()` and reconcile with
+`Gateway::reconcile`, the same intent-aware read-only evidence interface used by Order recovery.
+Ownership alone is insufficient: expected old numbers, corrective bases and paired storno/original
+evidence matter. Only positive `Created`/`Reversed` evidence can settle through this interface; other
+results preserve uncertainty, and document queries cannot settle deletion. The caller records the
+settlement durably before any fresh business decision.
 
 ## 3. Principle: szamlazz.hu is the source of truth (ADR 0005)
 
@@ -371,7 +382,8 @@ through the gateway opened for this execution.
    because it is the prepayment chain's settled end and outlives its `ES`: after `ES` → `VS` → storno of the `ES`,
    `…:prepayment` is reversed, `…:invoice` is absent and the newest document under the order is the `ES`'s `SS` (not
    invoice-family, so the hint says absent), and szamlazz.hu's repetition toggle is per kind (verified), so without
-   the row a plain `SZ` (or a second `ES` under `reissue`) landed beside the live `VS` (#62). A reversed `VS` refuses
+    the row the worker could permit a plain `SZ` (or a second `ES` under `reissue`) beside the live `VS` (#62).
+    This is a modeled interleaving, not vendor evidence for that particular combination. A reversed `VS` refuses
    nothing.
    Another szamlazz.hu code (`Api`) → `TerminalError{unavailable}`
    (an answer nothing can be concluded from); no answer → `Unanswered`, retried by the read policy. A document under
@@ -439,8 +451,8 @@ through the gateway opened for this execution.
      a reply naming that old target → `Unconfirmed`, journaled as unresolved data with the marker retained.
      Read-only reconciliation must establish the replacement, excluding the old number; no second send.
      An API rejection → `Rejected{code, message}`; 3/135/136/164
-     → `CredentialsRejected{code, message}`: settled data, **not** `Unconfirmed`: re-executing with the same key would
-     only repeat the answer, so the run policy is not spent on it.
+      → `CredentialsRejected{code, message}`: settled data for this sole permitted send, **not** `Unconfirmed`.
+      A completed run replays its recorded answer; no write retry is authorized.
    - Transport failure, an open code (1, 55, 56 without a number, a code the agent crate does not know,
      `szamlazz_agent::OutcomeClass::Unknown`, because it may be a refusal or a new "issued, but…" code like 55/56,
      and `rejected` would assert that no document exists (#13), or a success without a document number) or
@@ -884,7 +896,7 @@ namespace = "acct"            # 1–16 bytes of [a-z0-9-]; prefixes every extern
 
 [issue]      # unmanaged Szamlazz.Agent.storno run policy; protected Order writes do not use it
 max_attempts = 5              # execution-count exhaustion threshold, including the first; can overshoot
-initial_delay = "2m"          # before the first re-execution; > client timeout + the longest observed server stall
+initial_delay = "2m"          # unmanaged storno retry delay; does not settle an earlier send
 factor = 2.0
 max_delay = "10m"
 max_duration = "1h"           # duration exhaustion threshold, not a deadline (ADR 0004)
@@ -921,8 +933,9 @@ server would spend the handler's `invocation_retry_policy` instead. Durations ar
 non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
 invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and a finite `factor ≥ 1` on all
 three) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
-`REQUEST_TIMEOUT` (60 s) plus a 30 s margin, unmanaged Agent storno re-executed sooner would query for the cut execution's
-send while it may still be in flight (the ~90 s rule of ADR 0002 and the behaviour notes, in code since #61; the read
+`REQUEST_TIMEOUT` (60 s) plus a 30 s margin. This retained operational spacing for unmanaged Agent storno
+does not establish that a cut execution's send has finished; its repeat policy relies on observed storno behavior,
+not elapsed time (ADR 0004). The floor dates to #61; the read
 and resolve policies have no floor, and the e2e suite's 1 s policies are built with
 `ValidatedWorkerConfig::unchecked` behind the `test-util` feature and never pass through `validate`; `validate` is the
 one way to the `ValidatedWorkerConfig` that `Order::from_parts` / `Agent::from_parts` take, #128);
@@ -1113,8 +1126,9 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   the storno number from the hint, `Collision`, `Foreign`, the corrective's exemption from the hint), the create step
   (`Issued`, code 56 *with* a number as `Issued` with `notification_delivery_failed` after one send and no re-query
   (in the shape the agent crate accepts; szamlazz.hu's own shape for 56 is unverified),
-  `Found` on a re-executed step, `Rejected`, the open codes re-queried once and `Unconfirmed` when nothing
-  landed, a code the agent crate does not know among them, on the create and the storno send , an answered code
+   `Found` on a permitted call's leading query, `Rejected`, public creation's open codes reconciled once and
+   `Unconfirmed` when no sufficient evidence is visible, a code the agent crate does not know among them,
+   on the create and the unmanaged storno send, an answered code
   or `szlahu_down` on the leading query settled as `Api` / `Unavailable` with the create and storno mocks seeing
   zero requests (#63), a failed post-send re-query as `ReQueryFailed` naming both causes, the `Unconfirmed`
   displays, the 71/152 matrix
@@ -1145,11 +1159,15 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   under `RejectionCode::Request`; a parse and a transport failure as `Transport`), `QueryError::answered` (7, a
   credential code and another code are answers, `szlahu_down` and a transport failure `Unanswered`) with the
   `outcome` fold every read fn applies, and the send rule of the two write steps as a function of what the leading
-  or re-query saw against the number the lookup saw reversed: `settle_create` (nothing, or exactly the lookup's
+  query or post-refusal diagnostic saw against the number the lookup saw reversed: `settle_create` (nothing, or exactly the lookup's
   reversed document still reversed, proceeds; a live document that is not it is `Found`, it live again `LiveAgain`,
   a reversed one that is not it `Reversed`, a collision and rejected credentials settle; every other failure is
-  handed back for the caller to place) and `settle_storno` (the `SS` settles as `AlreadyReversed`, nothing proceeds,
-  rejected credentials settle, the rest is handed back).
+  handed back for the caller to place) and unmanaged `settle_storno` (the `SS` settles as `AlreadyReversed`, nothing proceeds,
+  rejected credentials settle, the rest is handed back). These are not settlement rules for an uncertain
+  create send: that path uses shared `reconcile` evidence. Public-seam regressions retain intent across
+  a fresh Gateway, check old-target/corrective-base/collision/credential uncertainty and paired storno
+  evidence, and count no mutation during reconciliation. Conclusive duplicate refusals survive failed
+  diagnostics. See `tests/gateway/recovery.rs` and `tests/gateway/duplicate.rs`.
 - `contract`: every request type and every object it nests refuses one unknown top-level and one unknown nested field
   with serde's error naming the field, the externally tagged enums refuse a second key, and every documented body
   (the library README's and the rustdoc's examples, the e2e scenarios' literal bodies) still deserializes; under `schemars`, every
@@ -1244,7 +1262,14 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   path in full (the step-name table's demand, and the floor of the suite: a scenario that is the only walker of a
   path stays however plain its decision), and **the durable-execution proof**, what only a server can show. The
   decisions a handler takes on a given read are unit tests of `service`; the wire of a step is the gateway's.
-  **Phase 1**, the single-account deployment (the static resolver's `[account]`), unscoped, fourteen scenarios run
+  **Current protection coverage:** #216 replaced the old Order create/storno retry paths with consumed
+  permission, retained uncertainty, read-only reconciliation and pause. The unresolved-write and
+  expected-document scenarios exercise invisible effects, interruption, cancellation/kill, recovery and
+  stale expected targets while counting mutation sends. The historical Phase 1 and multi-account
+  inventory below records the earlier suite's evolution, not current write-retry rules or an execution
+  report for today's code. Current commands and evidence boundaries are in [testing](../testing.md);
+  current protection is specified in [the protocol](order-write-protocol.md).
+  **Historical Phase 1 inventory (before #216):** the single-account deployment (the static resolver's `[account]`), unscoped, fourteen scenarios ran
   **concurrently** on one runtime (a `JoinSet`; every scenario owns its order keys, numbers and
   `Idempotency-Key`s, every stub is mounted once and discriminated by them, `create_for(order)` on the
   `<rendelesSzam>` of every create, a storno by its `<szamlaszam>`, nothing is reset between scenarios, every count

@@ -283,6 +283,7 @@ pub struct InvoiceInfo {
     /// Exchange rate (`devizaarf`).
     #[doc(alias = "árfolyam")]
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub exchange_rate: Option<Decimal>,
     /// Comment shown on the document (`megjegyzes`).
     pub comment: Option<String>,
@@ -414,11 +415,13 @@ pub struct DocumentItem {
     pub id: Option<String>,
     /// Quantity (`mennyiseg`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub quantity: Decimal,
     /// Unit of measure (`mennyisegiegyseg`).
     pub unit: String,
     /// Net unit price (`nettoegysegar`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub unit_price: Decimal,
     /// VAT category (`afatipus`), when the row uses a special VAT code.
     #[doc(alias = "áfatípus")]
@@ -429,15 +432,19 @@ pub struct DocumentItem {
     pub vat_rate_code: String,
     /// Net value (`netto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub net_value: Decimal,
     /// Margin-scheme VAT base (`arresafaalap`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub margin_vat_base: Option<Decimal>,
     /// VAT value (`afa`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub vat_value: Decimal,
     /// Gross value (`brutto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub gross_value: Decimal,
     /// Row comment (`megjegyzes`).
     pub comment: Option<String>,
@@ -492,12 +499,15 @@ pub struct FinancialItem {
     pub vat_rate_code: String,
     /// Net amount (`netto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub net: Decimal,
     /// VAT amount (`afa`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub vat: Decimal,
     /// Gross amount (`brutto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub gross: Decimal,
     /// Settlement period start (`elszdattol`).
     pub settlement_from: Option<Date>,
@@ -535,6 +545,7 @@ pub struct RecordedCreditEntry {
     pub title: PaymentMethod,
     /// Amount (`osszeg`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// Comment (`megjegyzes`).
     pub comment: Option<String>,
@@ -546,6 +557,7 @@ pub struct RecordedCreditEntry {
     pub bank_transaction_id: Option<i64>,
     /// Exchange rate used for the credit entry (`devizaarf`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub exchange_rate: Option<Decimal>,
 }
 

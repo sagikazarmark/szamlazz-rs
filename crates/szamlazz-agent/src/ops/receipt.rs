@@ -73,6 +73,7 @@ pub struct ReceiptPayment {
     pub method: String,
     /// Amount paid with this tender (`osszeg`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// Free-text description of the tender (`leiras`).
     pub description: Option<String>,
@@ -574,6 +575,7 @@ pub struct Receipt {
     pub exchange_bank: Option<String>,
     /// Exchange rate for foreign-currency receipts (`devizaarf`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub exchange_rate: Option<Decimal>,
     /// Free-text comment (`megjegyzes`).
     pub comment: Option<String>,
@@ -618,11 +620,13 @@ pub struct ReceiptItem {
     pub id: Option<String>,
     /// Quantity (`mennyiseg`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub quantity: Decimal,
     /// Unit of measure (`mennyisegiEgyseg`), e.g. `db`.
     pub unit: String,
     /// Net unit price (`nettoEgysegar`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub unit_price: Decimal,
     /// VAT category code (`afatipus`), set when a special code (AAM, EUT, …)
     /// applies.
@@ -633,12 +637,15 @@ pub struct ReceiptItem {
     pub vat_rate_code: String,
     /// Net value (`netto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub net_value: Decimal,
     /// VAT value (`afa`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub vat_value: Decimal,
     /// Gross value (`brutto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub gross_value: Decimal,
     /// General-ledger metadata (`fokonyv`).
     pub ledger: Option<ReceiptItemLedger>,

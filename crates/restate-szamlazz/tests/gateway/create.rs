@@ -444,6 +444,52 @@ fn describe_create(outcome: &Result<CreateOutcome, Unconfirmed>) -> String {
 }
 
 #[tokio::test]
+async fn uncertain_create_never_settles_on_collision_credentials_or_the_old_target() {
+    for echo in [false, true] {
+        for after in [
+            api_error("135", "private credential diagnostic"),
+            Doc {
+                order: Some("OTHER"),
+                ..Doc::new("SZ-OTHER", "SZ")
+            }
+            .response(),
+            Doc::new("SZ-OLD", "SZ").response(),
+            Doc::reversed("SZ-OLD", "SZ").response(),
+        ] {
+            let h = Harness::start().await;
+            external_id_query("acct:ORD-1:invoice")
+                .respond_with(Doc::reversed("SZ-OLD", "SZ").response())
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            external_id_query("acct:ORD-1:invoice")
+                .respond_with(after)
+                .expect(1)
+                .mount(&h.server)
+                .await;
+            create()
+                .respond_with(if echo {
+                    created("SZ-OLD", "1000", "1270")
+                } else {
+                    ResponseTemplate::new(500)
+                })
+                .expect(1)
+                .mount(&h.server)
+                .await;
+
+            let result = h.create(Some("SZ-OLD")).await;
+            assert!(
+                result.is_err(),
+                "post-send evidence must retain uncertainty: {result:?}"
+            );
+            assert_eq!(h.bodies().await.len(), 3);
+            h.server.verify().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn create_rejection_is_settled_without_a_re_query() {
     let h = Harness::start().await;
     external_id_query("acct:ORD-1:invoice")

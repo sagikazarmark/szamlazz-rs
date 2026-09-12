@@ -525,9 +525,9 @@ and `Accounts::from` bundles it as resolver and store.
 
 ### Gateway and services
 
-`gateway::Gateway` is the module that speaks to szamlazz.hu on behalf of one account, over
-`szamlazz_agent::Client`. Reads and writes return expected szamlazz.hu outcomes as data, with
-different uncertainty contracts:
+`gateway::Gateway` is the expert orchestration interface that speaks to szamlazz.hu on behalf of one account,
+over `szamlazz_agent::Client`. Ordinary applications use the protected `Order` service. Gateway reads and
+writes return expected szamlazz.hu outcomes as data, with different uncertainty contracts:
 
 - the read fns (`lookup`, `lookup_ours`, `verify`, `query`, `hint`, `lookup_storno`, `query_taxpayer`, `probe`) return
   `Err(Unanswered)` when szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`);
@@ -537,14 +537,46 @@ different uncertainty contracts:
   reconciliation. Grant permission only after establishing that no earlier unresolved write can still act;
   after uncertainty, independently settle that exact request and make a fresh business decision. An empty
   query, elapsed time, cancellation or kill cannot justify a new grant. Never grant inside an automatic
-  write retry/replay closure. `Unconfirmed` requires retaining uncertainty; use `lookup_ours` or `query`
-  to gather evidence without another send. The supplied Order service owns its separate durable
+  write retry/replay closure. `CreatePermission::grant()` is the expert caller's assertion, not durable
+  authorization. `Unconfirmed` requires retaining uncertainty; use `reconcile` with the retained intent
+  to check evidence without another send. The supplied Order service owns its separate durable
   marker/arm protocol internally.
 - `create_once` and unmanaged `storno` return `Err(Unconfirmed)` for an outcome that is *not* known.
   This error is not permission to retry a create. An answer to their leading
   query (another code, `szlahu_down`) is data: nothing was sent. An unnumbered unmanaged storno acknowledgement
   is the exception: inconclusive reconciliation returns journaled `StornoOutcome::Unnumbered` data, so this
   reply ends the run rather than entering mutation retry.
+
+**Read-only reconciliation:** retain `CreateStepRequest::operation()` (the public, serializable
+`gateway::recovery::WriteOperation`) before a create, together with its external id, order and stable
+account mapping. `Gateway::reconcile(ReconciliationRequest { external_id, order, operation, candidate })`
+uses the same evidence rules as protected Order recovery, without needing an Order marker or Restate
+invocation metadata. For a reversal, retain `WriteOperation::Storno { number }` naming the original.
+
+- `ReconciliationOutcome::Created(document)` requires matching order and kind, a number different from
+  the expected old reissue target, and the intended base for a corrective. A corrective intent without
+  its base cannot establish completion. The document may have been reversed since issuance.
+- `Reversed { storno_number }` requires a matching reversal document **and a fresh matching original**
+  of this order, of a stornoable type, reported reversed.
+- `Inconclusive`, `CredentialsRejected`, `Api` and `Err(Unanswered)` all retain write uncertainty.
+  Absence, a colliding holder or the old target becoming live does not settle an uncertain create.
+  Deletion cannot be proved by document queries; it returns `Inconclusive` without a query.
+
+`candidate: Some(number)` is an exact constraint, not permission to substitute a different document.
+Creates still query their external-id holder; storno queries the candidate by number. Without a candidate,
+storno queries the external id and takes the order-number hint only on absence. A failed candidate check
+does not silently fall back; an orchestrator may explicitly make a separate discovery read with `None`.
+Vendor-reported evidence numbers retain their spelling and have no mutation-input byte bound.
+
+The caller durably records settlement and maintains exclusion across interrupted executions. Positive
+evidence settles the retained operation; it does not itself authorize replacement or another send.
+`lookup_ours` remains an order/type ownership read, insufficient by itself for expected-old-target or
+corrective-base settlement. `tests/gateway/recovery.rs` demonstrates the public seam across restored
+intent and a fresh Gateway, using only reads after an uncertain send.
+
+A conclusive 71/152 create refusal remains data even if diagnostic queries fail. The diagnostic failure
+is logged separately (credential failures retain their actionable warning); it cannot turn the refusal
+into `Unconfirmed` or `CredentialsRejected`.
 
 It is not a second client: the Számla Agent `Client` is the transport it wraps. Every read of account
 configuration by the services uses the journaled `Account` directly; a gateway is opened lazily inside the first

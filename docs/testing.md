@@ -37,6 +37,7 @@ cargo hack check --workspace --feature-powerset --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 python3 scripts/test-order-migration.py
+bash scripts/check-money-features.sh
 dagger check
 ```
 
@@ -63,6 +64,36 @@ Do not share a server between concurrent runs or deployments: registration
 changes which endpoint new invocations reach. Mocked-vendor tests retain their
 controlled failure, concurrency, cancellation, recovery and journal/privacy
 coverage in regular CI.
+
+### Expert Gateway reconciliation regression
+
+`cargo test -p restate-szamlazz --all-features --locked --test gateway` exercises the public
+orchestration boundary against wiremock. `tests/gateway/recovery.rs` retains issuance intent across
+a fresh Gateway and checks old reissue targets, corrective bases, collisions, blocked verification,
+exact candidates and paired storno/original evidence. Reconciliation sends no mutations; deletion
+remains inconclusive. `tests/gateway/duplicate.rs` checks that failed optional diagnostics do not
+replace a conclusive 71/152 refusal. These tests establish evidence classification, not caller-owned
+durability or vendor behavior. Actual-Restate/mocked-vendor Order tests cover the marker/arm protocol
+separately; see [the protected protocol](design/order-write-protocol.md).
+
+### Monetary dependency-graph regression
+
+Run `bash scripts/check-money-features.sh` from the workspace root when changing monetary Serde
+boundaries or dependencies. It runs the focused Agent `decimal_serde`/`numeric_fidelity`, executable CLI
+`boundary` tests (including its direct `serde_ignored` JSON wrapper), IPN Serde,
+Adatkapcsolat `monetary_serialization`, and worker `decimal_input` and journal codec tests under eight
+locked graphs: default, `rust_decimal/serde-float`, `rust_decimal/serde-arbitrary-precision`, both
+features together, and `serde-str` or `serde-bincode` combined with `serde-float`, each with and
+without arbitrary precision. Journal tests decode serialized bytes through the actual SDK codec;
+a prebuilt JSON `Value` round trip alone can hide feature-dependent text-decoding failures.
+It also prints the Agent's reverse Decimal feature tree for each graph. Cargo and the locked
+dependencies are required; a cold cache may fetch dependencies, but these tests contact no vendor.
+
+The regression is that downstream feature unification must not change public monetary strings into
+floating-point or numeric serialization, or silently lose exact digits on round trip. The focused
+tests also exercise supported non-JSON formats and representable exponent inputs. A default workspace
+run or cargo-hack's package feature powerset alone does not establish these downstream graph cases.
+This is a separate required focused command; listing it here does not claim execution or Dagger wiring.
 
 ## Offline request XSD validation
 

@@ -117,6 +117,7 @@ pub struct ExchangeRateInput {
         feature = "schemars",
         schemars(schema_with = "super::decimal::optional_schema")
     )]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub rate: Option<Decimal>,
 }
 
@@ -298,12 +299,14 @@ pub struct LineItemInput {
     /// Quantity (`mennyiség`).
     #[serde(deserialize_with = "super::decimal::required")]
     #[cfg_attr(feature = "schemars", schemars(schema_with = "super::decimal::schema"))]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub quantity: Decimal,
     /// Unit of measure (`mennyiségi egység`), e.g. `db`.
     pub unit: String,
     /// Net unit price (`nettó egységár`).
     #[serde(deserialize_with = "super::decimal::required")]
     #[cfg_attr(feature = "schemars", schemars(schema_with = "super::decimal::schema"))]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub unit_price: Decimal,
     /// VAT rate (`áfakulcs`): a numeric percentage such as `27` or a
     /// NAV-defined code such as `AAM`. The code set is open.

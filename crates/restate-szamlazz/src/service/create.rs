@@ -999,9 +999,11 @@ impl Execution {
                     LookupOutcome::Live(found)
                     | LookupOutcome::Reversed {
                         document: found, ..
-                    } if corrected_number
-                        .as_deref()
-                        .is_some_and(|base| !found.is_corrective_of(base)) =>
+                    } if !gateway::recovery::matches_create_base(
+                        &found,
+                        kind,
+                        corrected_number.as_deref(),
+                    ) =>
                     {
                         tracing::warn!(number = %found.number, "corrective base collision");
                         LookupOutcome::Collision(found)
@@ -1046,18 +1048,15 @@ impl Execution {
                 &intent.identity.external_id,
                 operation,
                 format!("create-{kind}"),
-                move |gateway, marker| async move {
+                move |gateway, _marker| async move {
                     gateway
-                        .protected_create(
-                            CreateStepRequest {
-                                external_id: &external_id,
-                                kind,
-                                order: &order_key,
-                                create: &create,
-                                reversed: reversed.as_deref(),
-                            },
-                            &marker,
-                        )
+                        .protected_create(CreateStepRequest {
+                            external_id: &external_id,
+                            kind,
+                            order: &order_key,
+                            create: &create,
+                            reversed: reversed.as_deref(),
+                        })
                         .await
                 },
             )

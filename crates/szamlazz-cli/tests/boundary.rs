@@ -218,6 +218,44 @@ async fn monetary_json_and_flags_refuse_loss_and_lookalikes_before_http() {
     );
 }
 
+#[tokio::test]
+async fn monetary_json_keeps_unknown_field_diagnostics_and_rejects_duplicate_amounts() {
+    let server = MockServer::start().await;
+    for input in [
+        r#"[{"date":"2026-09-11","title":"cash","amount":9007199254740993.5,"__unknown":true}]"#,
+        r#"[{"__unknown":true,"date":"2026-09-11","title":"cash","amount":9007199254740993.5}]"#,
+    ] {
+        let output = run(
+            &mut command(&server, &["payment", "register", "E-2026-1", "-f", "-"]),
+            Some(input),
+        )
+        .await;
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            text(&output.stderr).contains("unknown JSON field(s): 0.__unknown"),
+            "{output:?}"
+        );
+    }
+    for input in [
+        r#"[{"date":"2026-09-11","title":"cash","amount":12.34,"amount":56.78}]"#,
+        r#"[{"date":"2026-09-11","title":"cash","amount":12.34}] {}"#,
+    ] {
+        let output = run(
+            &mut command(&server, &["payment", "register", "E-2026-1", "-f", "-"]),
+            Some(input),
+        )
+        .await;
+        assert!(!output.status.success(), "{output:?}");
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+}
+
 async fn original_invoice(server: &MockServer, appearance: i64) {
     Mock::given(method("POST")).and(wiremock::matchers::body_string_contains("name=\"action-szamla_agent_xml\""))
         .respond_with(ResponseTemplate::new(200).set_body_raw(format!(
@@ -291,7 +329,7 @@ fn object_paths(value: &Value, path: &str, paths: &mut Vec<String>) {
 
 fn detailed_invoice() -> Value {
     let mut input = invoice();
-    input["header"]["exchange_rate"] = json!({"bank": "MNB", "rate": "400"});
+    input["header"]["exchange_rate"] = json!({"bank": "MNB", "rate": 400.25});
     input["header"]["template"] = json!({"other": "custom-template"});
     input["buyer"]["postal_address"] = json!({"city": "Budapest"});
     input["buyer"]["ledger"] = json!({"buyer_account": "311"});
@@ -302,14 +340,14 @@ fn detailed_invoice() -> Value {
         "trans_o_flex": {"parcel_count": 1},
         "pick_pack_point": {"barcode_prefix": "P"},
         "sprinter": {"parcel_count": 1},
-        "mpl": {"customer_code": "C", "barcode": "B", "weight": "1"}
+        "mpl": {"customer_code": "C", "barcode": "B", "weight": "1", "declared_value": 12.34}
     });
     input
 }
 
 fn detailed_receipt() -> Value {
     let mut input = receipt();
-    input["exchange_rate"] = json!({"bank": "MNB", "rate": "400"});
+    input["exchange_rate"] = json!({"bank": "MNB", "rate": 400.25});
     input["template"] = json!({"other": "custom-template"});
     input["items"][0]["ledger"] = json!({"revenue_account": "911"});
     input

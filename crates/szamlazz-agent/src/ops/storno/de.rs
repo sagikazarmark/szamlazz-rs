@@ -1,12 +1,7 @@
 //! Keep JSON content raw until the adjacent tag is known. Serde's derived
 //! adjacent-tag decoder otherwise buffers content-before-tag into private maps,
 //! losing the distinction between monetary number tokens and lookalike objects.
-use std::fmt;
-
-use serde::{
-    Deserialize, Deserializer,
-    de::{MapAccess, Visitor},
-};
+use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 
 use super::{CreatedInvoice, InvoiceAcknowledgement, StornoResponse};
@@ -17,6 +12,7 @@ use super::{CreatedInvoice, InvoiceAcknowledgement, StornoResponse};
 #[derive(Deserialize)]
 #[serde(
     remote = "StornoResponse",
+    rename = "StornoResponse",
     tag = "state",
     content = "response",
     rename_all = "snake_case"
@@ -40,43 +36,16 @@ struct JsonResponse {
 }
 
 pub(super) fn response<'de, D: Deserializer<'de>>(de: D) -> Result<StornoResponse, D::Error> {
-    struct Exact;
-
-    impl<'de> Visitor<'de> for Exact {
-        type Value = StornoResponse;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a storno response with state and response fields")
-        }
-
-        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-            let raw =
-                Box::<RawValue>::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-            let JsonResponse { state, response } =
-                serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
-            match state {
-                State::Numbered => {
-                    serde_json::from_str(response.get()).map(StornoResponse::Numbered)
-                }
-                State::Unnumbered => {
-                    serde_json::from_str(response.get()).map(StornoResponse::Unnumbered)
-                }
-            }
-            .map_err(serde::de::Error::custom)
-        }
-
-        fn visit_newtype_struct<D: Deserializer<'de>>(
-            self,
-            de: D,
-        ) -> Result<Self::Value, D::Error> {
-            Representation::deserialize(de)
-        }
-    }
-
-    if !de.is_human_readable() {
+    if !crate::number::de::is_json::<D>() {
         return Representation::deserialize(de);
     }
-    // Same RawValue protocol as the monetary scalar decoder: JSON hands us
-    // untouched text, ordinary formats unwrap a transparent newtype.
-    de.deserialize_newtype_struct("$serde_json::private::RawValue", Exact)
+    // Only serde_json receives its private RawValue protocol.
+    let raw = Box::<RawValue>::deserialize(de)?;
+    let JsonResponse { state, response } =
+        serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+    match state {
+        State::Numbered => serde_json::from_str(response.get()).map(StornoResponse::Numbered),
+        State::Unnumbered => serde_json::from_str(response.get()).map(StornoResponse::Unnumbered),
+    }
+    .map_err(serde::de::Error::custom)
 }

@@ -1,4 +1,4 @@
-//! Exact input numbers and balance arithmetic. JSON preserves the token through
+//! Exact input, response and journal numbers, and balance arithmetic. JSON preserves the token through
 //! `arbitrary_precision`; buffered Serde wrappers also support strings and exact integers.
 use rust_decimal::Decimal;
 use serde::{
@@ -6,6 +6,13 @@ use serde::{
     de::{MapAccess, Visitor},
 };
 use std::fmt;
+
+pub(super) fn serialize_vec<S: serde::Serializer>(
+    values: &[Decimal],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(values.iter().map(ToString::to_string))
+}
 
 /// Decimal's checked addition may round on success. Align integer coefficients
 /// instead, as the Számla Agent's derived line-item arithmetic does. With two
@@ -62,7 +69,7 @@ fn parse<E: serde::de::Error>(text: &str) -> Result<Decimal, E> {
     })
 }
 
-pub(super) fn required<'de, D: Deserializer<'de>>(de: D) -> Result<Decimal, D::Error> {
+pub(crate) fn required<'de, D: Deserializer<'de>>(de: D) -> Result<Decimal, D::Error> {
     struct Exact;
     impl<'de> Visitor<'de> for Exact {
         type Value = Decimal;
@@ -100,8 +107,19 @@ pub(super) fn required<'de, D: Deserializer<'de>>(de: D) -> Result<Decimal, D::E
     de.deserialize_any(Exact)
 }
 
-pub(super) fn optional<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Decimal>, D::Error> {
-    #[derive(Deserialize)]
-    struct Exact(#[serde(deserialize_with = "required")] Decimal);
+// Transparent wrappers retain the field's representation without invoking
+// Decimal's feature-dependent Deserialize implementation, including in vectors.
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct Exact(#[serde(deserialize_with = "required")] Decimal);
+
+pub(crate) fn optional<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Decimal>, D::Error> {
     Ok(Option::<Exact>::deserialize(de)?.map(|value| value.0))
+}
+
+pub(super) fn deserialize_vec<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<Decimal>, D::Error> {
+    Ok(Vec::<Exact>::deserialize(de)?
+        .into_iter()
+        .map(|value| value.0)
+        .collect())
 }

@@ -142,6 +142,50 @@ async fn authenticated_400_is_reserved_for_a_body_that_is_not_a_document() {
     assert!(response.contains("<nyugtavalasz"), "{response}");
 }
 
+#[tokio::test]
+async fn full_xml_shape_is_checked_after_authentication_before_dispatch() {
+    let bank = r#"<banktranz xmlns="http://www.szamlazz.hu/banktranz"><id>7</id></banktranz>"#;
+    for body in [
+        format!("{bank}{}", bank.replace(">7<", ">8<")),
+        format!("{bank}not XML"),
+        bank.replace("<id>", "<future>\0</future><id>"),
+        bank.replace("<id>", "<future attr='&#0;'/><id>"),
+    ] {
+        let (status, ack) = call(Some("not-the-key"), &body, true).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert!(ack.contains("<banktranzvalasz"));
+        assert!(ack.contains("KEY_ERR"));
+
+        // Shape must stop dispatch before an Ack can be returned.
+        let (status, response) = call(Some("secret-key"), &body, true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}: {response}");
+        assert!(!response.contains("valasz"));
+    }
+}
+
+#[cfg(feature = "opendal")]
+#[tokio::test]
+async fn concatenated_records_are_refused_before_json_only_archiving() {
+    let operator =
+        opendal::Operator::new(opendal::services::Memory::default()).expect("memory storage");
+    let archiver = szamlazz_adatkapcsolat::archive::Archiver::builder(operator.clone())
+        .save_xml(false)
+        .build();
+    let app = szamlazz_adatkapcsolat::axum::router("secret-key", archiver);
+    let bank = r#"<banktranz xmlns="http://www.szamlazz.hu/banktranz"><id>7</id></banktranz>"#;
+    let body = format!("{bank}{}", bank.replace(">7<", ">8<"));
+    let (status, _) = send(app, request(Some("secret-key"), &body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    for id in [7, 8] {
+        assert!(
+            !operator
+                .exists(&format!("bank-transactions/undated/{id}.json"))
+                .await
+                .expect("check archived record")
+        );
+    }
+}
+
 // The docs guarantee the header accompanies every push, so a missing header
 // is transport damage (e.g. a stripping proxy), not an unknown key. KEY_ERR
 // would halt resends (bank transactions and receipts permanently), while a
@@ -513,6 +557,84 @@ async fn unknown_key_answers_key_err_of_the_pushed_kind_for_every_root() {
         assert!(text.contains(ack_root), "{text}");
         assert!(text.contains("<hibakod>KEY_ERR</hibakod>"), "{text}");
         assert!(calls.lock().expect("calls").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn escaped_namespaces_reach_authentication_for_every_root() {
+    let incoming = incoming_invoice();
+    for (original, ack_root) in [
+        (OUTGOING_INVOICE, "<szamlavalasz"),
+        (incoming.as_str(), "<szamlabevalasz"),
+        (BANK_TRANSACTION, "<banktranzvalasz"),
+        (RECEIPT_BATCH, "<nyugtavalasz"),
+    ] {
+        let body = original.replace("http://", "http:&#47;&#47;");
+        for key in ["secret-key", "not-the-key"] {
+            let (status, ack) = call(Some(key), &body, false).await;
+            assert_eq!(status, StatusCode::OK, "{ack_root}, {key}: {ack}");
+            assert!(ack.contains(ack_root), "{ack}");
+            assert_eq!(ack.contains("KEY_ERR"), key == "not-the-key");
+        }
+        // Normalization cannot move the full parse before authentication.
+        let malformed = format!("{body}not XML");
+        let (status, ack) = call(Some("not-the-key"), &malformed, false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ack.contains(ack_root));
+        assert!(ack.contains("KEY_ERR"));
+        let (status, _) = call(Some("secret-key"), &malformed, false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn dtd_shape_is_checked_after_authentication_for_every_root() {
+    for (root, content, ack_root) in [
+        ("banktranz", "<id>7</id>", "<banktranzvalasz"),
+        (
+            "szamla",
+            "<alap><id>7</id><szamlaszam>E-1</szamlaszam></alap>",
+            "<szamlavalasz",
+        ),
+        (
+            "szamlabe",
+            "<alap><id>7</id><szamlaszam>E-1</szamlaszam></alap>",
+            "<szamlabevalasz",
+        ),
+        (
+            "xmlnyugtaarchiv",
+            "<nyugta><alap><id>7</id></alap></nyugta>",
+            "<nyugtavalasz",
+        ),
+    ] {
+        for (declaration, valid) in [
+            ("<!ELEMENT !!!>", false),
+            ("<!ELEMENT a:b:c EMPTY>", false),
+            ("<!ENTITY a:b 'x'>", false),
+            ("<!ELEMENT p:unused EMPTY>", true),
+            ("<!ENTITY unused '&#0;'>", false),
+            ("<?XML invalid?>", false),
+            ("<!ATTLIST extension future CDATA 'a>b'>", true),
+        ] {
+            let body = format!(
+                r#"<!DOCTYPE {root} [{declaration}]><{root} xmlns="http:&#47;&#47;www.szamlazz.hu/{root}">{content}</{root}>"#
+            );
+            let (status, ack) = call(Some("not-the-key"), &body, false).await;
+            assert_eq!(status, StatusCode::OK, "{body}: {ack}");
+            assert!(ack.contains(ack_root));
+            assert!(ack.contains("KEY_ERR"));
+            let (status, ack) = call(Some("secret-key"), &body, false).await;
+            assert_eq!(
+                status,
+                if valid {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "{body}: {ack}"
+            );
+            assert_eq!(ack.contains(ack_root), valid);
+        }
     }
 }
 

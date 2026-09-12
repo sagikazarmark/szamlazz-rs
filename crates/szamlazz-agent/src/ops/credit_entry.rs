@@ -29,6 +29,7 @@ pub struct CreditEntry {
     /// Amount credited (`osszeg`).
     #[doc(alias = "összeg")]
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// Free-text description (`leiras`).
     pub description: Option<String>,
@@ -260,13 +261,16 @@ pub struct InvoiceBalance {
     pub invoice_number: Option<InvoiceNumber>,
     /// Net total of the invoice (`szamlanetto` / `szlahu_nettovegosszeg`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// Gross total of the invoice (`szamlabrutto` / `szlahu_bruttovegosszeg`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlevoseg` / `szlahu_kintlevoseg`).
     #[doc(alias = "kintlévőség")]
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Payment method of the invoice (`szlahu_fizetesmod`).
     pub payment_method: Option<PaymentMethod>,

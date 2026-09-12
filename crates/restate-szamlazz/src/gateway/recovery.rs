@@ -1,4 +1,7 @@
-//! Read-only evidence for retained Order writes.
+//! Intent-aware, read-only evidence for caller-retained writes.
+//!
+//! The same evidence rules serve expert Gateway orchestrators and protected Order
+//! recovery. These reads do not admit, arm, retry or settle a write durably.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,8 +10,65 @@ use super::{
     StornoLookupOutcome, StornoOutcome, Unanswered,
 };
 use crate::contract::Selector;
-use crate::contract::recovery::{UnresolvedWrite, WriteOperation};
+use crate::contract::recovery::UnresolvedWrite;
+pub use crate::contract::recovery::WriteOperation;
 use crate::identity::{ExternalId, OrderKey};
+
+/// The exact retained intent to reconcile on this Gateway's account.
+///
+/// The caller must retain these values before sending and keep the account mapping
+/// stable. An external id is not unique at szamlazz.hu: ownership and operation
+/// intent are checked together. No Restate invocation or marker is required.
+#[derive(Debug, Clone, Copy)]
+pub struct ReconciliationRequest<'a> {
+    /// External id of the potentially effective write.
+    pub external_id: &'a str,
+    /// Order whose document was to be issued or reversed.
+    pub order: &'a OrderKey,
+    /// Create kind, expected old holder and corrective base, or exact mutation target.
+    /// A corrective must carry its base; omitting it cannot establish completion.
+    pub operation: &'a WriteOperation,
+    /// Optional exact candidate number. For creates it must match the external-id
+    /// holder; for storno it is queried by number. A mismatch is inconclusive,
+    /// with no fallback to a different number. Vendor numbers are not mutation
+    /// inputs: their original spelling and length are preserved.
+    pub candidate: Option<&'a str>,
+}
+
+/// What a read establishes about the retained intent. Only `Created` and
+/// `Reversed` are positive completion evidence; every other variant retains
+/// uncertainty, including an answered credential failure. None grants permission
+/// for a new write. A newer, reversed create can still establish that issuance
+/// occurred; inspect its `reversed` field before making a new business decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ReconciliationOutcome {
+    /// Matching issuance, possibly reversed since it was issued.
+    Created(Box<FoundDocument>),
+    /// Matching storno and a freshly queried, reversed original of this order.
+    Reversed {
+        /// The verified reversal document number.
+        storno_number: String,
+    },
+    /// No sufficient evidence. Absence cannot prove non-execution; queries also
+    /// cannot establish deletion rather than consumption or a hidden holder.
+    Inconclusive {
+        /// Safe explanation, without upstream body or vendor free text.
+        reason: String,
+    },
+    /// Credentials prevented verification; the earlier write remains unresolved.
+    CredentialsRejected(super::SzamlazzAnswer),
+    /// Another vendor answer prevented verification.
+    Api(super::SzamlazzAnswer),
+}
+
+impl ReconciliationOutcome {
+    fn inconclusive(reason: impl Into<String>) -> Self {
+        Self::Inconclusive {
+            reason: reason.into(),
+        }
+    }
+}
 
 enum StornoEvidence {
     Verified(String),
@@ -16,13 +76,28 @@ enum StornoEvidence {
 }
 
 /// The corrective base is part of issuance intent, beyond external-id ownership.
-fn matches_corrective_base(found: &FoundDocument, operation: &WriteOperation) -> bool {
+pub(super) fn matches_corrective_base(found: &FoundDocument, operation: &WriteOperation) -> bool {
     match operation {
         WriteOperation::Create {
-            corrected_number: Some(base),
+            kind,
+            corrected_number,
             ..
-        } => found.is_corrective_of(base),
+        } => matches_create_base(found, *kind, corrected_number.as_deref()),
         _ => true,
+    }
+}
+
+/// Issuance-base identity, shared by the pre-send lookup and positive evidence.
+/// Callers classify a mismatch according to whether a send can have happened.
+pub(crate) fn matches_create_base(
+    found: &FoundDocument,
+    kind: crate::identity::IssuedKind,
+    corrected_number: Option<&str>,
+) -> bool {
+    match (kind, corrected_number) {
+        (crate::identity::IssuedKind::Corrective, Some(base)) => found.is_corrective_of(base),
+        (crate::identity::IssuedKind::Corrective, None) | (_, Some(_)) => false,
+        (_, None) => true,
     }
 }
 
@@ -169,17 +244,8 @@ impl Gateway {
     pub(crate) async fn protected_create(
         &self,
         request: super::CreateStepRequest<'_>,
-        marker: &UnresolvedWrite,
     ) -> WriteResult {
         match self.settled_by_query(&request, true).await {
-            Ok(Some(CreateOutcome::Found(found) | CreateOutcome::Reversed(found)))
-                if !matches_corrective_base(&found, &marker.operation) =>
-            {
-                // This execution has not sent. A wrong-base holder is a
-                // collision, not completion of the requested correction.
-                tracing::warn!(number = %found.number, "corrective base collision");
-                return WriteResult::Create(CreateOutcome::Collision(found));
-            }
             Ok(Some(outcome)) => return WriteResult::Create(outcome),
             Ok(None) | Err(super::QueryError::NotFound) => {}
             Err(super::QueryError::Api(answer)) => {
@@ -195,7 +261,7 @@ impl Gateway {
         }
         match self.create_send(&request, true).await {
             Ok(outcome) => WriteResult::Create(outcome),
-            // Uncertain sends go through the marker's stronger identity checks.
+            // Uncertain sends continue through the shared read-only evidence seam.
             Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
         }
     }
@@ -277,96 +343,144 @@ impl Gateway {
         marker: &UnresolvedWrite,
         candidate: Option<&str>,
     ) -> Result<WriteResult, super::Unanswered> {
+        Ok(
+            match self
+                .reconcile(ReconciliationRequest {
+                    external_id: &marker.external_id,
+                    order: &marker.order,
+                    operation: &marker.operation,
+                    candidate,
+                })
+                .await?
+            {
+                ReconciliationOutcome::Created(found) => WriteResult::Create(if found.is_live() {
+                    CreateOutcome::Reconciled(found)
+                } else {
+                    CreateOutcome::Reversed(found)
+                }),
+                ReconciliationOutcome::Reversed { storno_number } => {
+                    WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number })
+                }
+                ReconciliationOutcome::Inconclusive { reason } => WriteResult::unresolved(reason),
+                ReconciliationOutcome::CredentialsRejected(answer) => WriteResult::Answered {
+                    credentials: true,
+                    answer,
+                },
+                ReconciliationOutcome::Api(answer) => WriteResult::Answered {
+                    credentials: false,
+                    answer,
+                },
+            },
+        )
+    }
+
+    /// Query evidence for retained issuance or reversal intent, without sending
+    /// any mutation. This is the evidence boundary used by protected Order too.
+    ///
+    /// Creates must match order, kind and corrective base and differ from the
+    /// expected old reissue target. Storno requires both a matching reversal and
+    /// a fresh, matching reversed original. Without a candidate, storno queries
+    /// the external id then takes the order hint only if that id is absent.
+    /// Deletion cannot be settled by these queries.
+    ///
+    /// The caller owns durable exclusion, account selection and recording the
+    /// settlement. Keep uncertainty on every result except positive evidence;
+    /// empty reads, elapsed time and interruptions never authorize another send.
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered`] if a query produced no answer. Repeating this read is safe;
+    /// its failure says nothing about the earlier write.
+    pub async fn reconcile(
+        &self,
+        request: ReconciliationRequest<'_>,
+    ) -> Result<ReconciliationOutcome, Unanswered> {
+        let ReconciliationRequest {
+            external_id,
+            order,
+            operation,
+            candidate,
+        } = request;
+        if matches!(operation, WriteOperation::Delete { .. }) {
+            return Ok(ReconciliationOutcome::inconclusive(
+                "deletion requires independent settlement; document queries cannot establish completion",
+            ));
+        }
         // Storno is idempotent by original number; a repeat does not attach our
         // external id. A supplied candidate is therefore verified by number.
         // Without a candidate, the order hint can name a matching reversal.
-        let queried = if matches!(marker.operation, WriteOperation::Storno { .. }) {
+        let queried = if matches!(operation, WriteOperation::Storno { .. }) {
             if let Some(number) = candidate {
                 self.verify(number).await?
             } else {
                 match self
-                    .query(&Selector::ExternalId(marker.external_id.clone()))
+                    .query(&Selector::ExternalId(external_id.to_owned()))
                     .await?
                 {
-                    QueryOutcome::NotFound => self.hint(&marker.order).await?,
+                    QueryOutcome::NotFound => self.hint(order).await?,
                     outcome => outcome,
                 }
             }
         } else {
-            self.query(&Selector::ExternalId(marker.external_id.clone()))
+            self.query(&Selector::ExternalId(external_id.to_owned()))
                 .await?
         };
         let found = match queried {
             QueryOutcome::Found(found) => found,
             QueryOutcome::CredentialsRejected(answer) => {
-                return Ok(WriteResult::Answered {
-                    credentials: true,
-                    answer,
-                });
+                return Ok(ReconciliationOutcome::CredentialsRejected(answer));
             }
             QueryOutcome::Api(answer) => {
-                return Ok(WriteResult::Answered {
-                    credentials: false,
-                    answer,
-                });
+                return Ok(ReconciliationOutcome::Api(answer));
             }
             QueryOutcome::NotFound => {
-                return Ok(WriteResult::unresolved(
+                return Ok(ReconciliationOutcome::inconclusive(
                     "document absent; absence does not settle the write",
                 ));
             }
         };
         if candidate.is_some_and(|number| found.number != number) {
-            return Ok(WriteResult::unresolved(
+            return Ok(ReconciliationOutcome::inconclusive(
                 "candidate number does not match the queried document",
             ));
         }
-        Ok(match &marker.operation {
+        Ok(match operation {
             WriteOperation::Create {
                 kind,
                 expected_number,
                 ..
             } => {
-                if !found.is_ours(&marker.order, *kind)
+                if !found.is_ours(order, *kind)
                     || expected_number.as_deref() == Some(found.number.as_str())
-                    || !matches_corrective_base(&found, &marker.operation)
+                    || !matches_corrective_base(&found, operation)
                 {
-                    return Ok(WriteResult::unresolved(
+                    return Ok(ReconciliationOutcome::inconclusive(
                         "document does not match order, kind or expected issuance intent",
                     ));
                 }
-                WriteResult::Create(if found.is_live() {
-                    CreateOutcome::Reconciled(found)
-                } else {
-                    CreateOutcome::Reversed(found)
-                })
+                ReconciliationOutcome::Created(found)
             }
             WriteOperation::Storno { number } => {
-                match self
-                    .verify_order_storno(&found, &marker.order, number)
-                    .await
-                {
+                match self.verify_order_storno(&found, order, number).await {
                     Ok(StornoEvidence::Verified(storno_number)) => {
-                        WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number })
+                        ReconciliationOutcome::Reversed { storno_number }
                     }
-                    Ok(StornoEvidence::Inconclusive(reason)) => WriteResult::unresolved(reason),
+                    Ok(StornoEvidence::Inconclusive(reason)) => {
+                        ReconciliationOutcome::inconclusive(reason)
+                    }
                     Err(error) => match error.answered()? {
-                        super::Answer::CredentialsRejected(answer) => WriteResult::Answered {
-                            credentials: true,
-                            answer,
-                        },
-                        super::Answer::Api(answer) => WriteResult::Answered {
-                            credentials: false,
-                            answer,
-                        },
-                        super::Answer::NotFound => {
-                            WriteResult::unresolved("original absent; reversal is not established")
+                        super::Answer::CredentialsRejected(answer) => {
+                            ReconciliationOutcome::CredentialsRejected(answer)
                         }
+                        super::Answer::Api(answer) => ReconciliationOutcome::Api(answer),
+                        super::Answer::NotFound => ReconciliationOutcome::inconclusive(
+                            "original absent; reversal is not established",
+                        ),
                     },
                 }
             }
             // A query cannot distinguish a deletion from consumption or hiding.
-            WriteOperation::Delete { .. } => WriteResult::unresolved(
+            WriteOperation::Delete { .. } => ReconciliationOutcome::inconclusive(
                 "deletion requires independent settlement; document queries cannot establish completion",
             ),
         })

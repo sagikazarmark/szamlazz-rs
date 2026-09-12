@@ -7,7 +7,7 @@ use super::common::{Doc, api_error, create, external_id_query, not_found, order_
 use super::harness::*;
 use restate_szamlazz::ExternalId;
 use restate_szamlazz::contract::IssuedKind;
-use restate_szamlazz::gateway::{CreateOutcome, Rejection, SzamlazzAnswer, Unconfirmed};
+use restate_szamlazz::gateway::{CreateOutcome, Rejection, SzamlazzAnswer};
 use wiremock::ResponseTemplate;
 
 const DUPLICATE_MESSAGE: &str = "M%C3%A1r+l%C3%A9tez%C5%91+rendel%C3%A9ssz%C3%A1m";
@@ -167,12 +167,10 @@ async fn duplicate_order_number_with_nothing_under_the_order_is_settled_without_
     );
 }
 
-/// The 71/152 re-query is what settles whether the duplicate is ours; when it
-/// fails itself the step is unconfirmed naming both the refusal and the
-/// re-query's failure (#63), and the order-number query (which names, but
-/// cannot settle) is not taken.
+/// With one admitted send and no earlier unresolved write, 152 settles the
+/// refusal. Failure of the optional diagnostic read cannot erase that answer.
 #[tokio::test]
-async fn duplicate_order_number_whose_re_query_fails_is_unconfirmed_naming_both() {
+async fn duplicate_order_number_whose_re_query_fails_remains_a_refusal() {
     let h = duplicate_harness(ResponseTemplate::new(500)).await;
     order_query("ORD-1")
         .respond_with(not_found())
@@ -180,16 +178,69 @@ async fn duplicate_order_number_whose_re_query_fails_is_unconfirmed_naming_both(
         .mount(&h.server)
         .await;
 
-    let error = h.create(None).await.expect_err("unconfirmed");
-    match &error {
-        Unconfirmed::ReQueryFailed { sent, re_query } => {
-            assert!(sent.contains("152"), "{sent}");
-            assert!(sent.contains("Már létező rendelésszám"), "{sent}");
-            assert!(re_query.contains("HTTP 500"), "{re_query}");
-        }
-        other => panic!("expected ReQueryFailed, got {other:?}"),
-    }
+    assert_eq!(
+        h.create(None).await,
+        Ok(CreateOutcome::DuplicateOrderNumber {
+            answer: SzamlazzAnswer::new("152", "Már létező rendelésszám"),
+            existing_number: None,
+        })
+    );
     assert_eq!(h.bodies().await.len(), 3, "query, create, re-query");
+}
+
+#[tokio::test]
+async fn duplicate_refusal_survives_diagnostic_codes_and_hint_failure() {
+    for hint in [false, true] {
+        for failed in [
+            api_error("135", "private credentials"),
+            api_error("57", "bad XML"),
+            ResponseTemplate::new(500),
+        ] {
+            let h = duplicate_harness(if hint { not_found() } else { failed.clone() }).await;
+            if hint {
+                order_query("ORD-1")
+                    .respond_with(failed)
+                    .expect(1)
+                    .mount(&h.server)
+                    .await;
+            }
+            assert_eq!(
+                h.create(None).await,
+                Ok(CreateOutcome::DuplicateOrderNumber {
+                    answer: SzamlazzAnswer::new("152", "Már létező rendelésszám"),
+                    existing_number: None,
+                })
+            );
+            assert_eq!(h.bodies().await.len(), if hint { 4 } else { 3 });
+            h.server.verify().await;
+        }
+    }
+    let h = Harness::start().await;
+    let id = ExternalId::new("acct:ORD-1:corrective:c1");
+    external_id_query(id.as_str())
+        .respond_with(not_found())
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    external_id_query(id.as_str())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(api_error("71", "duplicate"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.create_kind(IssuedKind::Corrective, &id, None).await,
+        Ok(CreateOutcome::Rejected(Rejection::from(
+            SzamlazzAnswer::new("71", "duplicate")
+        )))
+    );
+    assert_eq!(h.bodies().await.len(), 3);
+    h.server.verify().await;
 }
 
 #[tokio::test]
@@ -230,7 +281,13 @@ async fn duplicate_order_number_on_a_corrective_is_rejected_without_an_order_que
         .mount(&h.server)
         .await;
     external_id_query(corrective_id.as_str())
-        .respond_with(Doc::new("HS-1", "HS").response())
+        .respond_with(
+            Doc {
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new("HS-1", "HS")
+            }
+            .response(),
+        )
         .mount(&h.server)
         .await;
     create()

@@ -65,6 +65,22 @@ and read-only settlement; the type cannot verify those facts. A fresh grant requ
 unresolved effect and a deliberate business decision, never an automatic retry/replay after `Unconfirmed`,
 an empty query, elapsed time, cancellation or kill. Order owns its separate marker/arm protocol above.
 
+[ADR 0014](../adr/0014-gateway-as-an-expert-orchestration-interface.md) explicitly accepts this expert
+consumer contract. `grant()` asserts permission; it cannot establish durable admission or arming.
+Retain `CreateStepRequest::operation()` with the external id, order and stable account mapping before
+the call. `Gateway::reconcile(ReconciliationRequest)` is the shared read-only evidence boundary for
+direct consumers and Order recovery; it requires no Order marker or invocation metadata. Only its
+`Created` and `Reversed` outcomes establish positive completion evidence. Every other outcome or
+unanswered read preserves uncertainty; deletion is always inconclusive through this interface.
+An explicit candidate is exact, with no silent fallback; automatic Order storno reconciliation may
+separately call discovery without a candidate. The orchestrator records settlement durably, and
+positive evidence grants no new send permission. Public creation's immediate uncertain-send read
+uses this same boundary. A conclusive 71/152 refusal survives failed optional diagnostics in both paths.
+The request borrows `external_id`, `order`, retained `operation` and optional `candidate`, returning
+`Result<ReconciliationOutcome, Unanswered>`. Create queries the external-id holder and requires any
+candidate to match it. Storno verifies an explicit candidate by number; without one, it queries the
+external id and takes the order hint only if that id is absent. A colliding holder stays inconclusive.
+
 ## Acknowledgement identity
 
 A protected create reply naming the expected old reissue document does not establish a replacement.

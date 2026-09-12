@@ -76,8 +76,9 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
 
 /// Pause an unfinished deletion after its ownership result is journaled.
 /// On replay credit entries have arrived and a replacement holds the external
-/// id. Only the pinned number is checked; the old unpaid result authorizes nothing.
-pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Harness) {
+/// id. Consumed permission prevents another guard or send. Reconciliation retains
+/// uncertainty without querying: no document observation can establish deletion.
+pub(crate) async fn interrupted_deletion_reconciles_without_requerying_or_resending(h: &Harness) {
     use crate::common::CreditRecord;
     use restate_e2e_harness::run_result;
     use std::{sync::Arc, time::Duration};
@@ -91,7 +92,9 @@ pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Har
         .await;
     external_id_query("acct:E2E-D-REPLAY:proforma")
         .respond_with(Doc::of("D-REPLACEMENT", "D", "E2E-D-REPLAY").response())
-        .expect(1..)
+        // Deletion reconciliation cannot establish completion from a holder;
+        // it must not query the replacement or renew the consumed send permit.
+        .expect(0)
         .mount(&h.mock)
         .await;
     let signal = Arc::clone(&reached);
@@ -140,6 +143,14 @@ pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Har
             .await;
         h.admin().resume(&id).await;
         h.admin().await_status(&id, &["paused"]).await;
+        assert!(
+            h.admin()
+                .runs(&id)
+                .await
+                .iter()
+                .any(|run| run == "reconcile-write"),
+            "replay must reach reconciliation, not skip the unresolved write"
+        );
         h.admin().cancel(&id).await;
     };
     let (reply, ()) = tokio::join!(call, interrupt);
@@ -147,6 +158,22 @@ pub(crate) async fn replay_refreshes_the_pinned_proformas_credit_entries(h: &Har
     assert_eq!(reply.fault().is_cancelled(), Some(true));
     assert!(h.delete_bodies_of("D-PINNED").await.is_empty());
     assert!(h.delete_bodies_of("D-REPLACEMENT").await.is_empty());
+    let observed = h
+        .invoke(
+            &restate_e2e_harness::Call::object(
+                "Szamlazz.Order",
+                "E2E-D-REPLAY",
+                "observe_unresolved",
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(observed.body["state"], "unresolved", "{}", observed.body);
+    assert_eq!(
+        observed.body["marker"]["operation"],
+        json!({"type":"delete", "number":"D-PINNED"})
+    );
 }
 
 /// The order's live proforma is found under its external id and deleted after

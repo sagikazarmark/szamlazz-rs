@@ -175,6 +175,7 @@ pub struct InvoiceHeader {
     pub number_prefix: Option<String>,
     /// Adjustment to the payable total (`fizetendoKorrekcio`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub payable_adjustment: Option<Decimal>,
     /// Per-document paid control (`fizetve`). `None` omits the element,
     /// leaving szamlazz.hu's payment-method/account defaults in effect;

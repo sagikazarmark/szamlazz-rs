@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod create;
-mod decimal;
+pub(crate) mod decimal;
 pub mod document;
 pub mod recovery;
 pub mod storno;

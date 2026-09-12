@@ -38,13 +38,16 @@ pub struct CreatedInvoice {
     pub document_id: Option<i64>,
     /// Net total (`szamlanetto`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlevoseg`).
     #[doc(alias = "kintlévőség")]
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account/payment URL (`vevoifiokurl`).
     #[doc(alias = "vevoifiokurl")]
@@ -102,12 +105,15 @@ pub struct InvoiceAcknowledgement {
     pub document_id: Option<i64>,
     /// Reported net total.
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// Reported gross total.
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// Reported outstanding amount.
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account URL.
     pub customer_account_url: Option<String>,

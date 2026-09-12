@@ -32,5 +32,6 @@ mod open;
 mod privacy;
 mod probe;
 mod reads;
+mod recovery;
 mod storno;
 mod taxpayer;

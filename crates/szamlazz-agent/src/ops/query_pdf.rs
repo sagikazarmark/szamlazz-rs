@@ -42,13 +42,16 @@ pub struct InvoicePdf {
     pub invoice_number: Option<InvoiceNumber>,
     /// Net total (`szamlanetto`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// Gross total (`szamlabrutto`).
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlevoseg`), body before header; absent is not zero.
     #[doc(alias = "kintlevoseg")]
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Opaque buyer-facing URL (`vevoifiokurl`), body before the decoded header.
     #[doc(alias = "vevoifiokurl")]

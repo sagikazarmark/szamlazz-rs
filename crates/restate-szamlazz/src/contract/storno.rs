@@ -490,13 +490,16 @@ pub struct DocumentStatus {
     #[serde(flatten)]
     pub state: DocumentState,
     /// Gross total.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross: Option<Decimal>,
     /// Net total.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net: Option<Decimal>,
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::deserialize_vec")]
+    #[serde(serialize_with = "super::decimal::serialize_vec")]
     pub credit_entries: Vec<Decimal>,
     /// The proforma this document converted (`hivdijbekszam`).
     #[serde(default)]

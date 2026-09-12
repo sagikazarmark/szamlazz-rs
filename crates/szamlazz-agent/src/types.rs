@@ -952,6 +952,7 @@ pub struct ExchangeRate {
     /// The rate (`arfolyam` / `devizaarf`). May be omitted only for automatic
     /// current-rate MNB lookup.
     #[serde(default, deserialize_with = "crate::number::de::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub rate: Option<Decimal>,
 }
 
@@ -1080,12 +1081,15 @@ pub struct VatTotal {
     pub vat_rate_code: String,
     /// Net subtotal (`netto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub net: Decimal,
     /// VAT subtotal (`afa`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub vat: Decimal,
     /// Gross subtotal (`brutto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub gross: Decimal,
 }
 
@@ -1105,12 +1109,15 @@ impl VatTotal {
 pub struct GrandTotal {
     /// Net total (`netto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub net: Decimal,
     /// VAT total (`afa`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub vat: Decimal,
     /// Gross total (`brutto`).
     #[serde(deserialize_with = "crate::number::de::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub gross: Decimal,
 }
 

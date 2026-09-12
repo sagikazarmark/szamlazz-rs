@@ -46,8 +46,8 @@
 //!
 //! Public decimal fields accept decimal strings and JSON number tokens, including
 //! exponents, through [`parse_decimal`]: values must fit exactly, without rounding.
-//! Optional fields also accept null or omission. Serialization keeps Decimal's
-//! usual string representation. Decode JSON directly from text, bytes or a reader
+//! Optional fields also accept null or omission. Serialization is pinned to exact
+//! strings, independently of downstream `rust_decimal` Serde features. Decode JSON directly from text, bytes or a reader
 //! to preserve both numeric precision and the distinction between numbers and objects.
 //!
 //! Serde's buffered adapters (such as untagged or internally tagged enums and
@@ -58,7 +58,11 @@
 //! lookalike object as a number; decoding cannot reconstruct its original shape.
 //! Other self-describing formats accept strings and integers, and interpret floats
 //! by their shortest decimal spelling; precision lost before decoding is unrecoverable.
-//! Non-human-readable formats use Decimal's default string encoding.
+//! Non-human-readable formats use string encoding too. Raw-token dispatch is
+//! restricted to `serde_json`'s concrete text/bytes/reader and `Value` deserializers;
+//! monetary scalars also support `serde_ignored` 0.1 directly wrapping a JSON
+//! parser, whose forwarding preserves raw tokens and unknown-field callbacks.
+//! Other deserializer wrappers take the conservative scalar path above.
 //!
 //! # Features
 //!

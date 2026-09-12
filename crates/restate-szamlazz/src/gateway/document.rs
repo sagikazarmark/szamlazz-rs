@@ -93,11 +93,17 @@ pub struct FoundDocument {
     /// worker. Seller verification reads the full document outside the journal.
     pub test: Option<bool>,
     /// The net grand total (`osszegek/totalossz/netto`).
+    #[serde(deserialize_with = "crate::contract::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub net_total: Decimal,
     /// The VAT grand total (`osszegek/totalossz/afa`).
+    #[serde(deserialize_with = "crate::contract::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub vat_total: Decimal,
     /// The gross grand total (`osszegek/totalossz/brutto`): what a document
     /// with no credit entries owes in full.
+    #[serde(deserialize_with = "crate::contract::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub gross_total: Decimal,
     /// The credit entries registered against the document (`kifizetesek`),
     /// in the order szamlazz.hu lists them.
@@ -118,6 +124,8 @@ pub struct RecordedCreditEntry {
     /// wire token.
     pub title: String,
     /// The amount (`osszeg`), in the document's currency.
+    #[serde(deserialize_with = "crate::contract::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// The free-text comment (`megjegyzes`).
     pub comment: Option<String>,
@@ -312,10 +320,16 @@ pub struct IssuedDocument {
     /// carried for the same correlation.
     pub document_id: Option<i64>,
     /// The net total (`szamlanetto`).
+    #[serde(default, deserialize_with = "crate::contract::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// The gross total (`szamlabrutto`).
+    #[serde(default, deserialize_with = "crate::contract::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// The outstanding amount (`kintlevoseg`).
+    #[serde(default, deserialize_with = "crate::contract::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// The buyer-facing account URL (`vevoifiokurl`).
     pub customer_account_url: Option<String>,

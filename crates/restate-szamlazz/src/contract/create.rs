@@ -496,15 +496,18 @@ pub struct CreateResponse {
     #[serde(default)]
     pub storno_number: Option<String>,
     /// Net total (`nettó végösszeg`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub net_total: Option<Decimal>,
     /// Gross total (`bruttó végösszeg`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlévőség`).
     /// When derived from a queried document, absent if gross is unknown or the
     /// credit-entry sum or subtraction cannot fit exactly in a decimal.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::decimal::optional")]
+    #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account URL (`vevői fiók URL`). szamlazz.hu returns it
     /// only in the response to the create that issued the document, so it is

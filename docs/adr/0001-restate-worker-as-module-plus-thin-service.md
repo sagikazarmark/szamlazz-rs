@@ -1,5 +1,13 @@
 # The low-level szamlazz.hu layer is a Rust module inside `Order`, plus a thin `Szamlazz.Agent` service
 
+**Amended 2026-09-12:** the shared-module choice remains. [ADR 0014](0014-gateway-as-an-expert-orchestration-interface.md)
+now explicitly supports custom expert orchestrators; it supersedes the future-private-handler upgrade
+assumption below. The historical create re-execution, timing-based safety, finite-send-bound and
+no-state conclusions below are superseded by ADR 0004's #205 amendment and
+[the protected Order protocol](../design/order-write-protocol.md): Order retains unresolved-write
+state and reconciles read-only after consuming permission. Direct creation uses `create_once` with
+caller-owned durability. The older prose records the reasoning at the time, not current retry guidance.
+
 `restate-szamlazz` exposes the basic Számla Agent operations as Restate services. The layer that owns
 the `szamlazz_agent::Client` and the credentials had to live somewhere: either as a Restate service
 that `Order` invokes, or as code that `Order` runs itself. We chose the latter.

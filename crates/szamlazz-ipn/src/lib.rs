@@ -663,6 +663,16 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
+    fn serde_preserves_representable_scale() {
+        for (token, scale) in [("12.3400", 4), ("1.20e-2", 4), ("0.00e-2", 4)] {
+            let json = format!(r#"{{"document_number":"E-1","gross_total":{token}}}"#);
+            let value: PaymentNotification = serde_json::from_str(&json).expect("exact amount");
+            assert_eq!(value.gross_total.expect("known").scale(), scale);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
     fn serde_amounts_preserve_exact_digits_as_numbers_or_strings() {
         for (text, expected) in [
             ("12.34", dec!(12.34)),
@@ -675,6 +685,15 @@ mod tests {
             ("-79228162514264337593543950335", Decimal::MIN),
             ("1.234e1", dec!(12.34)),
             ("1E-28", dec!(0.0000000000000000000000000001)),
+            ("1.00e-28", dec!(0.0000000000000000000000000001)),
+            ("10e-29", dec!(0.0000000000000000000000000001)),
+            ("-10e-29", dec!(-0.0000000000000000000000000001)),
+            ("0e-29", Decimal::ZERO),
+            ("0e-99999999999999999999999999", Decimal::ZERO),
+            (
+                "1.00000000000000000000000000000e-28",
+                dec!(0.0000000000000000000000000001),
+            ),
         ] {
             for token in [
                 text.to_owned(),
@@ -712,6 +731,10 @@ mod tests {
             "1e-29",
             "1e9999999999999999999",
             "0.12345678901234567890123456789e1",
+            "79228162514264337593543950336e-1",
+            "1.01e-28",
+            "11e-29",
+            "1e-9223372036854775808",
         ];
         let mut tokens: Vec<String> = inexact
             .iter()

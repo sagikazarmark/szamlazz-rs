@@ -18,7 +18,7 @@ RESTATE_SERVER_BIN=/path/to/restate-server \
 `crates/restate-szamlazz/tests/e2e/unresolved.rs` runs two independent servers through the existing server gate.
 It is also selected by CI's workspace-wide `--ignored e2e_` command. No vendor account is contacted.
 
-**Current behavior:** the real Order runs with a **validated** `issue.max_attempts = 1`; the default two-minute
+**Historical baseline behavior (7098b5c, superseded by #216):** the real Order runs with a **validated** `issue.max_attempts = 1`; the default two-minute
 initial delay remains configured. The mock accepts a first send into pending work, returns HTTP 500 after four
 seconds (modeling a lost answer through an intermediary), and keeps the document invisible until the test
 explicitly publishes it. During that window a second invocation with a different Idempotency-Key is submitted
@@ -34,7 +34,7 @@ Observed on 2026-09-10, all three scenarios passed with **two sends before visib
 | `create_invoice` | `create_prepayment` | Exclusivity queries cannot see the still-processing invoice |
 
 The first run deliberately asserted “one send” and failed with **actual 2, expected 1**. The retained regression
-test asserts the current two-send behavior; replacing that expectation belongs to the recovery implementation.
+test at that baseline asserted the two-send behavior; #216 replaced it with protected-protocol regressions.
 The mock intentionally supplies no vendor deduplication. It proves a worker interleaving, **not a live duplicate**.
 
 **Protection probe:** a test-only `RetainedWrite` Virtual Object journals an uncertain send as data and uses an
@@ -81,7 +81,7 @@ cannot prevent existing explicit run exhaustion from completing the invocation.
 
 “Retained” means Restate keeps the exclusive Order lock. An unresolved marker is separate from that lock.
 
-| Event | Current production behavior | Approved target / permitted recovery |
+| Event | Historical baseline behavior (7098b5c) | Approved target / permitted recovery (implemented by #216) |
 |---|---|---|
 | Issue **run-policy exhaustion** after possible send | Handler completes `outcome_unknown`; releases lock | Persist uncertainty, continue read-only reconciliation in the original invocation, then pause. Never send because a retry count reset. |
 | **Invocation-policy exhaustion** from endpoint/worker failures | Automatic kill, no handler compensation; releases lock | Pause and retain lock. Resume on the pinned deployment into read-only recovery if a send permit may have been consumed. |
@@ -102,13 +102,18 @@ A new key is used only for an explicitly authorized operation after reconciliati
 Fresh `get` calls are non-atomic observations, not completion or negative-settlement barriers. Correctives need
 their external-id/by-number reconciliation: `get` only reads the four ordinary kinds.
 
-**Known runtime wording mismatch, deferred with the recovery implementation:** current create/storno exhaustion
-and read/credential fault constructors still emit “retry with a new Idempotency-Key” (notably
+**Historical runtime wording mismatch at the #205 baseline:** create/storno exhaustion
+and read/credential fault constructors emitted “retry with a new Idempotency-Key” (notably
 `service/create.rs::create_outcome_unknown`, `service/storno.rs` and `service/support.rs`). That message is not
-permission to bypass this evidence rule. Update those messages and their contract/e2e assertions together with
-the recovery boundary; #205 changes public protocol guidance and records the mismatch, not production handlers.
+permission to bypass this evidence rule. #216 implemented the recovery boundary and revised the guidance;
+the current contract requires settlement before deliberate renewal, with the original expected-document intent.
 
 ## Bounded implementation follow-up
+
+The remaining sections preserve the approved #205 implementation brief. #216 supplied the command
+sequence and recovery surface; [the implemented protocol](order-write-protocol.md) is authoritative
+where this historical brief lists alternatives or work to do. ADR 0014 subsequently added the shared
+public Gateway reconciliation interface on 2026-09-12 without transferring Order durability to it.
 
 Deliver one recovery protocol for **Order mutations**: create/proforma/prepayment/final, corrective, storno and
 proforma deletion. Keep `Szamlazz.Agent`'s unkeyed writes outside the protection claim; coordinate #201/#203 and
