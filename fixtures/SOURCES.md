@@ -298,7 +298,7 @@ receipt acquisition uncertainty, remain historical evidence. Do not replace
 them with these files, or modify these snapshots to make a writer pass. A source
 refresh gets a new dated directory and explicit expectation review. The same
 workspace-only/no-publication policy at the top of this file applies: the corpus
-is read at runtime by `scripts/check-agent-schemas.py`, never embedded in a Rust
+is read at runtime by `cargo xtask check-agent-schemas`, never embedded in a Rust
 binary or Cargo package.
 
 The required check verifies stored checksums, validates generated XML with

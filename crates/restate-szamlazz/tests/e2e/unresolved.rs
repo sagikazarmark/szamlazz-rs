@@ -608,16 +608,21 @@ async fn e2e_unresolved_kill_preserves_marker_and_recovery_requires_evidence() {
 async fn migration_inventory(restate: &Restate) -> std::process::Output {
     let admin = restate.admin_url().to_owned();
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("python3")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/check-order-migration.py"
-            ))
+        let mut command = if let Some(binary) = std::env::var_os("XTASK_BIN") {
+            std::process::Command::new(binary)
+        } else {
+            let mut command = std::process::Command::new("cargo");
+            command.args(["run", "--quiet", "--locked", "-p", "xtask", "--"]);
+            command.current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            command
+        };
+        command
+            .arg("check-order-migration")
             .arg("--admin-url")
             .arg(admin)
             .env_remove("RESTATE_ADMIN_TOKEN")
             .output()
-            .expect("start migration inventory: python3 must be installed and available on PATH")
+            .expect("start migration inventory: set XTASK_BIN or make Cargo available on PATH")
     })
     .await
     .expect("inventory task")

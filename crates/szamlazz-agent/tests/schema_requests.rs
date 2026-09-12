@@ -1,5 +1,5 @@
 //! Synthetic generated requests for the required workspace XSD check.
-//! Run `python3 scripts/check-agent-schemas.py`; this ignored test only exports
+//! Run `cargo xtask check-agent-schemas`; this ignored test only exports
 //! inputs, it does not claim XSD validation. No vendor credentials or client.
 
 use jiff::civil::date;
@@ -692,10 +692,10 @@ fn receipts(m: &mut Matrix) {
 }
 
 #[test]
-#[ignore = "exports inputs only; run python3 scripts/check-agent-schemas.py for XSD validation"]
+#[ignore = "exports inputs only; run cargo xtask check-agent-schemas for XSD validation"]
 fn emit_request_matrix() {
     let output = std::env::var_os("SZAMLAZZ_SCHEMA_OUTPUT")
-        .expect("run python3 scripts/check-agent-schemas.py (required output path)");
+        .expect("run cargo xtask check-agent-schemas (required output path)");
     let mut m = Matrix::default();
     invoices(&mut m);
     invoice_tokens(&mut m);

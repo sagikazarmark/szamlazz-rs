@@ -74,7 +74,7 @@ settle external uncertainty. Only then make both services private and finish dra
 operator ingress too. Run from the repository root against the canonical Restate admin URL (redirects are refused):
 
 ```sh
-python3 scripts/check-order-migration.py --admin-url "$RESTATE_ADMIN_URL"
+cargo xtask check-order-migration --admin-url "$RESTATE_ADMIN_URL"
 # Optional admin bearer credential is read from RESTATE_ADMIN_TOKEN, not argv.
 ```
 

@@ -194,5 +194,5 @@ SQL and broader alerting. State deletion, incompatible old code, scope remapping
 and vendor UI writes remain outside the protection boundary.
 
 Scope migration additionally requires no Order state under either identity, not merely completed invocations.
-Use `scripts/check-order-migration.py`; it inventories all scopes and blocks on undecodable state without reading
+Use `cargo xtask check-order-migration`; it inventories all scopes and blocks on undecodable state without reading
 its value. Recover under the old scope and independently settle external uncertainty before switching.

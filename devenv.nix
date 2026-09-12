@@ -14,7 +14,6 @@
     cargo-release
     cargo-watch
     libxml2 # xmllint: offline Számla Agent XSD 1.0 matrix
-    python3 # schema-check orchestration (stdlib only)
   ];
 
   languages = {

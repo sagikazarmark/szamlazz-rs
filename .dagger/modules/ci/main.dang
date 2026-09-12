@@ -49,11 +49,20 @@ type Ci {
   fixtures must exist; expected vendor-source conflicts are reported explicitly.
   """
   schemas: String! @check {
-    self.provisioned
-      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends libxml2-utils && rm -rf /var/lib/apt/lists/*"])
+    let artifacts = self.container
       .withExec(["cargo", "fetch", "--locked"])
-      .withExec(["python3", "scripts/test-agent-schema-runner.py"])
-      .withExec(["python3", "scripts/check-agent-schemas.py"])
+      .withExec(["cargo", "xtask", "prepare-agent-schemas", "--output", "/schema-artifacts"])
+      .directory("/schema-artifacts")
+    # Match the Rust builder's Debian release for the exported executables' ABI.
+    # This stage has no compiler, Cargo cache or Python runtime.
+    Dagger.container.from("debian:trixie-slim")
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends libxml2-utils && rm -rf /var/lib/apt/lists/*"])
+      .withDirectory("/checks", artifacts)
+      .withDirectory("/corpus", self.container.directory("/work/src/fixtures/upstream/agent/request-xsd-2026-09-11"))
+      .withEnvVariable("SZAMLAZZ_SCHEMA_CORPUS", "/corpus")
+      .withEnvVariable("XTASK_BIN", "/checks/xtask")
+      .withExec(["/checks/schema-runner-tests", "--include-ignored"])
+      .withExec(["/checks/xtask", "check-agent-schemas", "--requests", "/checks/requests.json", "--corpus", "/corpus"])
       .combinedOutput
   }
 
@@ -73,8 +82,8 @@ type Ci {
   Uses synthetic inputs and a loopback HTTP server; no deployed Admin credentials.
   """
   orderMigration: String! @check {
-    self.provisioned
-      .withExec(["python3", "scripts/test-order-migration.py"])
+    self.container
+      .withExec(["cargo", "test", "-p", "xtask", "--locked", "--test", "migration"])
       .combinedOutput
   }
 
@@ -104,9 +113,11 @@ type Ci {
   endToEnd: Directory! @check {
     self
       .compiled
-      # The recovery suite launches this Python tool as a subprocess. Check its
-      # runtime and source path before starting any Restate servers.
-      .withExec(["python3", "scripts/check-order-migration.py", "--help"])
+      # The recovery suite invokes the built checker directly, without nested Cargo.
+      .withExec(["cargo", "build", "-p", "xtask", "--locked"])
+      .withExec(["sh", "-c", "cp \"${CARGO_TARGET_DIR:-target}/debug/xtask\" /usr/local/bin/xtask"])
+      .withEnvVariable("XTASK_BIN", "/usr/local/bin/xtask")
+      .withExec(["/usr/local/bin/xtask", "check-order-migration", "--help"])
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
       .withEnvVariable("CI", "true")
@@ -147,12 +158,12 @@ exit "$status"
   }
 
   """
-  Install runtime tools before compilation fills the Cargo cache. Python serves
-  local regression checks; tzdata supplies Jiff's Linux Europe/Budapest database.
+  Install runtime tools before compilation fills the Cargo cache.
+  tzdata supplies Jiff's Linux Europe/Budapest database.
   """
   let provisioned: Container! {
     self.container
-      .withExec(["sh", "-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 tzdata && rm -rf /var/lib/apt/lists/*"])
+      .withExec(["sh", "-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*"])
   }
 
   """

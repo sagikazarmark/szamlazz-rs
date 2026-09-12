@@ -459,7 +459,7 @@ the broader operational SQL, alerting and per-fault runbook.
   producers while retaining authorized operator ingress under the old mapping, settle external uncertainty and
   recover markers. Then make both services private, drain `sys_invocation` and verify no Order state remains in either identity. A completed/killed owner may
   retain a marker: recover it under the original scope before proceeding. Use the read-only
-  `scripts/check-order-migration.py` inventory; unreadable state blocks too. Then register the revision with
+  `cargo xtask check-order-migration` inventory; unreadable state blocks too. Then register the revision with
   `[accounts.<scope>]` keeping the namespace, point callers at scoped paths, make the services public, probe
   every scope. The first scoped create for an already-invoiced order finds it under the unchanged external
   id (verified: `flag_day_keeps_the_documents_and_refuses_unscoped_calls`). The same drain–switch–resume

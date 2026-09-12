@@ -1,4 +1,5 @@
 [alias]
+xtask = "run --locked --offline --package xtask --"
 t = "nextest run --workspace --all-features --locked"
 e2e = "nextest run --workspace --all-features --locked --profile e2e --run-ignored only"
 live = "nextest run --workspace --all-features --locked --profile live --run-ignored only"

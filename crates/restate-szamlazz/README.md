@@ -1410,7 +1410,7 @@ cancel and reconcile them); stopping their originator alone does not remove deta
 through drain and switch. Retain authorized operator ingress under the old mapping while blocking business calls
 at the gateway; recover markers before making the services private, which blocks recovery ingress too.
 Invocation drain is insufficient: recover every retained marker under its original scope
-and independently settle external uncertainty. Run `python3 scripts/check-order-migration.py --admin-url "$RESTATE_ADMIN_URL"`
+and independently settle external uncertainty. Run `cargo xtask check-order-migration --admin-url "$RESTATE_ADMIN_URL"`
 from the repository root; every Order state row (including unreadable state) blocks switching. Its empty result
 is an inventory check, not vendor proof. Then update scope routing and reopen. See the
 [recovery runbook](../../docs/operations/order-recovery.md#scope-migration-inventory).

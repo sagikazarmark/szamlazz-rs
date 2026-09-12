@@ -36,7 +36,7 @@ cargo test --doc --workspace --all-features --locked
 cargo hack check --workspace --feature-powerset --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-python3 scripts/test-order-migration.py
+cargo test -p xtask --locked --test migration
 bash scripts/check-money-features.sh
 dagger check
 ```
@@ -50,10 +50,11 @@ JUnit is written to `target/nextest/<profile>/junit.xml`.
 `ci.end-to-end` returns its report directory for export. Live/probe JUnit also
 stores successful test output, including the run label and document numbers.
 `dagger check` also runs `ci.money-features`, `ci.order-migration` and `ci.schemas`.
-The migration check runs only the local Python regression suite with synthetic
+The migration check runs only the local Rust regression suite with synthetic
 inputs and a loopback server, not the inventory against a deployment. Dagger
-installs Python and system tzdata before compiling shared test targets, rather
-than installing Python after the e2e compilation has filled the Cargo cache.
+installs system tzdata before compiling shared test targets. The e2e container
+builds the migration command and supplies its path through `XTASK_BIN`; local
+e2e runs can supply that variable or let the suite invoke Cargo to build it.
 
 ```sh
 # Export the same Restate 1.7.8 binary used by Dagger.
@@ -99,7 +100,7 @@ floating-point or numeric serialization, or silently lose exact digits on round 
 tests also exercise supported non-JSON formats and representable exponent inputs. A default workspace
 run or cargo-hack's package feature powerset alone does not establish these downstream graph cases.
 The script is wired automatically as `ci.money-features` in `dagger check`; the
-local command remains useful for focused verification. Run either script's named
+local command remains useful for focused verification. Run either tool's named
 Dagger check independently with:
 
 ```sh
@@ -112,25 +113,37 @@ dagger -c 'ci | order-migration'
 Run the **required standalone schema check**, in addition to normal Rust tests:
 
 ```sh
-python3 scripts/check-agent-schemas.py
+cargo xtask check-agent-schemas
 # Targeted runner regression checks (also required in ci.schemas):
-python3 scripts/test-agent-schema-runner.py
+cargo test -p xtask --locked --test schema_runner -- --include-ignored
 # Outside devenv, with Nix:
-nix shell nixpkgs#libxml2 --command python3 scripts/check-agent-schemas.py
+nix shell nixpkgs#libxml2 --command cargo xtask check-agent-schemas
 # The dedicated CI check (also part of dagger check):
 dagger -c 'ci | schemas'
 ```
 
-Requires Python 3.9+ (stdlib only) and `xmllint` with XML Schemas support.
-`devenv.nix` supplies both; Dagger installs Debian's `libxml2-utils` and `python3`.
+Requires Rust and `xmllint` with XML Schemas support; `devenv.nix` supplies both.
+The unpublished `xtask` workspace crate implements the checks and their regressions.
+Dagger generates the request matrix and builds the checker and regression executable
+in its Rust container, then transfers those artifacts and the cached schemas to a
+separate `debian:trixie-slim` container with `libxml2-utils`. That runtime base matches
+the Rust builder's Debian release. The validation container needs no Cargo, compiler
+or Python; the Rust container needs neither Python nor `xmllint`.
 Dagger explicitly provisions locked Cargo dependencies with `cargo fetch --locked`
 before running these offline checks, so a cold cache is supported. Local offline
 runs likewise require dependencies already provisioned.
 `xmllint --schema` uses libxml2's **XSD 1.0 validator**, covering sequences,
-required/empty containers, cardinality, lexical types and facets. Python's XML
-parser only inventories coverage. Python `lxml` would add a binding to the same
-engine; a Rust libxml binding would add native build/linking requirements; an
-XSD 1.1/JVM validator is unnecessary here. No production dependency is added.
+required/empty containers, cardinality, lexical types and facets. The Rust XML
+parser only inventories coverage. No production dependency is added. Real-validator
+regression tests are ignored in ordinary Rust tests and required by `ci.schemas`.
+
+For artifact-based execution, `cargo xtask prepare-agent-schemas --output <directory>`
+exports `requests.json`, `xtask` and `schema-runner-tests`. Run the exported checker as
+`xtask check-agent-schemas --requests <requests.json> --corpus <schema-directory>`;
+it consumes these files without invoking Cargo. The exported regression executable
+takes `--include-ignored`, with `XTASK_BIN` and `SZAMLAZZ_SCHEMA_CORPUS` pointing to
+the transferred checker and corpus. Schema validation and regression logic is the
+same locally and in Dagger.
 
 The runner invokes `cargo test -p szamlazz-agent --locked --offline --test
 schema_requests -- --ignored --exact emit_request_matrix` to export freshly

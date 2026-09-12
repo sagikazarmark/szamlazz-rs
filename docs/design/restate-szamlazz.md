@@ -1004,7 +1004,7 @@ paused owners or deliberately stop and recover them; independently settle extern
 also blocks operator ingress, so recover markers **before** making both services private
 (`PATCH /services/{name} {"public": false}`). Then poll
 `sys_invocation` until no row has `status <> 'completed'` and run
-`python3 scripts/check-order-migration.py --admin-url "$RESTATE_ADMIN_URL"`: any Order state in any scope blocks
+`cargo xtask check-order-migration --admin-url "$RESTATE_ADMIN_URL"`: any Order state in any scope blocks
 the switch, including unreadable markers belonging to completed/killed owners. Recover under the original scope;
 never clear state manually or copy a marker into the new identity. The read-only inventory checks both services'
 unfinished invocations and every Order state key, without decoding marker values. Exit 0 is only a clean inventory,
