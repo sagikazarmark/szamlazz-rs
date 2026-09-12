@@ -4,6 +4,34 @@ use restate_szamlazz::contract::{CreateOptions, DeleteProformaRequest};
 use serde_json::json;
 
 #[test]
+fn named_target_deletion_is_explicit_and_namespace_owned_remains_the_default() {
+    use restate_szamlazz::contract::DeleteMode;
+
+    let default: DeleteProformaRequest =
+        serde_json::from_value(json!({"expected_number": "D-OLD"})).expect("default mode");
+    assert_eq!(default.mode, DeleteMode::NamespaceOwned);
+    let named: DeleteProformaRequest = serde_json::from_value(json!({
+        "expected_number": "D-OLD", "mode": "named_target", "force": true
+    }))
+    .expect("explicit named target");
+    assert_eq!(named.mode, DeleteMode::NamedTarget);
+    assert_eq!(named.expected_number.as_str(), "D-OLD");
+    assert!(named.force);
+    assert_eq!(
+        serde_json::to_value(named).expect("encode")["mode"],
+        "named_target"
+    );
+    for mode in [json!(null), json!(true), json!("named"), json!({})] {
+        assert!(
+            serde_json::from_value::<DeleteProformaRequest>(json!({
+                "expected_number": "D-OLD", "mode": mode
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn documented_reissue_request_decodes_with_its_expected_document() {
     let readme = include_str!("../README.md");
     let section = readme
@@ -28,6 +56,28 @@ fn documented_reissue_request_decodes_with_its_expected_document() {
             .as_str(),
         "SZ-A"
     );
+}
+
+#[test]
+fn documented_legacy_deletion_selects_the_named_target_explicitly() {
+    let section = include_str!("../README.md")
+        .split("### Named-target proforma deletion")
+        .nth(1)
+        .expect("named-target migration guidance");
+    let example = section
+        .split("```json\n")
+        .nth(1)
+        .expect("example")
+        .split("```")
+        .next()
+        .expect("JSON");
+    let request: DeleteProformaRequest = serde_json::from_str(example).expect("complete request");
+    assert_eq!(request.expected_number.as_str(), "D-OLD");
+    assert_eq!(
+        request.mode,
+        restate_szamlazz::contract::DeleteMode::NamedTarget
+    );
+    assert!(!request.force);
 }
 
 #[test]
@@ -96,6 +146,17 @@ fn discovery_schemas_require_closed_bounded_intent() {
         assert_eq!(wire["$defs"]["InvoiceNumber"]["maxLength"], 40);
     }
     let options = serde_json::to_value(schemars::schema_for!(CreateOptions)).expect("schema");
+    let deletion =
+        serde_json::to_value(schemars::schema_for!(DeleteProformaRequest)).expect("schema");
+    assert_eq!(deletion["properties"]["mode"]["default"], "namespace_owned");
+    assert_eq!(
+        deletion["$defs"]["DeleteMode"]["oneOf"][0]["const"],
+        "namespace_owned"
+    );
+    assert_eq!(
+        deletion["$defs"]["DeleteMode"]["oneOf"][1]["const"],
+        "named_target"
+    );
     assert_eq!(
         options["properties"]["reissue"]["anyOf"],
         json!([{"$ref": "#/$defs/Reissue"}, {"type": "null"}])

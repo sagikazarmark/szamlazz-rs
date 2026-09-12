@@ -212,6 +212,15 @@ substitution of its number. ADR 0012 records the request contract and migration
 from the historical boolean reissue option.
 _Avoid_: generation, indefinite idempotency, expected number as vendor atomic compare-and-set
 
+**Named-target deletion**:
+Explicit deletion of the caller's exact recorded proforma in the resolved account,
+requiring that it carry the current Order key. Distinct from namespace-owned deletion,
+which selects the expected holder of the worker's proforma external id. A coexisting
+namespace-owned proforma is untouched; an absent namespace slot says nothing about the
+named target. Reported absence cannot distinguish deletion from consumption or settle
+an earlier uncertain send.
+_Avoid_: adoption, force as an ownership bypass, local association as vendor-reported order association
+
 **Reversal (as observed)**:
 A document is reversed when szamlazz.hu reports `<sztornozott>true</sztornozott>` on it; the storno document carries `hivszamlaszam` = original and is the order-number hint only until something newer is issued under the order. The service does not track who reversed a document or when.
 _Avoid_: reversal origin (v1 concept; gone), cancellation

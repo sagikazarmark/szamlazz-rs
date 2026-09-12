@@ -83,8 +83,8 @@ pub use document::{
     PostalAddressInput, TaxpayerStatus,
 };
 pub use storno::{
-    DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentState, DocumentStatus,
-    OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
+    DeleteMode, DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentState,
+    DocumentStatus, OrderStatus, StornoOutcome, StornoRequest, StornoResponse,
 };
 
 /// The caller-supplied identities the requests carry, defined in

@@ -237,14 +237,32 @@ impl StornoResponse {
     }
 }
 
+/// How deletion selects the proforma before pinning its record identity.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteMode {
+    /// Require the expected holder of this namespace's proforma external id.
+    #[default]
+    NamespaceOwned,
+    /// Verify the exact expected number in the resolved account, requiring a
+    /// proforma carrying this Order key. A coexisting namespace holder is untouched.
+    NamedTarget,
+}
+
 /// Input of `Szamlazz.Order.delete_proforma`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeleteProformaRequest {
-    /// The intended proforma's number. Retain it across retries; a replacement
-    /// under the external id answers `target_changed`, even with `force`.
+    /// The intended proforma's number. Retain it and the mode across retries.
+    /// Namespace-owned mode refuses a replacement holder; named-target mode
+    /// queries only this number. Neither mode substitutes another document.
     pub expected_number: InvoiceNumber,
+    /// Explicit selection contract. Omission preserves namespace-owned deletion;
+    /// named-target deletion never infers target absence from the namespace slot.
+    #[serde(default)]
+    pub mode: DeleteMode,
     /// Delete even when the proforma has registered credit entries. szamlazz.hu has
     /// no guard of its own; without `force` a paid proforma is answered
     /// `{deleted: false, reason: "proforma_paid"}`. Checked again by number
@@ -261,6 +279,7 @@ impl DeleteProformaRequest {
     pub const fn new(expected_number: InvoiceNumber, force: bool) -> Self {
         Self {
             expected_number,
+            mode: DeleteMode::NamespaceOwned,
             force,
         }
     }
@@ -274,8 +293,9 @@ pub struct DeleteProformaResponse {
     /// Whether the proforma is deleted (now or already).
     pub deleted: bool,
     /// Why it is not deleted (`proforma_paid`, `external_id_collision`, `target_changed`, a
-    /// szamlazz.hu error code), or `absent` when there was nothing to delete
-    /// (deleted earlier or consumed; `get` tells which).
+    /// szamlazz.hu error code), or `absent` when the selected lookup reports no
+    /// document. Absence does not distinguish deletion from consumption; `get`
+    /// observes only namespace-owned documents and may provide a consumption link.
     #[serde(default)]
     pub reason: Option<DeleteReason>,
 }
@@ -290,8 +310,8 @@ impl DeleteProformaResponse {
         }
     }
 
-    /// There was nothing to delete: szamlazz.hu holds no proforma under our
-    /// external id.
+    /// The selected lookup reports no document: the namespace slot or, in
+    /// named-target mode, the exact requested number. This is not deletion proof.
     #[must_use]
     pub const fn absent() -> Self {
         Self {
@@ -319,8 +339,8 @@ impl DeleteProformaResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DeleteReason {
-    /// Nothing under the proforma's external id (deleted earlier or consumed;
-    /// `get` tells which). Reported with `deleted: true`.
+    /// No document reported by the selected lookup (namespace slot or exact
+    /// number). Deleted earlier or consumed; reported with `deleted: true`.
     Absent,
     /// The proforma has registered credit entries and the request did not
     /// `force`.
@@ -328,7 +348,8 @@ pub enum DeleteReason {
     /// The proforma's external id resolves to another order's or kind's
     /// document, which the handler never touches.
     ExternalIdCollision,
-    /// A different owned holder occupies the external id, or the pinned
+    /// A different owned holder occupies the external id, the named target
+    /// carries another order or type, or the pinned
     /// number's fresh query returned a different document id, number, order
     /// or type. `force` never bypasses these guards.
     TargetChanged,

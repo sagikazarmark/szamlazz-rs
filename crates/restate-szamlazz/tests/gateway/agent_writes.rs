@@ -16,6 +16,39 @@ use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_string_contains;
 
+/// Neither verification nor deletion requires a worker external id. The queried
+/// XML never reports one: legacy and manually issued documents share this seam.
+#[tokio::test]
+async fn a_verified_named_proforma_can_be_deleted_without_namespace_discovery() {
+    use super::common::{delete_of, external_id_query};
+    use restate_szamlazz::gateway::QueryOutcome;
+
+    let h = Harness::start().await;
+    number_query("D-LEGACY")
+        .respond_with(Doc::new("D-LEGACY", "D").response())
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    external_id_query("acct:ORD-1:proforma")
+        .respond_with(Doc::new("D-WORKER", "D").response())
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    delete_of("D-LEGACY")
+        .respond_with(proforma_deleted())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    let QueryOutcome::Found(pinned) = h.gateway.verify("D-LEGACY").await.expect("answered") else {
+        panic!("named proforma must be found");
+    };
+    assert_eq!(pinned.number, "D-LEGACY");
+    assert_eq!(
+        h.gateway.delete_proforma(&pinned, &order(), false).await,
+        DeleteOutcome::Deleted
+    );
+}
+
 #[tokio::test]
 async fn deletion_checks_fresh_credit_entries_on_the_pinned_number() {
     let h = Harness::start().await;

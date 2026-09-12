@@ -82,6 +82,16 @@ replace a conclusive 71/152 refusal. These tests establish evidence classificati
 durability or vendor behavior. Actual-Restate/mocked-vendor Order tests cover the marker/arm protocol
 separately; see [the protected protocol](design/order-write-protocol.md).
 
+### Named-target deletion regression
+
+Named-target deletion (#225) uses the same public seams: `tests/expected_document.rs` checks closed mode
+selection, discovery schemas and the migration example; Gateway `agent_writes.rs` checks number-only
+verification/deletion and fresh identity/credit-entry guards. `tests/e2e/delete_proforma.rs` checks named
+selection, coexistence, unavailable/mismatched reads and stale requests after purge. Recovery evidence
+scenarios cover named deletion after a lost reply or interrupted result, pause/resume, cancel/kill,
+blocked subsequent writes and exact audited settlement on real Restate 1.7.8. The provider is mocked;
+these checks assert worker behavior, not vendor atomicity (ADR 0015).
+
 ### Monetary dependency-graph regression
 
 Run `bash scripts/check-money-features.sh` from the workspace root when changing monetary Serde

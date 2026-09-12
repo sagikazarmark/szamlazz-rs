@@ -135,7 +135,7 @@ through deterministic external ids:
 | `create_final` | exclusive | `CreateRequest` → `CreateResponse` (requires a live prepayment; passes `elolegSzamlaszam`; the caller supplies the negative prepayment line) |
 | `correct_invoice` | exclusive | `CorrectRequest { invoice_number, correction_id, document }` → `CreateResponse` |
 | `storno_invoice` | exclusive | `StornoRequest { invoice_number, comment? }` → `StornoResponse`; the storno repeats the verified original's `telj` as `teljesitesDatum` (ADR 0007), never a caller's date |
-| `delete_proforma` | exclusive | `DeleteProformaRequest { expected_number, force }` → `DeleteProformaResponse` |
+| `delete_proforma` | exclusive | `DeleteProformaRequest { expected_number, mode?, force }` → `DeleteProformaResponse` |
 | `get` | shared | `()` → `OrderStatus` (non-atomic external observation) |
 
 Default attributes on the exclusive Order mutation handlers (ADR 0004):
@@ -322,6 +322,7 @@ evidence and `record-recovery` before clearance. Marker reads/set/clear are stat
 | `Szamlazz.Order` | `storno_invoice` (a live original) | `namespace`, `account`, `verify-original-{number}`, `lookup-storno-{number}`, `storno-{number}` |
 | `Szamlazz.Order` | `storno_invoice` (the verify sees it reversed) | `namespace`, `account`, `verify-original-{number}`, `hint-storno-{number}` |
 | `Szamlazz.Order` | `delete_proforma` | `namespace`, `account`, `lookup-proforma`, `delete-proforma-{number}` |
+| `Szamlazz.Order` | `delete_proforma` (named target) | `namespace`, `account`, `verify-proforma-{number}`, `delete-proforma-{number}` |
 | `Szamlazz.Order` | `get` | `namespace`, `account`, `lookup-proforma`, `lookup-invoice`, `lookup-prepayment`, `lookup-final` |
 | `Szamlazz.Agent` | `check_account` | `namespace`, `account`, `probe` |
 | `Szamlazz.Agent` | `query` | `namespace`, `account`, `query` |
@@ -631,7 +632,8 @@ acknowledgement instead takes immediate read-only reconciliation; inconclusive e
 `StornoOutcome::Unnumbered` and terminal `outcome_unknown`, rather than another mutation retry. A proforma or
 delivery note without a usable `telj` stops earlier as `unavailable` (ADR 0007).
 
-`delete_proforma({expected_number, force})`: `ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed,
+`delete_proforma({expected_number, mode?, force})`: default `namespace_owned` mode uses
+`ctx.run(query "…:proforma")` under the read policy: 7 → `{deleted: true, reason: absent}` (deleted or consumed,
 `get` tells which); a document under our id that fails validation → `{deleted: false, reason: external_id_collision}`;
 different owned number → `{deleted: false, reason: target_changed}`, even with `force`;
 matching `D` with credit entries ∧ `!force` → `{deleted: false, reason: proforma_paid}` (the server has no guard, verified);
@@ -650,6 +652,15 @@ Invocation-policy exhaustion pauses; cancellation returns `outcome_unknown` and 
 A crash before journaling cannot re-grant the consumed permit. Query/delete is not atomic against other writers.
 The response is `DeleteProformaResponse { deleted, reason? }` throughout, never a `rejected` outcome.
 Cancellation of the one-shot write is likewise the structured `outcome_unknown`, since deletion may have landed.
+
+Explicit `mode: named_target` instead journals `verify-proforma-{expected_number}` under the read policy.
+It requires the exact reported number, proforma type and this Order key, regardless of external-id history.
+Wrong/missing order or wrong/unknown type is `target_changed`; code 7 is `absent` for that exact number;
+inconclusive identity/reads are `unavailable`, credential codes `credentials_rejected`. The same paid guard,
+marker, acknowledged permit, fresh guard and recovery path then apply. Coexisting namespace holders are
+neither read nor mutated. Version-1 markers already retain the exact deletion number; their proforma slot is
+correlation only. See [ADR 0015](../adr/0015-named-target-proforma-deletion.md) and the
+[caller migration](../../crates/restate-szamlazz/README.md#named-target-proforma-deletion-225).
 Read `get` and query the expected number named in the fault. Reconcile the earlier send before deliberately
 renewing with a new `Idempotency-Key` and the same expected number; never substitute a replacement automatically.
 This does not change

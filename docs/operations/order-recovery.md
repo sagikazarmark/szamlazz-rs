@@ -53,6 +53,9 @@ trimmed or normalized. A deleted number remains the bounded mutation target and 
   Independent evidence establishes completed execution and impossibility of delayed execution. Use `issued`
   with the issued number or `reversed` with the storno number for those operations. The audit record must tie the
   result to the exact pinned account/order/intent; a completed deletion names exactly the pinned proforma.
+  This also covers named-target deletion: the marker's proforma `external_id` is correlation, not evidence
+  that the target occupied that slot. Use `operation.number`, never a coexisting namespace holder. `get`
+  does not inventory manual/legacy documents, and absence by either selector cannot settle deletion.
 
 Attestations are operator assertions, not worker-verified vendor facts. Keep the referenced evidence durably in
 the operator's incident system. Record vendor support's confirmation of the exact request where applicable;

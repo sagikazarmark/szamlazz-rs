@@ -1,7 +1,5 @@
-//! `Szamlazz.Order.delete_proforma`: one read (the proforma under its
-//! external id), a guard on what it found, the delete step (a one-shot write
-//! without a retry of its own, refreshing the pinned number inside the run),
-//! and the answer from data.
+//! `Szamlazz.Order.delete_proforma`: select by namespace ownership or exact
+//! number, then protect and refresh the pinned target before the one-shot delete.
 
 use std::ops::ControlFlow;
 
@@ -9,18 +7,17 @@ use restate_sdk::errors::HandlerError;
 use restate_sdk::prelude::ObjectContext;
 
 use super::prologue::Execution;
-use super::support::{AnsweredCode, Fault, lookup};
+use super::support::{AnsweredCode, Fault, lookup, verify};
 use crate::contract::{
-    DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentKind, IssuedKind,
+    DeleteMode, DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentKind,
+    IssuedKind,
 };
-use crate::gateway::{DeleteOutcome, FoundDocument, OwnershipOutcome};
+use crate::gateway::{DeleteOutcome, FoundDocument, OwnershipOutcome, QueryOutcome};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
 impl Execution {
     /// `delete_proforma`, on the `order` the handler parsed from its key:
-    /// one read (the proforma under its external id), [`delete_guard`] on
-    /// what it found, the delete step, [`delete_response`] on what it
-    /// settled.
+    /// Select the expected proforma, then use the shared protected delete step.
     pub(super) async fn delete(
         &self,
         ctx: &ObjectContext<'_>,
@@ -29,29 +26,41 @@ impl Execution {
     ) -> Result<DeleteProformaResponse, HandlerError> {
         let kind = DocumentKind::Proforma;
         let proforma_id = ExternalId::for_kind(&self.config.namespace, &order, kind);
-        // Every fault is about this proforma.
+        // The proforma slot correlates the Order write even in named mode;
+        // only the pinned number selects a named target or its recovery intent.
         let about = |fault: Fault| fault.about(&order, Some(IssuedKind::Proforma), &proforma_id);
-        let found = lookup(
-            ctx,
-            self,
-            "lookup-proforma",
-            &proforma_id,
-            &order,
-            kind.into(),
-        )
-        .await?;
-        if let OwnershipOutcome::Live(doc) | OwnershipOutcome::Reversed(doc) = &found
-            && doc.number != request.expected_number.as_str()
-        {
-            return Ok(DeleteProformaResponse::not_deleted(
-                DeleteReason::TargetChanged,
-            ));
-        }
-        let found =
-            match delete_guard(found, request.force, &self.config.namespace).map_err(about)? {
-                ControlFlow::Break(response) => return Ok(response),
-                ControlFlow::Continue(found) => found,
-            };
+        let selection = match request.mode {
+            DeleteMode::NamespaceOwned => {
+                let found = lookup(
+                    ctx,
+                    self,
+                    "lookup-proforma",
+                    &proforma_id,
+                    &order,
+                    kind.into(),
+                )
+                .await?;
+                if let OwnershipOutcome::Live(doc) | OwnershipOutcome::Reversed(doc) = &found
+                    && doc.number != request.expected_number.as_str()
+                {
+                    return Ok(DeleteProformaResponse::not_deleted(
+                        DeleteReason::TargetChanged,
+                    ));
+                }
+                delete_guard(found, request.force, &self.config.namespace)
+            }
+            DeleteMode::NamedTarget => {
+                let number = request.expected_number.as_str();
+                let found = verify(ctx, self, format!("verify-proforma-{number}"), number)
+                    .await
+                    .map_err(about)?;
+                named_delete_guard(found, &order, request.force, &self.config.namespace)
+            }
+        };
+        let found = match selection.map_err(about)? {
+            ControlFlow::Break(response) => return Ok(response),
+            ControlFlow::Continue(found) => found,
+        };
 
         let number = found.number.clone();
         let target_fault = |mut fault: Fault| {
@@ -84,6 +93,29 @@ impl Execution {
             outcome
         };
         delete_response(outcome, &self.config.namespace).map_err(|fault| target_fault(fault).into())
+    }
+}
+
+/// A by-number verify has already checked the exact reported number. Local
+/// association alone is insufficient: the vendor must report this order and type.
+fn named_delete_guard(
+    found: QueryOutcome,
+    order: &OrderKey,
+    force: bool,
+    namespace: &Namespace,
+) -> Result<ControlFlow<DeleteProformaResponse, Box<FoundDocument>>, Fault> {
+    match found {
+        QueryOutcome::Found(found) if !found.is_ours(order, IssuedKind::Proforma) => {
+            Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
+                DeleteReason::TargetChanged,
+            )))
+        }
+        QueryOutcome::Found(found) => Ok(paid_guard(found, force)),
+        QueryOutcome::NotFound => Ok(ControlFlow::Break(DeleteProformaResponse::absent())),
+        QueryOutcome::Api(answer) => Err(AnsweredCode::Inconclusive(answer).into_fault(namespace)),
+        QueryOutcome::CredentialsRejected(answer) => {
+            Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
+        }
     }
 }
 
@@ -124,16 +156,23 @@ fn delete_guard(
             return Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace));
         }
     };
+    Ok(paid_guard(found, force))
+}
+
+fn paid_guard(
+    found: Box<FoundDocument>,
+    force: bool,
+) -> ControlFlow<DeleteProformaResponse, Box<FoundDocument>> {
     if !found.credit_entries.is_empty() && !force {
-        return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
+        return ControlFlow::Break(DeleteProformaResponse::not_deleted(
             DeleteReason::ProformaPaid,
-        )));
+        ));
     }
-    Ok(ControlFlow::Continue(found))
+    ControlFlow::Continue(found)
 }
 
 /// A lost/inconclusive answer or cancelled one-shot run: reconcile first.
-const DELETE_RECOVERY: &str = "read get and query the expected number; reconcile the earlier send, then, if deletion is still intended, retry with a new Idempotency-Key and the same expected_number; never substitute a replacement automatically";
+const DELETE_RECOVERY: &str = "read get and query the expected number; get covers only namespace-owned documents and absence cannot settle deletion; reconcile the earlier send, then, if deletion is still intended, retry with a new Idempotency-Key and the same expected_number and mode; never substitute a replacement automatically";
 
 fn delete_unknown(lost: &impl std::fmt::Display) -> Fault {
     Fault::outcome_unknown(format!(
@@ -149,8 +188,8 @@ fn delete_unknown(lost: &impl std::fmt::Display) -> Fault {
 ///
 /// Failed fresh reads (`unavailable`), rejected credentials
 /// (`credentials_rejected`), and a lost or inconclusive answer
-/// (`outcome_unknown`: the step has no retry of its own, and the next call's
-/// lookup tells). The caller attaches the proforma's identity.
+/// (`outcome_unknown`: retained uncertainty requires independent recovery
+/// evidence). The caller attaches the proforma's identity.
 fn delete_response(
     outcome: DeleteOutcome,
     namespace: &Namespace,

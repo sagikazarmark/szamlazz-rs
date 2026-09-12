@@ -93,6 +93,19 @@ pub(crate) const RUN_NAMES: &[RunPath] = &[
     ),
     RunPath::new(
         "Szamlazz.Order",
+        "delete_proforma",
+        &[
+            "namespace",
+            "account",
+            "verify-proforma-{number}",
+            "prepare-write",
+            "arm-write",
+            "delete-proforma-{number}",
+            "reconcile-write",
+        ],
+    ),
+    RunPath::new(
+        "Szamlazz.Order",
         "create_proforma",
         &[
             "namespace",

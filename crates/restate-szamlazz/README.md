@@ -1032,10 +1032,10 @@ reversal without the number after a `warn`, while a cancellation of the invocati
 
 ### One-shot deletion and credit entries (#201 release notes)
 
-`delete_proforma` requires `expected_number` and compares it with the owned holder found by the journaled
+By default, `delete_proforma` requires `expected_number` and compares it with the owned holder found by the journaled
 ownership lookup. A different holder is `target_changed`, and absence is `{deleted: true, reason: "absent"}`
 (deleted earlier or consumed, not proof this invocation deleted it). Inside
-`delete-proforma-{number}`, each execution queries **that number** and checks its document id,
+`delete-proforma-{number}`, the permitted execution queries **that number** and checks its document id,
 number, order and proforma type, then its current credit entries. A changed target yields
 `{deleted: false, reason: "target_changed"}`; credit entries with `force: false` yield
 `proforma_paid`. `force: true` bypasses only the credit-entry guard. Disappearance (query code 7)
@@ -1043,6 +1043,54 @@ or deletion code 335 yields `deleted: true` (already deleted or consumed). A fai
 yields `unavailable` (503), a credential code `credentials_rejected` (503), with no delete sent
 by that execution. The step never reselects a replacement by external id. This narrows the
 replay gap; the vendor's query and delete are **not atomic** against other writers.
+
+### Named-target proforma deletion (#225)
+
+To delete an exact recorded proforma issued manually, under a legacy external ID, or with no external ID,
+call `Szamlazz.Order.delete_proforma` on its **reported Order key** in the intended account's scope:
+
+```json
+{"expected_number": "D-OLD", "mode": "named_target", "force": false}
+```
+
+Omitting `mode` means `"namespace_owned"`, preserving the existing ownership contract. Named mode verifies
+`D-OLD` directly (`verify-proforma-D-OLD`), requiring its exact number, proforma type and reported order
+association. A local back-office association is insufficient if the document does not carry that Order key.
+Neither the namespace slot nor the newest document under the order is queried. A coexisting namespace-owned
+proforma is untouched, even if it has credit entries or the slot contains a collision.
+
+| Observation before arming | Result |
+|---|---|
+| Exact number, proforma type and this Order key | Check credit entries, then use the protected delete step |
+| Different or missing order association, or another/unknown type | `{deleted: false, reason: "target_changed"}` |
+| Code 7 for the exact requested number | `{deleted: true, reason: "absent"}` |
+| Missing/mismatched reported number, malformed body, unanswered query or another vendor code | `unavailable` (503); no deletion |
+| Credential rejection | `credentials_rejected` (503); no deletion |
+| Any credit entry without `force` | `{deleted: false, reason: "proforma_paid"}` |
+
+The shared permitted write refreshes the exact number, internal record ID, type, order and credit entries.
+`force` bypasses only the credit-entry guard. The query and send have no vendor atomic compare-and-set;
+coordinate external writers, including UI edits. A changed reported number is inconclusive (`unavailable`),
+never an alternative target. After successful deletion and retention expiry/purge, the old command queries
+only `D-OLD` and cannot delete a newer number. Keep both `expected_number` and `mode` with the logical command.
+
+`absent` describes the selected lookup, not historical success: in default mode it describes the worker slot;
+in named mode it describes the exact number. Neither distinguishes deletion from consumption. `get` only
+observes namespace-owned documents and cannot establish what happened to a manual/legacy proforma.
+After an uncertain send, absence does not clear the marker or permit a new mutation. Pause/resume reconciles
+read-only; cancel/kill retains uncertainty. Deletion needs authorized, audited positive completion or
+non-execution-and-no-later-execution attestation; document queries alone cannot settle it.
+
+**Migration:** a legacy delete-by-recorded-number adapter can submit the JSON above once the vendor-reported
+order association is verified. Do not reinterpret an old namespace-mode `absent` as proof that its recorded
+external target is gone, and do not change an unfinished command's mode to bypass uncertainty. Rust callers
+set `mode: DeleteMode::NamedTarget` on `DeleteProformaRequest` (the `new` constructor retains namespace mode).
+The added public field requires updating struct literals; JSON requests omitting it retain their behavior.
+Deploy before enabling named mode: older deployments reject the new field. Version-1 unresolved markers keep
+their existing shape and exact delete number; their proforma `external_id` is correlation, not ownership proof.
+There is no state migration. Keep original invocations on their immutable deployment and review any exceptional
+replay against its exact journal and input. See [ADR 0015](../../docs/adr/0015-named-target-proforma-deletion.md)
+for provider evidence and the marker decision.
 
 ### Expected-document intent (0.4 breaking release notes, #206)
 

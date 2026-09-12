@@ -107,7 +107,8 @@ pub enum WriteOperation {
         /// Original invoice number.
         number: String,
     },
-    /// Deletion of the pinned proforma.
+    /// Deletion of the pinned proforma, selected by namespace or exact number.
+    /// Recovery needs the target number, not the original selection mode.
     Delete {
         /// Pinned proforma number.
         number: String,
@@ -169,7 +170,8 @@ pub struct UnresolvedWrite {
     /// Pinned deployment namespace.
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub namespace: Namespace,
-    /// External identity of the write.
+    /// External identity of the write. For deletion this is the Order's proforma
+    /// slot for correlation, not evidence that the pinned number occupies it.
     pub external_id: String,
     /// Pinned resolver-owned account id.
     pub account_id: String,

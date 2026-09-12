@@ -7,6 +7,13 @@ const VENDOR_NUMBER: &str = "VENDOR:document-number-outside-the-40-byte-bound & 
 // Doc and number_query accept literal XML text in these fixtures.
 const VENDOR_NUMBER_XML: &str = "VENDOR:document-number-outside-the-40-byte-bound &amp; 1";
 
+#[derive(Clone, Copy)]
+enum MutationCase {
+    Storno,
+    NamespaceDeletion,
+    NamedDeletion,
+}
+
 #[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; interrupted storno and deletion adapters"]
 #[allow(
@@ -25,13 +32,23 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
         })
         .await;
     let mock = MockServer::start().await;
-    for deletion in [false, true] {
-        let key = if deletion {
+    for case in [
+        MutationCase::Storno,
+        MutationCase::NamespaceDeletion,
+        MutationCase::NamedDeletion,
+    ] {
+        let deletion = !matches!(case, MutationCase::Storno);
+        let named = matches!(case, MutationCase::NamedDeletion);
+        let key = if named {
+            "INTERRUPTED-NAMED-DELETE"
+        } else if deletion {
             "INTERRUPTED-DELETE"
         } else {
             "INTERRUPTED-STORNO"
         };
-        let original = if deletion {
+        let original = if named {
+            "D-NAMED-INTERRUPTED"
+        } else if deletion {
             "D-INTERRUPTED"
         } else {
             "SZ-INTERRUPTED"
@@ -75,6 +92,9 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
         let state = acted.clone();
         number_query(original)
             .respond_with(move |_: &wiremock::Request| {
+                if deletion && state.load(Ordering::SeqCst) {
+                    return not_found();
+                }
                 Doc {
                     reversed: !deletion && state.load(Ordering::SeqCst),
                     ..Doc::of(original, if deletion { "D" } else { "SZ" }, key)
@@ -90,7 +110,9 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
             format!("acct:{key}:storno:{original}")
         })
         .respond_with(move |_: &wiremock::Request| {
-            if deletion {
+            if named {
+                Doc::of("D-COEXISTING", "D", key).response()
+            } else if deletion {
                 if state.load(Ordering::SeqCst) {
                     not_found()
                 } else {
@@ -106,6 +128,7 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
                 not_found()
             }
         })
+        .expect(if named { 0..=0 } else { 1..=10 })
         .mount(&mock)
         .await;
         let send = if deletion {
@@ -125,7 +148,7 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
         .mount(&mock)
         .await;
         let body = if deletion {
-            json!({"expected_number":original})
+            json!({"expected_number":original, "mode":if named {"named_target"} else {"namespace_owned"}})
         } else {
             json!({"invoice_number":original})
         };
@@ -150,7 +173,16 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
                 )
                 .await;
             assert_eq!(observed.body["state"], "unresolved");
+            assert_eq!(observed.body["marker"]["version"], 1);
+            assert_eq!(
+                observed.body["marker"]["operation"],
+                json!({"type":"delete","number":original})
+            );
             restate.admin().kill(owner.invocation_id()).await;
+            let blocked = restate
+                .invoke(&call, Some(&body), Some("blocked-after-kill"))
+                .await;
+            assert_eq!(blocked.status, 500);
             let evidence = json!({"marker":observed.body["marker"],"evidence":{"type":"completed","audit_reference":"confirmed-deletion","completion":{"type":"deleted","number":original},"completed_and_cannot_execute_later":true}});
             let recovered = restate
                 .invoke(
@@ -1047,8 +1079,21 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
         )
         .await;
 
-    for deleting in [true, false] {
-        let (key, number, kind, handler) = if deleting {
+    for case in [
+        MutationCase::NamespaceDeletion,
+        MutationCase::Storno,
+        MutationCase::NamedDeletion,
+    ] {
+        let deleting = !matches!(case, MutationCase::Storno);
+        let named = matches!(case, MutationCase::NamedDeletion);
+        let (key, number, kind, handler) = if named {
+            (
+                "NAMED-DELETE-EVIDENCE",
+                "D-NAMED-EVIDENCE",
+                "D",
+                "delete_proforma",
+            )
+        } else if deleting {
             ("DELETE-EVIDENCE", "D-1", "D", "delete_proforma")
         } else {
             ("STORNO-EVIDENCE", "SZ-1", "SZ", "storno_invoice")
@@ -1077,14 +1122,24 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
         };
         external_id_query(&external)
             .respond_with(move |_: &wiremock::Request| {
-                if deleting && !observed.load(Ordering::SeqCst) {
+                if named {
+                    Doc::of("D-COEXISTING", "D", key).response()
+                } else if deleting && !observed.load(Ordering::SeqCst) {
                     Doc::of(number, kind, key).response()
                 } else {
                     not_found()
                 }
             })
+            .expect(if named { 0..=0 } else { 1..=10 })
             .mount(&mock)
             .await;
+        if named {
+            delete_of("D-COEXISTING")
+                .respond_with(crate::common::proforma_deleted())
+                .expect(0)
+                .mount(&mock)
+                .await;
+        }
         let send = if deleting {
             delete_of(number)
         } else {
@@ -1100,7 +1155,7 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
         .mount(&mock)
         .await;
         let request = if deleting {
-            json!({"expected_number":number})
+            json!({"expected_number":number, "mode":if named {"named_target"} else {"namespace_owned"}})
         } else {
             json!({"invoice_number":number})
         };
@@ -1117,7 +1172,37 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
             .await;
         let observe = Call::object("Szamlazz.Order", key, "observe_unresolved");
         let marker = restate.invoke(&observe, None, None).await.body["marker"].clone();
-        restate.admin().kill(owner.invocation_id()).await;
+        if named {
+            restate.admin().resume(owner.invocation_id()).await;
+            restate
+                .admin()
+                .await_status(owner.invocation_id(), &["paused"])
+                .await;
+            restate.admin().cancel(owner.invocation_id()).await;
+            let cancelled = restate
+                .invoke(
+                    &Call::object("Szamlazz.Order", key, handler),
+                    Some(&request),
+                    Some(key),
+                )
+                .await;
+            let fault: restate_szamlazz::contract::Fault = cancelled.fault();
+            assert_eq!(fault.is_cancelled(), Some(true));
+            let blocked = restate
+                .invoke(
+                    &Call::object("Szamlazz.Order", key, handler),
+                    Some(&request),
+                    Some("blocked-after-cancel"),
+                )
+                .await;
+            assert_eq!(blocked.status, 500);
+            assert_eq!(
+                restate.invoke(&observe, None, None).await.body["marker"],
+                marker
+            );
+        } else {
+            restate.admin().kill(owner.invocation_id()).await;
+        }
         let recover = Call::object("Szamlazz.Order", key, "recover");
         let evidence = if deleting {
             let correct = json!({"type":"completed", "audit_reference":"SUPPORT-301",

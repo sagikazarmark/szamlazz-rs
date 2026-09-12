@@ -102,6 +102,13 @@ Order verified a stornoable invoice. The policy adjudication and evidence limits
 
 ## Recovery contract
 
+Named-target deletion (#225) uses this same protocol after a journaled exact-number verify of proforma
+type and the current Order key. It never selects or touches a coexisting namespace-owned holder. The
+version-1 delete marker already carries the exact number; selection mode is unnecessary for settlement
+because deletion reconciliation never queries the slot or grants another send. Its `external_id` remains
+the Order's proforma slot for correlation, not an assertion of target ownership. No state migration is
+needed; exceptional replay still requires actual-prefix review. [ADR 0015](../adr/0015-named-target-proforma-deletion.md).
+
 `Szamlazz.Order.observe_unresolved` is shared and operator-only. It returns absent, a versioned marker,
 or unreadable state. It does not resolve the current account or acquire credentials.
 

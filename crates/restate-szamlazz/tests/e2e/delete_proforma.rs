@@ -8,6 +8,281 @@ use crate::harness::szamlazz::{
     Doc, delete_of, external_id_query, not_found, number_query, proforma_deleted,
 };
 
+/// A recorded manual/legacy target is selected by number even with a separate
+/// namespace-owned proforma. After retention ends the old intent stays exact.
+pub(crate) async fn named_target_deletion_leaves_the_namespace_holder_untouched(h: &Harness) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let order = "E2E-D-NAMED";
+    let deleted = Arc::new(AtomicBool::new(false));
+    let state = deleted.clone();
+    number_query("D-LEGACY")
+        .respond_with(move |_: &wiremock::Request| {
+            if state.load(Ordering::SeqCst) {
+                not_found()
+            } else {
+                Doc::of("D-LEGACY", "D", order).response()
+            }
+        })
+        .expect(3)
+        .mount(&h.mock)
+        .await;
+    external_id_query(&format!("acct:{order}:proforma"))
+        .respond_with(Doc::of("D-WORKER", "D", order).response())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    delete_of("D-LEGACY")
+        .respond_with(move |_: &wiremock::Request| {
+            deleted.store(true, Ordering::SeqCst);
+            proforma_deleted()
+        })
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    delete_of("D-WORKER")
+        .respond_with(proforma_deleted())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let body = json!({"expected_number":"D-LEGACY", "mode":"named_target"});
+    let first = h
+        .call(order, "delete_proforma", &body, "named-delete")
+        .await;
+    assert_eq!(first.body, json!({"deleted":true,"reason":null}));
+    assert_eq!(
+        h.admin().runs(first.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-proforma-D-LEGACY",
+            "prepare-write",
+            "arm-write",
+            "delete-proforma-D-LEGACY"
+        ]
+    );
+    let replay = h
+        .call(order, "delete_proforma", &body, "named-delete")
+        .await;
+    assert_eq!(replay.invocation_id(), first.invocation_id());
+    h.admin().purge(first.invocation_id()).await;
+    let old = h
+        .call(order, "delete_proforma", &body, "named-delete")
+        .await;
+    assert_eq!(old.body, json!({"deleted":true,"reason":"absent"}));
+    h.assert_state_absent(None, order).await;
+}
+
+/// The main suite walks the complete named-target reconciliation journal path.
+pub(crate) async fn named_target_deletion_reconciles_a_lost_reply_without_another_send(
+    h: &Harness,
+) {
+    let order = "E2E-D-NAMED-LOST";
+    let number = "D-NAMED-LOST";
+    number_query(number)
+        .respond_with(Doc::of(number, "D", order).response())
+        .expect(2)
+        .mount(&h.mock)
+        .await;
+    delete_of(number)
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let body = json!({"mode":"named_target", "expected_number":number});
+    let call = restate_e2e_harness::Call::object("Szamlazz.Order", order, "delete_proforma");
+    let owner = h
+        .invoke(&call.send(), Some(&body), Some("named-lost"))
+        .await;
+    h.admin()
+        .await_status(owner.invocation_id(), &["paused"])
+        .await;
+    assert_eq!(
+        h.admin().runs(owner.invocation_id()).await,
+        [
+            "namespace",
+            "account",
+            "verify-proforma-D-NAMED-LOST",
+            "prepare-write",
+            "arm-write",
+            "delete-proforma-D-NAMED-LOST",
+            "reconcile-write"
+        ]
+    );
+    h.admin().cancel(owner.invocation_id()).await;
+    let cancelled = h.invoke(&call, Some(&body), Some("named-lost")).await;
+    assert_eq!(cancelled.fault().is_cancelled(), Some(true));
+    let blocked = h
+        .call(order, "delete_proforma", &body, "named-lost-next")
+        .await;
+    assert_eq!(blocked.status, 500);
+    h.expect_unresolved(None, order).await;
+}
+
+/// Exact-number selection requires the reported order/type and preserves read faults.
+#[allow(clippy::too_many_lines, reason = "one named-target selection matrix")]
+pub(crate) async fn named_target_deletion_requires_reported_order_type_and_unpaid_content(
+    h: &Harness,
+) {
+    use crate::common::{CreditRecord, api_error};
+    use wiremock::ResponseTemplate;
+
+    let order = "E2E-D-NAMED-GUARDS";
+    external_id_query(&format!("acct:{order}:proforma"))
+        .respond_with(not_found())
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let paid = [CreditRecord::transfer("1")];
+    for (label, response, force, status, reason, sends) in [
+        (
+            "UNASSOCIATED",
+            Doc {
+                order: None,
+                ..Doc::of("D-NAMED-UNASSOCIATED", "D", order)
+            }
+            .response(),
+            true,
+            200,
+            "target_changed",
+            0,
+        ),
+        (
+            "WRONG-ORDER",
+            Doc::of("D-NAMED-WRONG-ORDER", "D", "OTHER").response(),
+            true,
+            200,
+            "target_changed",
+            0,
+        ),
+        (
+            "WRONG-TYPE",
+            Doc::of("D-NAMED-WRONG-TYPE", "SZ", order).response(),
+            true,
+            200,
+            "target_changed",
+            0,
+        ),
+        (
+            "OPEN-TYPE",
+            Doc::of("D-NAMED-OPEN-TYPE", "FUTURE", order).response(),
+            true,
+            200,
+            "target_changed",
+            0,
+        ),
+        (
+            "WRONG-NUMBER",
+            Doc::of("D-NEWER", "D", order).response(),
+            true,
+            503,
+            "unavailable",
+            0,
+        ),
+        ("MISSING", not_found(), false, 200, "absent", 0),
+        (
+            "READ",
+            ResponseTemplate::new(500),
+            false,
+            503,
+            "unavailable",
+            0,
+        ),
+        (
+            "API",
+            api_error("57", "read refused"),
+            false,
+            503,
+            "unavailable",
+            0,
+        ),
+        (
+            "CREDENTIAL",
+            api_error("3", "login"),
+            false,
+            503,
+            "credentials_rejected",
+            0,
+        ),
+        (
+            "PAID",
+            Doc {
+                credit_entries: &paid,
+                ..Doc::of("D-NAMED-PAID", "D", order)
+            }
+            .response(),
+            false,
+            200,
+            "proforma_paid",
+            0,
+        ),
+        (
+            "FORCE",
+            Doc {
+                credit_entries: &paid,
+                ..Doc::of("D-NAMED-FORCE", "D", order)
+            }
+            .response(),
+            true,
+            200,
+            "",
+            1,
+        ),
+        (
+            "NO-ID",
+            Doc::of("D-NAMED-NO-ID", "D", order).response(),
+            false,
+            200,
+            "",
+            1,
+        ),
+    ] {
+        // Each case has an independent target, including any late read execution.
+        let number = format!("D-NAMED-{label}");
+        number_query(&number)
+            .respond_with(response)
+            .expect(1..)
+            .mount(&h.mock)
+            .await;
+        delete_of(&number)
+            .respond_with(proforma_deleted())
+            .expect(sends)
+            .mount(&h.mock)
+            .await;
+        let reply = h
+            .call(
+                order,
+                "delete_proforma",
+                &json!({"expected_number":number, "mode":"named_target", "force":force}),
+                &format!("named-{label}"),
+            )
+            .await;
+        assert_eq!(reply.status, status, "{label}: {}", reply.body);
+        if status == 200 {
+            assert_eq!(
+                reply.body["deleted"],
+                reason.is_empty() || reason == "absent",
+                "{label}"
+            );
+            assert_eq!(
+                reply.body["reason"],
+                if reason.is_empty() {
+                    json!(null)
+                } else {
+                    json!(reason)
+                },
+                "{label}"
+            );
+        } else {
+            assert_eq!(reply.fault().code.as_str(), reason, "{label}");
+        }
+        h.assert_state_absent(None, order).await;
+    }
+}
+
 /// Guard outcomes and send uncertainty survive the real handler/envelope path.
 /// Reusing the ingress key replays the completion without re-reading or sending.
 pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertainty(h: &Harness) {

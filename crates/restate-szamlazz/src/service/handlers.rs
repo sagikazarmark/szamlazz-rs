@@ -251,6 +251,8 @@ impl Order {
     }
 
     /// Deletes the order's expected proforma; a replacement is never selected.
+    /// Default namespace-owned mode requires the external-id holder. Explicit
+    /// named-target mode verifies the number, proforma type and reported Order key.
     /// A lost answer retains the unresolved marker and reconciles read-only,
     /// pausing on invocation-policy exhaustion. Cancellation is structured
     /// `outcome_unknown` and retains the marker too. Deletion absence is not
