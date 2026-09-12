@@ -29,22 +29,48 @@ and schema/runtime refusal. Metamorphic cases test sign symmetry and preservatio
 legacy-calculated amounts when asserted explicitly. The protected ingress suite checks
 monetary refusals produce `invalid_input` without a vendor operation or marker.
 
-## Live evidence still required
+## Live acceptance — passed 2026-09-12
 
-**Not executed in this implementation session:** `SZAMLAZZ_AGENT_KEY` was unset.
-No new provider acceptance, persisted-total or printed-PDF evidence is claimed.
-The focused opt-in worker case creates one actual EUR e-invoice through protected
-Order, queries its exact number, checks identity, currency, rate, all three persisted
-line/document totals, and uses the existing uncertainty-aware live cleanup. It reuses
-the #218 live infrastructure, with no automatic whole-test retries:
+The initial implementation session could not run this case because
+`SZAMLAZZ_AGENT_KEY` was unset. In a follow-up, the operator authorized issuance
+and reversal using the existing `.env` test-account credential. The focused case
+ran once through actual Restate 1.7.8 and protected Order against szamlazz.hu,
+with no whole-test retry:
 
 ```sh
-# Load the intended test-account credential and actual Restate source as in docs/testing.md.
-cargo live -E 'package(restate-szamlazz) & test(authoritative_gross_eur)'
-# Without nextest:
-cargo test -p restate-szamlazz --all-features --test live authoritative_gross_eur -- --ignored --exact --nocapture
+set -a
+source .env
+set +a
+RESTATE_SERVER_BIN=/tmp/opencode/restate-server-x86_64-unknown-linux-musl/restate-server \
+SZAMLAZZ_LIVE_RUN_ID=issue224-20260912 \
+cargo test -p restate-szamlazz --all-features --locked --test live \
+  authoritative_gross_eur -- --ignored --exact --nocapture
 ```
 
-Record the dated outcome and retained run diagnostics here after deliberate execution.
-The test proves queried persistence if it passes; it does not inspect PDF rendering,
-all currencies, VAT regimes or every provider tolerance.
+Result: **1 passed, 0 failed**, 8.51 seconds. Code under test: `3b8a347`
+(monetary implementation introduced in `99480de`).
+
+| Evidence | Observed value |
+|---|---|
+| Order | `45decc5a-512e-477e-a4d2-e047f7e2b67b` |
+| Ingress idempotency key | `45decc5a-512e-477e-a4d2-e047f7e2b67b:gross-invoice` |
+| Invocation | `inv_1d2fgdU4exkF5cqxw1VAvCVnJIiaL65HWy` |
+| Worker outcome | HTTP 200, `issued` |
+| Invoice | `E-CTEST-2026-63` |
+| Queried identity | Exact invoice number, matching order, `SZ`, `teszt=true` |
+| Currency / exchange rate | EUR / 400 |
+| Line quantity / VAT rate | 3 / 27% |
+| Persisted line and document totals | Net 23.62, VAT 6.38, gross 30.00 |
+| Cleanup reversal | `E-CTEST-2026-64` |
+
+Public monetary preflight accepted the explicit amounts before issuance. The
+test then queried the exact issued number and asserted all three line and
+document amounts, quantity, VAT rate, currency and exchange rate. Cleanup sent
+one direct Számla Agent storno with the original's queried date and appearance,
+queried its exact returned number as `SS` referencing the original, and freshly
+queried the original as reversed. No unresolved write or cleanup failure remained;
+`Restate::finish` completed successfully.
+
+This establishes provider acceptance and queried persistence for the selected
+EUR gross-first convention. It does not inspect PDF rendering, test the old
+23.61/6.39 split, or establish all currencies, VAT regimes or provider tolerances.

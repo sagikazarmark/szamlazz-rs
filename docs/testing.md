@@ -314,7 +314,8 @@ Core scenarios:
 6. `authoritative_gross_eur`: approved 3 × €10 gross through protected Order, public
    preflight, exact queried line/document 23.62 / 6.38 / 30.00 and cleanup. Select it with
    `cargo live -E 'package(restate-szamlazz) & test(authoritative_gross_eur)'`.
-   Added for #224; [live execution remains unrecorded](research/2026-09-12-authoritative-line-amounts.md).
+   Added for #224; [live acceptance passed on 2026-09-12](research/2026-09-12-authoritative-line-amounts.md#live-acceptance--passed-2026-09-12),
+   with exact persisted totals and verified cleanup reversal.
 
 PDF and credit-entry acknowledgements may omit the invoice number: a reported
 number must match, and an omitted echo is logged. PDF signatures, credit-entry
