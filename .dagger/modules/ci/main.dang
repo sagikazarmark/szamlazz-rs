@@ -104,6 +104,9 @@ type Ci {
   endToEnd: Directory! @check {
     self
       .compiled
+      # The recovery suite launches this Python tool as a subprocess. Check its
+      # runtime and source path before starting any Restate servers.
+      .withExec(["python3", "scripts/check-order-migration.py", "--help"])
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
       .withEnvVariable("CI", "true")

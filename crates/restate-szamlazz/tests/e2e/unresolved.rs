@@ -617,7 +617,7 @@ async fn migration_inventory(restate: &Restate) -> std::process::Output {
             .arg(admin)
             .env_remove("RESTATE_ADMIN_TOKEN")
             .output()
-            .expect("migration inventory process")
+            .expect("start migration inventory: python3 must be installed and available on PATH")
     })
     .await
     .expect("inventory task")
