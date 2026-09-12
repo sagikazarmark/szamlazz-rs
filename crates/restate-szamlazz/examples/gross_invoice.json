@@ -1,0 +1,12 @@
+{
+  "buyer": {"name": "Ticket buyer", "zip": "1010", "city": "Budapest", "address": "Example street 1"},
+  "items": [{
+    "name": "Conference ticket", "quantity": "3", "unit": "db",
+    "unit_price": "7.873333", "vat_rate": "27",
+    "amounts": {"net": "23.62", "vat": "6.38", "gross": "30.00"}
+  }],
+  "fulfillment_date": "2026-09-12", "due_date": "2026-09-12",
+  "payment_method": "card",
+  "overrides": {"currency": "EUR", "exchange_rate": {"bank": "MNB", "rate": "400"}},
+  "expected_totals": {"net": "23.62", "vat": "6.38", "gross": "30.00"}
+}

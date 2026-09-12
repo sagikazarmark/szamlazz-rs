@@ -121,6 +121,15 @@ fn public_money_replays_from_json_text_bytes_and_sdk() {
         token,
     );
     check(
+        &Amounts {
+            net: amount,
+            vat: amount,
+            gross: amount,
+        },
+        &["/net", "/vat", "/gross"],
+        token,
+    );
+    check(
         &serde_json::from_value::<ExchangeRateInput>(json!({"bank":"MNB", "rate":token}))
             .expect("exchange rate"),
         &["/rate"],

@@ -21,7 +21,7 @@ but an interrupted run can append the same entries again. Neither mode has Order
 a caller lock cannot fence a request still processing at szamlazz.hu.
 
 Both services are projections of the Számla Agent model: deployment constants live in configuration, line totals
-are computed, domain outcomes are returned as data.
+are computed or validated against caller assertions, domain outcomes are returned as data.
 
 ### Protection by operation
 
@@ -151,6 +151,75 @@ including lookalikes of serde_json's private arbitrary-precision representation,
 Optional response fields, a fault's included, are present as `null` when absent.
 Outstanding amounts derived from queried documents are `null` if gross is unknown or any intermediate
 credit-entry sum or final subtraction cannot fit Decimal exactly; they are never silently rounded.
+
+### Approved monetary amounts and gross-price migration
+
+`unit_price` always means **net unit price**. Without `items[].amounts`, the existing
+calculation is unchanged: round net price × quantity, round net × VAT percentage / 100,
+then add net + VAT. Rounding is half away from zero to the currency's minor unit.
+
+For externally approved prices, supply `amounts: {net, vat, gross}` on each affected
+line. These values are authoritative: the worker validates and submits them exactly,
+or returns `invalid_input` before document reads or write arming. Explicit lines may
+mix with calculated lines and use different VAT rates. The explicit convention is:
+
+- HUF/Ft amounts are whole; EUR amounts are cents. Extra **nonzero** fractional digits
+  are refused. Other currencies remain available for legacy calculation but are not
+  supported for explicit amounts until their provider precision is established.
+- Quantity is nonzero, including fractional and negative quantities. Negative prices
+  also support deductions. Net must equal rounded `unit_price × quantity`.
+- Gross must equal net + VAT exactly. VAT must equal **either** rounded `net × rate / 100`
+  **or** rounded `gross × rate / (100 + rate)` (gross-first). No tolerance or repair.
+- Numeric percentages must be in 0..=100. Supported zero-VAT codes: AAM, TAM, TAHK, ATK,
+  EUT, EUKT, F.AFA, HO, EUE, EUFADE, EUFAD37, NAM, EAM, KBAUK, KBAET. This establishes
+  arithmetic only, not eligibility for a tax code. Unknown and margin-scheme codes are
+  refused for explicit lines; the legacy open-set calculation remains unchanged.
+- Decimal inputs are exact. Explicit validation uses checked i128 coefficients and
+  rational rounding once, never floating point or rounded Decimal division. An
+  intermediate outside that bounded representation is refused even if a larger
+  arithmetic implementation could represent it. Document sums must fit Decimal exactly.
+
+For **3 × €10.00 gross at 27%**, migrate to line-gross rounding:
+
+```json
+{"name":"Tickets", "quantity":"3", "unit":"db", "unit_price":"7.873333", "vat_rate":"27",
+ "amounts":{"net":"23.62", "vat":"6.38", "gross":"30.00"}}
+```
+
+VAT is `round(30 × 27 / 127) = 6.38`; net is `30 − 6.38 = 23.62`.
+Choose sufficient net-unit precision so `round(unit_price × quantity) = net`.
+The former unit-rounded split **23.61 / 6.39 is refused**: it satisfies neither supported
+VAT convention. This is a documented caller migration requiring approval of the new
+split, not proof that szamlazz.hu would reject the old split. Keeping only net unit
+price `7.87` still computes **23.61 / 6.37 / 29.98**. There is no gross-unit-price field.
+
+Before sending, call `DocumentInput::monetary_preflight(&effective_currency)` to obtain
+the exact `items` and `totals`. `Account::build_create` uses that same method with the
+resolved account's currency override/default; it provides the full request for local
+`AgentRequest::to_wire` validation too. Neither method sends or fetches credentials.
+Include `document.expected_totals: {net, vat, gross}` in the request to enforce the
+approved document totals at execution, including for legacy calculated lines. Compare
+against independently approved amounts; don't obtain approval merely by copying a
+calculation you have not reviewed. Pin `overrides.currency` when pricing is authoritative.
+This is monetary preflight, not a new Restate handler or a guarantee of vendor acceptance.
+
+See the [complete JSON example](examples/gross_invoice.json) and run the local example:
+
+```sh
+cargo run -p restate-szamlazz --example monetary_preflight
+```
+
+JSON changes are optional additions. Rust struct literals need `amounts: None` and
+`expected_totals: None` (the existing constructors set these); `to_line_item` now returns
+`MonetaryError`, with the previous arithmetic errors nested in `Arithmetic`. Builds also
+refuse unrepresentable document totals, even when each legacy line fits independently.
+All issuing handlers share this validation. Protected execution, retained write uncertainty,
+expected-document intent and reconciliation rules continue to apply.
+
+The [provider rounding guide](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/rounding)
+documents gross-first HUF calculation. Its extension to EUR cents is covered by a focused
+opt-in create/query test, **not yet executed for this change**; see the
+[evidence scope and run command](../../docs/research/2026-09-12-authoritative-line-amounts.md).
 
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (a TOML file layered with environment overrides through figment, for instance).

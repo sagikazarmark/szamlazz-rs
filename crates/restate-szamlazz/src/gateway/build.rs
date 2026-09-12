@@ -97,6 +97,9 @@ pub enum InputError {
         #[source]
         source: ArithmeticError,
     },
+    /// Monetary assertions or exact document totals cannot be satisfied.
+    #[error(transparent)]
+    Monetary(#[from] crate::contract::MonetaryError),
 }
 
 impl Gateway {
@@ -231,14 +234,19 @@ impl Account {
         };
 
         let items = document
-            .items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                item.to_line_item(&currency)
-                    .map_err(|source| InputError::ItemOverflow { index, source })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .monetary_preflight(&currency)
+            .map_err(|error| {
+                if let crate::contract::MonetaryError::Item { index, source } = &error
+                    && let crate::contract::MonetaryError::Arithmetic(source) = **source
+                {
+                    return InputError::ItemOverflow {
+                        index: *index,
+                        source,
+                    };
+                }
+                InputError::Monetary(error)
+            })?
+            .items;
 
         Ok(CreateInvoice {
             e_invoice: overrides.e_invoice.unwrap_or(defaults.e_invoice),
@@ -661,12 +669,10 @@ mod tests {
         );
     }
 
-    /// A built request's total is summed with checked arithmetic: two items
-    /// that fit on their own but not together are `None`, never a panic (a
-    /// panic on the connection task would tear down every in-flight
-    /// invocation on it).
+    /// Monetary preflight refuses a document whose individual lines fit but
+    /// whose total does not, before it can be submitted.
     #[test]
-    fn gross_total_of_items_that_overflow_together_is_none_not_a_panic() {
+    fn document_totals_that_overflow_are_refused_before_construction() {
         let gateway = gateway(&json!({}));
         let mut document = sample_document();
         // Each item's own arithmetic fits: 1 × (MAX / 2) at 0 % VAT.
@@ -676,7 +682,7 @@ mod tests {
             LineItemInput::new("b", dec!(1), "db", half, "0"),
             LineItemInput::new("c", dec!(1), "db", half, "0"),
         ];
-        let create = gateway
+        let error = gateway
             .build_create(
                 IssuedKind::Invoice,
                 &document,
@@ -684,8 +690,11 @@ mod tests {
                 &external_id(),
                 DocumentRefs::default(),
             )
-            .expect("each item fits on its own");
-        assert_eq!(gross_total(&create), None);
+            .expect_err("document total overflows");
+        assert_eq!(
+            error,
+            InputError::Monetary(crate::contract::MonetaryError::Unrepresentable)
+        );
     }
 
     #[test]

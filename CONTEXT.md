@@ -128,6 +128,15 @@ A numeric percentage or a NAV-defined special code (AAM, TAM, EUT, KBAET, …) o
 One row of a document: name, quantity, unit, net unit price, VAT rate, and net/VAT/gross values whose arithmetic szamlazz.hu verifies server-side. When the crate derives the values (`LineItem::try_calculated`, the one derived constructor since 0.4) the rounding is an explicit `Rounding`: the currency's *minor unit* (whole forints for HUF, cents for EUR; the choice the worker makes for every document), a fixed scale, or exact; half away from zero at each step, and a value that does not fit a decimal is `ArithmeticError`, never a panic. The worker answers that error as `invalid_input`. `LineItem` is plain data (ADR 0008): the optional fields are set with functional update, not builder methods. A receipt row has no element for `margin_vat_base` or the ledger's economic-event and settlement fields, so a `CreateReceipt` carrying one is refused before the wire (`RequestError::UnsupportedOnReceipt`) rather than sent without it (#182). Minor-unit is what szamlazz.hu stores anyway: it rounds every sent value to two decimals on its own, each independently and without recomputing the gross, so an exact `100.004 / 27.00108 / 127.00508` becomes a stored `100 / 27 / 127.01` (P60); rounding per step on our side is what keeps the stored document consistent. Its `net = price × qty` check (259) tolerated a 0.5–2 HUF discrepancy and refused 5 (P60), so the half unit the rounding can introduce is inside.
 _Avoid_: `calculated` / `calculated_for_currency` / `with_comment` (the 0.3 forms, removed in 0.4: two panicked on caller money and the last was exact rather than minor-unit for every currency but HUF), unrounded/exact as a default, a receipt writer that drops a field silently
 
+**Authoritative line amounts**:
+Caller-approved net, VAT and gross values that must be submitted together without
+repair. Distinct from a net-calculated line: gross-first pricing derives VAT from
+the line gross, then net by subtraction, so rounding a net unit price first may
+produce a different split. Monetary preflight establishes the submitted amounts;
+approved document totals assert their sum before issuance. Neither establishes
+provider acceptance or settles write uncertainty. Decision: ADR 0016.
+_Avoid_: gross unit price as the meaning of `unit_price`, monetary parity checked only after issuance, arbitrary splits as provider-validated
+
 ### Restate worker concepts
 
 **Order**:

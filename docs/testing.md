@@ -310,7 +310,11 @@ Core scenarios:
    operation repetition. Full performance is 49.38 + 13.33; deduction is
    −24.69 − 6.67; final gross is 31.35. The vendor does not deduct automatically.
 5. Read-only taxpayer lookup: valid, matching tax-number stem and nonblank name, no pinned company
-   name/address. A NAV dependency failure fails this smoke explicitly.
+    name/address. A NAV dependency failure fails this smoke explicitly.
+6. `authoritative_gross_eur`: approved 3 × €10 gross through protected Order, public
+   preflight, exact queried line/document 23.62 / 6.38 / 30.00 and cleanup. Select it with
+   `cargo live -E 'package(restate-szamlazz) & test(authoritative_gross_eur)'`.
+   Added for #224; [live execution remains unrecorded](research/2026-09-12-authoritative-line-amounts.md).
 
 PDF and credit-entry acknowledgements may omit the invoice number: a reported
 number must match, and an omitted echo is logged. PDF signatures, credit-entry

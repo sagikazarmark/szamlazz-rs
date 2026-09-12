@@ -125,6 +125,61 @@ async fn call(
     reply.body
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires test-mode SZAMLAZZ_AGENT_KEY and actual Restate; issues an e-invoice"]
+async fn authoritative_gross_eur() {
+    let mut run = Run::new();
+    let restate = start().await;
+    let result = AssertUnwindSafe(async {
+        probe(&restate).await;
+        let mut body = document(dec!(7.873333), "EUR");
+        body["document"]["items"][0]["quantity"] = json!("3");
+        let approved = json!({"net":"23.62", "vat":"6.38", "gross":"30.00"});
+        body["document"]["items"][0]["amounts"] = approved.clone();
+        body["document"]["expected_totals"] = approved;
+        let input: DocumentInput = serde_json::from_value(body["document"].clone()).expect("input");
+        let preflight = input
+            .monetary_preflight(&Currency::EUR)
+            .expect("before send");
+        assert_eq!(preflight.totals.gross, dec!(30));
+        let reply = call(
+            &restate,
+            &mut run,
+            "create_invoice",
+            Some(&body),
+            "gross-invoice",
+        )
+        .await;
+        let number = issued(&reply);
+        let stored = run.by_number(&number).await;
+        assert_document(
+            &stored,
+            &number,
+            &run.order,
+            DocumentType::Invoice,
+            Currency::EUR,
+            (dec!(23.62), dec!(6.38), dec!(30)),
+        );
+        assert_eq!(stored.items.len(), 1);
+        let item = &stored.items[0];
+        assert_eq!(
+            (
+                item.quantity,
+                item.net_value,
+                item.vat_value,
+                item.gross_value
+            ),
+            (dec!(3), dec!(23.62), dec!(6.38), dec!(30))
+        );
+        assert_eq!(item.vat_rate(), VatRate::percent(27));
+        assert_eq!(stored.info.exchange_rate, Some(dec!(400)));
+    })
+    .catch_unwind()
+    .await;
+    run.finish(result).await;
+    restate.finish().await;
+}
+
 async fn probe(restate: &Restate) {
     let reply = restate
         .invoke(

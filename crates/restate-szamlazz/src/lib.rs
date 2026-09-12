@@ -9,7 +9,7 @@
 //! exposes by-number operations (query, credit entries, storno of unmanaged documents), the NAV
 //! taxpayer lookup by tax number (`query_taxpayer`) and the read-only `check_account` probe over
 //! the same gateway. Both are projections of the Számla Agent model: account constants live on the
-//! resolved [`Account`], deployment constants in [`WorkerConfig`], line totals are computed, and
+//! resolved [`Account`], deployment constants in [`WorkerConfig`], line totals are computed or validated, and
 //! domain outcomes are returned as data.
 //!
 //! - [`contract`]: the request/response types.

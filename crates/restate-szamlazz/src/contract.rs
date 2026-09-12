@@ -79,8 +79,8 @@ pub use create::{
     ProformaLink, Reissue, Warning,
 };
 pub use document::{
-    BuyerInput, DocumentInput, DocumentOverrides, ExchangeRateInput, LineItemInput, PaymentMethod,
-    PostalAddressInput, TaxpayerStatus,
+    Amounts, BuyerInput, DocumentInput, DocumentOverrides, ExchangeRateInput, LineItemInput,
+    MonetaryError, MonetaryPreflight, PaymentMethod, PostalAddressInput, TaxpayerStatus,
 };
 pub use storno::{
     DeleteMode, DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentState,

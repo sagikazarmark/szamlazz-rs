@@ -4,7 +4,7 @@
 //! These types are a *projection* of the Számla Agent model: account
 //! constants live on the resolved [`Account`](crate::account::Account) (its
 //! [`Defaults`](crate::account::Defaults) and seller block), line totals are
-//! computed here, and the payment method is an English enum. Each type
+//! computed or validated here, and the payment method is an English enum. Each type
 //! converts into its `szamlazz_agent` counterpart. Like every request type,
 //! each refuses a field it does not know (`#[serde(deny_unknown_fields)]`):
 //! a misspelt `buyer.tax_number` is an error naming the field, not an invoice
@@ -14,7 +14,10 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::ops::invoice::{Buyer, PostalAddress};
-use szamlazz_agent::{ArithmeticError, Currency, ExchangeRate, LineItem, Rounding, VatRate};
+use szamlazz_agent::{Currency, ExchangeRate, LineItem, Rounding, VatRate};
+
+mod money;
+pub use money::{Amounts, MonetaryError, MonetaryPreflight};
 
 /// One document to issue: everything the caller decides per call.
 ///
@@ -49,6 +52,10 @@ pub struct DocumentInput {
     /// Per-call overrides of the configured defaults.
     #[serde(default)]
     pub overrides: DocumentOverrides,
+    /// Approved document totals, checked against the exact sum of submitted lines.
+    /// A mismatch is refused before issuing. Omit when no total assertion is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_totals: Option<Amounts>,
 }
 
 impl DocumentInput {
@@ -72,6 +79,7 @@ impl DocumentInput {
             comment: None,
             issue_date: None,
             overrides: DocumentOverrides::default(),
+            expected_totals: None,
         }
     }
 }
@@ -284,12 +292,9 @@ impl From<TaxpayerStatus> for szamlazz_agent::TaxpayerStatus {
 
 /// One row of a document (`tétel`).
 ///
-/// Net, VAT and gross values are not part of the input: the service computes
-/// them (the Számla Agent crate's `LineItem::try_calculated`), rounded to the
-/// currency's minor unit (whole forints for HUF, cents for EUR), half away
-/// from zero at each step, so that the arithmetic szamlazz.hu verifies
-/// server-side always holds and the wire carries what the printed document
-/// can state.
+/// Without `amounts`, computes net then VAT, rounded to the currency's minor
+/// unit, half away from zero. With `amounts`, preserves the asserted values
+/// after validating the net-first or gross-first convention. See `Amounts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -311,6 +316,10 @@ pub struct LineItemInput {
     /// VAT rate (`áfakulcs`): a numeric percentage such as `27` or a
     /// NAV-defined code such as `AAM`. The code set is open.
     pub vat_rate: String,
+    /// Authoritative line amounts. Omission retains net-calculated semantics;
+    /// supplied amounts are validated, never silently rounded or replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amounts: Option<Amounts>,
     /// Account-side item identifier (`azonosító`).
     #[serde(default)]
     pub id: Option<String>,
@@ -334,6 +343,7 @@ impl LineItemInput {
             unit: unit.into(),
             unit_price,
             vat_rate: vat_rate.into(),
+            amounts: None,
             id: None,
             comment: None,
         }
@@ -345,14 +355,16 @@ impl LineItemInput {
         VatRate::from(self.vat_rate.as_str())
     }
 
-    /// The Agent line item with net, VAT and gross computed for `currency`,
-    /// rounded to its minor unit ([`Rounding::minor_unit`]).
+    /// The Agent line item with computed or validated amounts for `currency`.
     ///
     /// # Errors
     ///
-    /// [`ArithmeticError`] when a derived value overflows a [`Decimal`]; the
-    /// service answers it as `invalid_input`.
-    pub fn to_line_item(&self, currency: &Currency) -> Result<LineItem, ArithmeticError> {
+    /// [`MonetaryError`] for inconsistent or unrepresentable amounts; the
+    /// service answers it as `invalid_input` before a mutation.
+    pub fn to_line_item(&self, currency: &Currency) -> Result<LineItem, MonetaryError> {
+        if let Some(amounts) = &self.amounts {
+            return money::explicit_item(self, amounts, currency);
+        }
         Ok(LineItem {
             id: self.id.clone(),
             comment: self.comment.clone(),
@@ -434,6 +446,7 @@ pub(crate) mod tests {
     use jiff::civil::date;
     use rust_decimal::dec;
     use serde_json::json;
+    use szamlazz_agent::ArithmeticError;
 
     use super::*;
 
@@ -704,7 +717,7 @@ pub(crate) mod tests {
         let input = LineItemInput::new("x", dec!(10), "db", Decimal::MAX, "27");
         assert_eq!(
             input.to_line_item(&Currency::HUF),
-            Err(ArithmeticError::NetOverflow)
+            Err(MonetaryError::Arithmetic(ArithmeticError::NetOverflow))
         );
     }
 

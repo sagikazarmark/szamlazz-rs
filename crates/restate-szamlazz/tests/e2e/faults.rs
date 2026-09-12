@@ -72,6 +72,8 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
     );
     h.assert_state_absent(None, "E2E-10b").await;
 
+    monetary_refusals_before_vendor_operations(h).await;
+
     // The untrimmed key.
     let reply = h
         .call(
@@ -118,4 +120,44 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
         ["namespace", "account", "query"],
         "the answer was journaled as data"
     );
+}
+
+async fn monetary_refusals_before_vendor_operations(h: &Harness) {
+    // Currency-dependent assertions precede ownership queries and write arming.
+    for (suffix, pointer, amount, message) in [
+        (
+            "amounts",
+            "/document/items/0",
+            json!({"net":"1000", "vat":"271", "gross":"1271"}),
+            "amounts.vat",
+        ),
+        (
+            "expected_totals",
+            "/document",
+            json!({"net":"1000", "vat":"270", "gross":"1271"}),
+            "expected_totals",
+        ),
+    ] {
+        let order = format!("E2E-224-{suffix}");
+        create_never_sent(&h.mock, &order).await;
+        let mut body = create_body(dec!(1000));
+        body.pointer_mut(pointer).expect("input object")[suffix] = amount;
+        let reply = h
+            .call(
+                &order,
+                "create_invoice",
+                &body,
+                &format!("e2e-224-{suffix}"),
+            )
+            .await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        let fault = reply.fault();
+        assert_eq!(fault.code, TerminalCode::InvalidInput, "{fault:?}");
+        assert!(fault.message.contains(message), "{fault:?}");
+        assert!(
+            h.requests_of_order(&order).await.is_empty(),
+            "no vendor operation"
+        );
+        h.assert_state_absent(None, &order).await;
+    }
 }
