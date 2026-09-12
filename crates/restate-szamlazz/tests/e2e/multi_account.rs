@@ -83,6 +83,7 @@ pub(crate) async fn credential_failure_on_replay_preserves_operation_commands(h:
             .iter()
             .all(|entry| !entry.raw_contains("secret-store-source-sentinel"))
     );
+    h.expect_unresolved(Some("beta"), "E2E-INIT").await;
 }
 
 /// Initialization is a failure of the operation Run even on its first
@@ -175,8 +176,10 @@ pub(crate) async fn initialization_failure_is_journaled_at_the_operation(h: &Har
 pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &mut Harness) {
     h.reset().await;
 
-    // Business producers have joined. Keep operator ingress available until
-    // their scripted incidents are settled, then close all ingress and drain.
+    // Business producers have joined. Cleanup first checks the exact inventory
+    // registered by their intentional uncertainty endpoints; surprise state
+    // fails before any test-only settlement. Keep operator ingress available
+    // until those incidents are settled, then close all ingress and drain.
     h.settle_scripted_markers().await;
 
     // Private: the ingress refuses the call itself; nothing reaches the
@@ -222,6 +225,7 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     assert_eq!(reply.body["outcome"], "already_issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-1");
     assert_eq!(reply.body["external_id"], "acct:E2E-1:invoice");
+    h.assert_state_absent(Some("acme"), "E2E-1").await;
     let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.scope.as_deref(), Some("acme"), "{invocation:?}");
     let journal = h.admin().journal(reply.invocation_id()).await;
@@ -277,6 +281,8 @@ pub(crate) async fn flag_day_keeps_the_documents_and_refuses_unscoped_calls(h: &
     assert_eq!(fault.code, TerminalCode::UnknownAccount, "{fault:?}");
     assert!(fault.message.contains("gamma"), "{fault:?}");
     assert!(h.requests_of_order("E2E-16").await.is_empty());
+    h.assert_state_absent(None, "E2E-16").await;
+    h.assert_state_absent(Some("gamma"), "E2E-16").await;
 }
 
 /// The scope namespaces both identities Restate keys an invocation by. The
@@ -348,6 +354,7 @@ pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h
         );
     }
     for (reply, scope, id) in [(&acme, "acme", "acme"), (&beta, "beta", "beta")] {
+        h.assert_state_absent(Some(scope), "E2E-17").await;
         let invocation = h.admin().invocation(reply.invocation_id()).await;
         assert_eq!(invocation.scope.as_deref(), Some(scope), "{invocation:?}");
         assert_eq!(invocation.status, "completed");
@@ -405,6 +412,7 @@ pub(crate) async fn the_scope_namespaces_the_order_key_and_the_idempotency_key(h
     // The key again under each scope replays that scope's own completion.
     let before = h.requests_of_order("E2E-17B").await.len();
     for (scope, original) in [("acme", &acme), ("beta", &beta)] {
+        h.assert_state_absent(Some(scope), "E2E-17B").await;
         let replay = h
             .call_scoped(scope, "E2E-17B", "create_invoice", &body, "e2e-17b-shared")
             .await;
@@ -482,6 +490,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "reconciled", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-19");
+    h.assert_state_absent(Some("acme"), "E2E-19").await;
     let creates = h.create_bodies_of("E2E-19").await;
     assert_eq!(creates.len(), 1, "reconciliation does not resend");
     assert!(
@@ -530,6 +539,7 @@ pub(crate) async fn account_change_between_executions_does_not_reach_the_invocat
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    h.assert_state_absent(Some("acme"), "E2E-19B").await;
 }
 
 /// `beta`'s agent key is rotated between two executions of a create
@@ -603,6 +613,7 @@ pub(crate) async fn credential_rotation_between_executions_is_picked_up(h: &Harn
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "reconciled", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-20");
+    h.assert_state_absent(Some("beta"), "E2E-20").await;
     assert_eq!(reply.invocation_id(), id);
 
     let creates = h.create_bodies_of("E2E-20").await;

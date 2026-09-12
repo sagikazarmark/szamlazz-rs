@@ -88,6 +88,33 @@ async fn issue_invoice() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Monetary JSON and reported identity
+
+Use decimal **strings** when monetary models pass through framework or Serde
+wrappers. For example, a credit entry accepted by Axum 0.8's `Json<CreditEntry>` is:
+
+```json
+{"date":"2026-09-12","title":"cash","amount":"12.34"}
+```
+
+Direct `serde_json` decoding from text, bytes or a reader also accepts exactly
+representable number tokens and exponents. Axum's `serde_path_to_error` wrapper
+takes the conservative scalar path: fractional number tokens such as `12.34`
+are refused, while strings preserve exactness. `serde_ignored` directly over a
+JSON parser supports numeric monetary scalars, but a wrapped `StornoResponse`
+buffers `response` when it precedes `state`. Use strings there too for
+member-order-independent decoding. These limitations do not affect the client's
+XML response parsing. See the crate's monetary Serde rustdoc for format details.
+
+Queried invoice and receipt numbers preserve the reported string, including an
+empty or whitespace-only value; parsing is not a guarantee of usable business
+identity. Validate `!number.as_str().trim().is_empty()` before indexing by a
+reported number or using it as a mutation target, and compare it with any exact
+requested number. Preserve nonblank spelling rather than normalizing it. After
+a write, unusable identity requires reconciliation, not another issuance send.
+Credit/PDF acknowledgements deliberately allow an omitted reported number and
+must not substitute the requested target as a vendor echo.
+
 ## When the Call Fails
 
 Use the [operation recovery table](https://docs.rs/szamlazz-agent/latest/szamlazz_agent/error/index.html#recovery) for invoice creation/storno, receipt creation/storno, reads, credit entries, proforma deletion and receipt email. `outcome_class()` describes this exchange, not an earlier lost send of the logical operation. Invoice creation has no idempotency key; an immediate empty query cannot prove a create failed while it may still be in flight.

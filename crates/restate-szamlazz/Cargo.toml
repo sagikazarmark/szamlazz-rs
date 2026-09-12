@@ -39,7 +39,8 @@ url = "2.5.8"
 [dev-dependencies]
 regex = "1"
 futures-util = "0.3.32"
-jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
+# Linux reads system tzdata; the platform bundle covers Windows/macOS.
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 uuid = { version = "1", features = ["v4"] }
 # The crate itself with `test-util`, so the e2e harness can build the
 # sub-floor policies its mock is sized for; a path-only dev-dependency is

@@ -202,6 +202,7 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
         "nothing was retried by the handler: {elapsed:?}"
     );
     assert_second_call_queued_behind_the_first(h, "SZ-L1", first, second).await;
+    h.assert_state_absent(Some(SCOPE), "E2E-L1").await;
     assert_eq!(
         h.create_bodies_of("E2E-L1").await.len(),
         1,
@@ -308,6 +309,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         "the first call's create step is what re-executed: {retries:?}"
     );
     assert_second_call_queued_behind_the_first(h, "SZ-L2", first, second).await;
+    h.assert_state_absent(Some(SCOPE), "E2E-L2").await;
     assert_eq!(
         h.create_bodies_of("E2E-L2").await.len(),
         1,
@@ -376,6 +378,7 @@ pub(crate) async fn same_idempotency_key_in_flight_attaches_to_the_invocation(h:
         first.reply.body
     );
     assert_eq!(first.reply.body["invoice_number"], "SZ-L3");
+    h.assert_state_absent(Some(SCOPE), "E2E-L3").await;
     assert_eq!(
         retry.reply.body, first.reply.body,
         "the retry received the in-flight invocation's outcome"

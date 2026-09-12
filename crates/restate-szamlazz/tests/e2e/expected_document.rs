@@ -55,6 +55,7 @@ pub(crate) async fn purged_reissue_intent_cannot_replace_its_replacement(h: &Har
     let first = h.call(order, "create_invoice", &body, "intent-r").await;
     assert_eq!(first.status, 200, "{}", first.body);
     assert_eq!(first.body["outcome"], "issued");
+    h.assert_state_absent(None, order).await;
     let stored = h.call(order, "create_invoice", &body, "intent-r").await;
     assert_eq!(stored.invocation_id(), first.invocation_id());
     assert_eq!(stored.body, first.body);
@@ -116,6 +117,7 @@ pub(crate) async fn purged_deletion_intent_cannot_delete_a_replacement(h: &Harne
     let first = h.call(order, "delete_proforma", &body, "intent-d").await;
     assert_eq!(first.status, 200, "{}", first.body);
     assert_eq!(first.body, json!({"deleted": true, "reason": null}));
+    h.assert_state_absent(None, order).await;
     let stored = h.call(order, "delete_proforma", &body, "intent-d").await;
     assert_eq!(stored.invocation_id(), first.invocation_id());
     assert_eq!(stored.body, first.body);
@@ -131,6 +133,7 @@ pub(crate) async fn purged_deletion_intent_cannot_delete_a_replacement(h: &Harne
     );
     assert_eq!(h.delete_bodies_of("D-INTENT-A").await.len(), 1);
     assert!(h.delete_bodies_of("D-INTENT-B").await.is_empty());
+    h.assert_state_absent(None, order).await;
 }
 
 /// Every ordinary handler checks intent before its distinct prerequisites.
@@ -187,6 +190,7 @@ pub(crate) async fn expected_target_outcomes_precede_prerequisites(h: &Harness) 
                     format!("lookup-{kind}")
                 ]
             );
+            h.assert_state_absent(None, &order).await;
         }
     }
 }
@@ -241,6 +245,7 @@ pub(crate) async fn reissue_rechecks_the_expected_holder_after_prerequisites(h: 
     );
     assert_eq!(reply.body["existing_number"], "SZ-LOOKUP-B");
     assert!(h.create_bodies_of(order).await.is_empty());
+    h.assert_state_absent(None, order).await;
 }
 
 pub(crate) async fn purged_corrective_request_still_cannot_reissue(h: &Harness) {
@@ -276,6 +281,7 @@ pub(crate) async fn purged_corrective_request_still_cannot_reissue(h: &Harness) 
     assert_eq!(refused.status, 400, "{}", refused.body);
     assert!(h.admin().runs(refused.invocation_id()).await.is_empty());
     assert!(h.create_bodies_of(order).await.is_empty());
+    h.assert_state_absent(None, order).await;
 }
 
 pub(crate) async fn deletion_preserves_ownership_and_consumed_target_outcomes(h: &Harness) {
@@ -303,6 +309,7 @@ pub(crate) async fn deletion_preserves_ownership_and_consumed_target_outcomes(h:
             )
             .await;
         assert_eq!(reply.body, json!({"deleted": false, "reason": reason}));
+        h.assert_state_absent(None, &order).await;
     }
     let order = "E2E-INTENT-CONSUMED";
     h.absent(order, &["proforma", "prepayment", "final"]).await;
@@ -336,6 +343,7 @@ pub(crate) async fn deletion_preserves_ownership_and_consumed_target_outcomes(h:
         )
         .await;
     assert_eq!(reply.body, json!({"deleted": true, "reason": "absent"}));
+    h.assert_state_absent(None, order).await;
 }
 
 pub(crate) async fn missing_target_after_a_lost_reissue_preserves_uncertainty(h: &Harness) {
@@ -385,4 +393,5 @@ pub(crate) async fn missing_target_after_a_lost_reissue_preserves_uncertainty(h:
     );
     assert_eq!(reply.fault().is_cancelled(), Some(true));
     assert_eq!(h.create_bodies_of(order).await.len(), 1);
+    h.expect_unresolved(None, order).await;
 }

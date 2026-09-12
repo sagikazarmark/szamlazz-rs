@@ -35,7 +35,8 @@ serde_ignored = "0.1.14"
 ron = "0.12"
 futures-util = "0.3.32"
 uuid = { version = "1", features = ["v4"] }
-jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
+# Linux reads system tzdata; the platform bundle covers Windows/macOS.
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 ureq = { version = "3", default-features = false }
 wiremock = { workspace = true }

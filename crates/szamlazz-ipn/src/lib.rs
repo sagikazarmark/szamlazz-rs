@@ -71,6 +71,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
+mod decimal;
+
 #[cfg(feature = "serde")]
 mod decimal_serde;
 
@@ -306,13 +308,13 @@ fn non_empty(value: &str) -> Option<String> {
 fn parse_decimal(value: &str) -> Option<Decimal> {
     let value = value.trim();
 
-    Decimal::from_str_exact(value)
+    decimal::exact(value)
         .or_else(|error| {
             // The docs show only integer amounts and never specify a decimal
             // separator. Retain the lone-comma tolerance for "1234,56",
             // using the same exactness rule as for dot decimals.
             if value.matches(',').count() == 1 && !value.contains('.') {
-                Decimal::from_str_exact(&value.replace(',', "."))
+                decimal::exact(&value.replace(',', "."))
             } else {
                 Err(error)
             }

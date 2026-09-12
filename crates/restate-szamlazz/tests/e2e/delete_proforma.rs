@@ -49,6 +49,7 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
             assert_eq!(cancelled.fault().is_cancelled(), Some(true));
             let blocked = h.call(&order, "delete_proforma", &body, &format!("{key}-next")).await;
             assert_eq!(blocked.status, 500);
+            h.expect_unresolved(None, &order).await;
             continue;
         }
         let reply = h.call(&order, "delete_proforma", &body, &key).await;
@@ -71,6 +72,7 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
         assert_eq!(stored.invocation_id(), reply.invocation_id());
         assert_eq!(stored.body, reply.body);
         assert_eq!(h.delete_bodies_of(&number).await.len(), usize::from(reaches_send));
+        h.assert_state_absent(None, &order).await;
     }
 }
 
@@ -174,6 +176,7 @@ pub(crate) async fn interrupted_deletion_reconciles_without_requerying_or_resend
         observed.body["marker"]["operation"],
         json!({"type":"delete", "number":"D-PINNED"})
     );
+    h.expect_unresolved(None, "E2E-D-REPLAY").await;
 }
 
 /// The order's live proforma is found under its external id and deleted after
@@ -211,6 +214,7 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["deleted"], true, "{}", reply.body);
     assert!(reply.body["reason"].is_null(), "{}", reply.body);
+    h.assert_state_absent(None, "E2E-D1").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [

@@ -49,6 +49,11 @@ the `e2e` profile (one scenario at a time, no retries, 20-minute scenario timeou
 JUnit is written to `target/nextest/<profile>/junit.xml`.
 `ci.end-to-end` returns its report directory for export. Live/probe JUnit also
 stores successful test output, including the run label and document numbers.
+`dagger check` also runs `ci.money-features`, `ci.order-migration` and `ci.schemas`.
+The migration check runs only the local Python regression suite with synthetic
+inputs and a loopback server, not the inventory against a deployment. Dagger
+installs Python and system tzdata before compiling shared test targets, rather
+than installing Python after the e2e compilation has filled the Cargo cache.
 
 ```sh
 # Export the same Restate 1.7.8 binary used by Dagger.
@@ -93,7 +98,14 @@ The regression is that downstream feature unification must not change public mon
 floating-point or numeric serialization, or silently lose exact digits on round trip. The focused
 tests also exercise supported non-JSON formats and representable exponent inputs. A default workspace
 run or cargo-hack's package feature powerset alone does not establish these downstream graph cases.
-This is a separate required focused command; listing it here does not claim execution or Dagger wiring.
+The script is wired automatically as `ci.money-features` in `dagger check`; the
+local command remains useful for focused verification. Run either script's named
+Dagger check independently with:
+
+```sh
+dagger -c 'ci | money-features'
+dagger -c 'ci | order-migration'
+```
 
 ## Offline request XSD validation
 
@@ -224,12 +236,22 @@ cargo test -p szamlazz-agent --all-features --test live -- --ignored --test-thre
 cargo test -p restate-szamlazz --all-features --test live -- --ignored --test-threads=1 --nocapture
 ```
 
-On Linux, a build without Jiff's zoneinfo support can fail to load `Europe/Budapest`
-even when the system timezone database is installed. Enable it explicitly for the
-acceptance run (requires system tzdata):
+Both live suites explicitly enable Jiff's `tzdb-zoneinfo` dev feature for Linux
+and retain the platform bundle for Windows/macOS. Install system `tzdata` on
+Linux; Dagger provisions it before compilation. The normal live/probe commands
+need no extra Jiff feature flag.
+
+Each package owns its `tests/live_support` module. The worker carries only its
+observation, cleanup and assertion helpers, without including sibling Agent test
+source or adding a support crate. Its packaged live target can compile using the
+declared Agent dependency without that dependency's test sources. Compile the
+targets without contacting szamlazz.hu:
 
 ```sh
-cargo nextest run --workspace --all-features --features jiff/tzdb-zoneinfo --locked --profile live --run-ignored only
+cargo test -p szamlazz-agent --all-features --locked --test live --test probes --no-run
+cargo test -p restate-szamlazz --all-features --locked --test live --no-run
+# Local mock cleanup and timezone regressions, also selected by default/CI:
+cargo test -p szamlazz-agent --all-features --locked --test live_cleanup
 ```
 
 Missing/empty credentials or a missing required Restate source fail selected
@@ -380,7 +402,11 @@ Keep nextest output/JUnit or the Dagger trace with the release evidence.
 
 Assertion failures are caught long enough for best-effort cleanup. Known live
 documents are reversed in dependency order (final before prepayment); remaining
-proformas are deleted. Reversals are verified by type and original reference.
+proformas are deleted. Reversals require the exact reported storno candidate,
+storno type and original reference, followed by a fresh query of the exact
+original reporting `reversed = true` before dependent cleanup may proceed.
+Local mock tests exercise incomplete/mismatched evidence, blocked reads, the
+successful dependency sequence and retained uncertainty without another send.
 Cleanup failures are separate diagnostics and stop dependent cleanup. An
 unanswered write retains its exact intent diagnostic and defers mutation-based
 cleanup: absence, timeout or elapsed time cannot settle it. Reconcile the

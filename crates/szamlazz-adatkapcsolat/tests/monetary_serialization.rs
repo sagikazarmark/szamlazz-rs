@@ -4,6 +4,14 @@ use std::fmt::Write as _;
 use szamlazz_adatkapcsolat::*;
 
 fn fields<T: Serialize + DeserializeOwned>(identity: &str, fields: &[(&str, &str)]) {
+    // Exercise each field separately so a missed adapter cannot hide behind
+    // another field's rejection.
+    for (wire, _) in fields {
+        for token in ["1__2", "_12", "12_", "1.2_3", "1e1_0"] {
+            let xml = format!("<row>{identity}<{wire}>{token}</{wire}></row>");
+            assert!(quick_xml::de::from_str::<T>(&xml).is_err(), "{xml}");
+        }
+    }
     for token in [
         "9007199254740993.5",
         "79228162514264337593543950335",

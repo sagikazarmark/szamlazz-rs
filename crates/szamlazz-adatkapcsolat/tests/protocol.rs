@@ -19,6 +19,40 @@ use szamlazz_adatkapcsolat::{
 };
 use tower::util::ServiceExt as _;
 
+#[test]
+#[should_panic(expected = "Adatkapcsolat key must not be empty")]
+fn empty_fixed_key_is_rejected_at_construction() {
+    let _ = szamlazz_adatkapcsolat::axum::router("", MismatchedAck);
+}
+
+#[test]
+#[should_panic(expected = "Adatkapcsolat key must not be empty")]
+fn empty_fixed_key_with_body_limit_is_rejected_at_construction() {
+    let _ = szamlazz_adatkapcsolat::axum::router_with_body_limit(
+        "",
+        MismatchedAck,
+        BodyLimit::Unlimited,
+    );
+}
+
+#[tokio::test]
+async fn empty_presented_key_is_an_unknown_key_not_a_panic() {
+    let (status, body) = call(Some(""), OUTGOING_INVOICE, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("KEY_ERR"));
+}
+
+#[tokio::test]
+async fn numeric_lexical_shape_is_checked_only_after_authentication() {
+    let xml = br#"<banktranz xmlns="http://www.szamlazz.hu/banktranz"><id>1</id><osszeg>1__2</osszeg></banktranz>"#;
+    let (status, body) = call(Some("not-the-key"), xml, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("KEY_ERR"));
+    let (status, body) = call(Some("secret-key"), xml, true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!body.contains("valasz"));
+}
+
 #[tokio::test]
 async fn acks_document_with_valid_key() {
     let (status, body) = call(Some("secret-key"), OUTGOING_INVOICE, false).await;

@@ -90,6 +90,7 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
     assert_eq!(reply.body["invoice_number"], "HS-C1");
     assert_eq!(reply.body["kind"], "corrective");
     assert_eq!(reply.body["external_id"], "acct:E2E-C1:corrective:fix-1");
+    h.assert_state_absent(None, "E2E-C1").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [

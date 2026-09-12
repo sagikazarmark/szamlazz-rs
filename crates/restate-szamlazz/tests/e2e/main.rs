@@ -53,7 +53,8 @@
 //! keys, numbers and `Idempotency-Key`s, every stub is mounted once and
 //! discriminated by them, nothing is reset between scenarios, and every
 //! scenario's failure is reported (a panic in one does not hide the rest, and
-//! the run goes on to the second phase). The
+//! the run goes on to the second phase if its exact retained-state inventory
+//! passes; an inventory failure reports all collected failures before stopping). The
 //! second performs the documented single → multi **flag day** (private,
 //! drain, register the **multi-account** deployment (two accounts, reachable
 //! by scope only, behind a test-local mutable resolver and store), public;
@@ -65,7 +66,8 @@
 //! fetch, which the mutable store of this phase can do), the scoped reads and
 //! writes, an order Restate has no memory of, the resolve policy and a kill on
 //! the `account` step, credential rotation and account changes between
-//! executions; and, last, over the whole run, that the object kept no state,
+//! executions; and, last, over the whole run, that only explicitly expected
+//! unresolved-write state remains,
 //! that no agent key was ever journaled (the hex-decoded `raw` of every
 //! journal entry of every invocation), and that every invocation's `ctx.run`
 //! names are a prefix of one of its handler's paths and every path was walked
@@ -206,9 +208,10 @@ macro_rules! scenarios {
 /// the `storno` family and `agent_writes::agent_storno_and_…`); a scenario is
 /// selected when any needle matches. The prerequisites follow from what was
 /// selected: the flag day runs when a phase-2 scenario is selected; the three
-/// run-wide checks are **skipped** under any filter, since they count over
+/// run-wide coverage checks are **skipped** under any filter, since they count over
 /// the whole run, and a needle that selects nothing is a failure (a typo must
-/// not pass as an empty run). Unset or empty, the run is unchanged.
+/// not pass as an empty run). Exact state inventory checks still run in each
+/// selected phase. Unset or empty, the run is unchanged.
 #[derive(Debug, PartialEq, Eq)]
 struct Only(Vec<String>);
 
@@ -444,7 +447,7 @@ async fn e2e_order_protocol() {
             only.0
         );
         eprintln!(
-            "E2E_ONLY={:?}: {} of {} scenario(s) selected; the run-wide checks are skipped",
+            "E2E_ONLY={:?}: {} of {} scenario(s) selected; run-wide coverage checks are skipped; exact state inventories are checked",
             only.0,
             phase1.len() + phase2.len(),
             phase1.len() + phase2.len() + skipped1.len() + skipped2.len()
@@ -460,7 +463,19 @@ async fn e2e_order_protocol() {
     for (name, scenario) in phase1 {
         run.spawn(name, scenario(Arc::clone(&h)));
     }
-    let phase1_failures = run.join_all(&h).await;
+    let mut phase1_failures = run.join_all(&h).await;
+    // This is a correctness assertion even on a filtered run. Keep every
+    // scenario's failure, but do not let flag-day cleanup erase surprise state.
+    let inventory = Arc::clone(&h);
+    if let Err(error) = tokio::spawn(async move { inventory.assert_state_inventory().await }).await
+    {
+        phase1_failures.push(format!("phase-1 Order state inventory: {error}"));
+        Sequentially::after_phase_1(h, phase1_failures)
+            .finish()
+            .await;
+        return;
+    }
+    eprintln!("[phase 1] Order state inventory: pass");
     if !phase1_failures.is_empty() {
         // As after a failed phase-2 scenario: the flag day's `reset` verifies
         // the mock, and a failed scenario's unmet expectation was reported
@@ -483,7 +498,7 @@ async fn e2e_order_protocol() {
     // scenario failed, and reported with it; skipped under `E2E_ONLY`, since
     // they count over the whole run.
     let checks = scenarios![
-        invariants::the_order_keeps_no_state,
+        invariants::the_order_retains_only_expected_uncertainty,
         invariants::no_agent_key_in_any_journal_of_the_run,
         invariants::every_handler_journals_its_tabled_steps,
     ];
@@ -506,6 +521,11 @@ async fn e2e_order_protocol() {
     let mut run = Sequentially::after_phase_1(Arc::new(h), phase1_failures);
     run.run_all(Step::Scenario, phase2).await;
     if only.is_some() {
+        let h = Arc::clone(&run.h);
+        run.run(Step::Check, "Order state inventory", async move {
+            h.assert_state_inventory().await;
+        })
+        .await;
         report_skipped("checks", &names_of(&checks));
     } else {
         run.run_all(Step::Check, checks).await;

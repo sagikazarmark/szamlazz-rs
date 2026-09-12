@@ -229,6 +229,10 @@ impl Default for BodyLimit {
 /// [`router_with_body_limit`] to raise it or (as an explicit choice) to
 /// lift it with [`BodyLimit::Unlimited`].
 ///
+/// # Panics
+///
+/// Panics at construction if the configured key is empty.
+///
 /// [`Ok(None)`]: KeyResolver::resolve
 /// [`Err`]: KeyResolver::resolve
 pub fn router<H>(key: impl Into<String>, handler: H) -> Router
@@ -241,6 +245,10 @@ where
 
 /// Fixed-key router with a caller-selected request-body limit; see [`router`]
 /// for the protocol it answers and [`BodyLimit`] for the default it replaces.
+///
+/// # Panics
+///
+/// Panics at construction if the configured key is empty.
 pub fn router_with_body_limit<H>(
     key: impl Into<String>,
     handler: H,
@@ -250,9 +258,11 @@ where
     H: Handler + MaybeSend + MaybeSync + 'static,
     H::Error: MaybeSend,
 {
+    let key = key.into();
+    assert!(!key.is_empty(), "Adatkapcsolat key must not be empty");
     router_with_resolver_and_body_limit(
         FixedKey {
-            key: key.into(),
+            key,
             handler: Arc::new(handler),
         },
         body_limit,

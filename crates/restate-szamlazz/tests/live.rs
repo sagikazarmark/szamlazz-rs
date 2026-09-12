@@ -1,5 +1,4 @@
 //! Actual Restate → actual szamlazz.hu journeys; opt in with `cargo live`.
-#[path = "../../szamlazz-agent/tests/live_support/mod.rs"]
 mod live_support;
 
 use futures_util::FutureExt;

@@ -189,5 +189,6 @@ pub(crate) async fn all_create_kinds_record_reconciliation_before_clear(
             &h.admin().journal(reply.invocation_id()).await,
             "reconcile-write",
         );
+        h.assert_state_absent(None, &key).await;
     }
 }

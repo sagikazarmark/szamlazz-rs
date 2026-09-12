@@ -2039,7 +2039,12 @@ impl Gateway {
                 document.referenced_invoice_number,
                 request.invoice_number,
             ),
-            Err(error) => error.to_string(),
+            Err(error) => {
+                if let QueryError::CredentialsRejected(answer) = &error {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                }
+                error.to_string()
+            }
         };
         let unconfirmed = Unconfirmed::StornoVerification {
             number: created.invoice_number.to_string(),
@@ -2064,7 +2069,12 @@ impl Gateway {
         {
             Ok(Some(storno_number)) => Ok(StornoOutcome::AlreadyReversed { storno_number }),
             Ok(None) => Err(unconfirmed),
-            Err(error) => Err(unconfirmed.re_query_failed(&error)),
+            Err(error) => {
+                if let QueryError::CredentialsRejected(answer) = &error {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                }
+                Err(unconfirmed.re_query_failed(&error))
+            }
         }
     }
 

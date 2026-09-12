@@ -76,6 +76,7 @@ pub(crate) async fn create_final_names_its_live_prepayment_invoice(h: &Harness) 
     assert_eq!(reply.body["kind"], "final");
     assert_eq!(reply.body["invoice_number"], "VS-43");
     assert_eq!(reply.body["external_id"], "acct:E2E-43:final");
+    h.assert_state_absent(None, "E2E-43").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [

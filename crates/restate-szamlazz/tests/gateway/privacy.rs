@@ -1,8 +1,8 @@
 //! Diagnostics cross the same privacy boundary as document projections.
 
 use super::common::{
-    Doc, api_error, create, credit, delete, external_id_query, http_builder, not_found,
-    number_query, storno, taxpayer_query,
+    Doc, api_error, create, created_without_totals, credit, delete, external_id_query,
+    http_builder, not_found, number_query, storno, taxpayer_query,
 };
 use super::harness::*;
 use restate_szamlazz::gateway::{
@@ -12,6 +12,74 @@ use wiremock::ResponseTemplate;
 
 const KEY: &str = "DIAGNOSTIC-AGENT-KEY-215";
 const PRIVATE: &str = "PRIVATE-BUYER-TEXT-215";
+
+#[tokio::test]
+async fn unmanaged_storno_alerts_before_fallback_can_discard_credentials() {
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    for verification_fails in [true, false] {
+        let h = Harness::start().await;
+        let id = storno_id();
+        external_id_query(id.as_str())
+            .respond_with(not_found())
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        external_id_query(id.as_str())
+            .respond_with(if verification_fails {
+                Doc {
+                    referenced_invoice: Some("SZ-1"),
+                    ..Doc::new("SS-1", "SS")
+                }
+                .response()
+            } else {
+                api_error("135", &format!("{KEY} {PRIVATE}"))
+            })
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(created_without_totals("SS-1"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        number_query("SS-1")
+            .respond_with(if verification_fails {
+                api_error("135", &format!("{KEY} {PRIVATE}"))
+            } else {
+                not_found()
+            })
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        let before = logs.0.lock().expect("logs").len();
+        let outcome = h.gateway.storno(storno_request(&id)).await;
+        if verification_fails {
+            assert!(
+                matches!(outcome, Ok(restate_szamlazz::gateway::StornoOutcome::AlreadyReversed { storno_number }) if storno_number == "SS-1")
+            );
+        } else {
+            assert!(matches!(outcome, Err(Unconfirmed::ReQueryFailed { .. })));
+        }
+        let text =
+            String::from_utf8(logs.0.lock().expect("logs")[before..].to_vec()).expect("utf8");
+        assert_eq!(
+            text.matches("fix the account's agent key").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.contains("namespace=acct"), "{text}");
+        assert!(text.contains("code=135"), "{text}");
+        assert_private(&text);
+    }
+}
 
 fn assert_private(text: &str) {
     for sentinel in [KEY, PRIVATE] {

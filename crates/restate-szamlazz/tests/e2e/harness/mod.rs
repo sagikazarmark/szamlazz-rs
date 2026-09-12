@@ -26,10 +26,14 @@
 pub(crate) mod accounts;
 pub(crate) mod ingress;
 pub(crate) mod run_names;
+mod state;
 pub(crate) mod szamlazz;
 
 use restate_sdk::service::IntoServiceDefinition as _;
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+
+use state::{StateKey, check_inventory};
 
 use jiff::civil::date;
 use restate_e2e_harness::gate::{PROTOCOL_V7, SCOPED_VIRTUAL_OBJECTS, VQUEUES};
@@ -178,6 +182,8 @@ pub(crate) struct Harness {
     pub(crate) mock: MockServer,
     /// The multi-account phase's resolver and store, once the flag day ran.
     multi: Option<Arc<MutableAccounts>>,
+    /// Only scenarios that reach an intentional retained-state endpoint register.
+    expected_unresolved: Mutex<BTreeSet<StateKey>>,
 }
 
 struct TestOperator;
@@ -240,6 +246,7 @@ impl Harness {
             restate,
             mock,
             multi: None,
+            expected_unresolved: Mutex::default(),
         };
         harness.deploy(order, agent).await;
         harness
@@ -305,21 +312,73 @@ impl Harness {
         self.set_public(true).await;
     }
 
-    /// Test-only operator evidence after all scripted producers have joined.
-    /// The fake vendor has no detached processing after its requests finish;
-    /// this explicitly simulates independently audited positive settlement.
-    /// It is not a production method for inferring evidence from an inventory.
-    pub(crate) async fn settle_scripted_markers(&self) {
+    /// Register an intentional retained-state endpoint and assert its marker exists.
+    /// Call after the scenario's outcome assertions, never for temporary uncertainty
+    /// that the scenario goes on to settle. Scope is part of the object identity.
+    pub(crate) async fn expect_unresolved(&self, scope: Option<&str>, key: &str) {
+        let expected = StateKey::unresolved(scope, key);
+        let inserted = self
+            .expected_unresolved
+            .lock()
+            .expect("expectations lock")
+            .insert(expected.clone());
+        assert!(inserted, "duplicate unresolved expectation: {expected:?}");
+        check_inventory(
+            &BTreeSet::from([expected]),
+            self.order_state(scope, key).await,
+        );
+    }
+
+    /// Settled scenarios must leave no Order state, before any test-only cleanup.
+    /// SQL also works for invalid/unauthorized order keys and adds no invocations.
+    pub(crate) async fn assert_state_absent(&self, scope: Option<&str>, key: &str) {
+        check_inventory(&BTreeSet::new(), self.order_state(scope, key).await);
+    }
+
+    async fn order_state(&self, scope: Option<&str>, key: &str) -> Vec<Value> {
+        let scope = scope.map_or_else(
+            || "scope IS NULL".to_owned(),
+            |scope| format!("scope = '{}'", scope.replace('\'', "''")),
+        );
+        self.admin().sql_or_panic(&format!(
+            "SELECT scope, service_key, key FROM state WHERE service_name = 'Szamlazz.Order' AND service_key = '{}' AND {scope}",
+            key.replace('\'', "''")
+        )).await
+    }
+
+    /// Exact inventory, including unexpected state names and scopes. Runs even
+    /// for `E2E_ONLY`: expectations exist only for scenarios actually executed.
+    pub(crate) async fn assert_state_inventory(&self) {
         let rows = self
             .admin()
             .sql_or_panic(
                 "SELECT scope, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'",
             )
             .await;
-        for row in rows {
-            assert!(row["scope"].is_null(), "phase 1 is unscoped");
-            assert_eq!(row["key"], "unresolved-write");
-            let key = row["service_key"].as_str().expect("order key");
+        let expected = self
+            .expected_unresolved
+            .lock()
+            .expect("expectations lock")
+            .clone();
+        check_inventory(&expected, rows);
+    }
+
+    /// Test-only operator evidence after all scripted producers have joined.
+    /// The fake vendor has no detached processing after its requests finish;
+    /// this explicitly simulates independently audited positive settlement.
+    /// It is not a production method for inferring evidence from an inventory.
+    pub(crate) async fn settle_scripted_markers(&self) {
+        // Validate ALL state before manufacturing ANY settlement. Iterate intent,
+        // not observed rows: a surprise marker must survive for diagnosis and fail.
+        self.assert_state_inventory().await;
+        let expected = self
+            .expected_unresolved
+            .lock()
+            .expect("expectations lock")
+            .clone();
+        for entry in expected {
+            assert!(entry.scope.is_none(), "phase 1 cleanup is unscoped");
+            let key = entry.service_key.as_str();
             let observed = self
                 .invoke(
                     &Call::object("Szamlazz.Order", key, "observe_unresolved"),
@@ -328,6 +387,7 @@ impl Harness {
                 )
                 .await;
             assert_eq!(observed.status, 200, "{}", observed.body);
+            assert_eq!(observed.body["state"], "unresolved", "{}", observed.body);
             let marker = &observed.body["marker"];
             let completion = match marker["operation"]["type"].as_str().expect("operation") {
                 "create" => json!({"type":"issued","number":format!("MOCK-SETTLED-{key}")}),
@@ -344,7 +404,13 @@ impl Harness {
                 )
                 .await;
             assert_eq!(reply.status, 200, "{}", reply.body);
+            self.assert_state_absent(None, key).await;
+            self.expected_unresolved
+                .lock()
+                .expect("expectations lock")
+                .remove(&entry);
         }
+        self.assert_state_inventory().await;
     }
 
     /// The multi-account phase's resolver and store.

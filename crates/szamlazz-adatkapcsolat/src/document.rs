@@ -1786,7 +1786,7 @@ impl ReceiptBatch {
 pub(crate) mod de {
     use serde::{Deserialize, Deserializer};
 
-    use super::{Date, InvoiceAppearance, Pdf, TransactionDirection};
+    use super::{Date, Decimal, InvoiceAppearance, Pdf, TransactionDirection};
 
     pub fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
     where
@@ -1799,14 +1799,72 @@ pub(crate) mod de {
     pub fn empty_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
     where
         D: Deserializer<'de>,
-        T: std::str::FromStr,
-        T::Err: std::fmt::Display,
+        T: WireNumber,
     {
         let value = Option::<String>::deserialize(deserializer)?;
 
         match value.as_deref().map(str::trim) {
             None | Some("") => Ok(None),
-            Some(text) => text.parse().map(Some).map_err(serde::de::Error::custom),
+            Some(text) => T::parse_wire(text)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+
+    /// Numeric lexical rules belong to the wire, not a library's `FromStr` extensions.
+    pub trait WireNumber: Sized {
+        fn parse_wire(text: &str) -> Result<Self, String>;
+    }
+
+    impl WireNumber for i64 {
+        fn parse_wire(text: &str) -> Result<Self, String> {
+            text.parse::<Self>().map_err(|error| error.to_string())
+        }
+    }
+
+    impl WireNumber for Decimal {
+        fn parse_wire(text: &str) -> Result<Self, String> {
+            // Finite numeric spelling: sign, digits with an optional point,
+            // and an optional signed exponent. Check the *whole* token before
+            // Decimal can round and stop reading a fractional suffix.
+            let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+            let (base, exponent) = unsigned
+                .split_once(['e', 'E'])
+                .map_or((unsigned, None), |(base, exp)| (base, Some(exp)));
+            let mut digits = false;
+            let mut point = false;
+            for byte in base.bytes() {
+                match byte {
+                    b'0'..=b'9' => digits = true,
+                    b'.' if !point => point = true,
+                    _ => return Err("invalid numeric lexical value".to_owned()),
+                }
+            }
+            if !digits
+                || exponent.is_some_and(|exp| {
+                    let exp = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+                    exp.is_empty() || !exp.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            {
+                return Err("invalid numeric lexical value".to_owned());
+            }
+
+            // rust_decimal's parser recurses per digit until overflow or its
+            // scale limit. Leading integer zeroes postpone both indefinitely.
+            // Removing only those zeroes bounds recursion without changing
+            // the represented scale, exponent handling or rounding policy.
+            let compact = unsigned.trim_start_matches('0');
+            let compact = if compact.is_empty() || compact.starts_with(['.', 'e', 'E']) {
+                format!("0{compact}")
+            } else {
+                compact.to_owned()
+            };
+            let compact = if text.starts_with('-') {
+                format!("-{compact}")
+            } else {
+                compact
+            };
+            compact.parse::<Self>().map_err(|error| error.to_string())
         }
     }
 

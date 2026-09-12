@@ -7,7 +7,7 @@ those suites run against, exported for a developer
 
 Runs on the `rust` module's container (wired in as `container` from
 `rust:container`): the toolchain, the workspace at `/work/src` and the cargo
-caches. The two checks share one compilation of the test targets.
+caches. The Rust test and end-to-end checks share one compilation of the test targets.
 """
 type Ci {
   let container: Container!
@@ -49,11 +49,32 @@ type Ci {
   fixtures must exist; expected vendor-source conflicts are reported explicitly.
   """
   schemas: String! @check {
-    self.container
-      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends libxml2-utils python3"])
+    self.provisioned
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends libxml2-utils && rm -rf /var/lib/apt/lists/*"])
       .withExec(["cargo", "fetch", "--locked"])
       .withExec(["python3", "scripts/test-agent-schema-runner.py"])
       .withExec(["python3", "scripts/check-agent-schemas.py"])
+      .combinedOutput
+  }
+
+  """
+  Monetary Serde boundaries under downstream Decimal feature unification.
+  Runs the eight locked dependency graphs, independently of the feature powerset.
+  """
+  moneyFeatures: String! @check {
+    self.provisioned
+      .withExec(["cargo", "fetch", "--locked"])
+      .withExec(["bash", "scripts/check-money-features.sh"])
+      .combinedOutput
+  }
+
+  """
+  Local regression tests for the failure-closed Order migration inventory.
+  Uses synthetic inputs and a loopback HTTP server; no deployed Admin credentials.
+  """
+  orderMigration: String! @check {
+    self.provisioned
+      .withExec(["python3", "scripts/test-order-migration.py"])
       .combinedOutput
   }
 
@@ -83,7 +104,6 @@ type Ci {
   endToEnd: Directory! @check {
     self
       .compiled
-      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends python3"])
       .withFile("/usr/local/bin/restate-server", self.restateServer)
       .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
       .withEnvVariable("CI", "true")
@@ -118,9 +138,18 @@ exit "$status"
   """
   let compiled: Container! {
     self
-      .container
+      .provisioned
       .withFile("/usr/local/bin/cargo-nextest", self.nextestBinary)
       .withExec(["cargo", "test", "--workspace", "--all-features", "--locked", "--no-run"])
+  }
+
+  """
+  Install runtime tools before compilation fills the Cargo cache. Python serves
+  local regression checks; tzdata supplies Jiff's Linux Europe/Budapest database.
+  """
+  let provisioned: Container! {
+    self.container
+      .withExec(["sh", "-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 tzdata && rm -rf /var/lib/apt/lists/*"])
   }
 
   """

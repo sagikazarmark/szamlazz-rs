@@ -70,6 +70,7 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
         h.requests_of_order("E2E-10b").await.is_empty(),
         "nothing reached szamlazz.hu"
     );
+    h.assert_state_absent(None, "E2E-10b").await;
 
     // The untrimmed key.
     let reply = h
@@ -99,6 +100,7 @@ pub(crate) async fn refusals_and_szamlazz_codes_travel_as_structured_faults(h: &
     );
 
     // The envelope around a szamlazz.hu code.
+    h.assert_state_absent(None, " E2E-10c").await;
     let reply = h
         .call_agent(
             "query",

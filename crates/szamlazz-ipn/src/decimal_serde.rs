@@ -32,9 +32,9 @@ pub(crate) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Dec
 fn significand(text: &str) -> Result<Decimal, rust_decimal::Error> {
     // Redundant fractional zeroes do not consume precision. JSON grammar has
     // already been checked; unlike the form parser, this is typed exact input.
-    Decimal::from_str_exact(text).or_else(|error| {
+    crate::decimal::exact(text).or_else(|error| {
         if text.contains('.') {
-            Decimal::from_str_exact(text.trim_end_matches('0').trim_end_matches('.'))
+            crate::decimal::exact(text.trim_end_matches('0').trim_end_matches('.'))
         } else {
             Err(error)
         }

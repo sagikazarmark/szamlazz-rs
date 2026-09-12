@@ -98,6 +98,7 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
     assert_eq!(issued["kind"], "prepayment");
     assert_eq!(issued["invoice_number"], "ES-10");
     assert_eq!(issued["external_id"], "acct:E2E-10:prepayment");
+    h.assert_state_absent(None, "E2E-10").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [
@@ -129,6 +130,7 @@ pub(crate) async fn prepayment_converts_the_proforma_under_auto_and_by_number(h:
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "ES-10P");
+    h.assert_state_absent(None, "E2E-10P").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [

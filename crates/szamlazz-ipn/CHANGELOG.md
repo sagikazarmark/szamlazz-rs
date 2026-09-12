@@ -17,6 +17,10 @@ Breaking changes for the upcoming minor release of `szamlazz-ipn` (#149, #75):
 - Amounts use exact decimal parsing (including the existing lone-comma
   tolerance). Excess precision or range is unknown content with raw text
   preserved, never a rounded amount.
+- Form and JSON monetary parsing no longer recurse with input length. Long
+  leading-zero form amounts remain readable without a stack overflow; original
+  raw form text is retained. Form exponents remain unreadable, and JSON keeps
+  its stricter numeric grammar and exact significand/exponent policy.
 - The `serde` feature owns its JSON precision mode. Optional monetary JSON
   fields accept exact numbers or numeric strings even when built together with
   `szamlazz-agent`; they serialize consistently as strings/null. Invalid or

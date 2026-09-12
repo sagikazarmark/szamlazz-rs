@@ -1,4 +1,4 @@
-//! Shared vendor-live fixtures and failure-safe cleanup, also used by the worker.
+//! Package-local vendor-live fixtures and failure-safe cleanup.
 #![allow(dead_code)]
 
 use jiff::civil::Date;
@@ -302,18 +302,32 @@ async fn verify_reversal(
                 reply.invoice_number
             )
         })?;
-    if reversal.info.document_type == DocumentType::Storno
-        && reversal.info.referenced_invoice_number.as_ref() == Some(original)
-        && &reversal.info.invoice_number != original
+    if reversal.info.document_type != DocumentType::Storno
+        || reversal.info.referenced_invoice_number.as_ref() != Some(original)
+        || reversal.info.invoice_number != reply.invoice_number
+        || &reversal.info.invoice_number == original
     {
-        Ok(())
-    } else {
-        Err(format!(
+        return Err(format!(
             "unsupported/unverified reversal {} of {original}",
             reply.invoice_number
-        ))
+        ));
     }
+    // A storno candidate alone cannot unlock cleanup of a linked document.
+    // Query the exact original after the candidate, never reuse the pre-send read.
+    let refreshed = client
+        .send(&QueryInvoiceXml::new(InvoiceSelector::InvoiceNumber(
+            original.clone(),
+        )))
+        .await
+        .map_err(|error| format!("unverified original {original}: {error}"))?;
+    if &refreshed.info.invoice_number != original || refreshed.info.reversed != Some(true) {
+        return Err(format!("original {original} reversal is not established"));
+    }
+    Ok(())
 }
+
+#[cfg(test)]
+mod cleanup_tests;
 
 // Expected values read naturally as inline domain tokens at each scenario.
 #[allow(clippy::needless_pass_by_value)]

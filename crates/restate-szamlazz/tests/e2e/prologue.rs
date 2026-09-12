@@ -58,6 +58,7 @@ pub(crate) async fn a_flaky_resolver_is_retried_by_the_resolve_policy(h: &Harnes
     let retries = watch.finish().await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
+    h.assert_state_absent(Some(SCOPE), "E2E-14").await;
     assert!(
         elapsed < Duration::from_secs(60),
         "the resolve policy's delay was honoured, not the handler's: {elapsed:?}"
@@ -181,4 +182,5 @@ pub(crate) async fn a_killed_invocation_releases_the_order_key(h: &Harness) {
         1,
         "the queued delete's lookup"
     );
+    h.assert_state_absent(Some(SCOPE), "E2E-K").await;
 }

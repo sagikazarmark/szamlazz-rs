@@ -1,4 +1,4 @@
-//! The run-wide checks, last: the `Szamlazz.Order` object keeps no state, no
+//! The run-wide checks, last: only expected Order uncertainty remains, no
 //! agent key in any journal of the run, and every handler journals its
 //! steps in the table ([`TABLE`]);
 //! and, in phase 1, the leak scan's positive control planted.
@@ -46,6 +46,7 @@ pub(crate) async fn plant_the_leak_positive_control(h: &Harness) {
     assert_eq!(reply.body["outcome"], "rejected", "{}", reply.body);
     assert_eq!(reply.body["code"], "259", "{}", reply.body);
     assert_eq!(reply.body["message"], POSITIVE_CONTROL);
+    h.assert_state_absent(None, "E2E-12").await;
 
     let journal = h.admin().journal(reply.invocation_id()).await;
     let create_result = restate_e2e_harness::run_result(&journal, "create-invoice")
@@ -138,15 +139,14 @@ async fn recovery_paths(h: &Harness) {
         assert_eq!(response.status, 200, "{}", response.body);
         assert_eq!(response.body["evidence"], evidence);
         assert_eq!(h.invoke(&observe, None, None).await.body["state"], "absent");
+        h.assert_state_absent(None, key).await;
     }
 }
 
-/// The `Szamlazz.Order` object keeps no state: after every create, storno,
-/// delete and read of the run, on both deployments, the `state` table holds
-/// no row for the service; szamlazz.hu is the only record, and there is
-/// nothing a redeploy could leave behind. Checked over the run's invocations
-/// so that the empty table is not vacuous.
-pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
+/// Settled operations leave no state; only scenarios explicitly ending in
+/// retained uncertainty contribute an expected row, with scope and order exact.
+/// Count invocations too so an empty run cannot pass the full-suite check.
+pub(crate) async fn the_order_retains_only_expected_uncertainty(h: &Harness) {
     // Under what the run issues; a floor against an empty table proving
     // nothing (a purge or a retention change emptying `sys_invocation`).
     const ENOUGH_ORDER_INVOCATIONS: usize = 30;
@@ -161,18 +161,8 @@ pub(crate) async fn the_order_keeps_no_state(h: &Harness) {
         orders >= ENOUGH_ORDER_INVOCATIONS,
         "{orders} Szamlazz.Order invocations were run"
     );
-    let state = h.admin().sql_or_panic("SELECT service_name, service_key, key FROM state WHERE service_name = 'Szamlazz.Order'")
-        .await;
-    // Phase-1 markers were recovered before the scope switch. Phase 2 may
-    // retain new uncertainty; any remaining state must be protection state.
-    assert!(
-        state.iter().all(|row| row["key"] == "unresolved-write"),
-        "only uncertainty state: {state:?}"
-    );
-    eprintln!(
-        "  ({} unresolved markers after {orders} invocations)",
-        state.len()
-    );
+    h.assert_state_inventory().await;
+    eprintln!("  (exact Order state inventory after {orders} invocations)");
 }
 
 /// The leak check over the whole run: the hex-decoded `raw` of every journal

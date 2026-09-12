@@ -73,6 +73,7 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
     assert_eq!(first["external_id"], "acct:E2E-1:invoice");
     assert_eq!(first["gross_total"], "1270");
     assert_eq!(first.get("request_id"), None);
+    h.assert_state_absent(None, "E2E-1").await;
 
     // The prologue: the namespace pin and exactly one `account` entry, both
     // before the operation's first step; the journaled account carries its
@@ -207,6 +208,7 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
     assert_eq!(response["outcome"], "reversed", "{response}");
     assert_eq!(response["invoice_number"], "SZ-6B");
     assert_eq!(response["storno_number"], Value::Null);
+    h.assert_state_absent(None, "E2E-6B").await;
 
     // The create step was re-executed (one run retry) and journaled once.
     let runs = h.admin().runs(reply.invocation_id()).await;
@@ -303,5 +305,6 @@ pub(crate) async fn reversed_targets_answer_before_prerequisites(h: &Harness) {
             h.create_bodies_of(order).await.is_empty(),
             "{kind}: no send"
         );
+        h.assert_state_absent(None, order).await;
     }
 }

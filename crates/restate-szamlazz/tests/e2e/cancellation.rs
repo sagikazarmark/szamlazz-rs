@@ -71,6 +71,9 @@ pub(crate) async fn cancelled_reads_are_structured(h: &Harness) {
         assert_eq!(fault.is_cancelled(), Some(true));
         assert_eq!(fault.code.is_outcome_unknown(), Some(false));
         assert!(!fault.message.contains("retry"), "{fault:?}");
+        if handler == "storno_invoice" {
+            h.assert_state_absent(None, order).await;
+        }
     }
 }
 
@@ -165,6 +168,7 @@ pub(crate) async fn cancelled_storno_is_uncertain(h: &Harness) {
                 fault.message.contains("unresolved marker is retained"),
                 "{fault:?}"
             );
+            h.expect_unresolved(None, order).await;
         }
     }
 }

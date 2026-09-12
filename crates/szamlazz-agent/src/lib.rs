@@ -63,6 +63,11 @@
 //! monetary scalars also support `serde_ignored` 0.1 directly wrapping a JSON
 //! parser, whose forwarding preserves raw tokens and unknown-field callbacks.
 //! Other deserializer wrappers take the conservative scalar path above.
+//! In particular, Axum 0.8's `Json<T>` uses `serde_path_to_error`: send money as
+//! strings (for example, `"amount": "12.34"`) through that extractor. A
+//! `serde_ignored`-wrapped [`ops::storno::StornoResponse`] also needs strings for
+//! order-independent decoding: content before the adjacent tag is buffered.
+//! The scalar exception does not bypass whole-envelope unknown-field callbacks.
 //!
 //! # Features
 //!

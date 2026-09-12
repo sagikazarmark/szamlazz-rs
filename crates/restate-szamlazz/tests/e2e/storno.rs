@@ -119,6 +119,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
     assert_eq!(reversed["outcome"], "reversed", "{reversed}");
     assert_eq!(reversed["storno_number"], "SS-4");
     assert_eq!(reversed["invoice_number"], "SZ-4");
+    h.assert_state_absent(None, "E2E-4").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [
@@ -157,6 +158,7 @@ pub(crate) async fn storno_then_reissue(h: &Harness) {
     assert_eq!(reissued["external_id"], "acct:E2E-4:invoice");
     assert_eq!(reissued["invoice_number"], "SZ-4B");
     assert_eq!(h.create_bodies_of("E2E-4").await.len(), 1);
+    h.assert_state_absent(None, "E2E-4").await;
 }
 
 /// The storno handler's other path and its re-execution. An original the
@@ -246,6 +248,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
     assert_eq!(reply.body["storno_number"], "SS-4D", "{}", reply.body);
+    h.assert_state_absent(None, "E2E-4D").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [
@@ -267,6 +270,7 @@ pub(crate) async fn storno_answers_from_the_hint_or_re_executes_a_lost_send(h: &
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "reversed", "{}", reply.body);
     assert_eq!(reply.body["storno_number"], "SS-4E", "{}", reply.body);
+    h.assert_state_absent(None, "E2E-4E").await;
     let stornos = h.storno_bodies_of("SZ-4E").await;
     assert_eq!(stornos.len(), 1, "reconciliation never resends");
     assert!(stornos[0].contains(&original_telj_tag()));
@@ -383,6 +387,7 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
             h.admin().cancel(submitted.invocation_id()).await;
             let cancelled = h.invoke(&call, Some(&body), Some(order)).await;
             assert_eq!(cancelled.fault().is_cancelled(), Some(true));
+            h.expect_unresolved(None, order).await;
             continue;
         }
         let reply = h.invoke(&call, Some(&body), Some(order)).await;
@@ -429,6 +434,9 @@ pub(crate) async fn ambiguous_storno_retries_and_exhaustion_preserve_the_send(h:
         assert!(bodies.iter().all(|body| body == &bodies[0]
             && body.contains(&original_telj_tag())
             && body.contains("<eszamla>false</eszamla>")));
+        if managed {
+            h.assert_state_absent(None, order).await;
+        }
     }
 }
 
@@ -466,6 +474,7 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
         .await;
     assert_eq!(issued.status, 200, "{}", issued.body);
     assert_eq!(issued.body["outcome"], "issued", "{}", issued.body);
+    h.assert_state_absent(Some("acme"), "E2E-18").await;
     h.admin().purge(issued.invocation_id()).await;
 
     // Storno: the invoice is verified by number and reversed.
@@ -500,6 +509,7 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     assert_eq!(reversed.status, 200, "{}", reversed.body);
     assert_eq!(reversed.body["outcome"], "reversed", "{}", reversed.body);
     assert_eq!(reversed.body["storno_number"], "SS-18");
+    h.assert_state_absent(Some("acme"), "E2E-18").await;
     h.admin().purge(reversed.invocation_id()).await;
     assert!(
         h.admin().journal(issued.invocation_id()).await.is_empty()
@@ -550,6 +560,7 @@ pub(crate) async fn purged_order_is_stornoed_and_reissued(h: &Harness) {
     assert_eq!(reissued.body["outcome"], "issued", "{}", reissued.body);
     assert_eq!(reissued.body["invoice_number"], "SZ-18B");
     assert_eq!(reissued.body["external_id"], "acct:E2E-18:invoice");
+    h.assert_state_absent(Some("acme"), "E2E-18").await;
 
     // The scoped live view sees the new holder.
     h.reset().await;

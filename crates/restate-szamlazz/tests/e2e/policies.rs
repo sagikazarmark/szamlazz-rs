@@ -142,6 +142,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
         "the run policy's delay (1 s initial) was honoured, not the handler's: {elapsed:?}"
     );
     assert_eq!(reply.body["outcome"], "reconciled");
+    h.assert_state_absent(None, "E2E-11").await;
     // The run's re-execution is visible while the invocation is in flight:
     // `retry_count` (the invoker's count of starts) counts it, with the
     // create step named as the failing command, and the completed invocation
@@ -237,6 +238,7 @@ async fn flaky_read_is_re_executed(h: &Harness) {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "SZ-27");
+    h.assert_state_absent(None, "E2E-27").await;
     assert!(
         elapsed < Duration::from_secs(60),
         "the read policy's delay was honoured, not the handler's: {elapsed:?}"
@@ -335,6 +337,7 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
         h.create_bodies_of("E2E-28").await.is_empty(),
         "nothing was created"
     );
+    h.assert_state_absent(None, "E2E-28").await;
 }
 
 /// The other `Err` a write run can end with: a **cancellation**
@@ -460,6 +463,7 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         1,
         "nothing more was sent"
     );
+    h.expect_unresolved(None, "E2E-L4").await;
 }
 
 /// Submit with a known retry identity, wait until szamlazz.hu has the write,
@@ -582,4 +586,5 @@ pub(crate) async fn cancelled_one_shot_deletion_is_unknown_and_get_reconciles(h:
         .await;
     assert_eq!(again.status, 500, "{}", again.body);
     assert!(h.admin().runs(again.invocation_id()).await.is_empty());
+    h.expect_unresolved(None, "E2E-CANCEL-DELETE").await;
 }

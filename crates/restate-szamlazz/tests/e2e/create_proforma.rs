@@ -94,6 +94,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     assert_eq!(proforma["kind"], "proforma");
     assert_eq!(proforma["invoice_number"], "D-7");
     assert_eq!(proforma["external_id"], "acct:E2E-7:proforma");
+    h.assert_state_absent(None, "E2E-7").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [
@@ -126,6 +127,7 @@ pub(crate) async fn proforma_then_the_invoice_naming_it_then_get_consumed(h: &Ha
     assert_eq!(invoice["outcome"], "issued", "{invoice}");
     assert_eq!(invoice["invoice_number"], "SZ-7");
     assert_eq!(invoice["warnings"], json!([]));
+    h.assert_state_absent(None, "E2E-7").await;
     assert_eq!(
         h.admin().runs(reply.invocation_id()).await,
         [

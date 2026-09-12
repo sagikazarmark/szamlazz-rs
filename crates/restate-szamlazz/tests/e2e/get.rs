@@ -73,6 +73,7 @@ pub(crate) async fn run_retries_do_not_spend_invocation_attempts(h: &Harness) {
     assert_eq!(status["invoice"]["number"], "SZ-30", "{status}");
     assert_eq!(status["invoice"]["state"], "live");
     assert_eq!(status["proforma"], Value::Null);
+    h.assert_state_absent(None, "E2E-30").await;
     assert!(
         elapsed < Duration::from_secs(60),
         "four run retries one second apart, not the handler's policy: {elapsed:?}"

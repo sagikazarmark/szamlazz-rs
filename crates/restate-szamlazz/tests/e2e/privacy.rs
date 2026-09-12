@@ -99,6 +99,7 @@ pub(crate) async fn diagnostics_are_safe_in_run_failures_journals_and_ingress(h:
         "original and latest diagnostic: {:?}",
         observed.failures
     );
+    h.expect_unresolved(None, order).await;
 
     // A failed read is still unavailable; no write was attempted.
     number_query("SZ-PRIVACY-READ")
@@ -201,6 +202,7 @@ async fn credential_requery_keeps_the_send(h: &Harness) {
     assert_eq!(fault.is_cancelled(), Some(true));
     safe(&reply.body.to_string());
     inspect(h, reply.invocation_id(), "create-invoice", "Unresolved").await;
+    h.expect_unresolved(None, order).await;
 }
 
 async fn inspect(h: &Harness, id: &str, step: &str, category: &str) {
