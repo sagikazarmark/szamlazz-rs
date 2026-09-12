@@ -89,9 +89,7 @@ use std::fmt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use szamlazz_agent::client::BuildError;
-use szamlazz_agent::ops::credit_entry::{
-    CreditEntries, CreditEntry, InvoiceBalance, RegisterCreditEntry,
-};
+use szamlazz_agent::ops::credit_entry::InvoiceBalance;
 use szamlazz_agent::ops::invoice::{CreateInvoice, CreatedInvoice, CreationOutcome};
 use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
@@ -268,7 +266,7 @@ impl From<RejectionCode> for String {
 /// as the `request` pseudo-code, as every other response carries it.)
 impl From<RejectionCode> for DeleteReason {
     fn from(code: RejectionCode) -> Self {
-        Self::Szamlazz(String::from(code))
+        Self::Other(String::from(code))
     }
 }
 
@@ -2205,19 +2203,15 @@ impl Gateway {
         entries: &[CreditEntryInput],
         additive: bool,
     ) -> SetCreditEntriesOutcome {
-        let credit_entries = entries.iter().map(CreditEntry::from).collect::<Vec<_>>();
-        let credit_entries = match CreditEntries::try_from(credit_entries) {
-            Ok(entries) => entries,
+        let mut request = match build::credit_entry_request(number, entries, additive) {
+            Ok(request) => request,
             Err(error) => {
                 return SetCreditEntriesOutcome::Rejected(Rejection::request(error.to_string()));
             }
         };
-        let request = RegisterCreditEntry {
-            additive,
-            entries: credit_entries,
-            aggregator: self.account.defaults.aggregator.clone(),
-            ..RegisterCreditEntry::new(number)
-        };
+        request
+            .aggregator
+            .clone_from(&self.account.defaults.aggregator);
 
         match self.client.send(&request).await {
             Ok(result)
@@ -2462,6 +2456,7 @@ fn invoice_selector(selector: &Selector) -> InvoiceSelector {
 #[cfg(test)]
 mod tests {
     use rust_decimal::dec;
+    use szamlazz_agent::ops::credit_entry::RegisterCreditEntry;
     use szamlazz_agent::wire::{AgentRequest as _, RawResponse};
     use szamlazz_agent::{ParseError, RequestError};
 

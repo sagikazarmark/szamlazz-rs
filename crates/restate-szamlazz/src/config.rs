@@ -527,20 +527,21 @@ impl IssueConfig {
     /// values, derived rather than copied so that a change to the timeout
     /// moves the floor with it.
     ///
-    /// Every re-execution of the create or storno step begins with a query
-    /// for what the cut execution sent, and that query is conclusive only
-    /// once the send can no longer be in flight: the client gives up on a
-    /// reply at the timeout, but szamlazz.hu has been seen to stall that long
-    /// and still issue. The same rule sizes every write handler's
-    /// `initial_interval` (`2m`). The read and resolve policies have no floor:
-    /// a read writes nothing, and the resolve policy never reaches
-    /// szamlazz.hu.
+    /// This floor applies to unmanaged `Szamlazz.Agent.storno`, whose
+    /// query-first re-execution relies on observed vendor storno idempotence.
+    /// The delay reduces overlap with a slow exchange; neither the timeout,
+    /// the margin nor an empty query proves that vendor processing ended.
+    /// They never settle an earlier write or authorize a create resend.
     ///
-    /// The derivation holds because the gateway opens its client with the
-    /// default timeout: [`Gateway::open`](crate::gateway::Gateway::open) never
-    /// supplies its own `reqwest::Client`, on which the timeout would be the
-    /// caller's ([`Gateway::open_with_http`](crate::gateway::Gateway::open_with_http)
-    /// says so).
+    /// Protected [`Order`](crate::Order) writes instead consume one acknowledged
+    /// permission and reconcile read-only after interruption; their invocation
+    /// policy is separate from this issue policy. Read and resolve policies
+    /// have no floor because they send no mutations.
+    ///
+    /// [`Gateway::open`](crate::gateway::Gateway::open) explicitly configures
+    /// the client with `REQUEST_TIMEOUT`. Direct consumers supplying their own
+    /// HTTP client must retain a request deadline and disabled retries/redirects;
+    /// see [`Gateway::open_with_http`](crate::gateway::Gateway::open_with_http).
     pub const MIN_INITIAL_DELAY: Duration =
         szamlazz_agent::client::REQUEST_TIMEOUT.saturating_add(Self::RE_CHECK_MARGIN);
 }

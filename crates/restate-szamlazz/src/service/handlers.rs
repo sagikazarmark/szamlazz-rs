@@ -503,6 +503,7 @@ impl Agent {
         request: Body<SetCreditEntriesRequest>,
     ) -> HandlerResult<Json<SetCreditEntriesResponse>> {
         let request = request.into_request()?;
+        super::agent::validate_credit_entries(&request)?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {
             execution.set_credit_entries_request(ctx, request).await

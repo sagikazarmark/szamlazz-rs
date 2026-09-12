@@ -3,6 +3,9 @@
 
 use std::str::FromStr as _;
 
+use szamlazz_agent::ops::credit_entry::{
+    CreditEntries, CreditEntriesError, CreditEntry, RegisterCreditEntry,
+};
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::wire::AgentRequest;
@@ -12,7 +15,7 @@ use szamlazz_agent::{
 
 use super::{Gateway, StornoStepRequest};
 use crate::account::Account;
-use crate::contract::{DocumentInput, IssuedKind};
+use crate::contract::{CreditEntryInput, DocumentInput, IssuedKind};
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
 /// Exercise the exact send-boundary validation without fetching credentials or
@@ -23,6 +26,22 @@ pub(crate) fn validate_request(
 ) -> Result<(), szamlazz_agent::RequestError> {
     request.to_wire(&szamlazz_agent::Credentials::agent_key("validation"))?;
     Ok(())
+}
+
+/// Caller-owned registration content, shared by preflight validation and sending.
+/// The executing Gateway adds the separately validated account's aggregator.
+pub(crate) fn credit_entry_request(
+    number: &str,
+    entries: &[CreditEntryInput],
+    additive: bool,
+) -> Result<RegisterCreditEntry, CreditEntriesError> {
+    Ok(RegisterCreditEntry {
+        additive,
+        entries: CreditEntries::try_from(
+            entries.iter().map(CreditEntry::from).collect::<Vec<_>>(),
+        )?,
+        ..RegisterCreditEntry::new(number)
+    })
 }
 
 /// The documents a create refers to, by number.

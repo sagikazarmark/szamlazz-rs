@@ -19,6 +19,56 @@ use crate::harness::szamlazz::{
     number_query, original_telj_tag, storno_of, storno_of_number_repeating_telj,
 };
 
+/// Invalid registration content is independent of account/store availability.
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; credit validation before dependency access"]
+async fn e2e_invalid_credit_entries_need_no_account_or_credentials() {
+    use restate_e2e_harness::{Call, ReusePolicy, launcher_or_skip};
+    use restate_sdk::prelude::Endpoint;
+    use restate_szamlazz::contract::{Fault, TerminalCode};
+    use wiremock::MockServer;
+
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let server = launcher.launch(&crate::harness::MAIN_SERVER).await;
+    let mock = MockServer::start().await;
+    let (accounts, _, agent) = crate::harness::accounts::multi_account_services(&mock.uri()).await;
+    accounts.set_unavailable("acme", true);
+    server.deploy(Endpoint::builder().bind(agent).build()).await;
+    let call = Call::service("Szamlazz.Agent", "set_credit_entries").scoped("acme");
+    let entry = json!({"date":"2026-09-11","title":"transfer","amount":"1"});
+    let mut bad_date = entry.clone();
+    bad_date["date"] = json!("0000-01-01");
+    let mut bad_comment = entry.clone();
+    bad_comment["comment"] = json!("invalid\u{0000}text");
+    let mut bad_title = entry.clone();
+    bad_title["title"] = json!({"other":"invalid\u{ffff}text"});
+    for (case, entries, additive) in [
+        ("empty", vec![], false),
+        ("six", vec![entry.clone(); 6], true),
+        ("date", vec![bad_date], false),
+        ("comment", vec![bad_comment], true),
+        ("title", vec![bad_title], false),
+    ] {
+        let body = json!({"invoice_number":"SZ-VALIDATE","entries":entries,"additive":additive});
+        let reply = server.invoke(&call, Some(&body), Some(case)).await;
+        assert_eq!(reply.status, 400, "{case}: {}", reply.body);
+        assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+        assert!(server.admin().runs(reply.invocation_id()).await.is_empty());
+        assert_eq!(accounts.resolutions("acme"), 0);
+        assert_eq!(accounts.fetches("acme"), 0);
+    }
+    // A valid request must still reach the unavailable store, proving that
+    // the dependency configuration is exercised by this endpoint.
+    let body = json!({"invoice_number":"SZ-VALIDATE","entries":[entry]});
+    let reply = server.invoke(&call, Some(&body), Some("valid")).await;
+    assert_eq!(reply.fault::<Fault>().code, TerminalCode::Unavailable);
+    assert_eq!(accounts.fetches("acme"), 3);
+    assert!(mock.received_requests().await.expect("requests").is_empty());
+    server.finish().await;
+}
+
 /// Contradictory identity is a retained fault, never success attributed to the
 /// requested invoice or permission to repeat either registration mode.
 #[tokio::test]

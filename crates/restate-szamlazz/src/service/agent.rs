@@ -154,6 +154,23 @@ fn set_credit_entries_response(
     }
 }
 
+/// Refuse deterministic caller defects before resolving an account or acquiring
+/// credentials. The actual client still validates at the send boundary.
+pub(super) fn validate_credit_entries(request: &SetCreditEntriesRequest) -> Result<(), Fault> {
+    let invalid = |message| {
+        Fault::invalid_input(format!(
+            "the credit entries cannot be sent: {message}; nothing was sent"
+        ))
+    };
+    let wire = crate::gateway::build::credit_entry_request(
+        request.invoice_number.as_str(),
+        &request.entries,
+        request.additive,
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    crate::gateway::build::validate_request(&wire).map_err(|error| invalid(error.to_string()))
+}
+
 impl Execution {
     /// The `check_account` probe: the prologue has resolved whatever scope
     /// the SDK saw to an account (or refused the request as

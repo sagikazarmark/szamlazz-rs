@@ -248,6 +248,62 @@ pub(crate) async fn reissue_rechecks_the_expected_holder_after_prerequisites(h: 
     h.assert_state_absent(None, order).await;
 }
 
+#[tokio::test]
+#[ignore = "needs RESTATE_SERVER_BIN; expected target disappears after arming"]
+async fn e2e_missing_target_before_send_is_a_settled_conflict() {
+    use restate_e2e_harness::{ReusePolicy, launcher_or_skip};
+
+    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
+        return;
+    };
+    let h = Harness::start(launcher.launch(&crate::harness::MAIN_SERVER).await).await;
+    let order = "E2E-INTENT-ARMED";
+    external_id_query("acct:E2E-INTENT-ARMED:invoice")
+        .respond_with(
+            Doc {
+                reversed: true,
+                ..Doc::of("SZ-EXPECTED", "SZ", order)
+            }
+            .response(),
+        )
+        .up_to_n_times(2)
+        .expect(2)
+        .mount(&h.mock)
+        .await;
+    external_id_query("acct:E2E-INTENT-ARMED:invoice")
+        .respond_with(not_found())
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    h.absent(order, &["prepayment", "final", "proforma"]).await;
+    order_query(order)
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_for(order)
+        .respond_with(created("UNWANTED", "1000", "1270"))
+        .expect(0)
+        .mount(&h.mock)
+        .await;
+    let body = reissue_body(dec!(1000), "SZ-EXPECTED");
+    let reply = h.call(order, "create_invoice", &body, "armed-target").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "conflict");
+    assert_eq!(reply.body["conflict_reason"], "target_changed");
+    assert!(reply.body["existing_number"].is_null());
+    let runs = h.admin().runs(reply.invocation_id()).await;
+    assert!(runs.iter().any(|name| name == "arm-write"));
+    assert!(runs.iter().any(|name| name == "create-invoice"));
+    assert!(!runs.iter().any(|name| name == "reconcile-write"));
+    h.assert_state_absent(None, order).await;
+    let retained = h.call(order, "create_invoice", &body, "armed-target").await;
+    assert_eq!(retained.invocation_id(), reply.invocation_id());
+    assert_eq!(retained.body, reply.body);
+    assert!(h.create_bodies_of(order).await.is_empty());
+    h.assert_state_absent(None, order).await;
+    h.finish().await;
+}
+
 pub(crate) async fn purged_corrective_request_still_cannot_reissue(h: &Harness) {
     let order = "E2E-INTENT-C";
     external_id_query("acct:E2E-INTENT-C:corrective:fix")

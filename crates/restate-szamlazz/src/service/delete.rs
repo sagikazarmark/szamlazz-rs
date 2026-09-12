@@ -308,7 +308,7 @@ mod tests {
                 &namespace,
             )
             .expect("data"),
-            DeleteProformaResponse::not_deleted(DeleteReason::Szamlazz("57".to_owned()))
+            DeleteProformaResponse::not_deleted(DeleteReason::Other("57".to_owned()))
         );
 
         let (status, body) = fault_body(

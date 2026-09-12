@@ -199,7 +199,7 @@ An intentional stop of a Restate invocation, distinct from infrastructure unavai
 _Avoid_: cancellation as rollback, cancellation as dependency unavailability, cancellation as permission to reissue
 
 **Reissue**:
-Explicit replacement of the particular reversed document named by `options.reissue: {expected_number}`, after settling any earlier write uncertainty; the replacement becomes the newest holder of the same *External id*. An absent or changed target before arming is `conflict{target_changed}`, a matching live target is `conflict{live}`, and a reply naming the old target does not establish replacement: retain uncertainty and reconcile read-only ([ADR 0012](docs/adr/0012-expected-document-mutation-intent.md), [protected protocol](docs/design/order-write-protocol.md)).
+Explicit replacement of the particular reversed document named by `options.reissue: {expected_number}`, after settling any earlier write uncertainty; the replacement becomes the newest holder of the same *External id*. An absent or changed target before arming, or an absent target at the permitted final pre-send check, is `conflict{target_changed}` with nothing sent. A matching live target is `conflict{live}`, and a reply naming the old target does not establish replacement: retain uncertainty and reconcile read-only ([ADR 0012](docs/adr/0012-expected-document-mutation-intent.md), [protected protocol](docs/design/order-write-protocol.md)).
 _Avoid_: re-create, retry (a retry targets the same document)
 
 **Expected-document intent**:

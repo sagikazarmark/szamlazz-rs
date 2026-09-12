@@ -49,6 +49,10 @@ missing or unusable fulfillment date is instead `unavailable`, with no send or n
 the caller cannot choose that date. Create validates before document reads and again after resolving
 references; storno validates after deriving the original's facts.
 
+Credit-entry registration validates entry count, empty replacement, dates and XML text
+before the prologue. Invalid caller content is `invalid_input` even when the account
+resolver or credential store is unavailable; no credentials are fetched for it.
+
 ## Quick Start
 
 Bind both services to a Restate endpoint of your own, with the two things Restate's own guidance asks of an
@@ -365,7 +369,7 @@ reasons:
 | `prepaid_chain` | A plain invoice while the order's own prepayment invoice or final invoice is live, or a prepayment invoice while the order's own invoice or final invoice is. The final invoice keeps the chain closed after its prepayment is reversed. |
 | `order_invoiced` | A proforma after the order's own live invoice, prepayment invoice or final invoice. |
 | `live` | The expected reissue document is still live. |
-| `target_changed` | The expected reissue document is absent or a different owned holder is newest (`existing_number` when known). No send; never automatically substitute that number. |
+| `target_changed` | The expected reissue document is absent (including at the final permitted pre-send check) or a different owned holder is newest (`existing_number` when known). No send; never automatically substitute that number. Absence after an uncertain send instead retains write protection. |
 | `foreign` | A live invoice under the order number that is under none of the order's external ids (another channel's). |
 | `duplicate_order_number` | szamlazz.hu refused the protected create's sole permitted send (71/152). An optional diagnostic query may supply `existing_number`; its result does not replace the original refusal. |
 | `external_id_collision` | The external id's holder does not carry this order's number and kind. |
@@ -411,6 +415,8 @@ answer. Not cached by the worker; cache it in the caller with a TTL on the order
 `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
 `managed_by_order`, `unsupported_order_number`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
 `QueryResponse` and `SetCreditEntriesRequest` / `SetCreditEntriesResponse` are the remaining handler contracts.
+`DeleteReason` preserves unfamiliar strings in `Other(String)`, including vendor codes. The single
+wire string cannot distinguish a vendor code from a future worker reason; do not infer its origin.
 `Szamlazz.Agent.storno` returns `managed_by_order` only when the reported order number is a supported `OrderKey`.
 Otherwise it returns `UnsupportedOrderNumber` (`unsupported_order_number`), preserves the reported string in
 `order_key`, and explains the failed rule in `message`. Nothing was sent: reverse in szamlazz.hu and reconcile

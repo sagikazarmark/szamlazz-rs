@@ -315,7 +315,7 @@ impl DeleteProformaResponse {
 /// Serialises as the one string it always was (`absent`, `proforma_paid`,
 /// `external_id_collision`, `target_changed`, or the code as szamlazz.hu wrote it); `#[non_exhaustive]`
 /// and open on the way in, like every response type: a token this version
-/// does not know reads as [`DeleteReason::Szamlazz`].
+/// does not know reads as [`DeleteReason::Other`], without inferring its origin.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DeleteReason {
@@ -332,8 +332,9 @@ pub enum DeleteReason {
     /// number's fresh query returned a different document id, number, order
     /// or type. `force` never bypasses these guards.
     TargetChanged,
-    /// szamlazz.hu refused the deletion with this code.
-    Szamlazz(String),
+    /// An unclassified reason: a vendor code or a worker token this version
+    /// does not know. The wire string alone cannot establish its origin.
+    Other(String),
 }
 
 impl DeleteReason {
@@ -354,7 +355,7 @@ impl DeleteReason {
             Self::ProformaPaid => Self::PROFORMA_PAID,
             Self::ExternalIdCollision => Self::EXTERNAL_ID_COLLISION,
             Self::TargetChanged => Self::TARGET_CHANGED,
-            Self::Szamlazz(code) => code,
+            Self::Other(reason) => reason,
         }
     }
 }
@@ -365,8 +366,8 @@ impl fmt::Display for DeleteReason {
     }
 }
 
-/// From the wire string: the worker's tokens as themselves, anything else as
-/// szamlazz.hu's code.
+/// From the wire string: known worker tokens as themselves, anything else
+/// preserved without classification.
 impl From<String> for DeleteReason {
     fn from(reason: String) -> Self {
         match reason.as_str() {
@@ -374,7 +375,7 @@ impl From<String> for DeleteReason {
             Self::PROFORMA_PAID => Self::ProformaPaid,
             Self::EXTERNAL_ID_COLLISION => Self::ExternalIdCollision,
             Self::TARGET_CHANGED => Self::TargetChanged,
-            _ => Self::Szamlazz(reason),
+            _ => Self::Other(reason),
         }
     }
 }
@@ -382,7 +383,7 @@ impl From<String> for DeleteReason {
 impl From<DeleteReason> for String {
     fn from(reason: DeleteReason) -> Self {
         match reason {
-            DeleteReason::Szamlazz(code) => code,
+            DeleteReason::Other(reason) => reason,
             token => token.as_str().to_owned(),
         }
     }
@@ -811,8 +812,7 @@ mod tests {
 
     /// The delete response's `reason` is the worker's own token or
     /// szamlazz.hu's code, on the wire the one string it always was; a token
-    /// this version does not know reads as a szamlazz.hu code (the response
-    /// stays open).
+    /// this version does not know remains unclassified (the response stays open).
     #[test]
     fn delete_response_round_trips() {
         let json = round_trip(&DeleteProformaResponse::deleted());
@@ -822,7 +822,7 @@ mod tests {
         for (reason, wire) in [
             (DeleteReason::ProformaPaid, "proforma_paid"),
             (DeleteReason::ExternalIdCollision, "external_id_collision"),
-            (DeleteReason::Szamlazz("335".to_owned()), "335"),
+            (DeleteReason::Other("335".to_owned()), "335"),
         ] {
             let json = round_trip(&DeleteProformaResponse::not_deleted(reason.clone()));
             assert_eq!(
@@ -836,7 +836,7 @@ mod tests {
         }
         assert_eq!(
             serde_json::from_value::<DeleteReason>(json!("later_token")).expect("open"),
-            DeleteReason::Szamlazz("later_token".to_owned())
+            DeleteReason::Other("later_token".to_owned())
         );
     }
 

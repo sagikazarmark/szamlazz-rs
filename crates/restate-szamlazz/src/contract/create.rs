@@ -50,8 +50,8 @@ impl CreateRequest {
 pub struct CreateOptions {
     /// Explicitly replace the named reversed document. Keep this intent on
     /// retries; a different or absent holder at lookup answers
-    /// `conflict{target_changed}`. Absence inside the create step instead
-    /// preserves possible earlier-send uncertainty as `outcome_unknown`.
+    /// `conflict{target_changed}`, including absence at the final pre-send
+    /// check. Absence after an uncertain send never settles that write.
     /// Omit for ordinary creation; legacy booleans are refused.
     pub reissue: Option<Reissue>,
     /// Which proforma the document converts, on `create_invoice` and

@@ -110,9 +110,10 @@ impl Identity {
     ) -> Result<CreateResponse, Fault> {
         Ok(match outcome {
             gateway::CreateOutcome::TargetChanged => {
-                return Err(Fault::outcome_unknown(
-                    "the expected reversed holder disappeared inside the create step; no further create was sent, but an earlier send may have landed; reconcile before deliberately renewing the operation with the same expected number",
-                ));
+                // Only the permitted leading query produces this result. An
+                // interrupted send replays without permission and reconciles
+                // read-only, so this recorded result proves no send occurred.
+                self.conflict(ConflictReason::TargetChanged)
             }
             gateway::CreateOutcome::Issued(issued) => {
                 let mut response = self

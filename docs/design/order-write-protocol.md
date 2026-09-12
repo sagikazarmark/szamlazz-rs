@@ -83,6 +83,11 @@ external id and takes the order hint only if that id is absent. A colliding hold
 
 ## Acknowledgement identity
 
+If the expected reissue target disappears at the permitted leading query, the result is
+`conflict{target_changed}` with no send. The recorded result precedes marker clearance.
+An interrupted send cannot reach this branch on replay: it has no permit and reconciles
+read-only, where absence retains uncertainty.
+
 A protected create reply naming the expected old reissue document does not establish a replacement.
 The send is `Unconfirmed`, journaled as unresolved data; the marker remains and `reconcile-write` requires
 matching issuance evidence with a number distinct from the expected old target. No second create is sent.

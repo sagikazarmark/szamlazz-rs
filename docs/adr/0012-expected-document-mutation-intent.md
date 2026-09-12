@@ -24,10 +24,11 @@ holder (live or reversed) is `conflict{target_changed}`, with `existing_number`
 when known. The expected holder live is `conflict{live}`; reversed, it may
 proceed through prerequisites. Repeat the precondition at the full lookup.
 The create step may send only past that same reversed number; its disappearance
-does not authorize an ordinary create. Inside that step absence is
-`outcome_unknown`, because the execution may follow an earlier unconfirmed send;
-the stateless step cannot prove it is the first execution. It stops without
-another send. Before the create step, absence remains `conflict{target_changed}`.
+does not authorize an ordinary create. Absence at the permitted leading query
+is also `conflict{target_changed}`: the acknowledged one-use permit proves that
+this invocation has not sent. Record that settled result before clearing the marker.
+After an interrupted send, completed arming cannot grant permission again;
+read-only reconciliation preserves uncertainty on absence instead.
 A replacement found by a re-executed
 create step retains the existing recovery outcomes (`issued` when live,
 `reversed` when reversed), with no further send.

@@ -436,8 +436,9 @@ through the gateway opened for this execution.
      acknowledged; **nothing is sent**, the handler answers `outcome: reversed`); `reversed` itself reported live →
      `LiveAgain(doc)` (a server inconsistency; **nothing is sent**, answered `conflict{live}`); invalid →
       `Collision(doc)`; 7 without reissue, or `reversed` still reversed → send; 7 with an expected reversed
-      holder → `TargetChanged`, no further send, mapped to `outcome_unknown` because an earlier execution
-      may have sent; 3/135/136/164 → `Ok(CredentialsRejected{code,
+       holder → `TargetChanged`, no send, mapped to `conflict{target_changed}`: only the permitted
+       leading query reaches this branch; interrupted sends reconcile read-only instead.
+       3/135/136/164 → `Ok(CredentialsRejected{code,
      message})` (settled, nothing sent); **another code → `Ok(Api{code, message})` and `szlahu_down` →
      `Ok(Unavailable{message})`**; answers, settled with nothing sent (#63): the handler raises
      `TerminalError{unavailable}` at once, for a code, the same fault the lookup step raises for it; for
