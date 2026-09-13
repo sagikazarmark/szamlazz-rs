@@ -13,16 +13,12 @@
 use std::ops::ControlFlow;
 
 use restate_sdk::errors::HandlerError;
-#[cfg(test)]
-use restate_sdk::errors::TerminalError;
 use restate_sdk::prelude::ObjectContext;
 use szamlazz_agent::DocumentType;
 use szamlazz_agent::ops::invoice::CreateInvoice;
 
 use super::prologue::Execution;
 use super::support::{AnsweredCode, Fault, verified_document};
-#[cfg(test)]
-use super::support::{initialization_fault, is_cancelled};
 use super::support::{lookup, run_reading, verify};
 use crate::contract::{
     ConflictReason, CorrectRequest, CreateOutcome, CreateRequest, CreateResponse, DocumentInput,
@@ -468,29 +464,6 @@ fn decide_base(
         )));
     }
     Ok(None)
-}
-
-/// Test helper for the fault vocabulary of interrupted writes. Production
-/// protected writes attach identity and retain their marker in `protected_write`.
-/// Neither exhaustion nor cancellation authorizes renewal before settlement.
-#[cfg(test)]
-fn create_outcome_unknown(error: &TerminalError, order: &OrderKey, identity: &Identity) -> Fault {
-    if let Some(fault) = initialization_fault(error, "reconcile before deliberately renewing") {
-        return identity.about(order, fault);
-    }
-    let message = if is_cancelled(error) {
-        format!(
-            "the create step was cancelled ({}) before its outcome was confirmed; a send may have landed: reconcile before deliberately renewing",
-            error.code()
-        )
-    } else {
-        format!(
-            "the create step ended without a confirmed outcome ({}): {}; reconcile before deliberately renewing",
-            error.code(),
-            error.message()
-        )
-    };
-    identity.about(order, Fault::outcome_unknown(message).with_run_cause(error))
 }
 
 /// Both target decisions require explicit reissue intent to name the owned
@@ -2195,60 +2168,6 @@ mod tests {
             .expect("refused");
         assert_eq!(response.conflict_reason, Some(ConflictReason::BaseReversed));
         assert_eq!(response.existing_number.as_deref(), Some("SZ-1"));
-    }
-
-    // ----- step 4: the create step's own fault -----------------------------
-
-    /// Step 4, a create step whose run ended without a settled outcome
-    /// (the issue policy exhausted, 500, or the invocation cancelled, 409):
-    /// the `outcome_unknown` fault (500) naming how the run ended and the
-    /// last `Unconfirmed` display, telling the caller to retry with a new
-    /// `Idempotency-Key`, and about the document being created.
-    #[test]
-    fn an_unsettled_create_step_is_outcome_unknown_repeating_the_last_failure() {
-        let identity = invoice_identity();
-
-        let exhausted = TerminalError::new_with_code(
-            500,
-            "open code 55: signing; the re-query that would have settled it failed: HTTP 500",
-        );
-        let (status, body) = fault_body(create_outcome_unknown(&exhausted, &ord_1(), &identity));
-        assert_eq!(status, 500, "{body}");
-        assert_eq!(
-            body["code"],
-            TerminalCode::OutcomeUnknown.as_str(),
-            "{body}"
-        );
-        let message = body["message"].as_str().expect("message");
-        assert!(
-            message.contains("(500)"),
-            "names how the run ended: {message}"
-        );
-        assert!(
-            message.contains("open code 55"),
-            "the last failure: {message}"
-        );
-        assert!(message.contains("HTTP 500"), "{message}");
-        assert!(
-            message.contains("reconcile before deliberately renewing"),
-            "{message}"
-        );
-        assert_eq!(body["order"], "ORD-1", "{body}");
-        assert_eq!(body["kind"], "invoice", "{body}");
-        assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
-        assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
-
-        let cancelled = TerminalError::new_with_code(409, "cancelled");
-        let (status, body) = fault_body(create_outcome_unknown(&cancelled, &ord_1(), &identity));
-        assert_eq!(status, 500, "still outcome_unknown: {body}");
-        let message = body["message"].as_str().expect("message");
-        assert!(message.contains("(409)"), "{message}");
-        assert!(message.contains("cancelled"), "{message}");
-        assert!(
-            message.contains("a send may have landed: reconcile"),
-            "a cancelled write reconciles before it retries: {message}"
-        );
-        assert_eq!(body["external_id"], "acct:ORD-1:invoice", "{body}");
     }
 
     /// A create reply parsed the way the gateway parses it and projected the

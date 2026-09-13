@@ -1,14 +1,11 @@
-//! The run retry policies under Restate, driven through `create_invoice`: a
-//! read the issue or read policy re-executes and a step it gives up on, the
-//! exhaustion stored under the caller's `Idempotency-Key` as a structured
-//! fault and replayed by it, and a cancellation while a send's reply is in
-//! flight (the other `Err` a write run can end with). What a policy decides
-//! on a given answer is the gateway's (`Unanswered`, `Unconfirmed`) and the
-//! handlers' (`create_outcome_unknown`, the exhausted read's fault), unit
-//! tested; what is proved here is Restate's part: the re-execution and its
-//! delay, `retry_count` and the failing command on `sys_invocation` while in
-//! flight, one journal entry per step whatever the retries, and the stored
-//! completion.
+//! Read retries and protected Order writes under Restate: read-only
+//! reconciliation after a lost create answer, ordinary read-policy retries
+//! and exhaustion, and cancellation while a write's reply is in flight.
+//! These scenarios exercise the production protected-write boundary, including
+//! cancellation fault context and the retained marker guarding later mutations.
+//! They also check re-execution and its delay, `retry_count` and the failing
+//! command on `sys_invocation`, one journal entry per step, and retained
+//! completions under the caller's `Idempotency-Key`.
 
 use std::time::{Duration, Instant};
 
@@ -24,18 +21,14 @@ use crate::harness::szamlazz::{
 };
 use crate::harness::{Harness, create_body};
 
-/// The three policies' Restate half, on three orders at once:
+/// Protected reconciliation and the read policy, on three orders at once:
 ///
-/// - **the issue policy re-executes a write and its exhaustion is a
-///   structured fault the key replays** (`E2E-11`): every execution of the
-///   create step loses its reply and the re-query finds nothing, so the step
-///   is re-executed once (one second later under the test policy, not the
-///   handler's two-minute `initial_interval`; `retry_count` moves and
-///   `create-invoice` is the failing command while in flight) and its
-///   exhaustion is `outcome_unknown` (500) naming the order, kind and
-///   external id; the same `Idempotency-Key` then replays the stored fault
-///   without a request, and a new key finds the document that landed after
-///   all and answers `already_issued` from the target lookup with nothing sent;
+/// - **a lost create answer settles through read-only reconciliation**
+///   (`E2E-11`): one create loses its reply and the first reconciliation finds
+///   nothing. The invocation re-executes `reconcile-write` after the test's
+///   one-second delay, finds the document and answers `reconciled`, clearing
+///   its marker. The same `Idempotency-Key` replays that completion without a
+///   request; a new key then answers `already_issued` from the target lookup.
 /// - **the read policy re-executes a read** (`E2E-27`): the target lookup's
 ///   external-id query answers 500 once and code 7 afterwards; the create
 ///   completes `issued` in one invocation with `lookup-invoice` the failing
@@ -49,14 +42,14 @@ use crate::harness::{Harness, create_body};
 /// resolution can be scripted per scope.
 #[allow(
     clippy::too_many_lines,
-    reason = "one scenario: the three policies, each on its own order, concurrently"
+    reason = "one scenario: reconciliation and read policies on separate orders, concurrently"
 )]
 pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault(
     h: &Harness,
 ) {
-    // The exhausted create: the target lookup, full lookup, then two
-    // executions' leading query and re-query miss (six queries); the document
-    // that landed after all is found by the next call's target lookup.
+    // The lost create answer: target lookup, full lookup, leading query and
+    // first reconciliation miss (four queries). Read-only reconciliation
+    // finds the document on its next execution; no second send is permitted.
     h.absent("E2E-11", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-11")
@@ -110,20 +103,19 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
     create_never_sent(&h.mock, "E2E-28").await;
 
     tokio::join!(
-        exhausted_create_then_the_key_replays(h),
+        reconciled_create_then_the_key_replays(h),
         flaky_read_is_re_executed(h),
         exhausted_read_is_unavailable(h),
     );
 }
 
-/// The issue policy's half of the scenario above, on `E2E-11`: the
-/// exhaustion, the stored fault the same key replays, the next key's
-/// `already_issued`.
+/// The protected create on `E2E-11`: read-only reconciliation, the completion
+/// the same key replays, and the next key's `already_issued`.
 #[allow(
     clippy::too_many_lines,
-    reason = "the exhaustion, the stored fault, the next key"
+    reason = "the reconciliation, the stored completion, the next key"
 )]
-async fn exhausted_create_then_the_key_replays(h: &Harness) {
+async fn reconciled_create_then_the_key_replays(h: &Harness) {
     let started = Instant::now();
     let watch = h.watch("E2E-11");
     let reply = h
@@ -139,26 +131,25 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(60),
-        "the run policy's delay (1 s initial) was honoured, not the handler's: {elapsed:?}"
+        "the test invocation policy's reconciliation delay (1 s initial) was honoured: {elapsed:?}"
     );
     assert_eq!(reply.body["outcome"], "reconciled");
     h.assert_state_absent(None, "E2E-11").await;
-    // The run's re-execution is visible while the invocation is in flight:
-    // `retry_count` (the invoker's count of starts) counts it, with the
-    // create step named as the failing command, and the completed invocation
-    // carries the structured fault.
+    // Read-only reconciliation re-executes while the invocation is in flight:
+    // `retry_count` (the invoker's count of starts) counts it, and the failing
+    // command is reconcile-write, never a second create send.
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
         retries.failing_commands,
         ["reconcile-write"],
-        "the run, not the handler, is what retried: {retries:?}"
+        "only read-only reconciliation retried: {retries:?}"
     );
     assert!(
         retries
             .failures
             .iter()
             .all(|failure| failure.contains("unresolved")),
-        "the last failure is the Unconfirmed message: {retries:?}"
+        "reconciliation reports retained uncertainty: {retries:?}"
     );
     let invocation = h.admin().invocation(reply.invocation_id()).await;
     assert_eq!(invocation.handler, "create_invoice");
@@ -168,7 +159,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
     assert_eq!(
         runs.iter().filter(|name| *name == "create-invoice").count(),
         1,
-        "the re-executed step is one entry: {runs:?}"
+        "the create step was recorded once: {runs:?}"
     );
     assert_eq!(
         h.create_bodies_of("E2E-11").await.len(),
@@ -176,7 +167,7 @@ async fn exhausted_create_then_the_key_replays(h: &Harness) {
         "one send across every execution"
     );
 
-    // The same key: the stored fault, nothing read.
+    // The same key: the stored reconciled completion, nothing read.
     let before = h.requests_of_order("E2E-11").await.len();
     let replayed = h
         .call(
@@ -340,16 +331,15 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
     h.assert_state_absent(None, "E2E-28").await;
 }
 
-/// The other `Err` a write run can end with: a **cancellation**
+/// A **cancellation**
 /// (`PATCH /invocations/{id}/cancel`, the SDK's 409) while the create step is
-/// mid-send is `outcome_unknown` like an exhausted policy (#142, #125). The
+/// mid-send is `outcome_unknown` with `cause: cancelled` (ADR 0011). The
 /// send is delayed by szamlazz.hu; the cancel arrives while the reply is in
 /// flight; the SDK does not interrupt the closure, so the step's own send
 /// completes, and the cancel is what the step's result await sees. The
 /// invocation completes with the fault (never `issued`, never a kill), the
-/// order key is released by that completion, and the next call with a new key
-/// finds the document that landed and answers `already_issued` from its lookup
-/// with nothing sent. The cancelled invocation's runs are the full create
+/// order key is released by that completion, and its unresolved marker refuses
+/// the next mutation before any lookup or send. The cancelled invocation's runs are the full create
 /// path (the step's command was journaled before the cancel arrived), so no
 /// `RUN_NAMES` row is added: a cancellation anywhere on the path leaves a
 /// prefix, which the step-name table admits.
@@ -447,8 +437,8 @@ pub(crate) async fn a_cancellation_mid_send_is_outcome_unknown_and_releases_the_
         "the one send that landed"
     );
 
-    // The key is released by the completion: the next call runs at once and
-    // finds what landed.
+    // The key is released by the completion: the next mutation runs at once
+    // but the retained marker refuses it before any external operation.
     let started = Instant::now();
     let next = h.call("E2E-L4", "create_invoice", &body, "e2e-l4-k2").await;
     assert!(

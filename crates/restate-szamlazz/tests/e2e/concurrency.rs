@@ -1,8 +1,8 @@
 //! The `Szamlazz.Order` lock and the in-flight `Idempotency-Key`, same key,
 //! same scope: two `create_invoice` calls racing on one order with distinct
 //! keys get one document (the second is queued behind the Virtual Object's
-//! per-key lock while the first is mid-send, or while the first's create step
-//! is between its two executions), and a retry with the **same** key while the
+//! per-key lock while the first is mid-send, or while the first invocation
+//! re-executes read-only reconciliation), and a retry with the **same** key while the
 //! first invocation is still in flight attaches to it instead of queueing a
 //! second invocation (#125). Phase 2, under the `acme` scope: the first
 //! invocation is **held** where the scenario needs it by a parked credential
@@ -210,32 +210,19 @@ pub(crate) async fn same_key_same_scope_concurrent_creates_issue_once(h: &Harnes
     );
 }
 
-/// The re-execution variant: the first call's send is answered
-/// `szlahu_down` (nothing landed: the immediate re-query finds nothing, the
-/// create step is *Unconfirmed*, and the issue policy re-executes it after its
-/// `initial_delay`), and the second call arrives **between the two
-/// executions**: the first invocation's second execution is held at its
-/// credential fetch (after it replayed its journal, before it opens its
-/// gateway and sends again), the second call is accepted and queued behind
-/// the lock while it is held, and only then is it released to send. The
-/// second send lands; the second call then finds the document from its
-/// lookup. Two creates on the wire, both the first call's; the same
-/// assertions as the race above otherwise.
+/// The reconciliation variant: the first call's send is answered
+/// `szlahu_down`, leaving uncertainty, and the first reconciliation finds
+/// nothing. Its next execution is held at credential fetch before opening
+/// the gateway for read-only reconciliation. The second call is accepted and
+/// queued behind the lock while that execution is held. Only then does the
+/// scenario make the original document visible and release reconciliation.
+/// The first call answers `reconciled`; the second finds the document from
+/// its target lookup. Exactly one create reaches szamlazz.hu.
 ///
-/// #125 asks for the second call to arrive *while the create step waits out
-/// its delay*. This scenario places it a step later, at the re-execution's
-/// fetch, on purpose: the delay is a server-side timer of one second that
-/// cannot be widened (under vqueues a run retry delay at or above 2 s leaves
-/// the invoker for the scheduler and takes every in-flight column with it:
-/// `worker_config`'s rustdoc, verified in #123), the worker runs nothing
-/// during it, and a call raced into it is accepted before or after the timer
-/// as the host's load decides, which is the class of scenario #123 removed
-/// from this suite. The hold is the deterministic form of the same property:
-/// the second call is on the server after the first send that did not land
-/// and before the second that does, the lock queues it across the whole of
-/// the first invocation's retry (the key is held through `backing-off` and
-/// the re-execution alike), and it is answered from its lookup with nothing
-/// of its own sent.
+/// The hold avoids racing a server-side retry timer: the second call is on
+/// the server after the uncertain send and before its reconciliation can
+/// settle. The lock queues it across the first invocation's re-execution,
+/// and it is answered from its lookup with nothing of its own sent.
 pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_executions(
     h: &Harness,
 ) {
@@ -260,7 +247,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
     // The second execution's fetch (the first execution's is the first).
     let hold = h.multi().hold_fetch(SCOPE, 2);
     let watch = h.watch("E2E-L2");
-    let (first, second, (in_flight, released, second_send)) = tokio::join!(
+    let (first, second, (in_flight, released)) = tokio::join!(
         timed(h.call_scoped(SCOPE, "E2E-L2", "create_invoice", &body, "e2e-l2-k1")),
         async {
             // The first execution sent (and was answered szlahu_down); the
@@ -281,7 +268,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
             assert_eq!(
                 h.create_bodies_of("E2E-L2").await.len(),
                 1,
-                "the second call was queued before the second send: {in_flight:?}"
+                "the second call was queued before reconciliation settled: {in_flight:?}"
             );
             let released = Instant::now();
             crate::harness::szamlazz::external_id_query("acct:E2E-L2:invoice")
@@ -290,7 +277,7 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
                 .mount(&h.mock)
                 .await;
             hold.release();
-            (in_flight, released, Instant::now())
+            (in_flight, released)
         },
     );
     let retries = watch.finish().await;
@@ -299,14 +286,15 @@ pub(crate) async fn same_key_same_scope_second_call_between_the_first_calls_exec
         "the first invocation was one of the two in flight: {in_flight:?}"
     );
     assert!(
-        released < second_send,
-        "the second call was on the server before szamlazz.hu received the second send \
-         (released {released:?}, second send {second_send:?})"
+        released < first.done,
+        "both calls were on the server before reconciliation completed \
+         (released {released:?}, first answered {:?})",
+        first.done
     );
     assert_eq!(
         retries.failing_commands,
         ["reconcile-write"],
-        "the first call's create step is what re-executed: {retries:?}"
+        "the first call re-executed read-only reconciliation: {retries:?}"
     );
     assert_second_call_queued_behind_the_first(h, "SZ-L2", first, second).await;
     h.assert_state_absent(Some(SCOPE), "E2E-L2").await;
