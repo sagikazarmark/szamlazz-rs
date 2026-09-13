@@ -4,7 +4,7 @@
   # dotenv.enable = true;
 
   dagger.enable = true;
-  env.DAGGER_X_RELEASE = "v1.0.0-beta.11";
+  env.DAGGER_X_RELEASE = "v1.0.0-beta.13";
 
   packages = with pkgs; [
     lld
@@ -13,6 +13,8 @@
     cargo-dist
     cargo-release
     cargo-watch
+    cargo-hack
+    cargo-nextest
     libxml2 # xmllint: offline Számla Agent XSD 1.0 matrix
   ];
 
