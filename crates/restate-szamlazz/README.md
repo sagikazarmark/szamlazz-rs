@@ -216,6 +216,16 @@ refuse unrepresentable document totals, even when each legacy line fits independ
 All issuing handlers share this validation. Protected execution, retained write uncertainty,
 expected-document intent and reconciliation rules continue to apply.
 
+**Breaking Rust error-interface change (#230):** `InputError::NoItems` and
+`InputError::ItemOverflow` have been removed. `Account::build_create` and
+`Gateway::build_create` preserve monetary refusals as `InputError::Monetary`, containing
+the same `MonetaryError` returned by `DocumentInput::monetary_preflight`. Match
+`MonetaryError::NoItems` for empty documents and
+`MonetaryError::Item { index, source }` with `MonetaryError::Arithmetic` for indexed
+arithmetic failures. Language, exchange-rate and kind-reference errors retain their
+builder-specific variants. Validation order, displayed explanations and the worker's
+`invalid_input` mapping are unchanged.
+
 The [provider rounding guide](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/rounding)
 documents gross-first HUF calculation. Its extension to EUR cents is covered by a focused
 opt-in create/query test, **not yet executed for this change**; see the
