@@ -160,15 +160,13 @@ pub(crate) async fn issued_already_issued_and_the_key_replays(h: &Harness) {
     );
 }
 
-/// The hole #36 closes, end to end: the lookup sees nothing, the first
-/// execution of the create step sends (the document lands, the reply is lost,
-/// the immediate re-query still misses), and before the run policy
-/// re-executes the step the document is reversed in the szamlazz.hu UI. The
-/// second execution's leading query, inside the re-executed closure, finds it
-/// reversed and **does not send again**: `outcome: reversed`, exactly one
-/// create on the wire, one `create-invoice` entry in the journal. What the
-/// gateway's table asserts for one execution, here across two executions of one
-/// journaled step.
+/// A lost create answer followed by reversal, end to end: the lookup sees
+/// nothing, one create lands but loses its reply, and the first read-only
+/// reconciliation still misses. Before reconciliation re-executes, the
+/// document is reversed in the szamlazz.hu UI. Finding that reversed document
+/// settles the retained issuance without another send: `outcome: reversed`,
+/// the marker cleared, exactly one create on the wire and one `create-invoice`
+/// entry in the journal.
 pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Harness) {
     h.absent("E2E-6B", &["prepayment", "final", "proforma"])
         .await;
@@ -176,9 +174,9 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
         .respond_with(not_found())
         .mount(&h.mock)
         .await;
-    // The target lookup, full lookup, first execution's leading query and re-query
-    // miss; the second execution's leading query finds the document
-    // reversed.
+    // The target lookup, full lookup, leading query and first reconciliation
+    // miss; read-only reconciliation finds the reversed document on its next
+    // execution.
     holds_after_misses(
         &h.mock,
         4,
@@ -210,7 +208,7 @@ pub(crate) async fn reversal_between_executions_is_reversed_not_reissued(h: &Har
     assert_eq!(response["storno_number"], Value::Null);
     h.assert_state_absent(None, "E2E-6B").await;
 
-    // The create step was re-executed (one run retry) and journaled once.
+    // Reconciliation re-executed; the create step was recorded once.
     let runs = h.admin().runs(reply.invocation_id()).await;
     assert_eq!(
         runs.iter().filter(|name| *name == "create-invoice").count(),

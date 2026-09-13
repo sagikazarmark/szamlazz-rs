@@ -106,18 +106,6 @@ pub(crate) async fn holds_after_misses(mock: &MockServer, misses: u64, doc: &Doc
         .await;
 }
 
-/// The create of the document's order lands on szamlazz.hu but its reply is
-/// lost: the create answers 500, `expect(1)`, and `doc` is the holder of its
-/// external id from the moment the create request is received (code 7
-/// before, the document after). The transition is the create stub being
-/// matched (one flag, flipped by the create's responder and read by the
-/// external id's), so how many queries precede the send is not the test's to
-/// know. `doc` must state its external id and its order; the number and
-/// order selectors are not mounted.
-pub(crate) async fn create_lands_but_reply_lost(mock: &MockServer, doc: &Doc<'_>) {
-    let _sends = create_lands_when(mock, doc, vec![(ResponseTemplate::new(500), true)]).await;
-}
-
 /// The create lands and is answered, but its reply takes `delay` to arrive:
 /// `doc` is the holder of its external id from the moment the create request
 /// is **received** (code 7 before), while its sender is still waiting for
@@ -132,38 +120,47 @@ pub(crate) async fn create_lands_slowly(
     doc: &Doc<'_>,
     delay: Duration,
 ) -> Sends {
-    create_lands_when(
-        mock,
-        doc,
-        vec![(created(doc.number, "1000", "1270").set_delay(delay), true)],
-    )
-    .await
-}
-
-/// The first create request is answered `first` **without landing** (a reply
-/// to which szamlazz.hu did not act: `szlahu_down`, a 500) and the document
-/// stays absent; the second lands, is answered `created` at once, and `doc` is
-/// the holder of its external id from that request's receipt. What a create
-/// step that re-executes after an *Unconfirmed* first send meets. `expect(2)`;
-/// `doc` must state its external id and its order; the number and order
-/// selectors are not mounted.
-pub(crate) async fn create_lands_on_the_second_send(
-    mock: &MockServer,
-    doc: &Doc<'_>,
-    first: ResponseTemplate,
-) -> Sends {
-    create_lands_when(
-        mock,
-        doc,
-        vec![(first, false), (created(doc.number, "1000", "1270"), true)],
-    )
-    .await
+    let id = doc
+        .external_id
+        .expect("a landing create needs the document's external id");
+    let order = doc
+        .order
+        .expect("a landing create needs the document's order");
+    let landed = Arc::new(AtomicBool::new(false));
+    let flip = Arc::clone(&landed);
+    let reply = created(doc.number, "1000", "1270").set_delay(delay);
+    let (sends, received) = watch::channel(0u64);
+    create_for(order)
+        .respond_with(move |_: &Request| {
+            // Publish the landing before notifying the receipt waiter, so
+            // its next query sees the document while the reply is delayed.
+            sends.send_modify(|count| {
+                flip.store(true, Ordering::SeqCst);
+                *count += 1;
+            });
+            reply.clone()
+        })
+        .expect(1)
+        .mount(mock)
+        .await;
+    let document = doc.response();
+    external_id_query(id)
+        .respond_with(move |_: &Request| {
+            if landed.load(Ordering::SeqCst) {
+                document.clone()
+            } else {
+                not_found()
+            }
+        })
+        .mount(mock)
+        .await;
+    Sends(received)
 }
 
 /// How many create requests the stub has **received**, as a signal a scenario
 /// awaits: the moment szamlazz.hu has the send and its reply is still on its
-/// way (a delayed stub), or the moment the first of two sends is answered. The
-/// count moves at the responder, which wiremock runs at receipt, before any
+/// way (a delayed stub). The count moves at the responder, which wiremock runs
+/// at receipt, before any
 /// delay: a transport-side fact, not a guess from the client's clock. The
 /// document's landing is published **with** the count (both under the one
 /// write that notifies the receiver), so a query made after `received`
@@ -190,69 +187,6 @@ impl Sends {
             })
             .expect("the create stub outlives the scenario");
     }
-}
-
-/// szamlazz.hu holds `doc` under its external id from the moment a create of
-/// its order **lands** (code 7 before). `answers` are szamlazz.hu's replies
-/// to the create requests in the order they are received, each with whether
-/// that request lands: the flag flips at its receipt, whatever the reply or
-/// its delay, since a document exists on szamlazz.hu once the send reaches
-/// it. The create stub expects exactly `answers.len()` requests of the order;
-/// one beyond the list is answered 500 without landing and fails the `expect`
-/// at the next `verify`. Failure-injection sequencing, not a model of
-/// szamlazz.hu: one flag for one document. The three helpers above are its
-/// callers; the [`Sends`] counts the requests as they arrive.
-async fn create_lands_when(
-    mock: &MockServer,
-    doc: &Doc<'_>,
-    answers: Vec<(ResponseTemplate, bool)>,
-) -> Sends {
-    let id = doc
-        .external_id
-        .expect("a landing create needs the document's external id");
-    let order = doc
-        .order
-        .expect("a landing create needs the document's order");
-    let landed = Arc::new(AtomicBool::new(false));
-    let flip = Arc::clone(&landed);
-    let expected = u64::try_from(answers.len()).expect("a few answers");
-    let (sends, received) = watch::channel(0u64);
-    create_for(order)
-        .respond_with(move |_: &Request| {
-            // The answer is chosen and the landing recorded under the same
-            // write that publishes the count: a receiver woken by the count
-            // sees the document landed, never the count ahead of it.
-            let mut reply = None;
-            sends.send_modify(|count| {
-                let index = usize::try_from(*count).expect("a few sends");
-                reply = Some(match answers.get(index) {
-                    Some((template, lands)) => {
-                        if *lands {
-                            flip.store(true, Ordering::SeqCst);
-                        }
-                        template.clone()
-                    }
-                    None => ResponseTemplate::new(500),
-                });
-                *count += 1;
-            });
-            reply.expect("chosen under the write")
-        })
-        .expect(expected)
-        .mount(mock)
-        .await;
-    let document = doc.response();
-    external_id_query(id)
-        .respond_with(move |_: &Request| {
-            if landed.load(Ordering::SeqCst) {
-                document.clone()
-            } else {
-                not_found()
-            }
-        })
-        .mount(mock)
-        .await;
-    Sends(received)
 }
 
 // ----- the harness's stub helpers, against wiremock alone -----------------------
@@ -385,63 +319,6 @@ async fn holds_after_misses_answers_code_7_n_times_then_the_document() {
     assert_eq!(status, 404, "the order selector is not mounted");
 }
 
-/// `create_lands_but_reply_lost(doc)` answers the document's external id with
-/// code 7 until a create **of its order** is received (however many queries
-/// precede it, and whatever another order's creates do), and with the
-/// document from that moment on; the create itself is a 500. The transition
-/// is the create stub being matched, not a query count.
-#[tokio::test]
-async fn create_lands_but_reply_lost_makes_the_document_the_holder_on_the_create_hit() {
-    let mock = MockServer::start().await;
-    create_lands_but_reply_lost(
-        &mock,
-        &Doc {
-            external_id: Some("acct:ORD-5:invoice"),
-            ..Doc::of("SZ-5", "SZ", "ORD-5")
-        },
-    )
-    .await;
-
-    let by_id = "<szamlaKulsoAzon>acct:ORD-5:invoice</szamlaKulsoAzon>";
-    for query in 1..=5 {
-        let (status, body) = query_by(&mock, by_id).await;
-        assert_eq!(status, 200, "query {query} before the create");
-        assert!(
-            body.contains("<hibakod><![CDATA[7]]></hibakod>"),
-            "query {query} before the create: {body}"
-        );
-    }
-    // Another order's create matches nothing here and lands nothing.
-    let other = http_client()
-        .post(mock.uri())
-        .body(create_reply_body("ORD-6"))
-        .send()
-        .await
-        .expect("another order's create");
-    assert_eq!(other.status().as_u16(), 404, "not this order's stub");
-    let (_, body) = query_by(&mock, by_id).await;
-    assert!(
-        body.contains("<hibakod><![CDATA[7]]></hibakod>"),
-        "another order's create landed nothing here: {body}"
-    );
-
-    let response = http_client()
-        .post(mock.uri())
-        .body(create_reply_body("ORD-5"))
-        .send()
-        .await
-        .expect("create");
-    assert_eq!(response.status().as_u16(), 500, "the reply is lost");
-    for query in 1..=2 {
-        let (status, body) = query_by(&mock, by_id).await;
-        assert_eq!(status, 200, "query {query} after the create");
-        assert!(
-            body.contains("<szamlaszam>SZ-5</szamlaszam>"),
-            "query {query} after the create: {body}"
-        );
-    }
-}
-
 /// `create_lands_slowly(doc, delay)` makes the document the holder of its
 /// external id the moment the create request is *received*, while the create's
 /// own reply is still `delay` away: the [`Sends`] resolves at that receipt
@@ -512,56 +389,5 @@ async fn create_lands_slowly_makes_the_document_the_holder_while_the_reply_is_in
             .and_then(|value| value.to_str().ok()),
         Some("SZ-6"),
         "the created document"
-    );
-}
-
-/// `create_lands_on_the_second_send(doc, first)` answers the first create
-/// request `first` without landing (the document stays absent), and the
-/// second `created`, the document being the holder of its external id from
-/// the second request's receipt; the [`Sends`] counts both.
-#[tokio::test]
-async fn create_lands_on_the_second_send_keeps_the_document_absent_until_the_second_create() {
-    let mock = MockServer::start().await;
-    let mut sends = create_lands_on_the_second_send(
-        &mock,
-        &Doc {
-            external_id: Some("acct:ORD-7:invoice"),
-            ..Doc::of("SZ-7", "SZ", "ORD-7")
-        },
-        szlahu_down(),
-    )
-    .await;
-
-    let by_id = "<szamlaKulsoAzon>acct:ORD-7:invoice</szamlaKulsoAzon>";
-    let create = || {
-        http_client()
-            .post(mock.uri())
-            .body(create_reply_body("ORD-7"))
-            .send()
-    };
-    let first = create().await.expect("first create");
-    assert_eq!(first.status().as_u16(), 503, "the first answer");
-    assert!(first.headers().contains_key("szlahu_down"));
-    sends.received(1).await;
-    let (_, body) = query_by(&mock, by_id).await;
-    assert!(
-        body.contains("<hibakod><![CDATA[7]]></hibakod>"),
-        "still absent after a send that did not land: {body}"
-    );
-
-    let second = create().await.expect("second create");
-    sends.received(2).await;
-    assert_eq!(second.status().as_u16(), 200, "the second lands");
-    assert_eq!(
-        second
-            .headers()
-            .get("szlahu_szamlaszam")
-            .and_then(|value| value.to_str().ok()),
-        Some("SZ-7")
-    );
-    let (_, body) = query_by(&mock, by_id).await;
-    assert!(
-        body.contains("<szamlaszam>SZ-7</szamlaszam>"),
-        "the holder from the second send on: {body}"
     );
 }

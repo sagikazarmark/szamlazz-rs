@@ -1110,10 +1110,12 @@ other (a document is reachable by number, order number and external id with one 
 behind a thin consistency layer over wiremock. A scenario states what szamlazz.hu *holds* per document:
 `holds(doc)` mounts the one body on every selector the document is reachable by (its number, its order number when
 it carries one, the external id when the test states it), so the stubs cannot disagree; `holds_after_misses(n, doc)`
-is the document appearing under its external id after `n` code-7 answers. The one failure the create protocol is
-designed around (the create lands, the reply is lost) is `create_lands_but_reply_lost(doc)`: its transition is
-driven by the create request being received, not by a hand-counted number of queries (one flag for one document,
-flipped by the create stub's responder and read by the external id's). Raw selector stubs, `expect(n)` and
+is the document appearing under its external id after `n` code-7 answers. Cancellation and concurrency scenarios
+use `create_lands_slowly(doc, delay)`: one create lands at receipt while its answer is delayed. A receipt signal
+opens the scenario's window only after the document is visible under its external id (one flag for one document,
+flipped by the create stub's responder and read by the external id's); `expect(1)` enforces one send.
+Lost-answer and delayed-visibility scenarios exercise protected Order reconciliation through raw stubs.
+Raw selector stubs, `expect(n)` and
 `up_to_n_times(n)` stay where a scenario is about a specific wire sequence. The layer holds no state beyond that flag
 and does not grow into a fake. A stateful fake would be reconsidered for one capability only: property tests of
 the exactly-once invariant (random handler sequences under two scopes, "at most one live document per kind per
@@ -1224,10 +1226,12 @@ fixtures, so a fact learned about szamlazz.hu's XML is edited once.
   linking nothing, collision), `decide_proforma_by_number` (a proforma of ours linked, 7 as `proforma_missing`,
   another order's or an order-less one as `not_managed`, this order's non-proforma as `invalid_input` without a
   document identity, an answered code as a fault about the create), `decide_base` (`not_managed` before
-  `base_reversed`), `create_outcome_unknown` (exhaustion and cancellation as `outcome_unknown` repeating the last
-  failure) and `respond_to`'s `Issued` arms (56 as the `notification_delivery_failed` warning on an `issued`, a
+  `base_reversed`) and `respond_to`'s `Issued` arms (56 as the `notification_delivery_failed` warning on an `issued`, a
   number-less success as `outcome_unknown`), found documents built with `test_support::Doc`, create replies parsed
-  off the wire as the gateway parses them, and nothing recorded in the references on a refusal; the
+  off the wire as the gateway parses them, and nothing recorded in the references on a refusal. Protected Order
+  fault context, cancellation, arming interruptions, retained markers and read-only reconciliation are exercised
+  through the production handlers under real Restate (`tests/e2e/policies.rs`, `unresolved.rs`, `arm_ack.rs` and
+  `write_commands.rs`); the
   issue and read policies' field-for-field mapping onto
   `RunRetryPolicy` and `WorkerConfig::validate` on all three tables, the fault → status mapping incl. the exhausted
   read → `unavailable{step, last failure}` about the document and the missing-`telj` fault as a 503 `unavailable`,

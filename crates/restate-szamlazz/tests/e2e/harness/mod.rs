@@ -153,12 +153,7 @@ pub(crate) fn reissue_body(unit_price: Decimal, expected_number: &str) -> Value 
 ///   create stub being matched, not a query count, and the delay is the
 ///   window a second caller or a cancellation arrives in while the first
 ///   send's reply is in flight, opened to the scenario by the returned
-///   [`szamlazz::Sends`]. (Its sibling `create_lands_but_reply_lost`, the 500
-///   instead of the delayed answer, is the helper module's; no scenario needs
-///   it, the gateway's table covers the immediate re-query.)
-/// - [`szamlazz::create_lands_on_the_second_send`]: the first create answered
-///   without landing (`szlahu_down`, a 500), the second landing: what a
-///   create step meets when it re-executes after an *Unconfirmed* send.
+///   [`szamlazz::Sends`]. Exactly one create request is expected.
 /// - The raw builders (`number_query`, `order_query`, `external_id_query`,
 ///   `create_for`, `storno_of_number`), `expect(n)` and `up_to_n_times(n)`: a
 ///   stub the scenario asserts on (`expect`), a non-document answer (7, 500,
