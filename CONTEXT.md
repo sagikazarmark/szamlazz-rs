@@ -284,6 +284,14 @@ called non-execution. Absence, elapsed time, cancellation and kill alone establi
 Decision: ADR 0013.
 _Avoid_: vendor proof for operator evidence, force-clear, positive settlement as permission to reissue
 
+**Recovery operator**:
+The authenticated person whose identity the host application supplies for an Order recovery's audit record.
+The host owns authentication and authorization for recovery observation and settlement, including internal
+callers. Operator attribution identifies who submitted the evidence; it does not prove authorization or
+establish that the external operation completed. Recovery separately checks the exact unresolved intent
+and its evidence before recording the resolution.
+_Avoid_: operator identity as authorization, recovery authorization as a worker responsibility
+
 **Issue policy**:
 The deployment's run retry policy for unmanaged `Szamlazz.Agent.storno`, relying on observed storno idempotence; protected Order writes instead consume one permission and retain read-only reconciliation under their invocation policy. Execution-count and duration limits are exhaustion thresholds, not deadlines or external-send bounds, and delay is not settlement of an earlier request ([worker retry controls](crates/restate-szamlazz/README.md#retry-policy), ADR 0004).
 _Avoid_: attempt budget, backoff (the loop is gone), retry policy without qualification (the handlers have their own), a second copy of "60 s" (derive from `szamlazz_agent::client::REQUEST_TIMEOUT`)

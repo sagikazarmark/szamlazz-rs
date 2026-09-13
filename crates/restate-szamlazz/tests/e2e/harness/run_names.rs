@@ -32,21 +32,13 @@ use restate_e2e_harness::{RunPath, Table};
 /// every row is walked by at least one phase-1 or phase-2 scenario, and a row
 /// whose only walker were removed fails the check (#134).
 pub(crate) const RUN_NAMES: &[RunPath] = &[
-    RunPath::new(
-        "Szamlazz.Order",
-        "observe_unresolved",
-        &["authorize-recovery"],
-    ),
+    RunPath::new("Szamlazz.Order", "observe_unresolved", &[]),
     RunPath::new(
         "Szamlazz.Order",
         "recover",
-        &["authorize-recovery", "verify-recovery", "record-recovery"],
+        &["verify-recovery", "record-recovery"],
     ),
-    RunPath::new(
-        "Szamlazz.Order",
-        "recover",
-        &["authorize-recovery", "record-recovery"],
-    ),
+    RunPath::new("Szamlazz.Order", "recover", &["record-recovery"]),
     RunPath::new(
         "Szamlazz.Order",
         "create_invoice",

@@ -173,10 +173,6 @@ fn entries() -> Vec<Entry> {
         },
     };
     all.extend(entries_of(vec![()], &single()));
-    all.extend(entries_of(
-        vec![Some("operator-id".to_owned()), None::<String>],
-        &single(),
-    ));
     all.extend(entries_of(vec![marker], &single()));
     all.extend(entries_of(
         vec![RecoveryResponse {

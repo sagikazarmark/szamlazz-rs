@@ -26,7 +26,7 @@ fn recovery_preserves_vendor_numbers_outside_mutation_input_bounds() {
                 "completion":{"type":"reversed", "number":number},
                 "completed_and_cannot_execute_later":true}),
         ] {
-            let wire = json!({"marker":marker(), "evidence":evidence});
+            let wire = json!({"operator":"test-operator","marker":marker(), "evidence":evidence});
             let parsed: RecoveryRequest =
                 serde_json::from_value(wire.clone()).expect("vendor evidence number");
             assert_eq!(serde_json::to_value(parsed).expect("round trip"), wire);
@@ -40,7 +40,7 @@ fn recovery_refuses_blank_or_xml_invalid_evidence_and_keeps_deletion_bounded() {
 
     for number in ["", " \t\n", "\u{85}\u{2003}", "SZ\0", "SZ\u{ffff}"] {
         assert!(number.parse::<EvidenceNumber>().is_err(), "{number:?}");
-        let wire = json!({"marker":marker(), "evidence":{"type":"document", "number":number}});
+        let wire = json!({"operator":"test-operator","marker":marker(), "evidence":{"type":"document", "number":number}});
         assert!(serde_json::from_value::<RecoveryRequest>(wire).is_err());
     }
     let number = "\tSZ:1\n"
@@ -51,7 +51,7 @@ fn recovery_refuses_blank_or_xml_invalid_evidence_and_keeps_deletion_bounded() {
     let owned: String = number.into();
     assert_eq!(owned, "\tSZ:1\n");
 
-    let wire = json!({"marker":marker(), "evidence":{"type":"completed",
+    let wire = json!({"operator":"test-operator","marker":marker(), "evidence":{"type":"completed",
         "audit_reference":"INC-303", "completion":{"type":"deleted", "number":"X".repeat(41)},
         "completed_and_cannot_execute_later":true}});
     assert!(serde_json::from_value::<RecoveryRequest>(wire).is_err());
@@ -105,7 +105,7 @@ fn marker_order_identity_is_exact_even_though_general_order_parsing_trims() {
 
 #[test]
 fn recovery_requires_exact_marker_and_explicit_evidence() {
-    let request = json!({"marker": marker(), "evidence": {
+    let request = json!({"operator":"test-operator","marker": marker(), "evidence": {
         "type": "not_executed", "audit_reference": "INC-216",
         "did_not_execute_and_cannot_execute_later": true
     }});
@@ -127,7 +127,7 @@ fn completed_write_attestation_requires_an_explicit_conclusion_and_identity() {
     let evidence = json!({"type":"completed", "audit_reference":"INC-300",
         "completion":{"type":"issued", "number":"HS-1"},
         "completed_and_cannot_execute_later":true});
-    let request = json!({"marker":marker(), "evidence":evidence});
+    let request = json!({"operator":"test-operator","marker":marker(), "evidence":evidence});
     let parsed: RecoveryRequest =
         serde_json::from_value(request.clone()).expect("completed attestation");
     assert_eq!(serde_json::to_value(parsed).expect("round trip"), request);
@@ -144,6 +144,47 @@ fn completed_write_attestation_requires_an_explicit_conclusion_and_identity() {
         let mut refused = request.clone();
         refused["evidence"]["completion"] = completion;
         assert!(serde_json::from_value::<RecoveryRequest>(refused).is_err());
+    }
+}
+
+#[test]
+fn recovery_requires_nonblank_operator_attribution_and_preserves_it_verbatim() {
+    let mut request = json!({"marker":marker(), "evidence":{"type":"document", "number":"HS-1"}});
+    assert!(serde_json::from_value::<RecoveryRequest>(request.clone()).is_err());
+    for operator in [
+        json!(null),
+        json!(false),
+        json!(42),
+        json!(""),
+        json!(" \t\n"),
+        json!("\u{85}\u{2003}"),
+    ] {
+        request["operator"] = operator;
+        assert!(serde_json::from_value::<RecoveryRequest>(request.clone()).is_err());
+    }
+    request["operator"] = json!(" support:árvíz / 1 ");
+    let parsed: RecoveryRequest =
+        serde_json::from_value(request.clone()).expect("operator attribution");
+    assert_eq!(parsed.operator, " support:árvíz / 1 ");
+    assert_eq!(serde_json::to_value(parsed).expect("round trip"), request);
+}
+
+#[cfg(feature = "schemars")]
+#[test]
+fn recovery_discovery_requires_nonblank_operator_attribution() {
+    let schema = serde_json::to_value(schemars::schema_for!(RecoveryRequest)).expect("schema");
+    assert!(
+        schema["required"]
+            .as_array()
+            .expect("required fields")
+            .contains(&json!("operator"))
+    );
+    let operator = &schema["properties"]["operator"];
+    assert_eq!(operator["type"], "string");
+    assert_eq!(operator["minLength"], 1);
+    let pattern = regex::Regex::new(operator["pattern"].as_str().expect("pattern")).expect("regex");
+    for value in ["", " \t\n", "\u{85}\u{2003}", " support:árvíz / 1 "] {
+        assert_eq!(pattern.is_match(value), !value.trim().is_empty());
     }
 }
 

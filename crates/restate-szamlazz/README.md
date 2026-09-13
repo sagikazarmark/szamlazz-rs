@@ -456,7 +456,6 @@ The known codes are:
 
 - `invalid_input` (400)
 - `cancelled` (409): intentional read cancellation
-- `forbidden` (403): operator recovery access denied
 - `unknown_account` (400): the request names no account of this deployment
 - `not_found` (404): the document the request names by number is not known to szamlazz.hu (code 7)
 - `szamlazz_error` (422): szamlazz.hu answered with an error code of its own that the handler passes through,
@@ -891,7 +890,6 @@ when there is one, never the SDK's plain-text `Cannot decode input payload`.
 | Code | HTTP | Meaning | What to do |
 |---|---|---|---|
 | `cancelled` | 409 | Intentional cancellation during an ordinary read, account resolution or best-effort read. No write was sent. | Respect the stop; do not automatically retry. |
-| `forbidden` | 403 | The host denied operator recovery access. | Use the authenticated operator recovery boundary. |
 | `invalid_input` | 400 | The request is malformed: its body carries a field the contract does not know (every request type is closed: ``unknown field `resissue`, expected `reissue` or `proforma` ``), a wrong type, a missing required field, an `invoice_number` or `correction_id` outside its bound (40 bytes; no whitespace or `:`; not an external-id token), or its `Order` key has leading or trailing whitespace or is outside the key alphabet (1–40 bytes, no internal whitespace, no `:`, NFC); refused before anything is journaled or sent. Or it carries a value the operation cannot take: an option the handler does not take, a `{number}` proforma link that is not a proforma, a sixth credit entry on `set_credit_entries`, a replacing `set_credit_entries` (`additive: false`) with no entries (the wire contract takes five, and an empty replace would clear the invoice's credit entries; nothing is sent), or a line item whose arithmetic overflows a decimal (after the prologue's two journal entries, before any read; nothing is sent). | Fix the request. |
 | `unknown_account` | 400 | The request names no account of this deployment (rule 5). | Fix the scope; do not retry as is. |
 | `not_found` | 404 | The document the request names by number is not known to szamlazz.hu (code 7): `Szamlazz.Agent.query`'s selector, the invoice of `Szamlazz.Agent.storno` / `Szamlazz.Order.storno_invoice`, the base of `correct_invoice`. Nothing was sent. (A missing proforma named by `options.proforma: {number}` is `conflict{proforma_missing}`, an outcome.) | Fix the number; do not retry as is. |
@@ -950,7 +948,8 @@ kill and a new key do not settle uncertainty. Positive evidence must match the o
 reissue intent; storno recovery verifies the original reference and reversal. Deletion absence is ambiguous.
 
 `observe_unresolved` is an operator-only shared observation, usable beside a paused owner. `recover` is an
-operator-only exclusive action carrying the **exact observed marker** and either document evidence
+operator-only exclusive action carrying the host-supplied **`operator` audit identity**, the **exact observed
+marker** and either document evidence
 (`{"type":"document","number":"SZ-1"}`) or audited non-execution attestation
 (`{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}`).
 An attestation is the operator's assertion, never vendor proof. Recovery records evidence before clearing;
@@ -976,10 +975,19 @@ corrective base, and that no delayed execution remains. This is useful for a con
 proforma whose positive evidence is no longer queryable. It is never a substitute for missing evidence.
 See the [operator recovery runbook](../../docs/operations/order-recovery.md).
 
-Access defaults to `forbidden` (403). A host enables it with `Order::with_recovery_authorizer` and its
-`service::RecoveryAuthorizer`, using authenticated operator metadata from its ingress boundary. Strip caller
-identity assertions, enforce the same policy on internal SDK callers, and authenticate runtime requests to
-the endpoint. A request-body flag is not authorization. Never enable an allow-all authorizer on public ingress.
+The host application authenticates and authorizes access to both recovery handlers, including access by
+internal SDK callers. The worker performs no caller authorization. After authorizing recovery for the scope
+and Order, the host supplies `operator` from its authenticated identity, replacing any caller-supplied value.
+This required, nonblank string is preserved verbatim in the recovery receipt; it is audit attribution, not
+proof of authorization. Missing or blank attribution is `invalid_input` before marker access. Restate request
+identity authenticates the runtime to the endpoint, not the operator.
+
+**Recovery interface migration:** `RecoveryAuthorizer` and `Order::with_recovery_authorizer` have been removed.
+Move their policy into the host's authorization layer and include `operator` in every recovery request.
+The worker no longer emits `forbidden`; access-denied responses belong to the host. The `authorize-recovery`
+step is also removed: `observe_unresolved` only reads state, and `recover` verifies evidence when needed and
+records the receipt before clearing state. This changes recovery inputs and command sequences; keep existing
+invocations on their original deployment and review any exceptional replay against its actual prefix (ADR 0009).
 
 Prefer resuming a paused owner on its pinned deployment. Exclusive recovery cannot run behind that owner's
 lock: quiesce producers, inspect/cancel queued mutations, deliberately stop the owner, then submit evidence.

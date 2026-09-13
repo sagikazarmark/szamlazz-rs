@@ -50,8 +50,8 @@ interruption tests exercise the complete marker/arm/send ordering on server 1.7.
 checks that arming is recorded while no send has occurred, then drops the connection and verifies replay
 only reconciles. `write_commands.rs` checks marker preparation/guard/set, acknowledged arm, write/settlement
 and clear ordering through real journals, including every create kind's reconciliation path. Recovery
-interruption tests cover recorded authorization, document evidence and recovery receipt before clearance;
-revoking admission affects new invocations, not an already journaled authorization.
+interruption tests cover recorded document evidence and the recovery receipt before clearance, including
+preservation of the original request's operator attribution on replay.
 
 The production Gateway must disable reqwest retries and redirects explicitly, keep a fresh cookie jar
 per execution, and retain the Számla Agent request timeout. One permission authorizes one possibly
@@ -112,12 +112,18 @@ needed; exceptional replay still requires actual-prefix review. [ADR 0015](../ad
 `Szamlazz.Order.observe_unresolved` is shared and operator-only. It returns absent, a versioned marker,
 or unreadable state. It does not resolve the current account or acquire credentials.
 
-`Szamlazz.Order.recover` is exclusive and operator-only. Both handlers require the host's configured
-recovery authorizer; the default denies all access. `authorize-recovery` journals the admitted operator
-identity (or denial) before state access, so revocation cannot change an existing invocation's command
-prefix on replay. The host authorizes each new invocation. Authorization uses trusted request metadata at the
-host/ingress boundary, never a body flag. The host must prevent direct caller impersonation, including
-internal SDK calls; runtime request identity alone authenticates Restate, not the operator.
+`Szamlazz.Order.recover` is exclusive and operator-only. The host application authenticates and authorizes
+access to both handlers for the scope and Order, including internal SDK callers. The worker performs no
+caller authorization. The host supplies the required, nonblank `operator` in the recovery request from its
+authenticated identity, replacing caller-supplied attribution. This is audit data, not an authorization
+decision; runtime request identity alone authenticates Restate, not the operator. The worker checks the
+request shape before state access and records its operator, token and evidence before clearance.
+
+This separation replaces the host callback inside the handler: authorization policy and enforcement live
+in the application; exact-marker validation, evidence checks and durable settlement live in the worker.
+Removing `authorize-recovery` changes the command sequence, and adding `operator` changes the request contract.
+Existing invocations retain their original deployment; exceptional replay needs actual-prefix and input
+review (ADR 0009). An admitted invocation replays its original request and recorded evidence.
 
 Recovery names the exact marker token, scope, account id, endpoint, namespace and operation. It accepts:
 

@@ -315,14 +315,39 @@ pub enum RecoveryEvidence {
 }
 
 /// Exclusive operator recovery; the complete marker must match exactly.
+/// The host authenticates and authorizes the caller before invoking recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RecoveryRequest {
+    /// Nonblank operator identity supplied by the host for audit attribution.
+    /// Preserved verbatim; this field does not grant or prove authorization.
+    #[serde(deserialize_with = "nonblank_operator")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(
+            with = "String",
+            length(min = 1),
+            regex(
+                pattern = r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"
+            )
+        )
+    )]
+    pub operator: String,
     /// Exact marker observed under the same scope and Order key.
     pub marker: UnresolvedWrite,
     /// Evidence permitting settlement, never permission to send.
     pub evidence: RecoveryEvidence,
+}
+
+fn nonblank_operator<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    let operator = String::deserialize(de)?;
+    if operator.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "recovery operator must not be blank",
+        ));
+    }
+    Ok(operator)
 }
 
 /// Shared observation available even while the owner is paused.
@@ -381,7 +406,7 @@ impl<'de> Deserialize<'de> for UnresolvedObservation {
 pub struct RecoveryResponse {
     /// Marker settled by this recovery invocation.
     pub token: String,
-    /// Operator identity supplied by the host authorizer.
+    /// Host-supplied operator identity from the request, preserved for audit attribution.
     pub operator: String,
     /// Evidence that settled uncertainty. An attestation stays an attestation.
     pub evidence: serde_json::Value,

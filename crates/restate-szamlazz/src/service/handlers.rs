@@ -323,7 +323,8 @@ impl Order {
         .map(Json)
     }
 
-    /// Operator-only shared observation of unresolved Order uncertainty.
+    /// Shared observation of unresolved Order uncertainty.
+    /// The host must authorize operator access before invoking this handler.
     #[handler]
     async fn observe_unresolved(
         &self,
@@ -332,7 +333,8 @@ impl Order {
         self.observe_marker(&ctx).await.map(Json)
     }
 
-    /// Operator-only exclusive evidence-carrying settlement of the exact marker.
+    /// Exclusive evidence-carrying settlement of the exact marker.
+    /// The host must authorize operator access and supply the operator's audit identity.
     #[handler(
         invocation_retry_policy(
             initial_interval = "10s",

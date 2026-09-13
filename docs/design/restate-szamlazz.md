@@ -303,8 +303,9 @@ what an `unavailable` fault's message means by "the step". `{kind}` is the docum
 invoice number, the caller's as sent on every step but `delete-proforma-{number}`, where it is the found proforma's
 (`delete_proforma` requires the expected number); `{prefix}` the eight-digit taxpayer prefix. A handler with two shapes has two
 rows; a handler that answers early (a conflict, a refusal, `unknown_account`) journals a prefix of its row.
-Operator `observe_unresolved` journals `authorize-recovery`; `recover` adds `verify-recovery` for document
-evidence and `record-recovery` before clearance. Marker reads/set/clear are state commands, not run names.
+Operator `observe_unresolved` only reads state; `recover` journals `verify-recovery` for document evidence
+and `record-recovery` with the request's operator attribution before clearance. The host application owns
+caller authorization. Marker reads/set/clear are state commands, not run names.
 
 | Service | Handler | Path |
 |---|---|---|

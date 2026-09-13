@@ -32,12 +32,7 @@ async fn e2e_storno_email_uncertainty_resumes_read_only() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;

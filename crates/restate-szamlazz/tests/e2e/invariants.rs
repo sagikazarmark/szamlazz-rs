@@ -98,18 +98,10 @@ async fn recovery_paths(h: &Harness) {
     let create = Call::object("Szamlazz.Order", key, "create_invoice");
     let observe = Call::object("Szamlazz.Order", key, "observe_unresolved");
     let recover = Call::object("Szamlazz.Order", key, "recover");
-    let denied = h
-        .invoke(
-            &Call::object("Szamlazz.Order", "UNAUTHORIZED", "observe_unresolved"),
-            None,
-            None,
-        )
-        .await;
-    assert_eq!(denied.status, 403);
-    assert_eq!(
-        denied.fault().code,
-        restate_szamlazz::contract::TerminalCode::Forbidden
-    );
+    let empty = h.invoke(&observe, None, None).await;
+    assert_eq!(empty.status, 200);
+    assert_eq!(empty.body["state"], "absent");
+    assert!(h.admin().runs(empty.invocation_id()).await.is_empty());
     for (id, positive) in [("recovery-attested", false), ("recovery-positive", true)] {
         let body = create_body(dec!(1000));
         let submitted = h.invoke(&create.send(), Some(&body), Some(id)).await;
@@ -132,11 +124,12 @@ async fn recovery_paths(h: &Harness) {
         let response = h
             .invoke(
                 &recover,
-                Some(&json!({"marker":observed.body["marker"],"evidence":evidence})),
+                Some(&json!({"operator":"test-operator","marker":observed.body["marker"],"evidence":evidence})),
                 None,
             )
             .await;
         assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(response.body["operator"], "test-operator");
         assert_eq!(response.body["evidence"], evidence);
         assert_eq!(h.invoke(&observe, None, None).await.body["state"], "absent");
         h.assert_state_absent(None, key).await;

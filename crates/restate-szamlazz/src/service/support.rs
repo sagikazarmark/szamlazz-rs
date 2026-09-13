@@ -78,7 +78,6 @@ mod journaled {
 
     journaled!(
         (),
-        Option<String>,
         crate::contract::recovery::UnresolvedWrite,
         crate::contract::recovery::RecoveryResponse,
         crate::gateway::recovery::WriteResult,

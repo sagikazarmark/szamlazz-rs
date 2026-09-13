@@ -1,7 +1,8 @@
 # Recovering an unresolved Order write
 
-Use the deployed `Szamlazz.Order` operator endpoints through the authenticated ingress. The host must install
-`RecoveryAuthorizer`; access defaults to 403. Keep the original scope, Order key and invocation identity.
+Use the deployed `Szamlazz.Order` operator endpoints through the host application's authenticated and authorized
+access path. The host controls access to both `observe_unresolved` and `recover`, including internal SDK calls;
+the worker performs no caller authorization. Keep the original scope, Order key and invocation identity.
 Recovery is not permission to reissue. Empty queries, elapsed time, cancellation and kill do not settle a write.
 
 ## Storno notification recovery
@@ -39,10 +40,14 @@ calls and delayed sends), inspect/cancel queued mutations, and deliberately stop
 Kill releases its lock, not its external effects or marker. Submit a new recovery invocation with this body:
 
 ```json
-{"marker": "REPLACE WITH THE EXACT OBSERVED MARKER OBJECT", "evidence": {
+{"operator":"support:alice", "marker": "REPLACE WITH THE EXACT OBSERVED MARKER OBJECT", "evidence": {
   "type":"document", "number":"SS-1"
 }}
 ```
+
+The host supplies the required, nonblank `operator` from the authenticated identity after authorization,
+replacing any caller-supplied attribution. The worker records the string exactly as submitted; it does not
+authenticate it. Missing or blank attribution is refused before marker access.
 
 Evidence choices:
 

@@ -121,12 +121,7 @@ async fn e2e_document_identity_retains_uncertainty_until_valid_evidence() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;
@@ -249,7 +244,7 @@ async fn e2e_document_identity_retains_uncertainty_until_valid_evidence() {
         if storno {
             restate.admin().kill(owner.invocation_id()).await;
             let recover = Call::object("Szamlazz.Order", key, "recover");
-            let mut evidence = json!({"marker":observed.body["marker"],"evidence":{"type":"document","number":original}});
+            let mut evidence = json!({"operator":"test-operator","marker":observed.body["marker"],"evidence":{"type":"document","number":original}});
             // Only the candidate read is self-referential. The subsequent
             // original read remains a correctly numbered, reversed invoice,
             // so distinctness is tested independently of original-type checks.

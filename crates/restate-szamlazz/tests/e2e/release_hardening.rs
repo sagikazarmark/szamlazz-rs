@@ -50,10 +50,7 @@ async fn e2e_release_invalid_account_configuration_is_operational() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    Order::from_parts(accounts.clone(), config.clone())
-                        .with_recovery_authorizer(Arc::new(Operator)),
-                )
+                .bind(Order::from_parts(accounts.clone(), config.clone()))
                 .bind(Agent::from_parts(accounts, config))
                 .build(),
         )
@@ -137,11 +134,7 @@ async fn e2e_release_corrective_refuses_noninvoice_bases_before_arming() {
         .expect("config");
     let (order, _) = services_with_config(&mock.uri(), config);
     restate
-        .deploy(
-            Endpoint::builder()
-                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
-                .build(),
-        )
+        .deploy(Endpoint::builder().bind(order).build())
         .await;
     for token in ["D", "SL", "SS", "HS", "FUTURE"] {
         let key = format!("BASE-{token}");
@@ -263,12 +256,7 @@ async fn e2e_release_invalid_documents_never_arm_a_write() {
         .expect("config");
     let (order, agent) = services_with_config(&mock.uri(), config);
     restate
-        .deploy(
-            Endpoint::builder()
-                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
-                .bind(agent)
-                .build(),
-        )
+        .deploy(Endpoint::builder().bind(order).bind(agent).build())
         .await;
     for handler in [
         "create_invoice",
@@ -537,11 +525,7 @@ async fn corrective_lookup_checks_the_base(misses: usize) {
         .expect("config");
     let (order, _) = services_with_config(&mock.uri(), config);
     restate
-        .deploy(
-            Endpoint::builder()
-                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
-                .build(),
-        )
+        .deploy(Endpoint::builder().bind(order).build())
         .await;
     for (base, reversed) in [
         (None, false),
@@ -658,12 +642,7 @@ async fn e2e_release_corrective_reconciliation_retains_wrong_base_uncertainty() 
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;
