@@ -24,13 +24,21 @@ use crate::gateway::{FoundDocument, RecordedCreditEntry};
 pub struct QueryRequest {
     /// Which document to look up.
     pub selector: Selector,
+    /// Retain and return minimal buyer identity and per-VAT evidence. Default
+    /// false. Opting in puts these provider-observed fields in Restate's journal
+    /// and response for their retention periods; see `QueryVerification`.
+    #[serde(default)]
+    pub include_verification: bool,
 }
 
 impl QueryRequest {
     /// A query by `selector`.
     #[must_use]
     pub const fn new(selector: Selector) -> Self {
-        Self { selector }
+        Self {
+            selector,
+            include_verification: false,
+        }
     }
 }
 
@@ -69,7 +77,8 @@ impl Selector {
 }
 
 /// Output of `Szamlazz.Agent.query`: a projection of the queried document,
-/// read off the `FoundDocument` the handler's one step journaled.
+/// read off the `FoundDocument` the handler's one step journaled, or journaled
+/// directly with `QueryVerification` when explicitly requested.
 /// Deliberately omits the seller block. The deploy-side go-live check is
 /// `examples/verify_seller.rs`, using the actual deployed `Accounts` bundle
 /// and a fresh Számla Agent client outside Restate's journal.
@@ -77,6 +86,10 @@ impl Selector {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct QueryResponse {
+    /// Additional observed evidence, only when explicitly requested. Omitted
+    /// on ordinary reads and when decoding responses predating this option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<QueryVerification>,
     /// Document number (`számlaszám`).
     pub invoice_number: String,
     /// Provider record ID (`alap/id`) of `invoice_number`. Optional for older
@@ -149,6 +162,7 @@ impl QueryResponse {
     pub fn new(invoice_number: impl Into<String>, document_type: impl Into<String>) -> Self {
         Self {
             invoice_number: invoice_number.into(),
+            verification: None,
             document_id: None,
             document_type: document_type.into(),
             reversed: None,
@@ -165,6 +179,80 @@ impl QueryResponse {
             credit_entries: Vec::new(),
             outstanding: None,
             test: None,
+        }
+    }
+}
+
+/// Opt-in query evidence from the same provider read as the document facts.
+/// Buyer data is current provider-returned partner data: later activity can
+/// change it. It is not an immutable at-issuance snapshot or proof of payload
+/// equality. Worker ownership and reconciliation do not compare these fields.
+/// This allowlist is retained in the journal and response; no address, email,
+/// seller, item, raw XML or PDF is included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct QueryVerification {
+    /// Provider-returned buyer name (`vevo/nev`).
+    pub buyer_name: String,
+    /// Domestic tax number (`vevo/adoszam`); unreported is not a match.
+    #[serde(default)]
+    pub buyer_tax_number: Option<String>,
+    /// EU tax number (`vevo/adoszameu`); unreported is not a match.
+    #[serde(default)]
+    pub buyer_eu_tax_number: Option<String>,
+    /// Reported subtotals (`osszegek/afakulcsossz`), in provider order.
+    /// An empty array means no breakdown was reported, never zero totals or
+    /// an inferred allocation of the grand total.
+    #[serde(default)]
+    pub by_vat_rate: Vec<VerificationVatTotal>,
+}
+
+/// One reported VAT subtotal. Special category and numeric wire rate remain
+/// separate; no normalization, regrouping or arithmetic repair is performed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct VerificationVatTotal {
+    /// Special VAT category (`afatipus`), including unknown tokens verbatim.
+    #[serde(default)]
+    pub vat_type: Option<String>,
+    /// Numeric rate wire token (`afakulcs`), preserved independently of category.
+    pub vat_rate_code: String,
+    /// Exact net subtotal (`netto`), serialized as a decimal string.
+    #[serde(deserialize_with = "super::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    pub net: Decimal,
+    /// Exact VAT subtotal (`afa`), serialized as a decimal string.
+    #[serde(deserialize_with = "super::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    pub vat: Decimal,
+    /// Exact gross subtotal (`brutto`), serialized as a decimal string.
+    #[serde(deserialize_with = "super::decimal::required")]
+    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    pub gross: Decimal,
+}
+
+impl QueryVerification {
+    pub(crate) fn from_document(
+        document: &szamlazz_agent::ops::query_xml::InvoiceDocument,
+    ) -> Self {
+        Self {
+            buyer_name: document.buyer.name.clone(),
+            buyer_tax_number: document.buyer.tax_number.clone(),
+            buyer_eu_tax_number: document.buyer.eu_tax_number.clone(),
+            by_vat_rate: document
+                .totals
+                .by_vat_rate
+                .iter()
+                .map(|total| VerificationVatTotal {
+                    vat_type: total.vat_type.clone(),
+                    vat_rate_code: total.vat_rate_code.clone(),
+                    net: total.net,
+                    vat: total.vat,
+                    gross: total.gross,
+                })
+                .collect(),
         }
     }
 }
@@ -742,7 +830,7 @@ mod tests {
             ),
         ];
         for (selector, expected) in cases {
-            let request = QueryRequest { selector };
+            let request = QueryRequest::new(selector);
             let json = round_trip(&request);
             assert_eq!(json["selector"], expected);
         }

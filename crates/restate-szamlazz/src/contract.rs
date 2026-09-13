@@ -73,8 +73,8 @@ pub use crate::gateway::RecordedCreditEntry;
 pub use agent::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, CreditEntryInput, InvalidTaxNumber,
     MissingTaxpayerValidity, QueryRequest, QueryResponse, QueryTaxpayerRequest,
-    QueryTaxpayerResponse, Selector, SetCreditEntriesRequest, SetCreditEntriesResponse,
-    TaxpayerAddress,
+    QueryTaxpayerResponse, QueryVerification, Selector, SetCreditEntriesRequest,
+    SetCreditEntriesResponse, TaxpayerAddress, VerificationVatTotal,
 };
 pub use create::{
     ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,

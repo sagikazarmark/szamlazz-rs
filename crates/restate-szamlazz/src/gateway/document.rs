@@ -10,6 +10,9 @@
 //! the seller block, the line items, the PDF. What a document *is* to the
 //! worker (live, ours, a storno of a number, an e-invoice) is read here,
 //! once.
+//! An explicit [`Gateway::query_with_verification`](super::Gateway::query_with_verification)
+//! instead returns a query response with the minimal buyer/per-VAT allowlist;
+//! it does not widen `FoundDocument` or the mutation lookup journals.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

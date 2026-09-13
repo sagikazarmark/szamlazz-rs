@@ -20,6 +20,8 @@
 //!   queried document, none of which a handler reads (the reason the
 //!   outcomes carry [`FoundDocument`] / [`IssuedDocument`] rather than the
 //!   agent crate's types).
+//!   The explicit verification query additionally retains only its documented
+//!   buyer identity and per-VAT allowlist, never the full buyer block.
 //!
 //! The samples are built through the agent crate's parsers from wire XML
 //! and projected as the gateway projects them, since the agent's types are
@@ -219,6 +221,25 @@ fn entries() -> Vec<Entry> {
         ],
         &variants!(QueryOutcome { Found(_), NotFound, CredentialsRejected(_), Api(_) }),
     ));
+    // The explicit verification read has its own journaled projection. Sample
+    // every answer with the same exhaustive variant check as ordinary reads.
+    {
+        use crate::contract::{QueryResponse, QueryVerification};
+        type VerificationOutcome = QueryOutcome<QueryResponse>;
+        let wire = wire_document("SZ-1", false);
+        let verification = QueryVerification::from_document(&wire);
+        let mut response = QueryResponse::from(&FoundDocument::from(wire));
+        response.verification = Some(verification);
+        all.extend(entries_of(
+            vec![
+                VerificationOutcome::Found(Box::new(response)),
+                VerificationOutcome::NotFound,
+                VerificationOutcome::CredentialsRejected(CREDENTIALS.answer()),
+                VerificationOutcome::Api(API.answer()),
+            ],
+            &variants!(VerificationOutcome { Found(_), NotFound, CredentialsRejected(_), Api(_) }),
+        ));
+    }
     all.extend(entries_of(vec![
             OwnershipOutcome::Absent,
             OwnershipOutcome::Live(document("SZ-1", false)),
@@ -672,7 +693,7 @@ async fn no_journal_entry_carries_the_agent_key() {
 
 /// The keys a `szamlazz_agent` response type would bring into a journal entry
 /// and the worker's projections leave out: the seller block, the buyer block
-/// (the buyer's name, addresses, email and tax numbers under it), the line
+/// (the verification query retains only its explicit identity allowlist), the line
 /// items, the financial items, the labels and the PDF of a queried document,
 /// and the PDF of a create reply. (The `Account`'s seller block carries an
 /// `email` block of its own: the operator's configuration, not a document's.)

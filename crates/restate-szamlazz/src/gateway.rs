@@ -678,11 +678,13 @@ impl Unanswered {
 /// The answered result of a query by number, external id or order number
 /// ([`Gateway::verify`], [`Gateway::query`], [`Gateway::hint`]). A query
 /// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
+/// The default projection is [`FoundDocument`]; [`Gateway::query_with_verification`]
+/// uses [`crate::contract::QueryResponse`] to retain its explicit allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum QueryOutcome {
-    /// The document.
-    Found(Box<FoundDocument>),
+pub enum QueryOutcome<T = FoundDocument> {
+    /// The document projection selected by the read.
+    Found(Box<T>),
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
     /// number or external id, or a deleted / consumed proforma.
     NotFound,
@@ -1662,6 +1664,28 @@ impl Gateway {
         outcome(self.query_raw(invoice_selector(selector)).await)
     }
 
+    /// Query with the explicit minimal verification allowlist, retained beside
+    /// the ordinary query facts from the same read. Buyer evidence is current
+    /// provider data, not an immutable issuance snapshot. Ordinary reads and
+    /// mutation lookups never use this projection.
+    ///
+    /// # Errors
+    /// Returns [`Unanswered`] when the exchange yields no usable answer.
+    pub async fn query_with_verification(
+        &self,
+        selector: &Selector,
+    ) -> Result<QueryOutcome<crate::contract::QueryResponse>, Unanswered> {
+        outcome(
+            self.query_raw_with_verification(invoice_selector(selector), true)
+                .await
+                .map(|(found, verification)| {
+                    let mut response = crate::contract::QueryResponse::from(&found);
+                    response.verification = verification;
+                    response
+                }),
+        )
+    }
+
     /// Queries one of our external ids and validates what it holds against
     /// the `order` and `kind` the document should have: the "is this document
     /// ours?" read of every step that decides on an external id of the order
@@ -2295,9 +2319,21 @@ impl Gateway {
     /// [`FoundDocument`] at this boundary: nothing past it holds the agent
     /// crate's document.
     async fn query_raw(&self, selector: InvoiceSelector) -> Result<FoundDocument, QueryError> {
+        self.query_raw_with_verification(selector, false)
+            .await
+            .map(|(found, _)| found)
+    }
+
+    async fn query_raw_with_verification(
+        &self,
+        selector: InvoiceSelector,
+        include_verification: bool,
+    ) -> Result<(FoundDocument, Option<crate::contract::QueryVerification>), QueryError> {
         let request = QueryInvoiceXml::new(selector);
         match self.client.send(&request).await {
             Ok(document) => {
+                let verification = include_verification
+                    .then(|| crate::contract::QueryVerification::from_document(&document));
                 let found = FoundDocument::from(document);
                 let expected = match &request.selector {
                     InvoiceSelector::InvoiceNumber(number) => Some(number.as_str()),
@@ -2306,7 +2342,7 @@ impl Gateway {
                 found
                     .validate_identity(expected)
                     .map_err(|message| QueryError::Transport(message.to_owned()))?;
-                Ok(found)
+                Ok((found, verification))
             }
             Err(ClientError::Api(api)) if api.code == ErrorCode::MissingData => {
                 Err(QueryError::NotFound)
@@ -2395,7 +2431,7 @@ fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>)
 
 /// A raw query result as the read's outcome: every answer is data, no answer
 /// is [`Unanswered`].
-fn outcome(result: Result<FoundDocument, QueryError>) -> Result<QueryOutcome, Unanswered> {
+fn outcome<T>(result: Result<T, QueryError>) -> Result<QueryOutcome<T>, Unanswered> {
     match result {
         Ok(document) => Ok(QueryOutcome::Found(Box::new(document))),
         Err(error) => Ok(match error.answered()? {
@@ -2929,26 +2965,26 @@ mod tests {
             Ok(QueryOutcome::Found(Box::new(document)))
         );
         assert_eq!(
-            outcome(Err(QueryError::NotFound)),
+            outcome::<FoundDocument>(Err(QueryError::NotFound)),
             Ok(QueryOutcome::NotFound)
         );
         assert_eq!(
-            outcome(Err(rejected())),
+            outcome::<FoundDocument>(Err(rejected())),
             Ok(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
                 "3",
                 "Sikertelen bejelentkezés."
             )))
         );
         assert_eq!(
-            outcome(Err(other())),
+            outcome::<FoundDocument>(Err(other())),
             Ok(QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")))
         );
         assert_eq!(
-            outcome(Err(QueryError::Unavailable("szlahu_down".to_owned()))),
+            outcome::<FoundDocument>(Err(QueryError::Unavailable("szlahu_down".to_owned()))),
             Err(Unanswered::Unavailable("szlahu_down".to_owned()))
         );
         assert_eq!(
-            outcome(Err(QueryError::Transport("connection reset".to_owned()))),
+            outcome::<FoundDocument>(Err(QueryError::Transport("connection reset".to_owned()))),
             Err(Unanswered::Transport("connection reset".to_owned()))
         );
     }

@@ -519,6 +519,73 @@ answer. Not cached by the worker; cache it in the caller with a TTL on the order
 `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
 `managed_by_order`, `unsupported_order_number`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
 `QueryResponse` and `SetCreditEntriesRequest` / `SetCreditEntriesResponse` are the remaining handler contracts.
+
+### Opt-in document verification query
+
+`Szamlazz.Agent.query` accepts `include_verification: true` when a caller needs observed buyer identity
+and per-VAT subtotals before recording a document:
+
+```json
+{
+  "selector": {"invoice_number": "SZ-2026-123"},
+  "include_verification": true
+}
+```
+
+The usual `QueryResponse` facts (number and record ID, type, order, references, dates, currency,
+net/VAT/gross totals, credit entries, outstanding, test and reversal markers) remain available. The
+same Számla Agent read adds this **worker-owned allowlist**, under `verification`:
+
+```json
+{
+  "buyer_name": "Observed Buyer Kft.",
+  "buyer_tax_number": "12345678-2-42",
+  "buyer_eu_tax_number": "HU12345678",
+  "by_vat_rate": [
+    {"vat_type": null, "vat_rate_code": "27.0", "net": "100.00", "vat": "27.00", "gross": "127.00"},
+    {"vat_type": "AAM", "vat_rate_code": "0.0", "net": "10.00", "vat": "0", "gross": "10.00"}
+  ]
+}
+```
+
+**Retained data:** opting in stores those three buyer fields and the per-rate rows alongside the usual
+query facts in the `query` Run result and response, visible in the Restate UI during their configured
+retention periods (the query handler requests one-day journal retention). It includes no full buyer block,
+seller block, addresses, email, partner identifier, items, raw XML or PDF. Omitted or false
+`include_verification` keeps the ordinary reduced read and omits `verification` altogether; Order
+observations and mutation lookups keep their reduced `FoundDocument` projection.
+
+**Missing data and comparisons:** unreported domestic/EU tax numbers are `null`; no reported per-rate
+rows yields `by_vat_rate: []`. Neither is a fabricated match, a zero subtotal or an allocation inferred
+from the grand total. A reported zero row remains a row. Each row preserves its special `vat_type`
+separately from its numeric `vat_rate_code`, including unfamiliar tokens, and exact decimal amounts as
+strings. Rows retain provider order without regrouping or arithmetic repair. Compare the required
+evidence explicitly: equal grand gross does not imply equal allocation among VAT rates. Buyer name is
+the parsed provider name, not copied from the request; an empty name cannot establish a match to a
+known nonempty name.
+
+**Observation semantics:** queried buyer identity is current provider-returned partner data. Later
+activity can change what an earlier document returns; this is **not an immutable at-issuance buyer
+snapshot**. The option supports the caller's comparison policy and does not add full-payload validation
+to worker ownership or reconciliation. A fresh observation needs a fresh invocation/`Idempotency-Key`:
+reusing a retained key returns the retained observation, and replay uses the recorded evidence.
+
+In Rust, construct `QueryRequest::new(selector)` and set `request.include_verification = true`.
+Read `QueryResponse.verification: Option<QueryVerification>` and its `VerificationVatTotal` rows.
+Direct expert Gateway consumers use `query_with_verification(&selector)`, which returns
+`QueryOutcome<QueryResponse>`; ordinary `query`, `verify` and `hint` retain `QueryOutcome<FoundDocument>`
+(also spelled `QueryOutcome`). Errors, account scope, identity validation and read policy are the same.
+Older response JSON decodes with `verification: None`; callers must check for it rather than assume
+evidence is present.
+
+Rust migration: `QueryRequest` struct literals need `include_verification: false` (or use `new`). The
+ordinary query journal shape and step names are unchanged; opted-in reads journal the response projection
+instead of `FoundDocument`. Register a new immutable deployment. Exceptional replay requires review of
+the actual input, branch and journal prefix under ADR 0009; this option grants no cross-release replay
+compatibility.
+
+### Other contract details
+
 `DeleteReason` preserves unfamiliar strings in `Other(String)`, including vendor codes. The single
 wire string cannot distinguish a vendor code from a future worker reason; do not infer its origin.
 `Szamlazz.Agent.storno` returns `managed_by_order` only when the reported order number is a supported `OrderKey`.
