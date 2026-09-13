@@ -9,13 +9,11 @@ use szamlazz_agent::ops::credit_entry::{
 use szamlazz_agent::ops::invoice::{Buyer, CreateInvoice, InvoiceHeader, InvoiceKind};
 use szamlazz_agent::ops::storno::StornoInvoice;
 use szamlazz_agent::wire::AgentRequest;
-use szamlazz_agent::{
-    ArithmeticError, Currency, ExchangeRate, InvoiceNumber, InvoiceTemplate, Language,
-};
+use szamlazz_agent::{Currency, ExchangeRate, InvoiceNumber, InvoiceTemplate, Language};
 
 use super::{Gateway, StornoStepRequest};
 use crate::account::Account;
-use crate::contract::{CreditEntryInput, DocumentInput, IssuedKind};
+use crate::contract::{CreditEntryInput, DocumentInput, IssuedKind, MonetaryError};
 use crate::identity::{ExternalId, OrderKey, normalize_buyer_name};
 
 /// Exercise the exact send-boundary validation without fetching credentials or
@@ -64,9 +62,6 @@ pub struct DocumentRefs<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum InputError {
-    /// The document has no line items.
-    #[error("at least one line item is required")]
-    NoItems,
     /// The language token is not one szamlazz.hu accepts.
     #[error("unknown document language {0:?}")]
     UnknownLanguage(String),
@@ -87,19 +82,9 @@ pub enum InputError {
         /// The missing reference.
         reference: &'static str,
     },
-    /// A line item's net, VAT or gross value does not fit a decimal; named by
-    /// its position in `items`, as the caller's JSON has it.
-    #[error("items[{index}]: {source}")]
-    ItemOverflow {
-        /// The zero-based position of the item in `items`.
-        index: usize,
-        /// Which value overflowed.
-        #[source]
-        source: ArithmeticError,
-    },
-    /// Monetary assertions or exact document totals cannot be satisfied.
+    /// The document is empty or its monetary content cannot be satisfied.
     #[error(transparent)]
-    Monetary(#[from] crate::contract::MonetaryError),
+    Monetary(#[from] MonetaryError),
 }
 
 impl Gateway {
@@ -158,7 +143,7 @@ impl Account {
         let overrides = &document.overrides;
 
         if document.items.is_empty() {
-            return Err(InputError::NoItems);
+            return Err(MonetaryError::NoItems.into());
         }
         let language_token = overrides.language.as_deref().unwrap_or(&defaults.language);
         let language = Language::from_str(language_token)
@@ -234,20 +219,7 @@ impl Account {
             ..Buyer::from(document.buyer.clone())
         };
 
-        let items = document
-            .monetary_preflight(&currency)
-            .map_err(|error| {
-                if let crate::contract::MonetaryError::Item { index, source } = &error
-                    && let crate::contract::MonetaryError::Arithmetic(source) = **source
-                {
-                    return InputError::ItemOverflow {
-                        index: *index,
-                        source,
-                    };
-                }
-                InputError::Monetary(error)
-            })?
-            .items;
+        let items = document.monetary_preflight(&currency)?.items;
 
         Ok(CreateInvoice {
             e_invoice: overrides.e_invoice.unwrap_or(defaults.e_invoice),
@@ -281,7 +253,7 @@ mod tests {
     use jiff::civil::date;
     use rust_decimal::{Decimal, dec};
     use serde_json::json;
-    use szamlazz_agent::{Credentials, PaymentMethod};
+    use szamlazz_agent::{ArithmeticError, Credentials, PaymentMethod};
 
     use super::*;
     use crate::account::{Account, Endpoint};
@@ -575,7 +547,7 @@ mod tests {
                 &external_id(),
                 DocumentRefs::default(),
             ),
-            Err(InputError::NoItems)
+            Err(InputError::Monetary(MonetaryError::NoItems))
         );
         let mut klingon = document;
         klingon.overrides.language = Some("tlh".to_owned());
@@ -659,10 +631,10 @@ mod tests {
             .expect_err("overflow");
         assert_eq!(
             error,
-            InputError::ItemOverflow {
+            InputError::Monetary(MonetaryError::Item {
                 index: 1,
-                source: ArithmeticError::NetOverflow,
-            }
+                source: Box::new(MonetaryError::Arithmetic(ArithmeticError::NetOverflow)),
+            })
         );
         assert_eq!(
             error.to_string(),

@@ -1,8 +1,8 @@
 //! Approved amounts survive the public worker conversion and monetary XML.
 use restate_szamlazz::{
     account::Account,
-    contract::{DocumentInput, IssuedKind},
-    gateway::DocumentRefs,
+    contract::{DocumentInput, IssuedKind, MonetaryError},
+    gateway::{DocumentRefs, InputError},
     identity::{ExternalId, OrderKey},
 };
 use rust_decimal::dec;
@@ -20,6 +20,125 @@ fn document() -> DocumentInput {
         "expected_totals":{"net":"23.62", "vat":"6.38", "gross":"30.00"}
     }))
     .expect("public request")
+}
+
+#[test]
+fn empty_document_keeps_its_monetary_classification_before_builder_errors() {
+    let mut doc = document();
+    doc.items.clear();
+    // Empty lines take precedence over invalid language, missing exchange rate,
+    // missing kind reference, and the now-unsatisfied approved totals.
+    doc.overrides.language = Some("tlh".to_owned());
+    let mut account = Account::new("test", "test");
+    account.defaults.exchange_rate_bank = "OTP".to_owned();
+    let preflight = doc
+        .monetary_preflight(&szamlazz_agent::Currency::EUR)
+        .expect_err("empty document");
+    assert_eq!(preflight, MonetaryError::NoItems);
+    let construction = account
+        .build_create(
+            IssuedKind::Final,
+            &doc,
+            &OrderKey::parse("tickets").expect("key"),
+            &ExternalId::new("test:tickets:final"),
+            DocumentRefs::default(),
+        )
+        .expect_err("empty document before builder errors");
+    assert_eq!(
+        construction.to_string(),
+        "at least one line item is required"
+    );
+    assert_eq!(construction, InputError::Monetary(preflight));
+}
+
+#[test]
+fn arithmetic_failure_keeps_its_indexed_monetary_classification_and_source() {
+    let mut doc = document();
+    doc.items
+        .push(restate_szamlazz::contract::LineItemInput::new(
+            "Overflow",
+            dec!(10),
+            "db",
+            rust_decimal::Decimal::MAX,
+            "27",
+        ));
+    let arithmetic = MonetaryError::Arithmetic(szamlazz_agent::ArithmeticError::NetOverflow);
+    let preflight = doc
+        .monetary_preflight(&szamlazz_agent::Currency::EUR)
+        .expect_err("overflow");
+    assert_eq!(
+        preflight,
+        MonetaryError::Item {
+            index: 1,
+            source: Box::new(arithmetic.clone()),
+        }
+    );
+    let construction = Account::new("test", "test")
+        .build_create(
+            IssuedKind::Invoice,
+            &doc,
+            &OrderKey::parse("tickets").expect("key"),
+            &ExternalId::new("test:tickets:invoice"),
+            DocumentRefs::default(),
+        )
+        .expect_err("overflow");
+    assert_eq!(
+        construction.to_string(),
+        "items[1]: line item net value (unit price × quantity) cannot fit exactly in a decimal"
+    );
+    for error in [&preflight as &dyn std::error::Error, &construction] {
+        assert_eq!(
+            error
+                .source()
+                .expect("underlying monetary failure")
+                .to_string(),
+            "line item net value (unit price × quantity) cannot fit exactly in a decimal"
+        );
+    }
+    assert_eq!(construction, InputError::Monetary(preflight));
+}
+
+#[test]
+fn builder_errors_keep_precedence_over_nonempty_monetary_failures() {
+    let mut doc = document();
+    doc.expected_totals.as_mut().expect("approved totals").gross = dec!(29.98);
+    doc.overrides.language = Some("tlh".to_owned());
+    let mut account = Account::new("test", "test");
+    account.defaults.exchange_rate_bank = "OTP".to_owned();
+    let build = |doc: &DocumentInput| {
+        account.build_create(
+            IssuedKind::Final,
+            doc,
+            &OrderKey::parse("tickets").expect("key"),
+            &ExternalId::new("test:tickets:final"),
+            DocumentRefs::default(),
+        )
+    };
+    assert_eq!(
+        build(&doc).expect_err("language first"),
+        InputError::UnknownLanguage("tlh".to_owned())
+    );
+    doc.overrides.language = None;
+    assert_eq!(
+        build(&doc).expect_err("exchange rate next"),
+        InputError::MissingExchangeRate("EUR".to_owned())
+    );
+    doc.overrides.exchange_rate = Some(restate_szamlazz::contract::ExchangeRateInput {
+        bank: "OTP".to_owned(),
+        rate: None,
+    });
+    assert_eq!(
+        build(&doc).expect_err("invalid exchange rate"),
+        InputError::InvalidExchangeRate("OTP".to_owned())
+    );
+    doc.overrides.exchange_rate.as_mut().expect("rate").rate = Some(dec!(395));
+    assert_eq!(
+        build(&doc).expect_err("kind reference before totals"),
+        InputError::MissingReference {
+            kind: IssuedKind::Final,
+            reference: "prepayment",
+        }
+    );
 }
 
 #[test]
@@ -157,7 +276,6 @@ fn mixed_rates_and_negative_lines_have_exact_xml_and_document_totals() {
 
 #[test]
 fn inconsistent_or_unrepresentable_money_is_refused_by_preflight_and_construction() {
-    use restate_szamlazz::contract::MonetaryError;
     for (pointer, value, expected) in [
         (
             "/items/0/amounts/net",
@@ -226,7 +344,7 @@ fn inconsistent_or_unrepresentable_money_is_refused_by_preflight_and_constructio
             }
         };
         assert_eq!(error, expected, "{pointer}");
-        assert!(
+        assert_eq!(
             Account::new("test", "test")
                 .build_create(
                     IssuedKind::Invoice,
@@ -235,7 +353,9 @@ fn inconsistent_or_unrepresentable_money_is_refused_by_preflight_and_constructio
                     &ExternalId::new("test:tickets:invoice"),
                     DocumentRefs::default(),
                 )
-                .is_err()
+                .expect_err("construction refuses the same money"),
+            InputError::Monetary(error),
+            "{pointer}"
         );
     }
     // The downstream unit-rounded split is deliberately not silently migrated.
@@ -311,9 +431,21 @@ fn exact_sums_and_midpoint_boundaries_never_round_on_success() {
         ),
         restate_szamlazz::contract::LineItemInput::new("Small", dec!(1), "db", dec!(0.01), "AAM"),
     ];
-    assert!(
-        doc.monetary_preflight(&szamlazz_agent::Currency::EUR)
-            .is_err()
+    let preflight = doc
+        .monetary_preflight(&szamlazz_agent::Currency::EUR)
+        .expect_err("sum would lose precision");
+    assert_eq!(preflight, MonetaryError::Unrepresentable);
+    assert_eq!(
+        Account::new("test", "test")
+            .build_create(
+                IssuedKind::Invoice,
+                &doc,
+                &OrderKey::parse("tickets").expect("key"),
+                &ExternalId::new("test:tickets:invoice"),
+                DocumentRefs::default(),
+            )
+            .expect_err("construction refuses the same sum"),
+        InputError::Monetary(preflight)
     );
 }
 
