@@ -1029,38 +1029,22 @@ impl Execution {
         intent: &Intent,
         reversed: Option<String>,
     ) -> Result<gateway::CreateOutcome, HandlerError> {
-        let external_id = intent.identity.external_id.clone();
         let kind = intent.identity.kind;
-        let order_key = order.clone();
-        let create = intent.create.clone();
-        let operation = crate::contract::recovery::WriteOperation::Create {
+        let request = CreateStepRequest {
+            external_id: &intent.identity.external_id,
             kind,
-            expected_number: reversed.clone(),
-            corrected_number: match &create.kind {
-                szamlazz_agent::ops::invoice::InvoiceKind::Corrective { corrected_number } => {
-                    Some(corrected_number.to_string())
-                }
-                _ => None,
-            },
+            order,
+            create: &intent.create,
+            reversed: reversed.as_deref(),
         };
         let result = self
             .protected_write(
                 ctx,
                 order,
                 &intent.identity.external_id,
-                operation,
+                request.operation(),
                 format!("create-{kind}"),
-                move |gateway, _marker| async move {
-                    gateway
-                        .protected_create(CreateStepRequest {
-                            external_id: &external_id,
-                            kind,
-                            order: &order_key,
-                            create: &create,
-                            reversed: reversed.as_deref(),
-                        })
-                        .await
-                },
+                move |gateway, _marker| async move { gateway.protected_create(request).await },
             )
             .await?;
         match result {
